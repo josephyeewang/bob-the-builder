@@ -97,22 +97,36 @@ for (const skew of [5, 1500]) {
   });
 }
 
-test('L138 MAT-1: a wait whose stored since could not be copied onto the tell is matched by the window, copied, then told', async () => {
+test('L138 MAT-1, L338: a refused copy of the since is still told at once, the refusal in the text and the answer', async () => {
+  const w = world();
+  const real = w.E.record;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  const r = await withAlerts(rec, w.E.clock.t - 1500, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'needs you', alert, now: w.E.clock.t - 1500, ...ask }));
+  assert.equal(r.ok, true, r.reason);
+  assert.match(r.tell_refused ?? '', /could not be kept with its wait \(busy\)/);
+  assert.equal(w.card().state, 'waiting');
+  assert.equal(w.tell().wait_since, undefined, 'the copy was refused');
+  assert.equal(w.got.length, 1);
+  assert.match(w.got[0], /^needs you \(.*could not be kept with its wait \(busy\)/);
+  assert.equal(w.tell().told_since, w.card().wait.since, 'marked told for the wait it was for');
+  w.E.clock.t += MIN;
+  assert.deepEqual(await w.pass(), [], 'not told again');
+  assert.equal(w.got.length, 1);
+});
+
+test('L138 MAT-1: a copy refused and an alert not delivered stays queued, is delivered on a later pass, and marked once', async () => {
   const w = world();
   const real = w.E.record;
   let refuse = true;
   const rec = Object.create(real, { write: { value: (x) => (refuse && x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
-  const r = await withAlerts(rec, w.E.clock.t - 1500, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'needs you', alert, now: w.E.clock.t - 1500, ...ask }));
-  assert.equal(r.ok, true, r.reason);
-  assert.equal(w.card().state, 'waiting');
-  assert.equal(w.tell().wait_since, undefined, 'the copy was refused');
-  assert.deepEqual(w.got, [], 'nothing queued under a since the tell does not hold');
+  const down = fakeAlert({ answer: false });
+  assert.equal((await withAlerts(rec, w.E.clock.t - 1500, down, (alert) => waitOnJoe(rec, 'C-1', { text: 'needs you', alert, now: w.E.clock.t - 1500, ...ask }))).ok, true);
+  assert.equal(w.tell().told_since, undefined, 'not delivered, so not marked');
   refuse = false;
   w.E.clock.t += MIN;
-  assert.deepEqual(await w.pass(), [['C-1', 'told again: waits on joe']]);
-  assert.equal(w.tell().wait_since, w.card().wait.since, 'copied on by the next pass');
-  assert.equal(w.tell().told_since, w.card().wait.since);
-  assert.deepEqual(w.got, ['needs you']);
+  assert.deepEqual(await w.pass(), [], 'the queued copy is sent, not a second one');
+  assert.equal(w.tell().told_since, w.card().wait.since, 'marked once delivered');
+  assert.equal(w.got.length, 1);
   w.E.clock.t += MIN;
   assert.deepEqual(await w.pass(), []);
   assert.equal(w.got.length, 1);
@@ -149,19 +163,38 @@ test('audit #153 m1: a card put on Joe again for the same what is told the new t
   }
 });
 
-test('audit #153 m1: a re-wait whose since could not be copied onto the tell is still matched by the window, then told', async () => {
+test('audit #153 m1, L338: a re-wait whose since could not be copied onto the tell is still told, with the refusal', async () => {
   const w = world();
   const real = w.E.record;
   assert.equal((await withAlerts(real, w.E.clock.t, w.port, (alert) => waitOnJoe(real, 'C-1', { text: 'first tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
   w.E.clock.t += 2 * 60 * MIN;
-  let refuse = true;
-  const rec = Object.create(real, { write: { value: (x) => (refuse && x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
-  assert.equal((await withAlerts(rec, w.E.clock.t, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'second tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
-  assert.deepEqual(w.got, ['first tell'], 'nothing queued until the since is copied on');
-  refuse = false;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  const r = await withAlerts(rec, w.E.clock.t, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'second tell', alert, now: w.E.clock.t, ...ask }));
+  assert.equal(r.ok, true);
+  assert.ok(r.tell_refused);
+  assert.equal(w.got.length, 2);
+  assert.match(w.got[1], /^second tell \(/);
   w.E.clock.t += MIN;
-  assert.deepEqual(await w.pass(), [['C-1', 'told again: waits on joe']]);
-  assert.deepEqual(w.got, ['first tell', 'second tell']);
+  assert.deepEqual(await w.pass(), []);
+  assert.equal(w.got.length, 2);
+});
+
+test('L338: across the 60 s edge, a refused copy of the since is still told, and the refusal is in the answer', async () => {
+  const { seed } = await import('../M9-record/fixtures.test-helper.mjs');
+  const w = world();
+  const real = w.E.record;
+  assert.equal((await withAlerts(real, w.E.clock.t, w.port, (alert) => waitOnJoe(real, 'C-1', { text: 'first tell', alert, now: w.E.clock.t, ...ask }))).ok, true);
+  w.E.clock.t += 2 * 60 * MIN;
+  const c = w.card();
+  seed(w.E, 'card', 'C-1', { ...c, wait: { ...c.wait, since: new Date(w.E.clock.t + 59e3).toISOString() } });
+  // The copy is refused by a stale expectRev: the tell moved between the read and the write.
+  const rec = Object.create(real, { write: { value: (x) => real.write(x.doc?.wait_since ? { ...x, expectRev: x.expectRev - 1 } : x) } });
+  const now = w.E.clock.t - 50e3;
+  const r = await withAlerts(rec, now, w.port, (alert) => waitOnJoe(rec, 'C-1', { text: 'second tell', alert, now, ...ask }));
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.tell_refused, 'the refusal is in the answer');
+  assert.equal(w.got.length, 2, 'the second tell is sent');
+  assert.equal(w.tell().told_since, w.card().wait.since);
 });
 
 test('audit #153 r2 m1-r: a re-wait across the 60 s edge (stored since 59 s ahead, the tick 50 s behind) is still told', async () => {

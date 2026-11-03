@@ -34,9 +34,15 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   if (!w.ok) return w;
   // The wait just written is this tell's: its stored since is copied on as it is, not matched by the window, which the
   // Writer judges on its own clock, not the tick's (audit #153 r2 m1-r).
-  const stored = confirm(rec, id, rec.read('card', id)?.doc, { ours: true });
-  if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored }, kind: 'wait_told' });
-  return w;
+  // A refused copy still tells (L338): this tell knows its since, and the window may never match it again. The refusal
+  // is in the text Joe reads and in the answer, never dropped (L323).
+  const c = rec.read('card', id)?.doc;
+  const ours = waitOf({}, c, true);
+  if (!ours) return w;
+  const { stored, refused } = copyOn(rec, id, c, true);
+  const why = stored ? null : `this card's tell could not be kept with its wait (${refused ?? 'no answer'}); it may not be told again if this copy is lost`;
+  tellThen(alert, why ? `${text} (${why})` : text, { fact: WAIT_TELL_FACT(id), fields: { told_since: ours }, kind: 'wait_told' });
+  return why ? { ...w, tell_refused: why } : w;
 }
 
 // The stored since of the wait tell `f` is for, on card doc `c`: its `wait_since` when copied on, else a joe wait
@@ -53,12 +59,17 @@ function waitOf(f, c, ours = false) {
 // tell is for, or the copy could not be written (the next pass matches by the window and tries again). `ours`: the
 // caller just wrote this card's joe wait for this tell, so its since is taken without the window.
 function confirm(rec, card, c, { ours = false } = {}) {
+  return copyOn(rec, card, c, ours).stored;
+}
+
+// confirm, with why the copy was not written ({ stored, refused }).
+function copyOn(rec, card, c, ours) {
   const f = rec.read('fact', WAIT_TELL_FACT(card));
-  if (!f?.doc?.since) return null;
+  if (!f?.doc?.since) return { stored: null, refused: 'the tell is not on the Record' };
   const stored = waitOf(f.doc, c, ours);
-  if (!stored || f.doc.wait_since === stored) return stored;
+  if (!stored || f.doc.wait_since === stored) return { stored, refused: null };
   const put = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev: f.rev, doc: { ...f.doc, wait_since: stored }, kind: 'wait_tell' });
-  return put.ok ? stored : null;
+  return put?.ok ? { stored, refused: null } : { stored: null, refused: String(put?.reason ?? 'no answer').slice(0, 300) };
 }
 
 /** Each tick: every card still waiting on Joe under a wait whose alert was not delivered is told again. */
