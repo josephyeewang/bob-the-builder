@@ -32,6 +32,12 @@
 // tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A).
 // A file name goes into an alert or the diary only fenced (`shownName`: one line, stripped, masked; R-0b-126, probe P7).
 //
+// A proposal must name a ready card of its own product (R-0b-129): `proposal-<card>.md` for a card in the record that is
+// this product's and `ready`. Anything else (no such card, another product's, a card in any other state, or a research
+// copy, which only the copier lands) is refused at intake, before the docs check or review; a card that can't be read
+// keeps the proposal unused this pass and is told. "Claimed by the lane handing in" waits on R-0b-130's tab claims:
+// until then only a ready card is taken, so a card claimed by anyone is refused (L215 3).
+//
 // Day 1 (`product.cutover_stage` first; L76 (5)):
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
 //   - idea- files are refused: idea filing stays off until #95-b lands (L212, L215 2);
@@ -56,6 +62,23 @@ import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
+// The one card state a proposal may name until R-0b-130's claims (L215 3).
+export const PROPOSAL_CARD_STATES = Object.freeze(['ready']);
+
+/**
+ * Why a proposal from `product`'s folder can't name `card`: { refuse } for good, { broke } when the card can't be read
+ * (looked at again next pass), or null when it is a ready card of this product (R-0b-129).
+ */
+export function proposalCardProblem(rec, product, card) {
+  let o;
+  try { o = rec.read('card', card); } catch (e) { return { broke: `card ${card} could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
+  if (!o) return { refuse: `no card ${card} in the record: a proposal must name a ready card` };
+  if (o.corrupt || !o.doc || typeof o.doc !== 'object') return { broke: `card ${card} could not be read (${String(o.reason ?? 'no document').slice(0, 200)})` };
+  if (o.doc.product !== product) return { refuse: `card ${card} is ${typeof o.doc.product === 'string' && o.doc.product ? `${o.doc.product.slice(0, 100)}'s` : 'no product\'s'}, not ${product}'s` };
+  if (o.doc.kind === 'research_copy') return { refuse: `card ${card} is a research copy, which only the copier lands (L286)` };
+  if (!PROPOSAL_CARD_STATES.includes(o.doc.state)) return { refuse: `card ${card} is ${String(o.doc.state).slice(0, 40)}, not ready: a proposal must name a ready card` };
+  return null;
+}
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
 export const TEXT_CAP = 1024 * 1024;
 export const SETTLE_MS = 2000;
@@ -390,6 +413,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         bundle = { path: join(dir, pair), sha256: b.sha256 };
       }
       if (bytesStop(bytesSeen([hash, ...(bundle ? [bundle.sha256] : [])], false))) continue;
+      // It names a ready card of this product, or it goes no further (R-0b-129), after the duplicate-bytes check so
+      // bytes another product handed in are told as that first.
+      const named = proposalCardProblem(rec, product, card);
+      if (named?.refuse) { refuse(named.refuse, hash); continue; }
+      if (named?.broke) { r.refused = named.broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${named.broke}`, `card ${hash}`); continue; }
       if (stageOf(rules, product) !== 'second') {
         if (typeof docsCheck !== 'function') { refuse(`${FIRST_CUTOVER} (A docs proposal is taken in once the docs check on the push script's changed files is wired: R-0b-128 part 2.)`, hash); continue; }
         if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
