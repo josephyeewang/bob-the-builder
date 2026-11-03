@@ -14,6 +14,7 @@ import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, copyFromInstalledCopy, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { openJobJson } from '../../../shared/job-config.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
@@ -668,6 +669,26 @@ test('L83 minor 3 planted: readConfig refuses / itself, and a review copies fold
   assert.throws(cfg({ ...good, reviewCopies: d }), sep('root'), 'holding the runner\'s folder');
   assert.throws(cfg({ ...good, bobFolder: join(d, 'rc', 'bob') }), /bobFolder and reviewCopies must be two separate folders/, 'the Bob folder inside a copy');
   assert.throws(cfg({ ...good, reviewCopies: join(d, 'bob', 'rc') }), /bobFolder and reviewCopies must be two separate folders/, 'the copies inside the Bob folder');
+});
+
+test('audit #144 m3: main() refuses a config whose name no longer names the file read (a swap between the read and the checks)', async () => {
+  const d = realpathSync(tempDir('m4-swap-'));
+  const one = join(d, 'one.mjs'); writeFileSync(one, 'export function start() { return { ok: false, reason: "x" }; }\n');
+  const config = join(d, 'c.json');
+  writeFileSync(config, JSON.stringify({ wiring: one, snapshot: join(d, 'rules.json'), rules: { production: { env_files: [], programs: [], hosts: [] } }, uids: { reviewer: ME } }), { mode: 0o644 });
+  // The reader reads by descriptor, as the real one does; the walls are stood in for.
+  const readConfigFn = (f) => openJobJson(f, (why) => { throw new Error(`config: ${why}`); }).value;
+  const run = async (extra = {}) => {
+    const logs = []; const passes = [];
+    const code = await main([config], { log: (s) => logs.push(s), ports: { readConfigFn, programs: () => null, write: () => {}, pass: async () => { passes.push(1); return { ok: true, started: [], refused: [] }; }, ...extra } });
+    return { code, logs, passes };
+  };
+  const same = await run();
+  assert.equal(same.code, 0, same.logs.join('\n'));
+  const swapped = await run({ lstat: (p) => (p === config ? Object.assign(lstatSync(p), { ino: lstatSync(p).ino + 1 }) : lstatSync(p)) });
+  assert.equal(swapped.code, 1);
+  assert.match(swapped.logs.join('\n'), /config .*c\.json changed while it was read/);
+  assert.equal(swapped.passes.length, 0, 'no pass runs');
 });
 
 test('L83 minor 1 planted: main() refuses a wiring with a second export before any pass, and writes the snapshot before one', async () => {

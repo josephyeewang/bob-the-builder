@@ -9,7 +9,7 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
 import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
 import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
@@ -63,6 +63,11 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
   const pass = (min = 0, extra = {}) => tick({ rec, rules: extra.rules ?? rules, now: T0 + min * MIN, ports: { ...ports, ...extra.ports } });
   return { rec, calls, sessions, ports, pass };
 }
+
+// The job's own script must be one of the installed copy's code files (audit #144 m4): a script run spawns the copy's
+// own main.mjs (a layout with source: true); an in-process main() names a stand-in file in the layout as `self`.
+const copyMain = (L) => join(L.copy, 'modules/M11-dispatcher/main.mjs');
+const selfIn = (L) => L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
 
 test('MAT-1: one tick runs every step once, in the fixed order, and records the full pass', async () => {
   const w = world([account(), usage()]);
@@ -259,6 +264,7 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
 
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
   const L = installedLayout('m11-main-', { dirs: ['wiring'] });
+  const self = selfIn(L);
   const dir = L.base;
   const wiring = L.path('wiring/wiring.mjs');
   const here = fileURLToPath(new URL('.', import.meta.url));
@@ -279,21 +285,24 @@ export { rec };
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   const logs = [];
-  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 0);
+  // Audit #144 m4: by default main checks its own file, which in a checkout is not inside this layout: refused.
+  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.pop(), /orchestrate\/modules\/M11-dispatcher\/main\.mjs is not inside the installed copy/);
+  assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 0);
   const mod = await import(wiring);
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
   // refusals: no argument, a relative path, a wiring with no wire()
-  assert.equal(await main([], { log: (s) => logs.push(s) }), 1);
+  assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
   const rel = L.path('rel.json');
   writeFileSync(rel, JSON.stringify({ installRoot: L.installRoot, wiring: 'wiring.mjs', lockFile: join(dir, 'x.lock') }));
-  assert.equal(await main([rel], { log: (s) => logs.push(s) }), 1);
+  assert.equal(await main([rel], { self, log: (s) => logs.push(s) }), 1);
   const bare = L.path('wiring/bare.mjs');
   writeFileSync(bare, 'export const x = 1;\n');
   const cfg2 = L.path('c2.json');
   writeFileSync(cfg2, JSON.stringify({ installRoot: L.installRoot, wiring: bare, lockFile: join(dir, 'y.lock') }));
-  assert.equal(await main([cfg2], { log: (s) => logs.push(s) }), 1);
+  assert.equal(await main([cfg2], { self, log: (s) => logs.push(s) }), 1);
   assert.equal(logs.length, 3);
   assert.match(logs[1], /job config .*rel\.json: wiring must be a full path/);
   assert.match(logs[2], /no wire\(\)/);
@@ -306,7 +315,7 @@ export async function wire() { return { rec: recWith(), rules: rulesWith(), ${bo
     const cf = L.path(`m-b-${logs.length}.json`);
     writeFileSync(cf, JSON.stringify({ installRoot: L.installRoot, wiring: w, lockFile: join(dir, `m-b-${logs.length}.lock`) }));
     const before = logs.length;
-    assert.equal(await main([cf], { now: T0, log: (s) => logs.push(s) }), 1, body || 'no ports');
+    assert.equal(await main([cf], { self, now: T0, log: (s) => logs.push(s) }), 1, body || 'no ports');
     assert.equal(logs.length, before + 1);
     assert.match(logs[before], /wire\(\) must return exactly rec, rules, ports/);
     assert.match(logs[before], re);
@@ -314,11 +323,11 @@ export async function wire() { return { rec: recWith(), rules: rulesWith(), ${bo
 });
 
 test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
-  const L = installedLayout('m11-entry-', { dirs: ['wiring'] });
+  const L = installedLayout('m11-entry-', { dirs: ['wiring'], source: true });
   const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const link = join(dir, 'link');
-  symlinkSync(here, link);
+  symlinkSync(dirname(copyMain(L)), link);
   const out = join(dir, 'ran.json');
   const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
@@ -337,11 +346,11 @@ export async function wire() {
 `);
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
-  for (const script of [join(here, 'main.mjs'), join(link, 'main.mjs')]) {
+  for (const script of [copyMain(L), join(link, 'main.mjs')]) {
     rmSync(out, { force: true });
     const r = spawnSync(process.execPath, [script, config], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === join(here, 'main.mjs') ? 'the real path' : 'the symlink'}`);
+    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === copyMain(L) ? 'the copy\'s path' : 'the symlink'}`);
   }
   const bare = spawnSync(process.execPath, [join(link, 'main.mjs')], { encoding: 'utf8' });
   assert.equal(bare.status, 1);
@@ -463,7 +472,7 @@ test('audit 0b-6 r3 MAT-2: a port that never answers fails its own step at the d
 });
 
 test('audit 0b-6 r3 MAT-2: `node main.mjs` stuck on a port exits 2 at the run deadline, even with a timer left open, and the next start breaks the lock', () => {
-  const L = installedLayout('m11-stuck-', { dirs: ['wiring'] });
+  const L = installedLayout('m11-stuck-', { dirs: ['wiring'], source: true });
   const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const wiring = L.path('wiring/wiring.mjs');
@@ -487,7 +496,7 @@ export async function wire() {
   const lockFile = join(dir, 'pass.lock');
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 300 }));
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 30_000 });
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
@@ -497,7 +506,7 @@ export async function wire() {
   assert.equal(l.ok, true, l.reason);
   l.release();
   writeFileSync(L.path('bad.json'), JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: -1 }));
-  assert.equal(spawnSync(process.execPath, [join(here, 'main.mjs'), L.path('bad.json')], { encoding: 'utf8' }).status, 1);
+  assert.equal(spawnSync(process.execPath, [copyMain(L), L.path('bad.json')], { encoding: 'utf8' }).status, 1);
 });
 
 test('audit 0b-6 r3 MAT-3 sweep: with any one rules value missing, either the tick does exactly what it does with all present, or one alert names the value; the undo merge is always requested', async () => {
@@ -857,14 +866,14 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
     ['wire() never answers', 'export function wire() { return new Promise(() => {}); }'],
     ['wire() blocks', 'export function wire() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return {}; }'],
   ]) {
-    const L = installedLayout('m11-wiring-hang-', { dirs: ['wiring'] });
+    const L = installedLayout('m11-wiring-hang-', { dirs: ['wiring'], source: true });
     const dir = L.base;
     const wiring = L.path('wiring/wiring.mjs');
     writeFileSync(wiring, `setInterval(() => {}, 1000);\n${body}\n`);
     const config = L.path('config.json');
     writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
     const started = Date.now();
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
     assert.ok(Date.now() - started < 30_000, `${label}: ended by the watchdog, not by the test's own limit`);
     assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), `${label}: ${r.status} ${r.signal} ${r.stderr}`);
   }
@@ -873,7 +882,7 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
 // Audit 0b-6 r4 MAT-3: a port that blocks the thread itself. No timer in the main thread can fire, so
 // the watchdog thread ends the process; the next start breaks the lock and tells Joe.
 test('r4 MAT-3: `node main.mjs` blocked inside a synchronous port is ended by the watchdog; the next pass tells Joe', async () => {
-  const L = installedLayout('m11-blocked-', { dirs: ['wiring'] });
+  const L = installedLayout('m11-blocked-', { dirs: ['wiring'], source: true });
   const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const wiring = L.path('wiring/wiring.mjs');
@@ -894,7 +903,7 @@ export async function wire() {
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 200 }));
   const started = Date.now();
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000 });
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000 });
   assert.equal(r.signal, 'SIGKILL', `${r.status} ${r.stderr}`);
   assert.ok(Date.now() - started < 30_000, 'ended by the watchdog, not by the port giving up after a minute');
   assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), r.stderr);
@@ -911,6 +920,7 @@ export async function wire() {
 
 test('r4 MAT-3: main() ends its watchdog when the pass finishes, so a normal run is never killed', async () => {
   const L = installedLayout('m11-dog-', { dirs: ['wiring'] });
+  const self = selfIn(L);
   const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const wiring = L.path('wiring/wiring.mjs');
@@ -928,7 +938,7 @@ export async function wire() {
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   // In this process: a watchdog left running would kill the test run itself 5.2 s after the start.
-  assert.equal(await main([config], { now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
+  assert.equal(await main([config], { self, now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
   await new Promise((ok) => setTimeout(ok, 6_000));
   assert.ok(true, 'still alive past the watchdog time');
 });
@@ -953,7 +963,7 @@ test('r5 m4: a step error that changes only in a number is told once; an untold 
 // lock it broke) still reaches the working port, because the tick's first send starts alongside the safety
 // steps instead of after them.
 test('r7 M1: a pass blocked every time still delivers the broken-lock alert to a working port', { timeout: 120_000 }, () => {
-  const L = installedLayout('m11-r7m1-', { dirs: ['wiring'] });
+  const L = installedLayout('m11-r7m1-', { dirs: ['wiring'], source: true });
   const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const sent = join(dir, 'sent.txt');
@@ -974,7 +984,7 @@ export async function wire() {
   const config = L.path('config.json');
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
   for (let i = 0; i < 2; i += 1) {
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(r.signal, 'SIGKILL', r.stderr);
   }
   let got = '';

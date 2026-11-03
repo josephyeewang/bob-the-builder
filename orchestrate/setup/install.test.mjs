@@ -125,6 +125,11 @@ test('install config: refusals', async () => {
     { ...w.raw, extras: 'x' }, { ...w.raw, extras: ['/x/bin'] }, { ...w.raw, extras: [`/x/${UPDATER_CONFIG}`] }, { ...w.raw, extras: [`/x/${RUNNER_CONFIG}`] },
     { ...w.raw, extras: ['/x/..'] }, { ...w.raw, extras: ['rel/x'] }, { ...w.raw, base: '/Users/x/orch' },
   ]) assert.throws(() => parseInstallConfig(bad), /config/, JSON.stringify(bad).slice(0, 120));
+  // A code home's name, in any case (lane 2 on #144; audit #144 P14): the refusal says the name is the copy's own code's.
+  for (const name of ['wiring', 'Wiring', 'MODULES', 'shared']) {
+    assert.throws(() => parseInstallConfig({ ...w.raw, extras: [...w.raw.extras, `/x/${name}`] }), new RegExp(`extras must not hold /x/${name}: ${name} is the name of a folder of the copy's own code`), name);
+  }
+  assert.throws(() => parseInstallConfig({ ...w.raw, extras: ['/x/BIN'] }), /config: extras must be full paths/, 'a reserved item name in another case');
 });
 
 test('PIN: the label rule here is the launcher\'s (review-daemons.mjs refuses what LABEL_RE refuses, and takes what it takes)', () => {

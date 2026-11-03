@@ -188,7 +188,7 @@ test('R-0b-162 B (L242): with the Dispatcher never run, the late alert is queued
   // A stand-in for lane 3's deliverAlertsPass: it takes what is in the Record's queue when it runs.
   const deliver = ({ rec }) => { got.push(...queued(rec)); return { sent: got.length }; };
   const logs = [];
-  const code = await main([w.configFile], { log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
   assert.equal(code, 0, logs.join('\n'));
   assert.ok(got.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), got.join(' | '));
   // Every pass before it had run: their failures were queued first, so delivery saw them too.

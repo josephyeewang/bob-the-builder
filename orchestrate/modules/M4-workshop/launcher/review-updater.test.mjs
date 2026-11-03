@@ -531,6 +531,9 @@ test('item 19: a link or a submodule in main\'s folder, or a name that is one of
   assert.match(parseTree(Buffer.from(line('100644', 'blob', 'a/.GIT/config'))).reason, /is not a plain path/);
   assert.match(parseTree(Buffer.from(line('100644', 'blob', 'bin/node')), { keep: ['bin'] }).reason, /orchestrate\/bin has the name of one of the copy's own items/);
   assert.match(parseTree(Buffer.from(line('100644', 'blob', STAMP))).reason, /has the name of one of the copy's own items/);
+  // In any case (lane 2 on #144): main's Bin/ and a kept bin/ are one folder on macOS's disk.
+  assert.match(parseTree(Buffer.from(line('100644', 'blob', 'Bin/node')), { keep: ['bin'] }).reason, /orchestrate\/Bin has the name of one of the copy's own items/);
+  assert.match(parseTree(Buffer.from(line('100644', 'blob', 'wiring/x.mjs')), { keep: ['Wiring'] }).reason, /orchestrate\/wiring has the name of one of the copy's own items/);
   assert.match(parseTree(Buffer.alloc(0)).reason, /main holds no orchestrate folder/);
   assert.deepEqual(parseTree(Buffer.from(line('100755', 'blob', 'x/y'))).files, [{ mode: 0o755, oid, path: 'x/y' }]);
 });
@@ -939,7 +942,7 @@ test('L75 m-4, L132 M-1: a new copy must hold what the runner\'s config names in
   // M-1): a copy item is refused before the flip, even one `keep` carries, and so is one main does not hold.
   // L257 (B): wiring/ is a code home now, so a carried item may not take its name (or modules/ or shared/).
   const keepDir = tempDir('m4-keephome-');
-  for (const home of ['wiring', 'modules', 'shared']) {
+  for (const home of ['wiring', 'modules', 'shared', 'Wiring', 'MODULES']) {   // in any case: macOS's disk ignores it (lane 2 on #144)
     const f = join(keepDir, `keep-${home}.json`);
     writeFileSync(f, `${JSON.stringify({ ...w.c, keep: [...w.c.keep, home] })}\n`);
     assert.throws(() => readUpdaterConfig(f, { localAddress: true }), new RegExp(`keep must not hold ${home}, the name of a folder of the copy's own code`), home);

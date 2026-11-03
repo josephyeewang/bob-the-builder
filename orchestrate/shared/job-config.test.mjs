@@ -43,14 +43,14 @@ test('L253: a config written by group or others, a linked config, and a config t
   refuses(f, /can be written by group or others/);
   chmodSync(join(L.copy, 'job.json'), 0o644);
   symlinkSync(join(L.copy, 'job.json'), join(L.copy, 'link.json'));
-  refuses(L.path('link.json'), /is a link/);
+  refuses(L.path('link.json'), /link\.json: is a link \(name the file itself\)$/);   // the descriptor open (O_NOFOLLOW)
   refuses(L.path('modules'), /is not a plain file|can't be opened/);
 });
 
 test('L253: a linked wiring, a wiring outside the copy, a test file as wiring, and a missing wiring are refused', () => {
   const L = layout();
   symlinkSync(join(L.copy, WIRING), join(L.copy, 'modules/x/link.mjs'));
-  refuses(L.config({ wiring: L.path('modules/x/link.mjs') }), /link/);
+  refuses(L.config({ wiring: L.path('modules/x/link.mjs') }), /job\.json: \/.*modules\/x\/link\.mjs is a link$/);   // the copy walk (installProblem)
   rmSync(join(L.copy, 'modules/x/link.mjs'));
   const outside = join(L.base, 'wiring.mjs'); writeFileSync(outside, 'export const wire = 1;\n', { mode: 0o644 });
   refuses(L.config({ wiring: outside }), /is not inside the installed copy/);
@@ -59,6 +59,18 @@ test('L253: a linked wiring, a wiring outside the copy, a test file as wiring, a
   refuses(L.config({ wiring: L.path('modules/x/none.mjs') }), /missing/);
   refuses(L.config({ wiring: 'modules/x/wiring.mjs' }), /wiring must be a full path/);
   refuses(L.config({ wiring: undefined }), /wiring must be a full path/);
+});
+
+test('audit #144 m4: the job\'s own script (self) must be one of the copy\'s code files: outside the copy, a test file, or not named by a full path is refused', () => {
+  const L = layout();
+  const f = L.config();
+  const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+  assert.ok(readJobConfig(f, { self }));
+  assert.ok(readJobConfig(f, { self: join(L.copy, 'modules/M11-dispatcher/main.mjs') }), 'by its real path, as a job names itself');
+  refuses(f, /checkout-main\.mjs is not inside the installed copy/, { self: (() => { const p = join(L.base, 'checkout-main.mjs'); writeFileSync(p, 'export {};\n', { mode: 0o644 }); return p; })() });
+  refuses(f, /the job's own script, .*main\.test\.mjs, is one of the copy's test files/, { self: L.write('modules/M11-dispatcher/main.test.mjs', 'export {};\n') });
+  refuses(f, /the job's own script must be named by its full path/, { self: null });
+  refuses(f, /the job's own script must be named by its full path/, { self: 'main.mjs' });
 });
 
 test('L253: a config outside the copy, a group-writable file in the copy, and a group-writable folder at or above the copy are refused', () => {
@@ -94,6 +106,11 @@ test('L253: an access list above or inside the copy is refused, and an unreadabl
   const L = layout();
   const f = L.config();
   refuses(f, /has an access list/, { acl: (paths) => `${paths[0]} has an access list (ACL), which can let others write it (clear it with chmod -N)` });
+  // Audit #144 m2: an access list only on a folder above the copy's own parent (the walk up to /) is refused too.
+  const up = dirname(L.base);
+  const aboveOnly = (paths) => (paths.includes(up) ? `${up} has an access list (ACL), which can let others write it (clear it with chmod -N)` : null);
+  refuses(f, new RegExp(`${up.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} has an access list`), { acl: aboveOnly });
+  assert.ok(readJobConfig(f, { acl: (paths) => (paths.includes('/nowhere') ? 'x' : null) }), 'a stand-in that refuses nothing here passes');
 });
 
 test('L253: the file read is the file checked (a swap between the descriptor and the name is refused)', () => {
@@ -117,16 +134,36 @@ test('L253: a config that is not a JSON object, or names no installRoot, is refu
 });
 
 // ---- L253 guard: no job loads a config-named module through a config it did not read with this reader ----
-// Every production file that imports a computed path (`import(pathToFileURL(…))`, the way a job loads the wiring its
-// config names) must read its config through the checked reader: readJobConfig, M11 main.mjs's readConfig (which calls
-// it), or the review runner's descriptor read with its after-check. A new job script that parses its config itself fails here.
+// Pinned the way consume-ask's ALLOWED pins counts (audit #144 m1): every production file with a computed import is on
+// LOADERS, holds each pinned line exactly as many times as it says (comments aside), and makes exactly `imports`
+// computed imports. Reader text anywhere is not enough: a job that parses its own config while still importing the
+// reader (plant P11), or that builds the URL ahead of the import (P16), changes a pinned line and fails here. And no
+// such file may parse its argument itself (JSON.parse of argv, or a read of argv's file).
 const ORCH = fileURLToPath(new URL('..', import.meta.url));
-const READERS = [
-  /\breadJobConfig\(/,
-  /import\s*\{[^}]*\breadConfig\b[^}]*\}\s*from\s*['"][./]*(?:modules\/)?M11-dispatcher\/main\.mjs['"]/,
-  { all: [/\bopenJobJson\(/, /\breadChangedProblem\(/] },
-];
-const usesReader = (text) => READERS.some((r) => (r.all ? r.all.every((x) => x.test(text)) : r.test(text)));
+export const LOADERS = {
+  'modules/M11-dispatcher/main.mjs': { imports: 1, pins: [
+    ["  const c = readJobConfig(file, { code: ['wiring'], ...opts });", 1],
+    ['readConfigFn = readConfig, self = SELF } = {}) {', 1],
+    ['    config = readConfigFn(argv[0], { self });', 1],
+    ['    const mod = await import(pathToFileURL(config.wiring).href);', 1]] },
+  'wiring/robot-main.mjs': { imports: 1, pins: [
+    ["import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';", 1],
+    ['    config = readConfig(argv[0], { self });', 1],
+    ['    const mod = await import(pathToFileURL(config.wiring).href);', 1]] },
+  'modules/M4-workshop/launcher/review-runner-main.mjs': { imports: 2, pins: [
+    ['  const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;', 1],
+    ['  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write, lstat } = ports;', 1],
+    ['  try { c = readConfigFn(argv[0]); } catch (e) {', 1],
+    ['  const bad = programs(c, { self, config: realpathSync.native(argv[0]) });', 1],
+    ['  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;', 1],
+    ['  try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) {', 1],
+    ['    try { budget = await (await import(pathToFileURL(c.budget).href)).budget(c); } catch (e) {', 1]] },
+};
+const CALL_ANY = /(?<![\w$.])import\s*\(/g;
+const CALL_LIT = /(?<![\w$.])import\s*\(\s*(['"`])[^'"`$]+\1\s*\)/g;
+const SELF_PARSE = /JSON\.parse\([^;]*\bargv\b|readFileSync\(\s*(?:process\.)?argv\b/;
+const uncomment = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/(^|[^:'"`])\/\/(?![^\n]*['"`]\)).*$/gm, '$1');
+const count = (text, needle) => text.split(needle).length - 1;
 function productionFiles(dir) {
   const out = [];
   for (const n of readdirSync(dir)) {
@@ -137,27 +174,51 @@ function productionFiles(dir) {
   }
   return out;
 }
-export function unreadConfigLoaders(root) {
-  return productionFiles(root).filter((f) => {
-    const text = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-    return /\bimport\(\s*pathToFileURL\(/.test(text) && !usesReader(text);
-  }).map((f) => relative(root, f));
+/** What is wrong with every production file under `root` that makes a computed import, against `loaders`. */
+export function unreadConfigLoaders(root, loaders = LOADERS) {
+  const out = [];
+  for (const f of productionFiles(root)) {
+    const rel = relative(root, f).split('\\').join('/');
+    const text = uncomment(readFileSync(f, 'utf8'));
+    const computed = (text.match(CALL_ANY) ?? []).length - (text.match(CALL_LIT) ?? []).length;
+    if (computed === 0) { if (loaders[rel]) out.push(`${rel}: on LOADERS but makes no computed import`); continue; }
+    const pin = loaders[rel];
+    if (!pin) { out.push(`${rel}: makes ${computed} computed import(s) and is not on LOADERS`); continue; }
+    if (computed !== pin.imports) out.push(`${rel}: makes ${computed} computed import(s), not ${pin.imports}`);
+    for (const [line, n] of pin.pins) { const c = count(text, line); if (c !== n) out.push(`${rel}: holds "${line.trim()}" ${c} time(s), not ${n}`); }
+    if (SELF_PARSE.test(text)) out.push(`${rel}: parses its argument itself`);
+  }
+  return out;
 }
 
-test('L253 guard: every production file that imports a config-named module reads its config through the checked reader', () => {
+test('L253 guard: every production file that imports a config-named module reads its config through the checked reader, as pinned', () => {
   assert.deepEqual(unreadConfigLoaders(ORCH), []);
 });
 
-test('L253 guard, planted: a job that parses its own config and imports its wiring is caught; one through the reader is not', () => {
+test('L253 guard, planted (audit #144 m1): own JSON.parse beside the reader, a pre-built URL, an unlisted loader, a commented reader', () => {
   // Built, so consume-ask's computed-import scan does not count this test's own planted text as a loader.
   const IMP = ['im', 'port'].join('');
   const root = tempDir('orch-jobguard-');
   const w = (rel, text) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
-  w('modules/Mx/job.mjs', `const c = JSON.parse(readFileSync(f, 'utf8'));\nconst m = await ${IMP}(pathToFileURL(c.wiring).href);\n`);
-  w('wiring/ok.mjs', `import { readJobConfig } from '../shared/job-config.mjs';\nconst c = readJobConfig(f);\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);
-  w('wiring/via-m11.mjs', `import { readConfig, startWatchdog } from '../modules/M11-dispatcher/main.mjs';\nawait ${IMP}(pathToFileURL(readConfig(f).wiring).href);\n`);
-  w('modules/My/half.mjs', `const c = openJobJson(f, fail).value;\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);   // no after-check
-  w('modules/Mz/commented.mjs', `// readJobConfig(f)\nawait ${IMP}(pathToFileURL(c.wiring).href);\n`);
-  w('modules/Mx/job.test.mjs', `await ${IMP}(pathToFileURL(c.wiring).href);\n`);
-  assert.deepEqual(unreadConfigLoaders(root).sort(), ['modules/Mx/job.mjs', 'modules/My/half.mjs', 'modules/Mz/commented.mjs']);
+  const load = `    const mod = await ${IMP}(pathToFileURL(config.wiring).href);`;
+  const pins = { 'wiring/ok.mjs': { imports: 1, pins: [['    config = readConfig(argv[0], { self });', 1], [load, 1]] } };
+  const good = `    config = readConfig(argv[0], { self });\n${load}\n`;
+  w('wiring/ok.mjs', good);
+  w('modules/Mx/job.test.mjs', `await ${IMP}(pathToFileURL(c.wiring).href);\n`);   // a test file is not production code
+  w('modules/Mz/static.mjs', `const m = await ${IMP}('./x.mjs');\n`);                // a plain string is not computed
+  assert.deepEqual(unreadConfigLoaders(root, pins), []);
+  // P11: the reader still imported and called, but the module comes from the job's own parse.
+  w('wiring/ok.mjs', `    config = readConfig(argv[0], { self });\nconst own = JSON.parse(readFileSync(argv[0], 'utf8'));\n    const mod = await ${IMP}(pathToFileURL(own.wiring).href);\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), [`wiring/ok.mjs: holds "${load.trim()}" 0 time(s), not 1`, 'wiring/ok.mjs: parses its argument itself']);
+  // P16: the URL built ahead of the import.
+  w('wiring/ok.mjs', `    config = readConfig(argv[0], { self });\nconst u = pathToFileURL(config.wiring).href;\nconst mod = await ${IMP}(u);\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), [`wiring/ok.mjs: holds "${load.trim()}" 0 time(s), not 1`]);
+  // A second load, the reader only in a comment, and a loader no one listed.
+  w('wiring/ok.mjs', `${good}${load}\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: makes 2 computed import(s), not 1', `wiring/ok.mjs: holds "${load.trim()}" 2 time(s), not 1`]);
+  w('wiring/ok.mjs', `//    config = readConfig(argv[0], { self });\n${load}\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['wiring/ok.mjs: holds "config = readConfig(argv[0], { self });" 0 time(s), not 1']);
+  w('wiring/ok.mjs', good);
+  w('modules/My/half.mjs', `const c = openJobJson(f, fail).value;\nawait ${IMP}(new URL(c.wiring, 'file:').href);\n`);
+  assert.deepEqual(unreadConfigLoaders(root, pins), ['modules/My/half.mjs: makes 1 computed import(s) and is not on LOADERS']);
 });

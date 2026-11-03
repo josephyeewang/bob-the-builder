@@ -1,10 +1,12 @@
-// job-config.mjs — the one checked reader for a job's config (LEAD-CALLS L253): the Dispatcher (M11 main.mjs), the
-// robot job (wiring/robot-main.mjs), the Sensors loop (M12 loop.mjs) and the review runner (review-runner-main.mjs).
+// job-config.mjs — the one checked reader for a job's config (LEAD-CALLS L253), for the three jobs that import code
+// their config names: the Dispatcher (M11 main.mjs), the robot job (wiring/robot-main.mjs) and the review runner
+// (review-runner-main.mjs, which shares openJobJson and readChangedProblem and checks its programs itself).
 //
 // WHY. Each of those programs imports the code file its config names (`wiring`, the runner's `budget`). A config, or a
 // named file, that anyone but root or the job's own user could write would run that writer's code as the job, which
-// holds the Record and, for the robot job, the write tokens. Before L253 three of the four read their config with a bare
-// JSON.parse; only the review runner checked. Now all four check here, and there is no unchecked path to fall back to.
+// holds the Record and, for the robot job, the write tokens. Before L253 two of the three read their config with a bare
+// JSON.parse; only the review runner checked. Now all three check here, and the job's own script (`self`) is checked
+// the same way (audit #144 m4), so there is no unchecked path to fall back to.
 //
 // WHAT. readJobConfig(file, { code }) answers the parsed config, or throws one line naming the file and the reason:
 //   - the config is opened by descriptor, never through a link (O_NOFOLLOW), and checked with fstat on that descriptor:
@@ -17,6 +19,8 @@
 //   - the config and every code file it names (`code`: keys whose values are paths) are inside that copy, root's (or the
 //     job user's) alone, no links, no access lists, with the copy itself walked whole (install-check.mjs installProblem);
 //   - each code file is one of the copy's own code files (copyModuleProblem: not a test, not a fixture);
+//   - `self`, the running job's own script (its real path), is checked as a code file too: a job started from a file
+//     outside the copy, or a test file in it, is refused;
 //   - every folder above the copy, up to /, is a plain folder of root or that user, written by no one else (a sticky
 //     world-writable /tmp included: production never uses one, L257 (A)), with no access list.
 // The ports (lstat, fstat, open, list, readlink, acl, ownUid) are for a test only; every production caller passes none.
@@ -48,6 +52,9 @@ export function openJobJson(file, fail, { open = openSync, fstat = fstatSync } =
   if (value && typeof value === 'object') Object.defineProperty(value, READ_ID, { value: { dev: st.dev, ino: st.ino } });
   return { value, st };
 }
+
+/** True when `config` came from openJobJson (it carries the read's device and inode). */
+export const readByDescriptor = (config) => Boolean(config?.[READ_ID]);
 
 /** Null, or why `file` (by name, now) is not the file `config` was read from by openJobJson. */
 export function readChangedProblem(file, config, { lstat = lstatSync } = {}) {
@@ -91,7 +98,7 @@ function aboveProblem(from, owner, { lstat, acl }) {
  * The job's config, checked (see the top of this file). `code`: the config keys naming a code file the job imports,
  * each required; `optionalCode`: the same, checked only when the config has the key. → the parsed config, or throws.
  */
-export function readJobConfig(file, { code = ['wiring'], optionalCode = [], ownUid = process.getuid?.(), lstat = lstatSync, fstat = fstatSync,
+export function readJobConfig(file, { code = ['wiring'], optionalCode = [], self, ownUid = process.getuid?.(), lstat = lstatSync, fstat = fstatSync,
   open = openSync, list = readdirSync, readlink = readlinkSync, acl = aclProblem } = {}) {
   const fail = (why) => { throw new Error(`job config ${file}: ${why}`); };
   if (typeof file !== 'string' || !isAbsolute(file)) fail('must be a full path');
@@ -105,17 +112,19 @@ export function readJobConfig(file, { code = ['wiring'], optionalCode = [], ownU
   if (st.uid !== owner) fail(`is owned by uid ${st.uid}, not by the installed copy's owner (${ownerName(owner)})`);
   const keys = [...code, ...optionalCode.filter((k) => c[k] !== undefined)];
   for (const k of keys) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) fail(`${k} must be a full path`);
+  if (self !== undefined && (typeof self !== 'string' || !isAbsolute(self))) fail('the job\'s own script must be named by its full path');
+  const named = [...keys.map((k) => [k, c[k]]), ...(self === undefined ? [] : [["the job's own script", self]])];
   const ports = { owner, lstat, list, readlink, acl };
-  const bad = installProblem(c.installRoot, [file, ...keys.map((k) => c[k])], { ...ports, top: dirname(c.installRoot) });
+  const bad = installProblem(c.installRoot, [file, ...named.map(([, p]) => p)], { ...ports, top: dirname(c.installRoot) });
   if (bad) fail(bad);
   // The descriptor read must be the file the folder checks walked: no swap between the two looks.
   const swapped = readChangedProblem(file, c, { lstat });
   if (swapped) fail(swapped);
   const cur = currentCopy(c.installRoot, { owner, lstat, readlink });
-  for (const k of keys) {
-    const why = inside(c.installRoot, c[k]) === null && inside(cur.real, c[k]) === null ? 'is not inside the installed copy'
-      : codeFileProblem(c.installRoot, c[k], { owner, lstat, readlink });
-    if (why) fail(`${k}, ${c[k]}, ${why}`);
+  for (const [k, p] of named) {
+    const why = inside(c.installRoot, p) === null && inside(cur.real, p) === null ? 'is not inside the installed copy'
+      : codeFileProblem(c.installRoot, p, { owner, lstat, readlink });
+    if (why) fail(`${k}, ${p}, ${why}`);
   }
   const up = dirname(dirname(c.installRoot));
   if (up !== dirname(c.installRoot)) { const a = aboveProblem(up, owner, { lstat, acl }); if (a) fail(a); }

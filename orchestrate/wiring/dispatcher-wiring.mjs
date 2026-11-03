@@ -22,7 +22,8 @@
 // rules reader's alerts take the same honest answer or go into that queue (below).
 //
 // The config (one JSON file, main.mjs's argument). Every path is absolute; nothing here names a machine or a product.
-//   wiring, lockFile, runDeadlineMs   main.mjs's own (see main.mjs)
+//   installRoot, wiring, lockFile, runDeadlineMs   main.mjs's own (see main.mjs); the config, the wiring and main.mjs
+//                  must be files of the installed copy at installRoot (shared/job-config.mjs, L253)
 //   product        the product this Dispatcher runs (one Record per product, M9)
 //   recordRoot     the product's Record folder (M9 store)
 //   ownerUid       the Mac user that owns the Record (M9 store checks it)
