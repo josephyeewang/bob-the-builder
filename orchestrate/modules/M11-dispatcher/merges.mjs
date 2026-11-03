@@ -83,7 +83,9 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  * is asked for, and the pass ends with that error once the other limits have run, so the tick tells Joe. Returns the
  * list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+// `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
+// refuses a since more than 60 s off its clock). Left out, it is `now`.
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -135,7 +137,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
+      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now: Math.max(now, clock()), kind: 'no_reviewer_ask', alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });

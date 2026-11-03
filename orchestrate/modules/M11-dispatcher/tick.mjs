@@ -34,6 +34,7 @@
 // The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
 // (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
 
+import { tellRefused, watchWrites } from './refused-writes.mjs';
 import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
@@ -170,7 +171,14 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
  * One full pass. `ports` holds every outside effect (see README, "The tick's ports"); each step reads
  * only the ports it needs. Returns { steps: { name: { ok, result | error } } }.
  */
-export async function tick({ rec, rules, now, ports: p }) {
+// `clock` (ms): read before each step, so each step's `now` is the time it starts, never before the tick's own (L321:
+// steps run one after another, each up to STEP_DEADLINE_MS, and the Store Writer refuses a wait whose since is more
+// than 60 s off its clock). Left out, it is the tick's fixed `now`.
+export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
+  // Every refused write of a watched kind is noted, and told at the end of the pass (refused-writes.mjs, L323).
+  const base = rec;
+  const watched = watchWrites(rec);
+  rec = watched.rec;
   const res = {};
   // Every alert is queued (alerts.mjs, L47): no step sends or waits on a send.
   const alert = outbox(rec, now);
@@ -187,6 +195,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // A time limit on each stop, save and Lead hand-off call; the defaults are pass.mjs's.
   const portDeadlines = Object.fromEntries([['portDeadlineMs', p.portDeadlineMs], ['saveDeadlineMs', p.saveDeadlineMs]].filter(([, v]) => v !== undefined));
   const run = async (step, f) => {
+    now = Math.max(now, clock());
     let timer;
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${deadline} ms`)), deadline); });
@@ -214,7 +223,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The safety acts, first and alone (L38).
   let stops = null;
   await run('stops', async () => {
-    stops = await stopPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, ...portDeadlines });
+    stops = await stopPass({ rec, rules, now, clock, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, ...portDeadlines });
     missing.push(...stops.missing);
     return stops;
   });
@@ -288,7 +297,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The time limits themselves still run.
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
-  await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, gateAlive: p.gateAlive,
+  await run('limits', () => timeLimits({ rec, rules, now, clock, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
   await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
   // A card put on Joe whose alert was not delivered is told again (L130).
@@ -311,9 +320,13 @@ export async function tick({ rec, rules, now, ports: p }) {
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');
   // The one sender (alerts.mjs) again, last: this pass's own alerts.
+  // Refused writes (L323): told after every step, before this pass's own alerts go out.
+  let refused = [];
+  try { refused = tellRefused({ rec: base, alert, now: Math.max(now, clock()), refused: watched.refused, ran: (step) => res[step]?.ok === true }); }
+  catch (e) { alert(`the Dispatcher could not tell its refused writes: ${e?.message ?? e}`); }
   const last = await sendAlerts(rec, p.alert, now, sendOpts);
   const alerts = { sent: first.sent + last.sent, failed: first.failed + last.failed, left: last.left };
-  return { steps: res, alerts };
+  return { steps: res, alerts, refused };
 }
 
 /** The login job's entry: one full pass under the single-instance lock (M16). */
