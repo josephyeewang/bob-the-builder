@@ -82,6 +82,8 @@ export function passUnreadable(facts) {
     || (facts.compareStatus === null && facts.compareAnswered !== true));
   return { outage, unreadable };
 }
+// A merge whose check just before merging did not finish (L231): a refused write under the lock, or a stopped pass.
+export const CHECK_CUT_NOTE = 'the gate\'s check just before merging did not finish (a write was refused, or the pass stopped); nothing was merged, and the card goes back and is asked for again';
 export const GITHUB_NO_NOTE ='GitHub refused the merge; the card goes back and is asked for again, and the same refusal twice goes to the owner';
 
 // The order the queue is served in: undo first, the lead's daily card when the blueprint's freshness alarm is on,
@@ -297,6 +299,7 @@ export async function gatePass(ctx) {
   // starts it, nor refuses, nor stops it, so an outage alone never refuses a change for good (L164), and an outage in the
   // middle of a long wait doesn't start it again. Only a read that succeeds and comes back incomplete counts toward the cap.
   // `unreadable` has no default: every caller says (L190 M2, a caller missed when this function's inputs changed).
+  // Answers whether the merge moved (held, or refused at the cap): check() must not leave one in checking (L231).
   function hold(m, v, unreadable) {
     if (typeof unreadable !== 'boolean') throw new Error('hold() needs to be told whether GitHub was readable this pass (L190 M2)');
     const outage = unreadable;
@@ -312,12 +315,14 @@ export async function gatePass(ctx) {
       const stuck = Date.parse(fields.stuck_since ?? '');
       if (limit !== undefined && Number.isFinite(stuck) && now() - stuck >= WAIT_CAP_TIMES * limit) {
         const reasons = waitingOn;
-        if (move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) tellRefused(fresh('merge', m.id));
-        return;
+        if (!move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) return false;
+        tellRefused(fresh('merge', m.id));
+        return true;
       }
     }
-    if (!move(cur, 'held', fields) || !waiting) return;
-    waitedLong(fresh('merge', m.id), limit);
+    if (!move(cur, 'held', fields)) return false;
+    if (waiting) waitedLong(fresh('merge', m.id), limit);
+    return true;
   }
 
   function waitedLong(m, limit) {
@@ -355,6 +360,8 @@ export async function gatePass(ctx) {
     const head = facts.pr.head.sha;
     const card = fresh('card', m.doc.card);
     const mm = fresh('merge', m.id);
+    // The wait clock (waiting_since, stuck_since) comes along into checking (L231): a wait seen again under the lock
+    // is the same wait, so it goes on from when it began and can reach the cap at once. That is meant.
     const pair = record.write({ actor: ACTOR, entity: 'merge', id: mm.id, expectRev: mm.rev, doc: { ...mm.doc, state: 'checking', judged_head: head, judged_main: facts.main.sha, tier: facts.tier, needs_joe: facts.approve?.needed !== false || card.doc.needs_joe === true },
       also: [{ entity: 'card', id: card.id, expectRev: card.rev, doc: { ...card.doc, state: 'merging' } }] });
     if (!pair.ok) { alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'checking', reason: pair.reason }); return; }
@@ -369,11 +376,23 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      if (v.decision === 'hold') hold(m, v, passUnreadable(facts).unreadable); else move(m, 'refused', { reasons });
+      const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons });
+      if (!left) cutShort(m, reasons);
       return putBack(m, 'verified');
     }
     if (!move(m, 'merging', { judged_main: facts.main.sha, ...WAIT_CLEARED })) return;
     return land(fresh('merge', m.id));
+  }
+
+  // L231: under the lock, the move out of checking was refused. Left in checking, the next pass's recover() would refuse
+  // it with no word of why, and the write-refused alert alone can be lost, so Joe would never hear of the wait or the
+  // cap. It ends now, refused with what the check found, told until delivered (3b). The card goes back and is asked
+  // for again, so a wait ended this way is judged again, never refused for good. If this write is refused too,
+  // recover() refuses and tells the same way next pass.
+  function cutShort(m, reasons) {
+    const cur = fresh('merge', m.id);
+    if (cur?.doc?.state !== 'checking') return;
+    if (move(cur, 'refused', { ...WAIT_CLEARED, hold: null, reasons, tell_owner: true, tell_note: CHECK_CUT_NOTE })) tellRefused(fresh('merge', m.id));
   }
 
   async function land(m) {
@@ -496,7 +515,8 @@ export async function gatePass(ctx) {
         putBack(m, 'verified');
         return;
       }
-      move(m, 'refused', { reasons: ['GitHub did not merge the judged head'] });
+      // Told until delivered (L231): this is where a check cut short by a refused write, or a stopped pass, ends.
+      if (move(m, 'refused', { reasons: ['GitHub did not merge the judged head'], tell_owner: true, tell_note: CHECK_CUT_NOTE })) tellRefused(fresh('merge', m.id));
       putBack(m, 'verified');
       return;
     }
