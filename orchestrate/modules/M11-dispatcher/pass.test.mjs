@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -302,6 +302,33 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
   assert.equal(told().length, 1);
   await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
   assert.equal(told().length, 1, 'told once');
+});
+
+// A hand-edited Record (L285): the M9 writer always stamps a readable since; this test's stand-in Record keeps what it
+// is given, so it can hold one that isn't.
+const garbleSince = (rec, id) => {
+  const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, since: 'not a time' } });
+  assert.ok(r.ok, r.reason);
+  assert.equal(rec.read('card', id).doc.wait.since, 'not a time');
+};
+
+test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });   // no hit is ever recorded for acct-u
+  garbleSince(w.rec, 'S'); garbleSince(w.rec, 'U');
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage', 'exactly the no-hit cap from the run\'s start is not over it');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  // The hit (3 days in) and its reset (10 days in) are each in bounds; counted from the hit the card would wait past
+  // its reset with every new hit. Counted from the run's start, a minute past the bound waits on Joe.
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage', 'exactly the cap from the run\'s start is not over it');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer than any real limit window/.test(x)).length, 1);
 });
 
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
