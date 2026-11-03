@@ -36,6 +36,7 @@ import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, readConfig, zoneFor } from './kinds.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const HELD_CLOSED_STATES = Object.freeze(['merged', 'closed', 'cancelled', 'closed_no_answer', 'reverted']);
 const MAX_WINDOW_MARKS = 20;
@@ -136,12 +137,14 @@ async function retryClose(ctx, a, events) {
 }
 
 // An unanswered lapsing ask 12 hours after it was raised this round, or an unused merge approval 24 hours after:
-// the first time it goes back to open to be re-asked once (reask_count 1); the second time it expires.
+// the first time it goes back to open to be re-asked once (reask_count 1); the second time it expires. A raised_at that
+// can't be read or lies in the future runs out now (L329: pastTime; an expiry never waits on a time it can't trust).
 async function runOut(ctx, a, nowMs, events) {
   const doc = a.doc;
   const k = activeKind(doc.kind);
-  const unanswered = k.lapse && (doc.state === 'open' || doc.state === 'pushed') && nowMs >= lapseAt(doc);
-  const unused = k.merge_approve && doc.state === 'answered' && ms(doc.raised_at) !== null && nowMs >= ms(doc.raised_at) + MERGE_APPROVE_MS;
+  const unanswered = k.lapse && (doc.state === 'open' || doc.state === 'pushed') && nowMs >= lapseAt(doc, nowMs);
+  const raised = pastTime(doc.raised_at, nowMs);
+  const unused = k.merge_approve && doc.state === 'answered' && (raised === null || nowMs >= raised + MERGE_APPROVE_MS);
   if (!unanswered && !unused) return false;
   const next = structuredClone(doc);
   if (doc.reask_count === 0) {
@@ -241,8 +244,12 @@ export async function schedulePass(ctx) {
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }
     const urgent = cfg.urgent.includes(doc.kind);
     let due;
-    if (urgent) due = !raisedThisRound(doc) || nowMs - (ms(doc.last_push_at) ?? 0) >= URGENT_REPUSH_MS;
-    else due = win !== null && !raisedThisRound(doc) && (ms(doc.lapsed_at ?? doc.created_at) ?? Infinity) <= win.start;
+    // A stored time that can't be read or lies in the future counts as long past (L329: pastTime): the push goes out
+    // now, never held back by it. Before, an unreadable created_at kept a non-urgent ask out of every window.
+    const pushed = pastTime(doc.last_push_at, nowMs);
+    const since = pastTime(doc.lapsed_at ?? doc.created_at, nowMs);
+    if (urgent) due = !raisedThisRound(doc) || pushed === null || nowMs - pushed >= URGENT_REPUSH_MS;
+    else due = win !== null && !raisedThisRound(doc) && (since === null || since <= win.start);
     if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }
   // Marks are kept only for asks still waiting to be pushed; re-read, since a push moved some on.
@@ -260,7 +267,7 @@ export async function readApprove(ctx, id, { view, catchUps = [] } = {}) {
   if (doc.state !== 'pushed' || !Number.isSafeInteger(doc.pr) || !raisedThisRound(doc)) return { ok: true, counted: false };
   const c = await countApprove({ gh: ctx.gh, view, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId, raisedAt: doc.raised_at, catchUps });
   if (!c.ok) return { ok: true, counted: false, reason: c.reason, ...(c.line ? { line: c.line } : {}) };
-  if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc)) return { ok: true, counted: false, lapsed: true };
+  if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };
   const binding = { kind: 'github_review', pr: doc.pr, review_id: c.review.id, commit_id: c.review.commit_id, submitted_at: c.review.submitted_at, carried: c.carried };
   const answer = { channel: 'github_review', choice: 'approve', approves: true, declined: false, head: c.head, binding, at: iso(ctx.now()) };
   // The one approval check, on the answer as it will be recorded (L81).
@@ -281,12 +288,12 @@ export async function approvalStands(ctx, id, { head, view, catchUps = [] } = {}
   if (!activeKind(doc.kind)?.merge_approve) return fail(`a ${doc.kind} ask does not approve a merge`);
   if (doc.state !== 'answered' || doc.answer?.approves !== true) return fail(`ask ${id} is ${doc.state}`);
   if (typeof head !== 'string' || doc.answer.head !== head) return fail('the approval is for another head');
-  const raised = ms(doc.raised_at);
+  const raised = pastTime(doc.raised_at, ctx.now());   // unreadable or in the future: lapsed (L329)
   if (raised === null || ctx.now() >= raised + MERGE_APPROVE_MS) return fail('the approval lapsed: no merge within 24 hours');
   const c = await countApprove({ gh: ctx.gh, view, owner: ctx.owner, repo: ctx.repo, pr: doc.pr, githubId: cfg.githubId, raisedAt: doc.raised_at, catchUps });
   // GitHub could not be read: whether it stands is not known, which the Merge Gate waits out (L205).
   if (!c.ok && c.unreadable === true) return fail(`whether the approval stands could not be read from GitHub: ${c.reason}`, { unreadable: true, cause: c.cause });
   if (!c.ok || c.head !== head) return fail(`the approval no longer stands on GitHub: ${c.reason ?? 'the pull request moved to another head'}`);
-  if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc)) return fail('the standing Approve came after the ask lapsed');
+  if ((ms(c.review.submitted_at) ?? Infinity) >= lapseAt(doc, ctx.now())) return fail('the standing Approve came after the ask lapsed');
   return { ok: true };
 }

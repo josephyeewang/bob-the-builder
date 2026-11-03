@@ -10,6 +10,7 @@
 
 export { ASK_KINDS, BOX_STATUSES, RELEASE_REASONS, ASK_FIELDS, URGENT_DEFAULT, activeKind } from '../../shared/asks.mjs';
 import { ASK_KINDS, URGENT_DEFAULT } from '../../shared/asks.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const STILL_OPEN_LINE = 'Still open: a typed answer doesn\'t count, tap a choice';
 export const CLOSED_LINE = 'that question had closed; nothing was recorded';
@@ -30,9 +31,12 @@ export const WINDOW_GRACE_MS = 60 * 60_000;
 
 // When this round of an ask lapses: 12 hours after it was raised in this round (raised_reask = reask_count). A lapsed ask
 // sent back to open is not raised again until its next push or box, so until then nothing lapses it a second time.
-export function lapseAt(doc) {
-  const t = Date.parse(doc?.raised_at ?? '');
-  return ASK_KINDS[doc?.kind]?.lapse && Number.isFinite(t) && doc.raised_reask === doc.reask_count ? t + LAPSE_MS : Infinity;
+// An ask not raised this round (no raised_at, or another round's) never lapses. A raised_at that can't be read, or lies
+// more than a minute ahead of `now`, lapses now (L329: shared pastTime; an expiry fails closed, never "not yet").
+export function lapseAt(doc, now) {
+  if (!ASK_KINDS[doc?.kind]?.lapse || doc.raised_at == null || doc.raised_reask !== doc.reask_count) return Infinity;
+  const t = pastTime(doc.raised_at, now);
+  return t === null ? -Infinity : t + LAPSE_MS;
 }
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;

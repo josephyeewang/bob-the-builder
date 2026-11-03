@@ -177,7 +177,7 @@ function tryBind(ctx, sid, role, e, b, events) {
   if (!version) return mismatch('the box is not M2\'s exact question');
   if (doc.state !== 'open' && doc.state !== 'pushed') return mismatch(`the ask is ${doc.state}`);
   if (ms(doc.created_at) === null || ms(e.timestamp) === null || ms(e.timestamp) < ms(doc.created_at)) return mismatch('asked before the ask was created');
-  if (ms(e.timestamp) >= lapseAt(doc)) return mismatch('the ask has lapsed');
+  if (ms(e.timestamp) >= lapseAt(doc, ctx.now())) return mismatch('the ask has lapsed');
   if (role === 'thinking' && doc.origin_session !== sid) return mismatch('a thinking room asks only its own questions');
   if (liveBox(doc)) return mismatch('the ask already has a live box');
   const busy = st.asks().some((o) => o.id !== a.id && (o.doc.boxes ?? []).some((x) => x.status === 'bound' && x.session_id === sid));
@@ -211,7 +211,7 @@ function answer(ctx, sid, e, b, events) {
   if (box.status !== 'bound') { events.push({ type: 'closed', ask: a.id, card: doc.card, session: sid }); return; }
   const at = ms(e.timestamp);
   // The ask moved on while the box was open (m4-1): the box is released, nothing counts, and the owner is told.
-  if (doc.state !== 'pushed' || at === null || at >= lapseAt(doc) || at < (ms(box.bound_at) ?? Infinity)) {
+  if (doc.state !== 'pushed' || at === null || at >= lapseAt(doc, ctx.now()) || at < (ms(box.bound_at) ?? Infinity)) {
     const reason = doc.state === 'withdrawn' ? 'withdrawn' : doc.state === 'expired' ? 'expired' : doc.state === 'answered' || doc.state === 'consumed' ? 'answered_elsewhere' : 'lapsed';
     releaseBoxes(doc, reason, ctx.now(), { moveBack: false, session: sid });
     const w = writeDoc(ctx.record, 'ask', a, doc);
@@ -281,7 +281,7 @@ export function nextBox(ctx, { sessionId, role, card = null, releasedThisReply =
   const open = st.asks().filter(({ id, doc }) => {
     const k = activeKind(doc.kind);
     if (!k || k.channel !== 'tap' || (doc.state !== 'open' && doc.state !== 'pushed')) return false;
-    if (liveBox(doc) || nowMs >= lapseAt(doc)) return false;
+    if (liveBox(doc) || nowMs >= lapseAt(doc, nowMs)) return false;
     if (role === 'thinking' && doc.origin_session !== sessionId) return false;
     if (held.has(id) && !k.urgent) return false;
     return true;

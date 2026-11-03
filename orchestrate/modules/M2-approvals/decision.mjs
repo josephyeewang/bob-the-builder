@@ -133,7 +133,9 @@ export async function readDecision(ctx, id) {
   if (!v.ok) return v;
   if (v.verdict === 'none') return { ok: true, counted: false, ...(v.line ? { line: v.line } : {}), ...(v.blocked ? { reason: v.blocked } : {}) };
   // An answer given after the ask lapsed counts nothing, even if no pass ran in between (the Mini was down; R-0b-51).
-  if (Date.parse(v.review.submitted_at) >= lapseAt(doc)) return { ok: true, counted: false, lapsed: true };
+  // A submitted_at that can't be read counts as lapsed, as in schedule.mjs (L329; it used to count).
+  const at = Date.parse(v.review.submitted_at);
+  if (!Number.isFinite(at) || at >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };
   const go = doc.kind === 'go_t1';
   let choice; let approves;
   if (v.verdict === 'changes_requested') { choice = go ? 'Not now' : null; approves = false; } else {

@@ -26,6 +26,7 @@ import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const MIN = 60000;
 // How long a session claim may wait for its process (claims.unlaunched_min, L72) when the rules don't say.
@@ -545,7 +546,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (!s) return { dead: false, why: 'no session record' };
     const sessionDead = s.doc.state === 'ended' || s.doc.state === 'quarantined' || processDead({ pid: s.doc.pid, pid_start: s.doc.pid_start }, p);
     if (!sessionDead) return { dead: false, why: 'session alive' };
-    const last = Math.max(Date.parse(s.doc.last_activity) || 0, Date.parse(s.ts) || 0);
+    // A time that can't be read or lies in the future is no activity (L329: pastTime), never "recent activity" for ever.
+    const last = Math.max(pastTime(s.doc.last_activity, nowMs) ?? 0, pastTime(s.ts, nowMs) ?? 0);
     if (nowMs - last <= stuckMin * MIN) return { dead: false, why: 'recent activity' };
     return { dead: true, why: 'process and session dead, no recent activity' };
   }
@@ -597,7 +599,9 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     for (const c of store.list('card')) {
       const claim = c.doc.claim;
       if (c.doc.state !== 'claimed' || claim?.kind !== 'session' || Number.isInteger(claim.pid)) continue;
-      if (!(nowMs > Date.parse(claim.claimed_at) + unlaunchedMin * MIN)) continue;
+      // A claimed_at that can't be read or lies in the future lapses now (L329: pastTime); before, it never lapsed.
+      const claimedAt = pastTime(claim.claimed_at, nowMs);
+      if (claimedAt !== null && nowMs <= claimedAt + unlaunchedMin * MIN) continue;
       let ok = false, why = 'no way to stop a session was given';
       if (typeof stopSession === 'function') { try { ok = stopSession(claim.session_id) === true; if (!ok) why = 'stopSession did not say it stopped'; } catch (e) { why = String(e?.message ?? e).slice(0, 200); } }
       if (ok) stopped.add(`${c.id}\u0000${claim.session_id}`);
@@ -642,10 +646,13 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
           }
           // A tab claim: its heartbeat or the running limit. A heartbeat counts only from the Dispatcher's own family,
           // written by the Dispatcher (L74 addendum, L77 (5)): another role's `tab_heartbeat` keeps no claim alive.
-          const beats = tx.list('fact').filter((x) => factFrom(TAB_HEARTBEAT_WRITER, x, TAB_HEARTBEAT_FAMILY) && x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => Date.parse(x.ts));
-          const lastBeat = Math.max(Date.parse(claim.claimed_at) || 0, ...beats);
+          const beats = tx.list('fact').filter((x) => factFrom(TAB_HEARTBEAT_WRITER, x, TAB_HEARTBEAT_FAMILY) && x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => pastTime(x.ts, nowMs)).filter((x) => x !== null);
+          // A time that can't be read or lies in the future counts for nothing (L329: pastTime): an unreadable beat no
+          // longer turns the stale check off, and an unreadable or future claimed_at hits the running limit now.
+          const claimedAt = pastTime(claim.claimed_at, nowMs);
+          const lastBeat = Math.max(claimedAt ?? -Infinity, ...beats);
           const staleHit = stale >= 1 && nowMs - lastBeat > stale * MIN;
-          const limitHit = !!running?.minutes && nowMs - (Date.parse(claim.claimed_at) || 0) > running.minutes * MIN;
+          const limitHit = !!running?.minutes && (claimedAt === null || nowMs - claimedAt > running.minutes * MIN);
           if (!staleHit && !limitHit) continue;
           const why = staleHit ? 'heartbeat stale' : 'running limit';
           if (e.doc.state === 'claimed') {
