@@ -31,7 +31,7 @@ const REPORT = '# What the top three rivals charge\n\nAnnual plans run 20-30% un
 function world({ values = ON, state = 'active', asks = 1 } = {}) {
   const t = setup({ values, prefix: 'm11-research-' });
   if (state) must(t.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: 0, doc: { state } }), 'product');
-  const ctx = { record: t.record, rules: t.rules, product: PRODUCT, now: () => t.clock.t, alert: () => true };
+  const ctx = { record: t.record, rules: t.rules, product: PRODUCT, now: () => t.clock.t, alert: fakeAlert() };
   for (let i = 1; i <= asks; i += 1) {
     const f = outboxFile('ask-request', `20261103-0915-r${"abcdefgh"[i]}`, { ask: 'research', product: PRODUCT, brief: `find out thing ${i}` });
     const c = checkOutboxFile(f.name, f.text, { products: [PRODUCT], seenIds: [] });
