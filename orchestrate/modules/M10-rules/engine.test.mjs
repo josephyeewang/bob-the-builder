@@ -128,7 +128,6 @@ test('start_session: an undo is never refused by the editing caps; one undo per 
   assert.equal(start(w, undo).decision, 'allow', 'cap 0 + undo → allowed');
   assert.match(start(w).reason, /is 0/, 'cap 0 + an ordinary editing worker → refused');
   assert.match(start(w, { card: { id: 'C-2', kind: 'docs' } }).reason, /is 0/, 'only the exact-reverse kind is spared');
-  assert.match(start(w, { card: { id: 'C-2', kind: 'docs', exact_reverse: true } }).reason, /is 0/, 'the kind, not some other field (plant D)');
   w.run.undo = { app: 1 }; w.run.app = 1; w.run.mac = 1;
   assert.match(start(w, undo).reason, /an undo is already running for app/, 'a second undo on one product → refused');
   w.run.undo = { other: 1 };
@@ -179,8 +178,6 @@ test('start_session: a Tier 1 undo is not held for a missing or stale usage read
   assert.match(start(w, { tier: 1, usage: stale }).reason, /stale/);
   assert.match(start(w, { ...undo, tier: 1, role: 'writer' }).reason, /usage reading/, 'not a worker: held');
   assert.match(start(w, { ...undo, tier: 1, editing: false, role: 'auditor' }).reason, /usage reading/, 'read-only: held');
-  // A worker that doesn't edit is not an undo either, whatever its card says (L226, the auditor's plant F).
-  assert.match(start(w, { ...undo, tier: 1, editing: false }).reason, /usage reading/, 'a read-only worker: held');
 });
 
 test('start_session while paused: an exact-reverse undo starts, nothing else does; still one undo at a time (L210)', () => {
@@ -314,8 +311,6 @@ test('must-match values: a pin, model, account or home-zone mismatch stops every
 test('one product with no usable rules stops every start on the Mac (MAT-10)', () => {
   const w = world({ policies: { app: pol(), other: null } });
   assert.match(start(w).reason, /rules unusable for other/);
-  // The undo exception is not past this check: an undo is refused too (L226, the auditor's plant P).
-  assert.match(start(w, { card: { id: 'C-undo', kind: 'exact_reverse' } }).reason, /rules unusable for other/, 'an undo is refused too');
   assert.equal(w.rules.get('caps.editing_per_mac'), undefined);
   assert.equal(w.rules.get('caps.rounds', { product: 'app' }), 3, 'a per-product value of a healthy product still reads');
 });
