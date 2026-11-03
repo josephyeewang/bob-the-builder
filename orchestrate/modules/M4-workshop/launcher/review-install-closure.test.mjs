@@ -57,6 +57,7 @@ const BUILTIN = new Set([...builtinModules, ...builtinModules.map((m) => `node:$
 // file fails.
 const CONFIG_IMPORTS = Object.freeze([
   ['modules/M11-dispatcher/main.mjs', 'import(pathToFileURL(config.wiring).href)'],
+  ['modules/M12-sensors/loop.mjs', 'import(pathToFileURL(config.wiring).href)'], // R-0b-169: the Sensors job's wiring, named like M11's
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.wiring).href)'],
   ['modules/M4-workshop/launcher/review-runner-main.mjs', 'import(pathToFileURL(c.budget).href)'],
 ]);

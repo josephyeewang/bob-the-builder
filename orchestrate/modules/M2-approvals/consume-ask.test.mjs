@@ -191,6 +191,7 @@ const STAR_FROM = /\bexport\s*\*\s*(?:as\s+[\w$]+\s*)?from\s*(['"`])([^'"`]+)\1/
 // config, a copy made by a test, or text inside a test's string). A new one, or one more in these, fails.
 export const ALLOWED = Object.freeze({
   'modules/M11-dispatcher/main.mjs': 1,
+  'modules/M12-sensors/loop.mjs': 1, // R-0b-169: the Sensors job loads the wiring module its config names, as main.mjs does
   'modules/M11-dispatcher/tick.test.mjs': 1,
   'modules/M4-workshop/git/refusal-reasons.test.mjs': 1,
   'modules/M4-workshop/hooks/attacks.test.mjs': 1,
