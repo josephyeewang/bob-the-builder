@@ -495,7 +495,7 @@ function holders(reason, product, running) {
   return on.map((s) => s.card).filter(Boolean);
 }
 const LIST_MAX = 10;
-const listed = (cards) => cards.slice(0, LIST_MAX).map((c) => (c.title ? `${c.id} (${c.title})` : c.id)).join(', ') + (cards.length > LIST_MAX ? ` +${cards.length - LIST_MAX} more` : '');
+const listed = (ids) => ids.slice(0, LIST_MAX).join(', ') + (ids.length > LIST_MAX ? ` +${ids.length - LIST_MAX} more` : '');
 /** The one alert per product and cause for held starts (L299). */
 function tellWaits({ rec, groups, alert, now }) {
   for (const [key, g] of groups) {
@@ -543,7 +543,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
         const g = groups.get(key) ?? { product, cls, reason, cards: [], by: [], oldest: Infinity };
         const t = Date.parse(since({ id }));
         g.oldest = Math.min(g.oldest, Number.isFinite(t) ? t : -Infinity);
-        g.cards.push({ id, title: typeof doc.title === 'string' ? doc.title.slice(0, 80) : null });
+        g.cards.push(id);
         if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running));
         groups.set(key, g);
         return;
