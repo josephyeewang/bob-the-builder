@@ -98,11 +98,13 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? [])].filter(Boolean);
   if (paths.mirror && denyPaths.includes(paths.mirror)) return refuse('the mirror must not be on the read-deny list');
   if (!Array.isArray(productionFiles)) return refuse('the rules\' production file list was not given');
-  const unguarded = productionFiles.filter((f) => !denyPaths.some((d) => typeof f === 'string' && (f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`))));
+  // One rule for every path that must be denied (lane 2's #124 review, m2): the path itself, or a folder above it, is on the list.
+  const denied = (f) => typeof f === 'string' && denyPaths.some((d) => f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`));
+  const unguarded = productionFiles.filter((f) => !denied(f));
   if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
   if (proposalOutboxes === undefined && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders were not given');
   if (proposalOutboxes !== undefined && !Array.isArray(proposalOutboxes)) return refuse('the rules\' proposals folders are not a list');
-  const open = (proposalOutboxes ?? []).filter((f) => typeof f !== 'string' || !denyPaths.includes(f));
+  const open = (proposalOutboxes ?? []).filter((f) => !denied(f));
   if (open.length) return refuse(`the rules' proposals folders are not all on the read-deny list: ${open.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
