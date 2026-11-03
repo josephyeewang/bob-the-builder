@@ -22,6 +22,7 @@ import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ME = process.getuid();
@@ -191,6 +192,13 @@ test('install: the real updater accepts the layout; every item passes; the work 
   assert.match(stamp, /^[0-9a-f]{40}$/);
   const uc = JSON.parse(readFileSync(join(copy, UPDATER_CONFIG), 'utf8'));
   assert.equal(uc.installRoot, w.mac.at(`${BASE}/install/orchestrate`));
+  // L253's setup condition: what this setup places passes the shared job-config reader's parts the review runner uses.
+  // The runner config as placed is read by descriptor (a plain file no one else writes), and the wiring it names is
+  // one of the copy's own code files. (No Dispatcher, robot or Sensors config is placed on 3 Nov.)
+  const placed = openJobJson(join(copy, RUNNER_CONFIG), (why) => { throw new Error(`placed ${RUNNER_CONFIG} ${why}`); }).value;
+  const inCopy = (p) => join(copy, p.slice(w.mac.at(`${BASE}/install/orchestrate`).length + 1));
+  assert.equal(codeFileProblem(w.mac.at(`${BASE}/install/orchestrate`), placed.wiring, { owner: process.getuid() }), null, 'the placed wiring is a copy code file');
+  assert.ok(existsSync(inCopy(placed.wiring)));
   const again = w.run(['install']);
   assert.equal(again.code, 0, again.text);
   assert.match(again.text, /already installed/);

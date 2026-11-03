@@ -3,8 +3,10 @@
 // for another owner where only root could make it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, lstatSync, fstatSync, symlinkSync, writeFileSync, linkSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, lstatSync, fstatSync, symlinkSync, writeFileSync, linkSync, rmSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tempDir } from './test-tmp.mjs';
 import { readJobConfig } from './job-config.mjs';
 import { installedLayout } from './job-config.test-helper.mjs';
 
@@ -112,4 +114,48 @@ test('L253: a config that is not a JSON object, or names no installRoot, is refu
   refuses('job.json', /must be a full path/);
   const hard = join(L.copy, 'hard.json'); linkSync(join(L.copy, 'job.json'), hard);
   assert.ok(readJobConfig(L.path('hard.json')), 'a second name of a checked file is the same file');
+});
+
+// ---- L253 guard: no job loads a config-named module through a config it did not read with this reader ----
+// Every production file that imports a computed path (`import(pathToFileURL(…))`, the way a job loads the wiring its
+// config names) must read its config through the checked reader: readJobConfig, M11 main.mjs's readConfig (which calls
+// it), or the review runner's descriptor read with its after-check. A new job script that parses its config itself fails here.
+const ORCH = fileURLToPath(new URL('..', import.meta.url));
+const READERS = [
+  /\breadJobConfig\(/,
+  /import\s*\{[^}]*\breadConfig\b[^}]*\}\s*from\s*['"][./]*(?:modules\/)?M11-dispatcher\/main\.mjs['"]/,
+  { all: [/\bopenJobJson\(/, /\breadChangedProblem\(/] },
+];
+const usesReader = (text) => READERS.some((r) => (r.all ? r.all.every((x) => x.test(text)) : r.test(text)));
+function productionFiles(dir) {
+  const out = [];
+  for (const n of readdirSync(dir)) {
+    const p = join(dir, n);
+    if (n === 'node_modules' || n === 'fixtures' || n.startsWith('.')) continue;
+    if (statSync(p).isDirectory()) out.push(...productionFiles(p));
+    else if (n.endsWith('.mjs') && !/\.test(-helper)?\.mjs$/.test(n)) out.push(p);
+  }
+  return out;
+}
+export function unreadConfigLoaders(root) {
+  return productionFiles(root).filter((f) => {
+    const text = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    return /\bimport\(\s*pathToFileURL\(/.test(text) && !usesReader(text);
+  }).map((f) => relative(root, f));
+}
+
+test('L253 guard: every production file that imports a config-named module reads its config through the checked reader', () => {
+  assert.deepEqual(unreadConfigLoaders(ORCH), []);
+});
+
+test('L253 guard, planted: a job that parses its own config and imports its wiring is caught; one through the reader is not', () => {
+  const root = tempDir('orch-jobguard-');
+  const w = (rel, text) => { mkdirSync(dirname(join(root, rel)), { recursive: true }); writeFileSync(join(root, rel), text); };
+  w('modules/Mx/job.mjs', "const c = JSON.parse(readFileSync(f, 'utf8'));\nconst m = await import(pathToFileURL(c.wiring).href);\n");
+  w('wiring/ok.mjs', "import { readJobConfig } from '../shared/job-config.mjs';\nconst c = readJobConfig(f);\nawait import(pathToFileURL(c.wiring).href);\n");
+  w('wiring/via-m11.mjs', "import { readConfig, startWatchdog } from '../modules/M11-dispatcher/main.mjs';\nawait import(pathToFileURL(readConfig(f).wiring).href);\n");
+  w('modules/My/half.mjs', "const c = openJobJson(f, fail).value;\nawait import(pathToFileURL(c.wiring).href);\n");   // no after-check
+  w('modules/Mz/commented.mjs', "// readJobConfig(f)\nawait import(pathToFileURL(c.wiring).href);\n");
+  w('modules/Mx/job.test.mjs', "await import(pathToFileURL(c.wiring).href);\n");
+  assert.deepEqual(unreadConfigLoaders(root).sort(), ['modules/Mx/job.mjs', 'modules/My/half.mjs', 'modules/Mz/commented.mjs']);
 });
