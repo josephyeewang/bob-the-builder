@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
@@ -563,7 +564,8 @@ test('L246: a reading whose state is not open or closed, or whose merged is not 
   });
   for (const [doc, ok] of [[{ state: 'open', merged: false }, true], [{ state: 'closed', merged: true }, true], [{ state: 'closed', merged: false }, true],
     [{ state: null, merged: null }, false], [{ state: 'open', merged: null }, false], [{ state: 'merged', merged: true }, false],
-    [{ state: 'closed', merged: 'true' }, false], [{ merged: false }, false], [{ state: 'open' }, false]]) {
+    [{ state: 'closed', merged: 'true' }, false], [{ merged: false }, false], [{ state: 'open' }, false],
+    [{ state: 'open', merged: true }, false]]) {   // L347 m3: a contradiction GitHub never gives
     assert.equal(prReadingAfter(recOf(doc), 7, 'M-1') !== null, ok, JSON.stringify(doc));
   }
 });
@@ -780,3 +782,98 @@ for (const [name, ts] of [['unreadable', 'not a time'], ['1 h ahead', iso(T0 + 6
     assert.deepEqual(states(rec), ['merging', 'merging']);
   });
 }
+
+// ---- L347 (the #171 audit): the clear of the "no fresh reading" mark ----
+
+// A pass whose outbox delivers through `port` (answering true or false), as the tick does.
+const passVia = async (rec, minutesLater, port, over = dead) => {
+  const now = T0 + minutesLater * MIN;
+  setClock(rec.base ?? rec, now);
+  const { p } = ports(over);
+  return withAlerts(rec.base ?? rec, now, port, (alert) => timeLimits({ rec, rules: R, now, b: GREEN, ...p, alert }));
+};
+// The Record with the clear write (told_at back to null on a merge-unread- fact) refused.
+const refuseClear = (rec) => ({ ...rec, base: rec.base ?? rec, write: (w) => (w.entity === 'fact' && w.id.startsWith(UNREAD_FACT('')) && w.doc?.told_at === null
+  ? { ok: false, reason: 'refused for the test' } : rec.write(w)) });
+
+test('L347 m1: a first tell still queued when the merge settles is dropped, never delivered about a merged PR', async () => {
+  const { rec } = gone();
+  const refused = [];
+  await passVia(rec, 20, (x) => { refused.push(x); return false; });
+  assert.equal(refused.length, 1, 'the first tell was tried and not delivered');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1'))?.doc?.told_at ?? null, null, 'not marked told: it is only in the queue');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const sent = [];
+  await passVia(rec, 22, (x) => { sent.push(x); return true; });
+  await passVia(rec, 23, (x) => { sent.push(x); return true; });
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+  assert.deepEqual(sent.filter((x) => /no fresh reading/.test(x)), [], 'the queued copy was dropped when the wait ended');
+});
+
+test('L347 m2/m5: a refused clear write is listed in the moves, from the start-of-pass sweep and from the in-loop clear', async () => {
+  // The sweep: the merge settles on a fresh reading, and the mark's reset is refused.
+  const { rec } = gone();
+  await pass(rec, 20, dead);
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, 'told');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const r = await pass(refuseClear(rec), 22, dead);
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /"no fresh reading" mark could not be cleared/.test(why)), JSON.stringify(r.moves));
+  // The in-loop port: still merging with no reading, but the merge was written again, so it is back under the limit.
+  const { rec: r2 } = gone();
+  await pass(r2, 20, dead);
+  setClock(r2.base, T0 + 30 * MIN);
+  change(r2.base, 'merge', 'M-1', { changed_at: at(30) });
+  const q = await pass(refuseClear(r2), 31, dead);
+  assert.ok(q.moves.some(([id, why]) => id === 'M-1' && /could not be cleared/.test(why)), JSON.stringify(q.moves));
+});
+
+test('L347 m5: back under the limit while still merging, the in-loop clear resets the mark, so the next stretch is told at once', async () => {
+  const { rec } = gone();
+  assert.equal((await pass(rec, 20, dead)).alerts.length, 1);
+  setClock(rec.base, T0 + 30 * MIN);
+  change(rec.base, 'merge', 'M-1', { changed_at: at(30) });
+  await pass(rec, 31, dead);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merging');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null, 'cleared by the in-loop port');
+  assert.equal((await pass(rec, 60, dead)).alerts.length, 1, 'past the limit again: told at once, not a day later');
+});
+
+test('L347 m5: a fresh reading while the merge stays merging clears the mark', async () => {
+  const { rec } = gone();
+  await pass(rec, 20, dead);
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at);
+  reading(rec, 21, { state: 'open', merged: false });
+  await pass(rec, 22, { gateAlive: () => true });   // the gate is back: the merge is its own, and stays merging
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merging');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null);
+});
+
+test('L347 m5 (L341): clearUnread drops the queued copy before it resets the mark', () => {
+  const src = readFileSync(new URL('./merges.mjs', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('function clearUnread('), src.indexOf('function clearUnreads('));
+  assert.ok(body.includes('dropCause(') && body.includes('rec.write('), 'both steps are in clearUnread');
+  assert.ok(body.indexOf('dropCause(') < body.indexOf('rec.write('), 'the drop comes first');
+});
+
+test('L347 m3: a reading that says open and merged at once is no reading: the merge stays merging', async () => {
+  const { rec } = gone();
+  reading(rec, 1, { state: 'open', merged: true, merge_commit_sha: MC });
+  assert.equal(prReadingAfter(rec, 7, 'M-1'), null);
+  await pass(rec, 5, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never recorded merged on a contradiction');
+});
+
+test('L347 cosmetic: a tell the queue refused is listed as unsent in the moves', async () => {
+  const { rec } = gone();
+  const r = await pass(rec, 20, { ...dead, alert: () => false });
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /the alert could not be queued/.test(why)), JSON.stringify(r.moves));
+});
+
+test('L347 m2: a refused drop of the queued copy is listed in the moves, and the mark is not reset past it', async () => {
+  const { rec } = gone();
+  await passVia(rec, 20, () => false);
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const noDrop = { ...rec, base: rec.base, write: (w) => (w.kind === 'alert_cause_cleared' ? { ok: false, reason: 'refused for the test' } : rec.write(w)) };
+  const r = await pass(noDrop, 22, dead);
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /its queued alert could not be dropped/.test(why)), JSON.stringify(r.moves));
+});

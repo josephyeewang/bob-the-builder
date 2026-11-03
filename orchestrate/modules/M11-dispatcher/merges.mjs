@@ -21,7 +21,7 @@ import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause } from './alerts.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 import { FINAL_STATES } from '../../shared/record.mjs';
@@ -73,23 +73,28 @@ function retellReconciles(rec, { alert, now }) {
 const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
 
 // The "no fresh reading" wait ended (L342): a queued copy is dropped and the mark's told_at reset, so the next stretch
-// is told at once. Cheap when there is nothing to clear. Answers false only when a reset was refused.
+// is told at once. The queued copy goes first (L341), so a copy sent late can't put the mark back after the reset.
+// Cheap when there is nothing to clear. Answers what was refused (L323), or null when all of it went through.
+const UNCLEARED = 'the "no fresh reading" mark could not be cleared';
 function clearUnread(rec, mergeId, now) {
   const f = UNREAD_FACT(mergeId);
-  if (isQueued(rec, f)) dropCause(rec, UNREAD_FACT(mergeId));
+  if (isQueued(rec, f) && !dropCause(rec, UNREAD_FACT(mergeId))) return `${UNCLEARED}: its queued alert could not be dropped`;
   const c = rec.read('fact', f);
-  if (c?.doc?.told_at == null) return true;
-  return rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: c.rev, doc: { ...c.doc, told_at: null, cleared_at: iso(now) }, kind: 'note' }).ok === true;
+  if (c?.doc?.told_at == null) return null;
+  const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: c.rev, doc: { ...c.doc, told_at: null, cleared_at: iso(now) }, kind: 'note' });
+  return w.ok === true ? null : UNCLEARED;
 }
-// Every told "no fresh reading" mark whose merge has left merging, is gone, or has a fresh reading now is cleared.
+// Every told or queued "no fresh reading" mark whose merge has left merging, is gone, or has a fresh reading now is
+// cleared. A first tell still in the queue has no fact yet, so the queue is walked too (L347 m1).
 function clearUnreads(rec, now) {
   const out = [];
-  for (const f of rec.list('fact')) {
-    if (!f.id.startsWith(UNREAD_FACT('')) || (f.doc?.told_at == null && !isQueued(rec, f.id))) continue;
-    const mergeId = f.id.slice(UNREAD_FACT('').length);
+  const told = rec.list('fact').filter((f) => f.id.startsWith(UNREAD_FACT('')) && f.doc?.told_at != null).map((f) => f.id);
+  for (const id of new Set([...told, ...queuedMarks(rec, UNREAD_FACT(''))])) {
+    const mergeId = id.slice(UNREAD_FACT('').length);
     const m = rec.read('merge', mergeId)?.doc;
     if (m?.state === 'merging' && !fresh(rec, m.pr, mergeId)) continue;
-    if (!clearUnread(rec, mergeId, now)) out.push([mergeId, 'the "no fresh reading" mark could not be cleared']);
+    const refused = clearUnread(rec, mergeId, now);
+    if (refused) out.push([mergeId, refused]);
   }
   return out;
 }
@@ -211,19 +216,22 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
         if (lim.none) { done.push([id, `waiting for a fresh PR reading; ${lim.none}`]); continue; }
         const started = rec.meta?.('merge', id)?.ts;
         const t = pastTime(started, now);
-        const age = t === null ? 'longer than the merging limit' : `${Math.round((now - t) / 60_000)} min`;
+        const age = t === null ? 'longer than the merging limit' : `${Math.max(0, Math.round((now - t) / 60_000))} min`;
         const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${age}; it stays merging until the Sensors read the PR (check that they are running, and what GitHub answers for it: a reading counts only with state open or closed and merged true or false). Told again each day while it stays so`;
         const why = `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`;
         // The note is the alert's mark, written once it is delivered (L127): a queue that refused it is retried next pass.
-        stillWaiting({
+        // Both answers are kept (L323): a tell the queue refused is listed as unsent, a clear that was refused as such.
+        let refused = null;
+        const w = stillWaiting({
           waiting: true, now,
           since: typeof started === 'string' ? started : undefined,
           after: { since: started, limit: lim.ms },
           read: () => rec.read('fact', UNREAD_FACT(id))?.doc ?? null,
           tell: (fields) => tellThen(alert, say, { fact: UNREAD_FACT(id), fields: { ...noted(why, now), ...fields }, kind: 'note' }),
-          clear: () => clearUnread(rec, id, now),
+          clear: () => { refused = clearUnread(rec, id, now); },
         });
-        done.push([id, 'waiting for a fresh PR reading']); continue;
+        if (refused) done.push([id, refused]);
+        done.push([id, w.did === 'unsent' ? 'waiting for a fresh PR reading; the alert could not be queued, retried next pass' : 'waiting for a fresh PR reading']); continue;
       }
       // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a). A final answer
       // (merged, or closed and not merged) is settled with no limit read (L116 m2).
