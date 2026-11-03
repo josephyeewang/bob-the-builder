@@ -171,6 +171,22 @@ export function change(rec, entity, id, patch) {
   throw new Error(`change ${entity} ${id}: no script may make this change (${JSON.stringify(patch)})`);
 }
 
+/**
+ * Test-only: a card whose run began at `ranAt` (claimed then, so the Record stamps claim.claimed_at), parked on a usage
+ * limit at `parkedAt` the way a worker's limit exit parks it: running → waiting, the wait naming `account` (left out
+ * when null). The Record copies the claim's time onto wait.run_started (M9 guard.mjs, MAT-1).
+ */
+export function parkOnLimit(rec, id, { ranAt = T0, parkedAt = ranAt, account, card = {} } = {}) {
+  seed(rec, 'card', id, { state: 'running', product: 'p1', tier: 2, files: [`src/${id}.js`], ...card, changed_at: iso(ranAt) });
+  const clock = clocks.get(rec);
+  const was = clock.t;
+  clock.t = parkedAt;
+  try {
+    return change(rec, 'card', id, { state: 'waiting', wait: { who: 'usage', what: 'limit_hit', since: iso(parkedAt), next_check: iso(parkedAt + MIN),
+      resume: 'retry', return_to: 'ready', ...(account ? { account } : {}) } });
+  } finally { clock.t = was; }
+}
+
 const clocks = new WeakMap();
 /** Moves the Record's clock of a recWith record (ms): its later writes are stamped then. */
 export const setClock = (rec, ms) => { clocks.get(rec).t = ms; };

@@ -15,7 +15,11 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { OUTBOX_KINDS, OUTBOX_KIND_PATTERN } from '../../shared/record.mjs';
+
+// The one path of the role files folder (roles/ beside this file); every module that loads the profiles uses it (L235).
+export const ROLES_DIR = fileURLToPath(new URL('./roles', import.meta.url));
 
 export const ROLE_FILES = Object.freeze(['lead', 'worker', 'reviewer', 'incident', 'scout', 'writer', 'front_door',
   'thinking', 'script', 'explore']);
