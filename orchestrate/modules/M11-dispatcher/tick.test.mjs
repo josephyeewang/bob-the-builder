@@ -6,6 +6,7 @@ import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
@@ -135,11 +136,11 @@ test('L221: a missing approvals port fails the step (loud); one product failing 
     return { ok: true, events: [] };
   };
   const rules = rulesWith({}, allow);
-  await assert.rejects(approvalsStep({ rec: w.rec, rules, now: T0, alert: () => true, approvals: () => [{ product: 'p3' }, { product: 'p1' }, { product: 'p2' }], productMs: 30, pass }),
+  await assert.rejects(approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p3' }, { product: 'p1' }, { product: 'p2' }], productMs: 30, pass }),
     (e) => e.message === 'the Approvals pass failed for p1 (it did not finish within N ms), p3 (rev N moved)');
   assert.deepEqual(ran, ['p3', 'p1', 'p2'], 'the product after a failed and a hung one still ran');
   // A bad approvals config is M2's to tell (approvals_config), not a step failure.
-  const ok = await approvalsStep({ rec: w.rec, rules, now: T0, alert: () => true, approvals: () => [{ product: 'p2' }], pass: async () => ({ ok: false, reason: 'bad config', events: [] }) });
+  const ok = await approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p2' }], pass: async () => ({ ok: false, reason: 'bad config', events: [] }) });
   assert.deepEqual(ok, [{ product: 'p2', ok: false, reason: 'bad config', events: 0 }]);
 });
 
@@ -155,10 +156,11 @@ test('L221: M2\'s object alerts become one line from known fields; an unknown ty
   assert.equal(approvalsAlertText('p2', { type: 'brand_new_kind' }), 'Approvals, p2: brand new kind');
   // The outbox's false is passed back to M2, so its `=== false` dedup keeps working.
   const w = world([account(), usage()]);
-  const seen = [];
-  await approvalsStep({ rec: w.rec, rules: rulesWith({}, allow), now: T0, alert: (t) => { seen.push(t); return false; }, approvals: () => [{ product: 'p2' }],
-    pass: async (ctx) => { seen.push(ctx.alert({ type: 'push_not_sent', ask: 'A-1' })); return { ok: true, events: [] }; } });
-  assert.deepEqual(seen, ['Approvals, p2: push not sent (ask A-1)', false]);
+  const lost = fakeAlert({ answer: false });
+  let answer;
+  await approvalsStep({ rec: w.rec, rules: rulesWith({}, allow), now: T0, alert: lost, approvals: () => [{ product: 'p2' }],
+    pass: async (ctx) => { answer = ctx.alert({ type: 'push_not_sent', ask: 'A-1' }); return { ok: true, events: [] }; } });
+  assert.deepEqual([lost.texts, answer], [['Approvals, p2: push not sent (ask A-1)'], false]);
 });
 
 test('MAT-1: a failing step never stops the rest; one alert per distinct error; cleared when it works again', async () => {

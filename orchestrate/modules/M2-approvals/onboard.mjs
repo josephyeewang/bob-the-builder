@@ -70,7 +70,7 @@ function saveNotices(ctx, n) {
   writeFileSync(join(ctx.stateDir, NOTICES), `${JSON.stringify({ seen: n.seen.slice(-MAX_SEEN), due: n.due })}\n`);
 }
 
-const sent = (ctx, alert) => { try { return ctx.alert(alert) !== false; } catch { return false; } };
+const sent = (ctx, alert) => { try { return ctx.alert(alert) === true; } catch { return false; } };
 
 export function onboardNotices(ctx, made) {
   const p = ctx.product;
@@ -78,15 +78,15 @@ export function onboardNotices(ctx, made) {
   if (made?.type === 'onboarded') { n.due = true; saveNotices(ctx, n); }
   if (n.due && sent(ctx, { type: 'product_on', product: p, text: ONBOARD_SHOWN.on(p) })) { n.due = false; saveNotices(ctx, n); }
   let key = null;
-  let alert = null;
+  let notice = null;
   if (made?.type === 'onboard_near_miss') {
     key = `value:${shownValue(made.value)}`;
-    alert = { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) };
+    notice = { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) };
   } else if (made?.type === 'onboard_refused') {
     const reason = String(made.reason ?? 'no reason given');
     key = `refused:${reason.replace(/\d+/g, 'N')}`;
-    alert = { type: 'onboard_refused', product: p, text: ONBOARD_SHOWN.refused(p, reason) };
+    notice = { type: 'onboard_refused', product: p, text: ONBOARD_SHOWN.refused(p, reason) };
   }
   if (!key || n.seen.includes(key)) return;
-  if (sent(ctx, alert)) { n.seen.push(key); saveNotices(ctx, n); }
+  if (sent(ctx, notice)) { n.seen.push(key); saveNotices(ctx, n); }
 }

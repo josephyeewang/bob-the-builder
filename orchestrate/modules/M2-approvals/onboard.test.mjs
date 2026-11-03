@@ -10,6 +10,7 @@ import { env, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { schedulePass } from './schedule.mjs';
 import { onboard, onboardNotices, ONBOARD_KEY, ONBOARD_SHOWN } from './onboard.mjs';
 import { makeRules } from '../../shared/rules.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { FIRST } from '../M10-rules/first-cutover.test-helper.mjs';
@@ -124,7 +125,7 @@ test('a near-miss value with no record sends one alert per distinct value; a mis
 test('an alert the sink did not take is sent again next pass, then kept quiet (L221 m-1)', async () => {
   const t = world({ [ONBOARD_KEY]: 'Active' });
   const sink = t.ctx.alert;
-  t.ctx.alert = (a) => (a.type === 'onboard_near_miss' ? false : sink(a));
+  t.ctx.alert = fakeAlert({ answer: (a) => (a.type === 'onboard_near_miss' ? false : sink(a)) });
   await schedulePass(t.ctx);
   t.ctx.alert = sink;
   await schedulePass(t.ctx);
@@ -158,7 +159,7 @@ test('a successful onboard sends one "is now on" notice, and a lost one is sent 
   assert.equal(ONBOARD_SHOWN.on(PRODUCT), `${PRODUCT} is now on: its rules file says onboarding.state: active.`);
   const lost = world();
   const sink = lost.ctx.alert;
-  lost.ctx.alert = (a) => (a.type === 'product_on' ? false : sink(a));
+  lost.ctx.alert = fakeAlert({ answer: (a) => (a.type === 'product_on' ? false : sink(a)) });
   await schedulePass(lost.ctx);
   assert.equal(told(lost, 'product_on').length, 0);
   lost.ctx.alert = sink;

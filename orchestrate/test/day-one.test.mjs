@@ -336,7 +336,6 @@ function readsAndWriters() {
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
 const KNOWN_UNWRITTEN = Object.freeze({
-  product: 'L129: read by M11 gate.mjs and pass.mjs and M2 schedule.mjs; M2 approvals has the grant, no code writes it, so no worker starts (L204-b)',
   session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
 });
 
