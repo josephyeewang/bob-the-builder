@@ -43,7 +43,7 @@ function setup({ names } = {}) {
   const pass = () => watchOutside({ fetchJson, repo: 'owner/outside-check', homeAlerts, productAlerts, ...(names ? { writer, productNames: names } : {}), now: () => t });
   // The Mini's no-write probe (lead call L24) is green and fresh here; its own tests are in l24.test.mjs.
   const gate = (product = 'test-product') => robotMergesGreen({ read: (i) => (i === NO_PUSH_FACT ? { green: true, at: new Date(t).toISOString() } : rec.read('fact', i)?.doc), product, now: () => t });
-  return { home, p1, tick, pass, gate, fact: (p = 'test-product') => rec.read('fact', ROBOT_FACT(p))?.doc, now: () => t, stop: () => { stopped = true; }, setSteps: (s) => { steps = s; }, setOwner: (o) => { owner = o; } };
+  return { rec, runs, home, p1, tick, pass, gate, fact: (p = 'test-product') => rec.read('fact', ROBOT_FACT(p))?.doc, now: () => t, stop: () => { stopped = true; }, setSteps: (s) => { steps = s; }, setOwner: (o) => { owner = o; } };
 }
 
 test('stop the check on purpose → the Mini alerts within ~2 h (10-minute passes), once', async () => {
@@ -199,3 +199,45 @@ test('0b-7 audit round 4 M-3: the first pass on a Mini, or a gap of more than 5 
   w.tick(6 * 24 * 60); await w.pass();
   assert.match(w.gate().problems.join(), /saw nothing for more than 5 days/);
 });
+
+// L329 (the pastTime sweep): a time that can't be read, or one 1 h ahead, is never a sign of a recent run or result.
+const BAD = (now) => [['unreadable', 'not a time'], ['1 h ahead', new Date(now + 3600e3).toISOString()]];
+for (const name of ['unreadable', '1 h ahead']) {
+  test(`L329 outside-watch: a newest run whose start time is ${name} raises "stopped", never clears it`, async () => {
+    const w = setup();
+    w.stop();
+    w.runs.unshift({ id: 99, created_at: Object.fromEntries(BAD(w.now()))[name], status: 'completed', steps: [] });
+    await w.pass();
+    assert.equal(w.home.issues.size, 1, 'the stopped alert is raised');
+    assert.match(w.home.issues.get(1).title, /stopped/);
+    assert.match(w.home.issues.get(1).body, /can't be read or are in the future/);
+  });
+
+  test(`L329 outside-watch: a stored last-result time that is ${name} fires the gap latch`, async () => {
+    const w = setup({ names: NAMES });
+    w.setSteps(RM('success')); w.tick(20); await w.pass();
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+    const f = w.rec.read('fact', ROBOT_FACT('test-product'));
+    must(w.rec, f, { at: Object.fromEntries(BAD(w.now()))[name] });
+    w.tick(10); await w.pass();
+    assert.equal(w.gate().open, false);
+    assert.match(w.gate().problems.join(), /the time of the Mini's last result can't be read or is in the future/);
+  });
+
+  test(`L329 outside-watch: a stored last-run time that is ${name} fires the gap latch on the next run`, async () => {
+    const w = setup({ names: NAMES });
+    w.setSteps(RM('success')); w.tick(20); await w.pass();
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+    const f = w.rec.read('fact', ROBOT_FACT('test-product'));
+    must(w.rec, f, { run_at: Object.fromEntries(BAD(w.now() + 60 * 60e3))[name] });   // still 1 h ahead at the next run
+    w.tick(60); await w.pass();   // a new run
+    assert.equal(w.gate().open, false);
+    assert.match(w.gate().problems.join(), /the time of the last outside-check run seen can't be read or is in the future/);
+  });
+}
+function must(rec, f, fields) {
+  const r = rec.write({ actor: 'sensors', entity: 'fact', id: f.id, expectRev: f.rev, doc: { ...f.doc, ...fields } });
+  assert.ok(r.ok, JSON.stringify(r));
+}

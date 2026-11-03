@@ -29,6 +29,7 @@
 //     and under 2 hours old.
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9).
 
+import { pastTime } from '../../shared/still-waiting.mjs';
 export const STOPPED_MIN = 90;
 export const ROBOT_GREEN_MIN = 120;
 export const LATCH_RUNS = 2;
@@ -55,12 +56,16 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
     return out;
   }
   out.push(['cannot-read', await homeAlerts.clear({ key: readKey, note: 'The Mini can read the outside check\'s runs again.' })]);
-  const newest = runs.map((r) => Date.parse(r.created_at)).filter(Number.isFinite).sort((a, b) => b - a)[0];
+  // Through pastTime (L329): a run time that can't be read, or is in the future (a clock gone back), is no sign the
+  // check still runs; were it counted, the "stopped" alert would be cleared instead of raised.
+  const times = runs.map((r) => pastTime(r.created_at, now()));
+  const newest = times.filter((x) => x !== null).sort((a, b) => b - a)[0];
+  const unreadTimes = times.some((x) => x === null);
   const age = newest === undefined ? Infinity : Math.round((now() - newest) / 60e3);
   const stoppedKey = 'outside-check|stopped|schedule';
   if (age > STOPPED_MIN) {
     out.push(['stopped', await homeAlerts.raise({ key: stoppedKey, title: 'The hourly outside check has stopped running',
-      body: newest === undefined ? 'The outside-check repo shows no scheduled run at all.' : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.`,
+      body: newest === undefined ? (unreadTimes ? 'The outside-check repo\'s scheduled runs have start times that can\'t be read or are in the future (a clock is off), so none shows the check still running.' : 'The outside-check repo shows no scheduled run at all.') : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.`,
       status: newest === undefined ? 'no-runs' : 'stopped' })]);
   } else {
     out.push(['stopped', await homeAlerts.clear({ key: stoppedKey, note: 'The outside check is running again.' })]);
@@ -117,11 +122,17 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       const redRuns = step?.conclusion === 'success' ? 0 : stepFailed && newRun ? prevRuns + 1 : prevRuns;
       let redSince = prevDoc?.red_since ?? null;
       let latchWhy = prevDoc?.latch_reason ?? null;
-      const passGap = !prevDoc || !(now() - Date.parse(prevDoc.at) <= UNSEEN_GAP_MS);
-      const runGap = !!prevDoc && newRun && ranAt !== null && !(Date.parse(ranAt) - Date.parse(prevDoc.run_at) <= UNSEEN_GAP_MS);
+      // Through pastTime (L329): a stored time that can't be read, or is in the future, counts as a gap, so the latch
+      // fires; were it counted as recent, a gap of any length would be skipped and robot merges would stay open.
+      const prevAt = prevDoc ? pastTime(prevDoc.at, now()) : null;
+      const prevRunAt = prevDoc ? pastTime(prevDoc.run_at, now()) : null;
+      const passGap = !prevDoc || prevAt === null || now() - prevAt > UNSEEN_GAP_MS;
+      const runGap = !!prevDoc && newRun && ranAt !== null && (prevRunAt === null || Date.parse(ranAt) - prevRunAt > UNSEEN_GAP_MS);
       if (!redSince && (passGap || runGap)) {
         redSince = nowIso;
-        latchWhy = !prevDoc ? 'no earlier result on this Mini' : passGap ? 'the Mini saw nothing for more than 5 days' : 'more than 5 days between outside-check runs';
+        latchWhy = !prevDoc ? 'no earlier result on this Mini'
+          : passGap ? (prevAt === null ? 'the time of the Mini\'s last result can\'t be read or is in the future' : 'the Mini saw nothing for more than 5 days')
+            : prevRunAt === null && prevDoc.run_at != null ? 'the time of the last outside-check run seen can\'t be read or is in the future' : 'more than 5 days between outside-check runs';
       }
       if (!redSince && redRuns >= LATCH_RUNS) { redSince = ranAt ?? nowIso; latchWhy = `failed in ${redRuns} runs in a row`; }
       // The newest run whose result wasn't green (round 6 MAT-A): a clear must come after it too.
