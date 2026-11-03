@@ -18,7 +18,7 @@ const tapped = (over = {}) => ({ channel: 'tap', choice: 'Undo', approves: true,
 const ask = (over = {}) => ({ state: 'answered', kind: 'undo', product: 'p', card: 'T-1', tier: 2, risky: [], choices: ['Undo', 'Keep'], answer: tapped(), ...over });
 const target = (over = {}) => ['card', 'T-1', { state: 'merged', module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], merge_commit: SHA, ...over }];
 const merge = (over = {}, id = 'MG-1') => ['merge', id, { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p', ...over }];
-const undoCard = (over = {}) => ({ state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, module: 'M-u', product: 'p', tier: 2, files: ['src/a.js', 'src/b.js'], what: 'undo PR 7', ...over });
+const undoCard = (over = {}) => ({ state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, module: 'M-u', product: 'p', files: ['src/a.js', 'src/b.js'], what: 'undo PR 7', ...over });
 
 function world(entries, { files = ['src/a.js', 'src/b.js'], rec: wrap } = {}) {
   const base = recWith(entries);
@@ -172,6 +172,18 @@ test('D8: M6 says not clean on a failed undo card -> a fix card as a draft for t
   assert.equal(w.calls.alerts.length, 1, 'once');
 });
 
+// #117 audit m1: the undo card is Tier 2 (an exact reverse); its fix card is a hand-planned change, so it gets no
+// tier (Tier 1 until the Lead plans it), while the rest of the plan is still copied.
+test('#117 m1: an undo card with tier 2 gives a fix card with no tier', async () => {
+  const U = UNDO_CARD('A-1');
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo({ tier: 2 }), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
+  assert.equal(w.rec.read('card', U).doc.tier, 2, 'the undo card is Tier 2');
+  assert.deepEqual((await w.step()), [[U, 'fix card written']]);
+  const fix = w.rec.read('card', FIX_CARD(U)).doc;
+  assert.equal(Object.hasOwn(fix, 'tier'), false, JSON.stringify(fix));
+  assert.deepEqual(fix.files, ['src/a.js', 'src/b.js'], 'the rest of the plan is copied');
+});
+
 test('L130: a fix card whose alert was not queued is told on the next pass, once, and only then noted', async () => {
   const U = UNDO_CARD('A-1');
   const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })]);
@@ -308,4 +320,16 @@ test('r4 MAT-5: exactReverse refuses a card that differs from the merge in any o
     assert.equal(out.ok, false, label);
     assert.match(out.reason, why, label);
   }
+});
+
+test('L228: a fix card the Record refuses is told to Joe, once a day while it lasts, never silently', async () => {
+  const U = UNDO_CARD('A-1');
+  const refusesFix = (rec) => ({ ...proxy(rec), write: (x) => (x.entity === 'card' && x.id === FIX_CARD(U) ? { ok: false, reason: 'the store is busy' } : rec.write(x)) });
+  const w = world([target(), merge(), ['ask', 'A-1', ask()], failedUndo(), reverseFact({ state: 'not_clean', reason: 'a later change touched src/a.js' })], { rec: refusesFix });
+  assert.deepEqual(await w.step(), [[U, 'fix card not recorded: the store is busy']]);
+  assert.equal(w.calls.alerts.length, 1);
+  assert.match(w.calls.alerts[0], /could not be an exact reverse: a later change touched src\/a\.js; its fix card could not be recorded \(the store is busy\)/);
+  await w.step();
+  assert.equal(w.calls.alerts.length, 1, 'once a day, not every pass');
+  assert.equal(w.rec.read('fact', UNDO_NOTE_FACT(U)), null, 'not noted as written');
 });

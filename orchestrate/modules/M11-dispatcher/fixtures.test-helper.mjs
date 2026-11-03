@@ -13,6 +13,7 @@ import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/m
 import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
+import { undoCardDoc } from './undo.mjs';
 
 export const VALUES = Object.freeze({
   [K.redPace]: 1.0, [K.redWeek]: 85, [K.redH5]: 80,
@@ -229,7 +230,8 @@ export function undoEntries(id, over = {}, { product = 'p1', files = [`src/${id}
     ['card', target, { state: 'merged', module: 'M-test', product, tier: 2, files, merge_commit: sha }],
     ['merge', `MG-${id}`, { state: 'merged', card: target, pr, merge_commit: sha, product }],
     ['ask', UNDO_ASK(id), { state: 'answered', kind: 'undo', product, card: target, tier: 2, risky: [], choices: ['Undo', 'Keep'], answer: { channel: 'tap', choice: 'Undo', approves: true, at: iso(T0 - 700_000) } }],
-    ['card', id, { state: 'ready', kind: 'exact_reverse', source: { ask: UNDO_ASK(id) }, module: 'M-test', product, tier: 2, files, what: `undo PR ${pr}`, changed_at: iso(T0 - 600_000), ...over }],
+    // The undo card is built by undo.mjs's own builder, so its tier is the one production writes, not this file's (L199).
+    ['card', id, { ...undoCardDoc({ askId: UNDO_ASK(id), files, target: { id: target, doc: { product, module: 'M-test' } }, pr, commit: sha }), state: 'ready', changed_at: iso(T0 - 600_000), ...over }],
   ];
 }
 export const filesOfCommits = (sha) => { if (!commitFiles.has(sha)) throw new Error(`no such commit ${sha}`); return commitFiles.get(sha); };
