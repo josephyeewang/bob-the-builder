@@ -86,7 +86,7 @@ export const folderFactId = (product) => `intake-applied-proposals-folder-${idHa
 /** The fact that says files of `kind` sit in a product's folder with nothing to take them in yet. */
 export const waitingFactId = (product, kind) => `intake-applied-proposals-waiting-${idHash(product, kind)}`;
 /** The fact that says which product first took files in from a folder, by its device and file number (L268 MAT-B). */
-export const ownerFactId = (dev, ino) => `intake-applied-proposals-owner-${idHash(dev, ino)}`;
+export const ownerFactId = (ino, birth) => `intake-applied-proposals-owner-${idHash(ino, birth)}`;
 /** The fact a tell is marked on when the record refused the file's own fact (told once, not every pass). */
 export const toldFactId = (product, name) => `intake-applied-proposals-told-${idHash(product, name)}`;
 // The row that will take each handed-on kind in (L233 M-2: until then, told once per product and kind).
@@ -178,16 +178,19 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (!why) why = folderProblem(dir, ownerUid, lookDir);
     return { product, dir, why };
   });
-  // Two products whose rules name the same folder (by device and file number, so a second path to it counts too)
+  // Two products whose rules name the same folder (by file number and creation time, so a second path to it counts too)
   // would each take every file in once: both are refused until the rules give each its own folder (L260 MAT-3).
+  // A folder is known by its file number and creation time, never its device number: macOS numbers devices in the
+  // order they attach, so the device can change after a restart or an update, and the folder would count as new
+  // (L275 MAT-C). Both survive a restart and a rename.
   const byFolder = new Map();
   for (const f of folders) {
     if (f.why) continue;
     let st; try { st = lookDir(f.dir); } catch { st = null; }
     // A folder that can't be told apart from another is not read: no owner could be checked for it (L268 MAT-B).
-    if (!Number.isInteger(st?.ino) || st.ino <= 0 || !Number.isInteger(st?.dev)) { f.why = 'the proposals folder could not be identified'; continue; }
-    f.at = { dev: st.dev, ino: st.ino };
-    const k = `${st.dev}:${st.ino}`;
+    if (!Number.isInteger(st?.ino) || st.ino <= 0 || !Number.isFinite(st?.birthtimeMs) || st.birthtimeMs <= 0) { f.why = 'the proposals folder could not be identified'; continue; }
+    f.at = { ino: st.ino, birth: st.birthtimeMs };
+    const k = `${st.ino}:${st.birthtimeMs}`;
     byFolder.set(k, [...(byFolder.get(k) ?? []), f]);
   }
   for (const group of byFolder.values()) {
@@ -197,16 +200,16 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   // The folder's first product owns it for good (L268 MAT-B): the used memory is per product, so another product that
   // named it later would take every file the first one used in again. Recorded before any file is read; a write the
   // record refuses keeps the folder unread this pass. The cost (L268): a folder stays its first product's for good, so
-  // another product needs a new folder, never a used one. And the folder is known by device and file number: a remount
-  // (an external disk, a rebuilt volume) can change them, and the folder then counts as new. MAT-3 has the same limit.
+  // another product needs a new folder, never a used one. A folder copied or restored to a new place has a new file
+  // number and counts as new; MAT-3 has the same limit.
   for (const f of folders) {
     if (f.why) continue;
-    const id = ownerFactId(f.at.dev, f.at.ino);
+    const id = ownerFactId(f.at.ino, f.at.birth);
     const o = rec.read('fact', id);
     const first = o?.doc?.product;
     if (first === f.product) continue;
     if (first != null) { f.why = `the proposals folder was ${first}'s first, so the files ${first} took in from it would be taken in again; give ${f.product} a new folder`; continue; }
-    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, dev: f.at.dev, ino: f.at.ino, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
+    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, ino: f.at.ino, birth: f.at.birth, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
     if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${w.reason})`;
   }
   for (const { product, dir, why: cause } of folders) {
@@ -271,7 +274,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat') {
       // A pass that stopped between its claim and the hand-over (outbox-intake's MAT-7): whether the file was used is
       // not known, so it is never used twice. Told once. A heartbeat is a poll, so it is simply taken again.
-      const said = `the intake of ${name} from ${product}'s proposals folder was interrupted; it may or may not have been used, and was not used again`;
+      const said = `the intake of ${name} from ${product}'s proposals folder was interrupted (version ${String(prev.doc.sha256).slice(0, 12)}); it may or may not have been used, and was not used again`;
       // Keyed on the interrupted bytes; one still untold from before is told in the same alert (L268 MAT-A). A claim
       // never carries a told mark, so the key need only differ from the mark this fact holds now.
       const old = untoldOf(prev.doc);
