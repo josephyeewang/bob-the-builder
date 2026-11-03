@@ -6,24 +6,36 @@ import { readFileSync, readdirSync, writeFileSync, appendFileSync, mkdirSync } f
 import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { fakeIssues } from './alerts.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
-import { readUnsent } from '../M9-record/store.mjs';
+import { readUnsent } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { RECORD_LOCKED_MARKER, channelProblem, deliverAlertsPass, deliverWith, entryKey, githubIssues, repoProblem } from './alert-channel.mjs';
 
 const T0 = Date.parse('2026-11-03T08:00:00Z');
 const MIN = 60_000;
 
-// fakeIssues plus the two calls the channel adds: findOpen (by marker in the body) and true answers from edit / close.
+// The GitHub stand-in, answering as the channel's client does (open → a number, edit/comment/close → true, findOpen →
+// a number or null). It is not M13's fakeIssues, whose calls only succeed (L130): a test that needs a call lost swaps
+// that method for one that answers false or throws (the L235 c test).
 function fakeGitHub() {
-  const gh = fakeIssues();
-  const { edit, comment, close } = gh;
-  gh.edit = async (i, b) => { await edit(i, b); return true; };
-  gh.comment = async (i, t) => { await comment(i, t); return true; };
-  gh.close = async (i, t) => { await close(i, t); return true; };
-  gh.findOpen = async (marker) => { gh.calls.push(['findOpen']); for (const [n, x] of gh.issues) if (!x.closed && x.body.includes(marker)) return n; return null; };
-  gh.openIssues = () => [...gh.issues.values()].filter((x) => !x.closed);
+  const issues = new Map();
+  const calls = [];
+  let n = 0;
+  const gh = {
+    calls, issues,
+    async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
+    async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); return true; },
+    async comment(i, text) { issues.get(i).comments.push(text); calls.push(['comment', i]); return true; },
+    async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); return true; },
+    async isClosed(i) {
+      if (!Number.isSafeInteger(i) || i <= 0 || !issues.has(i)) throw new Error(`fakeGitHub.isClosed: no issue ${JSON.stringify(i)}`);
+      return issues.get(i).closed;
+    },
+    async findOpen(marker) { calls.push(['findOpen']); for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
+    ownerCloses(i) { issues.get(i).closed = true; },
+    openIssues: () => [...issues.values()].filter((x) => !x.closed),
+  };
   return gh;
 }
 
@@ -263,8 +275,6 @@ test('L239/L240: the store\'s unsent alerts are raised and marked sent; a torn l
   // A mark that can't be written (the file replaced by a folder after the read): raised again, editing the same issue.
   const v = world();
   appendFileSync(join(v.root, 'unsent-alerts.jsonl'), `${JSON.stringify({ id: 'u9', outcome: 'unsent', event: { type: 'tamper' } })}\n`);
-  const store = await import('../M9-record/store.mjs');
-  assert.equal(typeof store.markSent, 'function');
   const pass1 = await v.run({ probe: ALIVE, now: () => T0 });
   assert.equal(pass1.sent, 1);
   // Undo the mark to stand for a lost one, then run again: the same key edits issue 1, no second issue.
@@ -274,9 +284,9 @@ test('L239/L240: the store\'s unsent alerts are raised and marked sent; a torn l
 });
 
 test('L240: a real store\'s lost alert is delivered by the channel, and the store\'s own resend then stays quiet', async () => {
-  const calls = [];
   let mode = 'false';
-  const env = setup({ prefix: 'm13-chan-store-', extra: { alert: (a) => { calls.push(a); return mode !== 'false'; } } });
+  const alert = fakeAlert({ answer: () => mode !== 'false' });
+  const env = setup({ prefix: 'm13-chan-store-', extra: { alert } });
   seed(env, 'card', 'C-1', { state: 'draft', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1 });
   seed(env, 'card', 'C-1', { state: 'draft', product: PRODUCT, module: 'M2', kind: 'ordinary', round: 1 });
   const { unlinkSync } = await import('node:fs');
@@ -287,9 +297,9 @@ test('L240: a real store\'s lost alert is delivered by the channel, and the stor
   const r = await deliverAlertsPass({ rec: memoryRecord(), now: () => T0, recordRoot: env.root, products: [PRODUCT], repos: { [PRODUCT]: 'acme/product-1' }, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 });
   assert.equal(r.sent, 1);
   assert.deepEqual(readUnsent(env.root), []);
-  const before = calls.length;
+  const before = alert.calls.length;
   env.store.transaction(() => null);
-  assert.equal(calls.length, before, 'the store does not resend what the channel delivered');
+  assert.equal(alert.calls.length, before, 'the store does not resend what the channel delivered');
 });
 
 test('L236: nothing the Dispatcher runs imports the channel or the token code', () => {

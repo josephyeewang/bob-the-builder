@@ -21,11 +21,12 @@
 //   store.recover()   // runs under the lock at the first lock in each process and after a dead holder's lock is broken
 
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, closeSync, fchmodSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, ftruncateSync, unlinkSync, writeFileSync, writeSync, constants } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
+import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
 // Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
@@ -64,45 +65,6 @@ function look(path) {
     if (!st.isFile()) return { kind: 'odd', why: 'not a plain file' };
     return { kind: 'file', bytes: readFileSync(fd) };
   } catch (e) { return { kind: 'odd', why: `unreadable (${e?.code ?? e})` }; } finally { closeSync(fd); }
-}
-// The store's own side files are opened without following a link or waiting on a FIFO, and only a plain file is
-// written or read: a link in their place must not let a refusal or a seen mark land outside the store (round 9).
-function plainFd(path, flags) {
-  const fd = openSync(path, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { const st = fstatSync(fd); if (!st.isFile() || st.nlink !== 1) throw Object.assign(new Error(`${path} is not a plain file with one name`), { store: true }); } catch (e) { closeSync(fd); throw e; }
-  return fd;
-}
-function appendPlain(path, text) {
-  const fd = plainFd(path, constants.O_WRONLY | constants.O_APPEND);
-  try { fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
-}
-function readPlain(path) { const fd = plainFd(path, constants.O_RDONLY); try { return readFileSync(fd, 'utf8'); } finally { closeSync(fd); } }
-
-// ---- unsent-alerts.jsonl: the one reader and the one 'delivered' mark (L240) ----
-// Read by resend() at every transaction and by the alert channel (M13 alert-channel.mjs) in the robot job, which delivers
-// them while the Dispatcher is dead. A line that is not whole JSON (a torn write) is skipped: it neither waits nor marks
-// anything sent. The file is only ever appended to, so a mark from outside the lock never races a resend; both may
-// send one alert twice, never lose it.
-const UNSENT = 'unsent-alerts.jsonl';
-function unsentIn(text) {
-  const done = new Set();
-  const waiting = [];
-  for (const l of String(text).split('\n')) {
-    let x; try { x = JSON.parse(l); } catch { continue; }
-    if (x?.outcome === 'sent' && typeof x.id === 'string') done.add(x.id);
-    else if (x?.outcome === 'unsent' && typeof x.id === 'string' && x.event && typeof x.event === 'object') waiting.push(x);
-  }
-  return waiting.filter((x) => !done.has(x.id));
-}
-/** The store's alerts not yet delivered: [{ id, event }], oldest first. Throws when the file can't be read as a plain file. */
-export function readUnsent(root) { return unsentIn(readPlain(join(root, UNSENT))).map(({ id, event }) => ({ id, event })); }
-/**
- * Marks one delivered: one line, appended in a single write() with O_APPEND (appendPlain), well under the size a write
- * lands whole in. Throws when it can't be written; the alert then stays unsent and is delivered again.
- */
-export function markSent(root, id, at) {
-  if (typeof id !== 'string' || !id) throw new Error('markSent needs an entry id');
-  appendPlain(join(root, UNSENT), `${JSON.stringify({ id, outcome: 'sent', at: String(at) })}\n`);
 }
 // A document's bytes: null when there is none, ODD when something other than a readable plain file is there.
 const ODD = Symbol('odd');

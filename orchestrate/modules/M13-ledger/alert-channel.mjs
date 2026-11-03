@@ -34,7 +34,7 @@ import { alertKey, makeAlerts } from './alerts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { makeLock, readHolder } from '../M9-record/lock.mjs';
-import { markSent, readUnsent } from '../M9-record/store.mjs';
+import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
 export const RECORD_LOCKED_MARKER = '<!-- orch:record_locked -->';
