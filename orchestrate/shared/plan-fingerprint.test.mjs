@@ -7,7 +7,9 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TIER1_BAR, canonicalJson, planFingerprint, cleanPath, pathKey, foldKey } from './plan-fingerprint.mjs';
 import { pathKey as m3PathKey } from '../modules/M3-lead/task-brief.mjs';
-import { normPath, matches } from '../modules/M11-dispatcher/gate.mjs';
+import { normPath, matches, disjoint } from '../modules/M11-dispatcher/gate.mjs';
+import { rulesWith, recWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
+import { KEYS } from '../modules/M11-dispatcher/keys.mjs';
 
 const T2 = { product: 'sample-app', card_id: 'C-1', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
 const T1 = { ...T2, tier: 1, plan_sha256: 'a'.repeat(64), main_commit: 'b'.repeat(40) };
@@ -162,6 +164,26 @@ test('L105: M3 compares paths by the shared pathKey, and M11\'s start gate folds
   assert.equal(matches('SRC/STRASSE/*', normPath('src/straße/a.js')), true);
   assert.equal(matches('src/ẞ*', normPath('src/ss.js')), true);
   assert.equal(matches('src/\ud800*', normPath('src/a.js')), true);
+});
+
+test('L247: a daily pattern that can\'t be folded holds the overlap, and the refusal names the pattern', () => {
+  const rec = recWith([['card', 'W', { state: 'running', files: ['src/a.js'] }]]);
+  const others = [{ id: 's1', kind: 'editing', card: 'W' }];
+  const ask = (patterns) => disjoint({ rules: rulesWith({ [KEYS.leadDailyCard]: patterns }), card: { id: 'D', kind: 'daily' }, product: 'p1', others, rec });
+  const r = ask(['src/\ud800*']);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /^shares src\/a\.js \(daily pattern "src\/\\ud800\*" can't be folded, so it counts as every file\) with running card W$/);
+  assert.match(ask(['src/*']).reason, /^shares src\/a\.js with running card W$/, 'a plain pattern hit reads as before');
+  assert.equal(ask(['docs/*']).ok, true);
+});
+
+test('lane 2 review of #133: a row id or a path that is not well formed refuses the card, with its own reason', () => {
+  const rec = recWith([]);
+  const ask = (card) => disjoint({ rules: rulesWith({}), card: { id: 'C', ...card }, product: 'p1', others: [], rec });
+  assert.deepEqual(ask({ files: ['src/a.js'], rows: ['R-\ud800'] }), { ok: false, reason: 'the card names a row id that is not well formed' });
+  assert.deepEqual(ask({ files: ['src/a\ud800.js'] }), { ok: false, reason: 'the card names a path that is not well formed ("src/a\\ud800.js")' });
+  assert.match(ask({ files: ['../a.js'] }).reason, /outside the repo/, 'a path outside the repo reads as before');
+  assert.equal(ask({ files: ['src/a.js'], rows: ['R-1'] }).ok, true);
 });
 
 // L105 guard: no module outside shared/ builds its own path key. A case change or a Unicode normalization on a value

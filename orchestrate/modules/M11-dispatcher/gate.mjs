@@ -38,7 +38,9 @@ export function matches(pattern, path) {
 export function fileSet(card, { dailyPatterns }) {
   const out = new Set();
   const named = new Set((card.rows ?? []).map((r) => foldKey(String(r))));
+  if (named.has(null)) return refuse('the card names a row id that is not well formed');
   for (const f of card.files ?? []) {
+    if (typeof f === 'string' && !f.isWellFormed()) return refuse(`the card names a path that is not well formed (${JSON.stringify(f)})`);
     const n = normPath(f);
     if (!n) return refuse(`the card names a path outside the repo (${f})`);
     const row = ROW_FILE.exec(n);
@@ -49,10 +51,12 @@ export function fileSet(card, { dailyPatterns }) {
   return { ok: true, files: out, patterns: card.kind === 'daily' ? dailyPatterns : [] };
 }
 
+// A pattern hit names a pattern that can't be folded, so a run held by it says why (L247).
+const byPattern = (p, f) => (foldKey(String(p)) === null ? `${f} (daily pattern ${JSON.stringify(String(p))} can't be folded, so it counts as every file)` : f);
 function overlaps(a, b) {
   for (const f of a.files) if (b.files.has(f)) return f;
-  for (const p of a.patterns) for (const f of b.files) if (matches(p, f)) return f;
-  for (const p of b.patterns) for (const f of a.files) if (matches(p, f)) return f;
+  for (const p of a.patterns) for (const f of b.files) if (matches(p, f)) return byPattern(p, f);
+  for (const p of b.patterns) for (const f of a.files) if (matches(p, f)) return byPattern(p, f);
   return null;
 }
 
