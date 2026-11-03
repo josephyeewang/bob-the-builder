@@ -1114,6 +1114,82 @@ test('R-0b-127: a proposal bundle is verified, fetched for its card\'s branch on
   assert.deepEqual(readdirSync(w.ports.privateDir), []);
 });
 
+test('L274 (6): the same bytes pushed twice answer the recorded push: no second push, no second pull request, the fact unchanged; new bytes are a new attempt', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha256 = await w.propose();
+  const first = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.equal(first.ok, true, first.reason);
+  const id = `push.C-1.p-${sha256.slice(0, 12)}`;
+  const fact = w.record.read('fact', id);
+  const refs = await w.ghRefs();
+  callLog.length = 0;
+  const again = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.deepEqual(again, { ok: true, already: true, product: PRODUCT, card: 'C-1', branch: first.branch, tip: first.tip, binaries: first.binaries ?? [] });
+  assert.equal(callLog.length, 0, 'git ran for bytes already pushed');
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.prs.length, 1);
+  assert.deepEqual(w.record.read('fact', id), fact, 'the push fact was rewritten');
+  assert.equal(fact.doc.product, PRODUCT);
+  // The proposal's own checks still run first (#170 r1 m1): another product, or the card gone from the Record, is
+  // refused, not answered from the fact; a corrupt fact is not a push (m2).
+  const view = (read) => ({ ...w.record, read });
+  const other = await w.pushP({ product: 'other-app', card: 'C-1', sha256 });
+  assert.equal(other.ok, false);
+  assert.equal(other.already, undefined);
+  const gone = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => (e === 'card' ? null : w.record.read(e, i))) });
+  assert.equal(gone.ok, false);
+  assert.match(gone.reason, /card C-1 is not in the Record/);
+  // Those refusals are added to the recorded push, never written over it.
+  const kept = w.record.read('fact', id).doc;
+  assert.deepEqual({ ...kept, last_refusal: undefined }, { ...fact.doc, last_refusal: undefined });
+  assert.match(kept.last_refusal.reason, /card C-1 is not in the Record/);
+  // New bytes for the same card are a new attempt, pushed and recorded beside the first.
+  await w.commit('more docs', (c) => writeFileSync(join(c, 'README.md'), 'better still\n'));
+  const sha2 = await w.propose();
+  const next = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: sha2 });
+  assert.equal(next.ok, true, next.reason);
+  assert.equal(next.already, undefined);
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha2.slice(0, 12)}`).doc.result, 'pushed');
+  assert.deepEqual(w.record.read('fact', id).doc, kept);
+  // Rules that throw (not a refusal) still go through settle: refused, recorded, never thrown out (#170 r2).
+  const broke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
+  assert.equal(broke.ok, false);
+  assert.match(w.record.read('fact', id).doc.last_refusal.reason, /rules broke/);
+  // So does the shortcut's read of the push fact, when it throws (once, here): it answers, never throws (L344).
+  let throws = 1;
+  const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
+  assert.equal(factBroke.ok, false);
+  assert.equal(factBroke.already, undefined);
+  const corrupt = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === id ? { ...r, corrupt: true } : r; }) });
+  assert.equal(corrupt.already, undefined, 'a corrupt fact answered as a push');
+  // A refused attempt is not "already": the same bytes are tried again.
+  const w2 = await world();
+  await w2.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha3 = await w2.propose();
+  assert.equal((await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 }, { fstat: ownedBy(ME + 7) })).ok, false);
+  const retry = await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 });
+  assert.equal(retry.ok, true, retry.reason);
+  assert.equal(retry.already, undefined);
+});
+
+test('L274 (2): a proposal for a card the Record lacks is refused at the push script, and says so; GitHub untouched', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha256 = await w.propose();
+  const refs = await w.ghRefs();
+  // The look first: refused, and it records nothing.
+  for (const look of [true, false]) {
+    const r = await w.pushP({ product: PRODUCT, card: 'C-9', sha256 }, { look });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /card C-9 is not in the Record/);
+    if (look) assert.equal(w.record.read('fact', `push.C-9.p-${sha256.slice(0, 12)}`), null, 'a look recorded a refusal');
+  }
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.prs.length, 0);
+  assert.equal(w.record.read('fact', `push.C-9.p-${sha256.slice(0, 12)}`).doc.result, 'refused');
+});
+
 test('R-0b-127: look answers the net change\'s files and pushes, asks and records nothing', async () => {
   const w = await world();
   await w.commit('docs', (c) => { writeFileSync(join(c, 'README.md'), 'better\n'); writeFileSync(join(c, 'notes.md'), 'new\n'); });

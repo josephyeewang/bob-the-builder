@@ -45,7 +45,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FIRST, ENTRY, PENDING, swap } from '../modules/M10-rules/first-cutover.test-helper.mjs';
@@ -70,6 +71,11 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
+import { fakeRules } from '../shared/rules.mjs';
+import { openRecord } from '../modules/M9-record/writer.mjs';
+import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { blobOf } from '../wiring/fake-github.test-helper.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -86,8 +92,9 @@ function dayOne({ text = FIRST, withProduct = true } = {}) {
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
   env.clock.t = T0;
-  // The product document: M2 onboard.mjs writes it (L204-b), but only through the approvals port, not wired yet (L270; see
-  // the writers tests below). With withProduct it is written through the real Record, as approvals would.
+  // The product document: M2 onboard.mjs writes it (L204-b) through the approvals port, which the Dispatcher wiring
+  // answers (L270); the boot test below proves that on the Mac's own path (L292). With withProduct it is written here
+  // through the real Record, as approvals would, so the other tests need no boot.
   // productState is wired here by the test: no production code builds the engine yet, and rulesFromText's own default
   // reads every product as active, so "paused with no document" is this wiring's answer, not yet the Mac's.
   if (withProduct) writeProduct(env, 'active');
@@ -255,10 +262,49 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
   assert.equal(r.decision, 'allow', `the docs lane refuses the undo: ${r.reason}`);
 });
 
-test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L270 (lane 1, the approvals wiring PR after #121): M2 onboard.mjs writes the product document, but only through the tick approvals port, and the Dispatcher wiring answers that port with "not wired yet"; until it is wired the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
-  const { rules } = dayOne({ withProduct: false });
-  const merge = rules.may('merge', { product: P, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
+// The Mac's own first boot (L292): `node main.mjs <config>` as the login job runs it, through the real Dispatcher wiring,
+// a real Record on disk, the real rules reader, engine and lock. The only stand-in is GitHub (wiring/fake-github.test-helper.mjs,
+// put in with `node --import`), answering the rules file at the version Joe approved. Nothing writes the product
+// document but that boot: the approvals step reads the rules' onboarding.state and M2 onboard.mjs writes it as approvals.
+const ROOT_ORCH = ORCH;
+function macBoot() {
+  // An installed copy of this checkout (L253): main.mjs takes only a config and wiring inside the copy it runs from.
+  const L = installedLayout('orch-day-one-boot-', { source: true });
+  const dir = L.base;
+  const f = (n) => join(dir, n);
+  writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
+  const rulesStateDir = f('rules-state');
+  mkdirSync(rulesStateDir, { mode: 0o700 });
+  writeFileSync(join(rulesStateDir, 'approved-rules.json'), JSON.stringify({ [ENTRY.product]: [blobOf(FIRST)] }));
+  const token = f('token');
+  writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
+  chmodSync(token, 0o600);
+  const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
+    recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
+    approvalsStateDir: f('approvals-state') };
+  const configFile = L.write('dispatcher.json', config);
+  writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
+  const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
+  const rec = openRecord({ root: config.recordRoot, product: ENTRY.product, ownerUid: process.getuid(), rules: fakeRules() }).record;
+  return { code: r.status, err: r.stderr, rec };
+}
+
+test('with only production writers, the product reads active and the docs lane is not undo-only (L292: the Mac\'s own boot)', () => {
+  const { code, err, rec } = macBoot();
+  assert.equal(code, 0, err);
+  const p = ENTRY.product;
+  // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
+  assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
+  assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
+  assert.equal((rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => e.text.includes(`${p} is now on`)).length, 1, 'Joe is told the product is on, once');
+  // The engine reads that document as the product's state: the docs lane merges an ordinary docs change, not undo-only.
+  const rules = rulesFromText({ [p]: FIRST }, { productState: (q) => rec.read('product', q)?.doc ?? null, clock: () => T0 });
+  const merge = rules.may('merge', { product: p, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
   assert.equal(merge.decision, 'allow', merge.reason);
+  // And the start gate finds the product record the boot made (it refused "no product record" without it).
+  const start = startGate({ rules, rec, card: { id: 'C-9', kind: 'exact_reverse', product: p, tier: 2, files: [DOC] }, kind: 'undo', product: p, b: green(rules), running: [], exactReverse: true });
+  assert.equal(start.ok, true, start.reason);
 });
 
 test('with no product document today, the gaps are exactly the known ones (paused, undo-only, no product record)', () => {
