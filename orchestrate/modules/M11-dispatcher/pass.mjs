@@ -31,7 +31,7 @@ import { hostname } from 'node:os';
 import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
-import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { tellThen, dropCause, clearTold, isQueued } from './alerts.mjs';
 import { stillWaiting, dueToTell, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { exactReverse } from './undo.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
@@ -554,11 +554,7 @@ function tellWaits({ rec, groups, alert, now }) {
       // Marked told only once a copy is delivered (L47), as holdAlert; every field it is given is written.
       tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
       // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and the mark written only if set.
-      clear: () => {
-        dropCause(rec, fact);
-        const cur = rec.read('fact', fact)?.doc;
-        if (cur != null && !(typeof cur === 'object' && cur.told_at == null)) putFact(rec, fact, { ...(typeof cur === 'object' ? cur : {}), told_at: null }, 'hold_cleared');
-      },
+      clear: () => clearTold(rec, fact),
     });
   }
 }

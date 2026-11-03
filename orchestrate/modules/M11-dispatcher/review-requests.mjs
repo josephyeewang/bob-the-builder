@@ -9,7 +9,7 @@
 //                                                             → { requestReview, hasReviewer, reviewAlerts }
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
-//   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
+//   relayReviewAlerts({ rec, alerts, alert, now })            → tells each runner alert once, and each hold while it lasts
 //
 // Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each once:
 //   - a pass that failed (`ok: false`), once per cause (its error text);
@@ -33,7 +33,8 @@ import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/r
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
-import { tellThen } from './alerts.mjs';
+import { tellThen, clearTold, queuedFacts } from './alerts.mjs';
+import { stillWaiting } from '../../shared/still-waiting.mjs';
 
 const HEX40 = /^[0-9a-f]{40}$/;
 
@@ -62,8 +63,9 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
 
 /**
- * The Dispatcher's own alerts from a status (readReviewStatus's answer), in the runner's alert shape. `at` is fixed, so
- * each is told once per id (REVIEW_ALERT_FACT keys on id and at).
+ * The Dispatcher's own holds from a status (readReviewStatus's answer), in the shape the relay takes: listed on every
+ * pass they last, so each is told again each day and cleared when it ends (L315). `since` names this trouble: another
+ * error, or another installed commit, is told at once.
  */
 export const STAMP_GRACE_MS = 30 * 60_000;
 const AHEAD_MS = 5 * 60_000;
@@ -72,7 +74,7 @@ export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) 
   const out = [];
   if (s?.ok === false) {
     const why = typeof s.error === 'string' && s.error ? s.error.slice(0, 300) : 'no reason given';
-    out.push({ id: `runner-failed-${sha(why)}`, at: 'once', text: `Its last pass failed: ${why}.` });
+    out.push({ id: 'runner-failed', hold: true, since: sha(why), text: `Its last pass failed: ${why}.` });
   }
   let head = null;
   try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch { head = null; }
@@ -82,7 +84,7 @@ export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) 
     const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;
     // Behind main for less than the grace: the updater has not had its turn yet.
     if (at && since !== null && now - since < STAMP_GRACE_MS) return out;
-    out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
+    out.push({ id: 'stamp', hold: true, since: at ?? 'none', text: at
       ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
       : `Its installed copy has no commit stamp (the file that says which commit of main the copy was made from), so whether reviews run main's code can't be told. A copy installed before the copy's layout changed has none; the review runner says what to do in its log, ${logWhere(runnerLog)}.` });
   }
@@ -116,22 +118,47 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
-    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
+    reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
   };
 }
 
 /** The fact that marks one runner alert as sent to Joe: its id and time, so the same trouble coming back later is sent again. */
 export const REVIEW_ALERT_FACT = (a) => `review-alert-${createHash('sha256').update(`${a.id}|${a.at}`).digest('hex').slice(0, 24)}`;
 
-/** Each runner alert to Joe once, through the outbox (marked once a copy is delivered). Returns how many were queued. */
+// The mark of one hold, in pass.mjs's hold- family: one per id, so a hold that ends clears its own mark (L315).
+const REVIEW_HOLD_PREFIX = 'hold-review-';
+export const REVIEW_HOLD_FACT = (id) => `${REVIEW_HOLD_PREFIX}${sha(id)}`;
+
+/**
+ * Each runner alert to Joe once, and each hold (`hold: true`) at once, then each day while it is listed, through the
+ * outbox (marked once a copy is delivered). A hold no longer listed is cleared, its queued copy dropped, so its return is
+ * told afresh. Only a status that was read gets here: a read that failed clears nothing. Returns how many were queued.
+ */
 export function relayReviewAlerts({ rec, alerts, alert, now }) {
   let n = 0;
+  const listed = new Set();
+  const tell = ({ fact, waiting, since, text }) => stillWaiting({
+    now, waiting, ...(since !== undefined ? { since } : {}),
+    read: () => rec.read('fact', fact)?.doc,
+    tell: (fields) => tellThen(alert, text, { fact, fields, kind: 'hold_alert' }),
+    clear: () => clearTold(rec, fact),
+  });
   for (const a of alerts ?? []) {
     if (!a || typeof a.id !== 'string' || typeof a.text !== 'string') continue;
+    if (a.hold) {
+      const fact = REVIEW_HOLD_FACT(a.id);
+      listed.add(fact);
+      if (tell({ fact, waiting: true, since: typeof a.since === 'string' ? a.since : undefined, text: `review runner: ${a.text.slice(0, 500)}` }).did === 'told') n += 1;
+      continue;
+    }
     const fact = REVIEW_ALERT_FACT(a);
     if (rec.read('fact', fact)?.doc?.told_at) continue;
     // Only an alert the queue took is counted (L130 c1).
     if (tellThen(alert, `review runner: ${a.text.slice(0, 500)}`, { fact: REVIEW_ALERT_FACT(a), fields: { told_at: new Date(now).toISOString() }, kind: 'review_alert' }) !== false) n += 1;
+  }
+  const marked = rec.list('fact').map((f) => f.id);
+  for (const fact of new Set([...marked, ...queuedFacts(rec)])) {
+    if (fact.startsWith(REVIEW_HOLD_PREFIX) && !listed.has(fact)) tell({ fact, waiting: false });
   }
   return n;
 }

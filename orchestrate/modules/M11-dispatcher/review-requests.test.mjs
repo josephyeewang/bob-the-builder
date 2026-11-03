@@ -88,21 +88,21 @@ test('L65: hasReviewer reads the runner\'s status: the card, role and head must 
   assert.throws(() => p.hasReviewer('C-1', 'reviewer', HEAD), /written by others/);
 });
 
-test('L66: a failed runner pass and an installed copy behind main are told, each once per cause', () => {
+test('L66, L315: a failed runner pass and an installed copy behind main are holds, each naming its cause', () => {
   const MAIN = 'c'.repeat(40);
   const ok = { ok: true, error: null, installed_commit: MAIN, alerts: [], running: [] };
   assert.deepEqual(statusAlerts(ok, () => MAIN), []);
-  // A failed pass: one alert per cause, the same id each time it is read.
+  // A failed pass: one hold, the same each time it is read; another cause is the same hold with another `since`.
   const f1 = statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN);
   assert.equal(f1.length, 1);
   assert.match(f1[0].text, /last pass failed: the requests could not be listed \(EACCES\)/);
   assert.deepEqual(statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN), f1);
-  assert.notEqual(statusAlerts({ ...ok, ok: false, error: 'another cause' }, () => MAIN)[0].id, f1[0].id);
-  // The stamp: behind main, or none, is told once per installed commit; without main's head, nothing.
+  assert.notEqual(statusAlerts({ ...ok, ok: false, error: 'another cause' }, () => MAIN)[0].since, f1[0].since);
+  // The stamp: behind main, or none, is named by the installed commit; without main's head, nothing.
   const behind = statusAlerts({ ...ok, installed_commit: HEAD }, () => MAIN);
   assert.equal(behind.length, 1);
   assert.match(behind[0].text, /installed copy is at abababa, but main is at ccccccc/);
-  assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].id, behind[0].id, 'main moving on does not tell it again');
+  assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].since, behind[0].since, 'main moving on is the same trouble');
   // m-f (audit r2): plain words, and where the runner's log is: the path when the wiring gives it, else the file's name.
   const none = statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text;
   assert.match(none, /no commit stamp \(the file that says which commit of main the copy was made from\).*the review runner says what to do in its log, review-runner\.err\.log, in the folder the Mac setup chose for the review jobs' logs\.$/);
@@ -114,7 +114,7 @@ test('L66: a failed runner pass and an installed copy behind main are told, each
   const dir = tempDir('m11-status-');
   const file = status(dir, { written_at: new Date(T0).toISOString(), ok: false, error: 'the review user is an admin', installed_commit: HEAD, running: [], alerts: [{ id: 'x', at: 'y', text: 'z' }] });
   const got = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0, mainHead: () => MAIN }).reviewAlerts();
-  assert.deepEqual(got.map((a) => a.id.replace(/-[0-9a-f]{24}$/, '-#')), ['x', 'runner-failed-#', `stamp-${HEAD}`]);
+  assert.deepEqual(got.map((a) => a.id), ['x', 'runner-failed', 'stamp']);
 });
 
 test('L136 m4: reviewPorts hands runnerLog to the no-stamp alert, so Joe is told where the log really is', () => {
@@ -140,7 +140,7 @@ test('item 20(c) planted: a copy behind main is told only once it has stayed beh
   assert.deepEqual(behindFor(STAMP_GRACE_MS - 1), []);
   const late = behindFor(STAMP_GRACE_MS);
   assert.equal(late.length, 1);
-  assert.equal(late[0].id, `stamp-${HEAD}`);
+  assert.deepEqual([late[0].id, late[0].since], ['stamp', HEAD]);
   assert.match(late[0].text, /installed copy is at abababa, but main is at ccccccc/);
   // The port is asked about the installed commit, so `since` can be when main first moved past it.
   const asked = [];
@@ -189,5 +189,5 @@ test('L75 m-2: the stamp alert waits from root\'s record of main, read the way t
   const sfile = join(dir, 'status.json');
   writeFileSync(sfile, JSON.stringify({ written_at: new Date(T0).toISOString(), ...ok }), { mode: 0o644 });
   const got = reviewPorts({ requests: dir, status: sfile, reviewUid: ME, now: () => T0, installRoot, main: () => MAIN }).reviewAlerts();
-  assert.deepEqual(got.map((a) => a.id), [`stamp-${HEAD}`]);
+  assert.deepEqual(got.map((a) => a.id), ['stamp']);
 });

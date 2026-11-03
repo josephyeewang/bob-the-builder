@@ -1,6 +1,5 @@
-// review-told-once.test.mjs — L315 (class audit "told once ever while still waiting"): reproductions, as to-do tests,
-// of the review holds that are told to Joe once and never again while they last. Nothing here is fixed yet: each test
-// is marked todo until lane 5's shared stillWaiting check lands and is wired in. The tests say what the fix must do:
+// review-told-once.test.mjs — L315 (class audit "told once ever while still waiting"): the review holds that
+// were told to the owner once and never again while they lasted. Each now goes through the shared stillWaiting check:
 // quiet 2 hours on, told again 25 hours on while the trouble holds, and the mark cleared once it ends, so the same
 // trouble coming back is told again.
 //
@@ -11,11 +10,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { reviewPorts } from './review-requests.mjs';
+import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT } from './review-requests.mjs';
+import { outbox, isQueued } from './alerts.mjs';
 import { timeLimits } from './merges.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { rulesWith, recWith, setClock, withAlerts, iso, T0 } from './fixtures.test-helper.mjs';
@@ -85,8 +85,7 @@ function mac(over = {}) {
   return { base, root, rec, ctx, clock, live, starts, hour, run, card: () => rec.read('card', 'C-1').doc };
 }
 
-test('L315: a review user that is an admin is told again a day later while it lasts, and again if it comes back after a fix',
-  { todo: 'L315 (lane 4): review-runner state.told keeps review-admin told for good; wait for lane 5\'s stillWaiting' }, async () => {
+test('L315: a review user that is an admin is told again a day later while it lasts, and again if it comes back after a fix', async () => {
     const m = mac();
     const ADMIN = /review runner: The review user is an admin Mac user/;
     // The runner has run once as it should (its folders are made); then the review user becomes an admin, before the
@@ -109,8 +108,7 @@ test('L315: a review user that is an admin is told again a day later while it la
     assert.deepEqual(await m.run(28, 29, ADMIN), [28]);
   });
 
-test('L315: a review runner memory file that can\'t be read is told again a day later while it lasts, and again after a fix',
-  { todo: 'L315 (lane 4): state-corrupt keeps the file\'s time as its `at`, so the Dispatcher tells it once; wait for stillWaiting' }, async () => {
+test('L315: a review runner memory file that can\'t be read is told again a day later while it lasts, and again after a fix', async () => {
     const m = mac();
     const CORRUPT = /review runner: The review runner's memory file can't be read/;
     await m.hour(0);
@@ -125,8 +123,7 @@ test('L315: a review runner memory file that can\'t be read is told again a day 
     assert.deepEqual(await m.run(28, 29, CORRUPT), [28]);
   });
 
-test('L315: a verdict the Record has not taken is told again a day later while it is still not taken, and never once it is',
-  { todo: 'L315 (lane 4): not-taken-<session> stays in state.told for good; wait for stillWaiting' }, async () => {
+test('L315: a verdict the Record has not taken is told again a day later while it is still not taken, and never once it is', async () => {
     let taken = { ok: false, reason: 'the Record holds no verdict of session S-1' };
     const m = mac({ verdictTaken: () => taken });
     const NOT_TAKEN = /review runner: The reviewer for card C-1 at aaaaaaa handed in a verdict the Record has not taken/;
@@ -154,33 +151,32 @@ function statusMac() {
   const clock = { t: T0 };
   let say = { ok: true, error: null, installed_commit: MAIN };
   let main = { commit: MAIN, since: T0 };
+  let unreadable = false;
   const ports = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => clock.t, mainHead: () => main });
   const hour = async (h) => {
     clock.t = T0 + h * H;
     setClock(rec, clock.t);
-    writeFileSync(file, JSON.stringify({ written_at: iso(clock.t), running: [], alerts: [], ...say }), { mode: 0o644 });
+    writeFileSync(file, unreadable ? '{' : JSON.stringify({ written_at: iso(clock.t), running: [], alerts: [], ...say }), { mode: 0o644 });
     chmodSync(file, 0o644);
     const got = [];
     await withAlerts(rec, clock.t, (t) => { got.push(t); return true; }, (alert) => timeLimits({ rec, rules: R, now: clock.t, b: GREEN, alert, ...ports, gateAlive: () => true }));
     return got;
   };
   const run = async (from, to, re) => { const out = []; for (let h = from; h <= to; h += 1) for (const t of await hour(h)) if (re.test(t)) out.push(h); return out; };
-  return { set: (s) => { say = { ...say, ...s }; }, setMain: (x) => { main = x; }, hour, run };
+  return { set: (s) => { say = { ...say, ...s }; }, setMain: (x) => { main = x; }, unreadable: (u) => { unreadable = u; }, hour, run };
 }
 
 const FAILED = /review runner: Its last pass failed: the requests could not be listed \(EACCES\)/;
 const EACCES = { ok: false, error: 'the requests could not be listed (EACCES)' };
 
-test('L315: a runner pass that keeps failing is told again a day later',
-  { todo: 'L315 (lane 4): runner-failed has at:\'once\', so it is told once per error text, ever; wait for stillWaiting' }, async () => {
+test('L315: a runner pass that keeps failing is told again a day later', async () => {
     const s = statusMac();
     s.set(EACCES);
     assert.deepEqual(await s.run(0, 2, FAILED), [0], 'told once; quiet 2 hours on');
     assert.deepEqual(await s.run(3, 25, FAILED), [24], 'told again a day later, while every pass still fails');
   });
 
-test('L315: a runner error that stopped and later comes back is told again at once',
-  { todo: 'L315 (lane 4): the runner-failed fact is never dropped when the error stops; wait for stillWaiting' }, async () => {
+test('L315: a runner error that stopped and later comes back is told again at once', async () => {
     const s = statusMac();
     s.set(EACCES);
     assert.deepEqual(await s.run(0, 1, FAILED), [0]);
@@ -191,8 +187,7 @@ test('L315: a runner error that stopped and later comes back is told again at on
     assert.deepEqual(await s.run(5, 6, FAILED), [5], 'the same error back after it stopped');
   });
 
-test('L315 (minor): an installed review copy that stays behind main is told again a day later',
-  { todo: 'L315 (lane 4): stamp-<installed> is told once per installed commit; wait for stillWaiting' }, async () => {
+test('L315 (minor): an installed review copy that stays behind main is told again a day later', async () => {
     const s = statusMac();
     const BEHIND = /review runner: Its installed copy is at aaaaaaa, but main is at fffffff/;
     s.set({ installed_commit: HEAD });
@@ -201,8 +196,7 @@ test('L315 (minor): an installed review copy that stays behind main is told agai
     assert.deepEqual(await s.run(3, 25, BEHIND), [24], 'told again a day later, while the copy is still behind');
   });
 
-test('L315 (minor): a Lead\'s read-only request whose start keeps being refused reaches Joe once it has waited a day',
-  { todo: 'L315 (lane 4): outbox-intake tells the Lead once that it is queued and never Joe; wait for stillWaiting' }, async () => {
+test('L315 (minor): a Lead\'s read-only request whose start keeps being refused reaches Joe once it has waited a day', async () => {
     const root = tempDir('m11-told-once-ob-');
     const ob = join(root, 'lead');
     mkdirSync(ob, { recursive: true });
@@ -230,3 +224,77 @@ test('L315 (minor): a Lead\'s read-only request whose start keeps being refused 
     assert.equal(rec.read('fact', 'intake-applied-L-1-think-q9.md').doc.state, 'applied');
     assert.equal(told.joe.filter(([, t]) => /think-q9\.md/.test(t)).length, 1, 'started: not told again');
   });
+
+test('L315: a verdict not taken stays a hold on passes with no request, and through a pass that stops at the admin check', async () => {
+  const m = mac({ verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict' }) });
+  for (const h of [0, 1, 2]) await m.hour(h);
+  m.live.splice(0);
+  for (const h of [3, 4]) await m.hour(h);
+  const notTaken = () => JSON.parse(readFileSync(join(m.root, 'status.json'), 'utf8')).holds.filter((x) => x.id.startsWith('not-taken-'));
+  assert.equal(notTaken().length, 1);
+  // A runner pass alone: nothing asks, so no request is waiting, and the hold is still listed.
+  await runnerPass(m.ctx);
+  assert.equal(readdirSync(join(m.root, 'requests')).length, 0);
+  assert.equal(notTaken().length, 1);
+  m.ctx.isAdmin = async () => true;
+  await runnerPass(m.ctx);
+  assert.equal(notTaken().length, 1, 'the pass stopped early and kept it');
+});
+
+test('L315: a verdict not taken on a head the card has left is no longer a hold', async () => {
+  const m = mac({ verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict' }) });
+  for (const h of [0, 1, 2]) await m.hour(h);
+  m.live.splice(0);
+  for (const h of [3, 4]) await m.hour(h);
+  const had = m.ctx.readCard;
+  m.ctx.readCard = (c) => { const r = had(c); return { ...r, doc: { ...r.doc, head: 'b'.repeat(40) } }; };
+  await runnerPass(m.ctx);
+  assert.deepEqual(JSON.parse(readFileSync(join(m.root, 'status.json'), 'utf8')).holds, []);
+});
+
+test('L315: a status that can\'t be read clears no hold; the hold is not told afresh when it reads again', async () => {
+  const s = statusMac();
+  s.set(EACCES);
+  assert.deepEqual(await s.run(0, 1, FAILED), [0]);
+  s.unreadable(true);
+  await assert.rejects(s.hour(2), /status can't be read/);
+  s.unreadable(false);
+  assert.deepEqual(await s.run(4, 5, FAILED), [], 'still the same trouble, still marked');
+});
+
+test('L315: another error is told at once, not held by the last one\'s mark', async () => {
+  const s = statusMac();
+  s.set(EACCES);
+  assert.deepEqual(await s.run(0, 1, FAILED), [0]);
+  s.set({ ok: false, error: 'the disk is full' });
+  assert.deepEqual(await s.run(2, 3, /Its last pass failed: the disk is full/), [2]);
+});
+
+test('L315: a hold that ends while its alert is queued leaves the queue unsent', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('review-admin');
+  const hold = { id: 'review-admin', hold: true, text: 'The review user is an admin Mac user.' };
+  assert.equal(relayReviewAlerts({ rec, alerts: [hold], alert: outbox(rec, T0), now: T0 }), 1);
+  assert.equal(isQueued(rec, fact), true);
+  assert.equal(relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, T0 + H), now: T0 + H }), 0);
+  assert.equal(isQueued(rec, fact), false);
+});
+
+test('L315: a Lead\'s request that starts leaves its queued tell unsent', async () => {
+  const root = tempDir('m11-told-once-ob2-');
+  const ob = join(root, 'lead');
+  mkdirSync(ob, { recursive: true });
+  writeFileSync(join(ob, 'think-q9.md'), 'Is B safe?');
+  const rec = recWith();
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: ME, product: 'p1' }];
+  const pass = (h, startReadonly) => {
+    setClock(rec, T0 + h * H);
+    return intakePass({ rec, sessions, now: T0 + h * H, wait: async () => {}, alert: outbox(rec, T0 + h * H), note: () => {}, startReadonly, replyToLead: () => {} });
+  };
+  const applied = 'intake-applied-L-1-think-q9.md';
+  await pass(0, () => ({ ok: false, reason: 'cap 4' }));
+  await pass(25, () => ({ ok: false, reason: 'cap 4' }));
+  assert.equal(isQueued(rec, applied), true);
+  await pass(26, () => ({ ok: true }));
+  assert.equal(isQueued(rec, applied), false);
+});

@@ -18,7 +18,8 @@ import { join } from 'node:path';
 import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
 import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
-import { tellThen, isQueued } from './alerts.mjs';
+import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { OUTBOX_KINDS } from '../../shared/record.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
@@ -37,6 +38,8 @@ export const startsOnly = (kind) => {
 const notARecord = (applied) => applied?.not_a_record === true || applied?.outcome === 'not_a_record';
 
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+// What a Lead's waiting request keeps through each write of its fact: when it began, and the mark of its tell.
+const WAIT_FIELDS = ['waiting_since', 'told_at'];
 const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 
@@ -119,11 +122,14 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     try { why = vet({ session: s, kind: file.kind, text: file.text }); } catch (e) { why = `could not be checked: ${e.message}`; } // audit MIN-12
     if (why) { r.refused = why; note(`outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`); continue; }
     // A Lead's read-only request starts its session first. Refused (at the cap, in red) -> the file waits
-    // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued.
+    // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued, and the owner once it has
+    // waited a day, then each day it still waits (L315). The wait's start and mark go through each write of the fact.
     const word = file.kind.slice(0, -1);   // the request's word: think-, scout-, write- -> think, scout, write
     if (s.role === 'lead' && Object.hasOwn(READONLY_REQUESTS, word)) {
       // Claim first (audit 0b-6 r2 MIN-7): a crash between the start and the claim must not start a second helper.
-      const claimStart = put({ state: 'starting', tries: prev?.doc?.tries ?? 0 }, 'outbox_starting');
+      const waitingSince = prev?.doc?.waiting_since ?? new Date(now).toISOString();
+      const kept = Object.fromEntries(Object.entries({ ...prev?.doc, waiting_since: waitingSince }).filter(([k, v]) => WAIT_FIELDS.includes(k) && v != null));
+      const claimStart = put({ state: 'starting', tries: prev?.doc?.tries ?? 0, ...kept }, 'outbox_starting');
       if (!claimStart.ok) { r.refused = `could not record the start: ${claimStart.reason}`; continue; }
       let started;
       try { started = await startReadonly({ lead: s.sessionId, profile: READONLY_REQUESTS[word], kind: word, brief: file.text, product: s.product }); }
@@ -132,11 +138,18 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       if (!started?.ok) {
         const reason = started?.reason ?? 'no answer';
         const told = (prev?.doc?.tries ?? 0) > 0;
-        put({ state: 'waiting', reason, tries: (prev?.doc?.tries ?? 0) + 1 }, 'outbox_waiting');
+        put({ state: 'waiting', reason, tries: (prev?.doc?.tries ?? 0) + 1, ...kept }, 'outbox_waiting');
         if (!told) replyToLead({ lead: s.sessionId, text: `Your ${word} request ${name} is queued: ${reason}. It starts by itself when it can.` });
         r.waiting = reason;
+        stillWaiting({
+          now, waiting: true, every: STILL_WAITING_MS, after: { since: waitingSince, limit: STILL_WAITING_MS },
+          read: () => prev?.doc,
+          tell: (fields) => tellThen(alert, `${s.role} ${s.sessionId}: the ${word} request ${name} has waited since ${waitingSince} and has not started: ${reason}`, { fact: key, fields, kind: 'outbox_told' }),
+          clear: () => dropCause(rec, key),
+        });
         continue;
       }
+      dropCause(rec, key);
       // L140: the session started, and that was the hand-in's whole job.
       if (startsOnly(word)) {
         put({ state: 'applied', started: true, applied_at: new Date(now).toISOString() }, 'outbox_applied');
