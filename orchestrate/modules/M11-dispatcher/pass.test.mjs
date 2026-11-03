@@ -1265,3 +1265,34 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   assert.equal(isQueued(w.rec, fact), false, 'the unsent copy is dropped');
   assert.equal(w.rec.read('fact', fact)?.doc?.told_at ?? null, null);
 });
+
+test('L324: a wanted stop whose since is ahead or unreadable is restarted from now and forced one grace later, not waited out for ever', async () => {
+  for (const label of ['future', 'unreadable']) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.setCard('C-1', { state: 'cancelled' });
+    w.probes.set(sid, busy);
+    await w.pass(1);
+    change(w.rec, 'fact', STOP_FACT(sid), { since: label === 'future' ? iso(T0 + 30 * 24 * H) : 'garbage' });
+    await w.pass(2);
+    assert.equal(w.calls.stops.length, 0, `${label}: not stopped at once over a bad field`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, iso(T0 + 2 * MIN), `${label}: restarted from now`);
+    await w.pass(4);
+    assert.deepEqual(w.calls.stops, [sid], `${label}: forced one grace later`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.hard, true);
+    assert.match(w.rec.read('fact', `stop-note-${sid}`).doc.text, /without a safe point after 2 min \(cancel\)/);
+  }
+});
+
+test('L324: an unknown-usage start that is ahead or unreadable counts as over a day: told at once', async () => {
+  for (const [label, bad] of [['future', iso(T0 + 30 * 24 * H)], ['unreadable', 'garbage']]) {
+    const w = world([], { usage: null });
+    const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+    await w.pass(0);
+    assert.equal(told(), 0, label);
+    change(w.rec, 'fact', BAND_FACT, { unknown_since: bad });
+    await w.pass(1);
+    assert.equal(told(), 1, label);
+  }
+});

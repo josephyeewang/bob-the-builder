@@ -226,6 +226,13 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
     }
     if (!pending) continue;
+    // A wanted-since that can't be read or lies ahead (L324) would never come due, so the stop would wait for a safe
+    // point for ever. It is restarted from now instead (not counted as late, which would stop at once with no safe
+    // point over a bad field): the stop is forced one limit from now at most.
+    if (pastTime(pending.since, now) === null) {
+      pending = { ...pending, since: iso(now) };
+      putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
+    }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
     const late = now - Date.parse(pending.since) >= limit;
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
@@ -316,7 +323,10 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   }
 
   // 5. Resume parked work (M8).
-  const unknownLong = b.band === 'unknown' && unknownSince && now - Date.parse(unknownSince) > unknownMaxMs;
+  // A start of the unknown band that can't be read or lies ahead counts as over a day (L324, shared pastTime): told,
+  // never waited out.
+  const unknownAt = unknownSince ? pastTime(unknownSince, now) : undefined;
+  const unknownLong = b.band === 'unknown' && !!unknownSince && (unknownAt === null || now - unknownAt > unknownMaxMs);
   for (const { id, doc } of rec.list('card')) {
     if (doc.state !== 'waiting') continue;
     // A wait's `what` names what it waits on; leaving waiting clears the wait (M9), and the diary keeps the move's kind.
