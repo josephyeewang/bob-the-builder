@@ -1,19 +1,27 @@
-// A card the Dispatcher puts on Joe through waitOnJoe is told to him until a copy is delivered (L130). Not every wait
-// on Joe goes through here yet: M4 headless-result.mjs budget_stop (L138 m5) is open, on the alert inventory.
+// A card waiting on Joe is told to him at once, and again every day while it still waits (L130, L315: the shared
+// still-waiting rule; before L315 it was told once, ever, and a card could sit on Joe for a month without a word).
+// Every card waiting on Joe is covered, not only those put there by waitOnJoe: a joe wait written with no tell (M9's
+// round cap, writer.mjs; headless-result.mjs budget_stop until it goes through waitOnJoe) is given one here, whose text
+// names the card, what it waits on, why, and what Joe can do (L316). A card parked because its product is paused
+// (PAUSED_WAIT_WHAT) is not: it resumes by itself when Joe unpauses, and the trip brief shows it apart (L85 m-5).
 //
 // waitOnJoe records the tell first (fact `wait-tell-<card>`: the text, and `since`, the tick's time it asked at), then
 // moves the card to wait, then reads the card back and copies the wait's STORED `since` onto the tell as `wait_since`
 // (L138 MAT-1: the Record stamps a wait with its own clock, which need not be the tick's). Then it queues the alert
 // through tellThen, whose mark (`told_since` = that stored since) is written only once a copy is delivered.
-// retellWaits runs each tick: a card still waiting on Joe under that same wait, with no delivered mark for it, is told
-// again (the same queue entry, not a second one). A tell that could not be recorded moves nothing, so the step that
+// retellWaits runs each tick, on stillWaiting: a card still waiting on Joe under that same wait is told again when no
+// copy for this wait was delivered, or the last was delivered a day ago (the mark: `told_since`, the wait it told, and
+// `told_at`). A queued copy is not queued twice. When the wait ends, a copy still queued is dropped and the mark cleared,
+// so a new wait is told afresh. A tell that could not be recorded moves nothing, so the step that
 // wanted the wait sees the card again next pass. A wait that could not be written leaves a tell no wait matches, which
 // retellWaits ignores. A wait written but not yet copied onto its tell (that write failed) is matched by the Record's
 // own window: the Record takes a wait only when its since is within 60 s of the Record's clock, so a joe wait whose
 // since is within 60 s of the tell's asked time is the wait it asked for; retellWaits copies it on, then tells.
 
 import { waitOn } from './moves.mjs';
-import { tellThen, isQueued } from './alerts.mjs';
+import { tellThen, isQueued, dropCause } from './alerts.mjs';
+import { stillWaiting } from '../../shared/still-waiting.mjs';
+import { OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const WAIT_TELL_FACT = (card) => `wait-tell-${card}`;
 const iso = (ms) => new Date(ms).toISOString();
@@ -29,7 +37,7 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   const w = waitOn(rec, id, { who: 'joe', now, ...wait });
   if (!w.ok) return w;
   const stored = confirm(rec, id, rec.read('card', id)?.doc);
-  if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored }, kind: 'wait_told' });
+  if (stored) tellThen(alert, text, { fact: WAIT_TELL_FACT(id), fields: { told_since: stored, told_at: iso(now) }, kind: 'wait_told' });
   return w;
 }
 
@@ -53,19 +61,58 @@ function confirm(rec, card, c) {
   return put.ok ? stored : null;
 }
 
-/** Each tick: every card still waiting on Joe under a wait whose alert was not delivered is told again. */
-export function retellWaits({ rec, alert }) {
+/** The text for a joe wait written with no tell: the card, what it waits on, why, and what Joe can do (L316). */
+export function untoldWaitText(card, wait) {
+  // The wait's reason says what the owner can do where its site wrote one (the round cap: cancel it, or a new card from
+  // the Lead); with none, the general answer.
+  const what = wait?.what ?? 'nothing named';
+  if (typeof wait?.reason === 'string' && wait.reason) return `card ${card} waits on you (${what}): ${wait.reason}. Answer it through the Front Door`;
+  return `card ${card} waits on you (${what}); no reason was recorded. Answer it through the Front Door: say how it goes on, or cancel the card`;
+}
+
+// A card waiting on Joe whose wait has no tell for it: one is written, so retellWaits tells it like any other (L316).
+function adoptUntold(rec) {
+  let cards;
+  try { cards = rec.list('card'); } catch { return; }
+  for (const { id, doc } of cards) {
+    const w = doc?.wait;
+    if (doc?.state !== 'waiting' || w?.who !== OWNER_WAIT_WHO || w.what === PAUSED_WAIT_WHAT || !w.since) continue;
+    const f = rec.read('fact', WAIT_TELL_FACT(id));
+    if (f?.doc?.since && waitOf(f.doc, doc)) continue;
+    rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(id), expectRev: f?.rev ?? 0,
+      doc: { since: w.since, wait_since: w.since, text: untoldWaitText(id, w) }, kind: 'wait_tell' });
+  }
+}
+
+/** Each tick: every card waiting on Joe is told at once, then daily while the same wait lasts (shared stillWaiting). */
+export function retellWaits({ rec, alert, now }) {
   const out = [];
+  adoptUntold(rec);
   for (const f of rec.list('fact')) {
     if (!f.id.startsWith(WAIT_TELL_FACT('')) || !f.doc?.since) continue;
     const card = f.id.slice(WAIT_TELL_FACT('').length);
+    const fact = WAIT_TELL_FACT(card);
     const c = rec.read('card', card)?.doc;
     const at = waitOf(f.doc, c);
-    if (!at || f.doc.told_since === at || isQueued(rec, WAIT_TELL_FACT(card))) continue;
-    const stored = confirm(rec, card, c);
-    if (!stored) continue;
-    tellThen(alert, f.doc.text, { fact: WAIT_TELL_FACT(card), fields: { told_since: stored }, kind: 'wait_told' });
-    out.push([card, 'told again: waits on joe']);
+    stillWaiting({
+      now,
+      waiting: !!at,
+      // A mark for another wait (its told_since) is no mark for this one: a new wait is told at once.
+      read: () => { const d = rec.read('fact', fact)?.doc; return d?.told_since === at ? d : null; },
+      tell: ({ told_at }) => {
+        if (isQueued(rec, fact)) return true;
+        const stored = confirm(rec, card, c);
+        if (!stored) return false;
+        out.push([card, 'told again: waits on joe']);
+        return tellThen(alert, f.doc.text, { fact, fields: { told_since: stored, told_at }, kind: 'wait_told' });
+      },
+      // The wait ended (or the tell is for no wait): a copy still queued leaves unsent, and a set mark is cleared.
+      clear: () => {
+        dropCause(rec, fact);
+        const d = rec.read('fact', fact);
+        if (d?.doc?.told_at != null) rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: d.rev, doc: { ...d.doc, told_at: null }, kind: 'wait_tell' });
+      },
+    });
   }
   return out;
 }
