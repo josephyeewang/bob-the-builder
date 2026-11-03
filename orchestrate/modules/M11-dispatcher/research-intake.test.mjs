@@ -20,6 +20,7 @@ import { openResearchAsks, researchBrief } from '../M2-approvals/research-ask.mj
 import { waitingItems } from '../M13-ledger/waiting.mjs';
 import { judge, researchCopyProblem } from '../M6-merge-gate/refusals.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
+import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 
 const ON = { [`${GO_FREE_KEY}.research_copy`]: true };
@@ -39,7 +40,9 @@ function world({ values = ON, state = 'active', asks = 1 } = {}) {
   }
   assert.equal(openResearchAsks(ctx).opened.length, asks);
   const research = researchHandler({ rules: t.rules });
-  const hand = (id, text, over = {}) => research({ rec: t.record, product: PRODUCT, kind: 'research', id, name: `research-${id}.md`, text, sha256: sha(text), now: t.clock.t, ...over });
+  // What the intake hands a handler (L290 M-1): the fenced text and the raw bytes' sha256, blob id and size; never the text.
+  const hand = (id, text, over = {}) => research({ rec: t.record, product: PRODUCT, kind: 'research', id, name: `research-${id}.md`, source: 'research-file', fenced: cleanOutside(text, 'research-file'),
+    sha256: sha(text), blob: blobSha(Buffer.from(text)), size: Buffer.byteLength(text), now: t.clock.t, ...over });
   return { t, rec: t.record, research, hand };
 }
 
@@ -76,15 +79,16 @@ test('fail closed: with research copies off in the rules, nothing is written and
   assert.match(RESEARCH_OFF, /approvals\.plan_go\.go_free\.research_copy/);
 });
 
-test('refused: no open ask by that number, an odd name, another product, bytes that are not the text, a landed ask', () => {
+test('refused: no open ask by that number, an odd name, another product, no proof of the bytes, a landed ask', () => {
   const w = world({ asks: 2 });
   assert.match(w.hand('R-9', REPORT).reason, /there is no research ask R-9/);
   assert.match(w.hand('r1', REPORT).reason, /named research-R-<number>\.md/);
   assert.match(w.hand('R-1', REPORT, { name: 'research-R-2.md' }).reason, /named research-R-<number>\.md/);
   assert.match(w.hand('R-1', REPORT, { product: 'other-app' }).reason, /research ask R-1 is for product sample-app, not this one/);
-  // The intake read bytes that are not UTF-8: its text hashes to something else, so the copy would not be those bytes.
-  const raw = Buffer.from([0x23, 0x20, 0xff, 0xfe, 0x0a]);
-  assert.match(w.hand('R-1', raw.toString('utf8'), { sha256: sha(raw) }).reason, /not plain UTF-8/);
+  // No proof of the bytes (L290 M-1): a missing or odd sha256, blob id or size is refused, never made up here.
+  for (const over of [{ sha256: undefined }, { sha256: 'X'.repeat(64) }, { blob: undefined }, { blob: sha(REPORT) }, { size: undefined }, { size: -1 }, { size: '10' }]) {
+    assert.match(w.hand('R-1', REPORT, over).reason, /did not hand on the report's sha256, blob id and size/, JSON.stringify(over));
+  }
   assert.equal(w.rec.list('card').length, 0);
   // Taken in once; the ask has landed, so a second report for it is refused.
   assert.equal(w.hand('R-2', REPORT).ok, true);
@@ -98,6 +102,7 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   must(w.rec.write({ actor: 'dispatcher', entity: 'card', id: RESEARCH_CARD('R-1'), expectRev: 0, kind: 'research_card',
     doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
   assert.match(w.hand('R-1', 'other bytes').reason, /R-1 already has its research_copy card/);
+  assert.match(w.hand('R-1', REPORT, { blob: 'b'.repeat(40) }).reason, /R-1 already has its research_copy card/, 'same sha256, another blob');
   assert.equal(w.hand('R-1', REPORT).ok, true);
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
   assert.ok(w.rec.read('ask', 'R-1').doc.landed);
@@ -131,6 +136,26 @@ test('through the real proposals intake: taken in once, and a refusal is told to
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, sha(REPORT));
   assert.equal(w.rec.list('card').length, 1);
   assert.equal(alerts.filter((a) => /research-R-7\.md/.test(a) && /there is no research ask R-7/.test(a)).length, 1, 'told once');
+});
+
+test('L290: through the real proposals intake, the card\'s sha256 and blob are the raw bytes\', git\'s own, for BOM, CRLF and non-UTF-8 reports', async () => {
+  const reports = {
+    'R-1': Buffer.from('﻿# Report\nA & B < C\n', 'utf8'),
+    'R-2': Buffer.from('# Report\r\nline two\r\n', 'utf8'),
+    'R-3': Buffer.from([0x23, 0x20, 0xFF, 0xFE, 0x41, 0x0D, 0x0A, 0x80]),
+  };
+  const w = world({ asks: 3 });
+  const dir = join(w.t.base, 'proposals'); mkdirSync(dir); chmodSync(dir, 0o750);
+  const now = w.t.clock.t + 3_600_000;
+  const rules = { get: (k, o) => (k === 'proposals.outbox' ? dir : w.t.rules.get(k, o)) };
+  for (const [id, bytes] of Object.entries(reports)) writeFileSync(join(dir, `research-${id}.md`), bytes);
+  const out = await proposalsPass({ rec: w.rec, rules, products: [PRODUCT], ownerUid: UID, wait: async () => {}, alert: outbox(w.rec, now), handlers: { research: w.research }, now });
+  for (const [id, bytes] of Object.entries(reports)) {
+    assert.equal(out.find((r) => r.name === `research-${id}.md`)?.applied, true, id);
+    const src = w.rec.read('card', RESEARCH_CARD(id)).doc.source;
+    const git = execFileSync('git', ['hash-object', '--stdin'], { input: bytes }).toString().trim();
+    assert.deepEqual(src, { file: `research-${id}.md`, sha256: sha(bytes), blob: git, size: bytes.length }, id);
+  }
 });
 
 // ---- the merge gate, refusal 10 ----

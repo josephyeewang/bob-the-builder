@@ -180,8 +180,9 @@ export function stageOf(rules, product) {
  * `handlers`: { research, claim, heartbeat }, each ({ rec, product, kind, id, name, source, fenced, sha256, blob, size }) → { ok, reason? }:
  *   `fenced` is the file's text as cleanOutside's fenced copy (R-0b-126); a handler never sees the raw text or bytes.
  *   `sha256`, `blob` (git's blob id) and `size` are of the raw bytes, from the same read (L290 M-1): a handler that
- *   needs the file itself (the research copy) records them, and lane 2's copier (push.mjs, L286) reads the file again
- *   through M9's safe side-file open and copies it only when its sha256 still matches; refusal 10 checks the blob.
+ *   needs the file itself (the research copy) records them on its card, and M6 refusal 10 compares the blob at merge.
+ *   Open (lane 2, L286 follow-up): the copier, push.mjs, is not built; it will read the file again through M9's safe
+ *   side-file open and copy it only when its sha256 still matches the card's.
  * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.

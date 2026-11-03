@@ -12,6 +12,7 @@ import { checkOutboxFile, intakePush, outboxFile } from '../M1-front-door/outbox
 import { waitingItems, waitingLines } from '../M13-ledger/waiting.mjs';
 import { askStore } from './ask-store.mjs';
 import { researchHandler, RESEARCH_CARD } from '../M11-dispatcher/research-intake.mjs';
+import { blobSha } from '../M10-rules/reader.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
 
@@ -33,8 +34,9 @@ function fileAsk(t, brief, id = '20261103-0915-ra', product = PRODUCT, sid = 'F-
 const RESEARCH_ON = { [`${GO_FREE_KEY}.research_copy`]: true };
 function handIn(t, name, text) {
   const m = /^research-(.*)\.md$/.exec(name);
-  return researchHandler({ rules: t.ctx.rules })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name, text,
-    sha256: createHash('sha256').update(text).digest('hex'), now: t.clock.t });
+  // What the intake hands it (L290 M-1): the raw bytes' sha256, blob id and size, never the text.
+  return researchHandler({ rules: t.ctx.rules })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name,
+    sha256: createHash('sha256').update(text).digest('hex'), blob: blobSha(Buffer.from(text)), size: Buffer.byteLength(text), now: t.clock.t });
 }
 
 test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report lands in the record (through R-0b-135)', () => {
