@@ -23,7 +23,7 @@ const ME = process.getuid();
 const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
 
 function settingsOf(role) {
-  const r = renderRoleSettings({ productionFiles: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
     paths: { copy: '/rc/S-1', outbox: '/o/reviewer/S-1', hooksDir: '/i/hooks', snapshot: '/r/rules.json', node: '/i/node', bobFolder: '/b', notes: '/r/notes/S-1',
       deny: { secrets: ['/k'] }, reviewWalls: { outboxRoot: '/o', runnerRoot: '/r' } } });
   assert.equal(r.ok, true, r.reason);

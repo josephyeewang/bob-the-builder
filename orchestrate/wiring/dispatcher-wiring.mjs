@@ -48,7 +48,7 @@ const NAME = /^[A-Za-z0-9._-]+$/;
 export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
   'sessions', 'probe', 'launch', 'stopGroup', 'saveWork', 'hostLock', 'pauseLead', 'gateAlive', 'stopSession', 'hasReviewer',
   'requestReview', 'reviewAlerts', 'filesOf', 'sendFrontDoor', 'restartFrontDoor', 'startMinibase', 'frontDoorAlive',
-  'strayFrontDoor', 'frontDoorHandoff']);
+  'strayFrontDoor', 'frontDoorHandoff', 'approvals']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['mirrorFor', 'git', 'saveWork']);
 export const notWiredText = (port) => `not wired yet: ${port} (R-0b-162)`;
 export const refusing = (port) => () => { throw new Error(notWiredText(port)); };
