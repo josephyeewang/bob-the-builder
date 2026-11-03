@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
@@ -34,32 +34,37 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
   'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait', 'approvals']);
+  'reviewAlerts', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
+// The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
+const PORTS_WIRED = Object.freeze(['approvals']);
+const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
+const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
 const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 const EXPECTED_STEPS = Object.freeze({
-  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: NW('approvals'),
+  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok',
   pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
-function world({ extra = {} } = {}) {
+function world({ extra = {}, omit = [], products = [ENTRY] } = {}) {
   // An installed copy of this checkout (L253): main.mjs reads its config through shared/job-config.mjs, which takes only
   // a config and wiring inside the copy, so the boot runs the copy's main.mjs with the copy's wiring, as the job will.
   const L = installedLayout('orch-wiring-', { source: true });
   const dir = L.base;
   const f = (n) => join(dir, n);
-  writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
+  writeFileSync(f('products.json'), JSON.stringify(products));
   const rulesStateDir = f('rules-state');
   mkdirSync(rulesStateDir, { mode: 0o700 });
   const token = f('token');
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
-    productsFile: f('products.json'), rulesStateDir, tokenFile: token, ...extra };
+    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...extra };
+  for (const k of omit) delete config[k];
   const configFile = L.write('dispatcher.json', config);
   const main = L.path('modules/M11-dispatcher/main.mjs');
   const fake = { owner: ENTRY.owner, repo: ENTRY.repo, commit: COMMIT, text: FIRST, logFile: f('github.log') };
@@ -128,6 +133,10 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
     [{ recordRoot: 'relative/record' }, /config: recordRoot must be an absolute path/],
     [{ rulesStateDir: 'rules-state' }, /config: rulesStateDir must be an absolute path/],
     [{ product: 'another-app' }, /config: .*products\.json does not list the product another-app/],
+    // L309 Minor 1: the product names a folder, so . and .. (and any name not starting with a letter or digit) are refused.
+    [{ product: '..' }, /config: product must be a product name/],
+    [{ product: '.' }, /config: product must be a product name/],
+    [{ product: '.sample-app' }, /config: product must be a product name/],
   ];
   for (const [extra, why] of cases) {
     const r = boot(world({ extra }));
@@ -139,10 +148,10 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
   const src = readFileSync(TICK, 'utf8');
   const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
-  assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
+  assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...PORTS_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
   const w = world();
   const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
-  assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal');
+  assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal or a pinned wiring');
   assert.deepEqual(Object.keys(Object.getOwnPropertyDescriptors(ports.cleanup)).sort(), [...CLEANUP_NOT_WIRED].sort());
 });
 
@@ -183,4 +192,91 @@ test('R-0b-162 A: the wired rules know the role files, and refuse a start that n
   const ed = rules.may('start_session', { product: P, role: 'worker', tier: 2, editing: true });
   assert.equal(ed.decision, 'deny');
   assert.match(ed.reason, new RegExp(notWiredText('running').replace(/[()]/g, '\\$&')));
+});
+
+test('L270: the approvals port answers this product with its state folder; its GitHub writes and copies refuse', async () => {
+  const w = world();
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  const list = await ports.approvals();
+  assert.equal(list.length, 1);
+  const [x] = list;
+  assert.deepEqual(Object.keys(x).sort(), ['copies', 'gh', 'owner', 'product', 'repo', 'stateDir']);
+  // The product's own subfolder (L295 MAT-2), made at boot, private to this user.
+  assert.deepEqual([x.product, x.owner, x.repo, x.stateDir], [P, ENTRY.owner, ENTRY.repo, join(w.config.approvalsStateDir, P)]);
+  for (const d of [w.config.approvalsStateDir, x.stateDir]) assert.equal(lstatSync(d).mode & 0o777, 0o700, d);
+  assert.deepEqual(Object.keys(x.gh).sort(), [...APPROVALS_GH]);
+  for (const k of APPROVALS_GH) assert.throws(() => x.gh[k]('/x'), { message: notWiredText('approvals.gh') }, k);
+  assert.deepEqual(Object.keys(x.copies).sort(), [...APPROVALS_COPIES]);
+  for (const k of APPROVALS_COPIES) assert.throws(() => x.copies[k]('s'), { message: notWiredText('approvals.copies') }, k);
+  assert.equal('push' in x, false, 'no phone channel: M2 says approvals_no_push in the open');
+});
+
+test('L270: a boot whose rules say onboarding.state active turns the product on, as approvals, once', () => {
+  const w = world();
+  w.approve([blobOf(FIRST)]);
+  assert.equal(boot(w).code, 0);
+  let rec = readRecord(w);
+  const p = rec.read('product', P);
+  assert.equal(p?.doc?.state, 'active', 'the product record was made');
+  const made = rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === P);
+  assert.deepEqual(made.map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
+  assert.ok(queued(rec).some((s) => s.includes(`${P} is now on`)), queued(rec).join('\n'));
+  // A second boot leaves the record alone and says nothing new about it.
+  const n = queued(rec).length;
+  assert.equal(boot(w).code, 0);
+  rec = readRecord(w);
+  assert.equal(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === P).length, 1);
+  assert.equal(queued(rec).filter((s) => s.includes(`${P} is now on`)).length, 1);
+  assert.equal(queued(rec).length, n);
+});
+
+// L295 MAT-1: a state folder M2 can't use stops the start, before the Record opens, so no product is turned on untold.
+test('L295 MAT-1: a missing, relative, unmakeable, linked, shared or read-only approvals folder stops the start', () => {
+  const cases = [
+    [(w) => ({ omit: ['approvalsStateDir'] }), /config: approvalsStateDir must be an absolute path/],
+    [() => ({ extra: { approvalsStateDir: 'approvals-state' } }), /config: approvalsStateDir must be an absolute path/],
+    [() => ({ extra: { approvalsStateDir: '/nonexistent-orch-parent/approvals-state' } }), /the approvals state folder \(approvalsStateDir\) .* is missing and could not be made/],
+    ['link', /the approvals state folder \(approvalsStateDir\) .* is not a plain folder/],
+    ['shared', /the approvals state folder \(approvalsStateDir\) .* can be read by others \(mode 755\)/],
+    ['read-only', /the approvals state folder \(approvalsStateDir\) .* can't be written/],
+  ];
+  for (const [how, why] of cases) {
+    const w = typeof how === 'function' ? world(how()) : world();
+    if (how === 'link') { mkdirSync(w.f('real-state'), { mode: 0o700 }); symlinkSync(w.f('real-state'), w.config.approvalsStateDir); }
+    if (how === 'shared') { mkdirSync(w.config.approvalsStateDir); chmodSync(w.config.approvalsStateDir, 0o755); }
+    if (how === 'read-only') { mkdirSync(w.config.approvalsStateDir); chmodSync(w.config.approvalsStateDir, 0o500); }
+    w.approve([blobOf(FIRST)]);
+    const r = boot(w);
+    assert.equal(r.code, 1, String(how));
+    assert.match(r.err, new RegExp(`dispatcher: not started: ${why.source}`), String(how));
+    assert.equal(existsSync(w.config.recordRoot), false, `${how}: the Record was not opened, so nothing was turned on`);
+    if (how === 'read-only') chmodSync(w.config.approvalsStateDir, 0o700);
+  }
+});
+
+// L295 MAT-2 + Minor 2: products.json with another product first: this product's own owner/repo, and its own subfolder,
+// so two Dispatchers sharing approvalsStateDir never share a told-once mark.
+test('L295 MAT-2: with two products listed, each Dispatcher answers its own owner/repo and its own state subfolder', async () => {
+  const OTHER = { ...ENTRY, product: 'other-app', owner: 'other-org', repo: 'other-repo' };
+  const w = world({ products: [OTHER, ENTRY] });
+  const [x] = await (await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) })).ports.approvals();
+  assert.deepEqual([x.product, x.owner, x.repo], [P, ENTRY.owner, ENTRY.repo]);
+  const other = { ...w.config, product: OTHER.product, recordRoot: w.f('record-other') };
+  const [y] = await (await wire(other, { log: () => {}, fetchFn: fakeGitHubFetch({ ...w.fake, owner: OTHER.owner, repo: OTHER.repo }) })).ports.approvals();
+  assert.deepEqual([y.product, y.owner, y.repo], [OTHER.product, OTHER.owner, OTHER.repo]);
+  assert.notEqual(x.stateDir, y.stateDir);
+  assert.deepEqual([x.stateDir, y.stateDir], [join(w.config.approvalsStateDir, P), join(w.config.approvalsStateDir, OTHER.product)]);
+});
+
+// L295 Minor 2: the queue replaces identical text in place, so "once" is checked on the entry itself: a second boot
+// that queued "is now on" again would move its queued_at.
+test('L295 Minor 2: a second boot does not queue "is now on" again (the entry and its queued_at are unchanged)', () => {
+  const w = world();
+  w.approve([blobOf(FIRST)]);
+  assert.equal(boot(w).code, 0);
+  const on = (rec) => (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => e.text.includes(`${P} is now on`));
+  const first = on(readRecord(w));
+  assert.equal(first.length, 1);
+  assert.equal(boot(w).code, 0);
+  assert.deepEqual(on(readRecord(w)), first);
 });

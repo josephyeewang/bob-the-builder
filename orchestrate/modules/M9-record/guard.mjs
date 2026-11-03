@@ -9,9 +9,10 @@
 //   guardWrite({ entity, id, actor, old, doc, createdBy }) → { ok: true, doc, moving, from, to, changed, cleared } | { ok: false, reason }
 //   `old` is the document as stored now, or null to create. `doc` is not changed; the answer's doc has the ended
 //   fields taken out. The Store Writer's other checks (the ready rule, the claim, waits, verdicts, merges) stay in
-//   writer.mjs: they need the whole record.
+//   writer.mjs: they need the whole record, but for the since a wait's re-check keeps (keptSince), which the stand-in keeps the same way.
 
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 import { SESSION_ID, STATES } from '../../shared/record-names.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
 import { ATTEMPTS, PLAN_INPUTS, WRITERS, actorName, factFamilyOf, fieldsAllowed } from './permissions.mjs';
@@ -137,6 +138,32 @@ function checkStart(before, after) {
   if (!same(rest, before)) return no('claimed → running only adds pid and pid_start to the claim');
   return { ok: true };
 }
+/**
+ * The since a re-check keeps: the stored wait's, when it waits on the same who and what and its since reads as a past
+ * time by pastTime's rule (no more than 60 s ahead of `nowMs`); else null. A stored since in the future is not kept
+ * (#153 audit MAT-1): kept, it would hold every cap measured from it at zero until that time came, and the re-check
+ * that should replace it would keep it again. `nowMs` is required; without a readable one nothing is kept.
+ */
+export function keptSince({ wait, kept = null, nowMs }) {
+  if (!kept || kept.who !== wait?.who || kept.what !== wait?.what || !Number.isFinite(nowMs)) return null;
+  return pastTime(kept.since, nowMs) === null ? null : kept.since;
+}
+
+/**
+ * A wait's since, on the write that sets or re-checks it (L285, L296): { ok: true, since } | { ok: false, reason }.
+ * `kept` is the wait being re-checked (the entry stays in its waiting state), or null when the wait begins. A re-check on
+ * the same who and what keeps the stored since, whatever the caller sends: since is when the waiting began, and moving
+ * it would quietly reset every cap measured from it. Otherwise the caller's since must be now (within 60 s), and the
+ * write stores now. The Store Writer's checkWait calls this; the stand-in (shared/record.mjs memoryRecord) calls keptSince.
+ */
+export function waitSince({ wait, kept = null, nowMs }) {
+  const keep = keptSince({ wait, kept, nowMs });
+  if (keep !== null && wait.since === keep) return { ok: true, since: keep };
+  const since = Date.parse(wait?.since);
+  if (!Number.isFinite(since) || Math.abs(since - nowMs) > 60000) return no('wait.since must be now (within 60 s)');
+  return { ok: true, since: keep ?? new Date(nowMs).toISOString() };
+}
+
 /** A card write's claim, after guardWrite: { ok: true, claim? } (claim = the stamped claim to store) | { ok: false, reason }. */
 export function claimCheck({ old, doc, from, to, changed, nowMs }) {
   let claim;

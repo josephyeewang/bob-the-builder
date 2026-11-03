@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
 import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { outbox, isQueued } from './alerts.mjs';
 import { change, parkOnLimit, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -302,6 +303,37 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
   assert.equal(told().length, 1);
   await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
   assert.equal(told().length, 1, 'told once');
+});
+
+// A hand-edited Record (L285): the M9 writer always stamps a readable since. The stand-in keeps a re-checked wait's
+// since as the writer does (L296), but stores a new wait's since as sent (its one departure, shared/record.mjs), so the
+// bad since goes in as a wait on another what, then back: an unreadable since is never kept, so it stays as sent.
+const garbleSince = (rec, id, since = 'not a time') => {
+  const wait = rec.read('card', id).doc.wait;
+  for (const what of ['hand-edited', wait.what]) {
+    const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, what, since } });
+    assert.ok(r.ok, r.reason);
+  }
+  assert.deepEqual([rec.read('card', id).doc.wait.what, rec.read('card', id).doc.wait.since], [wait.what, since]);
+};
+
+test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });   // no hit is ever recorded for acct-u
+  garbleSince(w.rec, 'S'); garbleSince(w.rec, 'U');
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage', 'exactly the no-hit cap from the run\'s start is not over it');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  // The hit (3 days in) and its reset (10 days in) are each in bounds; counted from the hit the card would wait past
+  // its reset with every new hit. Counted from the run's start, a minute past the bound waits on Joe.
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage', 'exactly the cap from the run\'s start is not over it');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer than any real limit window/.test(x)).length, 1);
 });
 
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
@@ -1170,4 +1202,198 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
   assert.equal(w.rec.read('fact', WAIT_TELL_FACT('C-1')).doc.told_since, w.rec.read('card', 'C-1').doc.wait.since);
   for (const min of [3, 4, 5]) await tick(24 * 60 + min);
   assert.equal(cardTells(), 1, 'told exactly once (P20)');
+});
+
+// Audit #153 MAT-1: a since or run_started more than 60 s ahead reads as none (pastTime's rule), so neither cap is held
+// at zero by a time that has not come.
+test('audit #153 MAT-1: a limit wait whose since is in the future still ends: both caps count from the run\'s start', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  const future = iso(T0 + 365 * DAY);
+  garbleSince(w.rec, 'S', future); garbleSince(w.rec, 'U', future);
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer/.test(x)).length, 1);
+});
+
+test('audit #153 MAT-1: a limit wait whose run_started is in the future is one with no run start: it waits on Joe', async () => {
+  const w = world();
+  // run_started is the Record's own, copied from the claim on the park: a run claimed by a clock a year ahead.
+  parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });
+  assert.equal(w.rec.read('card', 'R').doc.wait.run_started, iso(T0 + 365 * 24 * H));
+  await w.pass(1);
+  const r = w.rec.read('card', 'R').doc;
+  assert.deepEqual([r.wait.who, r.wait.what], ['joe', LIMIT_NO_RUN]);
+});
+
+test('audit #153 MAT-1: the stand-in does not keep a stored since in the future either; it keeps one up to 60 s ahead', () => {
+  const w = world();
+  parkOnLimit(w.rec, 'F', { ranAt: T0, account: 'acct-f' });
+  const recheck = (since) => { const r = change(w.rec, 'card', 'F', { wait: { ...w.rec.read('card', 'F').doc.wait, since, next_check: iso(T0 + 2 * MIN) } }); assert.ok(r.ok, r.reason); };
+  garbleSince(w.rec, 'F', iso(T0 + 365 * 24 * H));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0), 'the future since is not kept: the since sent is stored');
+  garbleSince(w.rec, 'F', iso(T0 + MIN));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0 + MIN), 'one 60 s ahead of the clock is kept');
+});
+
+// L329's two plants for these sites: a since an hour ahead of the pass that should fire the cap (the unreadable one is
+// the L285 test above), and a run_started an hour ahead (an unreadable one can't be stored: the Record drops it).
+test('audit #153 MAT-1, L329: a since an hour ahead of the pass still lets each cap fire, and a run_started an hour ahead waits on Joe', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  garbleSince(w.rec, 'U', iso(T0 + (24 * 60 + 1) * MIN + H));
+  garbleSince(w.rec, 'S', iso(T0 + LIMIT_RESET_MAX_MS + MIN + H));
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  const r = world();
+  parkOnLimit(r.rec, 'R', { ranAt: T0 + 2 * MIN + H, parkedAt: T0, account: 'acct-r' });
+  await r.pass(2);
+  assert.deepEqual([r.rec.read('card', 'R').doc.wait.who, r.rec.read('card', 'R').doc.wait.what], ['joe', LIMIT_NO_RUN]);
+});
+
+// ---- L324: a told time that lies ahead (a clock that went back, a bad write) or can't be read is due, never "told
+// recently". Before, each of these sites trusted it: a refused undo with a future told_at was told 0 times in 10 days.
+const BAD_TOLD = (now) => [['future', iso(now + 3 * 24 * H)], ['unreadable', 'garbage']];
+
+test('L324: a failed stop whose told time is ahead or unreadable is told again on the next pass', async () => {
+  for (const [label, bad] of BAD_TOLD(T0 + 2 * MIN)) {
+    const f = world([card('C-3')]);
+    await f.pass(0);
+    const sid = f.sessions[0].id;
+    f.setCard('C-3', { state: 'cancelled' });
+    const alert = fakeAlert();
+    const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
+      stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert };
+    await dispatcherPass({ ...base, now: T0 + MIN });
+    const told = () => alert.texts.filter((x) => /could not be stopped/.test(x)).length;
+    assert.equal(told(), 1, label);
+    change(f.rec, 'fact', STOP_FACT(sid), { told_at: bad });
+    await dispatcherPass({ ...base, now: T0 + 2 * MIN });
+    assert.equal(told(), 2, label);
+  }
+});
+
+test('L324: usage unread for over a day, its told time ahead or unreadable, is told again on the next pass', async () => {
+  for (const [label, bad] of BAD_TOLD(T0 + 25 * H)) {
+    const w = world([], { usage: null });
+    const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+    await w.pass(0);
+    await w.pass(25 * 60);
+    assert.equal(told(), 1, label);
+    change(w.rec, 'fact', UNKNOWN_FACT, { told_at: bad });
+    await w.pass(25 * 60 + 1);
+    assert.equal(told(), 2, label);
+  }
+});
+
+test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told again on the next pass', async () => {
+  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+    const w = world();
+    w.setProduct('p1', 'paused');
+    const alert = fakeAlert();
+    const alerts = () => alert.texts.filter((a) => /could not be asked to hand off/.test(a));
+    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: () => { throw new Error('send failed'); }, alert, filesOf: filesOfCommits });
+    await at(0);
+    assert.equal(alerts().length, 1, label);
+    change(w.rec, 'fact', PAUSE_FACT('p1'), { told_at: bad });
+    await at(1);
+    assert.equal(alerts().length, 2, label);
+  }
+});
+
+test('L324: a held undo, its told time ahead or unreadable, is told again on the next pass (was: 0 times in 10 days)', async () => {
+  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+    const w = world([...undoEntries('U-1')]);
+    const rules = rulesWith({}, { start_session: { decision: 'deny', reason: 'the product waits' } });
+    const told = () => w.calls.alerts.filter((a) => /your undo \(card U-1\) is waiting/.test(a)).length;
+    await w.pass(0, { rules });
+    assert.equal(told(), 1, label);
+    change(w.rec, 'fact', UNDO_HELD_FACT('U-1'), { told_at: bad });
+    await w.pass(1, { rules });
+    assert.equal(told(), 2, label);
+    await w.pass(2, { rules });
+    assert.equal(told(), 2, `${label}: then quiet within the day`);
+  }
+});
+
+test('L324: missing rule values, their told time ahead or unreadable, are told again on the next pass', async () => {
+  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+    const rec = recWith();
+    const alert = fakeAlert();
+    const alerts = alert.texts;
+    const tell = (now) => rulesMissingAlert({ rec, keys: ['a'], alert, now, complete: true });
+    await tell(T0);
+    assert.equal(alerts.length, 1, label);
+    change(rec, 'fact', RULES_MISSING_FACT, { told_at: bad });
+    await tell(T0 + MIN);
+    assert.equal(alerts.length, 2, label);
+    assert.match(alerts[1], /no value for a:/);
+  }
+});
+
+// #157 r2 audit n5 (plant Q11): a held-starts fold that ends while its alert is still queued (never sent) drops it, so
+// Joe is not told of a hold that is over.
+test('n5: a fold that ends while its alert is still queued drops the queued copy, and the mark stays unset', async () => {
+  const w = world([card('C-1', { changed_at: iso(T0 - 2 * 24 * H) })]);
+  setClock(w.rec, T0); w.setProduct('p1', 'paused');
+  const fact = 'hold-waits-p1-paused';
+  // M10's own words for a paused product (the paused fold).
+  const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
+    ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
+  const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
+  await at(T0 + 25 * H);
+  assert.equal(isQueued(w.rec, fact), true, 'told: queued, not yet sent');
+  setClock(w.rec, T0 + 26 * H); w.setProduct('p1', 'active');
+  await at(T0 + 26 * H + MIN);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'running', 'it started: the fold is over');
+  assert.equal(isQueued(w.rec, fact), false, 'the unsent copy is dropped');
+  assert.equal(w.rec.read('fact', fact)?.doc?.told_at ?? null, null);
+});
+
+test('L324: a wanted stop whose since is ahead or unreadable is restarted from now and forced one grace later, not waited out for ever', async () => {
+  for (const label of ['future', 'unreadable']) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.setCard('C-1', { state: 'cancelled' });
+    w.probes.set(sid, busy);
+    await w.pass(1);
+    change(w.rec, 'fact', STOP_FACT(sid), { since: label === 'future' ? iso(T0 + 30 * 24 * H) : 'garbage' });
+    await w.pass(2);
+    assert.equal(w.calls.stops.length, 0, `${label}: not stopped at once over a bad field`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, iso(T0 + 2 * MIN), `${label}: restarted from now`);
+    await w.pass(4);
+    assert.deepEqual(w.calls.stops, [sid], `${label}: forced one grace later`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.hard, true);
+    assert.match(w.rec.read('fact', `stop-note-${sid}`).doc.text, /without a safe point after 2 min \(cancel\)/);
+  }
+});
+
+test('L324: an unknown-usage start that is ahead or unreadable counts as over a day: told at once', async () => {
+  for (const [label, bad] of [['future', iso(T0 + 30 * 24 * H)], ['unreadable', 'garbage']]) {
+    const w = world([], { usage: null });
+    const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+    await w.pass(0);
+    assert.equal(told(), 0, label);
+    change(w.rec, 'fact', BAND_FACT, { unknown_since: bad });
+    await w.pass(1);
+    assert.equal(told(), 1, label);
+  }
 });
