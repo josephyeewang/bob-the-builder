@@ -36,7 +36,7 @@ export const startsOnly = (kind) => {
 // The answer applyOutbox gives a `record: 'none'` kind (L140): handled, not refused.
 const notARecord = (applied) => applied?.not_a_record === true || applied?.outcome === 'not_a_record';
 
-const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 

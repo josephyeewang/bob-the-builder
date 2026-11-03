@@ -29,6 +29,7 @@ export const UNWIRED = Object.freeze({
   watchOnce: 'L221: R-0b-162 wiring, lane 4',
   planPass: 'L221: R-0b-142 (the Lead turns a plan reviewer PASS into M2 plan check), no code calls it yet; lead to place',
   installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
+  proposalsPass: 'L233: R-0b-162 wiring, lane 4',
 });
 
 const isTest = (f) => /\.test\.mjs$|test-helper/.test(f);

@@ -137,6 +137,7 @@ export const LATE_MARK_OK = Object.freeze({
   UNSAVED_FACT: 'one per stopped session, and a session id is never reused',
   // R-0b-128: the proposals folder's file facts.
   intakeFactId: 'the mark carries what it told (told_state, or told_new for the bytes); new bytes under the name are told again',
+  toldFactId: 'the mark carries what it told (`told`: the cause and bytes); a different cause or new bytes is told again',
 });
 
 // The fact names each told mark goes on: `fact: NAME` inside a tellThen call (a call `NAME(...)` or a bare name).
