@@ -45,6 +45,7 @@ import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
+import { makeMasker } from '../M12-sensors/mask.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
 /** The record_locked issue's marker for one product (two products may share a repository). */
@@ -85,7 +86,8 @@ export function channelProblem({ product, products, repos, owner } = {}) {
 export function recordProductProblem(rec, product) {
   const docs = rec.list('product');
   const other = docs.find((d) => d.id !== product);
-  if (other) return `this Record holds product ${String(other.id).slice(0, 100)}'s state, not ${product}'s`;
+  if (other && (typeof other.id !== 'string' || !other.id)) return `this Record's product can't be read, so it can't be told apart from ${product}'s`;
+  if (other) return `this Record holds product ${other.id.slice(0, 100)}'s state, not ${product}'s`;
   return null;
 }
 
@@ -107,6 +109,7 @@ const once = (token) => {
  * A GitHub issues client for one repository, with the contract M13 alerts.mjs uses: open → the issue number, or false;
  * edit, comment, close → true, or false when GitHub refused; isClosed → boolean, or a throw; findOpen(marker) → the
  * number of an open issue whose body holds `marker`, null when there is none, false when GitHub refused the list.
+ * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell Joe what GitHub said.
  * A missing token throws "alert channel not set up: …". Host fixed; the repository is checked once, here.
  */
 export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, timeoutMs = 15_000 } = {}) {
@@ -125,10 +128,14 @@ export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, t
     });
     let json = null;
     if (res.status >= 200 && res.status < 300) { try { json = await res.json(); } catch { json = null; } }
+    last = `GitHub answered ${res.status} to ${method} ${path.split('?')[0]}`;
     return { status: res.status, json };
   }
+  let last = null;
   async function comment(n, text) { return (await call('POST', `/issues/${num(n)}/comments`, { body: String(text) })).status === 201; }
   return Object.freeze({
+    /** What GitHub answered to this client's latest call ("GitHub answered 422 to POST /issues"), or null. */
+    get lastAnswer() { return last; },
     async open({ title, body, assignee }) {
       const r = await call('POST', '/issues', { title: String(title), body: String(body), ...(assignee ? { assignees: [assignee] } : {}) });
       return r.status === 201 && ISSUE(r.json?.number) ? r.json.number : false;
@@ -172,7 +179,9 @@ export function cutBody(text) {
 }
 
 // Raise one queue entry; `entryId` is its status, so a new entry on an open issue comments (notifies) and a retry of the
-// same entry only edits (L288 MAT-1). An issue Joe closed opens a new one (L237). True only when GitHub took the write.
+// same entry only edits (L288 MAT-1). A Record entry's status is its id and queue time, so an id used again after the
+// queue's counter was reset still reads as new (L298 Minor 4). An issue Joe closed opens a new one (L237). True only
+// when GitHub took the write.
 async function raiseNews(alerts, key, text, entryId) {
   const body = cutBody(text);
   const one = { key, title: titleOf(body), body, status: `queue entry ${entryId}`, note: `New alert: ${titleOf(body)}` };
@@ -182,6 +191,13 @@ async function raiseNews(alerts, key, text, entryId) {
     r = await alerts.raise(one);
   }
   return TOLD.has(r);
+}
+
+// One raise: null when GitHub took it, else why not, in words Joe can act on (GitHub's answer, or the error).
+async function raiseWhy(alerts, gh, key, text, entryId) {
+  try {
+    return (await raiseNews(alerts, key, text, entryId)) ? null : (gh?.lastAnswer ?? 'GitHub refused the write');
+  } catch (e) { return msg(e); }
 }
 
 // The store's own alert as issue text (masked by makeAlerts before it is posted).
@@ -257,22 +273,32 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       return clients.get(repo);
     };
 
+    // Whose Record this is comes first: a locked Record of another product tells no repository anything (L298).
+    const wrong = recordProductProblem(rec, target);
+    if (wrong) return { ...out, refused: `alert channel not set up: ${wrong}` };
     const lock = lockCheck({ recordRoot, ms: lockWaitMs, probe, host, nowMs: nowMs() });
     if (!lock.free) {
       let told;
       try { told = await tellLocked(ghFor(target), owner, target, lock, sendMs); } catch (e) { told = `not told: ${msg(e)}`; }
       return { ...out, refused: lock.reason, locked: told };
     }
-    const wrong = recordProductProblem(rec, target);
-    if (wrong) return { ...out, refused: `alert channel not set up: ${wrong}` };
     try { await clearLocked(ghFor(target), target, sendMs); } catch { /* closed on a later round */ }
 
     const start = clock();
     const when = () => new Date(nowMs());
-    const alerts = makeAlerts({ rec, gh: ghFor(target), owner, now: when });
-    const port = (text, entry) => raiseNews(alerts, entryKey(target, text, entry), text, entry?.id ?? 'unknown');
+    const gh = ghFor(target);
+    const alerts = makeAlerts({ rec, gh, owner, now: when });
+    let first = null;
+    const failedOn = (text, why) => { first ??= { title: titleOf(text), why }; };
+    const port = async (text, entry) => {
+      const why = await raiseWhy(alerts, gh, entryKey(target, text, entry), text, `${entry?.id ?? 'unknown'} ${entry?.queued_at ?? ''}`.trim());
+      if (why !== null) failedOn(text, why);
+      return why === null;
+    };
     const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
+    // A send that hung past sendMs never came back to the port: it is named by that.
+    if (r.failed && !first) first = { title: 'a Record alert', why: `no answer within ${sendMs} ms` };
     // A failed Record send does not skip the store's alerts (L288 MAT-2 c): they are a separate queue.
 
     // The store's own unsent alerts (L239, L240), to this product's repo, naming the product (L288 MAT-3).
@@ -284,10 +310,11 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     let storeLeft = waiting.length;
     for (const x of waiting) {
       if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
-      let ok = false;
-      try { ok = await within(sendMs, () => raiseNews(alerts, alertKey(target, 'store', x.id), storeText(x.event, target), x.id)); } catch { ok = false; }
+      const text = storeText(x.event, target);
+      let why;
+      try { why = await within(sendMs, () => raiseWhy(alerts, gh, alertKey(target, 'store', x.id), text, x.id)); } catch (e) { why = msg(e); }
       // One store alert GitHub refuses does not hold back the ones after it; it is tried again next round.
-      if (!ok) { out.failed += 1; continue; }
+      if (why !== null) { out.failed += 1; failedOn(text, why); continue; }
       out.sent += 1;
       storeLeft -= 1;
       // A mark that fails: the next round raises it again on the same key, so the same issue is edited, not a second opened.
@@ -295,7 +322,13 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     }
     out.storeLeft = storeLeft;
     // Any alert this round should have delivered and did not: the robot job counts the pass as failed (L288 MAT-2 d).
-    if (out.failed) out.refused = `${out.failed} alert(s) could not be delivered this round and stay queued for the next`;
+    // It names the first one and what GitHub said, so Joe has something to act on (L298 Minor 5); masked like the issue.
+    if (out.failed) {
+      const m = makeMasker();
+      const t = m.maskSecrets(first?.title ?? 'an alert').text;
+      const why = m.maskSecrets(String(first?.why ?? 'unknown')).text.slice(0, 200);
+      out.refused = `${out.failed} alert(s) could not be delivered this round and stay queued for the next; the first, "${t}": ${why}`;
+    }
   } catch (e) {
     out.refused = `the alert round failed: ${msg(e)}`;
   }

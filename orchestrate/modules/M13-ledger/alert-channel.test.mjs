@@ -510,3 +510,116 @@ test('L288: a lock holder whose start time is in the future is told at once, nev
   assert.equal(r.locked, 'opened');
   assert.match(w.gh.issues.get(1).body, /start time is in the future, so how long it has been held can't be told/);
 });
+
+// L298 (the #148 r2 audit's Minors): the auditor's probes N1–N3, N6, N7 made suite tests.
+const markOf = (n) => ({ fact: 'stop-x', fields: { n } });
+
+test('L298 Minor 2 (N1): different entries for the same cause, back to back with the issue open: each round notifies once', async () => {
+  const w = world();
+  const per = [];
+  for (let i = 1; i <= 4; i++) {
+    const b = w.gh.calls.length;
+    outbox(w.rec, w.now())('same cause same text', { mark: markOf(i) });
+    await w.run({ probe: ALIVE });
+    per.push(notifying(w.gh, b).map((c) => c.join(':')).join(','));
+    w.tick(1);
+  }
+  assert.deepEqual(per, ['open:1', 'comment:1', 'comment:1', 'comment:1']);
+});
+
+test('L298 Minor 2 (N2): a crash after GitHub took the comment but before the alert state was saved re-comments once, then stops; never skipped', async () => {
+  const w = world();
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ probe: ALIVE });
+  outbox(w.rec, w.now())('cause', { mark: markOf(2) });
+  const comment = w.gh.comment;
+  let crashed = false;
+  w.gh.comment = async (i, t) => { await comment(i, t); if (!crashed) { crashed = true; throw new Error('the process died after GitHub took the comment'); } return true; };
+  for (let i = 0; i < 4; i++) await w.run({ probe: ALIVE });
+  assert.equal(w.gh.issues.get(1).comments.length, 2, 'the lost save costs one repeat comment, no more and no fewer');
+  assert.deepEqual(queued(w.rec), []);
+});
+
+test('L298 Minor 2 (N3): a crash between saving the alert state and the queue mark: the next round is a silent edit, one notice in all', async () => {
+  const w = world();
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ probe: ALIVE });
+  outbox(w.rec, w.now())('cause', { mark: markOf(2) });
+  const write = w.rec.write.bind(w.rec);
+  let refused = false;
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.write = (o) => { if (!refused && o.id === ALERT_QUEUE_FACT && o.kind === 'alert_sent') { refused = true; return { ok: false, reason: 'crash' }; } return write(o); };
+  const b = w.gh.calls.length;
+  await w.run({ rec, probe: ALIVE });
+  assert.equal(queued(w.rec).length, 1, 'the entry is still queued after the crash');
+  await w.run({ rec, probe: ALIVE });
+  assert.deepEqual(notifying(w.gh, b), [['comment', 1]]);
+  assert.deepEqual(queued(w.rec), []);
+});
+
+test('L298 Minor 1 (N6): two products on one repository: each has its own locked issue, and one clearing leaves the other open', async () => {
+  const gh = fakeGitHub();
+  const a = world({ products: ['p1', 'p2'], product: 'p1', gh });
+  const b = world({ products: ['p1', 'p2'], product: 'p2', gh });
+  a.bound.repos = b.bound.repos = { p1: 'acme/shared', p2: 'acme/shared' };
+  writeLock(a.root, holder(T0 - 30 * MIN));
+  writeLock(b.root, holder(T0 - 30 * MIN));
+  assert.equal((await a.run({ host: 'mac-a', probe: ALIVE })).locked, 'opened');
+  assert.equal((await b.run({ host: 'mac-a', probe: ALIVE })).locked, 'opened');
+  rmSync(join(a.root, 'lock'));
+  await a.run({ host: 'mac-a', probe: ALIVE });
+  assert.equal(gh.issues.size, 2);
+  assert.equal(gh.issues.get(1).closed, true, 'p1\'s cleared');
+  assert.equal(gh.issues.get(2).closed, false, 'p2\'s is still locked and its issue stays open');
+  assert.ok(gh.issues.get(2).body.includes(lockedMarker('p2')));
+  assert.ok(!gh.issues.get(2).body.includes(lockedMarker('p1')));
+});
+
+test('L298 Minor 4 (N7): an entry id used again after the queue\'s counter was reset still comments', async () => {
+  const w = world();
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ probe: ALIVE });
+  const cur = w.rec.read('fact', ALERT_QUEUE_FACT);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: cur.rev, doc: { entries: [] }, kind: 'reset' });
+  w.tick(5);
+  outbox(w.rec, w.now())('cause', { mark: markOf(2) });
+  assert.equal(queued(w.rec)[0].id, 'a1', 'the counter really restarted');
+  const b = w.gh.calls.length;
+  assert.equal((await w.run({ probe: ALIVE })).sent, 1);
+  assert.deepEqual(notifying(w.gh, b), [['comment', 1]]);
+});
+
+test('L298 Minor 5: a round that leaves alerts queued names the first one and GitHub\'s answer, masked', async () => {
+  // The real client: GitHub answers 422 to the issue write.
+  const w = world();
+  outbox(w.rec, T0)('merge gate: card C-9 is held');
+  const fetchFn = async (url, o) => ({ status: o.method === 'GET' ? 200 : 422, json: async () => [] });
+  const r = await w.run({ probe: ALIVE, issuesFor: undefined, token: async () => ({ ok: true, token: 'dummy-token' }), fetchFn });
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /^1 alert\(s\) could not be delivered this round and stay queued for the next; the first, "merge gate: card C-9 is held": GitHub answered 422 to POST \/issues$/);
+  // A store alert that throws: its title and the error.
+  const v = world();
+  v.gh.open = async () => { throw new Error('socket hang up'); };
+  appendFileSync(join(v.root, 'unsent-alerts.jsonl'), storeLine('u1', 'store_fault'));
+  assert.match((await v.run({ probe: ALIVE })).refused, /the first, "p1's Record store: store_fault": socket hang up$/);
+  // A planted fake key in the alert never reaches the report.
+  const FAKE_KEY = ['ghp', 'dummyFAKEkey0000xxxx'].join('_');
+  const k = world();
+  k.gh.open = async () => false;
+  outbox(k.rec, T0)(`leaked ${FAKE_KEY} in a title`);
+  const kr = await k.run({ probe: ALIVE });
+  assert.ok(!kr.refused.includes(FAKE_KEY), kr.refused);
+  assert.match(kr.refused, /GitHub refused the write$/);
+});
+
+test('L298 cosmetic: whose Record it is is checked before the lock, and a product that can\'t be read is named so', async () => {
+  const w = world({ products: ['p1', 'p2'], product: 'p2' });
+  w.rec.write({ actor: 'approvals', entity: 'product', id: 'p1', expectRev: 0, doc: { state: 'active' } });
+  writeLock(w.root, holder(T0 - 30 * MIN));
+  const r = await w.run({ host: 'mac-a', probe: ALIVE });
+  assert.match(r.refused, /this Record holds product p1's state, not p2's/);
+  assert.equal(r.locked, undefined);
+  assert.equal(w.gh.calls.length, 0, 'a locked Record of another product tells no repository anything');
+  const rec = { list: () => [{ id: null, doc: {} }] };
+  assert.equal(recordProductProblem(rec, 'p2'), 'this Record\'s product can\'t be read, so it can\'t be told apart from p2\'s');
+});
