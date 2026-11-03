@@ -51,6 +51,7 @@ function world() {
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true, requestId: 'Q' }),
     filesOf: () => [], sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null, cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
+    approvals: () => [], // no products for Approvals here (L221; production must give the port)
     ...over,
   });
   const runTick = (over) => tick({ rec, rules, now: E.clock.t, ports: ports(over) });
