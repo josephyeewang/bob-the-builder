@@ -81,11 +81,20 @@ test('reachable: below 500 → true, 5xx → false, refused → false, timeout �
   assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: fails(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })) })(), false);
   assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: fails(Object.assign(new Error('t'), { name: 'TimeoutError' })) })(), null);
   assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: fails(new Error('odd')) })(), null);
+  // A kept-alive connection the server closed earlier (UND_ERR_SOCKET) is tried once more on a new one; twice → null.
+  const sock = Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_SOCKET' } });
+  const seq = (...steps) => { let i = 0; return async () => { const st = steps[Math.min(i++, steps.length - 1)]; if (st instanceof Error) throw st; return { status: st, body: null }; }; };
+  assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: seq(sock, Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })) })(), false);
+  assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: seq(sock, 200) })(), true);
+  assert.equal(await reachableProbe({ url: 'https://x.test/', fetchImpl: seq(sock, sock, 200) })(), null, 'twice stale is unknown, never up');
   assert.throws(() => reachableProbe({ url: 'https://u:p@x.test/' }));
   assert.throws(() => reachableProbe({ url: 'file:///etc/passwd' }));
 });
 
-test('reachable, for real: a local web server (200, 503, then closed)', async () => {
+test('reachable, for real: a local web server (200, 503, then closed), 20 times (the closed case raced on Linux)', async () => {
+  for (let i = 0; i < 20; i++) await reachableOnce();
+});
+async function reachableOnce() {
   let status = 200;
   const s = http.createServer((q, r) => { r.statusCode = status; r.end('x'); }); const port = await listen(s);
   const p = reachableProbe({ url: `http://127.0.0.1:${port}/` });
@@ -93,7 +102,7 @@ test('reachable, for real: a local web server (200, 503, then closed)', async ()
   status = 503; assert.equal(await p(), false);
   await new Promise((ok) => { s.close(ok); s.closeAllConnections?.(); });
   assert.equal(await p(), false);
-});
+}
 
 test('launchd: states and failures (stand-ins)', async () => {
   const out = (code, stdout = '', stderr = '') => async () => ({ code, stdout, stderr });
