@@ -1,7 +1,9 @@
 // research-ask.mjs — research asks (R-0b-136): the owner says "find out X" to the Front Door, and the ask, with its brief,
 // goes on the owner's "waiting on you" list. The owner runs it by saying "run research ask R-12" in a desktop session on
 // the Mini; that session leaves `research-R-12.md` in the proposals folder, and the Dispatcher takes it in only while the
-// ask is open (lane 2's R-0b-135), copying it into the product's docs/research/ on a go-free research_copy card.
+// ask is open (M11 research-intake.mjs, R-0b-135), onto one go-free research_copy card whose one path is
+// `researchPath(id)`. The file goes in byte for byte, never rewritten by an AI: the merge gate lets the change touch only
+// that path with the report's blob (M6 refusal 10), and the commit is copied from the proposals file (lane 2, L286).
 //
 // WHY HERE. Only M2 (actor `approvals`) writes asks. The Front Door's `ask-request-` file is kept by the record as an
 // inert report (0b-2 R3-M2); this pass is the one place that turns it into an ask, after checking its text again with
@@ -31,6 +33,8 @@ import { askStore, markPushSent, writeDoc } from './ask-store.mjs';
 export const RESEARCH_ID = /^R-[1-9]\d{0,5}$/;
 export const runLine = (id) => `run research ask ${id}`;
 export const researchFileName = (id) => `research-${id}.md`;
+/** Where a research ask's report lands in the product: the research_copy card's one file (M11, M6 refusal 10). */
+export const researchPath = (id) => `docs/research/${researchFileName(id)}`;
 // The one way to mark a research push sent: the kind is fixed here, so a caller can't leave it out (L117 M-1).
 export const markResearchPushSent = (ctx, id) => markPushSent(ctx, id, ['research']);
 const DAY_MS = 24 * 3600_000;
