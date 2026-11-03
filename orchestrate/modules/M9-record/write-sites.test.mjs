@@ -53,7 +53,10 @@ test('L112: the scan sees the writes the lead counted, so an empty answer is not
 
 test('L112, L118 m4, c3: an update is checked where the call passes a read rev, a create where it may be new', () => {
   const at = (file, line) => scan.sites.find((s) => s.file === file && s.line === line);
-  assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', 16).modes, ['create', 'update'], 'rec.read(...)?.rev ?? 0');
+  // The alert queue's write, found by its text (L288 MAT-4 moved it into updateFact).
+  const alertSrc = SOURCES.find((f) => f.file === 'modules/M11-dispatcher/alerts.mjs').src.split('\n');
+  const alertLine = alertSrc.findIndex((l) => l.includes("rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0")) + 1;
+  assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', alertLine)?.modes, ['create', 'update'], 'cur?.rev ?? 0');
   assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 44).modes, ['update'], 'c.rev');
   // The gate's create, found by its text, so an edit above it does not move the check.
   const gateSrc = SOURCES.find((f) => f.file === 'modules/M6-merge-gate/gate.mjs').src.split('\n');

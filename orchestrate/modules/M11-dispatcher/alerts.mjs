@@ -13,7 +13,22 @@
 import { randomUUID } from 'node:crypto';
 
 const iso = (ms) => new Date(ms).toISOString();
-const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+// Every write here is "only if unchanged since read" (L288 MAT-4): `change(doc)` builds the new doc from the one
+// read, and it is written at that read's rev. The rev used to be read again at write time, so a write from another
+// process in between (the alert channel's robot job beside the Dispatcher) was silently overwritten. If another
+// writer got in first, the fact is read and the doc built again, up to WRITE_TRIES times; `change` returning null
+// writes nothing. Any other refusal is returned as it is.
+export const WRITE_TRIES = 5;
+function updateFact(rec, id, change, kind) {
+  for (let i = 0; i < WRITE_TRIES; i += 1) {
+    const cur = rec.read('fact', id);
+    const doc = change(cur?.doc);
+    if (doc === null) return { ok: true, unchanged: true };
+    const r = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind });
+    if (r?.ok === true || (rec.read('fact', id)?.rev ?? 0) === (cur?.rev ?? 0)) return r;
+  }
+  return { ok: false, reason: `${id} kept changing under the write (${WRITE_TRIES} tries)` };
+}
 
 export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
@@ -90,15 +105,20 @@ const withDrops = (rec, d, entries, dropped) => ({ ...d, entries, dropped: (d.dr
  * drop is still counted, but the caller is not told it was queued).
  */
 export function queueAlert(rec, text, { now, mark = null } = {}) {
-  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
   const key = keyOf(mark);
-  const next = (d.next ?? 0) + 1;
-  const entry = { id: `a${next}`, key, text: String(text), mark, queued_at: iso(now) };
-  const all = entriesOf(d).slice();
-  const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
-  if (i >= 0) all[i] = entry; else all.push(entry);
-  const { entries, dropped } = capQueue(rec, all);
-  const kept = putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true;
+  let entry;
+  let dropped = [];
+  const kept = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+    const d = doc ?? {};
+    const next = (d.next ?? 0) + 1;
+    entry = { id: `a${next}`, key, text: String(text), mark, queued_at: iso(now) };
+    const all = entriesOf(d).slice();
+    const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
+    if (i >= 0) all[i] = entry; else all.push(entry);
+    const capped = capQueue(rec, all);
+    dropped = capped.dropped;
+    return { ...withDrops(rec, d, capped.entries, dropped), next };
+  }, 'alert_queued').ok === true;
   return kept && !dropped.some((e) => e.id === entry.id) ? entry.id : null;
 }
 
@@ -110,11 +130,12 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
  */
 export function dropCause(rec, fact) {
   try {
-    const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc;
-    const left = entriesOf(d).filter((e) => e.mark?.fact !== fact);
-    const causes = causesOf(d).filter((c) => c.fact !== fact);
-    if (left.length === entriesOf(d).length && causes.length === causesOf(d).length) return true;
-    return putFact(rec, ALERT_QUEUE_FACT, { ...d, entries: left, dropped_causes: causes }, 'alert_cause_cleared').ok === true;
+    return updateFact(rec, ALERT_QUEUE_FACT, (d) => {
+      const left = entriesOf(d).filter((e) => e.mark?.fact !== fact);
+      const causes = causesOf(d).filter((c) => c.fact !== fact);
+      if (left.length === entriesOf(d).length && causes.length === causesOf(d).length) return null;
+      return { ...d, entries: left, dropped_causes: causes };
+    }, 'alert_cause_cleared').ok === true;
   } catch { return false; }
 }
 
@@ -185,24 +206,30 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
  * dropped while the send was out are told on the next one (#39 check, M1), and its own cause's drop is cleared.
  */
 export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
-  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
-  const e = entriesOf(d).find(sameAs(sent));
   if (!ok) {
-    if (!e) return;
-    // Only the entry that was tried is held, so the held cap counts it; an entry not yet tried counts only
-    // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
-    // ahead of a burst).
-    const { entries, dropped } = capQueue(rec, [...entriesOf(d).filter((x) => x.id !== e.id), { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
-    putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
+    updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+      const d = doc ?? {};
+      const e = entriesOf(d).find(sameAs(sent));
+      if (!e) return null;
+      // Only the entry that was tried is held, so the held cap counts it; an entry not yet tried counts only
+      // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
+      // ahead of a burst).
+      const { entries, dropped } = capQueue(rec, [...entriesOf(d).filter((x) => x.id !== e.id), { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
+      return { ...withDrops(rec, d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) };
+    }, 'alert_failed');
     return;
   }
+  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
+  const e = entriesOf(d).find(sameAs(sent));
   const told = new Set([...(sent.carried?.causes ?? []), ...(sent.carried?.own ?? [])]);
   if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.id))) return;
-  if (e && sent.mark?.fact) putFact(rec, sent.mark.fact, { ...rec.read('fact', sent.mark.fact)?.doc, ...sent.mark.fields }, sent.mark.kind ?? 'alert_told');
-  const cur = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
-  const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
-  const causes = causesOf(cur).filter((c) => !told.has(c.id));
-  putFact(rec, ALERT_QUEUE_FACT, { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) }, 'alert_sent');
+  if (e && sent.mark?.fact) updateFact(rec, sent.mark.fact, (doc) => ({ ...doc, ...sent.mark.fields }), sent.mark.kind ?? 'alert_told');
+  updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+    const cur = doc ?? {};
+    const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
+    const causes = causesOf(cur).filter((c) => !told.has(c.id));
+    return { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
+  }, 'alert_sent');
 }
 
 // Why one send failed, or null when it was delivered: it threw, answered false, or did not answer within `ms`.
