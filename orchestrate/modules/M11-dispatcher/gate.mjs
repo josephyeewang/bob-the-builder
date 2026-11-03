@@ -10,7 +10,7 @@ import { posix } from 'node:path';
 import { KEYS, MissingKey, need } from './keys.mjs';
 import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
-import { foldKey } from '../../shared/plan-fingerprint.mjs';
+import { foldKey, matchForm } from '../../shared/plan-fingerprint.mjs';
 import { STATES } from '../../shared/record-names.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -27,12 +27,13 @@ export function normPath(p) {
 }
 
 /** `**` matches any depth, `*` one name. Patterns are folded like paths (foldKey); one that can't be folded matches
- * everything, so it counts as an overlap, never as none. */
+ * everything, so it counts as an overlap, never as none. Both sides are compared in the shared matchForm (NFD), so `docs/cafe*` still matches
+ * `docs/café.md`, whose é is e plus an accent there (audit-pr133-r2 Minor 2). */
 export function matches(pattern, path) {
-  const p = foldKey(String(pattern));
+  const p = matchForm(String(pattern));
   if (p === null) return true;
   const re = new RegExp(`^${p.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*')}$`);
-  return re.test(path);
+  return re.test(matchForm(String(path)) ?? '');
 }
 
 /** A card's own file set, or a refusal. The daily card also carries its patterns. */

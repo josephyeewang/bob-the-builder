@@ -240,7 +240,8 @@ test('L289 (audit-pr133 m-2 and the pre-existing case): what M10 and M11 refuse,
   // At the edge: 4096 characters pass, as M10 lets them; a ~ or a space inside a name is fine.
   assert.equal(cleanPath('a'.repeat(4096))?.length, 4096);
   for (const p of ['src/a~b.js', 'src/a b.js', ' a.js']) assert.equal(cleanPath(p), p, p);
-  // Every path cleanPath accepts, M11's start gate accepts too (never accepted by the plan, then held on every pass).
+  // M11's start gate accepts these examples that cleanPath accepts (a spot check, not every path): a plan path is never
+  // accepted here, then held on every pass.
   for (const p of ['src/a~b.js', 'src/a b.js', ' a.js', 'a'.repeat(4096), "src/it's.js"]) assert.ok(normPath(p) !== null, p);
 });
 
@@ -250,4 +251,23 @@ test('L289 (audit-pr133 m-1): a pattern with sigma still matches; final ς and �
   assert.equal(matches('docs/AΣ*', normPath('docs/aσb.md')), true);
   assert.equal(matches('docs/*ς.md', normPath('docs/aσ.md')), true);
   for (const s of ['ς', 'σ', 'Σ', 'aς', 'aσb', 'ΣΑΣ']) assert.ok(!foldKey(s).includes('ς'), s);
+});
+
+test('L297 (audit-pr133-r2 Minor 1): two spellings of one name get one key; NFC comes before the case fold', () => {
+  // ᾴ as one character, and as α + iota subscript + accent (the order NFC puts right). APFS stores both as one file.
+  const one = 'docs/\u1fb4.md';
+  const two = 'docs/\u03b1\u0345\u0301.md';
+  assert.equal(one.normalize('NFC'), two.normalize('NFC'), 'the two spellings are one name in NFC');
+  assert.equal(foldKey(one), foldKey(two));
+  assert.equal(pathKey(one), pathKey(two));
+  assert.equal(normPath(one), normPath(two));
+  assert.equal(normPath(two), pathKey(two));
+});
+
+test('L297 (audit-pr133-r2 Minor 2): a pattern matches a name whatever form its accents are stored in', () => {
+  assert.equal(matches('docs/cafe*', normPath('docs/caf\u00e9.md')), true);
+  assert.equal(matches('docs/cafe*', normPath('docs/cafe\u0301.md')), true);
+  assert.equal(matches('docs/caf\u00e9*', normPath('docs/cafe\u0301.md')), true);
+  assert.equal(matches('docs/caf\u00e9.md', normPath('docs/cafe\u0301.md')), true);
+  assert.equal(matches('docs/cafx*', normPath('docs/caf\u00e9.md')), false);
 });

@@ -49,7 +49,7 @@ export function filesProblems(files) {
     const k = pathKey(f);
     if (!k) { out.push(`${JSON.stringify(String(f)).slice(0, 80)} is not one plain path inside the product`); continue; }
     // The plan rule M2's go and M10 apply: plain printable ASCII only (L105). pathKey alone lets café.js through.
-    if (cleanPath(f) === null) { out.push(`${JSON.stringify(String(f)).slice(0, 80)} is not plain ASCII (letters a-z, digits and plain punctuation only)`); continue; }
+    if (cleanPath(f) === null) { out.push(`${JSON.stringify(String(f)).slice(0, 80)} is not plain ASCII (letters a-z or A-Z, digits and plain punctuation only)`); continue; }
     // The brief prints each path on its own line, so a path can't carry a fence of its own either (L87 M-5).
     if (/[<>]|&lt;|&gt;/i.test(k)) { out.push(`${JSON.stringify(String(f)).slice(0, 80)} holds a <, > or escaped fence`); continue; }
     if (seen.has(k)) out.push('a file is listed twice');

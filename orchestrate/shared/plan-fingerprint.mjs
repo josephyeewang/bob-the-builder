@@ -58,7 +58,10 @@ export function cleanPath(p) {
   return q !== null && PLAIN.test(q) ? q : null;
 }
 
-// The one case fold for "is it the same file" (L93 m-1, L105 M-1): lower, upper, lower, every final ς as σ, then NFC.
+// The one case fold for "is it the same file" (L93 m-1, L105 M-1, L297): NFC first, then lower, upper, lower, every
+// final ς as σ, then NFC again. NFC comes first because a case change can split one file's two spellings: `ᾴ` typed
+// as α + iota subscript + accent upper-cases the subscript to Ι before the accent, and folded to αί, not άι
+// (audit-pr133-r2 Minor 1).
 // The Mac's default disk
 // ignores case and Unicode normalization. A plain toLowerCase misses ß/SS and final ς/σ; upper-then-lower misses the
 // capital sharp S (ẞ → ß, but ß → SS). Measured against the Mac's own disk on 16,627 names (audit-pr84 r1): 0 groups
@@ -69,14 +72,24 @@ export function cleanPath(p) {
 // missed `docs/aσb.md` (audit-pr133 m-1). The disk treats ς and σ as one letter anyway.
 export function foldKey(s) {
   if (typeof s !== 'string' || !s.isWellFormed()) return null;
-  return s.toLowerCase().toUpperCase().toLowerCase().replaceAll('ς', 'σ').normalize('NFC');
+  return s.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().replaceAll('ς', 'σ').normalize('NFC');
+}
+
+// The form a pattern and a path are matched in (M11's start gate): foldKey, then NFD, so a pattern's plain letter
+// still matches the same letter with an accent, as `docs/cafe*` matches `docs/café.md` (audit-pr133-r2 Minor 2).
+// Null when foldKey is.
+export function matchForm(s) {
+  const k = foldKey(s);
+  return k === null ? null : k.normalize('NFD');
 }
 
 // The one key two plan paths are compared by (M3's duplicate and wave checks): the path's shape cleaned, then foldKey.
 // It does not apply the ASCII rule, so it answers "is it the same file" for any path; a caller that needs a plan path
 // also asks cleanPath (M3 filesProblems does). M11's start gate keys paths with its own shape rules (normPath) and this
-// same foldKey; wherever pathKey accepts a path the two keys are identical (audit-pr133: 400,000 paths, 0 splits). The
-// fingerprint keeps case (cleanPath); this key is never what the worker is told.
+// same foldKey. With NFC first in foldKey (L297), the two keys were identical wherever pathKey accepts a path, and two
+// spellings of one name never got two keys, on 300,000 simulated paths (audit-pr133-r2; before it, 178 of 400,000
+// Greek-heavy paths disagreed). That is a measurement, not a proof. The fingerprint keeps case (cleanPath); this key
+// is never what the worker is told.
 export function pathKey(p) {
   const q = shapeClean(p);
   return q === null ? null : foldKey(q);
