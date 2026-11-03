@@ -80,7 +80,7 @@ export function approvalsAlertText(product, a) {
  * each with its own deadline and its own try (L221 MAT-1). A product whose pass throws or runs late is failed, the
  * others still run, and the step then fails with one stable line naming the failed products, sorted, each with a short
  * cause (numbers out), so the tick's step-error alert tells it once per distinct set. A pass that answers `ok: false`
- * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), once.
+ * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), again each day while it stands.
  *   approvals() → [{ product, gh, owner, repo, stateDir, push, copies }]   per product, everything M2 reaches outside
  */
 export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass }) {
