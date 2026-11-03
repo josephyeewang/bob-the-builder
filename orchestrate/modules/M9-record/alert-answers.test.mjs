@@ -12,7 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { PRODUCT, UID, claimCard, iso, must, outboxFile, product, readyCard, runCard, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
 
 const LOST = ['false', 'throws'];
@@ -207,7 +207,7 @@ test('L135: a kept alert survives a restart: a new writer on the same store send
   assert.equal(waiting(env).length, 1);
   // A new process: a fresh writer on the same folder, with its own sink.
   const s2 = sink();
-  const other = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: s2.alert, now: () => env.clock.t, host: 'mac-a' });
+  const other = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: s2.alert, now: () => env.clock.t, host: 'mac-a' });
   other.store.transaction(() => null);
   assert.equal(s2.of('diary_torn_line_cut').length, 1, 'the new process sends the kept alert');
   assert.deepEqual(waiting(env), []);
