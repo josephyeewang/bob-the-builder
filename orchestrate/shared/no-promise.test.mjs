@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { OUTBOX_KINDS } from './record.mjs';
 import { sectionsNaming, shownUnits } from './kinds.test-helper.mjs';
 import { intakePush } from '../modules/M1-front-door/outbox.mjs';
+import { ONBOARD_SHOWN } from '../modules/M2-approvals/onboard.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL = join(ORCH, 'modules/M1-front-door/skill/orchestrate/SKILL.md');
@@ -166,4 +167,19 @@ test('L162: the scan catches what the r2 plants planted (a second quote, a pream
   assert.deepEqual(unapproved('idea-', { skill, ownerTest: own }), [], 'the unplanted text is clean');
   // Step 3 (m1): a mode request that says Filed goes red.
   assert.ok(step3Quotes(skill.replace('reply "Not filed."', 'reply "Filed: evolve X. The Mini confirms in a minute."')).some((x) => !STEP3_QUOTES.includes(x)));
+});
+
+// L221 m-1, m-2, c-4: what M2's onboarding tells Joe. Read for promises when added: "is now on" is said only after the
+// record was written, and neither refusal says it will be tried again or when. Exact both ways.
+export const ONBOARD_SHOWN_APPROVED = Object.freeze([
+  '<product> is now on: its rules file says onboarding.state: active.',
+  '<product> was not turned on: onboarding.state is "Active", and only the exact word active turns a product on.',
+  '<product> was not turned on: <reason>',
+]);
+test('L221: every sentence M2 onboarding can show Joe is an approved one, and the list is exact', () => {
+  const shown = [ONBOARD_SHOWN.on('<product>'), ONBOARD_SHOWN.nearMiss('<product>', 'Active'), ONBOARD_SHOWN.refused('<product>', '<reason>')];
+  assert.deepEqual(Object.keys(ONBOARD_SHOWN).sort(), ['nearMiss', 'on', 'refused'], 'a new sentence kind needs reading');
+  assert.deepEqual(shown.filter((u) => !ONBOARD_SHOWN_APPROVED.includes(u)), [], 'a sentence not on the list');
+  assert.deepEqual(ONBOARD_SHOWN_APPROVED.filter((u) => !shown.includes(u)), [], 'an approved sentence no longer shown');
+  for (const u of shown) assert.doesNotMatch(u, /\b(will|until|tonight|tomorrow|next pass|again|retr(y|ies|ied)|soon)\b/i, u);
 });

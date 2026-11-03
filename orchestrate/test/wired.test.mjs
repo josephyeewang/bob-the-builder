@@ -56,7 +56,6 @@ export const CONFIG = Object.freeze({
 
 // name → why it is not wired yet. Each names the capability row or issue that will give it a running home.
 export const UNWIRED = Object.freeze({
-  schedulePass: 'L221: tick approvals step, lane 1 on #121',
   gatePass: 'L221: R-0b-162 wiring, lane 4',
   heartbeatOnce: 'L221: R-0b-162 wiring, lane 4',
   watchOnce: 'L221: R-0b-162 wiring, lane 4',

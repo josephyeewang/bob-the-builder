@@ -41,6 +41,7 @@ test('the entry is fit, with its products.json line, and needs no import list', 
 
 test('the sample as it stands is refused, for each first-cutover reason', () => {
   assert.deepEqual(fit(SAMPLE), [
+    'onboarding.state must say active',
     'caps.editing_per_product must be 0',
     'lanes must be docs and research only',
     'product_profile.required_checks is missing (M6 reads it)',
@@ -72,6 +73,12 @@ test('each missing or wrong piece is named', () => {
   const cases = [
     [swap(FIRST, 'product:\n  cutover_stage: first\n', ''), 'product.cutover_stage must say first'],
     [swap(FIRST, 'cutover_stage: first', 'cutover_stage: second'), 'product.cutover_stage must say first'],
+    // The one "on" switch (L204-b, L209): missing, another word, another case, a trailing space or another type is off.
+    [swap(FIRST, 'onboarding:\n  state: active\n', ''), 'onboarding.state must say active'],
+    [swap(FIRST, '  state: active\n', '  state: paused\n'), 'onboarding.state must say active'],
+    [swap(FIRST, '  state: active\n', '  state: Active\n'), 'onboarding.state must say active'],
+    [swap(FIRST, '  state: active\n', "  state: 'active '\n"), 'onboarding.state must say active'],
+    [swap(FIRST, '  state: active\n', '  state: [active]\n'), 'onboarding.state must say active'],
     [swap(FIRST, 'editing_per_product: 0', 'editing_per_product: 1'), 'caps.editing_per_product must be 0'],
     [swap(FIRST, '  research:\n    - docs/research/**\n', ''), 'lanes must be docs and research only'],
     [swap(FIRST, 'lanes:\n', 'lanes:\n  product:\n    - app/**\n'), 'lanes must be docs and research only'],
