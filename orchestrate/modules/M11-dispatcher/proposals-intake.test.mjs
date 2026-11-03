@@ -4,11 +4,11 @@
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, openSync, readSync, closeSync } from 'node:fs';
+import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, openSync, readSync, closeSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   intakeProposals, proposalsReadBack, intakeFactId, folderFactId, folderProblem, proposalName,
-  FIRST_CUTOVER, IDEAS_OFF, SETTLE_MS, NAMES, SOURCE_OF, BYTES, fenceFor,
+  FIRST_CUTOVER, IDEAS_OFF, SETTLE_MS, BUNDLE_ALONE_MS, NAMES, SOURCE_OF, BYTES, fenceFor,
 } from './proposals-intake.mjs';
 import { cleanOutside, SOURCES, isFenced } from '../M12-sensors/escape.mjs';
 import { FAKE } from '../M12-sensors/fakes.mjs';
@@ -179,7 +179,12 @@ test('plant: a docs proposal needs its own bundle; a bundle for another card is 
   const docsCheck = async () => null;
   const out = await w.pass({ docsCheck, toReview: () => ({ ok: true }) });
   assert.equal(one(out, 'proposal-C-1.md').refused, 'no bundle-C-1.bundle carries this proposal\'s change');
-  assert.equal(one(out, 'bundle-C-2.bundle').refused, 'no proposal-C-2.md names this bundle\'s card');
+  assert.equal(one(out, 'bundle-C-2.bundle').waiting, 'waiting for proposal-C-2.md', 'a young bundle waits for its proposal');
+  assert.equal(w.calls.alerts.filter((t) => /proposal-C-2/.test(t)).length, 0, 'no false alarm while it waits');
+  const old = (Date.now() - BUNDLE_ALONE_MS - 60_000) / 1000;
+  utimesSync(join(w.dirs.a, 'bundle-C-2.bundle'), old, old);
+  const later = await w.pass({ docsCheck, toReview: () => ({ ok: true }) });
+  assert.equal(one(later, 'bundle-C-2.bundle').refused, 'no proposal-C-2.md names this bundle\'s card');
   const w2 = world();
   put(w2, 'proposal-C-1.md', 'code change');
   put(w2, 'bundle-C-1.bundle', 'bytes');
@@ -233,7 +238,7 @@ test('a handler that fails or throws is a refusal; a claim a crash left behind i
   assert.equal(w2.calls.alerts.filter((t) => /was interrupted/.test(t)).length, 1);
 });
 
-test('plant: the folder itself — loose mode, a link, missing, no key — is not taken in, and its problem is told once', async () => {
+test('plant: the folder itself — loose mode, a link, missing, relative — is not taken in, and its problem is told once; no key is a quiet skip', async () => {
   const w = world({ products: ['a', 'b'] });
   chmodSync(w.dirs.a, 0o755);
   put(w, 'research-r1.md', 'x', 'a');
@@ -257,6 +262,35 @@ test('plant: the folder itself — loose mode, a link, missing, no key — is no
     'the proposals folder is not a plain folder', 'the proposals folder is missing',
     'proposals.outbox is not a plain absolute folder path', 'no proposals.outbox in the rules',
   ]);
+});
+
+test('plant: a proposals.outbox that is set but unreadable is told once; only a missing key is a quiet skip (lane 2 #124 Material)', async () => {
+  for (const bad of [5, ['/x'], '   ', { dir: '/x' }, null]) {
+    const w = world();
+    const rules = { get: (key) => (key === 'proposals.outbox' ? bad : undefined) };
+    const out = await w.pass({ rules });
+    assert.equal(out[0].skipped, 'proposals.outbox is set but is not a folder path', JSON.stringify(bad));
+    await w.pass({ rules });
+    assert.equal(w.calls.alerts.filter((t) => /a's proposals folder is not taken in: proposals.outbox is set/.test(t)).length, 1, 'told once');
+  }
+  const w = world();
+  const out = await w.pass({ rules: { get: () => undefined } });
+  assert.equal(out[0].skipped, 'no proposals.outbox in the rules');
+  assert.equal(w.calls.alerts.length, 0);
+});
+
+test('plant: when the interrupted state cannot be written, it is told and the file is not claimed again (lane 2 #124 m1)', async () => {
+  const w = world();
+  put(w, 'research-r2.md', 'y');
+  const { createHash } = await import('node:crypto');
+  seed(w.rec, 'fact', intakeFactId('a', 'research-r2.md'), { session: 'proposals-a', product: 'a', name: 'research-r2.md', sha256: createHash('sha256').update('y').digest('hex'), state: 'applying' });
+  // The record refuses only the interrupted write (the record object is frozen, so a stand-in that inherits it).
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'write', { value: (x) => (x.kind === 'proposal_interrupted' ? { ok: false, reason: 'refused' } : w.rec.write(x)) });
+  const o = await w.pass({ rec });
+  assert.equal(one(o, 'research-r2.md').refused, 'could not record the interruption: refused');
+  assert.deepEqual(w.calls.handed, [], 'never used a second time');
+  assert.equal(w.calls.alerts.filter((t) => /was interrupted/.test(t)).length, 1, 'told');
 });
 
 test('plant: a folder owned by another user is refused (Joe\'s uid comes from the config, never from the folder)', () => {

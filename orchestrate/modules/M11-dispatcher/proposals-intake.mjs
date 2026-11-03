@@ -46,6 +46,8 @@ export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
 export const TEXT_CAP = 1024 * 1024;
 export const SETTLE_MS = 2000;
+// A bundle with no proposal is waited for this long (by its own write time), then refused.
+export const BUNDLE_ALONE_MS = 10 * 60_000;
 
 // The six names (L76 (3)). An id is a card, ask, slug or tab id, in the push script's own card id shape.
 const ID = '([A-Za-z0-9][A-Za-z0-9-]{0,63})';
@@ -155,8 +157,16 @@ export async function intakeProposals({ rec, rules, products, ownerUid, wait, al
   const seen = [];
   for (const product of products) {
     let dir;
-    try { dir = need(rules, KEYS.proposalsOutbox, { product, type: 'text' }); } catch { out.push({ product, skipped: 'no proposals.outbox in the rules' }); continue; }
-    let why = folderProblem(dir, ownerUid, lookDir);
+    let why = null;
+    // A product with no proposals.outbox has no folder: a quiet skip. A value that is there but is not text is a
+    // folder that is never read, so it is told like any other folder problem (lane 2's #124 review, Material).
+    try { dir = need(rules, KEYS.proposalsOutbox, { product, type: 'text' }); } catch {
+      let raw;
+      try { raw = rules.get(KEYS.proposalsOutbox, { product }); } catch { raw = null; }
+      if (raw === undefined) { out.push({ product, skipped: 'no proposals.outbox in the rules' }); continue; }
+      why = 'proposals.outbox is set but is not a folder path';
+    }
+    if (!why) why = folderProblem(dir, ownerUid, lookDir);
     let names = null;
     if (!why) { try { names = list(dir); } catch { why = 'the proposals folder could not be read'; } }
     tellFolder(rec, product, why, alert, now);
@@ -197,7 +207,8 @@ export async function intakeProposals({ rec, rules, products, ownerUid, wait, al
       // not known, so it is never used twice. Told once. A heartbeat is a poll, so it is simply taken again.
       const said = `the intake of ${name} from ${product}'s proposals folder was interrupted; it may or may not have been used, and was not used again`;
       const w = put({ ...prev.doc, state: 'interrupted', at: new Date(now).toISOString(), alert_text: said }, 'proposal_interrupted');
-      if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
+      if (!w.ok) { r.refused = `could not record the interruption: ${w.reason}`; alert(said); continue; }
+      tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_state: 'interrupted' }, kind: 'proposal_told' });
     }
     if (prev && prev.doc?.sha256 != null) {
       const was = prev.doc.state;
@@ -218,7 +229,12 @@ export async function intakeProposals({ rec, rules, products, ownerUid, wait, al
     if (parsed.kind === 'idea') { refuse(IDEAS_OFF, hash); continue; }
     if (parsed.kind === 'bundle') {
       const pair = `proposal-${parsed.id}.md`;
-      if (!names.includes(pair)) { refuse(`no ${pair} names this bundle's card`, hash); continue; }
+      if (!names.includes(pair)) {
+        // Its proposal may still be on the way (lane 2's #124 review, m3): wait, unrecorded, while the bundle is young.
+        const mtime = Number(String(first).split(':')[1]);
+        if (now - mtime < BUNDLE_ALONE_MS) { r.waiting = `waiting for ${pair}`; continue; }
+        refuse(`no ${pair} names this bundle's card`, hash); continue;
+      }
       r.held = `taken in with ${pair}`;
       continue;
     }
