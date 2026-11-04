@@ -9,10 +9,14 @@
 // Where each wrapper stands (L170, 1 Nov 2026):
 //   - tellThen (M11): return alert(text, { mark }): the alert's own answer, and a throw passes. Ruled.
 //   - M13 `raise` (alerts.mjs): a GitHub call that answers false (or `open` with no issue number) makes raise answer
-//     false; one that throws makes raise throw; nothing is saved before the call succeeds. Ruled. A write the Record
-//     refuses makes raise and clear answer { refused: reason } (L389), which wasTold reads as a lost alert.
+//     false; one that throws makes raise throw; nothing that stops the next try is saved first (the issue's number
+//     only). Ruled (L427). Since #184 raise and clear no longer answer { refused } (L389 retired): a write the Record
+//     refuses changes no answer, because the issue holds the alert's state and the Record only says where to look
+//     (L401). Refusals are reported through cacheTrouble (the heartbeat's red line) and reportTrouble (an alert of its
+//     own, one per caller: `record-refusing:<source>`, L409). Limit left (L426, cutover c4): callers that share one
+//     makeAlerts share its pass state, so one caller's retry can write an older status over another's newer one.
 //   - prod-watcher `raise`: answers result !== false; a setting change whose raise answered false keeps its old
-//     baseline and is raised again next pass; a throw stops the pass. Ruled (the r4 hand-check).
+//     baseline and is raised again next pass; a throw stops the pass. Ruled (the r4 hand-check; re-ruled L427).
 //   - heartbeat `set`: answers nothing; it raises a red fact again every pass, whatever raise answered. Open (lane 3).
 //   - safeAlert (M2): answers false when the alert answers false or throws, but takes a promise as sent, so one that
 //     rejects later counts as given. Open (lane 1).
@@ -42,13 +46,13 @@ function watcher(raise) {
     return { ...project, targets: { production: { id: null } } };
   };
   const writer = makeFactWriter(memoryRecord());
-  const alerts = { raise, clear: async () => 'none' };
+  const alerts = { raise, clear: async () => 'none', reportTrouble: async () => 'none' };
   const pass = () => watchOnce({ vercel: makeVercelReader(fetchJson, { projectId: 'prj_test' }), rulesEntry: { stage: 'first' }, mainFirstParent: new Set(), evidence: new Set(), writer, alerts, product: 'p' });
   return { s, alerts, pass, change: () => { s.envs = [{ ...s.envs[0], updatedAt: s.envs[0].updatedAt + 1 }]; } };
 }
 const isSettingChange = (a) => a.key.includes('|setting-changed|');
 
-function heart(raise) {
+function heart(raise, trouble = null) {
   let t = Date.parse('2026-11-03T12:00:00Z');
   const now = () => new Date(t);
   const rec = memoryRecord();
@@ -61,7 +65,7 @@ function heart(raise) {
     account: async () => ({ signedIn: true, login: world.login }),
     usage: async () => null,
   };
-  const alerts = { raise, clear: async () => 'none' };
+  const alerts = { raise, clear: async () => 'none', cacheTrouble: () => trouble, reportTrouble: async () => 'none' };
   const gh = fakeIssues();   // one GitHub for every pass: since #98 the pinned issue is read back (isClosed) on the next pass
   const pass = () => heartbeatOnce({ product: 'p', writer, gh, alerts, owner: 'o', probes, now });
   return { world, alerts, pass, tick: () => { t += 10 * 60e3; } };
@@ -70,14 +74,20 @@ function heart(raise) {
 // ---- what the callers rely on ----
 
 test('M13 raise: a GitHub call that throws makes raise throw and saves nothing that stops the next try (L139)', async () => {
-  const down = m13({ open: fakeAlert({ throws: new Error('github down') }) });
+  const down = m13();
+  const open = down.gh.open;
+  down.gh.open = fakeAlert({ throws: new Error('github down') });
   await assert.rejects(down.a.raise({ key: 'k', title: 't', body: 'b' }), /github down/, 'open throws: raise throws');
-  assert.equal(down.a.state('k'), null, 'and saves no alert state, so the next pass opens it');
+  down.gh.open = open;
+  assert.equal(await down.a.raise({ key: 'k', title: 't', body: 'b' }), 'opened', 'and nothing saved stops the next pass opening it');
   const later = m13();
-  await later.a.raise({ key: 'k', title: 't', body: 'b', status: 's1' });
+  assert.equal(await later.a.raise({ key: 'k', title: 't', body: 'b', status: 's1' }), 'opened');
+  const comment = later.gh.comment;   // the same fake's comment, put back below: a fresh fake's points at no issues (L409)
   later.gh.comment = fakeAlert({ throws: new Error('github down') });
   await assert.rejects(later.a.raise({ key: 'k', title: 't', body: 'b', status: 's2' }), /github down/, 'comment throws: raise throws');
-  assert.equal(later.a.state('k').status_text, 's1', 'and the change is not saved, so the next pass comments again');
+  later.gh.comment = comment;
+  assert.equal(await later.a.raise({ key: 'k', title: 't', body: 'b', status: 's2' }), 'changed', 'the change was not marked told, so the next pass tells it');
+  assert.equal(later.gh.issues.get(1).comments.length, 1, 'exactly one change notice lands');
 });
 test('M13 raise: a GitHub call that answers false saves nothing that stops the next try (L139)', async () => {
   const noIssue = m13({ open: fakeAlert({ answer: false }) });
@@ -147,30 +157,11 @@ test('heartbeat account-changed: the new login is saved only when the raise was 
   assert.equal(switchRaises(lost, 'account B'), 2, 'answered false: the change is raised again on the next pass');
 });
 
-const NOT_SAVED = { refused: 'the Record refused to save this alert\'s state: test' };
-test('L389: a refused save counts as a lost alert: the setting change and the login are raised again', async () => {
-  const lost = fakeAlert({ answer: NOT_SAVED });
-  const v = watcher(lost);
-  await v.pass();
-  v.change();
-  await v.pass();
-  lost.reset();
-  await v.pass();
-  assert.equal(settingChanges(lost), 1, 'the old baseline stays');
-  const hurt = fakeAlert({ answer: NOT_SAVED });
-  const h = heart(hurt);
-  await h.pass();
-  h.world.login = 'account B';
-  await h.pass();
-  await h.pass();
-  assert.equal(switchRaises(hurt, 'account B'), 2);
-});
-
-test('L389: a refused save shows red on the heartbeat, in plain words, once a pass; other passes do not', async () => {
-  const h = heart(fakeAlert({ answer: NOT_SAVED }));
-  const r = await h.pass();
+// L389's { refused } answer is gone (#184, L401): a refused write is reported by cacheTrouble instead, as below.
+test('a Record refusing alert writes shows red on the heartbeat, in plain words, once a pass; other passes do not', async () => {
+  const r = await heart(fakeAlert({ answer: 'opened' }), 'test').pass();
   assert.equal(r.red.filter((k) => k === 'alert-not-saved').length, 1);
-  assert.match(r.body, /RED +alerts: the Record refused to save this alert's state: test/);
+  assert.match(r.body, /RED +alerts: the Record refused to save where an alert is: test/);
   const fine = await heart(fakeAlert({ answer: 'opened' })).pass();
   assert.ok(!fine.red.includes('alert-not-saved'));
 });
