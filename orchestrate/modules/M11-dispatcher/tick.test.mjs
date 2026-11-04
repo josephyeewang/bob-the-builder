@@ -122,7 +122,7 @@ test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan r
   seed(w.rec, 'ask', 'go-C-3', { kind: 'go_t2', product: 'p2', card: 'C-3', title: 'C-3', state: 'answered', fingerprint: fp.fingerprint, created_at: iso(T0 - MIN), answer: { approves: false, choice: 'Not now' } });
   // recWith seeds a card as a script; a Lead's session wrote this plan.
   const rec = Object.create(w.rec, { diary: { value: (...x) => [...w.rec.diary(...x), { actor: 'lead:L-1', writes: [{ entity: 'card', id: 'C-3', doc: { files: ['changed'] } }] }] } });
-  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); } } });
+  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); return { ok: true }; } } });
   assert.equal(replies.length, 1, w.calls.alerts.join(' | '));
   assert.match(replies[0].text, /declined the plan for card C-3/);
 });

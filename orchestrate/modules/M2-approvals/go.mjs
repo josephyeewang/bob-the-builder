@@ -27,7 +27,8 @@
 import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
-import { createAsk } from './binding.mjs';
+import { createAsk, releaseBoxes } from './binding.mjs';
+import { closeDecisionPr } from './decision.mjs';
 import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
@@ -99,6 +100,22 @@ const closedGoAsk = (st, cardId, a) => ['withdrawn', 'expired'].includes(a.doc.s
   || (a.doc.state === 'answered' && a.doc.answer?.approves !== true)
   || (a.doc.state === 'consumed' && st.go(`go-${cardId}`)?.doc.ask !== a.id);
 
+// A new plan's ask replaces the card's older live ones (L462 m2): their boxes are released and a Tier-1 go's pull request
+// closed, so the owner isn't left answering a plan that has gone. `withdrawn_for` tells this from any other withdrawal:
+// if the plan comes back, it is asked again. → null, or the reason one could not be withdrawn (raiseGo then raises nothing
+// and the next raise tries again).
+async function withdrawOlder(ctx, st, cardId, fingerprint) {
+  for (const a of st.asks()) {
+    if (a.doc.card !== cardId || !activeKind(a.doc.kind)?.go || a.doc.fingerprint === fingerprint || !['open', 'pushed'].includes(a.doc.state)) continue;
+    if (!(await closeDecisionPr(ctx, a.id, a.doc))) return `the pull request of ask ${a.id} could not be closed`;
+    const next = structuredClone(a.doc);
+    releaseBoxes(next, 'withdrawn', ctx.now(), { moveBack: false });
+    const w = writeDoc(ctx.record, 'ask', a, { ...next, state: 'withdrawn', withdrawn_for: fingerprint });
+    if (!w.ok) return `ask ${a.id} could not be withdrawn: ${w.reason}`;
+  }
+  return null;
+}
+
 export function goFingerprint(ctx, cardId) {
   const c = ctx.record.read('card', cardId);
   if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
@@ -127,6 +144,8 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = 
   // under a new id when the Lead raises it again (audit round 1 M-3); otherwise the card would hang on a closed ask.
   const base = `go-${cardId}-${fp.sha256.slice(0, 12)}`;
   const st = askStore(ctx.record);
+  const stuck = await withdrawOlder(ctx, st, cardId, fp.sha256);
+  if (stuck) return fail(stuck);
   let id = base;
   for (let n = 2; ; n++) {
     const prev = st.ask(id);
