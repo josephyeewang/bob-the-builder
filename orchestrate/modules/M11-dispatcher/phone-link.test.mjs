@@ -226,3 +226,25 @@ test('r7 M2: an outage alert queued while the port was down is dropped when the 
   for (m = 18; m <= 60; m += 1) { read(m, false); await step(m); }
   assert.equal(got.filter((t) => /cannot reach the Front Door/.test(t)).length, 1, got.join(' | '));
 });
+
+// L412 m2: the clock went back after the stamp, so it lies ahead; the retry does not wait for the clock to catch up.
+test('L412 m2 planted: a Front Door restart or Mini Base start stamped ahead is tried again now', async () => {
+  const w = world();
+  w.read(0, { mb: false });
+  await w.step(0);
+  assert.equal(w.calls.minibase, 1);
+  w.read(-30, { mb: false });
+  await w.step(-30);
+  assert.equal(w.calls.minibase, 2);
+  const rec = recWith();
+  let restarts = 0;
+  const step = (min) => {
+    for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value: true, observed_at: iso(T0 + min * MIN) } });
+    return withAlerts(rec, T0 + min * MIN, () => {}, (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
+      restartFrontDoor: async () => { restarts += 1; return { ok: true }; }, frontDoorAlive: () => false, lastHandoff: () => 'h', alert }));
+  };
+  assert.deepEqual(await step(0), ['Front Door was missing; restarted']);
+  assert.deepEqual(await step(1), ['Front Door missing; restarted recently, waiting'], 'a true stamp still waits');
+  assert.deepEqual(await step(-30), ['Front Door was missing; restarted']);
+  assert.equal(restarts, 2);
+});
