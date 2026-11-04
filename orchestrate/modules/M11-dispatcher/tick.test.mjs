@@ -18,6 +18,7 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -1216,4 +1217,55 @@ test('audit #144 r2 n1: a config that names no installRoot is refused by main, w
   const lines = [];
   assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
   assert.match(lines.join('\n'), /installRoot must be a full path/);
+});
+
+// L329: a step error's told time that can't be read, or lies more than a minute ahead, does not keep it quiet.
+test('L329: a step error whose told_at is unreadable or an hour ahead is told again, not held until that time', async () => {
+  for (const told_at of [new Date(T0 + 60 * MIN).toISOString(), 'not a time']) {
+    const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at }]], { over: {
+      sessions: () => { throw new Error('no session list'); } } });
+    await w.pass(0);
+    assert.equal(w.calls.alerts.filter((t) => /stops step failed: no session list/.test(t)).length, 1, told_at);
+  }
+  // A told_at within the day is still quiet.
+  const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at: new Date(T0 - 60 * MIN).toISOString() }]], { over: {
+    sessions: () => { throw new Error('no session list'); } } });
+  await w.pass(0);
+  assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
+});
+
+test('L354 step ok: the queued copy leaves first and the told fields go; a refused drop keeps the error for the next tick, and says so', async () => {
+  const failed = async () => {
+    let boom = true;
+    const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+    await w.pass();
+    boom = false;
+    queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  // The channel is down, so the copy is still queued when the step comes back.
+  const at = (w, rec, min) => tick({ rec, rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, alert: () => false } });
+  const a = await failed();
+  const log = [];
+  await at(a, writeLog(a.rec, log), 1);
+  assertDropFirst(log, `step_ok:${STEP_ERROR_FACT('outage')}`);
+  const cleared = a.rec.read('fact', STEP_ERROR_FACT('outage')).doc;
+  assert.deepEqual([cleared.error, cleared.told_cause, cleared.told_at], [null, undefined, undefined]);
+  const b = await failed();
+  const r = await at(b, writeLog(b.rec, [], { refuseDrop: true }), 1);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, 'board unreadable', 'held');
+  assert.match(r.steps.outage.note, /could not be dropped.*next pass/);
+  await at(b, b.rec, 2);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, null, 'the next tick clears it');
+});
+
+test('L354 item 3: a mark landing as a step clears does not outlive the clear', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; }, alert: () => false } });
+  await w.pass();
+  boom = false;
+  const fact = STEP_ERROR_FACT('outage');
+  await tick({ rec: lateMark(w.rec, 'step_ok', fact, { told_cause: 'board unreadable', told_at: iso(T0) }), rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  const doc = w.rec.read('fact', fact).doc;
+  assert.deepEqual([doc.error, doc.told_cause, doc.told_at], [null, undefined, undefined]);
 });

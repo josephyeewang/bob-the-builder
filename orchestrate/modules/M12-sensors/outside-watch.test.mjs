@@ -10,7 +10,7 @@ const T0 = Date.parse('2026-11-03T12:00:00Z');
 const TAG = 'slottag01';
 const NAMES = { 'product 1': { product: 'test-product', tag: TAG } };
 
-function setup({ names } = {}) {
+function setup({ names, ahead = 0 } = {}) {
   let t = T0;
   const rec = memoryRecord();
   const home = fakeIssues(); const p1 = fakeIssues();
@@ -22,7 +22,7 @@ function setup({ names } = {}) {
   const tick = (min) => {
     for (let i = 0; i < min; i++) {
       t += 60e3;
-      if (!stopped && new Date(t).getUTCMinutes() === 17) runs.unshift({ id: ++id, created_at: new Date(t).toISOString(), status: 'completed', steps: steps.map((s) => ({ ...s })) });
+      if (!stopped && new Date(t).getUTCMinutes() === 17) runs.unshift({ id: ++id, created_at: new Date(t + ahead).toISOString(), status: 'completed', steps: steps.map((s) => ({ ...s })) });
     }
   };
   // The outside repo's owner file: the slot tag, and the owner's clear written right after the Mini's first pass
@@ -43,7 +43,7 @@ function setup({ names } = {}) {
   const pass = () => watchOutside({ fetchJson, repo: 'owner/outside-check', homeAlerts, productAlerts, ...(names ? { writer, productNames: names } : {}), now: () => t });
   // The Mini's no-write probe (lead call L24) is green and fresh here; its own tests are in l24.test.mjs.
   const gate = (product = 'test-product') => robotMergesGreen({ read: (i) => (i === NO_PUSH_FACT ? { green: true, at: new Date(t).toISOString() } : rec.read('fact', i)?.doc), product, now: () => t });
-  return { home, p1, tick, pass, gate, fact: (p = 'test-product') => rec.read('fact', ROBOT_FACT(p))?.doc, now: () => t, stop: () => { stopped = true; }, setSteps: (s) => { steps = s; }, setOwner: (o) => { owner = o; } };
+  return { rec, runs, home, p1, tick, pass, gate, fact: (p = 'test-product') => rec.read('fact', ROBOT_FACT(p))?.doc, now: () => t, stop: () => { stopped = true; }, setSteps: (s) => { steps = s; }, setOwner: (o) => { owner = o; } };
 }
 
 test('stop the check on purpose → the Mini alerts within ~2 h (10-minute passes), once', async () => {
@@ -198,4 +198,186 @@ test('0b-7 audit round 4 M-3: the first pass on a Mini, or a gap of more than 5 
   assert.equal(w.gate().open, true);
   w.tick(6 * 24 * 60); await w.pass();
   assert.match(w.gate().problems.join(), /saw nothing for more than 5 days/);
+});
+
+// L329 (the pastTime sweep): a time that can't be read, or one 1 h ahead, is never a sign of a recent run or result.
+const BAD = (now) => [['unreadable', 'not a time'], ['1 h ahead', new Date(now + 3600e3).toISOString()]];
+for (const name of ['unreadable', '1 h ahead']) {
+  test(`L329 outside-watch: a newest run whose start time is ${name} raises "stopped", never clears it`, async () => {
+    const w = setup();
+    w.stop();
+    w.runs.unshift({ id: 99, created_at: Object.fromEntries(BAD(w.now()))[name], status: 'completed', steps: [] });
+    await w.pass();
+    assert.equal(w.home.issues.size, 1, 'the stopped alert is raised');
+    assert.match(w.home.issues.get(1).title, /stopped/);
+    assert.match(w.home.issues.get(1).body, /can't be read or are in the future/);
+  });
+
+  test(`L329 outside-watch: a stored last-result time that is ${name} fires the gap latch`, async () => {
+    const w = setup({ names: NAMES });
+    w.setSteps(RM('success')); w.tick(20); await w.pass();
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+    const f = w.rec.read('fact', ROBOT_FACT('test-product'));
+    must(w.rec, f, { at: Object.fromEntries(BAD(w.now()))[name] });
+    w.tick(10); await w.pass();
+    assert.equal(w.gate().open, false);
+    assert.match(w.gate().problems.join(), /the time of the Mini's last result can't be read or is in the future/);
+  });
+
+  test(`L329 outside-watch: a stored last-run time that is ${name} fires the gap latch on the next run`, async () => {
+    const w = setup({ names: NAMES });
+    w.setSteps(RM('success')); w.tick(20); await w.pass();
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+    const f = w.rec.read('fact', ROBOT_FACT('test-product'));
+    must(w.rec, f, { run_at: Object.fromEntries(BAD(w.now() + 60 * 60e3))[name] });   // still 1 h ahead at the next run
+    w.tick(60); await w.pass();   // a new run
+    assert.equal(w.gate().open, false);
+    assert.match(w.gate().problems.join(), /the time of the last outside-check run seen can't be read or is in the future/);
+  });
+}
+function must(rec, f, fields) {
+  const r = rec.write({ actor: 'sensors', entity: 'fact', id: f.id, expectRev: f.rev, doc: { ...f.doc, ...fields } });
+  assert.ok(r.ok, JSON.stringify(r));
+}
+
+// L375 m1 (the L362 class rule): GitHub's run time is an outside clock, so what is stored is capped at now.
+test('L375 m1: GitHub\'s clock 70 min ahead: the gate opens and stays open, the latch does not re-fire, and nothing stored is ahead', async () => {
+  const w = setup({ names: NAMES, ahead: 70 * 60e3 });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  for (let m = 10; m <= 300; m += 10) {
+    w.tick(10); await w.pass();
+    assert.equal(w.gate().open, true, `at +${m} min: ${w.gate().problems.join()}`);
+  }
+  assert.equal(w.fact().red_since, null);
+  assert.ok(Date.parse(w.fact().run_at) <= w.now());
+  assert.ok(Date.parse(w.fact().last_green_at) <= w.now());
+  // Red runs under the same clock: the latch time and the last red are not ahead either, so a clear written now works.
+  w.setSteps(RM('failure')); w.tick(60); await w.pass(); w.tick(60); await w.pass();
+  assert.match(w.fact().latch_reason, /failed in 2 runs/);
+  assert.ok(Date.parse(w.fact().red_since) <= w.now());
+  assert.ok(Date.parse(w.fact().last_red_at) <= w.now());
+  w.setSteps(RM('success')); w.tick(60); await w.pass();
+  w.setOwner({ tags: { 'product 1': TAG }, cleared: { 'product 1': new Date(w.now()).toISOString() } });
+  w.tick(60); await w.pass();
+  assert.equal(w.gate().open, true, w.gate().problems.join());
+});
+
+test('L375 m1: a last-green time 3 days ahead is replaced by the next green run, so it does not shut the gate for 3 days', async () => {
+  const w = setup({ names: NAMES });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  must(w.rec, w.rec.read('fact', ROBOT_FACT('test-product')), { last_green_at: new Date(w.now() + 3 * 24 * 3600e3).toISOString() });
+  w.tick(60); await w.pass();
+  assert.equal(w.gate().open, true, w.gate().problems.join());
+});
+
+// L375 m2: a shut latch with a stored time that can't be read. Two runs failed, the step is green again, nothing cleared.
+async function latched() {
+  const w = setup({ names: NAMES });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  w.setSteps(RM('failure')); w.tick(60); await w.pass(); w.tick(60); await w.pass();
+  w.setSteps(RM('success')); w.tick(60); await w.pass();
+  assert.ok(w.fact().red_since);
+  return w;
+}
+const clearAt = (w, at) => w.setOwner({ tags: { 'product 1': TAG }, cleared: { 'product 1': new Date(at).toISOString() } });
+const set = (w, fields) => must(w.rec, w.rec.read('fact', ROBOT_FACT('test-product')), fields);
+const UNREADABLE = (now) => ({ unreadable: 'not a time', 'masked by the writer': '[REDACTED:wrong-shape]', '3 h ahead': new Date(now + 3 * 3600e3).toISOString() });
+
+for (const name of ['unreadable', 'masked by the writer', '3 h ahead']) {
+  test(`L375 m2: a last failed-run time that is ${name} refuses the owner's clear, says why, and a new clear opens the gate`, async () => {
+    const w = await latched();
+    clearAt(w, w.now());
+    set(w, { last_red_at: UNREADABLE(w.now())[name] });
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, false, 'that clear can\'t be shown to come after the red');
+    assert.match(w.gate().problems.join(), /the time of the last failed run can't be read or is in the future, so an earlier clear doesn't count; before that: failed in 2 runs/);
+    assert.equal(w.fact().last_red_at, new Date(w.now()).toISOString(), 'restarted, readable');
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, false, 'the old clear still does not count');
+    clearAt(w, w.now());
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+  });
+
+  test(`L375 m2: a latch start time that is ${name} stays shut, restarts readable with a reason, and can be cleared`, async () => {
+    const w = await latched();
+    clearAt(w, w.now());
+    set(w, { red_since: UNREADABLE(w.now())[name] });
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, false);
+    assert.match(w.gate().problems.join(), /the time this hold began can't be read or is in the future, so it restarts now; before that: failed in 2 runs/);
+    assert.equal(w.fact().red_since, new Date(w.now()).toISOString(), 'restarted, readable');
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, false, 'the old clear comes before the restart');
+    clearAt(w, w.now());
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, true, w.gate().problems.join());
+  });
+}
+
+for (const field of ['last_red_at', 'red_since']) {
+  test(`L375 m2: on the pass that restarts ${field}, a clear dated just ahead of it (inside the 5-minute allowance) does not open the gate`, async () => {
+    const w = await latched();
+    clearAt(w, w.now() + 62 * 60e3);
+    set(w, { [field]: 'not a time' });
+    w.tick(60); await w.pass();
+    assert.equal(w.gate().open, false, 'the restart pass never clears');
+  });
+}
+
+test('L375: an earlier run with no stored time reads as that, not as more than 5 days between runs', async () => {
+  const w = setup({ names: NAMES });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  set(w, { run_at: null });
+  w.tick(60); await w.pass();
+  const problems = w.gate().problems.join();
+  assert.match(problems, /the time of the last outside-check run seen can't be read or is in the future/);
+  assert.doesNotMatch(problems, /more than 5 days/);
+});
+
+// L375 m3: the allowance is real here too. A time 30 s ahead is a small clock difference, kept and read as recent.
+test('L375 m3: a stored last-result time 30 s ahead is kept: no latch', async () => {
+  const w = setup({ names: NAMES });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  set(w, { at: new Date(w.now() + 30e3).toISOString() });
+  await w.pass();
+  assert.equal(w.fact().red_since, null);
+  assert.equal(w.gate().open, true, w.gate().problems.join());
+});
+
+test('L375 m3: a stored last-run time 30 s ahead is kept: a new run does not latch', async () => {
+  const w = setup({ names: NAMES });
+  w.setSteps(RM('success')); w.tick(20); await w.pass();
+  w.tick(60); await w.pass();
+  set(w, { run_at: new Date(w.now() + 30e3).toISOString() });
+  w.runs.unshift({ id: 500, created_at: new Date(w.now()).toISOString(), status: 'completed', steps: RM('success') });
+  await w.pass();
+  assert.equal(w.fact().run_id, 500);
+  assert.equal(w.fact().red_since, null);
+  assert.equal(w.gate().open, true, w.gate().problems.join());
+});
+
+test('L375 m3: a newest run time 30 s ahead counts as a run: no "stopped" alert', async () => {
+  const w = setup();
+  w.stop();
+  w.runs.unshift({ id: 99, created_at: new Date(w.now() + 30e3).toISOString(), status: 'completed', steps: [] });
+  await w.pass();
+  assert.equal(w.home.issues.size, 0);
+});
+
+test('L375 m3: a latch start and a last failed-run time 30 s ahead are kept, and neither restarts', async () => {
+  const w = await latched();
+  const ahead = new Date(w.now() + 30e3).toISOString();
+  set(w, { red_since: ahead, last_red_at: ahead });
+  await w.pass();
+  assert.equal(w.fact().red_since, ahead);
+  assert.equal(w.fact().last_red_at, ahead);
+  assert.match(w.fact().latch_reason, /^failed in 2 runs/);
 });

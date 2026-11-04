@@ -551,7 +551,7 @@ test('L335 m-1: writeFrom writes only what changed since the read, over a concur
   assert.deepEqual(rec.read('fact', 'stop-f').doc, { a: 2, told: true, other: 'kept' }, 'a set, gone deleted, the mark and the other field kept');
   assert.equal(writeFrom(rec, 'stop-f', base, { a: 2, told: false }, 'k', { force: ['told'] }).ok, true);
   assert.deepEqual(rec.read('fact', 'stop-f').doc, { a: 2, told: false, other: 'kept' }, 'the forced clear wins over the mark');
-  assert.equal(writeFrom({ ...rec, read: () => { throw new Error('disk gone'); } }, 'stop-f', base, { a: 3 }, 'k').ok, false, 'never throws');
+  assert.throws(() => writeFrom({ ...rec, read: () => { throw new Error('disk gone'); } }, 'stop-f', base, { a: 3 }, 'k'), /disk gone/, 'a failing read fails the step, as a direct write did');
 });
 
 test('L335 M-1: an entry no longer queued when it settles marks nothing (its cause was cleared meanwhile)', async () => {
@@ -582,4 +582,14 @@ test('L354 item 5 (Q3b): a mark write that gives up is answered and leaves a dia
   await sendAlerts(broken, () => true, T0, { sendMs: 50 });
   assert.deepEqual(queue(rec), [], 'the queue settled');
   assert.match(rec.read('fact', `step-error-alert-settle-${e.id}`)?.doc?.text ?? '', /could not be written/);
+});
+
+test('L354 item 6: a give-up note the Record refuses still reaches the log', async () => {
+  const rec = recWith([['fact', 'stop-g', { told_at: null }]]);
+  queueAlert(rec, 'x', { now: T0, mark: mark('stop-g') });
+  const refusing = { ...rec, write: (x) => (x.entity === 'fact' && (x.id === 'stop-g' || String(x.id).startsWith('step-error-alert-settle-')) ? { ok: false, reason: 'refused' } : rec.write(x)) };
+  const lines = [];
+  await sendAlerts(refusing, async () => true, T0, { sendMs: 50, report: (l) => lines.push(l) });
+  assert.equal(lines.length, 1, lines.join(' | '));
+  assert.match(lines[0], /settle gave up .*note was refused \(refused\)/);
 });

@@ -240,6 +240,10 @@ test('an unknown product, and a malformed products list, deny', () => {
   const f = join(dir, 'products.json');
   for (const bad of ['{}', '[{"product":"a"}]', '[{"product":"a","owner":"o","repo":"r"}]',
     '[{"product":"a/../b","owner":"o","repo":"r","joe_github_id":1}]',
+    // L309 Minor 1: a name names a folder: it starts with a letter or digit, and two names differing in case are one.
+    '[{"product":"..","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":".","owner":"o","repo":"r","joe_github_id":1}]',
+    '[{"product":".app","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":"-app","owner":"o","repo":"r","joe_github_id":1}]',
+    '[{"product":"App","owner":"o","repo":"r","joe_github_id":1},{"product":"app","owner":"o","repo":"r2","joe_github_id":1}]',
     '[{"product":"a","owner":"o","repo":"r","joe_github_id":1},{"product":"a","owner":"o","repo":"r","joe_github_id":1}]']) {
     writeFileSync(f, bad);
     assert.throws(() => readProducts(f), bad);

@@ -33,6 +33,7 @@ const notRecord = (file, receiver) => NOT_RECORD_RECEIVERS.some((x) => x.receive
 export const NOT_OBJECT_SITES = Object.freeze([
   { file: 'shared/record.mjs', receiver: 'impl', count: 1, reason: "the Record's front door hands the caller's write to the store, which checks it" },
   { file: 'modules/M6-merge-gate/github-checker.mjs', receiver: 'impl', count: 1, reason: 'the bundled copy of shared/record.mjs' },
+  { file: 'modules/M11-dispatcher/refused-writes.mjs', receiver: 'inner', count: 1, reason: "watchWrites hands each of the tick's own writes to the Record unchanged, only noting a refusal (L323)" },
 ]);
 
 // Other forms of `write` that are not a way round the scan, by file and count (L118 m2). Anything else is a problem.

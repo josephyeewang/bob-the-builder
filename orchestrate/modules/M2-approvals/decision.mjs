@@ -21,7 +21,7 @@ import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { ownerVerdict, requestReview } from './github-review.mjs';
 import { goMarkdown, goView } from './go-view.mjs';
-import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, readConfig } from './kinds.mjs';
+import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, outsideTime, readConfig } from './kinds.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const LETTERS = 'ABCDEFGHIJ';
@@ -92,7 +92,7 @@ export async function openDecision(ctx, id) {
     const pr = await ctx.gh.post(`${base}/pulls`, { title: title(a.doc), head: branch, base: 'main', body });
     const number = pr?.json?.number;
     if (pr?.status !== 201 || !Number.isSafeInteger(number)) return fail(`could not open the pull request (${pr?.status})`);
-    const req = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: number, githubId: cfg.githubId });
+    const req = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: number, githubId: cfg.githubId, now: ctx.now() });
     // The pull request exists either way; its number is kept so it is never opened twice.
     const doc = { ...a.doc, pr: number, file: path };
     if (req.ok) Object.assign(doc, { state: 'pushed', raised_at: req.raised_at, raised_reask: doc.reask_count, first_pushed_at: doc.first_pushed_at ?? iso(ctx.now()) });
@@ -133,7 +133,7 @@ export async function readDecision(ctx, id) {
   if (!v.ok) return v;
   if (v.verdict === 'none') return { ok: true, counted: false, ...(v.line ? { line: v.line } : {}), ...(v.blocked ? { reason: v.blocked } : {}) };
   // An answer given after the ask lapsed counts nothing, even if no pass ran in between (the Mini was down; R-0b-51).
-  if (Date.parse(v.review.submitted_at) >= lapseAt(doc)) return { ok: true, counted: false, lapsed: true };
+  if (Date.parse(v.review.submitted_at) >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };
   const go = doc.kind === 'go_t1';
   let choice; let approves;
   if (v.verdict === 'changes_requested') { choice = go ? 'Not now' : null; approves = false; } else {
@@ -144,7 +144,7 @@ export async function readDecision(ctx, id) {
       approves = true;
     }
   }
-  const binding = { kind: 'github_review', pr: doc.pr, review_id: v.review.id, commit_id: v.review.commit_id, submitted_at: v.review.submitted_at };
+  const binding = { kind: 'github_review', pr: doc.pr, review_id: v.review.id, commit_id: v.review.commit_id, submitted_at: iso(outsideTime(v.review.submitted_at, ctx.now())) };
   const answer = { channel: 'github_review', choice, approves, declined: v.verdict === 'changes_requested', binding, at: iso(ctx.now()) };
   // The one approval check, on the answer as it will be recorded (L81).
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });

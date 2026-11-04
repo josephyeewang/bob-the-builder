@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL } from './phone-link.mjs';
+import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL, FD_RESTART_FACT, FD_STRAY_FACT } from './phone-link.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, T0, MIN, iso, withAlerts, writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 function world({ outcome = 'sent', restartOk = true, minibaseOk = true, alert = null } = {}) {
@@ -270,4 +270,86 @@ test('L354 item 5 (Q4): a save that changes other fields keeps a told mark writt
   const doc = w.rec.read('fact', LINK_FACT).doc;
   assert.equal(doc.told, true, 'the save wrote its pre-read copy over the mark');
   assert.equal(doc.changed_at, iso(T0 + MIN), 'the save itself landed');
+});
+
+// L412 m2: the clock went back after the stamp, so it lies ahead; the retry does not wait for the clock to catch up.
+test('L412 m2 planted: a Front Door restart or Mini Base start stamped ahead is tried again now', async () => {
+  const w = world();
+  w.read(0, { mb: false });
+  await w.step(0);
+  assert.equal(w.calls.minibase, 1);
+  w.read(-30, { mb: false });
+  await w.step(-30);
+  assert.equal(w.calls.minibase, 2);
+  const rec = recWith();
+  let restarts = 0;
+  const step = (min) => {
+    for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc: { value: true, observed_at: iso(T0 + min * MIN) } });
+    return withAlerts(rec, T0 + min * MIN, () => {}, (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), startMinibase: async () => ({ ok: true }),
+      restartFrontDoor: async () => { restarts += 1; return { ok: true }; }, frontDoorAlive: () => false, lastHandoff: () => 'h', alert }));
+  };
+  assert.deepEqual(await step(0), ['Front Door was missing; restarted']);
+  assert.deepEqual(await step(1), ['Front Door missing; restarted recently, waiting'], 'a true stamp still waits');
+  assert.deepEqual(await step(-30), ['Front Door was missing; restarted']);
+  assert.equal(restarts, 2);
+});
+
+// L354: one run of the step on a chosen view of the Record, at minute `min`, its sensors read just now.
+const stepOn = (w, rec, min, more = {}) => {
+  w.read(min, more.reading ?? {});
+  return phoneLinkStep({ rec, rules: rulesWith(), now: T0 + min * MIN, send: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), lastHandoff: () => 'h', alert: fakeAlert(), ...more.ports });
+};
+
+test('L354 items 1, 2: each phone-link clear drops the queued copy first; a refused drop is in the step\'s answer, and held where the step comes back', async () => {
+  const sites = [
+    { fact: FD_RESTART_FACT, kind: 'phone_link', ports: { frontDoorAlive: () => true }, held: true },
+    { fact: FD_RESTART_FACT, kind: 'phone_link', ports: { frontDoorAlive: () => false }, held: true },
+    { fact: FD_STRAY_FACT, kind: 'phone_link', ports: { frontDoorAlive: () => true, strayFrontDoor: async () => ({ ok: true, stopped: [] }) }, held: false },
+    { fact: LINK_FACT, kind: 'phone_link', ports: {}, held: true },
+  ];
+  for (const { fact, kind, ports, held } of sites) {
+    const w = world();
+    queueFor(w.rec, fact, 'told', true, T0);
+    const log = [];
+    await stepOn(w, writeLog(w.rec, log), 0, { ports });
+    assertDropFirst(log, `${kind}:${fact}`);
+    const b = world();
+    queueFor(b.rec, fact, 'told', true, T0);
+    const relog = [];
+    const said = await stepOn(b, writeLog(b.rec, relog, { refuseDrop: true }), 0, { ports });
+    assert.ok(said.some((t) => (held ? /could not be dropped.*next pass/ : /could not be dropped.*anyway/).test(t)), `${fact}: ${said.join(' | ')}`);
+    assert.equal(relog.includes(`${kind}:${fact}`), !held, `${fact}: ${relog.join(' | ')}`);
+  }
+});
+
+test('L354 item 1: the clear moves the fact\'s version even when the read shows no mark, so a mark on its way cannot land on it', async () => {
+  const w = world();
+  await stepOn(w, w.rec, 0, { ports: { frontDoorAlive: () => true } });
+  const one = w.rec.read('fact', FD_RESTART_FACT);
+  assert.equal(one.doc.told, false);
+  await stepOn(w, w.rec, 1, { ports: { frontDoorAlive: () => true } });
+  assert.ok(w.rec.read('fact', FD_RESTART_FACT).rev > one.rev, 'no write, so the mark would have landed at the rev it read');
+});
+
+test('L354 item 6: a save or a note the Record refuses is in the step\'s answer', async () => {
+  const w = world();
+  w.read(0, { fd: 'unknown' });
+  const refuseAll = { ...w.rec, write: (x) => (x.id === LINK_FACT || x.id === 'phone-link-note' ? { ok: false, reason: 'refused' } : w.rec.write(x)) };
+  const said = await phoneLinkStep({ rec: refuseAll, rules: rulesWith(), now: T0, send: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), alert: fakeAlert() });
+  assert.ok(said.some((t) => /could not be saved \(refused\)/.test(t)), said.join(' | '));
+  assert.ok(said.some((t) => /note could not be written \(refused\)/.test(t)), said.join(' | '));
+});
+
+test('L354 item 3: a mark landing as a phone-link clear is written does not outlive the clear', async () => {
+  const w = world();
+  await stepOn(w, w.rec, 0, { ports: { frontDoorAlive: () => true } });
+  await stepOn(w, lateMark(w.rec, 'phone_link', FD_RESTART_FACT, { told: true }), 1, { ports: { frontDoorAlive: () => true } });
+  assert.equal(w.rec.read('fact', FD_RESTART_FACT).doc.told, false);
+});
+
+test('L354 item 2: a clear the Record refuses is in the step\'s answer', async () => {
+  const w = world();
+  const refusing = { ...w.rec, write: (x) => (x.id === FD_RESTART_FACT ? { ok: false, reason: 'refused' } : w.rec.write(x)) };
+  const said = await stepOn(w, refusing, 0, { ports: { frontDoorAlive: () => true } });
+  assert.ok(said.some((t) => t === `${FD_RESTART_FACT} could not be cleared (refused)`), said.join(' | '));
 });

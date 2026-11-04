@@ -160,3 +160,12 @@ test('S4 alerts.mjs: at the untried cap, a new cause-tied entry dropped by its o
   assert.equal(ok, false);
   assert.ok(q.dropped_causes.some((c) => c.key === 'hold-probe:told_at'), 'its drop is counted');
 });
+
+test('L343: a dead card put on the owner whose tell could not keep its since says so in the steps done', () => {
+  const w = world();
+  readyCard(w.E, 'C-1');
+  runCard(w.E, 'C-1');
+  const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+  const r = actOnDead({ rec, rules: w.rules, now: w.E.clock.t, restart: [], asks: ['C-1'], alert: outbox(w.rec, w.E.clock.t) });
+  assert.match(r[0][1], /^waiting on Joe; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(r));
+});

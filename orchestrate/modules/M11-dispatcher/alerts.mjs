@@ -37,21 +37,20 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * the version it reads and again on a conflict, and on each try only what the caller changed (the keys where `doc`
  * differs from `base`, set or removed) goes onto the doc as it is now. Nothing else written: exactly `doc`; something
  * else written meanwhile: its own fields stay. A key in `force` is written as `doc` has it even when `base` had the same
- * (a clear that must win over a mark written after the read). Answers updateFact's answer; never throws.
+ * (a clear that must win over a mark written after the read). Answers updateFact's answer; a read or write that throws fails the step, as a direct write does.
  */
 export function writeFrom(rec, id, base, doc, kind, { force = [] } = {}) {
-  try {
-    const was = base ?? {};
-    const keys = new Set([...Object.keys(was), ...Object.keys(doc), ...force]);
-    return updateFact(rec, id, (cur) => {
-      const next = { ...(cur ?? {}) };
-      for (const k of keys) {
-        if (same(was[k], doc[k]) && !force.includes(k)) continue;
-        if (Object.hasOwn(doc, k)) next[k] = doc[k]; else delete next[k];
-      }
-      return next;
-    }, kind);
-  } catch (e) { return { ok: false, reason: String(e?.message ?? e) }; }
+  const was = base ?? {};
+  const keys = new Set([...Object.keys(was), ...Object.keys(doc), ...force]);
+  return updateFact(rec, id, (cur) => {
+    const next = { ...(cur ?? {}) };
+    for (const k of keys) {
+      if (same(was[k], doc[k]) && !force.includes(k)) continue;
+      if (Object.hasOwn(doc, k)) next[k] = doc[k]; else delete next[k];
+    }
+    // The Record refuses a write that changes nothing; here that is nothing to do.
+    return cur && same(next, cur) ? null : next;
+  }, kind);
 }
 
 export const ALERT_QUEUE_FACT = 'unsent-alerts';
@@ -163,9 +162,30 @@ export function dropCause(rec, fact) {
   } catch { return false; }
 }
 
+/**
+ * The one order where a cause clears (L335 M-1, L354): its queued alert leaves first, then `clear` runs, so no told mark
+ * can land after the clear. A drop that fails is told through `report`. With `hold` (the default, for a step that comes
+ * back to this cause next pass) the clear waits for a drop that works; `hold: false` is for a clear with no next pass,
+ * which goes ahead. A clear that writes told fields forces them (writeFrom): a diff would keep a mark.
+ */
+export function clearCause(rec, fact, clear, report, { hold = true } = {}) {
+  const dropped = dropCause(rec, fact);
+  if (!dropped) report(`the queued alert for ${fact} could not be dropped; ${hold ? 'the clear waits for the next pass' : 'the cause was cleared anyway, so it may still be sent'}`);
+  return dropped || !hold ? clear() : undefined;
+}
+
 /** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */
 export function isQueued(rec, fact) {
   try { return entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((e) => e.mark?.fact === fact); } catch { return false; }
+}
+
+/** The mark facts of the queued alerts whose mark starts with `prefix`, each once: a cause told for the first time has
+ * a queue entry before it has a fact, so a step that clears such causes looks here too (L347 m1). */
+export function queuedMarks(rec, prefix) {
+  try {
+    const ids = entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).map((e) => e.mark?.fact).filter((f) => typeof f === 'string' && f.startsWith(prefix));
+    return [...new Set(ids)];
+  } catch { return []; }
 }
 
 /** The `alert(text, { mark })` every step gets: it queues and returns whether it did; it never sends, waits or throws. */
@@ -286,7 +306,7 @@ const LATE = Symbol('late');
  * steps then changes none of their facts under them (audit 0b-6 r7 M1).
  * Returns { sent, failed, left, settle }; never throws.
  */
-export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budgetMs = ALERT_BUDGET_MS, clock = Date.now, later = false } = {}) {
+export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budgetMs = ALERT_BUDGET_MS, clock = Date.now, later = false, report = (line) => process.stderr.write(`${line}\n`) } = {}) {
   const done = [];
   const inFlight = outFor(rec);
   const settle = () => {
@@ -296,7 +316,10 @@ export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budge
       try { r = settleAlert(rec, e, ok, now, why); } catch (err) { r = { ok: false, reason: String(err?.message ?? err) }; }
       // A settle that gave up is a diary line, never ignored (L335 m-2, L323): the entry may be sent again.
       if (r?.ok === false) {
-        try { note(rec, `step-error-alert-settle-${e.id}` /* the Dispatcher's own family (alert- is the ledger's) */, `alert ${e.id} was ${ok ? 'sent' : 'not sent'}, but its record could not be written (${String(r.reason).slice(0, 300)}); it may be sent again`, { now }); } catch { /* the Record is unwritable: the pass itself fails and tells */ }
+        let noted;
+        try { noted = note(rec, `step-error-alert-settle-${e.id}` /* the Dispatcher's own family (alert- is the ledger's) */, `alert ${e.id} was ${ok ? 'sent' : 'not sent'}, but its record could not be written (${String(r.reason).slice(0, 300)}); it may be sent again`, { now }); } catch (err) { noted = { ok: false, reason: String(err?.message ?? err) }; }
+        // Refused too: the log line is what is left (L354 item 6).
+        if (noted?.ok !== true) report(`alert ${e.id}: the settle gave up (${String(r.reason).slice(0, 300)}) and its note was refused (${noted?.reason ?? 'no answer'})`);
       }
     }
   };
