@@ -1305,6 +1305,7 @@ test('L449: a refused drop in each step that clears reaches the tick\'s reports,
 });
 
 test('L449: main logs each failure report of a tick that ran', async () => {
+  // The channel stays down: the tick's first send would deliver the queued copy, and then no drop is left to refuse.
   const L = installedLayout('m11-main-report-', { dirs: ['wiring'] });
   const self = selfIn(L);
   const wiring = L.path('wiring/wiring.mjs');
@@ -1316,7 +1317,7 @@ const real = recWith([['fact', fact, { error: 'it failed' }]]);
 queueFor(real, fact, 'told_at', 'x', T0);
 export async function wire() {
   const noop = () => [];
-  return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+  return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
