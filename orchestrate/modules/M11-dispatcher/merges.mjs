@@ -21,7 +21,8 @@ import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts } from './review-requests.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts, tellThen, alertText, heldAlerts, isQueued } from './alerts.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
+import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 import { FINAL_STATES } from '../../shared/record.mjs';
 
@@ -34,7 +35,11 @@ export const RECONCILED_FACT = (mergeId) => `reconciled-${mergeId}`;
  * a text with no told_at that is not already queued.
  */
 export const RECONCILE_TELL_FACT = (mergeId) => `merge-reconcile-tell-${mergeId}`;
-/** The note that Joe was told a stopped merge has had no fresh PR reading past its limit (L89), so he is told once. */
+/**
+ * The mark of the alert that a stopped merge has had no fresh PR reading past its limit (L89): { text, at, told_at,
+ * since }. Told at once, then again each day while the merge stays merging with no reading (L342, shared stillWaiting);
+ * cleared when the merge leaves merging or a fresh reading arrives, so a new stretch is told afresh.
+ */
 export const UNREAD_FACT = (mergeId) => `merge-unread-${mergeId}`;
 /** The note that Joe was told a repeat refusal could not be put on him (L116 M-1), once per card per refusal count. */
 export const ASK_REFUSED_FACT = (cardId, refusals) => `merge-ask-refused-${cardId}-${refusals}`;
@@ -65,7 +70,34 @@ function retellReconciles(rec, { alert, now }) {
   return out;
 }
 
-const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
+const fresh = (rec, prNumber, mergeId, now) => prReadingAfter(rec, prNumber, mergeId, now);
+
+// The "no fresh reading" wait ended (L342): a queued copy is dropped and the mark's told_at reset, so the next stretch
+// is told at once. The queued copy goes first (L341), so a copy sent late can't put the mark back after the reset.
+// Cheap when there is nothing to clear. Answers what was refused (L323), or null when all of it went through.
+const UNCLEARED = 'the "no fresh reading" mark could not be cleared';
+function clearUnread(rec, mergeId, now) {
+  const f = UNREAD_FACT(mergeId);
+  if (isQueued(rec, f) && !dropCause(rec, UNREAD_FACT(mergeId))) return `${UNCLEARED}: its queued alert could not be dropped`;
+  const c = rec.read('fact', f);
+  if (c?.doc?.told_at == null) return null;
+  const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: c.rev, doc: { ...c.doc, told_at: null, cleared_at: iso(now) }, kind: 'note' });
+  return w.ok === true ? null : UNCLEARED;
+}
+// Every told or queued "no fresh reading" mark whose merge has left merging, is gone, or has a fresh reading now is
+// cleared. A first tell still in the queue has no fact yet, so the queue is walked too (L347 m1).
+function clearUnreads(rec, now) {
+  const out = [];
+  const told = rec.list('fact').filter((f) => f.id.startsWith(UNREAD_FACT('')) && f.doc?.told_at != null).map((f) => f.id);
+  for (const id of new Set([...told, ...queuedMarks(rec, UNREAD_FACT(''))])) {
+    const mergeId = id.slice(UNREAD_FACT('').length);
+    const m = rec.read('merge', mergeId)?.doc;
+    if (m?.state === 'merging' && !fresh(rec, m.pr, mergeId, now)) continue;
+    const refused = clearUnread(rec, mergeId, now);
+    if (refused) out.push([mergeId, refused]);
+  }
+  return out;
+}
 const LANDED = ['checking', 'merging', 'merged', 'audited_ok', 'audit_flagged'];
 const landedElsewhere = (rec, id, doc) => rec.list('merge').some((m) => m.id !== id && m.doc?.pr === doc.pr && LANDED.includes(m.doc.state));
 // A Sensors reading is proof only from Sensors' own family, made by Sensors (L74 addendum).
@@ -89,6 +121,7 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
+  done.push(...clearUnreads(rec, now));
   // The limits are per-product keys, which the real engine answers only for a named product (L110, the M-1 class):
   // each is read for its card's product, where it is used, once per product per pass (L116 m2). A key the product's
   // rules lack skips only the step that needs it: that entry is listed, untouched, and the key goes back, with the
@@ -175,20 +208,32 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
       if (lim.none) { done.push([id, lim.none]); continue; }
       if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
-      const pr = fresh(rec, doc.pr, id);
+      const pr = fresh(rec, doc.pr, id, now);
       if (!pr) {
         // No reading since the merge's last write, so the outcome is unknown and the merge stays merging (never refused
-        // on no word). Past the merging limit, Joe is told once (L89): the Sensors may not be reading this PR at all.
+        // on no word). Past the merging limit, Joe is told (L89), then again each day while it stays so (L342): the
+        // Sensors may not be reading this PR at all. The merge's last write is read through pastTime (L329): a time that
+        // can't be read or lies in the future counts as past the limit, so it is told, never waited out.
         const lim = limOf(doc.card, 'mergingOpenMaxMin');
         if (lim.none) { done.push([id, `waiting for a fresh PR reading; ${lim.none}`]); continue; }
-        const since = (ms) => (Number.isFinite(ms) ? `${Math.round(ms / 60_000)} min` : 'longer than the merging limit');
-        if (tooLongOpen(rec, id, now, lim.ms) && !rec.read('fact', UNREAD_FACT(id))) {
-          // The note is the alert's mark, written once it is delivered (L127): a queue that refused it is retried next pass.
-          const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${since(ageMs(rec, 'merge', id, now, { since: 'write' }))}; it stays merging until the Sensors read the PR (check that they are running)`;
-          const why = `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`;
-          tellThen(alert, say, { fact: UNREAD_FACT(id), fields: noted(why, now), kind: 'note' });
-        }
-        done.push([id, 'waiting for a fresh PR reading']); continue;
+        const started = rec.meta?.('merge', id)?.ts;
+        const t = pastTime(started, now);
+        const age = t === null ? 'longer than the merging limit' : `${Math.max(0, Math.round((now - t) / 60_000))} min`;
+        const say = `merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} has had no fresh reading for ${age}; it stays merging until the Sensors read the PR (check that they are running, and what GitHub answers for it: a reading counts only with state open or closed and merged true or false). Told again each day while it stays so`;
+        const why = `merge ${id}: no fresh reading of PR ${doc.pr} past the merging limit; the owner was told`;
+        // The note is the alert's mark, written once it is delivered (L127): a queue that refused it is retried next pass.
+        // Both answers are kept (L323): a tell the queue refused is listed as unsent, a clear that was refused as such.
+        let refused = null;
+        const w = stillWaiting({
+          waiting: true, now,
+          since: typeof started === 'string' ? started : undefined,
+          after: { since: started, limit: lim.ms },
+          read: () => rec.read('fact', UNREAD_FACT(id))?.doc ?? null,
+          tell: (fields) => tellThen(alert, say, { fact: UNREAD_FACT(id), fields: { ...noted(why, now), ...fields }, kind: 'note' }),
+          clear: () => { refused = clearUnread(rec, id, now); },
+        });
+        if (refused) done.push([id, refused]);
+        done.push([id, w.did === 'unsent' ? 'waiting for a fresh PR reading; the alert could not be queued, retried next pass' : 'waiting for a fresh PR reading']); continue;
       }
       // Never refused while the outcome is unknown: GitHub may still be finishing the merge (L85 M-1 a). A final answer
       // (merged, or closed and not merged) is settled with no limit read (L116 m2).
@@ -201,9 +246,9 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
       }
       const openTooLong = !final && tooLongOpen(rec, id, now, openMs);
       if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
-      const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
-      // A notice only: the card goes back to be merged again whatever the answer; a lost one is in the list (L130 m3).
-      if (openTooLong && r.ok && r.outcome === 'refused' && alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`) === false) done.push([id, 'not told: the alert could not be queued']);
+      // The refusal carries its note, and M6's step 3b tells it until it is delivered (L357): one way of telling, whoever settled.
+      const note = openTooLong ? { interrupted_note: `pull request #${doc.pr} is still open after ${Math.round(openMs / 60_000)} min, with no merge; recorded as interrupted, and the card goes back to be merged again`, interrupted_told_at: null } : {};
+      const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong, fields: note });
       done.push(...settled(rec, id, r, { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
@@ -213,7 +258,7 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
       // merged: that merge is the PR's record, so this one is neither reconciled nor told (the PR is merged once).
       // MERGED_OUTSIDE_UNTOLD was written on a merged answer whose alert was not taken (L130 M6): it needs no newer reading.
       const untold = (doc.reasons ?? []).includes(MERGED_OUTSIDE_UNTOLD);
-      const pr = untold ? { merged: true } : fresh(rec, doc.pr, id);
+      const pr = untold ? { merged: true } : fresh(rec, doc.pr, id, now);
       if (pr?.merged === true) {
         let text = untold
           ? `merge ${id}: PR ${doc.pr} merged outside the gate, at a head the gate did not judge; check the card and its audit`

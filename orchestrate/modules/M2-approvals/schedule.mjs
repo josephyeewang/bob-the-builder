@@ -27,7 +27,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { toldRecently } from './told.mjs';
+import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
@@ -48,30 +48,34 @@ const fail = (reason, extra = {}) => ({ ok: false, reason, ...extra });
 
 // The config alert goes out once per distinct problem, not every pass (round 2 m2-6), then again each day while that
 // problem stands (L315: no ask is raised while the config is bad, so a once-ever message is a silent hold). The mark
-// is the problem and when it was told, kept only when the sink did not answer false (L130); a throw stops before the
-// write. It goes once the config reads fine. A file that can't be read counts as nothing told.
+// is stillWaiting's, its `since` naming the problem, kept only when the sink did not answer false (L130); a throw stops
+// before the write. It goes once the config reads fine. A file that can't be read counts as nothing told.
 function configAlert(ctx, reason) {
   const file = join(ctx.stateDir, 'config-alert.json');
-  if (reason === null) { rmSync(file, { force: true }); return; }
-  const now = ctx.now?.() ?? Date.now();
-  let last = null;
-  try { last = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null; } catch { last = null; }
-  if (last?.reason === reason && toldRecently(last.at, now)) return;
-  if (ctx.alert({ type: 'approvals_config', reason }) === false) return;
-  mkdirSync(ctx.stateDir, { recursive: true });
-  writeFileSync(`${file}.new`, `${JSON.stringify({ reason, at: now })}\n`, { mode: 0o600 });
-  renameSync(`${file}.new`, file);
+  stillWaiting({
+    waiting: reason !== null,
+    since: reason ?? undefined,
+    now: ctx.now?.() ?? Date.now(),
+    read: () => (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null),
+    tell: (mark) => {
+      if (ctx.alert({ type: 'approvals_config', reason }) === false) return false;
+      mkdirSync(ctx.stateDir, { recursive: true });
+      writeFileSync(`${file}.new`, `${JSON.stringify(mark)}\n`, { mode: 0o600 });
+      renameSync(`${file}.new`, file);
+      return true;
+    },
+    clear: () => rmSync(file, { force: true }),
+  });
 }
 
 // A push that can't go out (no phone channel, GitHub refused, the go can't be shown...) is told once per ask and cause,
 // then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
 // pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
 // Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
-// the alert's type and reason with its numbers out; its mark is when it was told, kept only once the sink took it
+// the alert's type and reason with its numbers out; its mark is stillWaiting's, kept only once the sink took it
 // (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
 // ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
 // stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
-// How long a told time counts: told.mjs (L315, temporary until lane 5's stillWaiting).
 const ASK_ALERTS = 'ask-alerts.json';
 const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
@@ -85,12 +89,19 @@ function askOnce(ctx) {
     alert(ask, e) {
       const key = causeOf(e);
       const told = marks[ask] && typeof marks[ask] === 'object' && !Array.isArray(marks[ask]) ? marks[ask] : {};
-      const at = told[key];
-      if (file && toldRecently(at, now)) return;   // quiet: nothing was sent, so there is no answer
-      // Kept as told only when the sink took it (answered true); a refusal or a throw answers false and marks nothing.
-      try { if (ctx.alert(e) !== true) return false; } catch { return false; }
-      if (file) marks[ask] = Object.fromEntries([...Object.entries(told).filter(([k]) => k !== key), [key, now]].slice(-MAX_WINDOW_MARKS));
-      return true;
+      const said = stillWaiting({
+        waiting: true,
+        now,
+        read: () => (file ? told[key] : null),
+        tell: (mark) => {
+          // Kept as told only when the sink took it (answered true); a refusal or a throw answers false and marks nothing.
+          try { if (ctx.alert(e) !== true) return false; } catch { return false; }
+          if (file) marks[ask] = Object.fromEntries([...Object.entries(told).filter(([k]) => k !== key), [key, mark]].slice(-MAX_WINDOW_MARKS));
+          return true;
+        },
+        clear: () => {},
+      });
+      return said.answer;   // quiet: nothing was sent, so there is no answer
     },
     pushed(ask) { delete marks[ask]; },
     save(waiting) {

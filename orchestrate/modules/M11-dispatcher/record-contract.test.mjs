@@ -231,7 +231,8 @@ test('L85 M-1 contract: an interrupted merge waits while its PR is open, is refu
   read({ state: 'open', merged: false });
   w.env.clock.t += 1000;
   assert.deepEqual(await run(), [['MG-1', 'refused:interrupted'], ['C-1', '->verified']]);
-  assert.equal(alerts.length, 1);
+  assert.deepEqual(alerts, [], 'M6 step 3b tells it from the note (L357)');
+  assert.match(w.rec.read('merge', 'MG-1').doc.interrupted_note, /still open after \d+ min/);
   // GitHub finishes the merge after all: the Merge Gate's reconcile, checked by the real Record.
   w.env.clock.t += MIN;
   read({ state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40) });
@@ -240,7 +241,7 @@ test('L85 M-1 contract: an interrupted merge waits while its PR is open, is refu
   const m = w.rec.read('merge', 'MG-1').doc;
   const c = w.rec.read('card', 'C-1').doc;
   assert.deepEqual([m.state, m.merge_commit, c.state, c.merge_commit], ['merged', 'c'.repeat(40), 'merged', 'c'.repeat(40)]);
-  assert.equal(alerts.length, 1);
+  assert.deepEqual(alerts, [], 'merged after all: nothing to tell');
 });
 
 // ---- L72 (5): the planted cases, on the real Record (and the stand-in where the case is the guard's) ----
