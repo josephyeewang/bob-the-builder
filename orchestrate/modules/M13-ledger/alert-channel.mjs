@@ -17,8 +17,10 @@
 // product's repository: the Record's queue, the store's own alerts and the "Record is locked" issue, each naming the
 // product (L288 MAT-3). A Record whose product document names another product is refused. Bob's own repository is
 // refused: Bob is public, and alerts carry a product's private state.
-// `token` is () → Promise<{ ok, token } | { ok: false, reason }>, built by the robot job from M6 token.mjs
-// mintInstallationToken (L237), asked once per pass. The App needs "Issues: read and write" on each product repo.
+// `token` is () → Promise<{ ok, token, login?, login_reason? } | { ok: false, reason }>, built by the robot job from M6
+// token.mjs mintInstallationToken (L237), asked once per pass. The App needs "Issues: read and write" on each product
+// repo. `login` is how the robot's issues are told from another app's (L399). With none, any bot's counts, and the
+// pass's answer says so.
 //
 // Each queue entry is one issue key (M13 alerts.mjs: one issue per key): a marked entry keys on its mark (product,
 // mark.kind, mark.fact); an unmarked one on a hash of its full text. Every new queue entry notifies (L288 MAT-1): the
@@ -40,7 +42,7 @@
 // once the lock is free. No state file.
 
 import { createHash } from 'node:crypto';
-import { alertKey, makeAlerts, wasTold } from './alerts.mjs';
+import { alertKey, lastLine, lineIs, makeAlerts, wasTold } from './alerts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
@@ -110,16 +112,16 @@ const once = (token) => {
 
 /**
  * A GitHub issues client for one repository, with the contract M13 alerts.mjs uses: open → the issue number, or false;
- * edit, comment, close → true, or false when GitHub refused; isClosed → boolean, or a throw; closedByOwner(n) → true
- * only when GitHub shows someone other than the issue's author (the robot) closed it, false when it can't tell;
- * findOpen(marker) → the number of an open issue a bot wrote whose body holds `marker`, on any page, null when there is
- * none, false when GitHub refused the list or there are too many to read. Only a bot's issue counts, since anyone can
- * open an issue on a public repo and quote the marker; the token can't name the robot's own login, and on this repo a
- * bot is an app the owner installed.
- * latestOwnComment(n, since) → the latest comment since that ISO time by the issue's own author (the robot: a public
- * repo lets anyone comment), as { at, body }; null when there is none; false when GitHub refused a read or there are too
- * many comments to read them all.
- * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell Joe what GitHub said.
+ * edit, close → true, or false when GitHub refused; comment → { at } (GitHub's time for it), or false.
+ * read(n) → { open, body, ours, closedByOwner }, null when the issue is gone (deleted: 410; not found: 404), false when
+ * GitHub refused the read. ours: the robot wrote it. closedByOwner: GitHub shows a person, not the robot and not any app,
+ * closed it. Anyone can open an issue on a public repo and quote a marker, so the robot's own login decides (L399).
+ * findOpen(test) → the number of an open issue of the robot's whose last line passes test, on any page, null when there
+ * is none, false when GitHub refused the list or there are too many to read.
+ * latestOwnComment(n, since) → the robot's latest comment since that ISO time, as { at, body }; null when there is none;
+ * false when GitHub refused a read or there are too many comments to read them all.
+ * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell the owner what GitHub said.
+ * `loginTrouble` says why the robot's login is unknown, in which case any bot counts as the robot; null when it is known.
  * A missing token throws "alert channel not set up: …". Host fixed; the repository is checked once, here.
  */
 export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutMs = 15_000 } = {}) {
@@ -127,12 +129,21 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
   if (bad) throw new Error(`alert channel not set up: ${bad}`);
   if (typeof token !== 'function') throw new Error('alert channel not set up: no token');
   const num = (n) => { if (!ISSUE(n)) throw new Error(`not an issue number: ${JSON.stringify(n)}`); return n; };
-  async function call(method, path, body) {
+  let last = null;
+  let robot = null;
+  let loginTrouble = null;
+  async function bearer() {
     const t = await token();
     if (!t?.ok || typeof t.token !== 'string') throw new Error(`alert channel not set up: ${String(t?.reason ?? 'no token').slice(0, 200)}`);
+    robot = typeof t.login === 'string' && t.login ? t.login : null;
+    loginTrouble = robot ? null : `the robot's own login could not be read (${String(t.login_reason ?? 'none given').slice(0, 200)}), so any bot's issue counted as the robot's this round`;
+    return t.token;
+  }
+  const mine = (user) => (robot ? user?.login === robot : user?.type === 'Bot');
+  async function call(method, path, body) {
     const res = await fetchFn(`https://api.github.com/repos/${repo}${path}`, {
       method,
-      headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${t.token}`, 'x-github-api-version': '2022-11-28', ...(body ? { 'content-type': 'application/json' } : {}) },
+      headers: { accept: 'application/vnd.github+json', authorization: `Bearer ${await bearer()}`, 'x-github-api-version': '2022-11-28', ...(body ? { 'content-type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -141,56 +152,53 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
     last = `GitHub answered ${res.status} to ${method} ${path.split('?')[0]}`;
     return { status: res.status, json };
   }
-  let last = null;
-  async function comment(n, text) { return (await call('POST', `/issues/${num(n)}/comments`, { body: String(text) })).status === 201; }
+  async function comment(n, text) {
+    const r = await call('POST', `/issues/${num(n)}/comments`, { body: String(text) });
+    return r.status === 201 ? { at: r.json?.created_at } : false;
+  }
   return Object.freeze({
     /** What GitHub answered to this client's latest call ("GitHub answered 422 to POST /issues"), or null. */
     get lastAnswer() { return last; },
-    async open({ title, body, assignee }) {
-      const r = await call('POST', '/issues', { title: String(title), body: String(body), ...(assignee ? { assignees: [assignee] } : {}) });
+    get loginTrouble() { return loginTrouble; },
+    async open({ title, body, assignee, labels }) {
+      const r = await call('POST', '/issues', { title: String(title), body: String(body), ...(assignee ? { assignees: [assignee] } : {}), ...(labels?.length ? { labels } : {}) });
       return r.status === 201 && ISSUE(r.json?.number) ? r.json.number : false;
     },
     async edit(n, body) { return (await call('PATCH', `/issues/${num(n)}`, { body: String(body) })).status === 200; },
     comment,
     async close(n, text) {
-      if (!(await comment(n, text))) return false;
+      if ((await comment(n, text)) === false) return false;
       return (await call('PATCH', `/issues/${num(n)}`, { state: 'closed' })).status === 200;
     },
-    // An issue that is gone (deleted: 410; not found: 404) reads as closed, so the next alert opens a new one rather
-    // than failing on it every round (L288 MAT-2 a).
-    async isClosed(n) {
+    async read(n) {
       const r = await call('GET', `/issues/${num(n)}`);
-      if (r.status === 404 || r.status === 410) return true;
-      if (r.status !== 200 || !r.json) throw new Error(`GitHub answered ${r.status} for issue ${n}`);
-      return r.json.state === 'closed';
+      if (r.status === 404 || r.status === 410) return null;
+      if (r.status !== 200 || !r.json) return false;
+      const by = r.json.closed_by;
+      const closed = r.json.state === 'closed';
+      return { open: !closed, body: String(r.json.body ?? ''), ours: mine(r.json.user),
+        closedByOwner: closed && by?.type === 'User' && typeof by.login === 'string' && !mine(by) };
     },
-    async closedByOwner(n) {
-      const r = await call('GET', `/issues/${num(n)}`);
-      const by = r.json?.closed_by?.login;
-      const robot = r.json?.user?.login;
-      return r.status === 200 && typeof by === 'string' && typeof robot === 'string' && by !== robot;
-    },
-    async findOpen(marker) {
+    async findOpen(test) {
+      await bearer();
+      const creator = robot ? `&creator=${encodeURIComponent(robot)}` : '';
       for (let page = 1; page <= ISSUE_PAGES; page++) {
-        const r = await call('GET', `/issues?state=open&per_page=${COMMENT_PAGE}&page=${page}`);
+        const r = await call('GET', `/issues?state=open${creator}&per_page=${COMMENT_PAGE}&page=${page}`);
         if (r.status !== 200 || !Array.isArray(r.json)) return false;
-        const hit = r.json.find((i) => i && !i.pull_request && i.user?.type === 'Bot' && typeof i.body === 'string' && i.body.includes(marker) && ISSUE(i.number));
+        const hit = r.json.find((i) => i && !i.pull_request && mine(i.user) && typeof i.body === 'string' && test(lastLine(i.body)) && ISSUE(i.number));
         if (hit) return hit.number;
         if (r.json.length < COMMENT_PAGE) return null;
       }
-      last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues, too many to look through for this alert's`;
+      last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues to look through for this alert, too many to read`;
       return false;
     },
     async latestOwnComment(n, since) {
-      const issue = await call('GET', `/issues/${num(n)}`);
-      const robot = issue.json?.user?.login;
-      if (issue.status !== 200 || typeof robot !== 'string') return false;
       let latest = null;
       for (let page = 1; page <= COMMENT_PAGES; page++) {
-        const r = await call('GET', `/issues/${n}/comments?since=${encodeURIComponent(since)}&per_page=${COMMENT_PAGE}&page=${page}`);
+        const r = await call('GET', `/issues/${num(n)}/comments?since=${encodeURIComponent(since)}&per_page=${COMMENT_PAGE}&page=${page}`);
         if (r.status !== 200 || !Array.isArray(r.json)) return false;
         for (const c of r.json) {
-          if (c?.user?.login !== robot) continue;
+          if (!mine(c?.user)) continue;
           if (!Number.isFinite(Date.parse(c.created_at))) return false;
           if (!latest || Date.parse(c.created_at) >= Date.parse(latest.at)) latest = { at: c.created_at, body: String(c.body ?? '') };
         }
@@ -233,13 +241,12 @@ async function raiseNews(alerts, key, text, entryId) {
   return r;
 }
 
-// One raise: null when GitHub took it and the Record saved it, else why not, in words Joe can act on (the Record's
-// refusal, GitHub's answer, or the error). A refused save leaves the entry queued: the next round reads GitHub, so it
-// neither comments again within 24 h nor opens a second issue.
+// One raise: null when GitHub took it, else why not, in words the owner can act on (GitHub's answer, or the error). The
+// Record refusing to keep where the issue is costs nothing here: the alert went out.
 async function raiseWhy(alerts, gh, key, text, entryId) {
   try {
     const r = await raiseNews(alerts, key, text, entryId);
-    return TOLD.has(r) ? null : (r?.refused ?? gh?.lastAnswer ?? 'GitHub refused the write');
+    return TOLD.has(r) ? null : (gh?.lastAnswer ?? 'GitHub refused the write');
   } catch (e) { return msg(e); }
 }
 
@@ -278,14 +285,14 @@ async function tellLocked(gh, owner, product, st, ms) {
       : `${product}'s Record has been locked for ${st.ageMin} min by pid ${st.pid}; alerts are queued and not delivered`;
   const marker = lockedMarker(product);
   const body = `${text}\n\n${marker}`;
-  const found = await within(ms, () => gh.findOpen(marker));
+  const found = await within(ms, () => gh.findOpen(lineIs(marker)));
   if (found === false) return 'list refused';
   if (ISSUE(found)) return (await within(ms, () => gh.edit(found, body))) ? 'edited' : 'edit refused';
   return ISSUE(await within(ms, () => gh.open({ title: `${product}'s Record is locked: alerts are not being delivered`, body, assignee: owner }))) ? 'opened' : 'open refused';
 }
 
 async function clearLocked(gh, product, ms) {
-  const found = await within(ms, () => gh.findOpen(lockedMarker(product)));
+  const found = await within(ms, () => gh.findOpen(lineIs(lockedMarker(product))));
   if (!ISSUE(found)) return;
   await within(ms, () => gh.close(found, 'Cleared: the Record is no longer locked, and the queued alerts are being delivered.'));
 }
@@ -372,6 +379,13 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       const why = m.maskSecrets(String(first?.why ?? 'unknown')).text.slice(0, 200);
       out.refused = `${out.failed} alert(s) could not be delivered this round and stay queued for the next; the first, "${t}": ${why}`;
     }
+    // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
+    const plus = [];
+    try {
+      if (await within(sendMs, () => alerts.reportTrouble(target)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
+    } catch (e) { plus.push(`the alert about the Record refusing writes did not go out: ${msg(e)}`); }
+    if (gh?.loginTrouble) plus.push(gh.loginTrouble);
+    if (plus.length) out.refused = [out.refused, ...plus].filter(Boolean).join('; ');
   } catch (e) {
     out.refused = `the alert round failed: ${msg(e)}`;
   }

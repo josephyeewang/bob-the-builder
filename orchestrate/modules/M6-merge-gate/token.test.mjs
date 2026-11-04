@@ -25,10 +25,17 @@ function keyFolder(mode = 0o600) {
 }
 
 // A fake GitHub that checks the signed request the way GitHub would, then answers with `status`.
-function fakeGitHub({ status = 201 } = {}) {
+function fakeGitHub({ status = 201, app = { status: 200, json: { slug: 'robot-app' } } } = {}) {
   const seen = [];
+  const apps = [];
   return {
-    seen,
+    seen, apps,
+    async get(path, headers) {
+      const [h, p, s] = String(/^Bearer (.+)$/.exec(headers?.Authorization ?? '')?.[1]).split('.');
+      apps.push({ path, okSig: verify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(s ?? '', 'base64url')) });
+      if (app instanceof Error) throw app;
+      return app;
+    },
     async post(path, body, headers) {
       const jwt = /^Bearer (.+)$/.exec(headers?.Authorization ?? '')?.[1];
       const [h, p, s] = String(jwt).split('.');
@@ -70,7 +77,8 @@ test('mints a token in memory, and no file in the temp folder holds it afterward
   const { dir, key } = keyFolder();
   const gh = fakeGitHub();
   const r = await mintInstallationToken(args(key, gh));
-  assert.deepEqual(r, { ok: true, token: TOKEN, expires_at: '2026-10-30T13:00:00Z' });
+  assert.deepEqual(r, { ok: true, token: TOKEN, expires_at: '2026-10-30T13:00:00Z', login: 'robot-app[bot]' });
+  assert.deepEqual(gh.apps, [{ path: '/app', okSig: true }], 'the login is read with the signed request');
   assert.equal(gh.seen.length, 1);
   assert.equal(gh.seen[0].path, '/app/installations/678/access_tokens');
   assert.equal(gh.seen[0].okSig, true);
@@ -147,4 +155,24 @@ test('GitHub saying 401, or answering oddly, is no token; a reason never carries
   assert.equal(noClient.ok, false);
   const nothing = await mintInstallationToken();
   assert.equal(nothing.ok, false);
+});
+
+// L399: the login comes with the token, and a mint that can't read it is still a mint, saying why.
+test('L399: a login that can\'t be read never stops the mint, and the reason says why and carries nothing secret', async () => {
+  const { key } = keyFolder();
+  const noLogin = async (app) => {
+    const r = await mintInstallationToken(args(key, fakeGitHub({ app })));
+    assert.deepEqual([r.ok, r.token, r.login], [true, TOKEN, null]);
+    return r.login_reason;
+  };
+  assert.equal(await noLogin({ status: 401, json: {} }), 'GitHub answered 401 to GET /app');
+  assert.equal(await noLogin({ status: 200, json: {} }), 'GitHub gave no App name');
+  assert.equal(await noLogin({ status: 200, json: { slug: 'not a slug' } }), 'GitHub gave no App name');
+  assert.equal(await noLogin({ status: 200, json: { slug: 'x[bot]' } }), 'GitHub gave no App name');
+  assert.equal(await noLogin(null), 'GitHub answered undefined to GET /app');
+  const leak = await noLogin(new Error(`boom ${TOKEN} ${PEM}`));
+  assert.match(leak, /^GET \/app failed: boom/);
+  for (const bad of [TOKEN, 'PRIVATE KEY']) assert.equal(leak.includes(bad), false, bad);
+  const r = await mintInstallationToken(args(key, { post: fakeGitHub().post }));
+  assert.deepEqual([r.ok, r.login, r.login_reason], [true, null, 'this GitHub client cannot read the App']);
 });

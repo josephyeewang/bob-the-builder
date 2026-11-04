@@ -22,6 +22,7 @@ export const dueToTell = (told, nowMs) => {
   return !Number.isFinite(t) || t > nowMs + FUTURE_SKEW_MS || nowMs - t >= RETELL_MS;
 };
 const CLEARED = 'Cleared: the check passes again.';
+const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) ? new Date(Date.parse(at)).toISOString() : stamp);
 // When the bot last commented, if under 24 h ago, read from GitHub, because the told line is what may have been lost.
 // null if not. Only the bot's count: anyone can comment on a public repo. A time ahead of the run reads as the run's own.
 async function spokeLately(api, number, nowMs) {
@@ -54,8 +55,10 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
         const due = dueToTell(toldOf(i.body) ?? sinceOf(i.body), Date.parse(stamp));
         // A told time already on GitHub means no comment went out this run, so this run reports `updated`.
         const spoke = due ? await spokeLately(api, i.number, Date.parse(stamp)) : null;
-        if (due && !spoke) await api('POST', `/issues/${i.number}/comments`, { body: `Still failing since ${sinceOf(i.body) ?? stamp}.` });
-        await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp, due ? (spoke ?? stamp) : toldOf(i.body)) });
+        const sent = due && !spoke ? await api('POST', `/issues/${i.number}/comments`, { body: `Still failing since ${sinceOf(i.body) ?? stamp}.` }) : null;
+        // The told line is GitHub's time for the comment, when that is a past time: the next run compares it with GitHub's.
+        const told = due ? (spoke ?? pastOr(sent?.created_at, stamp)) : toldOf(i.body);
+        await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp, told) });
         done.push([title, due && !spoke ? 'reminded' : 'updated']);
         return;
       }

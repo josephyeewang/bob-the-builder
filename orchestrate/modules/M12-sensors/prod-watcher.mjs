@@ -57,20 +57,28 @@ export function shapeProblems({ deps, live, settings }) {
   return p;
 }
 
-export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence, writer, alerts, product }) {
+export async function watchOnce(pass) {
+  const out = await watch(pass);
+  // The Record refusing alert writes gets its own alert (L402), and either answer shows like any other.
+  const result = await pass.alerts.reportTrouble(pass.product);
+  if (result !== 'none') out.push({ kind: 'alerts', subject: 'record-refusing', result });
+  return out;
+}
+
+async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, alerts, product }) {
   const id = stateFactId(product);
   const prev = writer.get(id);
   const out = [];
-  // Answers whether the alert went out: not when M13 lost it (L143) or the Record refused it (L389). What the pass saves after a raise (a deploy
-  // seen, a setting's baseline) is saved only when it went out, so a lost alert is raised again next pass.
+  // Answers whether the alert went out: not when M13 lost it (L143). What the pass saves after a raise (a deploy seen, a
+  // setting's baseline) is saved only when it went out, so a lost alert is raised again next pass.
   // With no status the body is the cause, which suits a body that's fixed for its key. One that isn't passes a status
   // (L376), or a figure in it would read as a new cause and open a new issue after each close.
   const raise = async (kind, subject, title, body, status) => {
     const result = await alerts.raise({ key: `${product}|${kind}|${subject}`, title: `${product}: ${title}`, body, ...(status ? { status } : {}) });
     out.push({ kind, subject, result });
-    return result !== false && !result?.refused;
+    return result !== false;
   };
-  // A clear the Record refused shows in the pass's answer, as a raise's does. One with nothing to clear does not show.
+  // A clear GitHub lost shows in the pass's answer, as a raise's does. One with nothing to clear does not show.
   const clear = async (kind, subject, note) => {
     const result = await alerts.clear({ key: `${product}|${kind}|${subject}`, note });
     if (result !== 'none') out.push({ kind, subject, result });

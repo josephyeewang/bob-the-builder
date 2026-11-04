@@ -23,13 +23,14 @@
 // Push requests are facts `push-request-<key>` for the Front Door to deliver (join item with lane 2).
 
 import { createHash } from 'node:crypto';
-import { wasTold } from './alerts.mjs';
+import { lineIs, wasTold } from './alerts.mjs';
 import { wasSaved } from '../M12-sensors/facts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const NOT_SAVED = 'alert-not-saved';
+const NOT_TOLD = 'alert-not-told';
 /** The pinned issue's marker: found again by it when the Record never kept its number. */
 export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -43,9 +44,10 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const key = (kind) => `${product}|heartbeat|${kind}`;
   const red = []; const lines = [];
   // A write the Record refused can't go in an alert (alerts are what it refused), so the pinned issue shows it red (L389).
+  const notSaved = (why) => { if (!red.includes(NOT_SAVED)) { red.push(NOT_SAVED); lines.push(`RED   alerts: ${why}`); } };
+  // An alert GitHub lost, so a notice left owed pass after pass shows here on each of them (L402).
   const shown = (answer) => {
-    if (!answer?.refused) return answer;
-    if (!red.includes(NOT_SAVED)) { red.push(NOT_SAVED); lines.push(`RED   alerts: ${answer.refused}`); }
+    if (answer === false && !red.includes(NOT_TOLD)) { red.push(NOT_TOLD); lines.push(`RED   alerts: ${gh.lastAnswer ?? 'GitHub lost an alert'}; the next pass tries again`); }
     return answer;
   };
   const set = async (kind, isRed, line, body) => {
@@ -136,6 +138,10 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     lines.push('ok    usage: unknown');
   }
 
+  const trouble = alerts.cacheTrouble();
+  if (trouble) notSaved(`the Record refused to save where an alert is: ${trouble}`);
+  shown(await alerts.reportTrouble(product));
+
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
     front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,
     login_told: signedIn && told ? acct.login : (toldBefore ?? last), red });
@@ -144,18 +150,18 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const pinned = () => `${render()}${heartbeatMarker(product)}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, pinned());
+  if (ISSUE(known) && (await gh.read(known))?.open) await gh.edit(known, pinned());
   else {
     // The issue is found again by its marker, so a number the Record refused to keep never means a new issue each pass
     // (L393). A list GitHub refused opens nothing this pass: the next one looks again.
-    const found = await gh.findOpen(heartbeatMarker(product));
+    const found = await gh.findOpen(lineIs(heartbeatMarker(product)));
     if (ISSUE(found)) await gh.edit(found, pinned());
     // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
     const issue = found === false || ISSUE(found) ? found : await gh.open({ title: 'Orchestrate heartbeat (pinned)', body: pinned(), assignee: owner, labels: ['orchestrate-heartbeat'] });
     if (ISSUE(issue)) {
       const put = writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
       if (!wasSaved(put)) {
-        shown({ refused: `the Record refused to save the pinned issue's number: ${String(put?.reason ?? 'no reason given').slice(0, 200)}` });
+        notSaved(`the Record refused to save the pinned issue's number: ${String(put?.reason ?? 'no reason given').slice(0, 200)}`);
         await gh.edit(issue, pinned());
       }
     }

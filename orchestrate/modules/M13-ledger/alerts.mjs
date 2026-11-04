@@ -4,151 +4,258 @@
 // WHY. The watcher runs every minute and the heartbeat every 10. A condition left standing (an unsupported deploy still
 // live, a Dispatcher down for an hour) would otherwise open ~60 issues an hour, and that volume can hit GitHub's rate
 // limits on the robot's token, the same token the Merge Gate and Approvals use. So each alert has a stable key
-// (product, kind, subject); the record keeps its state; a repeat only edits the open issue's body (silent); a comment,
-// which notifies, goes out when the condition changes, and again every 24 h while it stands (L315: an open issue is not
-// telling the owner again, so this goes through the shared stillWaiting); the issue closes when the condition clears. If
-// the owner closes it while the same condition still holds, nothing reopens or comments on it: closing it is their
-// answer. That answer covers that cause only (L371): a different status, or the condition coming back after it cleared,
-// opens a new issue, so a close never silences a later problem. Who closed it is read from GitHub, not the Record: the
-// Record can say "open" over the robot's own close when it refused to save that clear (L393).
+// (product, kind, subject); a repeat only edits the open issue's body (silent); a comment, which notifies, goes out when
+// the condition changes, and again every 24 h while it stands (L315: an open issue is not telling the owner again, so
+// this goes through the shared stillWaiting); the issue closes when the condition clears. If the owner closes it while
+// the same condition still holds, nothing reopens or comments on it: closing it is their answer. That answer covers that
+// cause only (L371): a different status, or the condition coming back after it cleared, opens a new issue, so a close
+// never silences a later problem.
 //
 // Every alert is a robot GitHub issue assigned to the owner (login from private config, passed in). No mail, no
 // other channel (design: alerts are only GitHub notices, Actions failure notices or Remote Control pushes).
 //
+// ONE PLACE FOR THE STATE (L401). The issue says what the alert's state is; the Record only says where to look. State in
+// both places meant every Record refusal made GitHub's state read wrong, three audit rounds running. The last line of the
+// issue's body is the footer, written only by the robot and read by a strict pattern, so alert text that quotes one
+// means nothing:
+//   <!-- orch:alert v1 key=<id> status=<hash> since=<iso> told=<iso> cleared=<iso|-> count=<n> owed=<hash|-> owed_at=<iso|-> -->
+// A closed issue with `cleared` set has cleared, so the cause coming back opens a new issue. Whether that line was
+// written before or after the close doesn't matter: the robot's own clear writes it first, and a clear after an owner's
+// close writes it afterwards. A closed issue without it is the owner's answer only if GitHub shows a person other than
+// the robot closed it; a bot, an unreadable close or anything else opens a new issue. Noise, never silence.
+//
+// A notice is three steps, so none of them can lose it or send it twice: an edit sets `owed`, the comment carries that
+// value in a hidden mark, and a second edit moves the footer on and clears `owed`. Until that last edit the footer keeps
+// the old status, so a pass that finds the comment missing sends the same notice again. A pass that finds the mark on the
+// robot's latest comment only finishes the edit. A read or comment that fails answers false and leaves `owed` in place.
+//
+// What the Record caches: the issue's number and whether it has settled (cleared), so a clean pass makes no GitHub call
+// for an old alert. Neither can change a decision: a stale number means a look on GitHub. A refused cache write loses
+// nothing, so raise and clear still give their real answer; it only costs reads, and cacheTrouble reports it.
+//
 // Injected GitHub client for one product repo (a fake in tests):
-//   open({ title, body, assignee }) → number      edit(number, body)      comment(number, text)
-//   close(number, text)                           isClosed(number) → boolean
-//   closedByOwner(number) → true only when GitHub shows someone other than the robot closed it; can't tell → false
-//   findOpen(marker) → the number of an open issue whose body holds marker, null when there is none
+//   open({ title, body, assignee, labels }) → number      edit(number, body)      close(number, text)
+//   comment(number, text) → { at } (GitHub's time for it, when it gives one)
+//   read(number) → { open, body, ours, closedByOwner }, null when the issue is gone, false when GitHub refused the read.
+//     ours: the robot wrote it. closedByOwner: GitHub shows a person other than the robot closed it.
+//   findOpen(test) → the number of a robot's open issue whose last line passes test, null when there is none
 //   latestOwnComment(number, since) → the robot's latest comment since that time, as { at, body }, or null
 // edit, comment and close answer false when GitHub refused them; open answers the new issue's number, anything else is
-// a lost open (L143). findOpen and latestOwnComment answer false when GitHub refused them. A failed findOpen sends
-// nothing, because a second issue never goes away. A failed latestOwnComment sends anyway: that read only matters when
-// the Record has refused, so a comment too many takes both failing, while holding back would lose real alerts.
-//
-// A write the Record refuses (L389). The Record remembers what was told, so a refused write would otherwise mean the
-// same comment or a new issue on every pass. Two things stop that. raise and clear answer a refusal, { refused: reason },
-// and wasTold reads it, so a caller treats it as a lost alert and shows it red. And the limit on what goes out is read
-// from GitHub, because the Record is what refused: no second issue for a key, and no second comment for 24 h. A status
-// change is limited by what it says, not by the clock: the robot's latest comment naming the same status, under 24 h
-// old, means the owner already has it, while a different status still notifies at once.
+// a lost open (L143). findOpen and latestOwnComment answer false when GitHub refused them.
 
 import { createHash } from 'node:crypto';
 import { makeFactWriter, wasSaved } from '../M12-sensors/facts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
-import { pastTime, STILL_WAITING_MS, stillWaiting } from '../../shared/still-waiting.mjs';
+import { pastTime, stillWaiting } from '../../shared/still-waiting.mjs';
 
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
-const idOf = (key) => `alert-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
+const hashOf = (text) => createHash('sha256').update(text).digest('hex').slice(0, 16);
+const idOf = (key) => `alert-${hashOf(key)}`;
 
+/** GitHub refuses a body over 65,536 characters, and the footer has to survive whatever the alert says. */
+const TEXT_MAX = 64_000;
+/** The clocks differ, so a notice's comment is looked for from a little before `owed_at`. */
+const CLOCK_SKEW_MS = 5 * 60_000;
+const NONE = '-';
+const FOOTER = /^<!-- orch:alert v1 key=(alert-[0-9a-f]{16}) status=([0-9a-f]{16}) since=(\S+) told=(\S+) cleared=(\S+) count=(\d+) owed=([0-9a-f]{16}|-) owed_at=(\S+) -->$/;
+const footerOf = (id, f) => `<!-- orch:alert v1 key=${id} status=${f.status} since=${f.since} told=${f.told} cleared=${f.cleared} count=${f.count} owed=${f.owed} owed_at=${f.owed_at} -->`;
+const toldMark = (owed) => `<!-- alert-told ${owed} -->`;
+const owedFor = (id, status, at) => hashOf(`${id}|${status}|${at}`);
+const TAIL = '\n\n---\nfirst seen ';
+
+// The footer before L401. It goes after the first cutover, with oldState below: nothing writes it any more, and an issue
+// is rewritten the first time it is touched.
 const keyMark = (id) => `<!-- alert-key ${id} -->`;
-const statusMark = (status) => `<!-- alert-status ${createHash('sha256').update(status).digest('hex').slice(0, 16)} -->`;
+
+/** A body's last line, the only line a footer or a marker counts on. */
+export const lastLine = (body) => String(body ?? '').trimEnd().split('\n').at(-1).trim();
+
+/** A findOpen test for a fixed marker: the marker has to be the whole last line. */
+export const lineIs = (marker) => (line) => line === marker;
 
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
 
-/** Whether raise's answer means the alert is told and saved: not when GitHub lost it (false), nor when the Record refused it. */
-export const wasTold = (answer) => answer !== false && !answer?.refused;
+/** Whether raise's answer means the alert went out: not when GitHub lost it (false). */
+export const wasTold = (answer) => answer !== false;
+
+// An old-form issue's state, from what the Record held then. A status it doesn't know reads as unchanged: one quiet update.
+function oldState(s, t) {
+  const text = s?.status_text ?? s?.body;
+  return { status: typeof text === 'string' ? hashOf(text) : null, since: s?.since ?? t, told: s?.told_at ?? s?.since ?? t,
+    cleared: s?.status === 'cleared' ? s.cleared ?? t : NONE, count: s?.count ?? 1, owed: NONE, owed_at: NONE, ownerAnswered: s?.status === 'closed-by-owner' };
+}
+
+// The state an issue holds, or null when it belongs to another key. A robot's issue with no footer (edited away by hand)
+// is `lost`: open, it gets one back with one notice; closed, the closer decides.
+function stateOf(body, id, s, t) {
+  const line = lastLine(body);
+  const m = FOOTER.exec(line);
+  if (m) return m[1] === id ? { status: m[2], since: m[3], told: m[4], cleared: m[5], count: Number(m[6]), owed: m[7], owed_at: m[8] } : null;
+  if (line === keyMark(id)) return oldState(s, t);
+  return /^<!-- (orch:alert|alert-key) /.test(line) ? null : { status: null, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE, lost: true };
+}
 
 export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
-  const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n${keyMark(idOf(s.key))}`;
-  // The answer `answer`, once the Record holds the write; a refusal with its reason, in plain words, when it does not.
-  const saved = (id, doc, answer) => {
-    const r = writer.put(id, doc);
-    if (wasSaved(r)) return answer;
-    return { refused: `the Record refused to save this alert's state: ${masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200)}` };
-  };
-  // The robot's latest comment on the issue if it is under 24 h old, otherwise null, also when GitHub refused the read.
-  const spokeLately = async (issue, tMs) => {
-    const last = await gh.latestOwnComment(issue, new Date(tMs - STILL_WAITING_MS).toISOString());
-    return last && tMs - Date.parse(last.at) < STILL_WAITING_MS ? last : null;
+  let trouble = null; // why the Record refused a cache write since the last report
+  let again = false;  // and an earlier write had been refused too
+  let wrote = false;  // a cache write landed
+
+  const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
+  // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
+  const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return p === null ? t : new Date(p).toISOString(); };
+
+  // Keeps where the issue is. `behind`: GitHub already showed the Record out of date, so an earlier write was refused too.
+  const cache = (id, s, key, issue, status, behind) => {
+    if (s?.issue === issue && s?.status === status) return;
+    const r = writer.put(id, { kind: 'fact.alert', key, issue, status });
+    if (wasSaved(r)) { wrote = true; return; }
+    trouble = masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200);
+    again ||= behind;
   };
 
+  const held = async (n, id, s, t) => {
+    const i = await gh.read(n);
+    if (i === false) return false;
+    const f = i?.ours ? stateOf(i.body, id, s, t) : null;
+    return f ? { n, i, f } : null;
+  };
+  // The robot's open issue for this key that the Record doesn't point at.
+  const looked = async (id, s, t) => {
+    const found = await gh.findOpen((line) => FOOTER.exec(line)?.[1] === id || line === keyMark(id));
+    if (found === false) return false;
+    if (!ISSUE(found)) return null;
+    const at = await held(found, id, s, t);
+    return at && !at.i.open ? null : at;
+  };
+
+  // The three steps. `next` is the state to end in, and false means nothing is lost: the next pass finds `owed`.
+  async function notice(n, id, f, next, text, note, t) {
+    let owed = f.owed;
+    if (owed === NONE || owed !== owedFor(id, next.status, f.owed_at)) {
+      owed = owedFor(id, next.status, t);
+      if (await gh.edit(n, bodyOf(id, { ...f, status: f.status ?? next.status, owed, owed_at: t }, text, t)) === false) return false;
+    }
+    const c = await gh.comment(n, `${note}\n\n${toldMark(owed)}`);
+    if (c === false) return false;
+    return await gh.edit(n, bodyOf(id, { ...next, told: toldAt(c?.at, t) }, text, t)) !== false;
+  }
+
   // The condition holds now. Returns what happened: opened | updated | changed | reminded (the 24 h comment) | suppressed
-  // (the owner closed it), false when GitHub lost it (L143), or { refused: reason } when the Record refused the write.
+  // (the owner closed it), or false when GitHub lost it (L143), and then the next pass tries again.
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
   // changing figure ("down 40 minutes") is edited silently (0b-7 audit M-3). Without a status, the body is the status.
   // `note` is the comment's text when the status changes (default "Changed: <first line>"); masked like the body.
   // Title and body are masked before they are compared, stored or posted.
-  // A GitHub call that throws makes raise throw; one that answers false (or an `open` with no issue number) makes raise
-  // answer false. Either way nothing is saved that would stop the next pass trying again: no open alert without an
-  // issue (every later pass would read it as closed by the owner), no new status whose comment was lost. A caller that
-  // keeps something after a raise (a baseline, a login) keeps it only when wasTold says so.
+  // A GitHub call that throws makes raise throw. A caller that keeps something after a raise (a baseline, a login) keeps
+  // it only when wasTold says so.
   async function raise({ key, title: rawTitle, body: rawBody, status: rawStatus, note: rawNote }) {
     const id = idOf(key);
     const title = masker.maskSecrets(rawTitle).text;
     const body = masker.maskSecrets(rawBody).text;
-    const status = rawStatus === undefined ? body : masker.maskSecrets(rawStatus).text;
+    const status = hashOf(rawStatus === undefined ? body : masker.maskSecrets(rawStatus).text);
+    const first = body.split('\n')[0];
     const t = now().toISOString();
     const s = writer.get(id);
-    // An open alert saved without an issue number (before L143) is opened again, not read as closed by the owner.
-    const known = s && (s.status === 'closed-by-owner' || (s.status === 'open' && ISSUE(s.issue)));
-    const closed = known && (s.status === 'closed-by-owner' || await gh.isClosed(s.issue));
-    // The same cause on a closed issue is held back only when the owner closed it. The robot's own close, or one that
-    // can't be read, goes on to a new issue: noise, never silence (L393).
-    if (closed && status === (s.status_text ?? s.body) && (s.status === 'closed-by-owner' || await gh.closedByOwner(s.issue))) {
-      return saved(id, { ...s, kind: 'fact.alert', status: 'closed-by-owner', last: t }, 'suppressed');
+    let at = ISSUE(s?.issue) ? await held(s.issue, id, s, t) : null;
+    if (at === false) return false;
+    if (at && !at.i.open) {
+      const same = at.f.status === null || at.f.status === status;
+      if (at.f.cleared === NONE && same && (at.f.ownerAnswered || at.i.closedByOwner)) return 'suppressed';
+      at = null;
     }
-    if (known && !closed) {
-      const next = { ...s, kind: 'fact.alert', last: t, count: s.count + 1, body, status_text: status };
-      if (await gh.edit(s.issue, bodyOf(next)) === false) return false;
-      if (status !== (s.status_text ?? s.body)) {
-        const note = rawNote === undefined ? `Changed: ${body.split('\n')[0]}` : masker.maskSecrets(rawNote).text;
-        const mark = statusMark(status);
-        const last = await spokeLately(s.issue, Date.parse(t));
-        if (!last?.body?.includes(mark) && await gh.comment(s.issue, `${note}\n\n${mark}`) === false) return false;
-        return saved(id, { ...next, told_at: t }, 'changed');
-      }
-      // Told again every 24 h while it stands (L315). The mark is written only once GitHub took the comment. tell is
-      // async, so its answer is awaited here; a throw reaches raise's caller, as every GitHub call's does. An alert
-      // saved before told_at is dated from when it opened: opening it told the owner. stillWaiting can't see inside an
-      // async tell, so `did` is always 'told' here; only told.answer says what happened.
-      const told = stillWaiting({
-        now: Date.parse(t), waiting: true, clear: () => {},
-        read: () => ({ told_at: s.told_at ?? s.since }),
-        tell: async ({ told_at }) => {
-          const last = await spokeLately(s.issue, Date.parse(t));
-          // GitHub's time, kept only when it is a readable past time: an outside clock never moves told_at ahead.
-          const seen = pastTime(last?.at, Date.parse(t));
-          if (last) return saved(id, { ...next, told_at: seen === null ? told_at : new Date(seen).toISOString() }, 'updated');
-          if (await gh.comment(s.issue, `Still open since ${s.since}: ${body.split('\n')[0]}`) === false) return false;
-          return saved(id, { ...next, told_at }, 'reminded');
-        },
-      });
-      if (told.did !== 'quiet') return told.answer;
-      return saved(id, next, 'updated');
+    if (!at) {
+      at = await looked(id, s, t);
+      if (at === false) return false;
     }
-    const st = { kind: 'fact.alert', key, title, body, status_text: status, status: 'open', since: t, last: t, count: 1, told_at: t };
-    // An open issue for this key whose number the Record never kept is used again, never a second one.
-    const found = await gh.findOpen(keyMark(id));
-    if (found === false) return false;
-    if (ISSUE(found)) {
-      if (await gh.edit(found, bodyOf(st)) === false) return false;
-      return saved(id, { ...st, issue: found }, 'updated');
+    if (!at) {
+      const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
+      if (!ISSUE(issue)) return false;
+      cache(id, s, key, issue, 'open', false);
+      return 'opened';
     }
-    const issue = await gh.open({ title, body: bodyOf(st), assignee: owner });
-    if (!ISSUE(issue)) return false;
-    return saved(id, { ...st, issue }, 'opened');
+    cache(id, s, key, at.n, 'open', true);
+
+    let f = { ...at.f, count: at.f.count + 1 };
+    let owedNow = false;
+    if (f.owed !== NONE) {
+      const last = await gh.latestOwnComment(at.n, new Date(Date.parse(f.owed_at) - CLOCK_SKEW_MS).toISOString());
+      if (last === false) return false;
+      if (last?.body?.includes(toldMark(f.owed))) {
+        const same = f.owed === owedFor(id, status, f.owed_at);
+        f = { ...f, owed: NONE, owed_at: NONE, told: toldAt(last.at, t), ...(same ? { status, cleared: NONE } : {}) };
+      } else owedNow = true;
+    }
+    const back = f.cleared !== NONE;
+    const changed = f.lost || back || (f.status !== null && f.status !== status);
+    const next = { status, since: f.since, told: f.told, cleared: NONE, count: f.count, owed: NONE, owed_at: NONE };
+    const still = `Still open since ${f.since}: ${first}`;
+    const tell = (note, answer) => notice(at.n, id, f, next, body, note, t).then((ok) => (ok ? answer : false));
+    if (changed) return tell(rawNote === undefined ? `${back ? 'Back' : 'Changed'}: ${first}` : masker.maskSecrets(rawNote).text, 'changed');
+    if (owedNow) return tell(still, 'reminded');
+    // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
+    // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
+    const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
+    if (told.did !== 'quiet') return told.answer;
+    return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
   }
 
-  // The condition no longer holds. Closes an open issue with a note; re-arms a owner-closed one. Answers false, and
-  // keeps the alert open so the next pass closes it, when GitHub answers the close false (L143); { refused: reason } when
-  // the Record refused the write. The next clear finds the issue closed and only tries the write again; a raise first
-  // finds the robot closed it, so it is not read as the owner's close.
-  async function clear({ key, note = 'Cleared: the condition no longer holds.' }) {
+  // The condition no longer holds. The footer says so first, then an open issue closes with a note. Answers 'none' with
+  // nothing to clear, and false, with the next pass trying again, when GitHub refused a step (L143). `look` also searches
+  // GitHub when the Record doesn't point at an issue.
+  async function clear({ key, note = 'Cleared: the condition no longer holds.', look = false }) {
     const id = idOf(key);
+    const t = now().toISOString();
     const s = writer.get(id);
-    if (!s || s.status === 'cleared') return 'none';
-    if (s.status === 'open' && ISSUE(s.issue) && !(await gh.isClosed(s.issue)) && await gh.close(s.issue, note) === false) return false;
-    return saved(id, { ...s, kind: 'fact.alert', status: 'cleared', cleared: now().toISOString() }, 'cleared');
+    const pointed = ISSUE(s?.issue) && s.status !== 'cleared';
+    if (!pointed && !look) return 'none';
+    let at = pointed ? await held(s.issue, id, s, t) : null;
+    if (at === false) return false;
+    if (!at && look) {
+      at = await looked(id, s, t);
+      if (at === false) return false;
+    }
+    if (!at) {
+      if (!pointed) return 'none';
+      cache(id, s, key, s.issue, 'cleared', false);
+      return 'cleared';
+    }
+    const settled = at.f.cleared !== NONE;
+    if (!settled) {
+      const old = String(at.i.body ?? '');
+      const cut = old.lastIndexOf(TAIL);
+      const text = cut < 0 ? old : old.slice(0, cut);
+      if (await gh.edit(at.n, bodyOf(id, { ...at.f, status: at.f.status ?? hashOf(text), cleared: t, owed: NONE, owed_at: NONE }, text, t)) === false) return false;
+    }
+    if (at.i.open && await gh.close(at.n, note) === false) return false;
+    cache(id, s, key, at.n, 'cleared', settled && !at.i.open);
+    return 'cleared';
   }
 
-  function state(key) { return writer.get(idOf(key)); }
-  return Object.freeze({ raise, clear, state });
+  /** Why the Record refused to keep where an alert is, since the last report, or null. */
+  const cacheTrouble = () => trouble;
+
+  // Called once at the end of a pass. A Record that refuses twice in a row gets one alert of its own, which needs nothing
+  // from the Record, and it clears once a write lands (L402). The second refusal is read from GitHub showing the Record
+  // behind, not counted: a count would have to be saved in the Record that is refusing. Only a pass where a write landed
+  // looks for that issue, because most passes write nothing.
+  async function reportTrouble(product) {
+    const key = alertKey(product, 'alerts', 'record-refusing');
+    const why = again ? trouble : null;
+    const answer = why === null
+      ? await clear({ key, note: 'The Record is taking alert writes again.', look: wrote })
+      : await raise({ key, title: `${product}: the Record is refusing alert writes`, status: 'refusing',
+        body: `The Record refused to save where this product's alerts are (${why}). Alerts still go out, but each pass has to look them up on GitHub until it takes them.` });
+    // After the alert, so a refusal of its own number isn't carried into the next pass as that pass's trouble.
+    trouble = null; again = false; wrote = false;
+    return answer;
+  }
+
+  return Object.freeze({ raise, clear, cacheTrouble, reportTrouble });
 }
 
-// A fake GitHub issue client that records every call but its two reads (tests, and the owner's dry runs). With no `now`
-// its comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock. close is the
-// robot's and ownerCloses the owner's, as closedByOwner tells them apart.
+// A fake GitHub issue client that records every call but its reads (tests, and the owner's dry runs). With no `now` its
+// comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock. close is the robot's
+// and ownerCloses the owner's.
 export function fakeIssues({ now = null } = {}) {
   const issues = new Map();
   const calls = [];
@@ -157,19 +264,18 @@ export function fakeIssues({ now = null } = {}) {
   let n = 0;
   return {
     calls, issues,
-    async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
+    async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
-    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); },
+    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: now?.().toISOString() }; },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; x.comments.push(text); said(i, text); calls.push(['close', i]); },
-    // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about an issue that was never opened, or about
-    // something that is not an issue number, is a caller's bug, so it throws rather than answering "closed".
-    async isClosed(i) {
-      if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.isClosed: not an issue number: ${JSON.stringify(i)}`);
-      if (!issues.has(i)) throw new Error(`fakeIssues.isClosed: no issue ${i}`);
-      return issues.get(i).closed;
+    // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about something that is not an issue number is a
+    // caller's bug, so it throws rather than answering "gone".
+    async read(i) {
+      if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.read: not an issue number: ${JSON.stringify(i)}`);
+      const x = issues.get(i);
+      return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true } : null;
     },
-    async closedByOwner(i) { return issues.get(i)?.closed === true && issues.get(i).byOwner === true; },
-    async findOpen(marker) { for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
+    async findOpen(test) { for (const [k, x] of issues) if (!x.closed && x.ours !== false && test(lastLine(x.body))) return k; return null; },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
     ownerCloses(i) { const x = issues.get(i); x.closed = true; x.byOwner = true; },
   };

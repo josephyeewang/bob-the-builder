@@ -2,13 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
-import { makeAlerts, alertKey, fakeIssues, wasTold } from './alerts.mjs';
+import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold } from './alerts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
 import { dueToTell as notifyDue, RETELL_MS, FUTURE_SKEW_MS as NOTIFY_SKEW } from './outside-check/notify.mjs';
 
-const idFor = (key) => `alert-${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
+const hashOf = (text) => createHash('sha256').update(text).digest('hex').slice(0, 16);
+const idFor = (key) => `alert-${hashOf(key)}`;
+/** What an issue's footer says. */
+const foot = (gh, n = 1) => Object.fromEntries(/^<!-- orch:alert v1 (.*) -->$/.exec(lastLine(gh.issues.get(n).body))[1].split(' ').map((x) => x.split('=')));
+/** What the Record caches for a key: nothing but where to look. */
+const cached = (rec, key) => makeFactWriter(rec, { actor: 'ledger' }).get(idFor(key));
 
 function setup() {
   let t = Date.parse('2026-11-03T08:00:00Z');
@@ -54,14 +59,59 @@ test('an issue the owner closed while the condition holds is not reopened until 
   assert.equal(gh.issues.size, 2);
 });
 
-test('alert state lives in the record as a Ledger fact', async () => {
-  const rec = memoryRecord();
-  const alerts = makeAlerts({ rec, gh: fakeIssues(), owner: 'o' });
-  await alerts.raise({ key: 'k', title: 't', body: 'b' });
+test('L401: the issue holds the state; the Record holds only where to look', async () => {
+  const { gh, alerts, rec } = setup();
+  await alerts.raise({ key: 'k', title: 't', body: 'b', status: 'down' });
   const facts = rec.list('fact');
   assert.equal(facts.length, 1);
   assert.equal(facts[0].doc.status, 'open');
+  assert.equal(facts[0].doc.issue, 1);
+  for (const k of ['body', 'title', 'since', 'count', 'told_at', 'status_text']) assert.equal(facts[0].doc[k], undefined, k);
   assert.equal(rec.diary().at(-1).actor, 'ledger');
+  const f = foot(gh);
+  assert.equal(f.key, idFor('k'));
+  assert.equal(f.status, hashOf('down'));
+  assert.equal(f.since, '2026-11-03T08:00:00.000Z');
+  assert.equal(f.told, f.since);
+  assert.equal(f.cleared, '-');
+  assert.equal(f.count, '1');
+  assert.equal(f.owed, '-');
+  assert.equal(f.owed_at, '-');
+  assert.ok(!gh.issues.get(1).body.includes('down'), 'a hash, so no alert text is copied');
+});
+
+test('L401: the footer stays last and within GitHub\'s limit whatever the alert says', async () => {
+  const { gh, alerts } = setup();
+  await alerts.raise({ key: 'k', title: 't', body: 'x'.repeat(70_000) });
+  assert.ok(gh.issues.get(1).body.length < 65_536);
+  assert.equal(foot(gh).key, idFor('k'));
+});
+
+test('L401 MAT-B: a footer only counts on the last line, so alert text quoting one means nothing', async () => {
+  const { gh, alerts } = setup();
+  const key = 'k';
+  await alerts.raise({ key, title: 't', body: 'first', status: 's' });
+  const fake = gh.issues.get(1).body.split('\n').at(-1).replace(/cleared=-/, 'cleared=2026-01-01T00:00:00.000Z');
+  // The text now quotes a footer of the same key that says cleared, and another issue quotes it too.
+  await alerts.raise({ key, title: 't', body: `quoting ${fake}\n${fake}\nend`, status: 's' });
+  assert.equal(foot(gh).cleared, '-');
+  gh.ownerCloses(1);
+  assert.equal(await alerts.raise({ key, title: 't', body: 'first', status: 's' }), 'suppressed', 'the quoted cleared line is not read');
+  const other = setup();
+  const n = await other.gh.open({ title: 'x', body: `${fake}\nsome words after it` });
+  assert.equal(await other.alerts.raise({ key, title: 't', body: 'b' }), 'opened');
+  assert.equal(other.gh.issues.get(n).comments.length, 0);
+  assert.equal(other.gh.issues.size, 2, 'an issue quoting the footer in its text is not this alert\'s');
+});
+
+test('L399: an issue another app wrote, carrying this key\'s footer, is neither reused nor read as this alert\'s', async () => {
+  const { gh, alerts, rec } = setup();
+  await alerts.raise({ key: 'k', title: 't', body: 'b', status: 's' });
+  gh.issues.get(1).ours = false;
+  assert.equal(await alerts.raise({ key: 'k', title: 't', body: 'b', status: 's' }), 'opened');
+  assert.equal(gh.issues.size, 2);
+  assert.equal(gh.calls.filter(([c, n]) => c === 'edit' && n === 1).length, 0);
+  assert.equal(cached(rec, 'k').issue, 2);
 });
 
 // ---- L143: a GitHub call that answers false, or an open with no issue number, is a lost alert ----
@@ -82,23 +132,22 @@ test('L143: an open with no issue number answers false and saves nothing; the ne
     const real = fakeIssues();
     const l = lossSetup({ open: async () => lost });
     assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'b' }), false, `open answered ${JSON.stringify(lost)}`);
-    assert.equal(l.alerts.state('k'), null, 'no open alert without an issue');
-    l.gh.open = real.open; l.gh.isClosed = real.isClosed;
+    assert.equal(cached(l.rec, 'k'), null, 'no open alert without an issue');
+    l.gh.open = real.open; l.gh.read = real.read; l.gh.edit = real.edit;
     l.tick(1);
     assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'b' }), 'opened');
-    assert.equal(l.alerts.state('k').issue, 1);
-    assert.equal(l.alerts.state('k').since, '2026-11-03T08:01:00.000Z', 'times are the tick, not the record clock');
+    assert.equal(cached(l.rec, 'k').issue, 1);
+    assert.equal(/since=(\S+)/.exec(real.issues.get(1).body)[1], '2026-11-03T08:01:00.000Z', 'times are the tick, not the record clock');
   }
 });
 
 test('L143: an open alert saved without an issue (before the fix) is opened again, never read as closed by the owner', async () => {
   const l = lossSetup();
-  const id = `alert-${createHash('sha256').update('k').digest('hex').slice(0, 16)}`;
-  l.writer.put(id, { kind: 'fact.alert', key: 'k', title: 't', body: 'b', status_text: 'b', status: 'open', since: 'x', last: 'x', count: 1 });
+  l.writer.put(idFor('k'), { kind: 'fact.alert', key: 'k', title: 't', body: 'b', status_text: 'b', status: 'open', since: '2026-01-01T00:00:00.000Z', last: '2026-01-01T00:00:00.000Z', count: 1 });
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'b' }), 'opened');
   assert.equal(opens(l.gh), 1);
-  assert.equal(l.alerts.state('k').status, 'open');
-  assert.equal(l.alerts.state('k').issue, 1);
+  assert.equal(cached(l.rec, 'k').status, 'open');
+  assert.equal(cached(l.rec, 'k').issue, 1);
 });
 
 test('L143: a change notice whose comment answered false answers false, keeps the old status, and is sent next pass', async () => {
@@ -107,22 +156,27 @@ test('L143: a change notice whose comment answered false answers false, keeps th
   const comment = l.gh.comment;
   l.gh.comment = async () => false;
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'second', status: 's2' }), false);
-  assert.equal(l.alerts.state('k').status_text, 's1');
-  assert.equal(l.alerts.state('k').count, 1, 'the lost pass is not counted');
+  assert.equal(foot(l.gh).status, hashOf('s1'));
+  assert.notEqual(foot(l.gh).owed, '-');
   l.gh.comment = comment;
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'second', status: 's2' }), 'changed');
   assert.deepEqual(l.gh.issues.get(1).comments.map((c) => c.split('\n')[0]), ['Changed: second']);
+  assert.equal(foot(l.gh).owed, '-');
+  assert.equal(foot(l.gh).status, hashOf('s2'));
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'second', status: 's2' }), 'updated', 'sent once, not again');
   assert.equal(l.gh.issues.get(1).comments.length, 1);
 });
 
-test('L143: an edit that answered false answers false and saves nothing', async () => {
+test('L143: an edit that answered false answers false and nothing goes out', async () => {
   const l = lossSetup();
   await l.alerts.raise({ key: 'k', title: 't', body: 'b', status: 's1' });
   l.gh.edit = async () => false;
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'c', status: 's2' }), false);
   assert.equal(l.gh.issues.get(1).comments.length, 0, 'no comment after a lost edit');
-  assert.equal(l.alerts.state('k').status_text, 's1');
+  assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'b', status: 's1' }), false, 'a quiet edit too');
+  assert.equal(await l.alerts.clear({ key: 'k' }), false);
+  assert.equal(l.gh.issues.get(1).closed, false, 'no close after a lost edit');
+  assert.equal(foot(l.gh).status, hashOf('s1'));
 });
 
 test('L143: a close that answered false answers false and keeps the alert open; the next clear closes it', async () => {
@@ -131,33 +185,53 @@ test('L143: a close that answered false answers false and keeps the alert open; 
   const close = l.gh.close;
   l.gh.close = async () => false;
   assert.equal(await l.alerts.clear({ key: 'k' }), false);
-  assert.equal(l.alerts.state('k').status, 'open');
+  assert.equal(cached(l.rec, 'k').status, 'open');
   l.gh.close = close;
   assert.equal(await l.alerts.clear({ key: 'k' }), 'cleared');
   assert.equal(l.gh.issues.get(1).closed, true);
 });
 
 test('L143: every GitHub call that throws makes raise or clear throw and saves nothing', async () => {
-  for (const m of ['open', 'edit', 'comment', 'isClosed', 'close']) {
+  for (const m of ['open', 'edit', 'comment', 'read', 'close']) {
     const l = lossSetup();
     if (m !== 'open') await l.alerts.raise({ key: 'k', title: 't', body: 'b', status: 's1' });
-    const before = l.alerts.state('k');
+    const before = cached(l.rec, 'k');
     l.gh[m] = async () => { throw new Error('github down'); };
     const call = m === 'close' ? l.alerts.clear({ key: 'k' }) : l.alerts.raise({ key: 'k', title: 't', body: 'b', status: 's2' });
     await assert.rejects(call, /github down/, m);
-    assert.deepEqual(l.alerts.state('k'), before, `${m}: nothing saved`);
+    assert.deepEqual(cached(l.rec, 'k'), before, `${m}: nothing saved`);
   }
 });
 
-test('L152 m2: an open alert saved without an issue (before L143) clears without calling GitHub', async () => {
+test('L402: an alert with no issue, and one the Record says has settled, clear without calling GitHub', async () => {
   const calls = [];
-  const no = (name) => async (...a) => { calls.push(name); throw new Error(`${name} called`); };
-  const l = lossSetup({ open: no('open'), edit: no('edit'), comment: no('comment'), close: no('close'), isClosed: no('isClosed') });
-  const id = `alert-${createHash('sha256').update('k').digest('hex').slice(0, 16)}`;
-  l.writer.put(id, { kind: 'fact.alert', key: 'k', title: 't', body: 'b', status_text: 'b', status: 'open', since: 'x', last: 'x', count: 1 });
-  assert.equal(await l.alerts.clear({ key: 'k' }), 'cleared');
+  const no = (name) => async () => { calls.push(name); throw new Error(`${name} called`); };
+  const l = lossSetup({ open: no('open'), edit: no('edit'), comment: no('comment'), close: no('close'), read: no('read'), findOpen: no('findOpen') });
+  l.writer.put(idFor('k'), { kind: 'fact.alert', key: 'k', title: 't', body: 'b', status_text: 'b', status: 'open', since: '2026-01-01T00:00:00.000Z', last: '2026-01-01T00:00:00.000Z', count: 1 });
+  assert.equal(await l.alerts.clear({ key: 'k' }), 'none');
+  assert.equal(await l.alerts.clear({ key: 'never raised' }), 'none');
+  l.writer.put(idFor('settled'), { kind: 'fact.alert', key: 'settled', issue: 3, status: 'cleared' });
+  assert.equal(await l.alerts.clear({ key: 'settled' }), 'none');
   assert.deepEqual(calls, []);
-  assert.equal(l.alerts.state('k').status, 'cleared');
+});
+
+test('L402: a clear finds the issue gone: nothing to do on GitHub, and it settles', async () => {
+  const { gh, alerts, rec } = setup();
+  await alerts.raise({ key: 'k', title: 't', body: 'b' });
+  gh.issues.delete(1);
+  assert.equal(await alerts.clear({ key: 'k' }), 'cleared');
+  assert.equal(cached(rec, 'k').status, 'cleared');
+  assert.deepEqual(gh.calls.filter(([c]) => c === 'close'), []);
+});
+
+test('L402: a clear that can\'t read the issue answers false and does nothing', async () => {
+  const { gh, alerts, rec } = setup();
+  await alerts.raise({ key: 'k', title: 't', body: 'b' });
+  gh.read = async () => false;
+  assert.equal(await alerts.clear({ key: 'k' }), false);
+  assert.equal(await alerts.raise({ key: 'k', title: 't', body: 'b' }), false, 'a raise the same');
+  assert.equal(cached(rec, 'k').status, 'open');
+  assert.equal(gh.issues.get(1).closed, false);
 });
 
 // L315: an open issue assigned to the owner does not count as telling them again. A comment notifies; a body edit doesn't.
@@ -173,7 +247,7 @@ test('L315: a condition that stands is commented on again every 24 h, not more o
   clock.tick(23 * 60);
   assert.equal(await alerts.raise(standing), 'reminded');
   assert.equal(comments(gh), 1, 'told at +25 h');
-  assert.match(gh.issues.get(1).comments[0], /^Still open since 2026-11-03T08:00:00\.000Z: first line$/);
+  assert.match(gh.issues.get(1).comments[0], /^Still open since 2026-11-03T08:00:00\.000Z: first line\n/);
   clock.tick(60);
   assert.equal(await alerts.raise(standing), 'updated');
   assert.equal(comments(gh), 1, 'the 24 h run from the last comment');
@@ -199,27 +273,28 @@ test('L315: a change of status counts as telling, so the 24 h run from it', asyn
   assert.equal(comments(gh), 2);
 });
 
-test('L315: a reminder whose comment answered false answers false, saves nothing, and is sent next pass', async () => {
+test('L315: a reminder whose comment answered false answers false and is sent next pass', async () => {
   const { gh, alerts, clock } = setup();
   await alerts.raise(standing);
   clock.tick(25 * 60);
   const comment = gh.comment;
   gh.comment = async () => false;
   assert.equal(await alerts.raise(standing), false);
-  assert.equal(alerts.state(standing.key).count, 1, 'nothing saved');
   gh.comment = comment;
   clock.tick(1);
   assert.equal(await alerts.raise(standing), 'reminded');
   assert.equal(comments(gh), 1);
 });
 
-test('L315: a reminder whose comment throws makes raise throw and saves nothing', async () => {
+test('L315: a reminder whose comment throws makes raise throw, and the next pass sends it', async () => {
   const { gh, alerts, clock } = setup();
   await alerts.raise(standing);
   clock.tick(25 * 60);
+  const comment = gh.comment;
   gh.comment = async () => { throw new Error('GitHub is down'); };
   await assert.rejects(alerts.raise(standing), /GitHub is down/);
-  assert.equal(alerts.state(standing.key).count, 1);
+  gh.comment = comment;
+  assert.equal(await alerts.raise(standing), 'reminded');
 });
 
 test('L315: an issue the owner closed is not commented on: closing it is their answer', async () => {
@@ -230,28 +305,23 @@ test('L315: an issue the owner closed is not commented on: closing it is their a
   assert.equal(comments(gh), 0);
 });
 
-test('L315: an alert saved before told_at is dated from when it opened; a told_at that cannot be read or is in the future tells now', async () => {
-  for (const [plant, min, want] of [[undefined, 60, 'updated'], [undefined, 25 * 60, 'reminded'], ['not a time', 60, 'reminded'], ['2099-01-01T00:00:00.000Z', 60, 'reminded']]) {
-    const { rec, alerts, clock } = setup();
+test('L315: a told time that cannot be read or is in the future tells now', async () => {
+  for (const [plant, min, want] of [[null, 60, 'updated'], [null, 25 * 60, 'reminded'], ['not-a-time', 60, 'reminded'], ['2099-01-01T00:00:00.000Z', 60, 'reminded']]) {
+    const { gh, alerts, clock } = setup();
     await alerts.raise(standing);
-    const writer = makeFactWriter(rec, { actor: 'ledger', now: clock.now });
-    const { told_at, ...old } = alerts.state(standing.key);
-    assert.ok(told_at, 'opening is telling');
-    writer.put(idFor(standing.key), { ...old, ...(plant === undefined ? {} : { told_at: plant }) });
+    assert.equal(foot(gh).told, '2026-11-03T08:00:00.000Z', 'opening is telling');
+    if (plant) gh.issues.get(1).body = gh.issues.get(1).body.replace(/told=\S+/, `told=${plant}`);
     clock.tick(min);
     assert.equal(await alerts.raise(standing), want, String(plant));
   }
 });
 
-// L371 item 1: the told mark passes the fact allow-list. Without told_at on the alert shape it is dropped on write, and
-// every pass reads as not told: 119 comments in two hours.
-test('L371: the told mark survives the write, so a standing alert is commented on once a day, not every pass', async () => {
+test('L371: a standing alert is commented on once a day, not every pass', async () => {
   const { gh, alerts, clock } = setup();
   await alerts.raise(standing);
-  assert.equal(alerts.state(standing.key).told_at, '2026-11-03T08:00:00.000Z');
   for (let m = 10; m <= 49 * 60; m += 10) { clock.tick(10); await alerts.raise(standing); }
   assert.equal(comments(gh), 2, 'at +24 h and +48 h');
-  assert.equal(alerts.state(standing.key).told_at, '2026-11-05T08:00:00.000Z');
+  assert.equal(foot(gh).told, '2026-11-05T08:00:00.000Z');
 });
 
 // L371 item 2: notify.mjs ships alone into the outside repo, so it keeps a copy of the rule. Same table, same answers.
@@ -272,7 +342,7 @@ test('L371: notify.mjs\'s copy of the 24 h rule answers as the shared rule does'
 
 // L371 item 3: closing an issue answers that cause. A close never silences a later problem.
 test('L371: after the owner closes an issue, a different cause opens a new one, and the same cause stays quiet', async () => {
-  const { gh, alerts, clock } = setup();
+  const { gh, alerts, clock, rec } = setup();
   await alerts.raise(standing);
   gh.ownerCloses(1);
   assert.equal(await alerts.raise(standing), 'suppressed');
@@ -281,8 +351,8 @@ test('L371: after the owner closes an issue, a different cause opens a new one, 
   assert.equal(gh.issues.size, 2);
   assert.equal(gh.issues.get(1).closed, true, 'the closed one stays closed');
   assert.equal(gh.issues.get(2).closed, false);
-  assert.equal(alerts.state(standing.key).issue, 2);
-  assert.equal(alerts.state(standing.key).status, 'open');
+  assert.equal(cached(rec, standing.key).issue, 2);
+  assert.equal(cached(rec, standing.key).status, 'open');
   assert.equal(await alerts.raise({ ...standing, status: 'a different cause' }), 'updated', 'the new issue is the live one');
 });
 
@@ -314,7 +384,7 @@ test('L371: the same cause coming back after it cleared opens a new issue, close
 });
 
 test('L371: opening the new issue when GitHub loses it answers false, and the next pass tries again', async () => {
-  const { gh, alerts } = setup();
+  const { gh, alerts, rec } = setup();
   await alerts.raise(standing);
   gh.ownerCloses(1);
   await alerts.raise(standing);
@@ -322,12 +392,12 @@ test('L371: opening the new issue when GitHub loses it answers false, and the ne
   gh.open = async () => undefined;
   const other = { ...standing, status: 'a different cause' };
   assert.equal(await alerts.raise(other), false);
-  assert.equal(alerts.state(standing.key).status, 'closed-by-owner', 'nothing saved');
+  assert.equal(cached(rec, standing.key).issue, 1, 'nothing saved');
   gh.open = open;
   assert.equal(await alerts.raise(other), 'opened');
 });
 
-// L389 MAT-1: the Record is what remembers what was told, so when it refuses, the limit has to come from GitHub.
+// The Record refusing: it only says where to look, so nothing about what the owner hears may change.
 const writerOf = (rec, clock) => makeFactWriter(rec, { actor: 'ledger', now: clock.now, masker: makeMasker() });
 
 // `refuse` says which writes the Record refuses right now; everything else goes through.
@@ -339,10 +409,9 @@ function refusing() {
   const real = writerOf(rec, clock);
   const world = { refuse: () => false };
   const writer = { get: real.get, put: (id, doc) => (world.refuse(doc) ? { ok: false, reason: 'the store is full' } : real.put(id, doc)) };
-  const alerts = makeAlerts({ rec, gh, owner: 'o', now: clock.now, writer });
-  return { gh, alerts, clock, world };
+  const make = () => makeAlerts({ rec, gh, owner: 'o', now: clock.now, writer });
+  return { gh, alerts: make(), make, clock, world, rec, writer };
 }
-const REFUSED = /the Record refused to save this alert's state: the store is full/;
 const perDay = (at) => { for (let i = 1; i < at.length; i++) assert.ok(at[i] - at[i - 1] >= 24 * 60, `comments at ${at[i - 1]} and ${at[i]} min`); };
 
 // 120 one-minute passes, then to 50 h in 10-minute passes.
@@ -359,7 +428,7 @@ async function overTime({ gh, alerts, clock }, alert) {
   return { at, answers };
 }
 
-test('L389: a refused reminder save: one comment a day over 120 passes and 50 h, and every pass answers the refusal', async () => {
+test('L401: a Record refusing: one comment a day over 120 passes and 50 h, and every pass still counts as told', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
   w.clock.tick(24 * 60);
@@ -368,10 +437,10 @@ test('L389: a refused reminder save: one comment a day over 120 passes and 50 h,
   assert.equal(comments(w.gh), 3, 'due on the first pass, then every 24 h over the next 50 h');
   perDay(at);
   assert.equal(opens(w.gh), 1);
-  for (const a of answers) { assert.equal(wasTold(a), false); assert.match(a.refused, REFUSED); }
+  for (const a of answers) assert.equal(wasTold(a), true);
 });
 
-test('L389: a refused save on a status change: one comment a day, and every pass answers the refusal', async () => {
+test('L401: a Record refusing on a status change: one comment, then the same day-by-day', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
   w.world.refuse = () => true;
@@ -380,56 +449,53 @@ test('L389: a refused save on a status change: one comment a day, and every pass
   assert.equal(comments(w.gh), 3, 'at the first pass, and 24 h and 48 h on');
   perDay(at);
   assert.equal(opens(w.gh), 1);
-  for (const a of answers) assert.match(a.refused, REFUSED);
+  assert.equal(answers[0], 'changed');
+  for (const a of answers) assert.equal(wasTold(a), true);
 });
 
-test('L389: a refused save on opening: one issue over 120 passes and 50 h, no comments, and every pass answers the refusal', async () => {
+test('L401: a Record refusing from the start: one issue over 120 passes and 50 h, and it is told', async () => {
   const w = refusing();
   w.world.refuse = () => true;
   const { answers } = await overTime(w, () => standing);
   assert.equal(opens(w.gh), 1);
-  assert.equal(comments(w.gh), 0);
-  for (const a of answers) assert.match(a.refused, REFUSED);
+  assert.equal(comments(w.gh), 2, 'the first opened it; then the daily reminders');
+  assert.equal(answers[0], 'opened');
+  for (const a of answers) assert.equal(wasTold(a), true);
 });
 
-test('L389: once the Record takes writes again, the alert goes on from the issue GitHub already holds', async () => {
+test('L401: once the Record takes writes again, the alert goes on from the issue GitHub already holds', async () => {
   const w = refusing();
   w.world.refuse = () => true;
   await w.alerts.raise(standing);
   w.world.refuse = () => false;
   w.clock.tick(10);
   assert.equal(await w.alerts.raise(standing), 'updated');
-  assert.equal(w.alerts.state(standing.key).issue, 1);
+  assert.equal(cached(w.rec, standing.key).issue, 1);
   assert.equal(opens(w.gh), 1);
   w.clock.tick(10);
   assert.equal(await w.alerts.raise(standing), 'updated');
 });
 
-test('L389: a save lost after the reminder went out is made good next pass, and the next reminder runs from that comment', async () => {
+test('L401: told is GitHub\'s time for the comment, so the next 24 h run from it', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
   w.clock.tick(24 * 60);
-  w.world.refuse = () => true;
-  assert.ok((await w.alerts.raise(standing)).refused);
-  w.world.refuse = () => false;
-  w.clock.tick(60);
-  assert.equal(await w.alerts.raise(standing), 'updated');
-  assert.equal(w.alerts.state(standing.key).told_at, '2026-11-04T08:00:00.000Z', 'GitHub\'s comment time, not this pass');
-  assert.equal(comments(w.gh), 1);
-  w.clock.tick(23 * 60);
+  const comment = w.gh.comment;
+  w.gh.comment = async (...a) => { await comment(...a); return { at: '2026-11-04T07:59:00.000Z' }; };
   assert.equal(await w.alerts.raise(standing), 'reminded');
+  assert.equal(foot(w.gh).told, '2026-11-04T07:59:00.000Z');
 });
 
-test('L389: a comment time from the future never moves told_at ahead', async () => {
-  const w = refusing();
-  await w.alerts.raise(standing);
-  const first = w.alerts.state(standing.key).told_at;
-  w.clock.tick(25 * 60);
-  const ahead = '2026-11-20T00:00:00.000Z';
-  w.gh.latestOwnComment = async () => ({ at: ahead, body: '' });
-  assert.equal(await w.alerts.raise(standing), 'updated');
-  assert.notEqual(w.alerts.state(standing.key).told_at, ahead);
-  assert.notEqual(w.alerts.state(standing.key).told_at, first);
+test('L401: a comment time from the future, or none, never moves told ahead of this pass', async () => {
+  for (const at of ['2026-11-20T00:00:00.000Z', undefined, 'garbage']) {
+    const w = refusing();
+    await w.alerts.raise(standing);
+    w.clock.tick(25 * 60);
+    const comment = w.gh.comment;
+    w.gh.comment = async (...a) => { await comment(...a); return { at }; };
+    assert.equal(await w.alerts.raise(standing), 'reminded');
+    assert.equal(foot(w.gh).told, '2026-11-04T09:00:00.000Z', String(at));
+  }
 });
 
 test('L389: a new status still notifies at once; only the same status is held back', async () => {
@@ -439,37 +505,34 @@ test('L389: a new status still notifies at once; only the same status is held ba
   assert.equal(comments(gh), 4);
 });
 
-test('L389: suppressed, updated and cleared each answer a refused save', async () => {
+test('L401: suppressed, updated and cleared keep their answers with the Record refusing, and it says why', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
+  assert.equal(w.alerts.cacheTrouble(), null);
   w.world.refuse = () => true;
   w.clock.tick(10);
-  assert.match((await w.alerts.raise(standing)).refused, REFUSED);
-  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(w.alerts.cacheTrouble(), null, 'nothing to keep, so nothing refused');
+  assert.equal(await w.alerts.clear({ key: standing.key }), 'cleared');
+  assert.match(w.alerts.cacheTrouble(), /the store is full/);
   assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 1);
-  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
-  assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 1, 'the second try only writes again');
+  assert.equal(await w.alerts.clear({ key: standing.key }), 'cleared');
+  assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 1, 'the second try closes nothing');
   const x = refusing();
   await x.alerts.raise(standing);
   x.gh.ownerCloses(1);
   x.world.refuse = () => true;
-  assert.match((await x.alerts.raise(standing)).refused, REFUSED);
+  assert.equal(await x.alerts.raise(standing), 'suppressed');
   assert.equal(opens(x.gh), 1);
 });
 
-// L393 m1: that read only matters once the Record has refused, so holding back on it would lose real alerts.
-test('L393: a comment read GitHub refuses still sends; a refused issue list sends nothing', async () => {
-  const w = refusing();
-  await w.alerts.raise(standing);
-  w.clock.tick(24 * 60);
-  w.gh.latestOwnComment = async () => false;
-  assert.equal(await w.alerts.raise(standing), 'reminded');
-  assert.equal(await w.alerts.raise({ ...standing, status: 'other cause' }), 'changed');
-  assert.equal(comments(w.gh), 2);
+test('L393: a refused issue list sends nothing', async () => {
   const y = refusing();
   y.gh.findOpen = async () => false;
   assert.equal(await y.alerts.raise(standing), false);
   assert.equal(opens(y.gh), 0);
+  await y.gh.open({ title: 't', body: 'x' });
+  assert.equal(await y.alerts.clear({ key: standing.key, look: true }), false);
 });
 
 // L393 MAT-A: a clear the Record refused leaves it saying "open" over the robot's own close.
@@ -477,11 +540,11 @@ test('L393: a refused clear, then the cause comes back: a new issue, never suppr
   const w = refusing();
   await w.alerts.raise(standing);
   w.world.refuse = () => true;
-  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
+  await w.alerts.clear({ key: standing.key });
   w.world.refuse = () => false;
   w.clock.tick(10);
   assert.equal(await w.alerts.raise(standing), 'opened');
-  assert.equal(w.alerts.state(standing.key).issue, 2);
+  assert.equal(cached(w.rec, standing.key).issue, 2);
   for (let i = 0; i < 5; i++) { w.clock.tick(25 * 60); assert.notEqual(await w.alerts.raise(standing), 'suppressed'); }
   assert.equal(opens(w.gh), 2);
 });
@@ -491,33 +554,278 @@ test('L393: the same, with the Record still refusing when it comes back: one new
   await w.alerts.raise(standing);
   w.world.refuse = () => true;
   await w.alerts.clear({ key: standing.key });
-  for (let i = 0; i < 6; i++) { w.clock.tick(10); assert.match((await w.alerts.raise(standing)).refused, REFUSED); }
+  for (let i = 0; i < 6; i++) { w.clock.tick(10); assert.notEqual(await w.alerts.raise(standing), false); }
   assert.equal(opens(w.gh), 2);
   w.world.refuse = () => false;
   w.clock.tick(10);
   assert.equal(await w.alerts.raise(standing), 'updated');
-  assert.equal(w.alerts.state(standing.key).issue, 2);
+  assert.equal(cached(w.rec, standing.key).issue, 2);
   assert.equal(opens(w.gh), 2);
 });
 
-test('L393: a close only GitHub can name decides: the owner\'s holds, one it can\'t read opens anew', async () => {
+test('L402 MAT-A2: the owner closes, it clears with the Record refusing, and it comes back: the footer says cleared, so a new issue', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
   w.gh.ownerCloses(1);
-  w.clock.tick(10);
-  assert.equal(await w.alerts.raise(standing), 'suppressed');
-  w.gh.closedByOwner = async () => assert.fail('a saved owner\'s close is not read again');
-  w.clock.tick(10);
-  assert.equal(await w.alerts.raise(standing), 'suppressed');
+  w.world.refuse = () => true;
+  assert.equal(await w.alerts.clear({ key: standing.key }), 'cleared');
+  assert.notEqual(foot(w.gh).cleared, '-');
+  assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 0, 'it was closed already');
+  assert.equal(comments(w.gh), 0, 'the edit is silent');
+  assert.equal(cached(w.rec, standing.key).status, 'open', 'the Record never heard');
+  assert.equal(await w.alerts.raise(standing), 'opened');
+});
+
+test('L402: a closed issue keeps only a person\'s answer: a bot\'s close or an unreadable one opens anew', async () => {
   const y = refusing();
   await y.alerts.raise(standing);
   y.gh.ownerCloses(1);
-  y.gh.closedByOwner = async () => false;
+  y.gh.issues.get(1).byOwner = false; // the client says no person closed it: a bot, or GitHub doesn't say
   y.clock.tick(10);
   assert.equal(await y.alerts.raise(standing), 'opened');
 });
 
-// L389 m2: with a status, the status alone is the cause, on a closed issue and an open one.
+test('L402: an issue reopened after a clear is told once as back, and the footer loses cleared', async () => {
+  const { gh, alerts, clock } = setup();
+  await alerts.raise(standing);
+  await alerts.clear({ key: standing.key });
+  gh.issues.get(1).closed = false;
+  clock.tick(10);
+  assert.equal(await alerts.raise(standing), 'changed');
+  assert.equal(gh.issues.size, 1);
+  assert.match(gh.issues.get(1).comments.at(-1), /^Back: first line/);
+  assert.equal(foot(gh).cleared, '-');
+  clock.tick(10);
+  assert.equal(await alerts.raise(standing), 'updated');
+});
+
+test('L402: a close that failed leaves cleared on an open issue, and the condition returning is told as back', async () => {
+  const { gh, alerts, clock } = setup();
+  await alerts.raise(standing);
+  const close = gh.close;
+  gh.close = async () => false;
+  assert.equal(await alerts.clear({ key: standing.key }), false);
+  gh.close = close;
+  assert.notEqual(foot(gh).cleared, '-');
+  clock.tick(1);
+  assert.equal(await alerts.clear({ key: standing.key }), 'cleared');
+  assert.equal(gh.issues.get(1).closed, true);
+  const y = setup();
+  await y.alerts.raise(standing);
+  y.gh.close = async () => false;
+  await y.alerts.clear({ key: standing.key });
+  assert.equal(await y.alerts.raise(standing), 'changed');
+  assert.equal(y.gh.issues.size, 1);
+});
+
+test('L402: a clear keeps the alert\'s own text, also when that text looks like the footer\'s rule line', async () => {
+  const { gh, alerts } = setup();
+  const body = 'above\n\n---\nfirst seen by me\nbelow';
+  await alerts.raise({ key: 'k', title: 't', body });
+  await alerts.clear({ key: 'k' });
+  assert.ok(gh.issues.get(1).body.startsWith(`${body}\n\n---\nfirst seen 2026`));
+});
+
+// ---- The notice is three steps (L402): each one failing, then the next pass ----
+
+function failsLastEdit(w) {
+  const edit = w.gh.edit;
+  let n = 0;
+  w.gh.edit = async (...a) => { n += 1; return n === 2 ? false : edit(...a); };
+  return () => { w.gh.edit = edit; };
+}
+
+test('L402 owed: the last edit fails: the comment is not sent twice, and the next pass only finishes the edit', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(1);
+  const heal = failsLastEdit(w);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), false);
+  heal();
+  assert.equal(comments(w.gh), 1);
+  assert.notEqual(foot(w.gh).owed, '-');
+  w.clock.tick(1);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), 'updated');
+  assert.equal(comments(w.gh), 1, 'the mark on the robot\'s comment says it went out');
+  assert.equal(foot(w.gh).owed, '-');
+  assert.equal(foot(w.gh).status, hashOf('worse'));
+  assert.equal(foot(w.gh).told, '2026-11-03T08:01:00.000Z', 'the comment\'s time');
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), 'updated');
+  assert.equal(comments(w.gh), 1);
+});
+
+test('L402 owed: a reminder the same way: the 24 h run from the comment that went out', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(24 * 60);
+  const heal = failsLastEdit(w);
+  assert.equal(await w.alerts.raise(standing), false);
+  heal();
+  w.clock.tick(60);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(comments(w.gh), 1);
+  assert.equal(foot(w.gh).told, '2026-11-04T08:00:00.000Z');
+  w.clock.tick(23 * 60);
+  assert.equal(await w.alerts.raise(standing), 'reminded');
+});
+
+test('L402 owed: the status moves on after the comment went out: the new status is told too', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(1);
+  const heal = failsLastEdit(w);
+  await w.alerts.raise({ ...standing, status: 'worse' });
+  heal();
+  w.clock.tick(1);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worst' }), 'changed');
+  assert.equal(comments(w.gh), 2);
+  assert.equal(foot(w.gh).status, hashOf('worst'));
+  assert.equal(foot(w.gh).owed, '-');
+});
+
+test('L402 owed: the comment never went out, and the status moved on: one notice, of the new status', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  const comment = w.gh.comment;
+  w.gh.comment = async () => false;
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), false);
+  w.gh.comment = comment;
+  w.clock.tick(1);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worst' }), 'changed');
+  assert.equal(comments(w.gh), 1);
+  assert.equal(foot(w.gh).status, hashOf('worst'));
+  assert.equal(foot(w.gh).owed, '-');
+});
+
+test('L402 owed: when the read of the comments fails nothing is sent, and owed stays for the next pass', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(1);
+  const heal = failsLastEdit(w);
+  await w.alerts.raise({ ...standing, status: 'worse' });
+  heal();
+  const read = w.gh.latestOwnComment;
+  w.gh.latestOwnComment = async () => false;
+  for (let i = 0; i < 3; i++) { w.clock.tick(1); assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), false); }
+  assert.equal(comments(w.gh), 1);
+  assert.notEqual(foot(w.gh).owed, '-');
+  w.gh.latestOwnComment = read;
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), 'updated');
+  assert.equal(comments(w.gh), 1);
+});
+
+test('L402 owed: a mark on an older comment, under a newer comment of the robot\'s, reads as not found: one more notice, never silence', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(1);
+  const heal = failsLastEdit(w);
+  await w.alerts.raise({ ...standing, status: 'worse' });
+  heal();
+  await w.gh.comment(1, 'some later robot comment');
+  w.clock.tick(1);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'worse' }), 'changed');
+});
+
+// ---- Today's issues (L402). The old form goes after the first cutover, and these tests with it. ----
+
+function oldIssue({ record, closed = false, byOwner = false, body = 'old text' } = {}) {
+  const w = refusing();
+  const id = idFor(standing.key);
+  w.gh.open({ title: 't', body: `${body}\n\n---\nfirst seen 2026-11-01T00:00:00.000Z · last seen x · seen 4 times\n<!-- alert-key ${id} -->` });
+  Object.assign(w.gh.issues.get(1), { closed, byOwner });
+  w.gh.calls.length = 0;
+  if (record) w.writer.put(id, { kind: 'fact.alert', key: standing.key, issue: 1, ...record });
+  return w;
+}
+const oldOpen = { status: 'open', status_text: standing.status, title: 't', body: 'old', since: '2026-11-01T00:00:00.000Z', last: '2026-11-01T00:00:00.000Z', told_at: '2026-11-03T07:00:00.000Z', count: 4 };
+
+test('L402 old issues: the Record knows it: status and told come from there, and the next write makes it v1', async () => {
+  const w = oldIssue({ record: oldOpen });
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(comments(w.gh), 0);
+  const f = foot(w.gh);
+  assert.equal(f.status, hashOf(standing.status));
+  assert.equal(f.told, '2026-11-03T07:00:00.000Z');
+  assert.equal(f.since, '2026-11-01T00:00:00.000Z');
+  assert.equal(f.count, '5');
+});
+
+test('L402 old issues: the Record knows it and the status moved: told once', async () => {
+  const w = oldIssue({ record: oldOpen });
+  assert.equal(await w.alerts.raise({ ...standing, status: 'other' }), 'changed');
+  assert.equal(comments(w.gh), 1);
+});
+
+test('L402 old issues: the Record has no row: found by its old marker, one quiet update, no notice', async () => {
+  const w = oldIssue();
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(comments(w.gh), 0);
+  assert.equal(opens(w.gh), 0);
+  assert.equal(foot(w.gh).told, '2026-11-03T08:00:00.000Z');
+  assert.equal(foot(w.gh).status, hashOf(standing.status));
+});
+
+test('L402 old issues: closed, and the Record says cleared: it is honoured, so a new issue', async () => {
+  const w = oldIssue({ record: { ...oldOpen, status: 'cleared', cleared: '2026-11-02T00:00:00.000Z' }, closed: true });
+  assert.equal(await w.alerts.raise(standing), 'opened');
+  assert.equal(w.gh.issues.size, 2);
+});
+
+test('L402 old issues: closed, and the Record says the owner closed it: honoured, so quiet, for that cause only', async () => {
+  const w = oldIssue({ record: { ...oldOpen, status: 'closed-by-owner' }, closed: true });
+  assert.equal(await w.alerts.raise(standing), 'suppressed');
+  assert.equal(await w.alerts.raise({ ...standing, status: 'other' }), 'opened');
+});
+
+test('L402 old issues: closed, and the Record says only open: the closer decides', async () => {
+  const owner = oldIssue({ record: oldOpen, closed: true, byOwner: true });
+  assert.equal(await owner.alerts.raise(standing), 'suppressed');
+  const robot = oldIssue({ record: oldOpen, closed: true, byOwner: false });
+  assert.equal(await robot.alerts.raise(standing), 'opened');
+});
+
+test('L402 old issues: a clear rewrites it as cleared, keeping its text', async () => {
+  const w = oldIssue({ record: oldOpen });
+  assert.equal(await w.alerts.clear({ key: standing.key }), 'cleared');
+  assert.notEqual(foot(w.gh).cleared, '-');
+  assert.ok(w.gh.issues.get(1).body.startsWith('old text\n\n---\nfirst seen 2026-11-01'));
+  assert.equal(w.gh.issues.get(1).closed, true);
+});
+
+test('L402: a footer deleted by hand: an open issue gets it back with one notice; a closed one follows the closer rule', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.gh.issues.get(1).body = 'the owner tidied this up';
+  assert.equal(await w.alerts.raise(standing), 'changed');
+  assert.equal(comments(w.gh), 1);
+  assert.equal(foot(w.gh).status, hashOf(standing.status));
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  const o = refusing();
+  await o.alerts.raise(standing);
+  o.gh.issues.get(1).body = 'tidied';
+  o.gh.ownerCloses(1);
+  assert.equal(await o.alerts.raise(standing), 'suppressed');
+  const r = refusing();
+  await r.alerts.raise(standing);
+  r.gh.issues.get(1).body = 'tidied';
+  r.gh.issues.get(1).closed = true;
+  assert.equal(await r.alerts.raise(standing), 'opened');
+});
+
+test('L402: a stale number, or another key\'s footer under it, means a look on GitHub, never a wrong edit', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  await w.alerts.raise({ ...standing, key: 'other key' });
+  w.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 2, status: 'open' });
+  const edits = w.gh.calls.length;
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.deepEqual(w.gh.calls.slice(edits), [['edit', 1]]);
+  assert.equal(cached(w.rec, standing.key).issue, 1);
+  w.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 99, status: 'open' });
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(cached(w.rec, standing.key).issue, 1);
+});
+
 test('L389: once a status is passed, a body change is never a new cause', async () => {
   const { gh, alerts, clock } = setup();
   const red = (m) => ({ key: standing.key, title: 't', body: `down ${m} minutes`, status: 'red' });
@@ -529,4 +837,65 @@ test('L389: once a status is passed, a body change is never a new cause', async 
   for (const m of [21, 31, 41]) { clock.tick(10); assert.equal(await alerts.raise(red(m)), 'suppressed'); }
   assert.equal(opens(gh), 1);
   assert.equal(comments(gh), 0);
+});
+
+// ---- cacheTrouble (L402): the Record refusing on two passes running gets one alert of its own ----
+
+const troubleIssues = (gh) => [...gh.issues.values()].filter((i) => /refusing alert writes/.test(i.title));
+
+test('L402 cacheTrouble: one refusal raises nothing; the second pass raises one alert; it clears once a write lands', async () => {
+  const w = refusing();
+  w.world.refuse = () => true;
+  // Each pass makes its own alerts, as the channel does: nothing is counted in memory.
+  let a = w.make();
+  assert.equal(await a.raise(standing), 'opened');
+  assert.match(a.cacheTrouble(), /the store is full/);
+  assert.equal(await a.reportTrouble('p'), 'none');
+  assert.equal(troubleIssues(w.gh).length, 0, 'one refusal may be nothing');
+  assert.equal(a.cacheTrouble(), null, 'reported');
+  for (let i = 0; i < 3; i++) {
+    w.clock.tick(10);
+    a = w.make();
+    await a.raise(standing);
+    await a.reportTrouble('p');
+  }
+  assert.equal(troubleIssues(w.gh).length, 1, 'one alert however long it lasts');
+  const issue = troubleIssues(w.gh)[0];
+  assert.equal(issue.closed, false);
+  assert.match(issue.body, /the store is full/);
+  assert.equal(comments(w.gh), 0);
+  w.world.refuse = () => false;
+  w.clock.tick(10);
+  a = w.make();
+  await a.raise(standing);
+  assert.equal(await a.reportTrouble('p'), 'cleared');
+  assert.equal(issue.closed, true);
+  assert.match(issue.comments.at(-1), /taking alert writes again/);
+});
+
+test('L402 cacheTrouble: a clean pass makes no GitHub call for it', async () => {
+  const { gh, alerts } = setup();
+  await alerts.raise(standing);
+  await alerts.reportTrouble('p'); // the pass that opened it: a write landed, so this one looks
+  const seen = gh.calls.length;
+  let lists = 0;
+  gh.findOpen = async () => { lists += 1; return null; };
+  await alerts.raise(standing);
+  await alerts.reportTrouble('p');
+  assert.equal(lists, 0);
+  assert.equal(gh.calls.length, seen + 1);
+});
+
+test('L402 cacheTrouble: a Record that heals and stays quiet still clears the alert when its number is cached', async () => {
+  const w = refusing();
+  w.world.refuse = () => true;
+  await w.make().raise(standing);
+  const a = w.make();
+  await a.raise(standing);
+  w.world.refuse = () => false; // it heals in time to keep the alert's own number
+  await a.reportTrouble('p');
+  assert.equal(troubleIssues(w.gh).length, 1);
+  const b = w.make();
+  assert.equal(await b.reportTrouble('p'), 'cleared');
+  assert.equal(troubleIssues(w.gh)[0].closed, true);
 });

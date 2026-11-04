@@ -260,6 +260,26 @@ test('L389 notify: a body update that keeps failing after its comment still send
 });
 
 // L393 m3: GitHub stamps the comment a little after the run's own time, so the next due run can find it just under 24 h old.
+// c3: the told line is GitHub's time for the comment, because the next run compares it with GitHub's. A time ahead of the
+// run's own, or none, can't be stored (L362).
+test('L402 c3 notify: the told line takes GitHub\'s time for a past comment, and the run\'s own for anything else', async () => {
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  const stamp = hours(24).toISOString();
+  const told = async (created_at) => {
+    const gh = fakeRepoIssues();
+    await notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(0) });
+    const api = async (method, path, body) => { const r = await gh.api(method, path, body); return method === 'POST' && /comments$/.test(path) ? { created_at } : r; };
+    assert.deepEqual(await notify({ ran: [t], failed: [t], api, now: () => hours(24) }), [[t, 'reminded']]);
+    return /last told (\S+)$/m.exec(gh.issues[0].body)[1];
+  };
+  const before = new Date(hours(24).getTime() - 3000).toISOString();
+  assert.equal(await told(before), before);
+  assert.equal(await told(new Date(hours(24).getTime() + 60e3).toISOString()), stamp, 'ahead of the run');
+  assert.equal(await told('not a time'), stamp);
+  assert.equal(await told(undefined), stamp);
+});
+
 test('L393 notify: a due run the bot already spoke in writes that comment\'s time, answers updated, and the next run reminds', async () => {
   const gh = fakeRepoIssues();
   const t = 'product 1 / heartbeat';
