@@ -1,113 +1,101 @@
-// The finding-checker and finalize (R-0b-145, L76 (4)). When a review session ends, before its verdict file's sha256
-// goes into its ended record (review-runner.mjs `endSession`), the runner finalizes that one session's own file:
-//   - each finding is checked against the head reviewed and where the change began; one whose file is on neither, or
-//     whose quote stands nowhere in either whole file, is noise, and is marked dropped (it stays in the notes, last, with
-//     the reason, so the next round and Joe can see it). A line number is never a reason to drop (L424): a real quote on
-//     a wrong line is kept, which costs a false fail, never a false pass;
-//   - repeats of the same finding are combined into one;
-//   - what the verdict says is worked out again from what is left: an auditor's Material count loses the dropped
-//     Material findings but never falls below the Material findings kept; a reviewer's checklist line that only noise
-//     put at its level comes down to the worst finding left on it. pass turns true only when dropped noise was the whole
-//     reason it was false. Any kept Material finding makes the verdict a fail, whatever pass and the count say, whether
-//     or not it names a line and whether or not anything was dropped (L92 M-1, L424);
-//   - a file it rewrites is marked `finalized`, and only such a file may hold a finding with a `dropped` key (M9
-//     verdictFields refuses any other), so a mark copied from an earlier round's notes never hides a finding. The file
-//     is the session's to write, so that mark alone proves nothing: finalize first writes the new file's sha256 into the
-//     runner's own record (`mark`, finalized/ in the runner's folder, which no session can write), and M9 trusts a
-//     `dropped` finding only in the file that record names (headReviews, L432).
+// The finding-checker and finalize (R-0b-145, L76 (4), L469). When a review session ends, before its verdict file's
+// sha256 goes into its ended record (review-runner.mjs `endSession`), the runner finalizes that one session's own file.
+// Finalize never drops a finding, and it changes no count and no pass: no matcher can prove a quote is absent, so what it
+// finds is a label for the reader, nothing more. A finding whose file or quote it can't find, at the head reviewed or where
+// the change began, gets `quote_found: false` and QUOTE_NOTE. Everything else in the file stays as the session wrote it.
+// A file with nothing to label is not touched, and neither is one the labels would take over the outbox size limit.
+// For a file it labels, finalize writes the sha256 of the file with its labels left out (M9 verdictContent) into the
+// runner's own record (`mark`, finalized/ in the runner's folder, which no session can write), once the labelled file is
+// ready and just before it goes in. M9 headReviews refuses a labelled file that record does not match. The record comes
+// from finalize, so it can't vouch for finalize: the runner reads the file before and after, and refuses a verdict
+// whose content moved (review-runner.mjs `endSession`, L482).
 // finalize reads and writes only the one verdict file in that session's own folder, in place (a temporary dot-named
 // file, renamed over it, which the gate never lists). It never writes a second verdict, and it never reads or changes
-// another session's: under L68 each launched session's own verdict counts and the worst wins, so nothing here can let
-// one session's pass stand in for another's fail. A finding with nothing to check (no file named) is kept.
+// another session's. A finding with nothing to check (no file named) gets no label.
 
-import { createHash } from 'node:crypto';
 import { closeSync, fchmodSync, fchownSync, fsyncSync, openSync, readdirSync, renameSync, unlinkSync, writeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
-import { keptMaterial, kindOf, readOutboxFile, verdictAsWritten } from '../M9-record/outbox.mjs';
-import { VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
-import { FINDING_LEVELS, findingProblem, verdictFileText } from './verdict-file.mjs';
+import { FINDING_LABELS, MAX_OUTBOX_BYTES, holdsLabel, kindOf, readOutboxFile, verdictContent, verdictFields } from '../M9-record/outbox.mjs';
+import { findingProblem } from './verdict-file.mjs';
 
 /** What a reader gives for a path that is at the commit but is not a plain file (a link, say): no text to check. */
 export const NOT_TEXT = Symbol('not a plain file');
-const RANK = Object.freeze({ clean: 0, cosmetic: 1, minor: 2, material: 3 });
-const worst = (levels) => levels.reduce((w, l) => (RANK[l] > RANK[w] ? l : w), 'clean');
+export const QUOTE_NOTE = 'quote not found in the code: check whether this finding is real';
 const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
-// A diff's hunk header stands in neither file, so a quote pasted from a diff is read without it (L432).
-const HUNK = /^@@ .* @@/;
+// Lines that say nothing either way: a diff's headers, and what a paste wraps a quote in. They stand in neither file.
+const HEADER = /^\s*(@@ .* @@|diff --git |index [0-9a-f]+\.\.|--- (a\/|\/dev\/null)|\+\+\+ (b\/|\/dev\/null)|\\ No newline at end of file|(new|deleted) file mode |old mode |new mode |similarity index |rename (from|to) |Binary files )/;
+const FENCE = /^\s*(\x60{3}|~~~)/;
+const WORD = /[\p{L}\p{N}]/u;
+// A line this long is one a real quote would hold, so one of them found is enough to keep the finding (L452).
+const SURE_LINE = 8;
+// What grep -n or cat -n puts before a line.
+const LINE_NUMBER = /^\s*(?:[^\s:]+:)?\d+[:\t ]/;
+const noMarker = (l) => squash(l.replace(/^[+\- ]/, ''));
+const readings = (l) => {
+  const bare = l.replace(LINE_NUMBER, '');
+  return [noMarker(l), squash(bare), noMarker(bare)].filter(Boolean);
+};
 
 /**
- * Does the quote stand in one of these texts? Line by line, a line may carry its diff marker or be a hunk header, and
- * each may stand in a different one. A quote that is only hunk headers has nothing to check, so it holds.
+ * Could the quote be in one of these texts? Only a label hangs on the answer. Headers, fences and lines with no letter or
+ * digit are set aside, and a quote with nothing else holds. Of the rest, one line of at least SURE_LINE non-space
+ * characters found in base or head is enough, or every shorter line found.
  */
-function quoteHolds(quote, texts) {
-  const hays = texts.map(squash);
+function quoteHolds(quote, texts, squashed) {
+  const hays = texts.map((t) => {
+    if (!squashed.has(t)) squashed.set(t, squash(t));
+    return squashed.get(t);
+  });
   const on = (t) => hays.some((h) => h.includes(t));
   if (on(squash(quote))) return true;
-  const lines = quote.split('\n');
-  const parts = lines.filter((l) => !HUNK.test(l)).map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
-  return parts.length ? parts.every(on) : lines.some((l) => HUNK.test(l));
+  const left = quote.split(/\r\n|\r|\n/).filter((l) => !HEADER.test(l) && !FENCE.test(l) && WORD.test(l));
+  if (!left.length) return true;
+  const found = (l) => readings(l).some(on);
+  const isSure = (l) => noMarker(l).replaceAll(' ', '').length >= SURE_LINE;
+  const short = left.filter((l) => !isSure(l));
+  return left.filter(isSure).some(found) || (short.length > 0 && short.every(found));
 }
 
 /**
- * Why a finding is noise, or null when it is kept. `readFile(path)` gives the file's text at the head reviewed and
+ * Can this finding's file and quote be found? `readFile(path)` gives the file's text at the head reviewed and
  * `readBase(path)` where the change began: null when that commit has no such file, NOT_TEXT when the path is there but
- * is not a plain file. A review is of a diff, so a finding may be about what the change removes (L92 M-2): it is noise
- * only when neither side bears it out, in the whole of either file (L424). A path with no text to check is never noise.
+ * is not a plain file. A review is of a diff, so a finding may be about what the change removes (L92 M-2): either side
+ * will do, anywhere in the file. A line number is never looked at (L424). A path with no text to check counts as found.
+ * `squashed` keeps each text's squashed form, for a caller checking many findings.
  */
-export async function noiseReason(f, readFile, readBase) {
-  if (f.file === undefined) return null;
+export async function quoteFound(f, readFile, readBase, squashed = new Map()) {
+  if (f.file === undefined) return true;
   const sides = [await readFile(f.file), await readBase(f.file)];
-  if (sides.includes(NOT_TEXT)) return null;
+  if (sides.includes(NOT_TEXT)) return true;
   const texts = sides.filter((t) => typeof t === 'string');
-  if (!texts.length) return `${f.file} is not in the head reviewed or where the change began`;
-  if (f.quote === undefined || quoteHolds(f.quote, texts)) return null;
-  return `the quote is not in ${f.file}`;
+  if (!texts.length) return false;
+  return f.quote === undefined || quoteHolds(f.quote, texts, squashed);
 }
 
-/** → { kept, dropped: [{ ...finding, dropped: reason }] }; repeats are combined, first one kept. */
-export async function checkFindings(findings, readFile, readBase) {
-  const seen = new Set();
-  const kept = []; const dropped = [];
-  for (const f of findings) {
-    const k = JSON.stringify([f.level, squash(f.says), f.file ?? null, f.line ?? null, f.quote === undefined ? null : squash(f.quote), f.on ?? null]);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    const why = await noiseReason(f, readFile, readBase);
-    if (why) dropped.push({ ...f, dropped: why }); else kept.push(f);
-  }
-  return { kept, dropped };
-}
+/** A reader that goes to the mirror once for each path, however many findings name it. */
+const oncePerPath = (read) => {
+  const seen = new Map();
+  return (path) => {
+    if (!seen.has(path)) seen.set(path, read(path));
+    return seen.get(path);
+  };
+};
 
-/** What the verdict says once the noise is out (see the top). Pure. */
-export function settle({ role, pass, checklist, material, kept, dropped }) {
-  const stays = keptMaterial(kept);
-  if (role === 'auditor') {
-    const out = dropped.filter((f) => f.level === 'material').length;
-    // The kept ones count whatever was written; a count above the list keeps what no finding accounts for. A verdict
-    // that gave no count gains none: it stays one M9 does not pass.
-    const left = Math.max(stays, (material ?? 0) - out);
-    return { pass: !stays && (pass || (material > 0 && left === 0)), material: material === null && !left ? null : left };
-  }
-  const next = { ...checklist };
-  let lowered = false;
-  for (const line of VERDICT_CHECKLIST) {
-    const gone = dropped.filter((f) => f.on === line).map((f) => f.level);
-    if (!gone.length) continue;
-    const left = worst(kept.filter((f) => f.on === line).map((f) => f.level));
-    // Only a line the noise explains comes down: its level is no worse than the worst dropped finding, and worse than
-    // anything left on it.
-    if (RANK[next[line]] <= RANK[worst(gone)] && RANK[next[line]] > RANK[left] && !(next[line] === 'material' && stays)) { if (next[line] === 'material') lowered = true; next[line] = left; }
-  }
-  const clean = VERDICT_CHECKLIST.every((l) => CHECKLIST_LEVELS.includes(next[l]) && next[l] !== 'material');
-  return { pass: !stays && (pass || (lowered && clean)), checklist: next };
+/** The header with each finding's label set by `found`, one yes or no per finding, and nothing else different. Pure. */
+export function labelled(header, found) {
+  const notes = header.fields.notes.map((n, i) => {
+    const rest = Object.fromEntries(Object.entries(n).filter(([k]) => !FINDING_LABELS.includes(k)));
+    return found[i] ? rest : { ...rest, quote_found: false, quote_note: QUOTE_NOTE };
+  });
+  return { ...header, fields: { ...header.fields, notes } };
 }
 
 /**
- * Finalize one session's verdict file. `owner` is the review user's uid, given back to the rewritten file. `mark` is
- * the runner's own record of what it finalized: read() → the sha256, or null when there is none; keep(sha256), once.
- * → { ok, changed, kept?, dropped? } | { ok: false, none?, reason } (a file that can't be finalized is left as it is,
- * for the runner's own read to judge)
+ * Label one session's verdict file. `owner` is the review user's uid, given back to the rewritten file. `mark` is the
+ * runner's own record of what finalize labelled: read() → the sha256, or null when there is none; keep(sha256), once.
+ * → { ok, changed, labelled? } | { ok: false, none?, reason } (a file that can't be labelled is left as it is, for the
+ * runner's own read to judge)
  */
 export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark }) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
@@ -120,59 +108,62 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   const file = join(dir, names[0]);
   const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file });
   if (!f.ok) return no(f.reason);
-  // As written: a file that says two things at once is what finalize settles.
-  const v = verdictAsWritten(f.header);
+  const v = verdictFields(f.header);
   if (!v.ok) return no(v.reason);
   if (v.card !== card || v.head !== head) return no('the verdict is for another card or head');
   if (f.body.trim()) return no('the verdict file has more than its one line');
-  // A file that says it was finalized: only the runner's record can say so. Run again on a file it did mark, nothing
-  // changes, so what it dropped stays dropped.
-  if (f.header.fields.finalized === true) {
-    let own; try { own = mark.read(); } catch (e) { return no(e?.message ?? String(e)); }
-    return own === f.sha256 ? { ok: true, changed: false } : no('the file says it was finalized, but the runner holds no record of that file');
-  }
   const notes = v.notes ?? [];
   if (!Array.isArray(notes)) return no('its notes are not a list');
-  const fresh = [];
+  if (!notes.length) return { ok: true, changed: false, labelled: 0 };
   for (const n of notes) {
     const p = findingProblem(n);
     if (p) return no(`a finding can't be checked: ${p}`);
-    fresh.push(n);
   }
-  const { kept, dropped } = await checkFindings(fresh, readFile, readBase);
-  const said = settle({ role, pass: v.pass, checklist: v.checklist, material: v.material, kept, dropped });
-  const order = (a, b) => FINDING_LEVELS.indexOf(a.level) - FINDING_LEVELS.indexOf(b.level);
-  const findings = [...kept.sort(order), ...dropped];
-  // Nothing dropped, no repeats and nothing to correct: the file stays exactly as the session wrote it.
-  const same = said.pass === v.pass && (role === 'reviewer' || said.material === v.material);
-  if (!dropped.length && kept.length === fresh.length && same) return { ok: true, changed: false, kept: kept.length, dropped: 0 };
-  let text;
-  try { text = verdictFileText({ role, card, head, pass: said.pass, ...(role === 'reviewer' ? { checklist: said.checklist } : { material: said.material }), findings, finalized: true }); } catch (e) { return no(e?.message ?? String(e)); }
-  // The record comes first: a stop before the rename leaves a record of a file not there yet, and a run after it works
-  // out the same bytes. The other way round, a stop would leave a marked file the runner could not tell from a forged one.
-  const sha = createHash('sha256').update(text).digest('hex');
-  try { if (mark.read() !== sha) mark.keep(sha); } catch (e) { return no(`the runner's record of it could not be written (${e?.code ?? e?.message})`); }
+  const found = [];
+  const [head1, base1, squashed] = [oncePerPath(readFile), oncePerPath(readBase), new Map()];
+  for (const n of notes) found.push(await quoteFound(n, head1, base1, squashed));
+  const next = labelled(f.header, found);
+  const count = found.filter((x) => !x).length;
+  // Nothing to label: the file stays exactly as the session wrote it.
+  if (!count && !holdsLabel(notes)) return { ok: true, changed: false, labelled: 0 };
+  const text = JSON.stringify(next);
+  // A label must not turn a file that fits into one that is refused for its size.
+  if (Buffer.byteLength(`${text}\n`) > MAX_OUTBOX_BYTES) return no('labels skipped: the file would be too large');
+  const sha = verdictContent(f.header);
+  const keepRecord = () => {
+    try { if (mark.read() !== sha) mark.keep(sha); return null; } catch (e) { return `the runner's record of it could not be written (${e?.code ?? e?.message})`; }
+  };
+  if (text === JSON.stringify(f.header)) {
+    const bad = keepRecord();
+    return bad ? no(bad) : { ok: true, changed: false, labelled: count };
+  }
+  // The temporary file comes first, the record next, the rename last. A session's own file in the temporary file's place
+  // stops finalize before there is a record, so a label it wrote can't get one. A stop before the rename leaves a record
+  // of a file not there yet, and a run after it works out the same record. A rename first could leave a labelled file
+  // the runner has no record of.
   const tmp = join(dir, `.finalize-${sessionId}`);
-  let fd;
+  let fd; let bad = null;
   try {
     fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-    writeSync(fd, text);
+    writeSync(fd, `${text}\n`);
     fchmodSync(fd, 0o644);
     if (Number.isInteger(owner)) fchownSync(fd, owner, -1);
     fsyncSync(fd);
     closeSync(fd); fd = undefined;
-    renameSync(tmp, file);
+    bad = keepRecord();
+    if (!bad) renameSync(tmp, file);
   } catch (e) {
-    if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ }
-    try { unlinkSync(tmp); } catch { /* not made */ }
-    return no(`the finalized verdict could not be written (${e?.code ?? e?.message})`);
+    bad = `the labelled verdict could not be written (${e?.code ?? e?.message})`;
   }
-  return { ok: true, changed: true, kept: kept.length, dropped: dropped.length };
+  if (!bad) return { ok: true, changed: true, labelled: count };
+  if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ }
+  try { unlinkSync(tmp); } catch { /* not made */ }
+  return no(bad);
 }
 
 /**
  * finalize's two readers, from the mirror: { readFile, readBase }. A git failure throws, here or in a reader, so finalize
- * stops and the file stays as written: a finding is never noise because the mirror could not answer.
+ * stops and the file stays as written: a finding gets no label because the mirror could not answer.
  */
 export async function changeReaders({ gitDir, head }) {
   const opts = { gitDir, purpose: 'finding-check', timeoutMs: 60_000 };
