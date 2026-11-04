@@ -1259,7 +1259,7 @@ test('L329: a verdict the Record has not taken, from a session whose end time is
     w.clock.t += MIN;
     w.ask();
     const r = await runnerPass(w.ctx);
-    assert.ok(r.holds.some((a) => /handed in a verdict the Record has not taken/.test(a.text)), `${what}: ${r.holds.map((a) => a.text).join(' | ')}`);
+    assert.ok(r.status.holds.some((a) => /handed in a verdict the Record has not taken/.test(a.text)), `${what}: ${r.status.holds.map((a) => a.text).join(' | ')}`);
   }
 });
 
