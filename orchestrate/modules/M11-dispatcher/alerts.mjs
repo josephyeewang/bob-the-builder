@@ -123,6 +123,15 @@ export function isQueued(rec, fact) {
   try { return entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((e) => e.mark?.fact === fact); } catch { return false; }
 }
 
+/** The mark facts of the queued alerts whose mark starts with `prefix`, each once: a cause told for the first time has
+ * a queue entry before it has a fact, so a step that clears such causes looks here too (L347 m1). */
+export function queuedMarks(rec, prefix) {
+  try {
+    const ids = entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).map((e) => e.mark?.fact).filter((f) => typeof f === 'string' && f.startsWith(prefix));
+    return [...new Set(ids)];
+  } catch { return []; }
+}
+
 /** The `alert(text, { mark })` every step gets: it queues and returns whether it did; it never sends, waits or throws. */
 export function outbox(rec, now) {
   const alert = (text, { mark = null } = {}) => { try { return queueAlert(rec, text, { now, mark }) !== null; } catch { return false; } };
