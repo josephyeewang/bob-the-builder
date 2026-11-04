@@ -640,7 +640,7 @@ test('L315: a bad config is told again each day while it stands; L317: a told ti
   assert.equal(cfg(), 2);
   const f = join(w.t.ctx.stateDir, 'config-alert.json');
   const m = JSON.parse(readFileSync(f, 'utf8'));
-  writeFileSync(f, JSON.stringify({ ...m, at: m.at + 30 * 24 * HOUR }));
+  writeFileSync(f, JSON.stringify({ ...m, told_at: new Date(Date.parse(m.told_at) + 30 * 24 * HOUR).toISOString() }));
   await w.at(W8 + 27 * HOUR);
   assert.equal(cfg(), 3, 'a told time 30 days ahead: told now');
   await w.at(W8 + 28 * HOUR);
@@ -676,12 +676,30 @@ test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that ca
   assert.equal(noPush(), 1);
   const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
   const m = JSON.parse(readFileSync(f, 'utf8'));
-  for (const k of Object.keys(m['U-1'])) m['U-1'][k] += 30 * 24 * HOUR;
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] = { told_at: new Date(Date.parse(m['U-1'][k].told_at) + 30 * 24 * HOUR).toISOString() };
   writeFileSync(f, JSON.stringify(m));
   await w.at(W8 + MIN);
   assert.equal(noPush(), 2);
   await w.at(W8 + 2 * MIN);
   assert.equal(noPush(), 2);
+});
+
+// L321's rule on the ask marks: no mark to read is "not told". It tells, and never counts as told a moment ago.
+test('L326: an ask-alerts mark that is null is due', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  assert.equal(noPush(), 1);
+  const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] = null;
+  writeFileSync(f, JSON.stringify(m));
+  await w.at(W8 + MIN);
+  assert.equal(noPush(), 2, 'a null mark is not told');
+  await w.at(W8 + 2 * MIN);
+  assert.equal(noPush(), 2, 'and it is marked again');
 });
 
 // L329 (L321 sweep): every stored time M2 reads for "has it lapsed / is a push due" goes through shared pastTime. A time
@@ -939,6 +957,19 @@ test('L362 m1: a live launch with a garbage time does not sort oldest', () => {
   assert.equal(boxSession(w.t.record, 'FD-1').replaced, true);
 });
 
+test('L412 c1 planted: a session launched twice is what its newest launch says', () => {
+  const again = (w, id, role) => must(w.t.record.write({ actor: 'dispatcher', entity: 'launch', id, expectRev: 0,
+    doc: { session_id: 'FD-1', role, card: 'C-0', head: 'a'.repeat(40), rev: 1, launched_at: iso(w.t.clock.t) } }), 'launch');
+  const boxFirst = world();
+  again(boxFirst, 'launch-1', 'front_door');
+  again(boxFirst, 'launch-2', 'reviewer');
+  assert.match(boxSession(boxFirst.t.record, 'FD-1').reason, /a reviewer session holds no approval box/);
+  const boxLast = world();
+  again(boxLast, 'launch-1', 'reviewer');
+  again(boxLast, 'launch-2', 'front_door');
+  assert.equal(boxSession(boxLast.t.record, 'FD-1').ok, true);
+});
+
 // L362 m2, m3: the plants that survived the audit of #180.
 test('L362 m2 and P9: a pushed merge approval with no readable raised time says why it counted nothing', async () => {
   for (const raised_at of [null, 'not a time']) {
@@ -995,3 +1026,15 @@ for (const raised_at of [12345, '']) {
     assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').reask_count], ['open', 1]);
   });
 }
+
+// L326: the config mark names its problem, so a different problem is told at once, not held back by the day.
+test('L326: a different config problem is told at once', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  const reasons = () => w.t.alerts.filter((a) => a.type === 'approvals_config').map((a) => a.reason);
+  await w.at(W8);
+  assert.equal(reasons().length, 1);
+  w.t.ctx.rules = world({ 'accounts.joe.github_id': 'not a number' }).t.ctx.rules;
+  await w.at(W8 + HOUR);
+  assert.equal(reasons().length, 2);
+  assert.notEqual(reasons()[0], reasons()[1]);
+});

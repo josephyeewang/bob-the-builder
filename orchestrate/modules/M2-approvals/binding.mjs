@@ -44,6 +44,7 @@ import { askStore, writeDoc } from './ask-store.mjs';
 import { askIdOf, payloadSha, renderPayload } from './payload.mjs';
 import { lapseAt, outsideTime, readConfig, TIME_REASKED_LINE } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
+import { launchesNewestFirst } from '../../shared/record.mjs';
 
 export const BOX_ROLES = Object.freeze(['front_door', 'thinking']);
 const MAX_MISMATCHED = 20;
@@ -52,17 +53,17 @@ const ms = (s) => { const t = Date.parse(s); return Number.isFinite(t) ? t : nul
 
 // The launch that makes `sid` a box session, or why not (round 2 m2-1, round 4 m4-3, round 2 m2-5).
 export function boxSession(record, sid) {
-  const launches = record.list('launch').filter((l) => l?.doc && !l.corrupt);
-  const mine = launches.filter((l) => l.doc.session_id === sid);
+  const newest = (keep) => launchesNewestFirst(record, (l) => !l.corrupt && keep(l.doc));
+  const mine = newest((d) => d.session_id === sid);
   if (!mine.length) return { ok: false, reason: 'not in the launch record' };
-  const role = mine.at(-1).doc.role;
+  const role = mine[0].doc.role;
   if (!BOX_ROLES.includes(role)) return { ok: false, reason: `a ${role} session holds no approval box` };
   const s = record.read('session', sid);
   if (s?.doc?.state === 'ended') return { ok: false, reason: 'session ended', ended: true };
   if (role === 'front_door') {
-    // Newest by the diary's order (the order list() gives), never a stored launch time: a stale launch stamped days
-    // ahead must not win, and a live one with a garbage time must not sort oldest (L362 m1).
-    const latest = launches.filter((l) => l.doc.role === 'front_door').at(-1);
+    // Newest by the Record's order, never a stored launch time: a stale launch stamped days ahead must not win, and a
+    // live one with a garbage time must not sort oldest (L362 m1).
+    const latest = newest((d) => d.role === 'front_door')[0];
     if (latest.doc.session_id !== sid) return { ok: false, reason: 'a newer Front Door replaced this session', replaced: true };
   }
   return { ok: true, role };

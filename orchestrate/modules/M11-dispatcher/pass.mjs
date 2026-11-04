@@ -341,6 +341,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
 export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
+  // A tell whose since could not be kept goes in the pass's notes as well as in the owner's text (L343).
+  const askJoe = (id, ask) => { const w = waitOnJoe(rec, id, ask); if (w.tell_refused) out.notes.push(`card ${id}: ${w.tell_refused}`); return w; };
   const missing = [...(st?.missing ?? [])];
   const read = readOr(missing);
   const unknownMaxMs = read(() => minutes(rules, KEYS.usageUnknownMaxMin), Infinity);
@@ -375,7 +377,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
     if (what === 'usage_band') {
       // No card waits on Joe silently (L138 m4): this one is told, until delivered, besides the stretch's own alert below.
       if (unknownLong) {
-        waitOnJoe(rec, id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
+        askJoe(id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
           text: `card ${id}: usage has been unreadable for over a day, so it can't resume by itself; it waits on you` });
         continue;
       }
@@ -400,14 +402,14 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
         // Told until delivered (L130 M12): the card is waiting on Joe from here on, so this branch never sees it again.
-        waitOnJoe(rec, id, { what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account', alert,
+        askJoe(id, { what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account', alert,
           text: `card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you` });
         continue;
       }
       // The same rule on run_started (#153 audit MAT-1): one in the future is as good as none.
       const runStarted = pastTime(doc.wait?.run_started, now);
       if (runStarted === null) {
-        waitOnJoe(rec, id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
+        askJoe(id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
           text: `card ${id}: it waits on account ${acct}'s usage limit but the record has no time its run began, so no limit hit can be matched to it; it waits on you` });
         continue;
       }
@@ -415,7 +417,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       const seen = Date.parse(lf?.observed_at ?? '');
       if (!(seen > runStarted)) {
         if (now - waitedFrom(doc, runStarted, now) > unknownMaxMs) {
-          waitOnJoe(rec, id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
+          askJoe(id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
         }
         continue;
@@ -425,20 +427,20 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
       // first pass after still judges the reset against the hit's own time.
       if (!Number.isFinite(resets) || resets > seen + LIMIT_RESET_MAX_MS) {
         const why = Number.isFinite(resets) ? `the reset time it gave (${lf.resets_at}) is more than a week after the hit` : 'the reset time could not be read';
-        waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+        askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
           text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
       if (now < resets) {
         if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
-          waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+          askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
         }
         continue;
       }
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       // No card waits on Joe silently (L130): this one is told, until delivered.
-      else waitOnJoe(rec, id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
+      else askJoe(id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
         text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
     } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.

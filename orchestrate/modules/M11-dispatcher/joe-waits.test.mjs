@@ -132,6 +132,25 @@ test('L138 MAT-1: a copy refused and an alert not delivered stays queued, is del
   assert.equal(w.got.length, 1);
 });
 
+test('L405 m1: a card on the owner, never told, whose copy is refused on every pass is told once, with the refusal in the text', async () => {
+  const w = world();
+  const real = w.E.record;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  // The first alert never queued (a crash between the wait and its tell).
+  assert.equal(waitOnJoe(rec, 'C-1', { text: 'needs you', alert: fakeAlert({ answer: false }), now: w.E.clock.t, ...ask }).ok, true);
+  assert.deepEqual(w.got, []);
+  let did = [];
+  for (let i = 0; i < 300; i++) {
+    w.E.clock.t += 10 * MIN;
+    did = did.concat(await withAlerts(rec, w.E.clock.t, w.port, (alert) => retellWaits({ rec, alert })));
+  }
+  assert.equal(w.got.length, 1, JSON.stringify(w.got));
+  assert.match(w.got[0], /^needs you \(this card's tell could not be kept with its wait \(busy\)/);
+  assert.match(did[0][1], /^told again: waits on joe; this card's tell could not be kept/);
+  assert.equal(w.tell().told_since, w.card().wait.since, 'marked by the since it matched');
+  assert.equal(w.tell().wait_since, undefined);
+});
+
 // Audit #153 m1: the Record keeps a re-checked wait's since (L296), so a tell asked at now would match no wait.
 test('audit #153 m1: a card put on Joe again for the same what is told the new text, on the real writer and the stand-in', async () => {
   const { recWith, seed, setClock, T0 } = await import('./fixtures.test-helper.mjs');
