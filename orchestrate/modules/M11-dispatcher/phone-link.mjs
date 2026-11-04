@@ -25,6 +25,7 @@ import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, dropCause } from './alerts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const LINK_FACT = 'phone-link';
 // Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
@@ -79,7 +80,9 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   const alive = frontDoorAlive();
   if (alive === true) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
   if (alive === false) {
-    if (now - Date.parse(st.fd_restarted_at ?? '') < RETRY_MS) done.push('Front Door missing; restarted recently, waiting');
+    // A stored time that can't be read or lies ahead counts as long ago (L412 m2): a retry never waits on a clock.
+    const restarted = pastTime(st.fd_restarted_at, now);
+    if (restarted !== null && now - restarted < RETRY_MS) done.push('Front Door missing; restarted recently, waiting');
     else {
       let r;
       try { r = await restartFrontDoor({ handoff: lastHandoff() }); } catch (e) { r = { ok: false, reason: e.message }; }
@@ -111,7 +114,8 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   }
 
   const mb = reading(rec, FACTS.minibase, now);
-  if (mb.value === false && !(now - Date.parse(st.minibase_started_at ?? '') < RETRY_MS)) {
+  const started = pastTime(st.minibase_started_at, now);
+  if (mb.value === false && (started === null || now - started >= RETRY_MS)) {
     const r = await startMinibase();
     st.minibase_started_at = iso(now);
     done.push(r?.ok ? 'Mini Base started' : 'Mini Base start failed');

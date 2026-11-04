@@ -24,7 +24,7 @@ import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen
 import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
-import { FINAL_STATES } from '../../shared/record.mjs';
+import { FINAL_STATES, launchesNewestFirst } from '../../shared/record.mjs';
 
 // The pull request reading and the open-too-long clock are M6's, shared with the gate's own recover() (L94).
 export { PR_FACT };
@@ -365,10 +365,10 @@ export function endedMerges(rec, card, head) {
 
 // The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
 function workerSession(rec, cardId) {
-  const mine = rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId && typeof l.doc.session_id === 'string');
-  mine.sort((x, y) => String(y.doc.launched_at ?? '').localeCompare(String(x.doc.launched_at ?? '')));
-  return mine[0]?.doc.session_id ?? null;
+  return workerLaunches(rec, cardId).find((l) => typeof l.doc.session_id === 'string')?.doc.session_id ?? null;
 }
+// A card's worker launches, newest first, by the Record's order.
+export const workerLaunches = (rec, cardId) => launchesNewestFirst(rec, (l) => l.doc.role === 'worker' && l.doc.card === cardId);
 // The card's pull request: the one Sensors reading whose head is the card's head (a card carries no PR number; no
 // script may write one on it).
 function prOf(rec, head) {

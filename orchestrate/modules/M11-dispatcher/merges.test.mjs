@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
@@ -449,6 +450,21 @@ test('L72: the session is the newest worker launch for the card, and the pull re
   assert.match(requestMerges({ alert: noAlert, rec: readyRec({}, [launch('C-1', 'S-9'), prSeen(7), prSeen(9)]), rules: R, now: T0, b: GREEN })[0][1], /2 pull requests show head aaaaaaa/);
 });
 
+// L367: the Record's order decides which launch is newest, so a launch stamped far ahead doesn't outrank a later one.
+test('L367: the session is the launch the Record took last, whatever launched_at says', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-8', 365 * 24 * 60), launch('C-1', 'S-9', -30), prSeen(7)]);
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requests(rec).map((q) => q.session_id), ['S-9']);
+});
+
+// L412 m3: launches that can't be read never read as none, so no request goes out on an older session or on none.
+test('L412 m3 planted: a failed read of the launches throws, and no merge request is stored', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-9'), prSeen(7)]);
+  const broken = Object.create(rec, { list: { value: (e) => { if (e === 'launch') throw new Error('the launches could not be read'); return rec.list(e); } } });
+  assert.throws(() => requestMerges({ alert: fakeAlert(), rec: broken, rules: R, now: T0, b: GREEN }), /the launches could not be read/);
+  assert.deepEqual(requests(rec), []);
+});
+
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
   // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and
@@ -479,7 +495,7 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   }
   // MAT-6: the card changes (a new rev) -> a new request at that rev, once.
   const rec = readyRec();
-  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requestMerges({ alert: fakeAlert(), rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
   endMerge(rec, ['stale']);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: ['stale'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);

@@ -957,6 +957,19 @@ test('L362 m1: a live launch with a garbage time does not sort oldest', () => {
   assert.equal(boxSession(w.t.record, 'FD-1').replaced, true);
 });
 
+test('L412 c1 planted: a session launched twice is what its newest launch says', () => {
+  const again = (w, id, role) => must(w.t.record.write({ actor: 'dispatcher', entity: 'launch', id, expectRev: 0,
+    doc: { session_id: 'FD-1', role, card: 'C-0', head: 'a'.repeat(40), rev: 1, launched_at: iso(w.t.clock.t) } }), 'launch');
+  const boxFirst = world();
+  again(boxFirst, 'launch-1', 'front_door');
+  again(boxFirst, 'launch-2', 'reviewer');
+  assert.match(boxSession(boxFirst.t.record, 'FD-1').reason, /a reviewer session holds no approval box/);
+  const boxLast = world();
+  again(boxLast, 'launch-1', 'reviewer');
+  again(boxLast, 'launch-2', 'front_door');
+  assert.equal(boxSession(boxLast.t.record, 'FD-1').ok, true);
+});
+
 // L362 m2, m3: the plants that survived the audit of #180.
 test('L362 m2 and P9: a pushed merge approval with no readable raised time says why it counted nothing', async () => {
   for (const raised_at of [null, 'not a time']) {

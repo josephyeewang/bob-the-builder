@@ -69,6 +69,13 @@ export const REQUIRED_FIELDS = Object.freeze({
   merge_request: ['card', 'pr', 'session_id', 'head', 'rev', 'requested_at'],
   verdict: ['session_id', 'head'],
 });
+/**
+ * The launches `pick` keeps, newest first, in the order the Record took them. list() gives that order: launches are
+ * create-only and its index is built from the diary. launched_at is a stored time, and one stamped ahead by a clock
+ * that went back must not outrank a later launch (L367, L362 m1). A failed read throws: never an empty list.
+ */
+export const launchesNewestFirst = (rec, pick) => rec.list('launch').filter((l) => l?.doc && pick(l)).reverse();
+
 // A launch names a card and head only for the roles that work on one card (0b-5: a Front Door or thinking session has
 // neither; with no role, all are needed). The one check both the fake and the real writer use.
 export const CARD_ROLES = Object.freeze(['worker', 'reviewer', 'auditor']);

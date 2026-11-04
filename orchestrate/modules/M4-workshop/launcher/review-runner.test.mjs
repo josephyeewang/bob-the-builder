@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, outboxLeft } from './review-runner.mjs';
+import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { createHash } from 'node:crypto';
@@ -1229,8 +1229,78 @@ test('L83 M-1 (c): a session the runner lost track of is swept, and its pinned p
   assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/);
 });
 
+// L367: the runner's launches are outside the Record, so their stored time orders them, read by pastTime's rule.
+test('L367: a launched_at that lies ahead or cannot be read sorts oldest', () => {
+  const now = Date.parse('2026-11-03T12:00:00Z');
+  const l = (id, launched_at) => ({ doc: { session_id: id, launched_at } });
+  const order = newestFirst([l('old', '2026-11-01T12:00:00Z'), l('ahead', '2027-11-03T12:00:00Z'), l('new', '2026-11-03T11:00:00Z'), l('bad', 'not a time'), l('none')], now);
+  assert.deepEqual(order.slice(0, 2).map((x) => x.doc.session_id), ['new', 'old']);
+  assert.deepEqual(order.slice(2).map((x) => x.doc.session_id).sort(), ['ahead', 'bad', 'none']);
+});
+
+// L403: a launch stamped ahead would otherwise look young for ever, and its lost session would never be ended.
+// L412 m1: nor is it swept at once: the 5 minutes run from the pass that first saw it.
+for (const [name, stamp] of [['lies ahead', (w) => new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString()], ['cannot be read', () => 'not a time']]) {
+  test(`L403, L412 m1 planted: a lost session whose launched_at ${name} is swept 5 minutes after the runner first saw it`, async () => {
+    const w = await ready();
+    w.ask();
+    await runnerPass(w.ctx);
+    editState(w, (s) => { s.running = []; });   // the memory lost it
+    w.end('S-1');
+    const f = join(w.root, 'launches', 'S-1.json');
+    const doc = JSON.parse(readFileSync(f, 'utf8'));
+    chmodSync(f, 0o644);
+    writeFileSync(f, JSON.stringify({ ...doc, launched_at: stamp(w) }));
+    w.clock.t += SWEEP_AFTER_MS + MIN;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true, 'not on the pass that first sees it');
+    w.clock.t += SWEEP_AFTER_MS - MIN;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true, 'not a minute early');
+    // The mark is itself a stored time: one that lies ahead starts the 5 minutes again, and can't hold it off for ever.
+    editState(w, (s) => { s.sweep_seen['S-1'] = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true);
+    w.clock.t += SWEEP_AFTER_MS;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').ended.how, 'swept');
+    w.clock.t += MIN;
+    await runnerPass(w.ctx);
+    assert.deepEqual(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).sweep_seen, {}, 'the mark goes with the session');
+  });
+}
+
+test('L412 m2 planted: a last failure stamped ahead does not hold new starts off until the clock catches up', async () => {
+  let tries = 0;
+  const w = await ready({ start: async () => { tries += 1; return { ok: false, reason: 'claude would not start' }; } });
+  w.ask();
+  await runnerPass(w.ctx);
+  assert.equal(tries, 1);
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) a.last_failed_at = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+  w.ask();
+  await runnerPass(w.ctx);
+  assert.equal(tries, 2);
+});
+
+test('L412 m2 planted: a verdict the Record has not taken is told though its ended time lies ahead; a session with no ended time is not', async () => {
+  const w = await ready();
+  w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
+  w.ctx.verdictTaken = () => ({ ok: false, reason: 'the Record holds no verdict of session S-1' });
+  w.ask();
+  await runnerPass(w.ctx);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 4, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).alerts.filter((a) => /has not taken/.test(a.text)).length; };
+  assert.equal(await told(), 0, 'inside the wait');
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) delete a.ended_at; });
+  assert.equal(await told(), 0, 'no ended time: nothing has ended');
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) a.ended_at = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+  assert.equal(await told(), 1);
+});
+
 // L329: each stored time is read by shared pastTime. One that can't be read, or is more than 60 s ahead, counts as old
-// enough (act or tell now), never as "not yet": a time an hour ahead must not hold a retry, a tell or a sweep.
+// enough (act or tell now), never as "not yet": a time an hour ahead must not hold a retry, a tell or a sweep (a sweep waits 5 minutes from first sight, L412 m1).
 const BAD_TIMES = [['unreadable', () => 'not a time'], ['an hour ahead', (now) => new Date(now + 60 * MIN).toISOString()]];
 
 test('L329: a failed start whose failure time is unreadable or an hour ahead is tried again, not held', async () => {
@@ -1261,7 +1331,7 @@ test('L329: a verdict the Record has not taken, from a session whose end time is
   }
 });
 
-test('L329: a lost session whose launch time is unreadable or an hour ahead is swept, not held', async () => {
+test('L329: a lost session whose launch time is unreadable or an hour ahead is swept 5 minutes after first sight, not held', async () => {
   for (const [what, bad] of BAD_TIMES) {
     const v = await ready({ start: async (x) => { v.starts.push(x); return { ok: true, pid: 4242, ...pkg(x) }; } });
     v.ask();
@@ -1270,6 +1340,10 @@ test('L329: a lost session whose launch time is unreadable or an hour ahead is s
     const p = join(v.root, 'launches', 'S-1.json');
     writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), launched_at: bad(v.clock.t) }), { mode: 0o644 });
     v.clock.t += MIN;
+    await runnerPass(v.ctx);
+    // L412 m1: not at once, but 5 minutes from the pass that first saw the bad stamp.
+    assert.equal(v.ended('S-1').none, true, `${what}: not on the pass that first sees it`);
+    v.clock.t += SWEEP_AFTER_MS;
     await runnerPass(v.ctx);
     assert.equal(v.ended('S-1').ended?.how, 'swept', what);
   }
