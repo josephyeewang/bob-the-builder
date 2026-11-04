@@ -45,7 +45,7 @@
 //   launches/    0755   the launch records (M9 reads them)
 //   ended/       0755   the ended records, one per launched session once it has ended (M9 `runnerEnded` reads them)
 //   set-aside/   0755   Joe's "review again": one record per session Joe set aside (M9 `runnerAside` reads them)
-//   finalized/   0755   the sha256 of each verdict file finalize rewrote (M9 `runnerFinalized` reads them, L432)
+//   finalized/   0755   what each verdict file finalize labelled says (M9 `runnerFinalized` reads them, L469)
 //   packages/    0755   one folder per session holding the review package it was given (change.diff), and
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read }
@@ -229,15 +229,15 @@ function writeLaunch(dir, sid, doc) {
   return final;
 }
 
-/** The runner's own record of what finalize wrote for one session (L432): what M5 `finalize` takes as `mark`. */
+/** The runner's own record of what finalize labelled for one session (L469): what M5 `finalize` takes as `mark`. */
 export const finalizeMark = ({ dir, uid, role, card, head, sessionId }) => ({
   read: () => {
     const r = runnerFinalized({ root: dir, uid, role, card, head, sessionId });
-    if (r.ok) return r.finalized.verdict_sha256;
+    if (r.ok) return r.finalized.content_sha256;
     if (r.none) return null;
     throw new Error(r.reason);
   },
-  keep: (sha) => { writeLaunch(dir, sessionId, { session_id: sessionId, role, card, head, verdict_sha256: sha }); },
+  keep: (sha) => { writeLaunch(dir, sessionId, { session_id: sessionId, role, card, head, content_sha256: sha }); },
 });
 
 // The review package's pin (audit R-0b-147 M-1 (c), L83, L91 m-2). The wiring writes a session's package into
@@ -438,7 +438,7 @@ export async function runnerPass(ctx) {
     const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid, kept: state.packages?.[doc.session_id] }) : null;
     let h;
     // Finalize first (R-0b-145): the finding-checker works on this session's own verdict file only, in place, so the
-    // sha256 below is that of the finalized file. One that can't be finalized is left as written, and judged as it is.
+    // sha256 below is that of the labelled file. One that can't be labelled is left as written, and judged as it is.
     // Not for a session whose package changed: its verdict counts for nothing, whatever its findings say.
     if (walls.ok && !pkgBad && ctx.finalize) {
       let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head, mark: finalizeMark({ dir: P.finalized, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: doc.session_id }) }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
