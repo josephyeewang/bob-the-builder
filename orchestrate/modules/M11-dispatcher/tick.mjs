@@ -51,6 +51,7 @@ import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { outbox, tellThen, sendAlerts, dropCause, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
+import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
@@ -174,7 +175,7 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
     // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
     const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
       alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
-    if (w.ok) done.push([cardId, 'waiting on Joe']);
+    if (w.ok) done.push([cardId, w.tell_refused ? `waiting on Joe; ${w.tell_refused}` : 'waiting on Joe']);
   }
   return done;
 }
@@ -221,7 +222,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
       // numbers out, so a changing pid or count is one cause (audit 0b-6 r5 m4). Told only once sent (r5 MAT-2).
       const cause = error.replace(/\d+/g, 'N');
       if (seen?.error !== error) putFact(rec, STEP_ERROR_FACT(step), { ...seen, error, at: iso(now) }, 'step_error');
-      if (seen?.told_cause !== cause || !(now - Date.parse(seen?.told_at ?? '') < HOLD_REPEAT_MS)) {
+      // A told_at that can't be read or lies ahead is told now (L329: shared dueToTell), not kept quiet until it passes.
+      if (seen?.told_cause !== cause || dueToTell(seen, now, HOLD_REPEAT_MS)) {
         tellThen(alert, `the Dispatcher's ${step} step failed: ${error}; the other steps still ran`, { fact: STEP_ERROR_FACT(step), fields: { told_cause: cause, told_at: iso(now) }, kind: 'step_error' });
       }
     } finally { clearTimeout(timer); }

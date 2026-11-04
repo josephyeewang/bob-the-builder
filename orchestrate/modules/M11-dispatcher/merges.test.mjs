@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
@@ -64,7 +65,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]); // M-2 is 21 min old at the first pass, 61 at the second (a time ahead counts as old: L329)
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
@@ -449,6 +450,21 @@ test('L72: the session is the newest worker launch for the card, and the pull re
   assert.match(requestMerges({ alert: noAlert, rec: readyRec({}, [launch('C-1', 'S-9'), prSeen(7), prSeen(9)]), rules: R, now: T0, b: GREEN })[0][1], /2 pull requests show head aaaaaaa/);
 });
 
+// L367: the Record's order decides which launch is newest, so a launch stamped far ahead doesn't outrank a later one.
+test('L367: the session is the launch the Record took last, whatever launched_at says', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-8', 365 * 24 * 60), launch('C-1', 'S-9', -30), prSeen(7)]);
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requests(rec).map((q) => q.session_id), ['S-9']);
+});
+
+// L412 m3: launches that can't be read never read as none, so no request goes out on an older session or on none.
+test('L412 m3 planted: a failed read of the launches throws, and no merge request is stored', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-9'), prSeen(7)]);
+  const broken = Object.create(rec, { list: { value: (e) => { if (e === 'launch') throw new Error('the launches could not be read'); return rec.list(e); } } });
+  assert.throws(() => requestMerges({ alert: fakeAlert(), rec: broken, rules: R, now: T0, b: GREEN }), /the launches could not be read/);
+  assert.deepEqual(requests(rec), []);
+});
+
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
   // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and
@@ -479,7 +495,7 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   }
   // MAT-6: the card changes (a new rev) -> a new request at that rev, once.
   const rec = readyRec();
-  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requestMerges({ alert: fakeAlert(), rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
   endMerge(rec, ['stale']);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: ['stale'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);
@@ -902,4 +918,39 @@ test('L332 m5: a merge refused twice is put on the owner at the time after the r
     gateAlive: () => true, requestReview: () => ({ ok: true }), hasReviewer: async () => { t += 80_000; setClock(rec, t); return true; } }));
   const c = rec.read('card', 'C-1').doc;
   assert.deepEqual([c.state, c.wait?.who, c.wait?.since], ['waiting', 'joe', iso(t)], alerts.join(' | '));
+});
+
+// L329: ageMs reads the Record's times by shared pastTime. One that can't be read, or is more than 60 s ahead, is an
+// unknown age (Infinity), so each limit that uses it fires rather than waiting for a time that has not come.
+test('L329: a limit whose entry\'s time is unreadable or an hour ahead still times it out (checking, reporting, no reviewer)', async () => {
+  const NOW = T0 + 60 * MIN;
+  for (const [what, bad] of [['unreadable', 'not a time'], ['an hour ahead', iso(NOW + 60 * MIN)]]) {
+    for (const key of [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin]) {
+      const w = LIMIT_WORLDS[key];
+      const base = recWith(w.rows({}));
+      setClock(base, NOW);
+      const rec = Object.create(base);
+      Object.defineProperty(rec, 'meta', { value: (entity, id) => ({ ...base.meta(entity, id), ts: bad, stateSince: bad }) });
+      await timeLimits({ rec, rules: R, now: NOW, b: GREEN, ...ports({ hasReviewer: () => false, ...dead }).p, missing: [] });
+      assert.equal(w.timed(base), true, `${key}, ${what}`);
+    }
+  }
+});
+
+// L343: a refused copy of a wait's since (joe-waits.mjs tell_refused) is in the step's moves as well as in the owner's text.
+const noCopy = (rec) => ({ ...rec, base: rec, write: (w) => (w.doc?.wait_since ? { ok: false, reason: 'busy' } : rec.write(w)) });
+
+test('L343: a merge put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const base = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = noCopy(base);
+  await pass(rec, 31);
+  change(base, 'card', 'C-1', { state: 'merging' });
+  const { moves } = await pass(rec, 71);
+  assert.match(moves.at(-1)[1], /^waiting on joe; this card's tell could not be kept with its wait \(busy\)/);
+});
+
+test('L343: a card with no reviewer put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const rec = noCopy(recWith([['card', 'C-1', { state: 'in_review', head: HA, product: 'p1', attempts: { reviewer_starts: 2 } }]]));
+  const { moves } = await pass(rec, 300, { hasReviewer: () => false });
+  assert.match(moves.find(([id]) => id === 'C-1')?.[1] ?? '', /^in_review->waiting; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(moves));
 });
