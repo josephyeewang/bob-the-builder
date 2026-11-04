@@ -61,7 +61,14 @@ const later = (w, ms) => { w.t.clock.t += ms; };
 // M2 closing an ask, as the same actor (its writeDoc is fenced to its own folder).
 function close(w, id, state) { const a = askStore(w.t.record).ask(id); if (state === 'expired') must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: a.rev, doc: { ...a.doc, state: 'open', reask_count: 1, lapsed_at: new Date(w.t.clock.t).toISOString() } })); const b = askStore(w.t.record).ask(id); must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: b.rev, doc: { ...b.doc, state } })); }
 // The Lead changes the card's plan.
-function replan(w, id, files) { const c = w.t.record.read('card', id); must(roadmap(w.t, { id, expectRev: c.rev, fields: { files: files ?? [...c.doc.files, 'src/b.mjs'] } })); }
+function replan(w, id, files) {
+  const c = w.t.record.read('card', id);
+  const to = files ?? [...c.doc.files, 'src/b.mjs'];
+  // A card made from a plan file is changed only by a plan file (L490 m2).
+  if (!c.doc.plan_sha256) { must(roadmap(w.t, { id, expectRev: c.rev, fields: { files: to } })); return; }
+  const d = c.doc;
+  must(planFile(w.t, [{ id, tier: d.tier, module: d.module, depends_on: d.depends_on, brief: { goal: d.what, done_when: d.done_when, files: to } }], { head: d.main_commit }));
+}
 
 // The owner's tap on a go box, as M2's binding records it. M2's writeDoc is fenced to its own folder, so this writes as
 // the same actor directly.
@@ -1512,6 +1519,41 @@ test('R-0b-170: a card whose dependency will never merge is told to the owner on
   later(w, 25 * HOUR);
   await pass(w);
   assert.equal(told(), 2);
+});
+
+test('L490: a card whose dependency was reverted is told at once, at 24 hours and at 48 hours, and stays in draft', async () => {
+  const w = world();
+  seed(w.t, 'card', 'D', { state: 'reverted', product: PRODUCT });
+  card(w, 'A', { depends_on: ['D'] });
+  await withGo(w, 'A');
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: dependency D is reverted/.test(s)).length;
+  await pass(w);
+  await pass(w);
+  assert.equal(told(), 1, w.sent.join(' | '));
+  later(w, 24 * HOUR);
+  await pass(w);
+  assert.equal(told(), 2, 'at 24 hours');
+  later(w, 24 * HOUR);
+  await pass(w);
+  assert.equal(told(), 3, 'at 48 hours');
+  assert.equal(stateOf(w, 'A'), 'draft');
+});
+
+test('L490 m7: a card whose product record can\'t be read is told once, then daily; it never waits quietly', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  const base = w.t.record;
+  const corrupt = { id: PRODUCT, corrupt: true, reason: 'unreadable' };
+  const record = Object.create(base, { read: { value: (e, id) => (e === 'product' ? corrupt : base.read(e, id)) }, lookup: { value: (e, id) => (e === 'product' ? corrupt : base.lookup?.(e, id)) } });
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: product .* record can't be read/.test(s)).length;
+  await pass(w, {}, { record });
+  await pass(w, {}, { record });
+  assert.equal(told(), 1, w.sent.join(' | '));
+  later(w, 25 * HOUR);
+  await pass(w, {}, { record });
+  assert.equal(told(), 2);
+  assert.equal(stateOf(w, 'A'), 'draft');
 });
 
 test('R-0b-170: a write the Record refuses at the last moment is told, and the next pass tries again', async () => {

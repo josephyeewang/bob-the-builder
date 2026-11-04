@@ -15,7 +15,7 @@
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
-import { tellThen } from './alerts.mjs';
+import { tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { ENTITIES } from '../../shared/record.mjs';
 
@@ -23,19 +23,22 @@ export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
 export const HARD_MARGIN = 50_000;
 const SID = /^[A-Za-z0-9-]+$/;
+const namesSession = (sid) => typeof sid === 'string' && SID.test(sid);
 const iso = (ms) => new Date(ms).toISOString();
 
 /**
  * The Lead's launch record (R-0b-170, L460), written at every Lead start: the main commit it started on, read before the
  * start. A plan takes its main_commit from here, so a Lead with no record can't plan, and the owner is told why.
- * `head` is a sha, or null when it could not be read. The wiring's first start of a Lead calls this too.
+ * `head` is a sha, or null when it could not be read. Only a restart calls this today: nothing starts a Lead for the
+ * first time yet, and until that is wired (on the cutover list) a first-started Lead has no record and its plans are held.
  */
 export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = null }) {
-  const w = !SID.test(String(sessionId)) ? { ok: false, reason: 'the start named no session' }
+  const named = namesSession(sessionId);
+  const w = !named ? { ok: false, reason: 'the start named no session' }
     : !/^[0-9a-f]{40}$/.test(String(head)) ? { ok: false, reason: 'the main commit could not be read' }
       : rec.write({ actor: 'dispatcher', entity: 'launch', id: `lead-${sessionId}-${now}`, expectRev: 0, kind: 'launch',
         doc: { session_id: sessionId, role: 'lead', card: null, head, rev: null, product, launched_at: iso(now) } });
-  if (!w.ok) holdAlert({ rec, cause: `lead-launch-${sessionId}`, text: `the Lead ${sessionId} started with no launch record, so its plans will be refused: ${w.reason}`, alert, now });
+  if (!w.ok) holdAlert({ rec, cause: named ? `lead-launch-${sessionId}` : 'lead-launch-no-session', text: `${named ? `the Lead ${sessionId}` : 'a Lead'} started with no launch record, so its plans will be refused: ${w.reason}`, alert, now });
   return w;
 }
 
@@ -92,7 +95,9 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     try { head = await mainSha({ product }); } catch { head = null; }
     let r;
     try { r = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { r = { ok: false, reason: e.message }; }
-    if (r?.ok) recordLeadLaunch({ rec, now, alert, sessionId: r.sessionId, head, product });
+    if (r?.ok && !recordLeadLaunch({ rec, now, alert, sessionId: r.sessionId, head, product }).ok && namesSession(r.sessionId)) {
+      writeFrom(rec, RESTART_FACT(r.sessionId), null, { phase: 'none', reasks: 0, launch_pending: true }, 'lead_launch_pending');
+    }
     return r;
   };
   const save = (doc, kind) => {
@@ -100,6 +105,15 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
     return w;
   };
+
+  // A start that left no launch record is tried again each pass for that session (L490 m5). Main is read now, so a commit
+  // that landed since the start can be named; a plan made on an older one is still checked by the reviewer against main.
+  if (st.launch_pending) {
+    const product = lead.product ?? null;
+    let head = null;
+    try { head = await mainSha({ product }); } catch { head = null; }
+    if (recordLeadLaunch({ rec, now, alert, sessionId: sid, head, product }).ok) save({ launch_pending: false }, 'lead_launch_pending');
+  }
 
   const noSize = !size || size.tokens == null;
   // Told only once sent (audit 0b-6 r5 MAT-2).

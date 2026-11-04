@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { env, OWNER_ID, PRODUCT, must } from './fixtures.test-helper.mjs';
-import { leadCard, product, put, roadmap } from '../M9-record/fixtures.test-helper.mjs';
+import { leadCard, product, put, roadmap, seed } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { writeDoc, askStore } from './ask-store.mjs';
@@ -184,15 +184,15 @@ test('Tier 1: the go is a decision pull request; a listed file changed on main i
   }
   assert.equal(askStore(w.t.record).asks().length, 0, 'nothing asked without the pass');
   // Audit r1 M-2: plan_sha256 alone is not the plan. A file list or done_when changed in draft after the pass, or a
-  // pass given for another card with the same plan document, is refused.
+  // pass given for another card with the same plan document, is refused. The Record now refuses such an edit (L490 m2),
+  // so it is seeded here: this check is the second line, and it must hold if a card changes some other way.
   for (const [change, label] of [[{ files: ['src/a.mjs', 'src/b.mjs'] }, 'files'], [{ done_when: 'a weaker test' }, 'done_when']]) {
     const c = w.t.record.read('card', 'T');
-    must(roadmap(w.t, { id: 'T', expectRev: c.rev, fields: change }), label);   // the Lead's draft edit, as the record allows
+    seed(w.t, 'card', 'T', { ...c.doc, ...change });
     const rs = change.done_when ? { 'R-1': { ...rows['R-1'], done_when: change.done_when } } : rows;
     const no = await raiseGo(w.t.ctx, { cardId: 'T', rows: rs, view: w.view, mainSha: w.M0, planCheck: pass });
     assert.equal(no.ok, false, `${label} changed after the pass`); assert.match(no.reason, /changed after review/, label);
-    const back = w.t.record.read('card', 'T');
-    must(roadmap(w.t, { id: 'T', expectRev: back.rev, fields: { files: c.doc.files, done_when: c.doc.done_when } }), 'restore');
+    seed(w.t, 'card', 'T', c.doc);
   }
   const rowsU = card(w, 'U', plan, { 'R-1': row('R-1', { tier: 1 }) });
   const otherCard = await raiseGo(w.t.ctx, { cardId: 'U', rows: rowsU, view: w.view, mainSha: w.M0, planCheck: pass });

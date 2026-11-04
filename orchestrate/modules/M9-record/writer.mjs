@@ -494,7 +494,11 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
       const typed = ['plan_sha256', 'main_commit'].filter((k) => Object.hasOwn(fields, k));
       if (typed.length) return no(`a roadmap file may not set ${typed.join(' or ')}; hand in a plan file`);
       const cur = tx.lookup('card', h.id);
-      if (cur?.doc && hasItsGo(cur) && PLAN_INPUTS.some((k) => Object.hasOwn(fields, k) && !same(fields[k], cur.doc[k]))) return no(PLAN_FROZEN(h.id));
+      const changes = (keys) => keys.some((k) => Object.hasOwn(fields, k) && !same(fields[k], cur?.doc?.[k]));
+      if (cur?.doc && hasItsGo(cur) && changes(PLAN_INPUTS)) return no(PLAN_FROZEN(h.id));
+      // The plan file a card names stays true of the card (L490 m2), and what the go covered stays what is built (m3).
+      if (cur?.doc?.plan_sha256 && changes(PLAN_INPUTS)) return no(`card ${h.id} was made from a plan file, so only a plan file can change its plan`);
+      if (cur?.doc && cur.doc.state !== 'draft' && changes(['brief'])) return no(`card ${h.id} is ${cur.doc.state}, so its brief can't change: a brief is frozen once a card is ready`);
       const base = h.expectRev === 0 ? { state: 'draft' } : (cur?.doc ?? {});
       const doc = { ...base, ...fields };
       if (h.to_state !== undefined) doc.state = h.to_state;

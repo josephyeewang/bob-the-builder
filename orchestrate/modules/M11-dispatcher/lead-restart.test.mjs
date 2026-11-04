@@ -356,6 +356,44 @@ test('R-0b-170: main unreadable at the start: the Lead still starts, no record i
   }
 });
 
+test('L490 m5: main unreadable at a start is tried again each pass for that session, quietly, until the record is written', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  const down = async () => { throw new Error('GitHub is down'); };
+  await w.step(ended(261_000, 2), 2, { mainSha: down });
+  assert.deepEqual(launches(w.rec), []);
+  const next = (min, mainSha) => leadRestartStep({ rec: w.rec, rules: R, now: T0 + min * MIN, lead: { sessionId: 'L-2', product: 'p' }, size: ended(1000, min), alert: fakeAlert(), inFlight: null, mainSha,
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-3' }) });
+  const lines = w.rec.diary().length;
+  await next(3, down);
+  await next(4, down);
+  assert.deepEqual(launches(w.rec), []);
+  assert.equal(w.rec.diary().length, lines, 'still unreadable: nothing moved, so nothing is written');
+  await next(5, async () => 'c'.repeat(40));
+  assert.deepEqual(launches(w.rec).map((l) => [l.session_id, l.head]), [['L-2', 'c'.repeat(40)]]);
+  await next(6, async () => 'd'.repeat(40));
+  assert.equal(launches(w.rec).length, 1, 'written once');
+});
+
+test('L490 m5: a Lead that was never marked is not given a launch record by a pass', async () => {
+  const w = world();
+  await w.step(ended(1000), 1);
+  assert.deepEqual(launches(w.rec), []);
+});
+
+test('L490 m5: a start that names no session has its own cause and is told, whatever it answered', () => {
+  for (const sessionId of [undefined, null, 'not a session!']) {
+    const w = world();
+    const alert = fakeAlert();
+    recordLeadLaunch({ rec: w.rec, now: T0, alert, sessionId, head: 'a'.repeat(40) });
+    assert.equal(alert.texts.length, 1);
+    assert.equal(alert.calls?.[0]?.[1]?.mark?.fact ?? 'hold-lead-launch-no-session', 'hold-lead-launch-no-session');
+    assert.match(alert.texts[0].text ?? alert.texts[0], /^a Lead started with no launch record, so its plans will be refused: the start named no session/);
+  }
+});
+
 test('R-0b-170: recordLeadLaunch refuses a start that named no session, and says so', () => {
   const w = world();
   const alert = fakeAlert();

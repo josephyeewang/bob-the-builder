@@ -41,6 +41,7 @@ export function planCards({ text, sha256, mainCommit, product, read, cards }) {
       continue;
     }
     // One plain reason for each case, so the Lead reads why the whole plan was turned down.
+    if (cur.doc.kind !== 'ordinary') return bad(`card ${c.id} is a ${cur.doc.kind} card, so no plan may change it; nothing in this plan was applied`);
     if (hasItsGo(cur)) return bad(`${PLAN_FROZEN(c.id)}; nothing in this plan was applied`);
     if (cur.doc.state !== 'draft') return bad(`card ${c.id} is ${cur.doc.state}, so no plan may change it; nothing in this plan was applied`);
     if (cur.doc.module !== c.module) return bad(`card ${c.id} is in module ${cur.doc.module}, and that can't change; nothing in this plan was applied`);

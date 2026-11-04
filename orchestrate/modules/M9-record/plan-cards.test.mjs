@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { HEAD, HEAD2, PRODUCT, iso, leadCard, must, outboxFile, plan, planFile, product, put, roadmap, setup } from './fixtures.test-helper.mjs';
+import { HEAD, HEAD2, PRODUCT, iso, leadCard, must, outboxFile, plan, planFile, product, put, roadmap, seed, setup } from './fixtures.test-helper.mjs';
 
 const world = () => { const env = setup({ prefix: 'm9-plan-' }); product(env); return env; };
 const entry = (id, over = {}) => ({ id, tier: 2, module: 'M1', depends_on: [], brief: { goal: `the goal of ${id}`, done_when: 'tests pass', files: ['src/a.mjs'] }, ...over });
@@ -87,6 +87,46 @@ test('R-0b-170: a plan with no tier or no module is refused, and no default stan
   assert.match(planFile(env, [entry('A', { tier: undefined })]).reason, /card A needs an id, a tier and a module/);
   assert.match(planFile(env, [entry('A', { module: undefined })]).reason, /card A needs an id, a tier and a module/);
   assert.match(planFile(env, [entry('A', { tier: 3 })]).reason, /needs an id, a tier and a module/);
+});
+
+test('L490 m2: on a card made from a plan file, a roadmap file changes none of the plan', () => {
+  const env = world();
+  must(planFile(env, [entry('A')]));
+  const cur = env.record.read('card', 'A');
+  for (const fields of [{ files: ['src/other.mjs'] }, { done_when: 'something else' }, { tier: 1 }]) {
+    assert.match(roadmap(env, { id: 'A', expectRev: cur.rev, fields }).reason, /only a plan file can change its plan/);
+  }
+  assert.equal(env.record.read('card', 'A').rev, cur.rev);
+  assert.equal(roadmap(env, { id: 'A', expectRev: cur.rev, fields: { files: cur.doc.files, brief: { goal: 'sharper' } } }).ok, true, 'the same plan, a new brief, in draft');
+});
+
+test('L490 m2: a card with no plan file is still planned by roadmap file', () => {
+  const env = world();
+  leadCard(env, 'A');
+  const { rev } = env.record.read('card', 'A');
+  assert.equal(roadmap(env, { id: 'A', expectRev: rev, fields: { files: ['src/other.mjs'] } }).ok, true);
+});
+
+test('L490 m3: a brief is frozen once the card leaves draft, whatever state it is in', () => {
+  const env = world();
+  must(planFile(env, [entry('A')]));
+  for (const state of ['ready', 'claimed', 'running', 'in_review', 'waiting']) {
+    const c = env.record.read('card', 'A');
+    seed(env, 'card', 'A', { ...c.doc, state });
+    const cur = env.record.read('card', 'A');
+    assert.match(roadmap(env, { id: 'A', expectRev: cur.rev, fields: { brief: { goal: 'another' } } }).reason, new RegExp(`card A is ${state}, so its brief can't change`));
+    assert.deepEqual(env.record.read('card', 'A').doc.brief, c.doc.brief);
+  }
+});
+
+test('L490 m8: a plan changes only an ordinary card; any other kind refuses the whole plan', () => {
+  for (const kind of ['research_copy', 'lead_daily_card', 'exact_reverse', 'fix']) {
+    const env = world();
+    seed(env, 'card', 'A', { state: 'draft', product: PRODUCT, module: 'M1', kind, ...plan() });
+    const r = planFile(env, [entry('B'), entry('A')]);
+    assert.match(r.reason, new RegExp(`card A is a ${kind} card, so no plan may change it; nothing in this plan was applied`));
+    assert.equal(env.record.read('card', 'B'), null);
+  }
 });
 
 test('R-0b-170: a roadmap file may not set plan_sha256 or main_commit, on a new card or an old one', () => {
