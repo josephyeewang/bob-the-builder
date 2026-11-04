@@ -2,7 +2,7 @@
 // review 0b-6 M7, M8, M16, M19, m5, m6, m7).
 //
 // At login and every pass: start what the record says should run, and stop what should not.
-//   1. Usage bands (usage.mjs), written as the `usage-band` fact.
+//   1. Usage bands (usage.mjs), written as the `band-usage` fact.
 //   2. host.lock (m5): "Air is home" never stops orchestrated products; one diary line per change.
 //   3. Compactions (M19), counted per card across all its sessions.
 //   4. What should stop: a cancelled card (the kill switch: hard stop after timeouts.cancel_grace_min),
@@ -13,29 +13,55 @@
 //      limit_hit -> after the reset, Tier 2 ready, Tier 1 waiting on Joe; usage unknown for over
 //      timeouts.usage_unknown_max_min -> waiting on Joe.
 //   6. Starts: for each ready card (front of the queue first; in amber Tier 1 before Tier 2):
-//      may('start_session') -> startGate -> a rev-checked claim -> the launcher. A launcher refusal
-//      puts the card back to ready with the reason. Nothing starts during an outage.
+//      may('start_session') -> startGate -> a rev-checked claim naming the session before it starts
+//      (L72: the Dispatcher makes the session id) -> the launcher -> claimed->running with the pid. A
+//      launcher refusal releases the claim (the card goes back to ready). Nothing starts during an outage.
 //   7. A paused product (m7, G8): once its workers are parked, the Lead is asked to hand off
 //      (pauseLead port: lead-restart's WRAP flow), once per pause.
 // Product-state starts are M10's `may('start_session')` answer; this file does not repeat them.
 // Every outside effect is a port, so tests run on fakes.
 
-import { KEYS, need, minutes, MissingKey } from './keys.mjs';
+import { KEYS, need, minutes, MissingKey, missingFor } from './keys.mjs';
 import { currentBands, recordBands } from './usage.mjs';
-import { startGate } from './gate.mjs';
+import { startGate, riskOf } from './gate.mjs';
 import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
+import { randomUUID, createHash } from 'node:crypto';
+import { hostname } from 'node:os';
 import { move, waitOn, note } from './moves.mjs';
-import { tellThen, dropCause } from './alerts.mjs';
+import { waitOnJoe } from './joe-waits.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
+import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { stillWaiting, dueToTell, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { exactReverse } from './undo.mjs';
-import { FINAL_STATES } from '../../shared/record.mjs';
+import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
+/** The mark that a stop's unsaved work was told (L130 M9). */
+export const UNSAVED_FACT = (sid) => `stop-unsaved-${sid}`;
 export const COMPACTION_FACT = (card) => `compactions-${card}`;
 export const HOST_FACT = 'host-lock-seen';
 export const PAUSE_FACT = (product) => `pause-${product}`;
 export const LIMIT_FACT = (account) => `limit-hit-${account}`;
-export const UNKNOWN_FACT = 'usage-unknown-alert';
+/** What a limit_hit wait that names no account becomes (L110 m-4): it waits on Joe. */
+export const LIMIT_NO_ACCOUNT = 'limit_hit: the wait names no account, so the limit reset can\'t be read';
+/** The other limit_hit waits that can't resume by themselves and wait on Joe (MAT-1, audit #78 r2). */
+export const LIMIT_NO_RUN = 'limit_hit: the wait has no time its run began, so no hit can be matched to it';
+export const LIMIT_NO_RESET = 'limit_hit: the hit has no readable reset time';
+/** The latest a limit can reset after its hit (audit #125 r1 MAT-A). The weekly window is the longest real one, so a
+ *  reset more than a week (and an hour's slack) after the hit is a misread, read as no reset time: the card waits on Joe
+ *  and he is told, never held in silence until a date that will not come. */
+export const LIMIT_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000;
+
+// When a card began to wait: its wait's since, or `fallback` when that can't be read (L285), so a cap measured from
+// it still ends. The Record writer stamps since and keeps it on a re-check (M9 checkWait), so only a hand-edited
+// Record lacks one. The fallback is the run's start (wait.run_started, which every limit wait that gets this far has):
+// fixed, and never later than the park. Not the hit's time: each new hit moves it, so a cap counted from it never ends.
+// Read by pastTime's rule (#153 audit MAT-1): a since more than 60 s ahead of `now` is not read, so a cap measured from
+// it still ends.
+const waitedFrom = (doc, fallback, now) => pastTime(doc.wait?.since, now) ?? fallback;
+export const LIMIT_NO_HIT = 'limit_hit: no limit hit was recorded for the run in time';
+export const UNKNOWN_FACT = 'unknown-usage-alert';
 export const RULES_MISSING_FACT = 'rules-missing-alert';
 // Used only when timeouts.cancel_grace_min itself is missing (audit MAT-2): Cancel must still stop.
 export const CANCEL_GRACE_FLOOR_MS = 2 * 60_000;
@@ -73,31 +99,34 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
   // last recorded set count, so a key that left is told again when it comes back.
   const told = list(doc?.told_keys).filter((k) => had.includes(k));
   const fresh = seen.filter((k) => !told.includes(k));
-  // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day).
-  const last = Date.parse(doc?.told_at ?? '');
-  const again = !fresh.length && keep.length && seen.length && Number.isFinite(last) && now - last >= HOLD_REPEAT_MS;
+  // Still missing a day after the last alert: told again, all of them (LEAD-CALLS L38, once per cause per day). A told
+  // time that can't be read or lies ahead counts as due (L324, shared dueToTell): before, it was never told again.
+  const last = pastTime(doc?.told_at, now);
+  const again = !fresh.length && keep.length && seen.length && dueToTell(doc, now, HOLD_REPEAT_MS);
   const tell = fresh.length ? fresh : again ? keep : [];
   const joined = keep.join(', ') || null;
   if (joined !== (doc?.keys ?? null)) putFact(rec, factId, { ...doc, keys: joined, at: iso(now) }, keep.length ? 'rules_missing' : 'rules_missing_cleared');
   const toldNow = () => [...new Set([...told, ...tell])].sort().join(', ');
   // A new key told alone keeps the day clock of the keys told before (audit 0b-6 r6 m-5).
-  const at = again || !Number.isFinite(last) ? iso(now) : doc.told_at;
+  const at = again || last === null ? iso(now) : doc.told_at;
   if (tell.length) tellThen(alert, `the rules have no value for ${tell.join(', ')}: ${what}`, { fact: factId, fields: { told_keys: toldNow(), told_at: at }, kind: 'rules_missing_told' });
   return seen.join(', ') || null;
 }
 
 export const HOLD_FACT = (cause) => `hold-${cause}`;
-export const HOLD_REPEAT_MS = 24 * 60 * 60_000;
+// The shared still-waiting repeat, one definition (#164 audit c1).
+export const HOLD_REPEAT_MS = STILL_WAITING_MS;
 
 /**
  * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
  * cause per day, on the fact `hold-<cause>`.
  */
-export function holdAlert({ rec, cause, text, alert, now }) {
+export function holdAlert({ rec, cause, text, alert, now, every = HOLD_REPEAT_MS }) {
   const f = factDoc(rec, HOLD_FACT(cause))?.doc;
-  const last = Date.parse(f?.told_at ?? '');
-  // Once per cause per day (L38): a changing detail in the text does not make it a new cause.
-  if (Number.isFinite(last) && now - last < HOLD_REPEAT_MS) return false;
+  // Once per cause per day (L38), or per `every` (a paused product, weekly; L299): a changing detail in the text
+  // does not make it a new cause. null, not false: already told today is not a refused alert (L130 m12). A told_at
+  // that can't be read, or more than 60 s ahead of now, is not told (shared dueToTell; #157 audit MAT-1).
+  if (!dueToTell(f, now, every)) return null;
   // Marked told only once a copy is delivered (audit 0b-6 r5 MAT-2; L47).
   return tellThen(alert, text, { fact: HOLD_FACT(cause), fields: { text, told_at: iso(now) }, kind: 'hold_alert' });
 }
@@ -113,7 +142,11 @@ export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p,
   return { ok: true, how: 'SIGKILL' };
 }
 
-const kindOf = (card) => (card.kind === 'undo' ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
+// An undo card is M9's kind exact_reverse (L74); the session kind stays 'undo'.
+const isUndo = (card) => card.kind === 'exact_reverse';
+const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
+// The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
+const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
@@ -127,7 +160,7 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
   if (card.state === 'cancelled') return 'cancel';
   if (!parkable(s)) return null;
   // A worker whose card has ended, or now waits on Joe, has nothing left to do (audit MIN-3).
-  if (FINAL_STATES.card.includes(card.state) || (card.state === 'waiting' && card.waiting?.who === 'joe')) return 'card_ended';
+  if (FINAL_STATES.card.includes(card.state) || (card.state === 'waiting' && card.wait?.who === OWNER_WAIT_WHO)) return 'card_ended';
   if (compactions >= split) return 'needs_split';
   if (b.band === 'red') return 'red';
   if (productDoc?.state === 'paused') return 'paused';
@@ -139,16 +172,36 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
  * this as its own first step (LEAD-CALLS L38), so no other step's failure, an unreadable file or a bad
  * rule, can skip a cancel. Returns { stopping, stopped, running, bands, unknownSince, missing }.
  */
-export async function stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
+// `clock` (ms) is read again once the stops and saves are back (up to PORT_DEADLINE_MS + SAVE_DEADLINE_MS later): the
+// park is written at that time, since the Store Writer refuses a wait whose since is more than 60 s off its clock (L321).
+// Left out, it is `now`.
+export async function stopPass({ rec, rules, now, clock = () => now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
   const out = { stopping: [], stopped: [] };
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
   // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
   // the stop loop (audit 0b-6 r3 MAT-1).
   const missing = [];
   const read = readOr(missing);
-  const cancelMs = read(() => minutes(rules, KEYS.cancelGraceMin), CANCEL_GRACE_FLOOR_MS);
-  const parkMs = read(() => minutes(rules, KEYS.parkWaitMin), Infinity);
-  const split = read(() => need(rules, KEYS.splitAfterCompactions), Infinity);
+  // Cancel grace, park wait and the compaction split are per-product keys (L131: each governs one product's session),
+  // which the real rules answer only for a named product. They are read for every product in the Record and every
+  // running session's product, so a product that lacks one starts nothing, as before, and a session is timed by its
+  // own product's value.
+  const limits = new Map();
+  const limitsFor = (product) => {
+    const k = product;
+    if (!limits.has(k)) {
+      const readFor = (key, f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? missingFor(e.key, product) : `the rules (${e?.message ?? e})`); return fallback; } };
+      limits.set(k, {
+        cancelMs: readFor(KEYS.cancelGraceMin, () => minutes(rules, KEYS.cancelGraceMin, { product }), CANCEL_GRACE_FLOOR_MS),
+        parkMs: readFor(KEYS.parkWaitMin, () => minutes(rules, KEYS.parkWaitMin, { product }), Infinity),
+        split: readFor(KEYS.splitAfterCompactions, () => need(rules, KEYS.splitAfterCompactions, { product }), Infinity),
+      });
+    }
+    return limits.get(k);
+  };
+  let products = [];
+  try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
+  for (const product of new Set([...products, ...sessions.map((s) => s.product)].filter(Boolean))) limitsFor(product);
   const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });
 
@@ -171,6 +224,10 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
       compactions = Object.values(by).reduce((a, x) => a + x, 0);
     }
     const productDoc = rec.read('product', s.product)?.doc;
+    // A session names its product; else its card does. With neither, nothing is read: no product's value applies, so a
+    // cancel still stops after the floor and nothing parks or splits on a limit.
+    const own = s.product ?? card?.product;
+    const { cancelMs, parkMs, split } = own ? limitsFor(own) : { cancelMs: CANCEL_GRACE_FLOOR_MS, parkMs: Infinity, split: Infinity };
     const why = stopReason({ s, card, productDoc, b, compactions, split });
     const sf = factDoc(rec, STOP_FACT(s.id));
     let pending = sf?.doc?.state === 'pending' ? sf.doc : null;
@@ -180,6 +237,13 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
     }
     if (!pending) continue;
+    // A wanted-since that can't be read or lies ahead (L324) would never come due, so the stop would wait for a safe
+    // point for ever. It is restarted from now instead (not counted as late, which would stop at once with no safe
+    // point over a bad field): the stop is forced one limit from now at most.
+    if (pastTime(pending.since, now) === null) {
+      pending = { ...pending, since: iso(now) };
+      putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted');
+    }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
     const late = now - Date.parse(pending.since) >= limit;
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
@@ -196,21 +260,61 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   // One alert per wanted stop, and again each day it fails (audit MIN-4; L38: no silent hold); told only
   // once delivered (r5 MAT-2). Queued, never waited on: a safety step does not wait on a send (L47).
   for (const { s, pending, stopped } of failed) {
-    if (!(now - Date.parse(pending.told_at ?? '') < HOLD_REPEAT_MS)) tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, { fact: STOP_FACT(s.id), fields: { told_at: iso(now) }, kind: 'stop_failed' });
+    if (dueToTell(pending, now, HOLD_REPEAT_MS)) tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, { fact: STOP_FACT(s.id), fields: { told_at: iso(now) }, kind: 'stop_failed' });
   }
   const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
+  const after = Math.max(now, clock());
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
-    if (!saved?.ok) alert(`session ${s.id} stopped but its unsaved work was not saved: ${saved?.reason ?? 'no answer'}`);
-    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
-    moveAfterStop(rec, s.card, pending.reason, now);
-    putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(now), how: stopped.how, hard: late, saved: !!saved?.ok }, 'stop_done');
+    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((after - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now: after });
+    // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
+    // and told to the owner while it lasts (refused-writes.mjs), never dropped.
+    const moved = moveAfterStop(rec, s.card, pending.reason, after);
+    putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(after), how: stopped.how, hard: late, saved: !!saved?.ok, ...(saved?.ok ? {} : { save_reason: saved?.reason ?? 'no answer' }), ...movedFields(moved) }, 'stop_done');
     dropCause(rec, STOP_FACT(s.id));
+    // Work not saved is told until delivered (L130 M9): the stop is done either way, and tellUnsaved asks again each pass.
+    if (!saved?.ok) tellThen(alert, unsavedText(s.id, saved?.reason), { fact: UNSAVED_FACT(s.id), fields: { told_at: iso(now) }, kind: 'unsaved_told' });
     running = running.filter((x) => x.id !== s.id);
     out.stopped.push([s.id, pending.reason]);
   }
 
+  tellUnsaved({ rec, alert, now });
+  reparkStopped({ rec, now: Math.max(after, clock()) });
   return { ...out, running, bands: b, unknownSince, missing };
+}
+
+// A stop's record of its card's move: moved true, or false with the Record's reason; nothing when no move was due.
+const movedFields = (m) => (m == null ? {} : m.ok ? { moved: true } : { moved: false, move_reason: m.reason ?? 'refused' });
+
+// A done stop whose card's park the Record refused (L323) is parked again each pass while its card still runs under
+// the stopped session. Each refusal is told through refused-writes.mjs; once the card moves on, by this or anything
+// else, the stop says so. A card that runs under another session now was started again: the stop no longer speaks for
+// it, and is marked superseded, never parked over the new run (L332 m3).
+function reparkStopped({ rec, now }) {
+  for (const f of rec.list('fact')) {
+    if (!f.id.startsWith(STOP_FACT('')) || f.doc?.state !== 'done' || f.doc.moved !== false) continue;
+    const card = rec.read('card', f.doc.card)?.doc;
+    const sid = f.id.slice(STOP_FACT('').length);
+    const runSid = card?.claim?.session_id;
+    if (card?.state === 'running' && typeof runSid === 'string' && runSid !== sid) {
+      putFact(rec, f.id, { ...f.doc, moved: 'superseded', move_reason: `the card runs under session ${runSid} now` }, 'stop_moved');
+      continue;
+    }
+    const m = card?.state === 'running' ? moveAfterStop(rec, f.doc.card, f.doc.reason, now) : { ok: true };
+    if (m?.ok) putFact(rec, f.id, { ...f.doc, moved: true, move_reason: null }, 'stop_moved');
+    else if (m && m.reason !== f.doc.move_reason) putFact(rec, f.id, { ...f.doc, move_reason: m.reason ?? 'refused' }, 'stop_moved');
+  }
+}
+
+// A done stop whose work was not saved, with no delivered alert for it, is told again (L130 M9).
+const unsavedText = (sid, reason) => `session ${sid} stopped but its unsaved work was not saved: ${reason ?? 'no answer'}`;
+function tellUnsaved({ rec, alert, now }) {
+  for (const f of rec.list('fact')) {
+    if (!f.id.startsWith(STOP_FACT('')) || f.doc?.state !== 'done' || f.doc.saved !== false) continue;
+    const sid = f.id.slice(STOP_FACT('').length);
+    if (f.id !== STOP_FACT(sid) || rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at) continue;
+    if (!isQueued(rec, UNSAVED_FACT(sid))) tellThen(alert, unsavedText(sid, f.doc.save_reason), { fact: UNSAVED_FACT(sid), fields: { told_at: iso(now) }, kind: 'unsaved_told' });
+  }
 }
 
 const readOr = (missing) => (f, fallback) => { try { return f(); } catch (e) { missing.push(e instanceof MissingKey ? e.key : `the rules (${e?.message ?? e})`); return fallback; } };
@@ -220,7 +324,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product }) -> { ok, sessionId, pgid, reason, signin, configDir }   (M4 launch, through accountLaunch)
+ *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, reason, signin, configDir }
+ *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId)
  *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
@@ -230,8 +335,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
-  const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
   const missing = [...(st?.missing ?? [])];
   const read = readOr(missing);
@@ -247,34 +352,99 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   if (missing.length) startsOff ??= `the rules have no value for ${[...new Set(missing)].sort().join(', ')}`;
 
   // 2. host.lock (m5). An unreadable file is "not known" and changes nothing (audit 0b-6 r3 MAT-1).
-  let host;
-  try { host = hostLock(); } catch (e) { host = undefined; out.notes.push(`host.lock unreadable: ${e?.message ?? e}`); }
+  let lockText;
+  try { lockText = hostLock(); } catch (e) { lockText = undefined; out.notes.push(`host.lock unreadable: ${e?.message ?? e}`); }
   const seen = factDoc(rec, HOST_FACT);
-  if (host !== undefined && (seen?.doc?.text ?? null) !== (host ?? null)) {
-    putFact(rec, HOST_FACT, { text: host ?? null, at: iso(now) }, 'host_lock');
-    if (host && /\bair\b/i.test(host)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
+  if (lockText !== undefined && (seen?.doc?.text ?? null) !== (lockText ?? null)) {
+    putFact(rec, HOST_FACT, { text: lockText ?? null, at: iso(now) }, 'host_lock');
+    if (lockText && /\bair\b/i.test(lockText)) { note(rec, 'host-lock-note', "who's-home file says Air; ignored for orchestrated products", { now }); out.notes.push('host.lock says Air'); }
   }
 
   // 5. Resume parked work (M8).
-  const unknownLong = b.band === 'unknown' && unknownSince && now - Date.parse(unknownSince) > unknownMaxMs;
+  // A start of the unknown band that can't be read or lies ahead counts as over a day (L324, shared pastTime): told,
+  // never waited out.
+  const unknownAt = unknownSince ? pastTime(unknownSince, now) : undefined;
+  const unknownLong = b.band === 'unknown' && !!unknownSince && (unknownAt === null || now - unknownAt > unknownMaxMs);
   for (const { id, doc } of rec.list('card')) {
     if (doc.state !== 'waiting') continue;
-    const what = doc.waiting?.what;
+    // A wait's `what` names what it waits on; leaving waiting clears the wait (M9), and the diary keeps the move's kind.
+    const what = doc.wait?.what;
     if (what === 'usage_band') {
-      if (unknownLong) { waitOn(rec, id, { who: 'joe', what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown' }); continue; }
+      // No card waits on Joe silently (L138 m4): this one is told, until delivered, besides the stretch's own alert below.
+      if (unknownLong) {
+        waitOnJoe(rec, id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
+          text: `card ${id}: usage has been unreadable for over a day, so it can't resume by itself; it waits on you` });
+        continue;
+      }
       // Not while usage is unknown either (audit 0b-6 r2 MIN-2): the gate would hold it, so it would only churn.
-      if (b.band !== 'red' && b.band !== 'unknown' && b.own_building !== 'full') { move(rec, 'card', id, { state: 'ready', waiting: null, resumed_from: 'usage_band' }, { now, kind: 'resume' }); out.resumed.push(id); }
+      if (b.band !== 'red' && b.band !== 'unknown' && b.own_building !== 'full') { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_usage_band' }).ok) out.resumed.push(id); }
     } else if (what === 'limit_hit') {
-      const lf = factDoc(rec, LIMIT_FACT(doc.account ?? account))?.doc;
+      // The limit of the account the card waits on (L97: parked on a's limit, it reads a's fact, not the pass's). The wait names it
+      // (`wait.account`, set by whoever parks the card; M9 lets no script put an account on the card itself). Only a
+      // hit observed after the card's run began counts (MAT-1, audit #78 r2): an older one is an earlier limit, already
+      // reset (L97 M-3). The Record sets `wait.run_started` from the claim when a claimed or running card is parked
+      // (M9 guard.mjs), so a hit written before the park still counts. Order is not wholly free: an older hit from the
+      // same run can resume a card parked later on a newer one, which is churn (it parks again), not a wrong start.
+      // Every limit wait that can't resume by itself waits on Joe, told until delivered (L130), never silently:
+      //   - a wait that names no account (L110 m-4: the pass's own account is not necessarily the one the card hit);
+      //   - a wait with no run_started (it was not parked from a run, or its claim had no readable time);
+      //   - a hit after the run began with no reset time (the worker could not read it, or it was already past), or a
+      //     reset more than LIMIT_RESET_MAX_MS after the hit;
+      //   - a card that has waited on a limit longer than LIMIT_RESET_MAX_MS since wait.since, whatever the reading says
+      //     (audit #125 r2 m-2, m-3): a reset that moves forward with each new hit, or a hit dated in the future, would
+      //     otherwise hold it quietly with no end;
+      //   - no hit after the run began, timeouts.usage_unknown_max_min after the card began to wait.
+      const acct = doc.wait?.account;
+      if (typeof acct !== 'string' || !acct) {
+        // Told until delivered (L130 M12): the card is waiting on Joe from here on, so this branch never sees it again.
+        waitOnJoe(rec, id, { what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account', alert,
+          text: `card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you` });
+        continue;
+      }
+      // The same rule on run_started (#153 audit MAT-1): one in the future is as good as none.
+      const runStarted = pastTime(doc.wait?.run_started, now);
+      if (runStarted === null) {
+        waitOnJoe(rec, id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
+          text: `card ${id}: it waits on account ${acct}'s usage limit but the record has no time its run began, so no limit hit can be matched to it; it waits on you` });
+        continue;
+      }
+      const lf = sensorsFact(rec, LIMIT_FACT(acct))?.doc;
+      const seen = Date.parse(lf?.observed_at ?? '');
+      if (!(seen > runStarted)) {
+        if (now - waitedFrom(doc, runStarted, now) > unknownMaxMs) {
+          waitOnJoe(rec, id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
+            text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
+        }
+        continue;
+      }
       const resets = Date.parse(lf?.resets_at ?? '');
-      if (!Number.isFinite(resets) || now < resets) continue;
-      if (doc.tier === 2) { move(rec, 'card', id, { state: 'ready', waiting: null, resumed_from: 'limit_hit' }, { now, kind: 'resume' }); out.resumed.push(id); }
-      else waitOn(rec, id, { who: 'joe', what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset' });
+      // Measured from the hit, never from now, on purpose (audit #125 r2 c-2): when the Mini was off past the reset, the
+      // first pass after still judges the reset against the hit's own time.
+      if (!Number.isFinite(resets) || resets > seen + LIMIT_RESET_MAX_MS) {
+        const why = Number.isFinite(resets) ? `the reset time it gave (${lf.resets_at}) is more than a week after the hit` : 'the reset time could not be read';
+        waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+          text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
+        continue;
+      }
+      if (now < resets) {
+        if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
+          waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+            text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
+        }
+        continue;
+      }
+      if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
+      // No card waits on Joe silently (L130): this one is told, until delivered.
+      else waitOnJoe(rec, id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
+        text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
+    } else if (what === PAUSED_WAIT_WHAT) {
+      // A card parked for a paused product goes back to ready once the product is no longer paused.
+      if (rec.read('product', doc.product)?.doc?.state !== 'paused' && move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_paused' }).ok) out.resumed.push(id);
     }
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || !(now - Date.parse(uf?.told_at ?? '') < HOLD_REPEAT_MS))) {
+  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 
@@ -283,7 +453,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
     if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs });
+    await starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -301,7 +471,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
       const cause = String(asked.reason).replace(/\d+/g, 'N');
       if (pf?.doc?.state !== 'failed') putFact(rec, PAUSE_FACT(product), { state: 'failed', reason: asked.reason, at: iso(now) }, 'pause_lead_failed');
-      if (pf?.doc?.told_cause !== cause || !(now - Date.parse(pf?.doc?.told_at ?? '') < HOLD_REPEAT_MS)) {
+      if (pf?.doc?.told_cause !== cause || dueToTell(pf?.doc, now, HOLD_REPEAT_MS)) {
         tellThen(alert, `the Lead of ${product} could not be asked to hand off: ${asked.reason}; tried again every pass`, { fact: PAUSE_FACT(product), fields: { told_cause: cause, told_at: iso(now) }, kind: 'pause_lead_failed' });
       }
       continue;
@@ -316,22 +486,25 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
 
 // Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert, portDeadlineMs = PORT_DEADLINE_MS }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
-  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, onlyUndo: true, missing, filesOf, portDeadlineMs });
+  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
   return { ...out, missing, running: live };
 }
 
+// A cancelled or ended card is not written: its stop is the stop fact's (stopped_at there). A parked card waits, with
+// resume retry (a running card's claim ends, so it starts again from ready): the Record has no running -> ready move
+// outside a release, a break or a lapse (L72). The Record's waiters are joe, usage, dependency, incident and date:
+// a card too big for one session waits on a dependency (the Lead's split), a paused product's card on Joe.
 function moveAfterStop(rec, cardId, reason, now) {
-  if (!cardId) return;
-  if (reason === 'cancel') return move(rec, 'card', cardId, { stopped_at: iso(now) }, { now, kind: 'cancel_stopped' });
-  if (reason === 'card_ended') return move(rec, 'card', cardId, { stopped_at: iso(now) }, { now, kind: 'ended_stopped' });
-  if (reason === 'needs_split') return waitOn(rec, cardId, { who: 'lead', what: 'needs_split', now, kind: 'needs_split' });
-  if (reason === 'red') return waitOn(rec, cardId, { who: 'dispatcher', what: 'usage_band', now, kind: 'park_red' });
-  return move(rec, 'card', cardId, { state: 'ready', parked_for: 'paused' }, { now, kind: 'park_paused' });
+  if (!cardId || reason === 'cancel' || reason === 'card_ended') return null;
+  if (rec.read('card', cardId)?.doc?.state !== 'running') return null;
+  if (reason === 'needs_split') return waitOn(rec, cardId, { who: 'dependency', what: 'needs_split', now, kind: 'needs_split' });
+  if (reason === 'red') return waitOn(rec, cardId, { who: 'usage', what: 'usage_band', now, kind: 'park_red' });
+  return waitOn(rec, cardId, { who: OWNER_WAIT_WHO, what: PAUSED_WAIT_WHAT, now, kind: 'park_paused' });
 }
 
 // Only an explicit Tier 2 is Tier 2 (audit MAT-3).
@@ -339,32 +512,158 @@ const tierOf = (c) => (c.tier === 2 ? 2 : 1);
 const capRefusal = (r) => /cap|already runs|shares |runs alone/.test(r);
 
 export const UNDO_HELD_FACT = (card) => `undo-held-${card}`;
+// A non-undo start held for a reason that clears by itself (L293, L299) is not told card by card on first sight:
+//   - queueing: another card holds the slot or the files, or Tier-1 work goes first in amber; a slot frees when a run ends;
+//   - the usage band, but only while the band itself is told (TOLD_BANDS, which tick.mjs's band alert reads too; L305);
+//   - a product Joe paused.
+// Once the oldest such card on a product has been in ready a day, Joe gets ONE alert per product and cause listing the
+// held cards (and, for queueing, the cards holding the slot), then daily; a paused product weekly. Every other reason,
+// a band reason with no band alert, and a daily pattern that can't be folded, is told on first sight, once per card and
+// cause, then daily (L38: no silent hold).
+export const TOLD_BANDS = Object.freeze(['red', 'unknown']);
+export const PAUSED_REPEAT_MS = 7 * HOLD_REPEAT_MS;
+// M10 is asked before the gate, so a full cap is first refused in M10's words (engine.mjs; #157 audit m2), then the gate's.
+const QUEUES = [
+  ['product-cap', /^the product already runs \d+ (editing worker\(s\) \(cap \d+\)|script\(s\))$|^rules: editing cap reached for \S+ \(\d+\)$/],
+  ['mac-cap', /^the Mac already runs \d+ (editing workers \(cap \d+\)|scripts)$|^rules: editing cap reached on this Mac \(\d+\)$/],
+  ['files', /^shares .+ with running card \S+$|^a card with no file list runs alone$|^card \S+ has no file list and runs alone$/],
+  ['tier1-first', /^queued behind Tier-1 work in amber$/],
+];
+const BAND_REASONS = /^(the red band|usage is unknown: no Tier-1|ORCHESTRATE has used its share of the week$|no new (scripts|overnight runs) outside the green band$|no Tier-1 production work above the usage line$|rules: .*Tier 1 start needs a usage reading)/;
+/** Which fold a held start's reason belongs to, or null if it is told on first sight. `band` is this pass's band. */
+export function waitClass(reason, product, band) {
+  if (/can't be folded/.test(reason)) return null;
+  // M10 is asked first: `product is paused: no starts` (engine.mjs, a state it can't read included; #157 audit m1). The
+  // gate's own words are the backstop.
+  if (reason === 'rules: product is paused: no starts' || reason === `${product} is paused: only its undo starts`) return 'paused';
+  const q = QUEUES.find(([, re]) => re.test(reason));
+  if (q) return q[0];
+  return BAND_REASONS.test(reason) && TOLD_BANDS.includes(band) ? `band-${band}` : null;
+}
+const FOLDS = ['paused', ...QUEUES.map(([c]) => c), ...TOLD_BANDS.map((b) => `band-${b}`)];
+// Who holds the slot: a shared file names its card; Tier-1 first names the Tier-1 cards it waits behind; otherwise the
+// running cards on the product, or on the Mac for a Mac cap.
+function holders(reason, product, running, tier1) {
+  const named = /with running card (\S+)$|^card (\S+) has no file list/.exec(reason);
+  if (named) return [named[1] ?? named[2]];
+  if (reason === 'queued behind Tier-1 work in amber') return tier1.get(product) ?? [];
+  const on = /^the Mac |on this Mac \(/.test(reason) ? running : running.filter((s) => s.product === product);
+  return on.map((s) => s.card).filter(Boolean);
+}
+const LIST_MAX = 10;
+const listed = (ids) => ids.slice(0, LIST_MAX).join(', ') + (ids.length > LIST_MAX ? ` +${ids.length - LIST_MAX} more` : '');
+function foldText(g) {
+  const n = g.cards.length;
+  if (g.cls === 'paused') return `${g.product} is paused; ${n} card(s) are waiting: ${listed(g.cards)}`;
+  const why = [...g.why].map(([reason, ids]) => `${listed(ids)} (${reason})`).join('; ');
+  const by = [...new Set(g.by)];
+  const behind = !by.length ? '' : g.cls === 'tier1-first' ? `; they wait behind Tier-1 card(s) ${listed(by)}` : `; the slot is held by card(s) ${listed(by)}`;
+  return `${g.product}: ${n} card(s) held from starting, the oldest for over a day: ${why}${behind}`;
+}
+/**
+ * The one alert per product and cause for held starts (L299), on the shared still-waiting rule (L315): told once the
+ * oldest held card has waited a day, again daily (a paused product weekly), and the mark cleared once nothing on that
+ * product and cause has waited a day, so a return is told afresh (#157 audit m3). Run on a full pass only: a pass that
+ * starts undo cards alone sees no groups and must not clear them.
+ */
+function tellWaits({ rec, groups, alert, now }) {
+  let products;
+  try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
+  const keys = new Set([...groups.keys(), ...products.flatMap((p) => FOLDS.map((c) => `${p}-${c}`))]);
+  for (const key of keys) {
+    const g = groups.get(key);
+    const fact = HOLD_FACT(`waits-${key}`);
+    stillWaiting({
+      now,
+      every: g?.cls === 'paused' ? PAUSED_REPEAT_MS : HOLD_REPEAT_MS,
+      // A paused fold is the wait of this pause (L324 n4): a re-pause is told on its own clock, not held by the mark
+      // of the last pause when no full pass ran in between to clear it (starts off, an outage).
+      ...(typeof g?.pausedSince === 'string' ? { since: g.pausedSince } : {}),
+      waiting: () => !!g && now - g.oldest >= HOLD_REPEAT_MS,
+      read: () => factDoc(rec, fact)?.doc,
+      // Marked told only once a copy is delivered (L47), as holdAlert; every field it is given is written.
+      tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
+      // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and the mark written only if set.
+      clear: () => {
+        dropCause(rec, fact);
+        const cur = rec.read('fact', fact)?.doc;
+        if (cur != null && !(typeof cur === 'object' && cur.told_at == null)) putFact(rec, fact, { ...(typeof cur === 'object' ? cur : {}), told_at: null }, 'hold_cleared');
+      },
+    });
+  }
+}
+// Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
+// fixed class, not their text (#157 audit m5); any other is keyed by its text with the numbers out.
+const FIXED_CAUSES = [['launcher', /^launcher: /], ['claim', /^not claimed: /], ['rules-error', /^rules: (could not be asked|rules error: )/]];
+const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason))?.[0]
+  ?? createHash('sha256').update(reason.replace(/\d+/g, 'N')).digest('hex').slice(0, 12);
 
-async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS }) {
+/** Card kinds the start loop never hands to a session. */
+export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
+
+async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
-  // A card meant for the Lead to plan (for: 'lead') is never started as a worker (audit MAT-4).
-  const ready = rec.list('card').filter((c) => c.doc.state === 'ready' && c.doc.for !== 'lead');
-  ready.sort((x, y) => (y.doc.queue === 'front') - (x.doc.queue === 'front')
+  // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
+  // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
+  // The Lead's own daily card is never started as a worker (audit MAT-4; M9 lets only the Lead make one). A fix
+  // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
+  // either: its commit is the owner's file, copied mechanically (research-intake.mjs; lane 2's copier, L286).
+  const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
+  const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
+  ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
     || (amberish ? tierOf(x.doc) - tierOf(y.doc) : 0)
-    || String(x.doc.changed_at ?? '').localeCompare(String(y.doc.changed_at ?? '')) || x.id.localeCompare(y.id));
-  const tier1Waiting = new Set();
+    || since(x).localeCompare(since(y)) || x.id.localeCompare(y.id));
+  const tier1Waiting = new Map();
+  const groups = new Map();
   for (const { id, rev, doc } of ready) {
     const card = { id, ...doc };
     const product = doc.product;
-    if (onlyUndo && doc.kind !== 'undo') continue;
+    if (onlyUndo && !isUndo(doc)) continue;
     // An undo that cannot start is the way out of a bad change: Joe is told why, once per reason and again
     // each day (audit 0b-6 r3 MAT-5). The reason counts with its numbers out, so "runs 2 workers" and
     // "runs 3 workers" are one cause (audit 0b-6 r4).
-    const refuse = (reason) => {
+    // `toldElsewhere`: a missing or unreadable rules value, which the missing-values alert tells once for the tick.
+    const refuse = (reason, toldElsewhere = false) => {
       out.refused.push([id, reason]);
+      if (!isUndo(doc)) {
+        if (toldElsewhere) return;
+        const cls = waitClass(reason, product, b?.band);
+        if (cls === null) {
+          holdAlert({ rec, cause: `start-${id}-${causeOf(reason)}`, text: `card ${id} can't start: ${reason}`, alert, now });
+          return;
+        }
+        // Folded per product and cause; the clock is the oldest ready time, the Record's, so nothing is written per pass.
+        // A ready time that can't be read, or more than 60 s ahead of now, counts as a day old: told, never held in
+        // silence (shared pastTime; #157 audit MAT-1). A paused card counts from the later of the pause and its ready
+        // time (#157 audit m3): a pause over cards long in ready is told a day after the pause, not at once.
+        const key = `${product}-${cls}`;
+        const g = groups.get(key) ?? { product, cls, why: new Map(), cards: [], by: [], oldest: Infinity };
+        let t = pastTime(since({ id }), now) ?? -Infinity;
+        if (cls === 'paused') {
+          const paused = rec.meta?.('product', product)?.stateSince;
+          t = Math.max(t, pastTime(paused, now) ?? -Infinity);
+          if (typeof paused === 'string') g.pausedSince = paused;
+        }
+        g.oldest = Math.min(g.oldest, t);
+        g.cards.push(id);
+        g.why.set(reason, [...(g.why.get(reason) ?? []), id]);
+        if (QUEUES.some(([c]) => c === cls)) g.by.push(...holders(reason, product, running, tier1Waiting));
+        groups.set(key, g);
+        return;
+      }
       const held = factDoc(rec, UNDO_HELD_FACT(id))?.doc;
       const cause = reason.replace(/\d+/g, 'N');
-      if (doc.kind === 'undo' && (held?.told_cause !== cause || !(now - Date.parse(held?.told_at ?? '') < HOLD_REPEAT_MS))) {
+      if (held?.told_cause !== cause || dueToTell(held, now, HOLD_REPEAT_MS)) {
         tellThen(alert, `your undo (card ${id}) is waiting: ${reason}`, { fact: UNDO_HELD_FACT(id), fields: { reason, told_cause: cause, told_at: iso(now) }, kind: 'undo_held' });
       }
     };
     let may;
-    try { may = rules.may('start_session', { card, product }); } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
+    // M10's start_session reads product, role, tier (1 or 2), editing and, for Tier 1, the usage reading's time
+    // (L81 sweep: asked with the card alone, the real engine refused every start). The tier is the one the start
+    // gate holds on (riskOf: the card's and the files' stricter); the role is the M10 profile the card runs.
+    try {
+      may = rules.may('start_session', { product, card, role: startRole(kindOf(doc)), tier: riskOf(rules, card).tier, editing: true, ...(b?.read_at ? { usage: { read_at: b.read_at } } : {}) });
+    } catch (e) { may = { decision: 'refuse', reason: `could not be asked (${e?.message ?? e})` }; }
     if (may.decision !== 'allow') { await refuse(`rules: ${may.reason}`); continue; }
     if (amberish && tierOf(doc) === 2 && tier1Waiting.has(product)) { await refuse('queued behind Tier-1 work in amber'); continue; }
     const kind = kindOf(doc);
@@ -373,34 +672,52 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     if (exact && !exact.ok) { await refuse(`it is not an exact reverse: ${exact.reason}`); continue; }
     const g = startGate({ rules, rec, card, kind, product, b, running, exactReverse: !!exact?.ok });
     if (g.missing) missing.push(g.missing);
-    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.add(product); await refuse(g.reason); continue; }
-    const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claimed_at: iso(now), changed_at: iso(now), rules_rev: may.rev ?? rules.rev ?? null }, kind: 'claim' });
+    if (!g.ok) { if (amberish && tierOf(doc) === 1 && capRefusal(g.reason)) tier1Waiting.set(product, [...(tier1Waiting.get(product) ?? []), id]); await refuse(g.reason, !!g.missing); continue; }
+    // The claim names the session before it starts (L72): the launcher starts claude with this id, so a second start
+    // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
+    const sessionId = randomUUID();
+    const rulesRev = may.rev ?? rules.rev;
+    const claimDoc = { kind: 'session', session_id: sessionId, host, ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
+    const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claim: claimDoc }, kind: 'claim' });
     if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
-    const l = await guarded(() => launch({ card, kind, product }), portDeadlineMs);
+    const l = await guarded(() => launch({ card, kind, product, sessionId }), portDeadlineMs);
     if (!l?.ok && l?.reason === `it did not answer within ${portDeadlineMs} ms`) {
       out.refused.push([id, `launcher: ${l.reason}`]);
-      holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice`, alert, now });
+      holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice (it lapses at claims.unlaunched_min once its session is stopped)`, alert, now });
       continue;
     }
+    // A refused launch started nothing: the claim's holder gives it back (M9 release), and the refusal is in the diary.
     if (!l?.ok) {
-      move(rec, 'card', id, { state: 'ready', last_refusal: l?.reason ?? 'the launcher gave no answer' }, { now, kind: 'launch_refused' });
+      const back = rec.release({ card: id, session_id: sessionId, reason: `launcher: ${l?.reason ?? 'no answer'}` });
+      if (!back?.ok) holdAlert({ rec, cause: `release-${id}`, text: `card ${id}: the launcher refused (${l?.reason ?? 'no answer'}) and its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`, alert, now });
       await refuse(`launcher: ${l?.reason ?? 'no answer'}`);
       continue;
     }
-    const started = move(rec, 'card', id, { state: 'running', session: l.sessionId }, { now, kind: 'started' });
+    // The launcher must start the session it was given: a different id is a session the claim doesn't name.
+    if (l.sessionId !== undefined && l.sessionId !== sessionId) {
+      out.refused.push([id, 'launcher: it started a session the claim does not name']);
+      holdAlert({ rec, cause: `launch-other-${id}`, text: `card ${id}: the launcher answered with session ${l.sessionId}, not the claimed ${sessionId}; the card stays claimed`, alert, now });
+      continue;
+    }
+    // claimed -> running adds the process (pid and its start time) to the claim, and nothing else.
+    const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
+    if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
     // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
-    // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say).
-    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: l.sessionId, expectRev: rec.read('launch', l.sessionId)?.rev ?? 0, kind: 'launch',
-      doc: { session_id: l.sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, launched_at: iso(now) } });
-    if (!lr.ok) alert(`card ${id}: session ${l.sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`);
-    running.push({ id: l.sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
+    // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
+    // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
+    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+      doc: { session_id: sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, copy: l.copy ?? null, launched_at: iso(now) } });
+    // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
+    if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`);
+    running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
     if (factDoc(rec, UNDO_HELD_FACT(id))?.doc?.reason) putFact(rec, UNDO_HELD_FACT(id), { reason: null, at: iso(now) }, 'undo_started');
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
     dropCause(rec, UNDO_HELD_FACT(id));
     out.started.push(id);
   }
+  if (!onlyUndo) tellWaits({ rec, groups, alert, now });
 }

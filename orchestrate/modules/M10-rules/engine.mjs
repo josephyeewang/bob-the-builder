@@ -10,25 +10,25 @@
 //     products      ['<product>', …] from products.json (the strictest-wins scope, MAT-10)
 //     rulesState(p) → the reader's state(p): { status: ok|last_good|deny_all, policy, commit, blob }
 //     productState(p) → the product record's doc ({ state, away?: { tz } }) or null
-//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac
+//     running({ product }) / running({}) → editing sessions running for that product / on the whole Mac, undo
+//                   workers included (they still count toward the caps for other starts, L199)
+//     running({ product, undo: true }) → undo workers (exact-reverse cards) running for that product (L199)
 //     rolesDir      the role-profile folder (roles/), loaded against each claude_code.pin
 //     clock()       → ms since epoch; the only clock used (subject.now is ignored, R3-m9)
 //     deepMerge     false (the first cutover): a merge passes only the docs-lane path check (lane-check.mjs, L34).
 //                   true is the second cutover's deep classifier answer, built and tested but not yet switched on.
 
-import { allow, ask, deny } from '../../shared/rules.mjs';
+import { allow, ask, deny, MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL, keyMatches, isMacKey } from '../../shared/rules.mjs';
 import { classifyChange, needsJoe, readSubjectOnce, MAX_FILES } from './classify.mjs';
 import { compileList, pathProblem } from './paths.mjs';
-import { PRODUCT_STATES, HOURS, validZone, compareVersions } from './policy.mjs';
+import { PRODUCT_STATES, HOURS, validZone, compareVersions, START_RULES, TIER1_MERGE_RULES } from './policy.mjs';
 import { loadRoles, profileFor } from './roles.mjs';
 import { docsLaneProblem, DOCS_FLOOR } from './lane-check.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 
-// Mac-wide keys and how they combine across products (MAT-10, R2-M5(b)). `*` = every key under that map.
-export const MAC_MIN = Object.freeze(['caps.editing_per_mac', 'caps.scripts_per_mac', 'caps.script_agents_max',
-  'usage.bands.*.*', 'usage.no_tier1_prod_above', 'usage.stale_after_min']);
-export const MAC_MAX = Object.freeze(['usage.reserve_pct.*', 'claude_code.required_minimum']);
-export const MAC_MATCH = Object.freeze(['claude_code.pin', 'models.*', 'accounts.current', 'accounts.joe.tz']);
+// Mac-wide keys and how they combine across products (MAT-10, R2-M5(b), L96): one definition, in shared/rules.mjs,
+// so fakeRules answers a read with no product exactly as this engine does (L110).
+export { MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL } from '../../shared/rules.mjs';
 
 export const LANES = Object.freeze(['lead', 'docs', 'product']);
 export const REVERSED_AUDIT = Object.freeze(['failure', 'success', 'none']);
@@ -72,15 +72,15 @@ function expand(policy, pattern) {
   return out;
 }
 
-const matches = (list, key) => list.some((pat) => {
-  const a = pat.split('.'); const b = key.split('.');
-  return a.length === b.length && a.every((s, i) => s === '*' || s === b[i]);
-});
+const matches = keyMatches;
 
 export function makeEngine({ products, rulesState, productState, running, rolesDir, clock, deepMerge = false }) {
   if (!Array.isArray(products) || !products.length) throw new Error('engine needs the product list');
   if (typeof clock !== 'function') throw new Error('engine needs a clock');
   const rolesByPin = new Map();
+  // A per-product key read with no product is missing, and kept here so a caller that forgot the product shows up
+  // (L104 O-1); reads with an unknown product are not kept (that product has no rules to read).
+  const noProductReads = new Set();
 
   const usable = (p) => {
     const s = rulesState(p);
@@ -120,13 +120,17 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const m = mac();
     if (!m.ok) return undefined;
     const vals = m.all.map((pol) => at(pol, key));
+    if (!vals.length) return undefined;
     if (vals.some((v) => v === undefined || v === null)) return undefined;
     if (matches(MAC_MATCH, key)) return vals[0];
+    if (matches(MAC_LIST_ALL, key)) {
+      if (!vals.every((v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x))) return undefined;
+      return Object.freeze(vals[0].filter((x, i, a) => a.indexOf(x) === i && vals.every((v) => v.includes(x))));
+    }
     if (key === 'claude_code.required_minimum') return vals.reduce((a, b) => (compareVersions(a, b) >= 0 ? a : b));
     if (vals.some((v) => typeof v !== 'number')) return undefined;
     return matches(MAC_MIN, key) ? Math.min(...vals) : Math.max(...vals);
   }
-  const isMacKey = (key) => matches(MAC_MIN, key) || matches(MAC_MAX, key) || matches(MAC_MATCH, key);
 
   function roles(pin) {
     if (!rolesByPin.has(pin)) rolesByPin.set(pin, loadRoles(rolesDir, { pin }));
@@ -157,11 +161,28 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const state = stateOf(product);
     const floor = STATE_FLOOR[state];
     const fileRule = at(pol, `product_state_rules.${state}.start`);
-    if (!['within_caps', 'editing_cap_1', 'none'].includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
-    if (!floor.start || fileRule === 'none') return deny(`product is ${state}: no starts`);
+    if (!START_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.start is not a known rule`);
 
-    // Caps (MAT-5, MAT-10). Editing starts only.
-    if (editing) {
+    // An undo (an exact-reverse card) is never refused by the product's state or the editing caps, a cap of 0 included:
+    // safety acts are never held, and pausing is often the moment Joe wants to undo (L31, L199, L210). This is the rule
+    // push_branch and merge already keep: an exact reverse passes the paused floor and the file's state rule (here
+    // `start: none`, as merge passes `undo_only`). Its own limit instead: at most one undo running per product. A
+    // running undo still counts toward the caps for every other editing start (the running port counts it). This
+    // matches M11's gate after #117 (lane 2, L199). The card's kind is only the claim; the Dispatcher checks it is an
+    // exact reverse before the start (L40). Only a worker runs an undo: no other role starts under this exception (L220).
+    // At the first cutover, an undo starts only where its merge could land: the state's tier1_merge must be a rule
+    // merge knows, so a typo there refuses the undo's start as the docs-lane merge refuses it (L220 M1). The second
+    // cutover's merge (mergeDeep) lets an exact reverse through before it reads tier1_merge, so there this check is
+    // stricter than the merge, not equal to it (L226).
+    const undo = editing && role === 'worker' && s.card?.kind === 'exact_reverse';
+    if (undo && !TIER1_MERGE_RULES.includes(at(pol, `product_state_rules.${state}.tier1_merge`))) {
+      return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    }
+    if (!undo && (!floor.start || fileRule === 'none')) return deny(`product is ${state}: no starts`);
+    if (undo && count({ product, undo: true }) >= 1) return deny(`an undo is already running for ${product} (one at a time)`);
+
+    // Caps (MAT-5, MAT-10). Editing starts only; an undo is not capped (above).
+    if (editing && !undo) {
       let cap = pol.caps.editing_per_product;
       if (!Number.isSafeInteger(cap)) return deny('caps.editing_per_product missing');
       if (floor.editingCap1 || fileRule === 'editing_cap_1') cap = Math.min(cap, 1);
@@ -172,8 +193,9 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
       if (count({}) >= macCap) return deny(`editing cap reached on this Mac (${macCap})`);
     }
 
-    // Tier 1 needs a fresh usage reading (A8).
-    if (tier === 1) {
+    // Tier 1 needs a fresh usage reading (A8). Not an undo: M11 already exempts undos from the usage bands, and a
+    // missing or stale reading must not hold a safety act (L31, L220).
+    if (tier === 1 && !undo) {
       const staleMin = macValue('usage.stale_after_min');
       const readAt = Date.parse(s.usage?.read_at ?? '');
       const now = clock();
@@ -290,7 +312,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     const reverse = s.kind === 'exact_reverse' && typeof s.reverses === 'string' && SHA.test(s.reverses) && s.exact_reverse_ok === true && REVERSED_AUDIT.includes(s.reversed_audit);
     const state = stateOf(s.product);
     const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
-    if (!['rules', 'tier1_hours_only', 'undo_only'].includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    if (!TIER1_MERGE_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
     if (!reverse && (state === 'paused' || fileRule === 'undo_only')) return deny(`product is ${state}: only an exact reverse may merge`);
     return allow(reverse ? 'exact reverse of a docs-lane change' : 'docs lane');
   }
@@ -335,7 +357,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     }
     const state = stateOf(s.product);
     const fileRule = at(pol, `product_state_rules.${state}.tier1_merge`);
-    if (!['rules', 'tier1_hours_only', 'undo_only'].includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
+    if (!TIER1_MERGE_RULES.includes(fileRule)) return deny(`product_state_rules.${state}.tier1_merge is not a known rule`);
     if (state === 'paused' || fileRule === 'undo_only') return deny(`product is ${state}: only an exact reverse may merge`);
     if (c.tier === 1 && !inHours(pol, s.product)) return deny('held_tier1_hours');
     if (c.risky.length || c.tier === 1) return ask(1, c.risky.length ? `risky: ${c.risky.join(', ')}` : 'Tier 1');
@@ -386,6 +408,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
         return s ? Object.freeze({ commit: s.commit, blob: s.blob }) : undefined;
       }
       if (isMacKey(key)) return macValue(key);
+      if (product === undefined || product === null) { noProductReads.add(key); return undefined; }
       if (!known(product) || !usable(product)) return undefined;
       const v = at(usable(product).policy, key);
       if (v === undefined && key.startsWith('failure_classes.') && key.split('.').length === 2) return 'joe';   // MIN-8
@@ -394,5 +417,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
     classify(change) {
       return classifyChange(policyOf(change?.product), change);
     },
+    // The per-product keys read with no product so far, in the order first read.
+    get noProductReads() { return Object.freeze([...noProductReads]); },
   });
 }

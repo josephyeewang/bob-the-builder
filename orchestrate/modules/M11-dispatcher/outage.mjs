@@ -10,8 +10,12 @@
 // The outage ends by itself after 2 passes in a row with the network up, the Mini signed in and
 // usage readable, or on Joe's "resume". Outside an outage, a dead session's card is restarted only
 // when `rerun_safe === true`; any other card becomes an ask (waiting on Joe), never a restart.
+// The Record has no rerun_safe field and no writer for one yet (L72 census, a (b) for the lead): until it does,
+// every dead session's card waits on Joe, the safe side. This file is the one outage rule (L72 (ii)): M9's
+// breakIfDead only breaks the claim it is given.
 
 import { KEYS, need, minutes } from './keys.mjs';
+import { tellThen } from './alerts.mjs';
 
 export const OUTAGE_FACT = 'outage';
 export const HEALTHY_PASSES = 2;
@@ -48,13 +52,16 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     }
     const more = dead.filter((s) => !(cur.doc.dead ?? []).some((d) => d.id === s.id)).map((s) => ({ id: s.id, card: s.card ?? null }));
     write({ ...cur.doc, healthy_passes: passes, dead: [...(cur.doc.dead ?? []), ...more] }, 'outage_pass');
+    // An outage whose alert the queue refused is told each pass until delivered (L130); the mark names the outage.
+    if (cur.doc.told_id !== cur.doc.id) tellThen(alert, cur.doc.alert_text ?? `running sessions stopped at once (${cur.doc.id}); nothing is restarted until you say resume`, { fact: OUTAGE_FACT, fields: { told_id: cur.doc.id }, kind: 'outage_told' });
     return { outage: true, ended: false, restart: [], asks: [] };
   }
   const threshold = Math.max(OUTAGE_MIN_DEAD, minDead, Math.ceil(Math.max(OUTAGE_MIN_SHARE, share) * board.length));
   if (board.length && dead.length >= threshold) {
     const id = `outage-${new Date(now).toISOString()}`;
-    const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, healthy_passes: 0 }, 'outage_start');
-    if (w.ok) alert(`${dead.length} of ${board.length} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`);
+    const text = `${dead.length} of ${board.length} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`;
+    const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, healthy_passes: 0, alert_text: text }, 'outage_start');
+    if (w.ok) tellThen(alert, text, { fact: OUTAGE_FACT, fields: { told_id: id }, kind: 'outage_told' });
     return { outage: true, ended: false, restart: [], asks: [] };
   }
   return { outage: false, ended: false, ...decide(rec, dead) };

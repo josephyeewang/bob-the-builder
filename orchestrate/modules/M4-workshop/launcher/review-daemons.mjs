@@ -27,6 +27,9 @@ export const SCRIPTS = Object.freeze({
   updater: 'modules/M4-workshop/launcher/review-updater.mjs',
 });
 export const UPDATE_EVERY_S = 600;
+// The review runner's log, in the jobs' log folder (`logDir`): where it says what is wrong when it can't start a pass.
+// The Dispatcher's alert about a copy with no stamp names it (M11 review-requests.mjs, audit r2 m-f).
+export const RUNNER_LOG = 'review-runner.err.log';
 // The copy's node, its stamp and the two configs' names have one home, install-check.mjs (root's updater reads them
 // there); they are passed on here for the install step and the tests.
 export { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG, installStamp };
@@ -37,6 +40,8 @@ function plist(entries) {
     '<plist version="1.0">', '<dict>', ...entries.map((e) => `  ${e}`), '</dict>', '</plist>', ''].join('\n');
 }
 const arr = (xs) => `<array>${xs.map(str).join('')}</array>`;
+// Export only (lane 4, LANES.md): the setup step's hourly watch-only job is built with this one plist builder and label rule.
+export { plist, str, arr, LABEL, ABS };
 
 /**
  * { label, installRoot, config, reviewRoot, reviewHome, accountCopy, ownerHome, ownerUid, logDir } → { runner, accountCopy }
@@ -61,7 +66,7 @@ export function reviewDaemonPlists({ label, installRoot, config, reviewRoot, rev
     `<key>WatchPaths</key>${arr([join(reviewRoot, 'requests')])}`,
     '<key>RunAtLoad</key><true/>',
     `<key>StandardOutPath</key>${str(join(logDir, 'review-runner.out.log'))}`,
-    `<key>StandardErrorPath</key>${str(join(logDir, 'review-runner.err.log'))}`,
+    `<key>StandardErrorPath</key>${str(join(logDir, RUNNER_LOG))}`,
   ]);
   const copy = plist([
     `<key>Label</key>${str(`${label}.review-account`)}`,

@@ -19,12 +19,12 @@ function weekOfRecord(writeRaw = null, env = SENSORS_ENV) {
   for (let day = 0; day < 7; day++) {
     for (const [i, key] of ALL.entries()) {
       // A declared text field (lead call L25), so these lines reach the second masking layer rather than the allow-list.
-      w.put(`log-${day}-${i}`, { kind: 'fact.pr', head_sha: 'c'.repeat(40), title: `day ${day}: auth failed with ${key} at src/app-2026.mjs` });
+      w.put(`pr-log-${day}-${i}`, { kind: 'fact.pr', head_sha: 'c'.repeat(40), title: `day ${day}: auth failed with ${key} at src/app-2026.mjs` });
     }
   }
-  if (writeRaw) rec.write({ actor: 'sensors', entity: 'fact', id: 'raw', expectRev: 0, doc: { line: writeRaw } });
-  // The planted control the scan must reach (written around the masker on purpose).
-  rec.write({ actor: 'sensors', entity: 'fact', id: 'scan-control', expectRev: 0, doc: { kind: 'fact.scan-control', line: `control ${FAKE.generic}` } });
+  if (writeRaw) rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-raw', expectRev: 0, doc: { line: writeRaw } });
+  // The planted control the scan must reach (written around the masker on purpose), in the Sensors' own family (L74).
+  rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-scan-control', expectRev: 0, doc: { kind: 'fact.scan-control', line: `control ${FAKE.generic}` } });
   return rec;
 }
 
@@ -38,7 +38,7 @@ test('R-0b-125: a week of masked Sensors facts finds 0 with the independent scan
 test('planted failure: one unmasked key written around the masker is found by the independent scan', () => {
   const r = scanRecordLoose(weekOfRecord(`oops ${FAKE.supabaseSecret}`), ['fact'], { control: FAKE.generic });
   assert.equal(r.count >= 1, true);
-  assert.ok(r.hits.some((h) => h.where.startsWith('fact/raw')));
+  assert.ok(r.hits.some((h) => h.where.startsWith('fact/pr-raw')));
   assert.ok(!JSON.stringify(r).includes(FAKE.supabaseSecret), 'the scan never repeats the secret');
 });
 
@@ -75,7 +75,8 @@ test('round 2 M-4: an empty entity list, a missed entity, or a control never pla
   const empty = scanRecordLoose(rec, [], { control: FAKE.generic });
   assert.equal(empty.valid, false, 'old code: valid with count 0');
   assert.deepEqual(empty.unscanned, ['fact']);
-  rec.write({ actor: 'sensors', entity: 'ask', id: 'a1', expectRev: 0, doc: { kind: 'ask', note: `leak ${FAKE.supabaseSecret}` } });
+  // An ask is approvals' to write (M9), and is born open.
+  assert.equal(rec.write({ actor: 'approvals', entity: 'ask', id: 'a1', expectRev: 0, doc: { state: 'open', kind: 'ask', note: `leak ${FAKE.supabaseSecret}` } }).ok, true);
   const partial = scanRecordLoose(rec, ['fact'], { control: FAKE.generic });
   assert.equal(partial.valid, false);
   assert.deepEqual(partial.unscanned, ['ask']);

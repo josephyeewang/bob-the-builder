@@ -240,6 +240,10 @@ test('an unknown product, and a malformed products list, deny', () => {
   const f = join(dir, 'products.json');
   for (const bad of ['{}', '[{"product":"a"}]', '[{"product":"a","owner":"o","repo":"r"}]',
     '[{"product":"a/../b","owner":"o","repo":"r","joe_github_id":1}]',
+    // L309 Minor 1: a name names a folder: it starts with a letter or digit, and two names differing in case are one.
+    '[{"product":"..","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":".","owner":"o","repo":"r","joe_github_id":1}]',
+    '[{"product":".app","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":"-app","owner":"o","repo":"r","joe_github_id":1}]',
+    '[{"product":"App","owner":"o","repo":"r","joe_github_id":1},{"product":"app","owner":"o","repo":"r2","joe_github_id":1}]',
     '[{"product":"a","owner":"o","repo":"r","joe_github_id":1},{"product":"a","owner":"o","repo":"r","joe_github_id":1}]']) {
     writeFileSync(f, bad);
     assert.throws(() => readProducts(f), bad);
@@ -254,4 +258,24 @@ test('an alert sink that throws does not change the answer', async () => {
   const reader = makeReader({ gh, stateDir, products: [PRODUCT], verifyApproved: () => false, alert: () => { throw new Error('x'); } });
   await reader.refresh();
   assert.equal(reader.state('sample-app').status, 'deny_all');
+});
+
+test('L168 M-3: an alert that answers false or throws is not marked sent, so the next read tells again', async () => {
+  for (const mode of ['false', 'throws']) {
+    const stateDir = tempDir('m10-reader-');
+    const gh = fakeGitHub(); gh.commit(1, fixture);
+    const calls = [];
+    let lose = true;
+    const alert = (a) => { calls.push(a.reason); if (!lose) return true; if (mode === 'throws') throw new Error('x'); return false; };
+    const reader = makeReader({ gh, stateDir, products: [PRODUCT], verifyApproved: () => false, alert });
+    await reader.refresh();
+    await reader.refresh();
+    assert.equal(reader.state('sample-app').status, 'deny_all', `${mode}: the answer is the same`);
+    assert.equal(calls.length, 2, `${mode}: lost, so told again on the next read`);
+    lose = false;
+    await reader.refresh();
+    await reader.refresh();
+    await reader.refresh();
+    assert.equal(calls.length, 3, `${mode}: told once delivered, then not again`);
+  }
 });

@@ -31,7 +31,7 @@ function world() {
   writeFileSync(snapshot, makeSnapshot({ production: { env_files: [envFile], programs: ['fakehost', 'fakedb'], hosts: ['db.prod.example.net'] }, secrets: { paths: [] } }));
   return { root, outbox, copy, home, prodDir, envFile, key, shellRc, snapshot };
 }
-const args = (w, role = 'worker') => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: role === 'lead' ? ['handoff'] : ['report'], copy: role === 'worker' ? w.copy : undefined });
+const args = (w, role = 'worker') => ({ role, outbox: w.outbox, snapshot: w.snapshot, kinds: role === 'lead' ? ['handoff-'] : ['report-'], copy: role === 'worker' ? w.copy : undefined });
 const bash = (command, cwd) => ({ tool_name: 'Bash', tool_input: { command }, cwd });
 const write = (file_path) => ({ tool_name: 'Write', tool_input: { file_path, content: 'x' } });
 const blocked = (r, what) => assert.equal(r.block, true, `passed: ${what}`);

@@ -10,16 +10,32 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 |---|---|
 | `writer.mjs` | The Store Writer. `openRecord({ root, product, ownerUid, rules, alert, outbox })` checks every write against the rev read, the legal moves, who may change which fields, and each move's conditions (the ready rule, a passing verdict for the current head, a full wait, one merge at a time, the round cap). Refused writes go to `refusals.jsonl` with an alert and leave no diary line. Also: the outbox, claims (release, dead-owner break, lapse), the ready list and overdue. |
 | `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. Before any read or write it checks the store folder's own names are a real folder or plain file; a link, a pipe or the wrong kind of thing stops the store with one alert naming it. A document changed by hand is quarantined, restored from the diary and alerted. Anything in `docs/` that is not a plain readable file (a folder, a link, a file the owner can't read) is moved into `quarantine/` as it is, never followed, so it can neither block writes nor reach outside the store; Finder's `.DS_Store` is left alone. `recover()` after a crash cuts a torn last diary line and rolls each document forward; a writer that finds a torn line under the lock recovers before it appends, and a line that doesn't read back stops the write before any document moves. |
+| `unsent.mjs` | The store's queue of alerts not yet delivered (`unsent-alerts.jsonl`): its one reader and its one "delivered" mark, and the plain-file opens every side file uses (no link followed, no FIFO waited on). Its own file so the alert channel (M13) can deliver the queue while the Dispatcher is dead without loading `store.mjs`, which only M9 may (L240). |
 | `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
 | `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
 | `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
 | `ready.mjs` | The one ready rule, used by both the move into `ready` and the ready list. |
 | `outbox.mjs` | Reads an AI session's outbox file as hostile: no links, the role's owner, 256 KB at most, a kind its role may send; one name in a worker's outbox (a second name in review's own stores is no fault, L70: it can't change review's bytes, while review's files may not be writable by others). A review session's outbox folder that is gone is a refusal, never a silence (L71). |
 | `*.test.mjs` | The tests. `*.test-helper.mjs` are shared set-up, not tests. |
+| `write-sites.test.mjs` | L112: reads every non-test module for its Record writes and checks each against `permissions.mjs`, so a row the real code needs cannot be missing while module tests pass on a record that allows everything. Writes another lane is fixing are printed on a named pending list, never skipped. |
 
 ## Claims
 
-A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. A session's claim ends by a release from its holder, a lapse (claimed for longer than the card's `claimed` time limit), or a dead-owner break. A break needs all three of: the process gone, its session ended or gone, and no activity for `claims.stuck_min` minutes. If three or more of this Mac's claims look dead at once and they are half or more, none is broken (an outage) and the owner gets one alert a day. Below that, each dead claim is broken on its own and each break is alerted (lead call L43). A claim from another Mac is never broken from this one. A tab's claim is never broken; it lapses when its heartbeat is older than `proposals.heartbeat_stale_min` or at the running limit.
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. It has two steps (lead call L72). `ready → claimed` names the session before it starts (`kind`, `session_id`, `host`, and `rules_rev`, the rules it was made under); the writer stamps `claimed_at`. `claimed → running` adds the process (`pid`, `pid_start`) and nothing else. A tab's claim carries `claim_id` in place of the session and does not change at running.
+
+A session's claim ends three ways:
+
+- **A release** by its holder.
+- **A lapse.** A claim that has no process yet and is older than `claims.unlaunched_min` (5 minutes when the rules don't say) goes back to ready. It lapses only once the caller's `stopSession(session_id)` says whatever started under that id is stopped, so the card can't run twice. With no `stopSession`, or one that does not answer true, the claim stays and the owner gets one alert a day.
+- **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one.
+
+Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
+
+## Facts: families and who may change them
+
+Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.
+
+A card's `attempts` holds counts kept across moves: `reviewer_starts` and `review_requests` (both written by the Dispatcher; the second goes up on every review request, so the request always changes the card and its clock moves, L85 m-1) `merge_refusals` (a list of reasons, written by the merge gate) and `merge_asks` (written by the Dispatcher: how many of those reasons Joe has been asked about, so the same refusal twice in a row is asked about once, L110 m-1). Each key has one writer and one shape; no other key is allowed.
 
 ## Why our own store, not Claude Code's task list
 
@@ -36,8 +52,8 @@ Claude Code has a native task list. We checked whether it could hold the claims:
 
 - **A crash between applying an outbox file and marking it seen.** On restart the file is applied again: a hand-in is refused (and logged as a refusal it isn't), a verdict is stored twice. Both are harmless to the card's state; one write for both would close it.
 - **`merged → reverted` has no evidence check yet.** The reversing merge is the Merge Gate's to name (0b-9).
-- ~~**Two claims, one dead.**~~ Closed by lead call L43: an outage needs at least three dead-looking claims, so a two-claim Mac breaks its one dead claim.
-- **The outage raises an alert, not an ask.** Only `approvals` writes asks; the alert goes out on the owner's push path once a day (L38).
+- ~~**Two claims, one dead.**~~ Closed by lead call L43. Since L72 the outage rule is the Dispatcher's (M11).
+- ~~**The outage raises an alert, not an ask.**~~ Moved to M11 with the outage rule (L72).
 
 ## Known gaps (audit round 2, logged, not fixed here)
 
@@ -90,8 +106,8 @@ Round 11 fixed: the round-10 one-name rule wrongly caught the lock, which is mad
 
 ## Known gaps (lead call L43, logged, not fixed here)
 
-- **A kill between a claim break and its alert** leaves the break in the diary (a `claim_break` line) with no alert sent; the card is already back to ready, so nothing retries it. Same window as any crash; the outage alert has a seen mark, the per-break alert doesn't.
-- **A Mac with one or two claims breaks them all after a reboot**, since that is under the outage floor of three. That is what L43 asks for.
+- **A kill between a claim break and its alert** leaves the break in the diary (a `claim_break` line) with no alert sent; the card is already back to ready, so nothing retries it. Same window as any crash; the per-break alert has no seen mark.
+- **A Mac with one or two claims breaks them all after a reboot**, since that is under the outage floor of three. That is what L43 asks for; the floor is M11's since L72.
 
 ## Running the tests
 

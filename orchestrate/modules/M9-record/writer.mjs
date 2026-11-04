@@ -19,32 +19,39 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isOpen, makeRecord, missingFields, timeoutFor } from '../../shared/record.mjs';
-import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
-import { CREATE_STATES, INTERNAL_MOVES, moveActors } from './moves.mjs';
-import { PLAN_INPUTS, actorName, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
+import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
+import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const MIN = 60000;
-// The fewest dead-looking claims that count as an outage (lead call L43): one or two dead claims are broken one by one,
-// so a Mac with two claims can still break its one dead one.
-const OUTAGE_MIN = 3;
+// How long a session claim may wait for its process (claims.unlaunched_min, L72) when the rules don't say.
+const UNLAUNCHED_MIN_DEFAULT = 5;
 const HEX40 = /^[0-9a-f]{40}$/;
 const KIND = /^[a-z_]{1,40}$/;
-const same = (a, b) => { try { return canonicalJson(a ?? null) === canonicalJson(b ?? null); } catch { return false; } };
 const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
 const NEEDS_JOE_SETTERS = ['lead', 'dispatcher', 'merge_gate'];
 
-export function openRecord({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
+// How long a tab claim may go without a heartbeat, in minutes, or undefined when the rules set none (L115 m-A): the
+// one reading, so lane 3's fit check calls this instead of copying it.
+export function heartbeatLimit(rules, product) {
+  const n = rules?.num?.('proposals.heartbeat_stale_min', { product });
+  return n !== undefined && n >= 1 ? n : undefined;
+}
+
+export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
   const get = (key) => rules.get(key, { product });
+  // Rules numbers through the one conversion (L96 step 2): text or an integer, else missing.
+  const num = (key) => rules.num(key, { product });
   const timeouts = () => ({ timeouts: get('timeouts') });
 
   // A view over the record for the ready rule: inside a transaction it reads the locked index, outside it reads the store.
@@ -64,42 +71,36 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
   };
 
   // ---- waits (R-0b-27, m-1, R2-m1, R2-m9, R2-m10) ----
-  function checkWait(wait, { entity, state, from, card, nowMs }) {
+  // `kept`: the wait being re-checked (the entry stays in its waiting state). When it waits on the same who and what, its
+  // since is kept, whatever the caller sends (L285): since is when the waiting began, and a re-check that moved it
+  // would quietly reset every cap measured from it (the limit cap, LIMIT_RESET_MAX_MS; the no-hit cap). A wait on a
+  // new who or what is a new wait, with a new since, so a Joe wait's tell still finds its wait (joe-waits.mjs).
+  function checkWait(wait, { entity, state, from, card, nowMs, kept = null }) {
     if (!wait || typeof wait !== 'object' || Array.isArray(wait)) return no(`a move into ${state} needs a wait (who, what, since, next_check)`);
     const missing = WAIT_FIELDS.filter((f) => wait[f] === undefined || wait[f] === null || wait[f] === '');
     if (missing.length) return no(`wait is missing ${missing.join(', ')}`);
     if (!WAIT_WHO.includes(wait.who)) return no(`wait.who must be one of ${WAIT_WHO.join(', ')}`);
     if (typeof wait.what !== 'string' || !wait.what.trim()) return no('wait.what must say what it waits on');
     if (wait.who === 'date' && !(typeof wait.reason === 'string' && wait.reason.trim())) return no('a wait on a date needs a reason');
-    const since = Date.parse(wait.since);
-    if (!Number.isFinite(since) || Math.abs(since - nowMs) > MIN) return no('wait.since must be now (within 60 s)');
+    const ws = waitSince({ wait, kept, nowMs });
+    if (!ws.ok) return ws;
     const next = Date.parse(wait.next_check);
     if (!Number.isFinite(next) || next <= nowMs) return no('wait.next_check must be in the future');
     const limit = timeoutFor(timeouts(), entity, state);
     if (limit === undefined || limit === null) return no(`the rules have no time limit for ${entity} ${state}`);
     const maxMin = limit.minutes ?? limit.recheck_max_min;
     if (next > nowMs + maxMin * MIN) return no(`wait.next_check is later than ${maxMin} minutes from now`);
-    const out = { ...wait, since: iso(nowMs) };
+    const out = { ...wait, since: ws.since };
     if (card) {
       if (wait.resume !== 'retry' && wait.resume !== 'continue') return no('a card wait needs resume: retry or continue');
       if (from === 'running' && wait.resume !== 'retry') return no('a running card waits only with resume: retry (its claim ends)');
       if (wait.resume === 'retry' && wait.return_to !== 'ready') return no('resume: retry returns to ready');
       if (wait.resume === 'continue' && wait.return_to !== from) return no(`resume: continue returns to ${from}`);
+      // An approved card waits only to come back to approved (L116, L123 m-3): a retry would send it to ready, past
+      // the owner's Approve and its review.
+      if (from === 'approved' && !(wait.resume === 'continue' && wait.return_to === 'approved')) return no('an approved card waits only with resume: continue, back to approved');
     }
     return { ok: true, wait: out };
-  }
-
-  function checkClaim(claim, nowMs) {
-    if (!claim || typeof claim !== 'object') return no('a claim needs its owner');
-    if (claim.kind === 'session') {
-      if (!Number.isInteger(claim.pid) || claim.pid <= 0) return no('a session claim needs the pid');
-      if (typeof claim.pid_start !== 'string' || !claim.pid_start) return no('a session claim needs pid_start');
-      if (typeof claim.session_id !== 'string' || !SESSION_ID.test(claim.session_id)) return no('a session claim needs a session_id the session can hand in with (letters, digits, dashes; at most 128)');
-    } else if (claim.kind === 'tab') {
-      if (typeof claim.claim_id !== 'string' || !claim.claim_id) return no('a tab claim needs claim_id');
-    } else return no('claim.kind must be session or tab');
-    if (typeof claim.host !== 'string' || !claim.host) return no('a claim needs the host');
-    return { ok: true, claim: { ...claim, at: iso(nowMs) } };
   }
 
   // The checks for one document. Returns the document to write, or a refusal.
@@ -120,17 +121,14 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       return no(`changed since read (rev ${cur?.rev ?? 0}, expected ${w.expectRev})${holder}`);
     }
     const nowMs = now();
-    const doc = structuredClone(w.doc);
-    const stateful = Object.hasOwn(STATES, entity);
-    if (stateful && !STATES[entity].includes(doc.state)) return no(`unknown ${entity} state "${doc.state}"`);
+    if (!cur && testNoRevCheck && w.expectRev !== 0) return no('no such document');
+    // Who may set which fields and make which move: the one check the test stand-in makes too (guard.mjs, L72).
+    const g = guardWrite({ entity, id, actor, old: cur?.doc ?? null, doc: w.doc, createdBy: cur?.createdBy ?? null });
+    if (!g.ok) return g;
+    const doc = g.doc;
 
     // ---------- create ----------
     if (!cur) {
-      if (testNoRevCheck && w.expectRev !== 0) return no('no such document');
-      const allowed = fieldsAllowed(entity, actor, { create: true });
-      if (!allowed) return no(`${name} may not create ${entity}`);
-      if (allowed !== '*') { const extra = Object.keys(doc).filter((f) => !allowed.has(f)); if (extra.length) return no(`${name} may not set ${extra.join(', ')} on a new ${entity}`); }
-      if (stateful && !(CREATE_STATES[entity]?.[doc.state] ?? []).includes(name)) return no(`${name} may not create a ${entity} in ${doc.state}`);
       if (entity === 'product' && id !== product) return no(`this record is product ${product}'s`);
       if (entity === 'ask') { if (doc.reask_count !== undefined && doc.reask_count !== 0) return no('a new ask starts at reask_count 0'); doc.reask_count = 0; }
       if (entity === 'merge_request') {
@@ -149,28 +147,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
     // ---------- update ----------
     const old = cur.doc;
-    const from = old.state;
-    const to = doc.state;
-    const moving = stateful && from !== to;
-    if (moving) {
-      if (INTERNAL_MOVES[entity]?.[from]?.includes(to)) return no(`${entity} ${from} → ${to} is made only by a claim break or lapse`);
-      const actors = moveActors(entity, from, to);
-      if (!actors) return no(`illegal move: ${entity} ${from} → ${to}`);
-      if (!actors.includes(name)) return no(`${name} may not move ${entity} ${from} → ${to}`);
-    }
-    // Fields the move itself ends: the claim when a card leaves claimed or running (R3-M4), the wait when it leaves a
-    // waiting state, a paused product's return_to.
-    const cleared = [];
-    if (entity === 'card' && moving && (from === 'claimed' || from === 'running') && to !== 'claimed' && to !== 'running') { delete doc.claim; cleared.push('claim'); }
-    if (moving && (from === 'waiting' || from === 'waiting_input' || from === 'waiting_limit')) { delete doc.wait; cleared.push('wait'); }
-    if (entity === 'product' && moving && from === 'paused') { delete doc.return_to; cleared.push('return_to'); }
-
-    const keys = new Set([...Object.keys(old), ...Object.keys(doc)]);
-    const changed = [...keys].filter((k) => k !== 'state' && !cleared.includes(k) && !same(old[k], doc[k]));
-    const allowed = fieldsAllowed(entity, actor, { state: from });
-    if (!allowed) return no(`${name} may not change ${entity}`);
-    if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity} ${id}`); }
-    if (!moving && !changed.length) return no('nothing changed');
+    const { from, to, moving, changed } = g;
 
     if (entity === 'card') { const r = checkCardUpdate(tx, { id, old, doc, from, to, moving, changed, name, nowMs, ctx }); if (!r.ok) return r; }
     if (entity === 'ask') { const r = checkAsk(old, doc, from, to, moving, changed); if (!r.ok) return r; }
@@ -195,11 +172,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       // cap can't be stepped round by naming the root again.
       if (parent.doc.state !== 'failed') return no(`a fix card fixes a failed card; ${doc.fix_of} is ${parent.doc.state}`);
       if (tx.list('card').some((c) => c.doc.kind === 'fix' && c.doc.fix_of === doc.fix_of)) return no(`${doc.fix_of} already has a fix card; the next round fixes that one`);
-      let root = parent;
-      for (let i = 0; i < 64 && typeof root.doc.fix_of === 'string'; i++) root = tx.lookup('card', root.doc.fix_of) ?? root;
-      // The plan inputs are the root's, unchanged (R3-m2): the go covers only that plan.
-      const diff = PLAN_INPUTS.filter((f) => !same(doc[f], root.doc[f]));
-      if (diff.length) return no(`a fix card's ${diff.join(', ')} must equal its root card's`);
+      // The plan inputs are the root's, unchanged, except that the tier may be absent (R3-m2, L228): guard.mjs.
+      const fp = fixPlanCheck(doc, (fid) => tx.lookup('card', fid)?.doc ?? null);
+      if (!fp.ok) return fp;
       // The round comes from the chain, never from the caller (M-8).
       doc.round = (Number.isInteger(parent.doc.round) ? parent.doc.round : 1) + 1;
     } else {
@@ -210,8 +185,11 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const src = doc.source;
       const ask = typeof src?.ask === 'string' ? tx.lookup('ask', src.ask) : null;
       const fact = typeof src?.fact === 'string' ? tx.lookup('fact', src.fact) : null;
-      const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed');
-      const factOk = fact && fact.createdBy === 'sensors' && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
+      // The answer must be the Undo choice, approving (L85 m-2): an answered Keep, or no answer, is no go for a reverse.
+      const undoChoice = ask?.doc?.choices?.[0] ?? 'Undo';
+      const askOk = ask && ask.doc.kind === 'undo' && (ask.doc.state === 'answered' || ask.doc.state === 'consumed')
+        && ask.doc.answer?.choice === undoChoice && ask.doc.answer?.approves === true;
+      const factOk = factFrom('sensors', fact, 'undo-issue-') && fact.doc.type === 'undo_issue' && fact.doc.authenticated === true;
       if (!askOk && !factOk) return no('an exact_reverse card needs an answered Undo ask or an authenticated audit issue (source)');
       // One reverse per piece of evidence (0b-2 audit MAT-2): one answered Undo is never the go for many cards.
       const key = askOk ? ['ask', src.ask] : ['fact', src.fact];
@@ -222,8 +200,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (!ask || ask.doc.kind !== 'research' || !isOpen('ask', ask.doc.state)) return no('a research_copy card needs an open research ask (research_ask)');
       if (tx.list('card').some((c) => c.doc.kind === 'research_copy' && c.doc.research_ask === doc.research_ask)) return no(`ask ${doc.research_ask} already has its research_copy card`);
     }
-    const cap = get('caps.rounds');
-    if (!Number.isInteger(cap) || cap < 1) return no('no round cap in the rules (caps.rounds)');
+    const cap = num('caps.rounds');
+    if (cap === undefined || cap < 1) return no('no round cap in the rules (caps.rounds)');
     if (doc.round > cap) {
       const t = timeoutFor(timeouts(), 'card', 'waiting');
       if (!t) return no('the rules have no card waiting limit');
@@ -258,27 +236,32 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       if (doc.needs_joe === true && !NEEDS_JOE_SETTERS.includes(name)) return no(`${name} may not set needs_joe`);
       if (doc.needs_joe !== true && name !== 'approvals') return no('only approvals clears needs_joe');
     }
-    // The claim: set only by ready → claimed; otherwise never changed by a write (R2-M6, R3-M4).
-    if (to === 'claimed' && from === 'ready') {
-      const c = checkClaim(doc.claim, nowMs);
-      if (!c.ok) return c;
-      doc.claim = c.claim;
-    } else if (changed.includes('claim')) return no('a claim is set only by ready → claimed');
-    if ((to === 'claimed' || to === 'running') && !doc.claim) return no(`a ${to} card has a claim`);
-    if (!(to === 'claimed' || to === 'running') && doc.claim) return no(`a ${to} card has no claim`);
+    // The claim: set by ready → claimed, given its process by claimed → running; otherwise never changed by a write
+    // (R2-M6, R3-M4, L72). One check, in guard.mjs, that the stand-in makes too.
+    const cl = claimCheck({ old, doc, from, to, changed, nowMs });
+    if (!cl.ok) return cl;
+    if (cl.claim) doc.claim = cl.claim;
     // The wait.
     if (to === 'waiting') {
       if (moving || changed.includes('wait')) {
         if (!moving && old.wait?.return_to === null) return no('a round-cap wait changes only by cancel or closed_no_answer');
-        const r = checkWait(doc.wait, { entity: 'card', state: 'waiting', from: moving ? from : old.wait?.return_to === 'ready' && old.wait?.resume === 'retry' ? 'ready' : old.wait?.return_to, card: true, nowMs });
+        const r = checkWait(doc.wait, { entity: 'card', state: 'waiting', from: moving ? from : old.wait?.return_to === 'ready' && old.wait?.resume === 'retry' ? 'ready' : old.wait?.return_to, card: true, nowMs, kept: moving ? null : old.wait });
         if (!r.ok) return r;
         if (!moving && (r.wait.resume !== old.wait?.resume || r.wait.return_to !== old.wait?.return_to)) return no('a re-check keeps the wait\'s resume and return_to');
-        doc.wait = r.wait;
+        // The head the card waits on is the writer's, never the caller's (L123 m-4): set when the wait begins and kept
+        // on a re-check, so the way back can tell whether a new head was pushed while it waited.
+        const { head: _given, ...given } = r.wait;
+        const waitHead = moving ? old.head : old.wait?.head;
+        doc.wait = waitHead === undefined ? given : { ...given, head: waitHead };
       }
     } else if (changed.includes('wait')) return no('only a waiting card has a wait');
     if (moving && from === 'waiting' && to !== 'closed_no_answer' && to !== 'cancelled') {
       if (old.wait?.return_to === null || old.wait?.return_to === undefined) return no('this wait has no way back (round cap): only cancelled or closed_no_answer');
-      if (to !== old.wait.return_to) return no(`a wait returns only to ${old.wait.return_to}`);
+      // A card that waited from approved and got a new head meanwhile goes back through review, never straight back to
+      // approved: the owner's Approve was for the old head (L123 m-4).
+      const headMoved = old.wait.return_to === 'approved' && doc.head !== old.wait.head;
+      if (headMoved && to === 'approved') return no('the head changed while the card waited: it goes back to in_review, not approved');
+      if (!(headMoved && to === 'in_review') && to !== old.wait.return_to) return no(`a wait returns only to ${old.wait.return_to}`);
     }
     // The head: only the push script, and a new head after verification sends the card back to review (R2-M7, R3-m6).
     if (changed.includes('head')) {
@@ -348,7 +331,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
   function checkSession(tx, old, doc, from, to, moving, nowMs, id) {
     if (to === 'waiting_input' || to === 'waiting_limit') {
-      if (moving || !same(old.wait, doc.wait)) { const r = checkWait(doc.wait, { entity: 'session', state: to, from, card: false, nowMs }); if (!r.ok) return r; doc.wait = r.wait; }
+      if (moving || !same(old.wait, doc.wait)) { const r = checkWait(doc.wait, { entity: 'session', state: to, from, card: false, nowMs, kept: moving ? null : old.wait }); if (!r.ok) return r; doc.wait = r.wait; }
     } else if (doc.wait !== undefined) return no(`a ${to} session has no wait`);
     if (moving && to === 'recycling' && old.role !== 'lead') return no('only the Lead\'s session recycles');
     if (moving && from === 'waiting_limit' && to === 'running') {
@@ -375,9 +358,19 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
       const busy = tx.list('merge').filter((m) => m.id !== id && (m.doc.state === 'checking' || m.doc.state === 'merging'));
       if (busy.length) return no(`one merge at a time: ${busy[0].id} is ${busy[0].doc.state}`);
     }
+    // refused → merged (L85 M-1 b): only an interrupted merge, only with a Sensors pr- reading of this merge's PR that
+    // shows it merged, at the head the gate judged, with this merge commit.
+    if (moving && from === 'refused') {
+      if (!(old.reasons ?? []).includes('interrupted')) return no('only an interrupted merge is reconciled');
+      if (typeof doc.merge_commit !== 'string' || !HEX40.test(doc.merge_commit)) return no('a reconciled merge names its merge commit (merge_commit)');
+      if (doc.judged_head !== old.judged_head) return no('a merge\'s judged head never changes');
+      const f = typeof w.data?.fact === 'string' ? tx.lookup('fact', w.data.fact) : null;
+      if (!factFrom('sensors', f, 'pr-') || f.id !== `pr-${old.pr}`) return no('a reconcile comes from the Sensors reading of this merge\'s PR (data.fact)');
+      if (f.doc.merged !== true || f.doc.head_sha !== old.judged_head || f.doc.merge_commit_sha !== doc.merge_commit) return no('the PR reading does not show this PR merged at the judged head with this commit');
+    }
     if (moving && from === 'merged') {
       const f = typeof w.data?.fact === 'string' ? tx.lookup('fact', w.data.fact) : null;
-      if (!f || f.createdBy !== 'sensors' || f.doc.type !== 'audit_run') return no('an audit result comes from a Sensors audit_run fact (data.fact)');
+      if (!factFrom('sensors', f, 'audit-run-') || f.doc.type !== 'audit_run') return no('an audit result comes from a Sensors audit_run fact (data.fact)');
       if (!doc.merge_commit || f.doc.commit !== doc.merge_commit) return no('the audit_run fact is for another commit');
       const want = f.doc.conclusion === 'success' ? 'audited_ok' : 'audit_flagged';
       if (to !== want) return no(`the audit concluded ${f.doc.conclusion}, so the merge is ${want}`);
@@ -489,6 +482,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
 
   function applyOutbox(tag, file) {
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
+    // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
+    if (isNotARecord(f)) return notARecord(f.kind);
     try {
       return store.transaction((tx) => {
         if (tx.seen(f.key)) return { ok: true, skipped: true };
@@ -516,8 +511,9 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           const reason = `store error: ${String(storeErr?.message ?? storeErr).slice(0, 200)}; the file will be tried again`;
           const once = `store_error:${f.key}`;
           if (tx.seen(once)) return no(reason);
-          tx.markSeen(once, 'alerted');
-          return refuse({ ...ev, outbox: true }, reason);
+          // Marked only once the refusal's alert is delivered: a lost one is told again on the next try (L130).
+          if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
+          return no(reason);
         }
         if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
@@ -533,7 +529,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     return tx.commit([{ entity: 'card', id: entry.id, doc }], meta('dispatcher', kind, data));
   }
 
-  function release({ card, session_id: sid } = {}) {
+  function release({ card, session_id: sid, reason } = {}) {
     try {
       return store.transaction((tx) => {
         const c = tx.current('card', card);
@@ -541,7 +537,7 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         if (c.doc.state !== 'claimed') return no(`card ${card} is ${c.doc.state}, not claimed`);
         const holder = c.doc.claim?.session_id ?? c.doc.claim?.claim_id;
         if (typeof sid !== 'string' || holder !== sid) return refuse({ actor: 'dispatcher', entity: 'card', id: card }, `only the claim's holder (${holder}) may release it`);
-        const r = endClaim(tx, c, 'ready', 'claim_release', { by: sid });
+        const r = endClaim(tx, c, 'ready', 'claim_release', releaseData(sid, reason));
         return { ok: true, rev: r.rev, seq: r.seq };
       });
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
@@ -554,7 +550,8 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     if (!s) return { dead: false, why: 'no session record' };
     const sessionDead = s.doc.state === 'ended' || s.doc.state === 'quarantined' || processDead({ pid: s.doc.pid, pid_start: s.doc.pid_start }, p);
     if (!sessionDead) return { dead: false, why: 'session alive' };
-    const last = Math.max(Date.parse(s.doc.last_activity) || 0, Date.parse(s.ts) || 0);
+    // A time that can't be read or lies in the future is no activity (L329: pastTime), never "recent activity" for ever.
+    const last = Math.max(pastTime(s.doc.last_activity, nowMs) ?? 0, pastTime(s.ts, nowMs) ?? 0);
     if (nowMs - last <= stuckMin * MIN) return { dead: false, why: 'recent activity' };
     return { dead: true, why: 'process and session dead, no recent activity' };
   }
@@ -568,42 +565,71 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
         if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
-        const stuckMin = get('claims.stuck_min');
-        if (!Number.isInteger(stuckMin) || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
+        if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
+        const stuckMin = num('claims.stuck_min');
+        if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');
         const nowMs = now();
         const mine = deadness(tx, claim, p, nowMs, stuckMin);
         if (!mine.dead) return no(`owner not provably dead (${mine.why})`);
-        // An outage: at least OUTAGE_MIN of this Mac's session claims look dead at once, and they are half or more. Break
-        // none (M-5 item 3). Below that, each dead claim is broken on its own, with an alert (lead call L43).
-        const board = tx.list('card').filter((e) => (e.doc.state === 'claimed' || e.doc.state === 'running') && e.doc.claim?.kind === 'session' && e.doc.claim.host === host);
-        if (board.length >= OUTAGE_MIN) {
-          const dead = board.filter((e) => deadness(tx, e.doc.claim, p, nowMs, stuckMin).dead).length;
-          if (dead >= OUTAGE_MIN && dead * 2 >= board.length) {
-            // One alert per Mac per day, not one per card per pass (L38; 0b-2 audit MIN-1).
-            const key = `alert:claims_outage:${host}:${iso(nowMs).slice(0, 10)}`;
-            if (!tx.seen(key)) { store.alert({ type: 'claims_outage', dead, of: board.length }); tx.markSeen(key, 'alerted'); }
-            return no(`${dead} of ${board.length} claims look dead at once; none is broken (outage)`);
-          }
-        }
+        // Whether many dead claims at once are an outage (and none is broken) is the Dispatcher's one rule (M11
+        // outage.mjs, L72 (ii)); this breaks only the claim it is given, once its own owner is provably dead.
         const r = endClaim(tx, c, 'ready', 'claim_break', { session_id: claim.session_id, pid: claim.pid, why: mine.why });
         return { ok: true, rev: r.rev, seq: r.seq, broke: { session_id: claim.session_id, why: mine.why } };
       });
-      // Each break is told to the owner, once the write is down (L43).
+      // Each break is told to the owner, once the write is down (L43). The break is never redone, so nothing would ask
+      // again: an alert that isn't delivered is kept and sent again at the next transaction (L135 site C).
       if (!out.ok) return out;
-      store.alert({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
-      return { ok: true, rev: out.rev, seq: out.seq };
+      const told = store.alertOrKeep({ type: 'claim_broken', card, session_id: out.broke.session_id, why: out.broke.why });
+      return { ok: true, rev: out.rev, seq: out.seq, told };
     } catch (e) { return no(`store error: ${String(e?.message ?? e).slice(0, 200)}`); }
   }
 
-  function lapseClaims(nowArg) {
+  // A session claim with no process yet that has not reached running within claims.unlaunched_min lapses (L72), but only
+  // once `stopSession(session_id)` answers true: whatever was started under that id is stopped (or nothing ran), so the
+  // card can't run twice. With no stopSession, or an answer that is not true, the claim stays and the owner is told once
+  // a day. stopSession runs before the lock is taken, and the lapse checks the claim is still that one.
+  function lapseClaims(nowArg, { stopSession } = {}) {
+    const nowMs = Number.isFinite(nowArg) ? nowArg : now();
+    // Through the typed reader (L148 item 2): the claims map stays text on a real install ("30"). Missing means the
+    // default; set but not a positive whole number refuses the pass.
+    let unlaunchedMin;
+    try {
+      const raw = get('claims.unlaunched_min');
+      unlaunchedMin = raw === undefined || raw === null ? UNLAUNCHED_MIN_DEFAULT : num('claims.unlaunched_min');
+    } catch (e) { return no(`the rules could not be read (${String(e?.message ?? e).slice(0, 200)})`); }
+    if (unlaunchedMin === undefined || unlaunchedMin < 1) return no('claims.unlaunched_min must be a whole number of minutes');
+    const stopped = new Set();
+    const held = [];
+    for (const c of store.list('card')) {
+      const claim = c.doc.claim;
+      if (c.doc.state !== 'claimed' || claim?.kind !== 'session' || Number.isInteger(claim.pid)) continue;
+      // A claimed_at that can't be read or lies in the future lapses now (L329: pastTime); before, it never lapsed.
+      const claimedAt = pastTime(claim.claimed_at, nowMs);
+      if (claimedAt !== null && nowMs <= claimedAt + unlaunchedMin * MIN) continue;
+      let ok = false, why = 'no way to stop a session was given';
+      if (typeof stopSession === 'function') { try { ok = stopSession(claim.session_id) === true; if (!ok) why = 'stopSession did not say it stopped'; } catch (e) { why = String(e?.message ?? e).slice(0, 200); } }
+      if (ok) stopped.add(`${c.id}\u0000${claim.session_id}`);
+      else held.push({ card: c.id, session_id: claim.session_id, why });
+    }
     try {
       return store.transaction((tx) => {
-        const nowMs = Number.isFinite(nowArg) ? nowArg : now();
+        for (const h of held) {
+          // One alert per card per day (L38).
+          const key = `alert:unlaunched_held:${h.card}:${iso(nowMs).slice(0, 10)}`;
+          if (!tx.seen(key) && store.alert({ type: 'unlaunched_claim_held', ...h }) !== false) tx.markSeen(key, 'alerted');   // marked only once delivered (L130 m15, L168 M-1)
+        }
         const t = timeouts();
-        const claimed = timeoutFor(t, 'card', 'claimed');
         const running = timeoutFor(t, 'card', 'running');
         const waitT = timeoutFor(t, 'card', 'waiting');
-        const stale = get('proposals.heartbeat_stale_min');
+        // The one reading of the heartbeat limit (heartbeatLimit, L115 m-A). Missing or not a positive whole number:
+        // staleness is not judged (the claim holds to the running limit, so the card can't start twice), and the owner is
+        // told once a day.
+        const stale = heartbeatLimit(rules, product);
+        if (stale === undefined && tx.list('card').some((e) => e.doc.claim?.kind === 'tab' && (e.doc.state === 'claimed' || e.doc.state === 'running'))) {
+          const key = `alert:heartbeat_stale_unreadable:${iso(nowMs).slice(0, 10)}`;
+          const staleRaw = get('proposals.heartbeat_stale_min');
+          if (!tx.seen(key) && store.alert({ type: 'heartbeat_stale_unreadable', key: 'proposals.heartbeat_stale_min', value: staleRaw === undefined ? null : String(staleRaw).slice(0, 40) }) !== false) tx.markSeen(key, 'alerted');   // L168 M-1
+        }
         const lapsed = [];
         for (const e of tx.list('card')) {
           const claim = e.doc.claim;
@@ -611,19 +637,26 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
           // Check the file before writing over it: a hand-edited card is quarantined and alerted, not silently replaced (round 3 m-C).
           const chk = tx.current('card', e.id);
           if (!chk || chk.tampered) continue;
-          const since = Date.parse(e.stateSince);
           if (claim.kind === 'session') {
-            if (e.doc.state === 'claimed' && claimed?.minutes && nowMs > since + claimed.minutes * MIN) {
-              const r = endClaim(tx, e, 'ready', 'claim_lapse', { after_min: claimed.minutes });
+            if (e.doc.state !== 'claimed') continue;
+            // A claimed session claim has no process yet (its pid comes with claimed → running): it lapses at
+            // claims.unlaunched_min, once its session id was stopped above (the same claim). A running one is never lapsed
+            // here; a dead owner's claim is broken (breakIfDead).
+            if (stopped.has(`${e.id}\u0000${claim.session_id}`)) {
+              const r = endClaim(tx, e, 'ready', 'claim_lapse', { why: 'never launched', after_min: unlaunchedMin, session_id: claim.session_id });
               lapsed.push({ card: e.id, to: 'ready', seq: r.seq });
             }
             continue;
           }
-          // A tab claim: its heartbeat (the latest tab_heartbeat fact, timed by the diary) or the running limit.
-          const beats = tx.list('fact').filter((x) => x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => Date.parse(x.ts));
-          const lastBeat = Math.max(Date.parse(claim.at) || 0, ...beats);
-          const staleHit = Number.isInteger(stale) && stale >= 1 && nowMs - lastBeat > stale * MIN;
-          const limitHit = !!running?.minutes && nowMs - (Date.parse(claim.at) || 0) > running.minutes * MIN;
+          // A tab claim: its heartbeat or the running limit. A heartbeat counts only from the Dispatcher's own family,
+          // written by the Dispatcher (L74 addendum, L77 (5)): another role's `tab_heartbeat` keeps no claim alive.
+          const beats = tx.list('fact').filter((x) => factFrom(TAB_HEARTBEAT_WRITER, x, TAB_HEARTBEAT_FAMILY) && x.doc.type === 'tab_heartbeat' && x.doc.claim_id === claim.claim_id).map((x) => pastTime(x.ts, nowMs)).filter((x) => x !== null);
+          // A time that can't be read or lies in the future counts for nothing (L329: pastTime): an unreadable beat no
+          // longer turns the stale check off, and an unreadable or future claimed_at hits the running limit now.
+          const claimedAt = pastTime(claim.claimed_at, nowMs);
+          const lastBeat = Math.max(claimedAt ?? -Infinity, ...beats);
+          const staleHit = stale >= 1 && nowMs - lastBeat > stale * MIN;
+          const limitHit = !!running?.minutes && (claimedAt === null || nowMs - claimedAt > running.minutes * MIN);
           if (!staleHit && !limitHit) continue;
           const why = staleHit ? 'heartbeat stale' : 'running limit';
           if (e.doc.state === 'claimed') {
@@ -670,7 +703,16 @@ export function openRecord({ root, product, ownerUid, rules, alert = () => {}, n
     read: (entity, id) => store.read(entity, id),
     list: (entity) => store.list(entity),
     diary: (opts) => store.lines(opts),
+    // The Record's own times (L72): the Dispatcher's limits read these, never a field a script stamps.
+    meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
+}
+
+// What every caller gets: the Record and recover(), never the raw store or impl, which commit without check()
+// (#91 r3 MIN-1). openRecordWithStore is M9's own tests' (the N9 scan refuses it outside modules/M9-record/).
+export function openRecord(opts) {
+  const { record, recover } = openRecordWithStore(opts);
+  return { record, recover };
 }

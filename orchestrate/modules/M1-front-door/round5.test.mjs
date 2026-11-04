@@ -22,7 +22,10 @@ test('0b-8 audit round 5 M-1: a plain pause after a trip pushes no trip brief', 
 
 test('0b-8 audit round 5 M-2: the skill says the freeze wording itself when the Mini is turning off', () => {
   const skill = readFileSync(new URL('./skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
-  assert.ok(skill.includes(FREEZE_TEXT), 'the skill carries the exact freeze text');
+  const parked = readFileSync(new URL('./parked-skill-wording.md', import.meta.url), 'utf8');
+  // L151: parked until trip mode is wired; the live skill promises no outside-check issue it can't stand behind.
+  assert.ok(parked.includes(FREEZE_TEXT), 'the parked wording carries the exact freeze text');
+  assert.equal(skill.includes('heartbeat stale'), false, 'the live skill does not');
 });
 
 test('0b-8 audit round 5 M-3: an older Air result synced late never replaces a newer one', () => {
