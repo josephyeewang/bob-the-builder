@@ -64,7 +64,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]); // M-2 is 21 min old at the first pass, 61 at the second (a time ahead counts as old: L329)
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
@@ -902,4 +902,39 @@ test('L332 m5: a merge refused twice is put on the owner at the time after the r
     gateAlive: () => true, requestReview: () => ({ ok: true }), hasReviewer: async () => { t += 80_000; setClock(rec, t); return true; } }));
   const c = rec.read('card', 'C-1').doc;
   assert.deepEqual([c.state, c.wait?.who, c.wait?.since], ['waiting', 'joe', iso(t)], alerts.join(' | '));
+});
+
+// L329: ageMs reads the Record's times by shared pastTime. One that can't be read, or is more than 60 s ahead, is an
+// unknown age (Infinity), so each limit that uses it fires rather than waiting for a time that has not come.
+test('L329: a limit whose entry\'s time is unreadable or an hour ahead still times it out (checking, reporting, no reviewer)', async () => {
+  const NOW = T0 + 60 * MIN;
+  for (const [what, bad] of [['unreadable', 'not a time'], ['an hour ahead', iso(NOW + 60 * MIN)]]) {
+    for (const key of [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin]) {
+      const w = LIMIT_WORLDS[key];
+      const base = recWith(w.rows({}));
+      setClock(base, NOW);
+      const rec = Object.create(base);
+      Object.defineProperty(rec, 'meta', { value: (entity, id) => ({ ...base.meta(entity, id), ts: bad, stateSince: bad }) });
+      await timeLimits({ rec, rules: R, now: NOW, b: GREEN, ...ports({ hasReviewer: () => false, ...dead }).p, missing: [] });
+      assert.equal(w.timed(base), true, `${key}, ${what}`);
+    }
+  }
+});
+
+// L343: a refused copy of a wait's since (joe-waits.mjs tell_refused) is in the step's moves as well as in the owner's text.
+const noCopy = (rec) => ({ ...rec, base: rec, write: (w) => (w.doc?.wait_since ? { ok: false, reason: 'busy' } : rec.write(w)) });
+
+test('L343: a merge put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const base = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = noCopy(base);
+  await pass(rec, 31);
+  change(base, 'card', 'C-1', { state: 'merging' });
+  const { moves } = await pass(rec, 71);
+  assert.match(moves.at(-1)[1], /^waiting on joe; this card's tell could not be kept with its wait \(busy\)/);
+});
+
+test('L343: a card with no reviewer put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const rec = noCopy(recWith([['card', 'C-1', { state: 'in_review', head: HA, product: 'p1', attempts: { reviewer_starts: 2 } }]]));
+  const { moves } = await pass(rec, 300, { hasReviewer: () => false });
+  assert.match(moves.find(([id]) => id === 'C-1')?.[1] ?? '', /^in_review->waiting; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(moves));
 });
