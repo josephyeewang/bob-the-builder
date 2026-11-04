@@ -14,6 +14,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass, REFUSED_QUIET_MS, MAX_STREAKS, MAX_MORE_STREAKS } from '../M4-workshop/launcher/review-runner.mjs';
+import { readCardFile } from '../M4-workshop/launcher/review-runner-main.mjs';
 import { reviewPorts, relayReviewAlerts, keepReviewHolds, REVIEW_HOLD_FACT, HOLD_ABSENT_MS, MAIN_UNREAD } from './review-requests.mjs';
 import { behindSince, nextMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { outbox, isQueued, ALERT_QUEUE_FACT } from './alerts.mjs';
@@ -813,6 +814,104 @@ test('R-0b-171: past the cap one hold counts the rest, and a freed place is take
   assert.match(statusHolds(m).find((h) => h.id === 'refused-more').text, /^9 more cards'/);
 });
 
+test('L489 n1: an overflow streak ends each way a streak ends', async () => {
+  const m = mac();
+  await m.hour(0);
+  await runnerPass(m.ctx);
+  const seed = (card, over = {}) => ({ [`${card} reviewer`]: { card, role: 'reviewer', head: HEAD, reason: 'x', first_at: iso(T0 - 30 * H), last_at: iso(T0 - H), ...over } });
+  const had = m.ctx.readCard;
+  m.ctx.readCard = (c) => (c === 'DONE-1' ? { ok: true, doc: { state: 'verified', head: HEAD, product: 'p1' } } : c === 'QUIET-1' || c === 'STAYS-1' ? { ok: true, doc: { state: 'in_review', head: HEAD, product: 'p1' } } : had(c));
+  editState(m, (st) => { st.refused_more = { ...seed('GONE-1'), ...seed('DONE-1'), ...seed('QUIET-1', { last_at: iso(T0 - REFUSED_QUIET_MS) }), ...seed('STAYS-1') }; });
+  await runnerPass(m.ctx);
+  assert.deepEqual(Object.keys(stateOf(m).refused_more), ['STAYS-1 reviewer']);
+});
+
+const realRecord = (m) => {
+  const dir = join(m.base, 'record');
+  mkdirSync(join(dir, 'docs', 'card'), { recursive: true });
+  for (const p of [dir, join(dir, 'docs'), join(dir, 'docs', 'card')]) chmodSync(p, 0o755);
+  writeFileSync(join(dir, 'docs', 'card', 'C-1.json'), JSON.stringify({ entity: 'card', id: 'C-1', rev: 1, doc: { state: 'in_review', product: 'p1', head: HEAD, tier: 2 } }), { mode: 0o644 });
+  m.ctx.readCard = (card) => readCardFile({ recordRoot: dir, recordUid: ME, card });
+};
+// The file's own name can't start with a dot: the runner never lists one that does.
+const askDot = (m, card, n) => writeFileSync(join(m.root, 'requests', `dot-${n}.json`), JSON.stringify({ card, head: HEAD, role: 'reviewer', request_id: `dot-${n}` }), { mode: 0o644 });
+
+test('L489 N1 C3g: 60 made-up ids starting with a dot, once: no streak, one hold for the bad requests, and the tells end', async () => {
+  const m = mac({ treeOf: async () => TREE });
+  realRecord(m);
+  await m.hour(0);
+  for (let k = 0; k < 60; k += 1) askDot(m, `.Z-${k}`, k);
+  await m.hour(1);
+  assert.deepEqual(stateOf(m).refused_streaks ?? {}, {});
+  assert.deepEqual(Object.keys(stateOf(m).unread_requests ?? {}), ['the card id is not a plain id']);
+  const texts = [];
+  for (let h = 2; h <= 96; h += 1) texts.push(...(await m.hour(h)).filter((t) => /plain id|refused/.test(t)));
+  assert.ok(texts.length >= 1 && texts.length <= 2, `told ${texts.length}`);
+  assert.equal(new Set(texts.map((t) => t.slice(0, 60))).size, 1);
+  assert.deepEqual(stateOf(m).unread_requests ?? {}, {});
+});
+
+test('L489 N1 C3h: one request naming a real card in other capitals makes no streak', async () => {
+  const m = mac({ treeOf: async () => TREE });
+  realRecord(m);
+  await m.hour(0);
+  ask(m, 'c-1', 1);
+  await m.hour(1);
+  assert.deepEqual(stateOf(m).refused_streaks ?? {}, {});
+  assert.deepEqual(await m.run(2, 60, /c-1/), []);
+});
+
+test('L489 N1 (b): the runner refuses a dot-led id before it reads any card', async () => {
+  const m = mac();
+  await m.hour(0);
+  await runnerPass(m.ctx);
+  const read = [];
+  const had = m.ctx.readCard;
+  m.ctx.readCard = (c) => { read.push(c); return had(c); };
+  askDot(m, '.Z-1', 1);
+  await runnerPass(m.ctx);
+  assert.equal(read.includes('.Z-1'), false);
+  assert.match(JSON.stringify(stateOf(m).refused), /the card id is not a plain id/);
+});
+
+test('L489 N1 (c): a card that can\'t be read is told daily while it is asked for, and ends once nothing asks', async () => {
+  const m = mac({ readCard: () => ({ ok: false, reason: 'the Record is away' }) });
+  const REFUSED_AWAY = /review runner: The reviewer request for card C-1 at aaaaaaa has been refused for a day/;
+  assert.deepEqual(await m.run(0, 80, REFUSED_AWAY), [25, 49, 73]);
+  await runnerPass(m.ctx);
+  assert.equal(Object.keys(stateOf(m).refused_streaks).length, 1);
+  // Nothing asks any more: the longest gap across products stands in for the card's own.
+  const seen = [];
+  m.ctx.requestGapMs = (p) => { seen.push(p); return 100 * H; };
+  m.clock.t += 199 * H;
+  await runnerPass(m.ctx);
+  assert.equal(Object.keys(stateOf(m).refused_streaks).length, 1);
+  assert.deepEqual(seen, [undefined]);
+  m.clock.t += H;
+  rmSync(join(m.root, 'requests'), { recursive: true, force: true });
+  await runnerPass(m.ctx);
+  assert.deepEqual(stateOf(m).refused_streaks, {});
+});
+
+test('L489 n2: a Record card head that isn\'t a head never stops a pass; it is told as a bad entry, and the hold stays', async () => {
+  for (const bad of [5, null, undefined, ['a'.repeat(40)], 'short']) {
+    const m = await notTakenTold();
+    const had = m.ctx.readCard;
+    m.ctx.readCard = (c) => { const r = had(c); return r.ok ? { ...r, doc: { ...r.doc, head: bad } } : r; };
+    await runnerPass(m.ctx);
+    assert.equal(held(m).length, 1, 'the kept hold stays');
+    assert.ok(statusHolds(m).some((h) => h.id === 'hold-entry-unread'), `kept loop, ${JSON.stringify(bad)}`);
+    rmSync(join(m.root, 'state.json'));
+    await runnerPass(m.ctx);
+    assert.deepEqual(held(m), [], 'the rebuild skips it');
+    assert.ok(statusHolds(m).some((h) => h.id === 'hold-entry-unread'), `rebuild, ${JSON.stringify(bad)}`);
+  }
+  const told = await notTakenTold();
+  const had = told.ctx.readCard;
+  told.ctx.readCard = (c) => { const r = had(c); return r.ok ? { ...r, doc: { ...r.doc, head: 5 } } : r; };
+  assert.deepEqual(await told.run(5, 60, /A hold entry could not be read/), [5, 29, 53]);
+});
+
 test('R-0b-171: the overflow itself is capped, and says so', async () => {
   const m = mac({ readCard: () => ({ ok: false, reason: 'the Record is away' }) });
   await m.hour(0);
@@ -821,7 +920,7 @@ test('R-0b-171: the overflow itself is capped, and says so', async () => {
   assert.equal(Object.keys(stateOf(m).refused_more).length, MAX_MORE_STREAKS);
   m.clock.t += 25 * H;
   await runnerPass(m.ctx);
-  assert.match(statusHolds(m).find((h) => h.id === 'refused-more').text, new RegExp(`^${MAX_MORE_STREAKS} or more more cards'`));
+  assert.match(statusHolds(m).find((h) => h.id === 'refused-more').text, new RegExp(`^At least ${MAX_MORE_STREAKS} more cards'`));
 });
 
 test('R-0b-171 C3a: launch records that can\'t be read are told a day after the first refusal, then daily', async () => {

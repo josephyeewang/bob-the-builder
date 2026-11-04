@@ -200,7 +200,8 @@ export function readRequest(dir, name) {
       if (!req || typeof req !== 'object' || Array.isArray(req)) return { ok: false, reason: 'it is not an object' };
       const keys = Object.keys(req).sort();
       if (keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')}` };
-      if (typeof req.card !== 'string' || !CARD_ID.test(req.card)) return { ok: false, reason: 'the card id is not a plain id' };
+      // No card file's name starts with a dot, so no such card can be read (R-0b-171).
+      if (typeof req.card !== 'string' || !CARD_ID.test(req.card) || req.card.startsWith('.')) return { ok: false, reason: 'the card id is not a plain id' };
       if (typeof req.head !== 'string' || !HEX40.test(req.head)) return { ok: false, reason: 'the head is not 40 hex' };
       if (typeof req.role !== 'string' || req.role.length > 40) return { ok: false, reason: 'the role is not a short word' };
       if (typeof req.request_id !== 'string' || !REQUEST_ID.test(req.request_id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
@@ -402,10 +403,12 @@ export async function runnerPass(ctx) {
     let gap; try { gap = await ctx.requestGapMs?.(product); } catch { gap = undefined; }
     return Number.isFinite(gap) && gap >= 0 ? Math.max(REFUSED_QUIET_MS, 2 * gap) : Infinity;
   };
-  const quietFor = async (c) => (c?.ok ? quietMs(c.doc?.product) : Infinity);
+  // A card that can't be read has no product to go by, so it gets the longest wait: a real failure still being asked
+  // about is renewed in time, and an id nothing will ask for again ends (N1).
+  const quietFor = async (c) => quietMs(c?.ok ? c.doc?.product : undefined);
   const lastAskOver = (r, quiet) => now - (pastTime(r.last_at, now) ?? now) >= quiet;
   // A request refused again and again stays a streak until a request is accepted, the card is gone or stops needing the
-  // role, or no request has renewed it (R-0b-171). A card that can't be read ends nothing.
+  // role, or no request has renewed it (R-0b-171).
   for (const map of [state.refused_streaks, state.refused_more]) {
     for (const [key, r] of Object.entries(map ?? {})) {
       const c = await cardOf(r.card);
@@ -424,6 +427,7 @@ export async function runnerPass(ctx) {
   for (const [key, n] of Object.entries(state.not_taken ?? {})) {
     let c; try { c = await ctx.readCard(n.card); } catch { c = null; }
     if (c?.ok && !needsRole(c.doc, n.role)) { delete state.not_taken[key]; continue; }
+    if (c?.ok && !isHead(c.doc.head)) { state.hold_unread_at = iso(now); continue; }
     const recheck = c?.ok && (c.doc?.head !== n.head || n.tree_unread === true);
     if (recheck && (typeof n.tree !== 'string' || await treeAt(n.card, c.doc.head) !== null)) { delete state.not_taken[key]; continue; }
     const at = recheck ? { ...n, head: c.doc.head, tree_unread: true } : n;
@@ -572,6 +576,8 @@ export async function runnerPass(ctx) {
     const c = await cardOf(d.card);
     if (!c?.ok || !needsRole(c.doc, d.role)) continue;
     const head = c.doc.head;
+    // A head that can't be a head is no place to hold a verdict: the card is skipped and told as a bad entry (L489).
+    if (!isHead(head)) { state.hold_unread_at = iso(now); continue; }
     if (head !== d.head && typeof d.tree !== 'string') continue;
     const treeNow = head === d.head ? d.tree : await treeAt(d.card, head);
     if (head !== d.head && treeNow !== null && treeNow !== d.tree) continue;
@@ -866,6 +872,7 @@ export async function runnerPass(ctx) {
 
 // What a pending hold on a verdict says (L315).
 const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given');
+const isHead = (h) => typeof h === 'string' && HEX40.test(h);
 const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
 const isObject = (v) => v !== null && typeof v === 'object';
 const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
@@ -883,7 +890,7 @@ const stuckHolds = (state, now) => {
   const more = Object.values(state.refused_more ?? {}).filter(dayOld);
   if (more.length) {
     const n = new Set(more.map((r) => r.card)).size;
-    holds.push({ id: 'refused-more', text: `${n}${Object.keys(state.refused_more).length >= MAX_MORE_STREAKS ? ' or more' : ''} more cards' review requests are refused.` });
+    holds.push({ id: 'refused-more', text: `${Object.keys(state.refused_more).length >= MAX_MORE_STREAKS ? 'At least ' : ''}${n} more cards' review requests are refused.` });
   }
   for (const u of Object.values(state.unread_requests ?? {}).filter(dayOld)) {
     holds.push({ id: `unread-request-${createHash('sha256').update(u.cause).digest('hex').slice(0, 12)}`, text: `Review requests can't be read (${u.cause}) for a day; the last: ${u.file}. No review starts from them.` });

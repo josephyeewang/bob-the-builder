@@ -261,7 +261,13 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   assert.match(read('C-4').reason, /not JSON/);
   put('C-5', { entity: 'card', id: 'C-5', doc: {} }, 0o666);
   assert.match(read('C-5').reason, /not the Record's own plain file/);
-  for (const id of ['C-3', 'C-4', 'C-5', '../x']) assert.equal(read(id).missing, undefined, 'there, or unknown, is never missing');
+  for (const id of ['C-4', 'C-5']) assert.equal(read(id).missing, undefined, 'a file that is there but can\'t be read is never missing');
+  put('C-10', { entity: 'other', id: 'C-10', doc: {} });
+  assert.equal(read('C-10').missing, undefined, 'its own id, the wrong kind');
+  for (const id of ['C-3', '../x', '.C-1', '']) assert.equal(read(id).missing, true, 'no card has this id (L489)');
+  for (const bad of ['null', '{}', '{"entity":"card"}']) { put('C-8', bad); assert.equal(read('C-8').missing, undefined, `a ruined file, ${bad}`); }
+  put('C-9', { entity: 'card', id: 'C-9', doc: {} });
+  assert.equal(read('c-9').missing, true, 'an id that differs only in case is another id');
   assert.equal(read('C-1', ME + 1).missing, undefined, 'a folder that fails its checks is never missing');
   symlinkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-6.json'));
   assert.match(read('C-6').reason, /ELOOP/);

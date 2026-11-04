@@ -229,7 +229,8 @@ function readRecordFile(p, recordUid, entity, id, missing) {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
     const d = JSON.parse(readFileSync(fd, 'utf8'));
-    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
+    // An id that isn't the one asked for is no such document: on a disk that ignores case, `c-1` opens the file of `C-1`.
+    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, ...(d?.entity === entity && typeof d.id === 'string' && d.id !== id ? { missing: true } : {}), reason: `its file is not a ${entity} document` };
     return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
 }
@@ -259,7 +260,7 @@ export function holdersOf(dir, { runFn = run } = {}) {
 
 /** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
 export function readCardFile({ recordRoot, recordUid, card }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, missing: true, reason: 'not a card id' };
   for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
     const bad = recordFolderProblem(d, recordUid);
     if (bad) return { ok: false, reason: bad };
