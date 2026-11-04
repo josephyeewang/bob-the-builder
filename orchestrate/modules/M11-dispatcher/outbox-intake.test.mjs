@@ -1,8 +1,9 @@
-import { test } from 'node:test';
+import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { intakePass, kindsFor } from './outbox-intake.mjs';
+import { intakePass, kindsFor, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS } from './outbox-intake.mjs';
+import { STEP_DEADLINE_MS } from './tick.mjs';
 import { note } from './moves.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
@@ -13,6 +14,9 @@ import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const UID = process.getuid();
+// A hung call must fail a named test, never hang the run (L497 m3).
+const test = (name, opts, fn) => (fn ? nodeTest(name, { timeout: 10_000, ...opts }, fn) : nodeTest(name, { timeout: 10_000 }, opts));
+
 function world() {
   const root = tempDir('m11-outbox-');
   const calls = { alerts: [], notes: [], readonly: [], replies: [] };
@@ -258,7 +262,7 @@ test('audit 0b-6 r2 MIN-7: the file is claimed before its read-only session star
   await intakePass({ rec, sessions, ...w.ports, startReadonly: (x) => { tries.push(x); return { ok: true }; } });
   assert.deepEqual(tries, [], 'never started twice');
   assert.equal(rec.read('fact', 'intake-applied-L-1-think-q1.md').doc.state, 'interrupted');
-  assert.match(w.calls.alerts.at(-1), /read-only session may or may not have started/);
+  assert.ok(w.calls.alerts.some((t) => /read-only session may or may not have started/.test(t?.text ?? t)), JSON.stringify(w.calls.alerts));
 });
 
 test('audit 0b-6 r2 MAT-8 (I5, I6): a read-only start that throws, or an apply that throws, does not stop the next file', async () => {
@@ -866,7 +870,7 @@ test('L490 M3: a file not used yet, and a verdict that waits, are noted once a d
   assert.equal(lines() - start, 1, sid);
 });
 
-test('L494 MAT-1: a plan the check refuses, heard by nobody, is kept and told a day later, then not again', async () => {
+test('L497: a plan the check refuses, heard by nobody, is kept and told at the next step, then not again', async () => {
   const p = planWorld();
   p.hand('plan-a.json', '{"cards": []}');
   const nobody = fakeAlert({ answer: false });
@@ -874,18 +878,18 @@ test('L494 MAT-1: a plan the check refuses, heard by nobody, is kept and told a 
   const fails = async () => { asked += 1; return { ok: false, reason: 'tab closed' }; };
   const logged = [];
   for (let i = 0; i < 3; i++) await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: nobody, now: p.E.clock.t, replyToLead: fails, failureLog: (l) => logged.push(l) });
-  assert.equal(asked, 1, 'one try a day');
+  assert.equal(asked, 1, 'one try until the wait is up');
   assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.state, 'refused');
   assert.match(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, /was not applied/, 'a failed tell keeps the note');
-  assert.equal(logged.filter((l) => /neither the Lead L-1 nor the owner could be told, so it is tried again in a day/.test(l)).length, 1, logged.join(' | '));
-  p.E.clock.t += OVER_A_DAY;
+  assert.equal(logged.filter((l) => /neither the Lead L-1 nor the owner could be told, so it is tried again/.test(l)).length, 1, logged.join(' | '));
+  p.E.clock.t += 5 * 60 * 1000;
   await passes(p);
   assert.equal(p.told.length, 1, 'the Lead hears it once it can');
   assert.match(p.told[0].text, /plan-a\.json was not applied/);
   assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, undefined);
 });
 
-test('L494 MAT-1: what became of a plan is told a day later if nobody had it, even when its file is gone', async () => {
+test('L497: what became of a plan is told at the next step if nobody had it, even when its file is gone', async () => {
   const p = planWorld();
   must(p.launch());
   p.hand('plan-a.json', [planCard('C-1')]);
@@ -895,8 +899,8 @@ test('L494 MAT-1: what became of a plan is told a day later if nobody had it, ev
   assert.equal(asked, 1);
   rmSync(join(p.ob, 'plan-a.json'));
   await passes(p);
-  assert.equal(p.told.length, 0, 'not before the day is up');
-  p.E.clock.t += OVER_A_DAY;
+  assert.equal(p.told.length, 0, 'not before the wait is up');
+  p.E.clock.t += 5 * 60 * 1000;
   await passes(p);
   assert.equal(p.told.length, 1);
   assert.match(p.told[0].text, /plan-a\.json was applied\. Created: C-1\./);
@@ -904,7 +908,7 @@ test('L494 MAT-1: what became of a plan is told a day later if nobody had it, ev
 
 // A pass cut off at the step limit, or killed, stops at the tell. The call never answers while later passes run.
 for (const [what, hand, said] of [['a plan the check refuses', '{"cards": []}', /plan-a\.json was not applied/], ['a plan that applies', [planCard('C-1')], /plan-a\.json was applied/]]) {
-  test(`L494 MAT-1 HUNG-REPLY: ${what}, with a tell cut off mid-call, keeps its note and is told at 24 hours`, async () => {
+  test(`L497 HUNG-REPLY: ${what}, with a tell cut off mid-call, keeps its note and is told at the next step`, async () => {
     const p = planWorld();
     must(p.launch());
     p.hand('plan-a.json', hand);
@@ -916,9 +920,10 @@ for (const [what, hand, said] of [['a plan the check refuses', '{"cards": []}', 
     const left = p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc;
     assert.match(left.lead_note, said, 'the note stays through the tell');
     assert.equal(typeof left.lead_note_tried_at, 'string');
-    for (let h = 0; h < 23; h++) { p.E.clock.t += 3600 * 1000; await p.run(); }
-    assert.equal(p.told.length, 0, 'tried once a day');
-    p.E.clock.t += 3600 * 1000 + 60_000;
+    p.E.clock.t += 4 * 60 * 1000;
+    await p.run();
+    assert.equal(p.told.length, 0, 'not before the wait is up');
+    p.E.clock.t += 60 * 1000;
     await p.run();
     assert.equal(p.told.length, 1);
     assert.match(p.told[0].text, said);
@@ -930,13 +935,225 @@ for (const [what, hand, said] of [['a plan the check refuses', '{"cards": []}', 
   });
 }
 
-test('L494 MAT-1: a Lead that does not answer in time costs one time limit, and the owner has the text', async () => {
+test('L497 REAL-HANG: a Lead that does not answer in time costs one time limit, the owner has the text, and the Lead is told at the next step', async () => {
   const p = planWorld();
   p.hand('plan-a.json', '{"cards": []}');
   const [r] = await p.run({ reply: () => new Promise(() => {}), portMs: 20 });
   assert.match(r.refused, /cards/);
-  assert.equal(p.owner.filter((t) => /the Lead L-1 could not be told \(it did not answer within 20 ms\).*plan-a\.json was not applied/.test(t)).length, 1, p.owner.join(' | '));
+  assert.equal(p.owner.filter((t) => /plan-a\.json was not applied.*The Lead could not be told \(it did not answer within 20 ms\)/.test(t)).length, 1, p.owner.join(' | '));
+  assert.match(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, /was not applied/, 'the owner reading it is not the Lead hearing it');
+  p.E.clock.t += 5 * 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 1);
   assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, undefined);
+});
+
+test('L497 BLIP: one failed tell keeps the note, the owner has the text at once, and the Lead is told at +5 minutes', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.sessions[0].product = PRODUCT;
+  p.hand('plan-a.json', [planCard('C-1')]);
+  await p.run({ reply: async () => ({ ok: false, reason: 'the tab was busy' }) });
+  const fact = () => p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc;
+  assert.match(fact().lead_note, /was applied/);
+  assert.equal(fact().lead_note_tries, 1);
+  assert.deepEqual(p.owner, [`Product ${PRODUCT}: the Lead L-1's plan plan-a.json was applied. Created: C-1. The Lead could not be told (the tab was busy).`]);
+  p.E.clock.t += 4 * 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 0);
+  p.E.clock.t += 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 1);
+  assert.equal(p.owner.length, 1, 'the owner is not told again once the Lead has heard');
+  for (const k of ['lead_note', 'lead_note_tried_at', 'lead_note_tries', 'lead_note_product']) assert.equal(fact()[k], undefined, k);
+});
+
+test('L497 c2: a refusal the owner reads drops the words meant for the Lead', async () => {
+  const p = planWorld();
+  p.hand('plan-a.json', '{"cards": []}');
+  await p.run({ reply: async () => ({ ok: false, reason: 'busy' }) });
+  assert.doesNotMatch(p.owner[0], /Your|Fix it/);
+  assert.match(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, /^Your plan .* Fix it and hand it in under a new name\.$/, 'the Lead still gets its own words');
+});
+
+test('L497 BLIP-NOQUEUE: with the owner\'s queue refusing too, the Lead is told well before a day', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
+  await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: fakeAlert({ answer: false }), now: p.E.clock.t, replyToLead: async () => ({ ok: false, reason: 'busy' }) });
+  p.E.clock.t += 5 * 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 1);
+});
+
+test('L497: a Lead that never answers is tried at +5 minutes, +1 hour, then daily, and the owner is told daily', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
+  let asked = 0;
+  const reply = async () => { asked += 1; return { ok: false, reason: 'busy' }; };
+  await p.run({ reply });
+  const tries = () => p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note_tries;
+  const MIN = 60 * 1000;
+  const step = async (wait, want, n) => {
+    p.E.clock.t += wait - MIN;
+    await p.run({ reply });
+    assert.equal(asked, want - 1, `not a minute before ${n}`);
+    p.E.clock.t += MIN;
+    await p.run({ reply });
+    assert.equal(asked, want, n);
+    assert.equal(tries(), want);
+  };
+  assert.equal(asked, 1);
+  await step(5 * MIN, 2, '+5 minutes');
+  assert.equal(p.owner.length, 1, 'once a day');
+  await step(60 * MIN, 3, '+1 hour');
+  assert.equal(p.owner.length, 1, 'once a day');
+  await step(24 * 60 * MIN, 4, 'a day on');
+  assert.equal(p.owner.length, 2, 'daily while the Lead has not heard');
+  await step(24 * 60 * MIN, 5, 'another day on');
+  assert.equal(p.owner.length, 3);
+});
+
+test('L497: an unheard note writes at most 6 lines on its first day and 4 a day after', { timeout: 60_000 }, async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
+  const reply = async () => ({ ok: false, reason: 'busy' });
+  const lines = () => p.rec.diary().filter((d) => !['plan', 'outbox_applied', 'outbox_claim'].includes(d.kind)).length;
+  const day = async () => {
+    const was = lines();
+    for (let i = 0; i < 288; i++) { await p.run({ reply }); p.E.clock.t += 5 * 60 * 1000; }
+    return lines() - was;
+  };
+  const first = await day();
+  assert.ok(first <= 6, `first day ${first}`);
+  for (let d = 0; d < 2; d++) { const n = await day(); assert.ok(n <= 4, `a later day ${n}`); }
+});
+
+test('L497 m4: the time limits fit the step', () => {
+  assert.ok(INTAKE_PORT_MS < STEP_DEADLINE_MS);
+  assert.ok(INTAKE_START_MS < STEP_DEADLINE_MS);
+  assert.ok(INTAKE_PASS_MS + INTAKE_START_MS + INTAKE_PORT_MS < STEP_DEADLINE_MS, 'the budget leaves room for one last start and note');
+});
+
+// 24 verdicts whose ended records hang, a healthy session's verdict, and a file that needs no ended record.
+function hungVerdicts(n = 24) {
+  const names = Array.from({ length: n }, (_, i) => `verdict-${String(i).padStart(2, '0')}.md`);
+  const dirs = { '/hung': [...names, 'wish-z.md'], '/well': ['verdict-w.md'] };
+  const sessions = [{ sessionId: 'R-1', role: 'reviewer', outbox: '/hung', uid: UID }, { sessionId: 'R-2', role: 'reviewer', outbox: '/well', uid: UID }];
+  const rec = recWith();
+  const asked = [];
+  const reached = [];
+  const hungPerPass = [];
+  let at = T0;
+  const pass = (over = {}) => {
+    at += 60_000;
+    hungPerPass.push(0);
+    return intakePass({ rec, sessions, now: at, wait: async () => {}, alert: fakeAlert(), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: async () => ({ ok: true }),
+      list: (d) => dirs[d], look: () => 'same', read: (d, name) => ({ ok: true, kind: name.startsWith('wish') ? 'wish-' : 'verdict-', text: name }), portMs: 20,
+      vet: ({ kind }) => { if (kind === 'wish-') reached.push(at); return 'a stand-in'; },
+      reviewEnded: (s) => { asked.push(s.sessionId); if (s.sessionId === 'R-2') return { ok: false, none: true }; hungPerPass[hungPerPass.length - 1] += 1; return new Promise(() => {}); }, ...over });
+  };
+  return { pass, rec, asked, reached, hungPerPass };
+}
+
+test('L497 m5: hung ended records cost three port limits a pass, and every later file is reached within a bounded number of passes', async () => {
+  const w = hungVerdicts();
+  await w.pass();
+  assert.equal(w.reached.length, 1, 'a file that needs no ended record, on the first pass');
+  let passes = 1;
+  while (!w.asked.includes('R-2') && passes < 20) { await w.pass(); passes += 1; }
+  assert.ok(w.asked.includes('R-2'));
+  assert.ok(passes <= 9, `${passes} passes`);
+  assert.ok(Math.max(...w.hungPerPass) <= 3, w.hungPerPass.join(' '));
+});
+
+test('L497 m5: slow verdicts take turns, and one that recovers loses its mark, writing nothing while it stays slow', async () => {
+  const w = hungVerdicts(8);
+  const asked = new Set();
+  const seen = (hang) => w.pass({ reviewEnded: (s, i = 0) => { if (s.sessionId === 'R-2') return { ok: false, none: true }; return hang(); } });
+  for (let i = 0; i < 4; i++) await seen(() => new Promise(() => {}));
+  const marks = () => w.rec.list('fact').filter((f) => f.id.startsWith('hold-intake-slow-') && f.doc?.at);
+  assert.equal(marks().length, 8, 'all eight are marked within three passes');
+  const lines = w.rec.diary().length;
+  const results = [];
+  for (let i = 0; i < 8; i++) results.push(...await seen(() => new Promise(() => {})));
+  assert.equal(w.rec.diary().length, lines, 'staying slow writes nothing');
+  for (const r of results) if (r.waiting === 'its session has not ended' && r.name !== 'verdict-w.md') asked.add(r.name);
+  assert.equal(asked.size, 8, [...asked].join(' '));
+  await seen(() => ({ ok: false, none: true }));
+  await seen(() => ({ ok: false, none: true }));
+  await seen(() => ({ ok: false, none: true }));
+  assert.equal(marks().length, 0, 'a quick answer clears the mark');
+});
+
+test('L497: a held file\'s tell that neither the Lead nor the owner took is reported once, and tried again in a day', async () => {
+  const p = planWorld();
+  p.hand('verdict-a.md', 'x');
+  const logged = [];
+  const pass = () => intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: fakeAlert({ answer: false }), now: p.E.clock.t, replyToLead: async () => ({ ok: false, reason: 'tab closed' }), failureLog: (l) => logged.push(l) });
+  await pass();
+  await pass();
+  assert.equal(logged.filter((l) => /neither the Lead L-1 nor the owner could be told, so it is tried again in a day: Your file verdict-a\.md/.test(l)).length, 1, logged.join(' | '));
+});
+
+test('L497 m5: a pass past its budget leaves files for the next pass, which takes them, and says nothing', async () => {
+  const p = planWorld();
+  p.hand('think-a.md', 'one');
+  p.hand('think-b.md', 'two');
+  const started = [];
+  const startReadonly = async (x) => { started.push(x.brief); await new Promise((r) => { setTimeout(r, 40); }); return { ok: true }; };
+  const out = await p.run({ startReadonly, passMs: 20 });
+  assert.deepEqual(started, ['one']);
+  assert.match(out.find((r) => r.name === 'think-b.md').waiting, /left for the next pass/);
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-think-b.md'), null);
+  p.E.clock.t += 60_000;
+  await p.run({ startReadonly });
+  assert.deepEqual(started, ['one', 'two']);
+  assert.equal(p.owner.length, 0);
+  assert.equal(p.rec.read('fact', 'hold-intake-left-out-since').doc.since ?? null, null, 'a pass that reached everything ends it');
+});
+
+test('L497 m5: files that stay left out are told, once a day, and the lines stay few', async () => {
+  const p = planWorld();
+  p.hand('think-a.md', 'one');
+  const MIN = 60 * 1000;
+  const lines = p.rec.diary().length;
+  await p.run({ passMs: 0 });
+  assert.equal(p.owner.length, 0, 'one pass left out is not told');
+  for (let i = 0; i < 14; i++) { p.E.clock.t += MIN; await p.run({ passMs: 0 }); }
+  assert.equal(p.owner.length, 0);
+  p.E.clock.t += LEFT_OUT_TELL_MS - 14 * MIN;
+  for (let i = 0; i < 5; i++) { await p.run({ passMs: 0 }); p.E.clock.t += MIN; }
+  assert.equal(p.owner.length, 1, p.owner.join(' | '));
+  assert.match(p.owner[0], /outbox intake has run out of time.*files left for the next pass: 1$/);
+  assert.ok(p.rec.diary().length - lines <= 5, 'the first write and one tell');
+  p.E.clock.t += OVER_A_DAY;
+  await p.run({ passMs: 0 });
+  assert.equal(p.owner.length, 2, 'daily');
+});
+
+test('L497 m5: a note past the budget stays for the next pass, and a held file left out keeps its hold', async () => {
+  const p = planWorld();
+  p.hand('plan-a.json', '{"cards": []}');
+  await p.run({ reply: async () => ({ ok: false, reason: 'busy' }) });
+  p.E.clock.t += 5 * 60 * 1000;
+  await p.run({ passMs: 0 });
+  assert.equal(p.told.length, 0);
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note_tries, 1);
+  await p.run();
+  assert.equal(p.told.length, 1);
+
+  const q = planWorld();
+  const name = badFile(q);
+  await q.run();
+  const told = q.rec.list('fact').filter((f) => f.id.startsWith('hold-outbox-read-') && f.doc?.told_at);
+  assert.equal(told.length, 1, name);
+  await q.run({ passMs: 0 });
+  q.E.clock.t += 60_000;
+  await q.run();
+  assert.equal(q.owner.length, 1, 'left out says nothing about the file, so its tell stands');
 });
 
 test('L494 MAT-1: a told note the Record will not clear is reported, and told again a day later, not every pass', async () => {
@@ -999,6 +1216,17 @@ test('L494: a read-only start that hangs is left claimed, told as interrupted, a
   await passes(p, 3, { startReadonly, startMs: 20 });
   assert.equal(starts, 1);
   assert.equal(p.owner.filter((t) => /think-q1\.md .*was interrupted; its read-only session may or may not have started/.test(t)).length, 1, p.owner.join(' | '));
+  assert.deepEqual(p.told.map((x) => x.text), ['Your think request think-q1.md may not have started; hand it in again under a new name if no report comes.'], 'L497 m6: the Lead is told too, once');
+});
+
+test('L497 m6: a Lead that can\'t be told of a start that may not have run leaves the owner a line meant for the owner', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  const reply = async () => ({ ok: false, reason: 'tab closed' });
+  await p.run({ reply, startMs: 20, startReadonly: () => new Promise(() => {}) });
+  await p.run({ reply });
+  const line = p.owner.filter((t) => /^the Lead L-1's/.test(t));
+  assert.deepEqual(line, ["the Lead L-1's think request think-q1.md may not have started. The Lead could not be told (tab closed)."]);
 });
 
 test('L494: a queued request\'s note to the Lead has the time limit too, and a thrown one is no loose rejection', async () => {
@@ -1008,8 +1236,11 @@ test('L494: a queued request\'s note to the Lead has the time limit too, and a t
   const [r] = await p.run({ startReadonly, portMs: 20, reply: () => new Promise(() => {}) });
   assert.match(r.waiting, /red band/);
   p.hand('think-q2.md', 'a second');
-  const [, r2] = await p.run({ startReadonly, reply: async () => { throw new Error('tab closed'); } });
+  let awaited = false;
+  const refused = { then(ok, no) { awaited = true; no(new Error('tab closed')); } };
+  const [, r2] = await p.run({ startReadonly, reply: () => refused });
   assert.match(r2.waiting, /red band/);
+  assert.equal(awaited, true, 'a note left loose would be an unhandled rejection');
 });
 
 test('L490 m4: when the Lead can\'t be told but the owner can, that is told, once', async () => {
@@ -1017,7 +1248,7 @@ test('L490 m4: when the Lead can\'t be told but the owner can, that is told, onc
   p.hand('plan-a.json', '{"cards": []}');
   await passes(p, 3, { reply: async () => ({ ok: false, reason: 'tab closed' }) });
   assert.equal(p.owner.length, 1, p.owner.join(' | '));
-  assert.match(p.owner[0], /could not be told \(tab closed\).*plan-a\.json was not applied/);
+  assert.match(p.owner[0], /^the Lead L-1's plan plan-a\.json was not applied.* The Lead could not be told \(tab closed\)\.$/);
 });
 
 const refusesMarks = (rec, kind) => { let on = true; return { rec: Object.create(rec, { write: { value: (x) => (on && x.kind === kind ? { ok: false, reason: 'turned down' } : rec.write(x)) } }), off: () => { on = false; } }; };
@@ -1104,7 +1335,7 @@ test('L475, L494: a Lead that can\'t be told means the owner reads it, once; if 
   p.hand('verdict-a.md', 'x');
   await passes(p, 3, { reply: async () => ({ ok: false, reason: 'tab closed' }) });
   assert.equal(p.owner.length, 1, JSON.stringify(p.owner));
-  assert.match(p.owner[0], /could not be told \(tab closed\).*verdict-a\.md/);
+  assert.match(p.owner[0], /^the Lead L-1's file verdict-a\.md was not used.* The Lead could not be told \(tab closed\)\.$/);
 
   const q = planWorld();
   q.hand('verdict-a.md', 'x');
@@ -1226,9 +1457,9 @@ test('R-0b-170: a Lead that can\'t be told means the owner reads it instead', as
     await p.run({ reply });
     assert.equal(p.rec.read('card', 'C-1').doc.state, 'draft', 'the plan still counts');
     assert.equal(p.owner.length, 1);
-    assert.match(p.owner[0], /the Lead L-1 could not be told .*plan-a\.json was applied/);
+    assert.match(p.owner[0], /the Lead L-1's plan plan-a\.json was applied.* The Lead could not be told/);
     p.hand('plan-b.json', '{"cards":');
     await p.run({ reply });
-    assert.match(p.owner[1], /the Lead L-1 could not be told .*plan-b\.json was not applied/);
+    assert.match(p.owner[1], /the Lead L-1's plan plan-b\.json was not applied.* The Lead could not be told/);
   }
 });

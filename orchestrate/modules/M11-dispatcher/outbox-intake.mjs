@@ -61,11 +61,26 @@ function planOutcome(name, applied) {
 }
 
 // One call's limit, under the tick's 120 s for the whole step (STEP_DEADLINE_MS), so a hung call can't take the step with
-// it. A start is given longer. Several hung notes can still outrun the step: a note's dated try covers that (L494).
+// it. A start is given longer. The pass has a budget too (L497 m5): past it no more notes or files are taken, and what
+// was left waits for the next pass. It leaves room for one last start and note before the step's limit.
 export const INTAKE_PORT_MS = 5_000;
 export const INTAKE_START_MS = 30_000;
+export const INTAKE_PASS_MS = 80_000;
+// Told only if files are still being left out this long after the first pass that left some.
+export const LEFT_OUT_TELL_MS = 15 * 60 * 1000;
+const LEFT_OUT_FACT = HOLD_FACT('intake-left-out-since');
+// The ended records' share of a pass, in port limits, however many verdicts wait. The rest are asked next pass.
+const ENDED_LIMITS = 3;
+const SLOW_FACT = (key) => HOLD_FACT(`intake-slow-${shortHash(key)}`);
 
-// A note the Lead must get: if it can't be left, the owner reads it instead.
+// A Lead that has not heard is tried again after these waits, by how many tries it has had, then each day (L497).
+export const LEAD_NOTE_WAITS_MS = [5 * 60 * 1000, 60 * 60 * 1000];
+const noteWait = (tries) => LEAD_NOTE_WAITS_MS[tries - 1] ?? HOLD_REPEAT_MS;
+
+// A note for the Lead, reworded for the owner, who reads it in place of the Lead (L497 c2).
+const ownerText = ({ lead, product, text, reason }) => `${product ? `Product ${product}: ` : ''}${text.replace(/^Your /, `the Lead ${lead}'s `).replace(/ (Fix it and hand|Hand) it in under a new name\.$/, '').replace(/; hand it in again under a new name if no report comes\.$/, '.')} The Lead could not be told (${reason}).`;
+
+// Leaves a note for the Lead. Only an answer of { ok: true } means it was left.
 async function leaveNote(replyToLead, lead, text) {
   try { return await replyToLead({ lead, text }); } catch (e) { return { ok: false, reason: e.message }; }
 }
@@ -79,39 +94,79 @@ const readHoldsOf = (sessionId) => HOLD_FACT(`outbox-read-${shortHash(sessionId)
 const readHoldsOfFile = (sessionId, name) => `${readHoldsOf(sessionId)}${shortHash(name)}-`;
 const readHold = (sessionId, name, why) => `${readHoldsOfFile(sessionId, name)}${why}`.slice(HOLD_FACT('').length);
 
-async function tellLead(replyToLead, alert, lead, text) {
+// A note that has no fact to be kept on, so it is tried once, and the owner reads what the Lead could not.
+async function tellLead({ replyToLead, alert, lead, product, text }) {
   const r = await leaveNote(replyToLead, lead, text);
-  return r?.ok === true || alert(`the Lead ${lead} could not be told (${r?.reason ?? 'no answer'}): ${text}`) !== false;
+  if (r?.ok !== true) alert(ownerText({ lead, product, text, reason: r?.reason ?? 'no answer' }));
 }
 
-// A tell with a dated try (L490 m4, m10, L494). The date goes on the Record before the tell and is never taken back. A
-// pass is one process, so the Record is the only thing that outlives it, and a pass killed or cut off mid-tell leaves the
-// date behind. What the date guarantees: a try at most once a day, so a Lead is not told every pass, and a failure writes
-// no more than the date. It does not say anyone heard. Answers true only when the Lead or the owner's queue took the text.
-// A date the Record refuses stops the tell, and the owner hears; a tell neither side took is reported, and tried in a day.
-async function tellDated({ rec, replyToLead, alert, report, lead, fact, was, tried, text, cause, kind }) {
+// A tell with a dated try (L490 m4, m10, L494, L497). The date goes on the Record before the tell and is never taken back.
+// A pass is one process, so the Record is the only thing that outlives it, and a pass killed or cut off mid-tell leaves
+// the date behind, so the tell's outcome is not known. The date says a try was started, never that anyone heard. A date
+// the Record refuses stops the tell, and the owner hears. Answers { saved, heard, reason }.
+async function tellDated({ rec, replyToLead, report, lead, fact, was, tried, text, cause, kind }) {
   const m = writeFrom(rec, fact, was, tried, kind);
-  if (!m?.ok) { report(`the Lead ${lead} was not told, as the mark could not be saved (${m?.reason ?? 'no answer'}): ${text}`, cause); return false; }
-  if (await tellLead(replyToLead, alert, lead, text)) return true;
-  report(`neither the Lead ${lead} nor the owner could be told, so it is tried again in a day: ${text}`, cause);
-  return false;
+  if (!m?.ok) { report(`the Lead ${lead} was not told, as the mark could not be saved (${m?.reason ?? 'no answer'}): ${text}`, cause); return { saved: false }; }
+  const r = await leaveNote(replyToLead, lead, text);
+  return { saved: true, heard: r?.ok === true, reason: r?.reason ?? 'no answer' };
 }
 
-// What a Lead must hear about a plan stays on the file's fact until a tell is confirmed (L490 m4, L494 MAT-1), as a
-// refusal's alert does (L130 M8). A cut-off pass can't lose it. If the Lead heard but the clearing write failed or never
-// ran, it is told again a day later: a repeat, which beats a loss.
+// What a Lead must hear about a plan stays on the file's fact until the Lead's own port answers { ok: true } (L494 MAT-1,
+// L497 m1). The owner reading it is not the Lead hearing it. A failed tell, or one a pass was cut off in, is tried again
+// after LEAD_NOTE_WAITS_MS and then daily: a repeat beats a loss. The owner has the text from the first failure, then daily
+// while the Lead has not heard. Each try is one date on the fact, and the owner's tell is one a day.
 async function deliverNote({ rec, replyToLead, alert, report, now }, id) {
   const was = rec.read('fact', id)?.doc;
   if (typeof was?.lead_note !== 'string') return;
+  const tries = Number.isInteger(was.lead_note_tries) ? was.lead_note_tries : 0;
   const last = pastTime(was.lead_note_tried_at, now);
-  if (last !== null && now - last < HOLD_REPEAT_MS) return;
+  if (last !== null && now - last < noteWait(tries)) return;
   const text = was.lead_note;
+  const lead = was.session;
   const cause = `lead-note-${shortHash(id)}`;
-  const tried = { ...was, lead_note_tried_at: new Date(now).toISOString() };
-  if (!await tellDated({ rec, replyToLead, alert, report, lead: was.session, fact: id, was, tried, text, cause, kind: 'outbox_told' })) return;
-  const { lead_note: heard, lead_note_tried_at: at, ...done } = tried;
+  const tried = { ...was, lead_note_tried_at: new Date(now).toISOString(), lead_note_tries: tries + 1 };
+  const t = await tellDated({ rec, replyToLead, report, lead, fact: id, was, tried, text, cause, kind: 'outbox_told' });
+  if (!t.saved) return;
+  if (!t.heard) {
+    const said = holdAlert({ rec, cause, now, alert, text: ownerText({ lead, product: was.lead_note_product, text, reason: t.reason }) });
+    if (said === false) report(`neither the Lead ${lead} nor the owner could be told, so it is tried again: ${text}`, cause);
+    return;
+  }
+  const { lead_note: heard, lead_note_tried_at: at, lead_note_tries: n, lead_note_product: p, ...done } = tried;
   const cleared = writeFrom(rec, id, tried, done, 'outbox_told');
-  if (!cleared?.ok) report(`the Lead ${was.session} was told, but the note could not be cleared (${cleared?.reason ?? 'no answer'}), so it is told again in a day: ${text}`, cause);
+  if (!cleared?.ok) report(`the Lead ${lead} was told, but the note could not be cleared (${cleared?.reason ?? 'no answer'}), so it is told again: ${text}`, cause);
+}
+
+// Files in the order a pass takes them. A verdict whose ended record was slow goes behind the rest, and the slow ones take
+// turns by the minute, so records that hang cost ENDED_LIMITS port limits a pass and can't keep any file from being reached.
+function inTurn(rec, seen, now) {
+  const isSlow = ({ s, name }) => pastTime(rec.read('fact', SLOW_FACT(appliedId(s.sessionId, name)))?.doc?.at, now) !== null;
+  const slow = seen.filter(isSlow);
+  const k = slow.length ? Math.floor(now / 60_000) % slow.length : 0;
+  return [...seen.filter((x) => !isSlow(x)), ...slow.slice(k), ...slow.slice(0, k)];
+}
+
+// Marks a verdict slow when it first is, and clears the mark when it no longer is, so a verdict that stays slow writes nothing.
+function markSlow({ rec, report, now }, key, slow) {
+  const id = SLOW_FACT(key);
+  const was = rec.read('fact', id)?.doc;
+  const marked = pastTime(was?.at, now) !== null;
+  if (slow === marked) return;
+  const w = writeFrom(rec, id, was, { at: slow ? new Date(now).toISOString() : null }, 'intake_slow');
+  if (!w?.ok) report(`the slow mark on an outbox file could not be saved (${w?.reason ?? 'no answer'})`, 'intake-slow');
+}
+
+// One write when files are first left out and one when none are, and a tell only if they stay left out.
+function noteLeftOut({ rec, alert, report, now }, count) {
+  const was = rec.read('fact', LEFT_OUT_FACT)?.doc;
+  const since = pastTime(was?.since, now);
+  if (!count && since === null) return;
+  if (count && since !== null) {
+    if (now - since >= LEFT_OUT_TELL_MS) holdAlert({ rec, cause: 'intake-left-out', now, alert, text: `outbox intake has run out of time on its passes since ${was.since}; files left for the next pass: ${count}` });
+    return;
+  }
+  const w = writeFrom(rec, LEFT_OUT_FACT, was, { since: count ? new Date(now).toISOString() : null }, 'intake_left_out');
+  if (!w?.ok) report(`the record of outbox files left for the next pass could not be saved (${w?.reason ?? 'no answer'})`, 'intake-left-out');
 }
 
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
@@ -128,7 +183,8 @@ export function kindsFor(entry) {
  * `startReadonly({ lead, profile, kind, brief, product })` starts a read-only session through the wiring
  *   port; the tick puts the start gate in front of it (audit 0b-6 r2 MAT-2), so it answers { ok, reason }.
  * `replyToLead({ lead, text })` leaves a report- note for the Lead; a plan's answer needs it to return { ok: true }.
- * It and `reviewEnded` have `portMs` to answer, and `startReadonly` has `startMs`.
+ * It and `reviewEnded` have `portMs` to answer, and `startReadonly` has `startMs`. Past `passMs` the pass takes nothing
+ * more: what is left is reported as waiting, and goes on the next pass.
  * `note(text, id)` writes a diary line, on the fact `id` when it names one. The diary keeps every line for good, so a
  * note is written when something moved or was told, never because a file was seen again (L490 M3). `failureLog` hears a
  * refused mark (main.mjs logs it).
@@ -141,8 +197,12 @@ export function kindsFor(entry) {
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead: replyPort, now = Date.now(),
   list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null,
-  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }), failureLog, portMs = INTAKE_PORT_MS, startMs = INTAKE_START_MS }) {
+  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }), failureLog, portMs = INTAKE_PORT_MS, startMs = INTAKE_START_MS, passMs = INTAKE_PASS_MS }) {
   const out = [];
+  const ends = Date.now() + passMs;
+  const outOfTime = () => Date.now() >= ends;
+  let leftOut = 0;
+  let endedMs = 0;
   const report = refusalReport({ rec, alert, now, lines: [], failureLog });
   const replyToLead = (x) => guarded(() => replyPort(x), portMs);
   const notes = { rec, replyToLead, alert, report, now };
@@ -159,7 +219,11 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
   // L138 m3: a refused or interrupted hand-in is told until a copy is delivered, from its recorded fact, whether or
   // not its file is still in the outbox (a file removed before the tell went out is still told).
   retellHandIns(rec, alert);
-  for (const f of rec.list('fact')) if (typeof f.doc?.lead_note === 'string' && f.id === appliedId(f.doc.session, f.doc.name)) await deliverNote(notes, f.id);
+  for (const f of rec.list('fact')) {
+    if (typeof f.doc?.lead_note !== 'string' || f.id !== appliedId(f.doc.session, f.doc.name)) continue;
+    if (outOfTime()) { leftOut += 1; continue; }
+    await deliverNote(notes, f.id);
+  }
   for (const s of sessions) {
     let names;
     try { names = list(s.outbox).filter((n) => !n.startsWith('.')); } catch { out.push({ session: s.sessionId, skipped: 'outbox unreadable' }); continue; }
@@ -167,10 +231,11 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     for (const name of names) seen.push({ s, name, first: look(join(s.outbox, name)) });
   }
   if (seen.length) await wait(SETTLE_MS);
-  for (const { s, name, first } of seen) {
+  for (const { s, name, first } of inTurn(rec, seen, now)) {
     const path = join(s.outbox, name);
     const r = { session: s.sessionId, name };
     out.push(r);
+    if (outOfTime()) { r.waiting = 'left for the next pass: this one ran out of time'; leftOut += 1; unsettled.add(readHoldsOfFile(s.sessionId, name)); continue; }
     if (first === null || look(path) !== first) { r.waiting = 'still being written'; unsettled.add(readHoldsOfFile(s.sessionId, name)); continue; }
     const kinds = kindsFor(s);
     const file = read(s.outbox, name, { kinds, uid: s.uid });
@@ -184,7 +249,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       // An alert still in the queue asks again each pass; only a new tell is a new line.
       const queued = isQueued(rec, fact);
       const told = notItsKind
-        ? await tellLeadDaily({ ...notes, lead: s.sessionId, fact, text: `Your file ${name} was not used: it is not a kind you can hand in (${kinds.join(', ')}).` })
+        ? await tellLeadDaily({ ...notes, lead: s.sessionId, product: s.product, fact, text: `Your file ${name} was not used: it is not a kind you can hand in (${kinds.join(', ')}).` })
         : holdAlert({ rec, cause, now, alert, text: `an outbox file from ${s.role} ${s.sessionId} (${name}) was refused: ${file.reason}` });
       if (told && !queued) note(`outbox file ${name} from ${s.role} ${s.sessionId} refused: ${file.reason}`);
       continue;
@@ -192,6 +257,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const hash = sha256(file.text);
     const key = appliedId(s.sessionId, name);
     let prev = rec.read('fact', key);
+    const forLead = (text) => ({ lead_note: text, ...(s.product ? { lead_note_product: s.product } : {}) });
     const put = (doc, kind) => {
       const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: key, expectRev: prev?.rev ?? 0, doc: { session: s.sessionId, name, sha256: hash, ...doc }, kind });
       if (w.ok) prev = rec.read('fact', key);
@@ -203,11 +269,14 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       // took the file is not known, so it is never applied a second time: Joe is told once, and a new
       // copy may be handed in under the same name.
       // A `starting` claim (audit 0b-6 r2 MIN-7) is the same for a read-only start: it may have started, so it is never started twice.
-      const what = prev.doc.state === 'starting' ? 'its read-only session may or may not have started, and was not started again' : 'it may or may not have reached the record, and was not applied again';
+      const startCut = prev.doc.state === 'starting';
+      const what = startCut ? 'its read-only session may or may not have started, and was not started again' : 'it may or may not have reached the record, and was not applied again';
       // Told until delivered (L130 M7): the text is kept on the fact, and a pass that sees it untold asks again.
       const said = `the hand-in of ${name} from ${s.role} ${s.sessionId} was interrupted; ${what}`;
       const w = put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date(now).toISOString(), alert_text: said }, 'outbox_interrupted');
       if (w.ok) tellThen(alert, said, { fact: appliedId(s.sessionId, name), fields: { told_state: 'interrupted' }, kind: 'outbox_told' });
+      // The Lead waits for that session's report, so it hears too (L497 m6).
+      if (startCut) await tellLeadDaily({ ...notes, lead: s.sessionId, product: s.product, fact: HOLD_FACT(`outbox-start-${shortHash(key)}-lead`), text: `Your ${file.kind.slice(0, -1)} request ${name} may not have started; hand it in again under a new name if no report comes.` });
     }
     if (prev) {
       const was = prev.doc.state;
@@ -218,7 +287,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         // One cause per file, so a file rewritten every pass is still once a day; the text names the latest bytes (L494).
         const cause = `outbox-new-${shortHash(key)}`;
         holdAlert({ rec, cause, now, alert, text: `${s.role} ${s.sessionId} handed in ${name} again with different content (latest ${hash.slice(0, 12)}); it was not used` });
-        if (PLAN_FILES.includes(file.kind)) await tellLeadDaily({ ...notes, lead: s.sessionId, fact: HOLD_FACT(`${cause}-lead`), text: `Your file ${name} has new content under a name already used, so it was not used. Hand it in under a new name.` });
+        if (PLAN_FILES.includes(file.kind)) await tellLeadDaily({ ...notes, lead: s.sessionId, product: s.product, fact: HOLD_FACT(`${cause}-lead`), text: `Your file ${name} has new content under a name already used, so it was not used. Hand it in under a new name.` });
         continue;
       }
     }
@@ -231,8 +300,12 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     // Taken only as M9 sessionVerdict counts it (L446): the file the record names, or a file found after a start that
     // never ran. Everything else waits and is noted, a value not known yet too.
     if (file.kind === 'verdict-') {
-      let e;
-      e = await guarded(() => reviewEnded(s), portMs);
+      if (endedMs >= ENDED_LIMITS * portMs) { r.waiting = 'its ended record was not asked this pass: earlier ones were slow'; continue; }
+      const asked = Date.now();
+      const e = await guarded(() => reviewEnded(s), portMs);
+      const took = Date.now() - asked;
+      endedMs += took;
+      markSlow(notes, key, took >= portMs / 2);
       const want = e?.ended?.verdict_sha256;
       const held = e?.ok !== true ? (e?.reason ?? 'no answer from the ended record')
         : want === hash || want === NEVER_RAN ? null
@@ -295,7 +368,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       const problems = planProblems(file.text);
       if (problems.length) {
         const why = problems.slice(0, 10).join('; ');
-        const w = put({ state: 'refused', reason: why, at: new Date(now).toISOString(), lead_note: `Your plan ${name} was not applied: ${why}. Fix it and hand it in under a new name.` }, 'outbox_applied');
+        const w = put({ state: 'refused', reason: why, at: new Date(now).toISOString(), ...forLead(`Your plan ${name} was not applied: ${why}. Fix it and hand it in under a new name.`) }, 'outbox_applied');
         if (w.ok) await deliverNote(notes, key);
         else report(`the plan ${name} from ${s.sessionId} failed its check, the refusal could not be recorded (${w.reason}), and the Lead was not told: ${why}`, `plan-refused-${shortHash(key)}`);
         r.refused = why;
@@ -323,7 +396,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const said = applied.ok ? null : `the record refused ${name} from ${s.role} ${s.sessionId}: ${applied.reason}`;
     // A roadmap file is a plan change too, and the Lead that wrote it hears when it is turned down (L473).
     const outcome = isPlan || (!applied.ok && file.kind === 'roadmap-') ? planOutcome(name, applied) : null;
-    const done = put({ state: applied.ok ? 'applied' : 'refused', applied_at: new Date(now).toISOString(), ...(said ? { alert_text: said } : {}), ...(outcome ? { lead_note: outcome } : {}) }, 'outbox_applied');
+    const done = put({ state: applied.ok ? 'applied' : 'refused', applied_at: new Date(now).toISOString(), ...(said ? { alert_text: said } : {}), ...(outcome ? forLead(outcome) : {}) }, 'outbox_applied');
     if (!applied.ok) {
       r.refused = applied.reason;
       // A refusal the record would not keep has no fact to re-ask from, so it is told now either way.
@@ -331,19 +404,25 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       else alert(said);
     }
     if (outcome && done.ok) await deliverNote(notes, key);
-    else if (outcome) await tellLead(replyToLead, alert, s.sessionId, outcome);
+    else if (outcome) await tellLead({ ...notes, lead: s.sessionId, product: s.product, text: outcome });
   }
+  noteLeftOut(notes, leftOut);
   clearReadHolds({ rec, alert, now, listed, held, unsettled });
   return out;
 }
 
 // holdAlert's once a day, for a tell that goes to the Lead. A note to the Lead is no alert, so its mark is `replied_at`:
 // told fields are for what the alert queue delivers. Answers whether this call told it.
-async function tellLeadDaily({ rec, replyToLead, alert, report, lead, fact, text, now }) {
+async function tellLeadDaily({ rec, replyToLead, alert, report, lead, product, fact, text, now }) {
   const was = rec.read('fact', fact)?.doc;
   const replied = pastTime(was?.replied_at, now);
   if (replied !== null && now - replied < HOLD_REPEAT_MS) return false;
-  return tellDated({ rec, replyToLead, alert, report, lead, fact, was, tried: { ...was, text, replied_at: new Date(now).toISOString() }, text, cause: `lead-mark-${shortHash(fact)}`, kind: 'hold_replied' });
+  const cause = `lead-mark-${shortHash(fact)}`;
+  const t = await tellDated({ rec, replyToLead, report, lead, fact, was, tried: { ...was, text, replied_at: new Date(now).toISOString() }, text, cause, kind: 'hold_replied' });
+  if (!t.saved) return false;
+  if (t.heard || alert(ownerText({ lead, product, text, reason: t.reason })) !== false) return true;
+  report(`neither the Lead ${lead} nor the owner could be told, so it is tried again in a day: ${text}`, cause);
+  return false;
 }
 
 // L475: a read-step cause ends when its file is gone or reads cleanly. Only sessions whose outbox was listed this pass
