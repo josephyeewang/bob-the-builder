@@ -1269,3 +1269,17 @@ test('L354 item 3: a mark landing as a step clears does not outlive the clear', 
   const doc = w.rec.read('fact', fact).doc;
   assert.deepEqual([doc.error, doc.told_cause, doc.told_at], [null, undefined, undefined]);
 });
+
+test('L424: the tick asks the reviewEnded port before a review session\'s verdict is taken', async () => {
+  const dir = tempDir('m11-tick-verdict-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'not read past the ended check\n');
+  const asked = [];
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+    reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  await w.pass();
+  assert.deepEqual(asked, ['R-1']);
+  assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
+});

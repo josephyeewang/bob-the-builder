@@ -49,7 +49,7 @@ import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
-import { outbox, tellThen, sendAlerts, clearCause, writeFrom } from './alerts.mjs';
+import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
@@ -63,18 +63,30 @@ export const APPROVALS_PRODUCT_MS = 30_000;
 // fields only, so nothing else an alert carries (a GitHub answer, a token) reaches Joe's phone; a type this list does
 // not know still becomes a line, never dropped (L221, lane 2's ask 5). Outbox's false ("not queued") is passed back,
 // so M2's `=== false` checks (configAlert, the onboard notices) keep working.
-const ALERT_FIELDS = [['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR']];
-const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+// What the owner needs to act is shown (L373); the list and its caps are alerts.mjs's, shared with alertText.
+const named = (v) => typeof v === 'string' && /^[a-z_]{1,60}$/.test(v);
+// What an undo by hand has to take out: the files it added, or that they could not be read, never just nothing.
+const filesLine = (a) => {
+  if (a?.files_known === false) return 'its file list could not be read';
+  return Array.isArray(a?.files) && a.files.length ? `added files: ${listed(a.files)}` : null;
+};
 /** The outbox `alert` handed to one product's approvals pass: its alerts, as text, into the step's own outbox. */
 export function approvalsAlerts(alert, product) { return (a) => alert(approvalsAlertText(product, a)); }
 export function approvalsAlertText(product, a) {
   if (typeof a === 'string') return `Approvals, ${plain(product, 80)}: ${plain(a, 400)}`;
   if (typeof a?.text === 'string') return plain(a.text, 400);
-  const type = typeof a?.type === 'string' && /^[a-z_]{1,60}$/.test(a.type) ? a.type.replace(/_/g, ' ') : 'an alert of an unknown type';
-  const parts = ALERT_FIELDS.filter(([k]) => ['string', 'number'].includes(typeof a?.[k])).map(([k, label]) => `${label} ${plain(a[k], 80)}`);
+  // Some M2 alerts name themselves by `kind` alone (research-ask.mjs); that is their name, not an unknown type.
+  const byKind = a?.type === undefined && named(a?.kind);
+  const name = byKind ? a.kind : named(a?.type) ? a.type : null;
+  const type = name ? name.replace(/_/g, ' ') : 'an alert of an unknown type';
+  const parts = alertFields(a, byKind ? ['kind'] : []);
   if (Array.isArray(a?.items)) parts.push(`${a.items.length} item${a.items.length === 1 ? '' : 's'}`);
-  const reason = typeof a?.reason === 'string' ? `: ${plain(a.reason)}` : '';
-  return `Approvals, ${plain(product, 80)}: ${type}${parts.length ? ` (${parts.join(', ')})` : ''}${reason}`;
+  const tail = [
+    typeof a?.reason === 'string' ? plain(a.reason) : null,
+    Array.isArray(a?.items) && a.items.some((x) => typeof x === 'string') ? listed(a.items) : null,
+    filesLine(a),
+  ].filter(Boolean).join('; ');
+  return `Approvals, ${plain(product, 80)}: ${type}${parts.length ? ` (${parts.join(', ')})` : ''}${tail ? `: ${tail}` : ''}`;
 }
 
 /**
@@ -271,7 +283,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     return g.ok ? p.startReadonly(x) : { ok: false, reason: g.reason };
   };
   await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text) => note(rec, 'intake-note', text, { now }),
-    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), ...(p.intakeFs ?? {}) }));
+    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, ...(p.intakeFs ?? {}) }));
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
     if (outageOpen) return 'outage: the Lead step waits';

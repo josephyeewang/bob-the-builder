@@ -156,7 +156,7 @@ function reaskUnreadable(ctx, a, nowMs, events) {
   const doc = a.doc;
   if (activeKind(doc.kind).channel !== 'tap' || (doc.state !== 'open' && doc.state !== 'pushed') || pastTime(doc.created_at, nowMs) !== null) return false;
   let told = false;
-  try { told = ctx.alert({ type: 'ask_time_unreadable', ask: a.id, card: doc.card, text: `The question about ${doc.card} is being asked again because its time could not be read. An earlier copy of it no longer counts.` }) === true; } catch { told = false; }
+  try { told = ctx.alert({ type: 'ask_time_unreadable', ask: a.id, card: doc.card, text: `The question about ${doc.card} [ask ${a.id}] is being asked again because its time could not be read. An earlier copy of it no longer counts.` }) === true; } catch { told = false; }
   if (!told) return true;
   const next = structuredClone(doc);
   releaseBoxes(next, 'time_unreadable', nowMs, { moveBack: false });
