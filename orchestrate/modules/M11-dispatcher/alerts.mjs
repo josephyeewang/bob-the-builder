@@ -152,15 +152,20 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
  * mark goes on has a step that calls this where the cause clears, or a line in alert-sites.test.mjs saying
  * why a late mark there is harmless. Returns whether the queue was written; never throws.
  */
-export function dropCause(rec, fact) {
+export function dropCause(rec, fact) { return dropAnswer(rec, fact).ok; }
+
+/** dropCause's answer in full: `removed` says the queue held something of this cause (L449 m2). */
+export function dropAnswer(rec, fact) {
+  let removed = false;
   try {
-    return updateFact(rec, ALERT_QUEUE_FACT, (d) => {
+    const ok = updateFact(rec, ALERT_QUEUE_FACT, (d) => {
       const left = entriesOf(d).filter((e) => e.mark?.fact !== fact);
       const causes = causesOf(d).filter((c) => c.fact !== fact);
-      if (left.length === entriesOf(d).length && causes.length === causesOf(d).length) return null;
-      return { ...d, entries: left, dropped_causes: causes };
+      removed = left.length !== entriesOf(d).length || causes.length !== causesOf(d).length;
+      return removed ? { ...d, entries: left, dropped_causes: causes } : null;
     }, 'alert_cause_cleared').ok === true;
-  } catch { return false; }
+    return { ok, removed };
+  } catch { return { ok: false, removed }; }
 }
 
 /**
@@ -168,11 +173,14 @@ export function dropCause(rec, fact) {
  * can land after the clear. A drop that fails is told through `report`. With `hold` (the default, for a step that comes
  * back to this cause next pass) the clear waits for a drop that works; `hold: false` is for a clear with no next pass,
  * which goes ahead. A clear that writes told fields forces them (writeFrom): a diff would keep a mark.
+ * `clear(moved)`: `moved` says something of this cause was in the queue, so a mark may be on its way and the clear must
+ * write, moving the fact's version so that mark conflicts (L449 m1, m2). With nothing queued and no mark there is
+ * nothing to race, and a clear that runs every pass writes nothing. `report(line, fact)`.
  */
 export function clearCause(rec, fact, clear, report, { hold = true } = {}) {
-  const dropped = dropCause(rec, fact);
-  if (!dropped) report(`the queued alert for ${fact} could not be dropped; ${hold ? 'the clear waits for the next pass' : 'the cause was cleared anyway, so it may still be sent'}`);
-  return dropped || !hold ? clear() : undefined;
+  const { ok, removed } = dropAnswer(rec, fact);
+  if (!ok) report(`the queued alert for ${fact} could not be dropped; ${hold ? 'the clear waits for the next pass' : 'the cause was cleared anyway, so it may still be sent'}`, fact);
+  return ok || !hold ? clear(removed) : undefined;
 }
 
 /** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */
