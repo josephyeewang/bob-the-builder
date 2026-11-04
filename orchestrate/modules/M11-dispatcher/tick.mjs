@@ -49,7 +49,7 @@ import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
-import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
+import { outbox, tellThen, sendAlerts, dropCause, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 
@@ -62,17 +62,8 @@ export const APPROVALS_PRODUCT_MS = 30_000;
 // fields only, so nothing else an alert carries (a GitHub answer, a token) reaches Joe's phone; a type this list does
 // not know still becomes a line, never dropped (L221, lane 2's ask 5). Outbox's false ("not queued") is passed back,
 // so M2's `=== false` checks (configAlert, the onboard notices) keep working.
-// What the owner needs to act is shown (L373), and approvals-alert-fields.test.mjs holds every field of every M2 alert
-// to that. A named list is capped so a long one can't bury the line; the ask holds the rest.
-const ALERT_FIELDS = [['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR'], ['commit', 'commit'], ['report', 'report']];
-export const APPROVALS_LIST_MAX = 50;
-const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+// What the owner needs to act is shown (L373); the list and its caps are alerts.mjs's, shared with alertText.
 const named = (v) => typeof v === 'string' && /^[a-z_]{1,60}$/.test(v);
-const listed = (list) => {
-  const names = list.filter((x) => typeof x === 'string');
-  const left = names.length - APPROVALS_LIST_MAX;
-  return `${names.slice(0, APPROVALS_LIST_MAX).map((x) => plain(x)).join(', ')}${left > 0 ? ` and ${left} more` : ''}`;
-};
 // What an undo by hand has to take out: the files it added, or that they could not be read, never just nothing.
 const filesLine = (a) => {
   if (a?.files_known === false) return 'its file list could not be read';
@@ -87,7 +78,7 @@ export function approvalsAlertText(product, a) {
   const byKind = a?.type === undefined && named(a?.kind);
   const name = byKind ? a.kind : named(a?.type) ? a.type : null;
   const type = name ? name.replace(/_/g, ' ') : 'an alert of an unknown type';
-  const parts = ALERT_FIELDS.filter(([k]) => !(byKind && k === 'kind') && ['string', 'number'].includes(typeof a?.[k])).map(([k, label]) => `${label} ${plain(a[k], 80)}`);
+  const parts = alertFields(a, byKind ? ['kind'] : []);
   if (Array.isArray(a?.items)) parts.push(`${a.items.length} item${a.items.length === 1 ? '' : 's'}`);
   const tail = [
     typeof a?.reason === 'string' ? plain(a.reason) : null,
