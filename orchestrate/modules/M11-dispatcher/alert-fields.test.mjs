@@ -35,13 +35,18 @@ const SHOWN = {
 // On an alert, not on the line, on purpose: which field, on which kinds, and why. By kind, so a new kind carrying one of
 // these fields is looked at, not let through by another kind's reason (L408 m2).
 const NOT_SHOWN = {
-  ask: { why: 'its text names the question by its card, which is what the owner acts on', kinds: ['ask_time_unreadable'] },
+  ask: { why: 'its text names it', kinds: ['ask_time_unreadable'] },
   card: { why: 'its text names it', kinds: ['ask_time_unreadable'] },
   error: { why: "an exception's own text can hold anything, and the fixed reason beside it says what failed", kinds: ['ask_request_refused', 'undo_request_refused'] },
   files_known: { why: 'said by the line when false; see the unreadable-list test', kinds: ['undo_by_hand'] },
   product: { why: "the line starts with it, or the alert's own text names it", kinds: ['onboard_near_miss', 'onboard_refused', 'product_on'] },
   text: { why: "the alert's own words are the whole line; see the text test", kinds: ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on'] },
 };
+// The kinds whose own text is the whole line, so everything else on them goes unseen. Pinned against the walk: a kind
+// that becomes a text alert fails until someone looks at what it stops showing (L438 m-1).
+const TEXT_KINDS = ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on'];
+// A text alert may leave these off the line only if its text says them: the template names the field's own value.
+const NAMED_IN_TEXT = ['ask', 'card', 'pr', 'commit', 'files'];
 const leftOff = (table, kind, field) => table[field]?.kinds.includes(kind) === true;
 // Every kind-and-field a table lists is one the walk found, so the table can't outlive what it speaks for.
 const pairs = (table) => Object.entries(table).flatMap(([field, { kinds }]) => kinds.map((k) => `${k} ${field}`)).sort();
@@ -84,14 +89,17 @@ function sitesIn(list) {
       const parts = topLevel(code, m.index + m[0].length - 1).map((x) => x.trim()).filter(Boolean);
       const name = parts.map((x) => /^(?:type|kind): (?:'([a-z_]+)'|(notSaved))$/.exec(x)).find(Boolean);
       assert.ok(name, `${file}: an alert with no name: ${parts.join(', ')}`);
+      const values = {};
       const keys = parts.flatMap((x) => {
         if (x === '...f') return SPREAD_F;
-        const maybe = /^\.\.\.\(\w+ \? \{ (\w+): \w+ \} : \{\}\)$/.exec(x); // a field there only when it has a value
-        if (maybe) return [maybe[1]];
+        const maybe = /^\.\.\.\(\w+ \? \{ (\w+): (\w+) \} : \{\}\)$/.exec(x); // a field there only when it has a value
+        if (maybe) { values[maybe[1]] = maybe[2]; return [maybe[1]]; }
         assert.ok(!x.startsWith('...'), `${file} ${name[1] ?? name[2]}: a spread this walk can't read: ${x}`);
-        return [x.split(':')[0].trim()];
+        const [key, ...value] = x.split(':');
+        values[key.trim()] = value.length ? value.join(':').trim() : key.trim();
+        return [key.trim()];
       });
-      out.push({ file, kind: name[1] ?? name[2], keys: keys.filter((k) => k !== 'type' && k !== 'kind') });
+      out.push({ file, kind: name[1] ?? name[2], keys: keys.filter((k) => k !== 'type' && k !== 'kind'), values });
     }
   }
   return out;
@@ -123,16 +131,34 @@ test('L408: every alert call in M2 and M6 is walked or named as a pass-through, 
   assert.deepEqual(passThroughs(m6Sources), M6_PASS_THROUGHS);
 });
 
-// What a pass-through hands on is what was walked, so nothing may be added to an alert after its object was written (L421 m-B).
-test('L421: no file with a pass-through writes a property onto an alert object', () => {
+// What a pass-through hands on is what was walked, so nothing may change on an alert after its object was written (L421
+// m-B, L438 m-2): no assignment of any kind, no Object.assign, no delete. A copy under another name is left to review.
+const CHANGES_ALERT = [
+  /\b(?:a|e|alert|notice)(?:\.\w+|\[[^\]]+\])\s*(?:[-+*/%|&^]|\?\?|&&|\|\|)?=(?![=>])/g,
+  /\bObject\.assign\(\s*(?:a|e|alert|notice)\b/g,
+  /\bdelete\s+(?:a|e|alert|notice)\b/g,
+];
+const changes = (src) => CHANGES_ALERT.flatMap((re) => [...noComments(src).matchAll(re)].map(([t]) => t));
+
+test('L421, L438: no file with a pass-through changes an alert object after it is written', () => {
   const files = new Set([...PASS_THROUGHS, ...M6_PASS_THROUGHS].map((x) => x.split(' ')[0]));
-  const added = (list) => list.filter(([f]) => files.has(f)).flatMap(([f, src]) => [...noComments(src).matchAll(/\b(?:a|e|alert|notice)\.\w+\s*=(?![=>])/g)].map(([t]) => `${f} ${t}`));
-  assert.deepEqual([...added(sources), ...added(m6Sources)], []);
+  const changed = (list) => list.filter(([f]) => files.has(f)).flatMap(([f, src]) => changes(src).map((t) => `${f} ${t}`));
+  assert.deepEqual([...changed(sources), ...changed(m6Sources)], []);
+});
+
+test('L438 controls: each way of changing an alert is read, and reading or comparing one is not', () => {
+  for (const line of ['e.x = 1', 'e.reason += y', "e['gh_detail'] = y", 'e.gh_detail ??= y', 'a.n ||= 1', 'Object.assign(e, { x: 1 })', 'delete e.reason', "delete alert['x']"]) {
+    assert.equal(changes(line).length, 1, line);
+  }
+  for (const line of ['if (e.x === 1) go()', 'if (a.n == 2) go()', 'const f = (e.x) => 1', 'if (e.n >= 2) go()', 'if (e.n != 2) go()', 'Object.assign(other, e)', 'delete other.e']) {
+    assert.deepEqual(changes(line), [], line);
+  }
 });
 
 test('L408 controls: the walk reads a template string, nested braces and a spread, and a hidden object is left for the check above', () => {
   const one = (src) => sitesIn([['x.mjs', src]]);
-  assert.deepEqual(one("alert({ type: 'a_kind', card: id, text: `one ${c ? `{${d}}` : '}'}, two`, reason: f({ b: 1, c }) });")[0], { file: 'x.mjs', kind: 'a_kind', keys: ['card', 'text', 'reason'] });
+  const site = one("alert({ type: 'a_kind', card: id, text: `one ${c ? `{${d}}` : '}'}, two`, reason: f({ b: 1, c }) });")[0];
+  assert.deepEqual([site.file, site.kind, site.keys, site.values.card], ['x.mjs', 'a_kind', ['card', 'text', 'reason'], 'id']);
   assert.throws(() => one("alert({ text: 'no name' });"), /an alert with no name/);
   assert.throws(() => one("alert({ type: 'a_kind', ...more });"), /a spread this walk can't read/);
   assert.deepEqual(one("alert({ type: 'a_kind', ...(x ? { card: x } : {}) });")[0].keys, ['card']);
@@ -165,6 +191,19 @@ test('L373: every field of every M2 alert reaches the delivered line, or is list
     const shown = keys.filter((k) => k in SHOWN);
     const line = approvalsAlertText('p-7', { type: kind, ...Object.fromEntries(shown.map((k) => [k, SHOWN[k][0]])) });
     for (const k of shown) assert.ok(line.includes(SHOWN[k][1]), `${file} ${kind}: ${k} is not in: ${line}`);
+  }
+});
+
+test('L438: leaving a field off the line takes a reason, and a text alert may do it only where its text says the field', () => {
+  for (const [field, { why }] of [...Object.entries(NOT_SHOWN), ...Object.entries(M6_NOT_SHOWN)]) {
+    assert.ok(typeof why === 'string' && why.trim() !== '', `${field}: no reason it is left off`);
+  }
+  const textSites = [...alertSites(), ...m6Sites()].filter(({ keys }) => keys.includes('text'));
+  assert.deepEqual([...new Set(textSites.map(({ kind }) => kind))].sort(), TEXT_KINDS, 'a kind that carries its own text must be pinned here, after looking at what it stops showing');
+  for (const { file, kind, keys, values } of textSites) {
+    for (const k of keys.filter((x) => NAMED_IN_TEXT.includes(x))) {
+      assert.ok(values.text.includes(`\${${values[k]}}`), `${file} ${kind}: ${k} is left off the line, but its text does not name \${${values[k]}}`);
+    }
   }
 });
 
