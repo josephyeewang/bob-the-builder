@@ -126,7 +126,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     // L424: a verdict is taken only once its session's ended record exists, never because the file sat still for
     // SETTLE_MS. The runner finalizes the file (it may rewrite it) and only then writes that record. Anything short of
     // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner,
-    // once until #181 lands its daily re-tell.
+    // and again each day while it stays untaken (#181, L458).
     // The file was read above, before this question: the runner may have finalized it in between, so a record naming
     // other bytes also waits (L445 m2). A claim on the old bytes would make every later pass say "new content".
     // Taken only as M9 sessionVerdict counts it (L446): the file the record names, or a file found after a start that

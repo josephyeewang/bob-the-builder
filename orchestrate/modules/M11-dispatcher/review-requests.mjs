@@ -9,8 +9,8 @@
 //                                                             → { requestReview, hasReviewer, reviewAlerts }
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
-//   relayReviewAlerts({ rec, alerts, alert, now })            → tells each runner alert once, and each hold while it lasts
-//   keepReviewHolds(rec)                                      → a pass whose status could not be read clears nothing
+//   relayReviewAlerts({ rec, alerts, alert, now, report })    → tells each runner alert once, and each hold while it lasts
+//   keepReviewHolds(rec, report)                              → a pass whose status could not be read clears nothing
 //
 // Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each a hold, told at
 // once and then each day it lasts (L315):
