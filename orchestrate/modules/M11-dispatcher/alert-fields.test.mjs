@@ -37,21 +37,22 @@ const SHOWN = {
 const NOT_SHOWN = {
   ask: { why: 'its text names it', kinds: ['ask_time_unreadable', 'withdrawn_pr_open'] },
   card: { why: 'its text names it', kinds: ['ask_time_unreadable'] },
-  error: { why: "an exception's own text can hold anything, and the fixed reason beside it says what failed", kinds: ['ask_request_refused', 'undo_request_refused'] },
+  error: { why: "an exception's own text can hold anything, and the fixed reason beside it says what failed", kinds: ['ask_request_refused', 'state_request_refused', 'undo_request_refused'] },
   files_known: { why: 'said by the line when false; see the unreadable-list test', kinds: ['undo_by_hand'] },
-  product: { why: "the line starts with it, or the alert's own text names it", kinds: ['onboard_near_miss', 'onboard_refused', 'product_on'] },
-  text: { why: "the alert's own words are the whole line; see the text test", kinds: ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'] },
+  product: { why: "the line starts with it, or the alert's own text names it", kinds: ['onboard_near_miss', 'onboard_refused', 'product_on', 'state_answer'] },
+  report: { why: "the owner's answer says what became of their request; the report's id means nothing to them, and the record keeps it", kinds: ['state_answer'] },
+  text: { why: "the alert's own words are the whole line; see the text test", kinds: ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'state_answer', 'withdrawn_pr_open'] },
 };
 // The kinds whose own text is the whole line, so everything else on them goes unseen. Pinned against the walk: a kind
 // that becomes a text alert fails until someone looks at what it stops showing (L438 m-1).
-const TEXT_KINDS = ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'];
+const TEXT_KINDS = ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'state_answer', 'withdrawn_pr_open'];
 // A text alert may leave these off the line only if its text says them: the template names the field's own value.
 const NAMED_IN_TEXT = ['ask', 'card', 'pr', 'commit', 'files'];
 const leftOff = (table, kind, field) => table[field]?.kinds.includes(kind) === true;
 // Every kind-and-field a table lists is one the walk found, so the table can't outlive what it speaks for.
 const pairs = (table) => Object.entries(table).flatMap(([field, { kinds }]) => kinds.map((k) => `${k} ${field}`)).sort();
 const carried = (sites, table, shown) => [...new Set(sites.flatMap(({ kind, keys }) => keys.filter((k) => k in table && (!(k in shown) || keys.includes('text'))).map((k) => `${kind} ${k}`)))].sort();
-// `...f` on a refused report: research-ask.mjs and undo-flag.mjs build it, and the test below holds it to these.
+// `...f` on a refused report: research-ask.mjs, undo-flag.mjs and state-request.mjs build it, and the test below holds it to these.
 const SPREAD_F = ['report', 'reason', 'error'];
 
 // The object at src[at], as its top-level `key: value` texts. Strings and templates are skipped, ${...} included.
@@ -170,7 +171,7 @@ test('L373: the source read holds every M2 alert kind, so the checks below are n
   assert.deepEqual([...new Set(alertSites().map((x) => x.kind))].sort(), [
     'approval_not_counted', 'approvals_config', 'approvals_no_pull_request', 'approvals_no_push', 'approvals_untrusted', 'approvals_write_refused',
     'ask_request_refused', 'ask_time_unreadable', 'decision_pr_not_closed', 'decision_pr_not_opened', 'go_not_shown', 'notSaved', 'onboard_near_miss', 'onboard_refused',
-    'product_on', 'push_not_sent', 'review_not_requested', 'transcript_tampered', 'undo_by_hand', 'undo_by_hand_mark_failed', 'undo_request_refused', 'untrusted_ask', 'withdrawn_pr_open',
+    'product_on', 'push_not_sent', 'review_not_requested', 'state_answer', 'state_request_refused', 'transcript_tampered', 'undo_by_hand', 'undo_by_hand_mark_failed', 'undo_request_refused', 'untrusted_ask', 'withdrawn_pr_open',
   ]);
   const undo = alertSites().find((x) => x.kind === 'undo_by_hand');
   assert.deepEqual(undo.keys, ['ask', 'card', 'pr', 'commit', 'files', 'files_known']);
@@ -227,6 +228,7 @@ test('L373: a long list is capped with what is left, and one with no names is on
 
 test('L373: an alert named by its kind alone is told by that name, once, with its fields', () => {
   assert.equal(approvalsAlertText('p2', { kind: 'ask_request_refused', report: 'R-1', reason: 'no card' }), 'Approvals, p2: ask request refused (report R-1): no card');
+  assert.equal(approvalsAlertText('p2', { kind: 'state_request_refused', report: 'R-1', reason: 'no card' }), 'Approvals, p2: state request refused (report R-1): no card');
   assert.equal(approvalsAlertText('p2', { kind: 'untrusted_ask', items: ['ask/A-1'] }), 'Approvals, p2: untrusted ask (1 item): ask/A-1');
   // An alert with a type keeps its kind as a field.
   assert.equal(approvalsAlertText('p2', { type: 'pushed', kind: 'go' }), 'Approvals, p2: pushed (kind go)');
@@ -234,6 +236,7 @@ test('L373: an alert named by its kind alone is told by that name, once, with it
 
 test('L373: an alert with its own words is told as they are', () => {
   assert.equal(approvalsAlertText('p2', { type: 'product_on', product: 'p2', text: 'p2 is now on.' }), 'p2 is now on.');
+  assert.equal(approvalsAlertText('p2', { type: 'state_answer', product: 'p2', report: 'R-1', text: 'Confirmed: p2 is paused.' }), 'Confirmed: p2 is paused.');
 });
 
 test('L373: what is not a known field still never reaches the line', () => {

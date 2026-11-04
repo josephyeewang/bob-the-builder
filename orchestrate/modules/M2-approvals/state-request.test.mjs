@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { outboxFile } from '../M1-front-door/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { env as m2env, must, PRODUCT } from './fixtures.test-helper.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { schedulePass } from './schedule.mjs';
 import { STATE_ANSWERS, applyStateRequests, markStateAnswerSent } from './state-request.mjs';
 
@@ -191,10 +192,9 @@ test('every answer the pass gives is one of STATE_ANSWERS (the list shared/no-pr
 });
 
 // L219 + L221's class: the pass is run by what runs in production, and its answers reach the owner.
-const told = (s, took = () => true) => {
-  const seen = [];
-  s.ctx.alert = (a) => { if (a.type === 'state_answer') seen.push(a); return a.type === 'state_answer' ? took(a) : true; };
-  return seen;
+const told = (s, opts) => {
+  s.ctx.alert = fakeAlert(opts);
+  return () => s.ctx.alert.texts.filter((a) => a.type === 'state_answer');
 };
 
 test('schedulePass applies a pause, tells the owner once, and the product it reads is the paused one', async () => {
@@ -205,21 +205,21 @@ test('schedulePass applies a pause, tells the owner once, and the product it rea
   assert.equal(r.ok, true, r.reason);
   assert.equal(s.product().doc.state, 'paused');
   assert.deepEqual(r.events.filter((e) => e.type === 'state_applied'), [{ type: 'state_applied', report: rep.id, state: 'paused' }]);
-  assert.deepEqual(seen, [{ type: 'state_answer', product: PRODUCT, report: rep.id, text: STATE_ANSWERS.paused(PRODUCT) }]);
+  assert.deepEqual(seen(), [{ type: 'state_answer', product: PRODUCT, report: rep.id, text: STATE_ANSWERS.paused(PRODUCT) }]);
   await schedulePass(s.ctx);
-  assert.equal(seen.length, 1, 'told once');
+  assert.equal(seen().length, 1, 'told once');
 });
 
-for (const [name, took] of [['answers false', () => false], ['answers nothing', () => undefined], ['throws', () => { throw new Error('down'); }]]) {
+for (const [name, opts] of [['answers false', { answer: false }], ['answers nothing', { answer: () => undefined }], ['throws', { throws: new Error('down') }]]) {
   test(`schedulePass: a sink that ${name} leaves the answer unmarked, so it is told again next pass`, async () => {
     const rep = report('20261103-0915-ab', { state: 'paused' });
     const s = setup({ reports: [rep] });
-    const seen = told(s, took);
+    const seen = told(s, opts);
     const r = await schedulePass(s.ctx);
     assert.equal(r.ok, true, r.reason);
     assert.deepEqual(r.events.filter((e) => e.type === 'state_answer_not_told'), [{ type: 'state_answer_not_told', report: rep.id }]);
     await schedulePass(s.ctx);
-    assert.equal(seen.length, 2);
+    assert.equal(seen().length, 2);
   });
 }
 
