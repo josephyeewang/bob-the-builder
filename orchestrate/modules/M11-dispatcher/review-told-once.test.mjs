@@ -866,7 +866,7 @@ test('R-0b-171: the quiet window follows the rules, for the card\'s product', as
   }
 });
 
-test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, daily, and end at a clean read', async () => {
+test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, daily', async () => {
   const m = mac();
   const old = process.umask(0o777);
   let told;
@@ -874,10 +874,37 @@ test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, d
   assert.deepEqual(told, [25, 49, 73]);
   assert.equal(m.starts.length, 0);
   assert.equal(statusHolds(m).length, 1);
-  await m.hour(81); // takes the last unreadable one; the next is written clean
-  await m.hour(82);
-  assert.deepEqual(statusHolds(m), [], 'a request read cleanly ends it');
-  assert.deepEqual(stateOf(m).unread_requests, undefined);
+});
+
+test('R-0b-171 L483: a clean request a day does not touch a hold on requests that can\'t be read; only its own silence ends it', async () => {
+  const m = mac({ readCard: () => ({ ok: false, reason: 'no such card', missing: true }) });
+  await m.hour(0);
+  await runnerPass(m.ctx);
+  const junk = (i) => writeFileSync(join(m.root, 'requests', `junk-${i}.json`), 'not json', { mode: 0o644 });
+  const JUNK = 'Review requests can\'t be read (it is not JSON)';
+  const heldNow = () => statusHolds(m).filter((h) => h.text.startsWith(JUNK)).length;
+  junk(0);
+  await runnerPass(m.ctx);
+  const first = Object.values(stateOf(m).unread_requests)[0].first_at;
+  for (let d = 1; d <= 3; d += 1) {
+    m.clock.t += 12 * H;
+    ask(m, 'NOPE-1', d);
+    await runnerPass(m.ctx);
+    m.clock.t += 12 * H;
+    junk(d);
+    ask(m, 'NOPE-1', d + 10);
+    await runnerPass(m.ctx);
+    assert.equal(heldNow(), 1, `day ${d}`);
+    assert.equal(Object.values(stateOf(m).unread_requests)[0].first_at, first, 'the day is not reset');
+  }
+  // Clean requests alone never end it; a quiet window with none of its cause does.
+  m.clock.t += REFUSED_QUIET_MS - H;
+  ask(m, 'NOPE-1', 99);
+  await runnerPass(m.ctx);
+  assert.equal(heldNow(), 1, 'an hour short');
+  m.clock.t += H;
+  await runnerPass(m.ctx);
+  assert.equal(heldNow(), 0);
 });
 
 test('R-0b-171: one hold per cause however many files, and none arriving ends it', async () => {
@@ -1025,7 +1052,7 @@ test('R-0b-171 C8: a bad entry in the runner\'s memory is dropped and told, and 
   const bads = [
     { refused_streaks: { x: null } }, { refused_streaks: { x: { ...good, head: 5 } } }, { refused_streaks: { x: { ...good, first_at: 'not a time' } } },
     { refused_streaks: { x: { ...good, last_at: 3 } } }, { refused_streaks: 'x' }, { refused_streaks: [] }, { refused_more: { x: 7 } },
-    { no_verdict: { x: { card: 5 } } }, { unread_requests: { x: {} } },
+    { unread_requests: { x: {} } },
   ];
   for (const bad of bads) {
     const m = mac();
@@ -1042,6 +1069,42 @@ test('R-0b-171 C8: a bad entry in the runner\'s memory is dropped and told, and 
     await runnerPass(m.ctx);
     assert.deepEqual(statusHolds(m), [], 'told, then over');
   }
+});
+
+test('R-0b-171 L483: a bad hold entry is dropped and told, and never stops a pass', async () => {
+  const good = { id: 'not-taken-S-9', session: 'S-9', card: 'C-1', head: HEAD, role: 'reviewer', text: 'x' };
+  const bads = [
+    { not_taken: { x: null } }, { not_taken: { x: 7 } }, { not_taken: { x: { ...good, head: 5 } } }, { not_taken: { x: { ...good, card: 5 } } },
+    { not_taken: { x: { ...good, role: 5 } } }, { not_taken: { x: { ...good, id: 5 } } }, { not_taken: { x: { ...good, text: null } } }, { not_taken: 'x' }, { not_taken: [] },
+    { no_verdict: { x: { card: 5 } } }, { no_verdict: 'x' },
+  ];
+  for (const bad of bads) {
+    const m = mac();
+    await m.hour(0);
+    await runnerPass(m.ctx);
+    editState(m, (st) => { Object.assign(st, bad); });
+    await runnerPass(m.ctx);
+    await runnerPass(m.ctx);
+    assert.deepEqual(statusHolds(m).map((h) => h.id), ['hold-entry-unread'], JSON.stringify(bad));
+    assert.match(statusHolds(m)[0].text, /A hold entry could not be read/);
+    m.clock.t += REFUSED_QUIET_MS;
+    await runnerPass(m.ctx);
+    assert.deepEqual(statusHolds(m), [], 'told, then over');
+  }
+  const kept = mac({ verdictTaken: () => ({ ok: false, reason: 'not yet' }) });
+  await kept.hour(0);
+  await runnerPass(kept.ctx);
+  editState(kept, (st) => { st.not_taken = { 'S-9': good }; });
+  await runnerPass(kept.ctx);
+  assert.deepEqual(statusHolds(kept).map((h) => h.id), ['not-taken-S-9'], 'a good entry is no bad one');
+});
+
+test('R-0b-171 L483: a dropped verdict comes back from its records', async () => {
+  const m = await notTakenTold();
+  editState(m, (st) => { st.not_taken['S-1'].head = 5; });
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+  assert.deepEqual(statusHolds(m).map((h) => h.id).sort(), ['hold-entry-unread', 'not-taken-S-1']);
 });
 
 test('R-0b-171 C8: a bad entry is told when the Dispatcher relays it, then each day', async () => {

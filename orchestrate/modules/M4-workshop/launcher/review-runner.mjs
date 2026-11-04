@@ -364,17 +364,19 @@ export async function runnerPass(ctx) {
   }
 
   // The refusal lists are the runner's own memory, but a bad entry must not stop every pass: it is dropped and told.
-  const keepGood = (name, good) => {
+  const keepGood = (name, good, told) => {
     const m = state[name];
     if (m === undefined) return;
-    if (m === null || typeof m !== 'object' || Array.isArray(m)) { delete state[name]; state.entry_unread_at = iso(now); return; }
-    for (const [k, v] of Object.entries(m)) if (!good(v)) { delete m[k]; state.entry_unread_at = iso(now); }
+    if (m === null || typeof m !== 'object' || Array.isArray(m)) { delete state[name]; state[told] = iso(now); return; }
+    for (const [k, v] of Object.entries(m)) if (!good(v)) { delete m[k]; state[told] = iso(now); }
   };
-  keepGood('refused_streaks', goodStreak);
-  keepGood('refused_more', goodStreak);
-  keepGood('no_verdict', goodNoVerdict);
-  keepGood('unread_requests', goodUnread);
-  if (now - (pastTime(state.entry_unread_at, now) ?? -Infinity) >= REFUSED_QUIET_MS) delete state.entry_unread_at;
+  keepGood('refused_streaks', goodStreak, 'entry_unread_at');
+  keepGood('refused_more', goodStreak, 'entry_unread_at');
+  keepGood('unread_requests', goodUnread, 'entry_unread_at');
+  keepGood('no_verdict', goodNoVerdict, 'hold_unread_at');
+  // A verdict dropped here comes back from its launch and ended records, if it is still not taken.
+  keepGood('not_taken', goodNotTaken, 'hold_unread_at');
+  for (const told of ['entry_unread_at', 'hold_unread_at']) if (now - (pastTime(state[told], now) ?? -Infinity) >= REFUSED_QUIET_MS) delete state[told];
 
   // m-3: an admin can become anyone, so a review user that is an admin keeps nothing apart.
   let admin; try { admin = await ctx.isAdmin(); } catch { admin = true; }
@@ -674,13 +676,13 @@ export async function runnerPass(ctx) {
     const refuse = (reason, req = got.req) => result.refused.push({ at: iso(now), request: name, card: req?.card ?? null, role: req?.role ?? null, request_id: req?.request_id ?? null, reason });
     if (!got.ok) {
       refuse(`the request ${got.reason}`);
-      // Named after what went wrong, never the file: one hold however many files, so junk can't flood (R-0b-171).
+      // Named after what went wrong, never the file: one hold however many files, so junk can't flood. Only silence
+      // from its own cause ends it: anyone can write a clean request, and that shows nothing is fixed (R-0b-171).
       const cause = String(got.code ?? got.reason).slice(0, 100);
       const was = state.unread_requests?.[cause];
       state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: name, first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
       continue;
     }
-    delete state.unread_requests;
     const { card, head, role, request_id: rid } = got.req;
     // A refusal that says the review can't go ahead, as opposed to a request that was stale or not needed (R-0b-171).
     const streakKey = `${card} ${role}`;
@@ -868,6 +870,7 @@ const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
 const isObject = (v) => v !== null && typeof v === 'object';
 const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
 const goodNoVerdict = (n) => isObject(n) && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head) && stamp(n.first_at);
+const goodNotTaken = (n) => isObject(n) && typeof n.id === 'string' && typeof n.text === 'string' && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head);
 const goodUnread = (u) => isObject(u) && typeof u.cause === 'string' && typeof u.file === 'string' && stamp(u.first_at) && stamp(u.last_at);
 const notTakenCovers = (state, { card, head, role }) => Object.values(state.not_taken ?? {}).some((x) => x.card === card && x.head === head && x.role === role);
 // The holds for what has kept a review from going ahead for a day (R-0b-171), each under its own cause, so a new reason
@@ -883,12 +886,13 @@ const stuckHolds = (state, now) => {
     holds.push({ id: 'refused-more', text: `${n}${Object.keys(state.refused_more).length >= MAX_MORE_STREAKS ? ' or more' : ''} more cards' review requests are refused.` });
   }
   for (const u of Object.values(state.unread_requests ?? {}).filter(dayOld)) {
-    holds.push({ id: `unread-request-${createHash('sha256').update(u.cause).digest('hex').slice(0, 12)}`, text: `Review requests can't be read (${u.cause}) for a day; the last: ${u.file}. No review starts from them until one reads cleanly.` });
+    holds.push({ id: `unread-request-${createHash('sha256').update(u.cause).digest('hex').slice(0, 12)}`, text: `Review requests can't be read (${u.cause}) for a day; the last: ${u.file}. No review starts from them.` });
   }
   for (const n of Object.values(state.no_verdict ?? {}).filter(dayOld)) {
     holds.push({ id: `no-verdict-${n.card}-${n.role}`, text: `The ${n.role} for card ${n.card} at ${n.head.slice(0, 7)} started but gave no counted verdict. One start per head and tree, so it won't start again: the owner needs to act.` });
   }
   if (typeof state.entry_unread_at === 'string') holds.push({ id: 'refused-entry-unread', text: 'A streak entry could not be read and was dropped, so a refused review request may have lost its place in these alerts.' });
+  if (typeof state.hold_unread_at === 'string') holds.push({ id: 'hold-entry-unread', text: 'A hold entry could not be read and was dropped, so a review the runner was holding may have lost its place in these alerts.' });
   return holds;
 };
 const notTakenWhyAt = (n, t) => (n.tree_unread ? `the tree of ${n.head.slice(0, 7)} can't be read, so whether the verdict still counts can't be checked; ${notTakenWhy(t)}` : notTakenWhy(t));
