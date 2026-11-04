@@ -3065,6 +3065,55 @@ test('L357 gate.mjs: an interrupted_note written with a refusal settled outside 
   assert.equal(told(w, 'merge_interrupted').length, 1, 'once taken, not again');
 });
 
+// L357 end to end: M11's open-too-long refusal carries its note, a first alert that isn't taken is sent on the next
+// pass, and once it is marked nothing more goes out. M11 itself tells nothing.
+test('L357 M11 + gate.mjs: an open-too-long refusal by M11 is told by step 3b, again after a lost alert, and quiet once marked', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  loseAnswer(w, { merged: false });
+  await gatePass(w.ctx);
+  const m = mergeOf(w);
+  assert.equal(m.doc.state, 'merging');
+  tick(w, LIMIT_MIN + 1);
+  sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: m.doc.judged_head, observed_at: nowIso(w, 0) });
+  const said = fakeAlert();
+  await timeLimits({ rec: recOf(w), rules: w.ctx.rules, now: w.env.clock.t, b: {}, gateAlive: () => false, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: said });
+  assert.equal(mergeOf(w).doc.state, 'refused');
+  assert.deepEqual(said.texts.filter((t) => /still open/.test(t)), [], 'M11 tells nothing itself');
+  const note = mergeOf(w).doc.interrupted_note;
+  assert.match(note, /still open after \d+ min, with no merge/);
+  const tries = flakyAlert(w, 'merge_interrupted', 'false', 1);
+  await later(w, 1);
+  assert.equal(tries.length, 1);
+  assert.equal(told(w, 'merge_interrupted').length, 0, 'the first was lost');
+  await later(w, 1);
+  assert.deepEqual(told(w, 'merge_interrupted').map((a) => a.note), [note], 'sent on the next pass');
+  assert.ok(mergeOf(w).doc.interrupted_told_at);
+  await later(w, DAY_MIN);
+  assert.equal(told(w, 'merge_interrupted').length, 1, 'quiet once marked');
+});
+
+// L348: a partial reading (GitHub's answer without a real merged) is no reading, so it holds the new merge of an
+// interrupted PR, and that wait is told past the limit like any other.
+test('L348 gate.mjs: a partial reading of an interrupted pull request holds the new merge, and the wait is told past the limit', async () => {
+  const w = world(limited());
+  const head = verifiedCard(w);
+  await interruptedThenAskedAgain(w, head);
+  const again = () => recOf(w).list('merge').find((m) => m.doc.request === 'mr-C-1-again');
+  await later(w, 1);
+  sensorsReads(w, { state: 'closed', merged: 'true', merge_commit_sha: null, head_sha: head, observed_at: nowIso(w, 0) });
+  await later(w, 1);
+  assert.equal(again().doc.state, 'queued');
+  assert.ok(again().doc.wait_reading, 'still waiting for a real reading');
+  assert.equal(gatePuts(w), 1, 'no second merge call');
+  assert.equal(told(w, 'merge_waiting_long').length, 0, 'under the limit');
+  await later(w, DEFAULT_WAIT_LIMIT_MIN + 1);
+  assert.equal(again().doc.state, 'queued');
+  assert.equal(gatePuts(w), 1);
+  assert.equal(told(w, 'merge_waiting_long').length, 1, 'told past the limit');
+  assert.match(told(w, 'merge_waiting_long')[0].note, /was interrupted; waiting for a reading/);
+});
+
 // L358: the start gate stops merging, not telling. With robot merges not green, a lost refusal alert and an
 // interrupted note are both sent again, and nothing else happens.
 test('L358 gate.mjs: with the start gate shut, a lost refusal alert and an interrupted note are sent again, and nothing merges', async () => {
