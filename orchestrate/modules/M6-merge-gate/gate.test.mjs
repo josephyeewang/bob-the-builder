@@ -1772,6 +1772,7 @@ const HOLDS = [
   ['main is red', (w) => w.g.checks.set(w.g.main, redRun(w.g.main)), /^2: main is red/],
   ['main has 100 check runs', (w) => w.g.checks.set(w.g.main, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: w.g.main, status: 'completed', conclusion: 'success' }))), /^2: main's checks could not be read/],
   ['the rules name no required checks', (w) => { w.values['product_profile.required_checks'] = null; }, /^1: the rules name no required checks/],
+  ['the rules name an empty list of required checks', (w) => { w.values['product_profile.required_checks'] = []; }, /^1: the rules name no required checks/],
   ['the rules give no merge answer', (w) => { w.ctx.rules = Object.create(w.ctx.rules, { may: { value: () => { throw new Error('the engine stopped'); } } }); }, /^9: the rules gave no merge answer/],
   ['the go check fails', (w) => { const base = w.ctx.record; w.ctx.record = Object.create(base, { read: { value: (e, id) => { if (e === 'go') throw new Error('go store gone'); return base.read(e, id); } } }); }, /^10: the go could not be checked/],
   ['GitHub never works out mergeable', (w) => { w.g.pulls.get(7).mergeable_state = 'unknown'; }, /^3: GitHub has not worked out/],
