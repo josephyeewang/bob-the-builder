@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
@@ -486,7 +487,7 @@ test('audit 0b-6 r2 MAT-4 / MAT-6 / MIN-9: an undo is requested in red, unknown 
   }
   // MAT-6: the card changes (a new rev) -> a new request at that rev, once.
   const rec = readyRec();
-  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requestMerges({ alert: fakeAlert(), rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
   endMerge(rec, ['stale']);
   change(rec, 'card', 'C-1', { attempts: { merge_refusals: ['stale'] } });
   assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0 + MIN, b: GREEN }), [['C-1', 'merge requested again']]);
