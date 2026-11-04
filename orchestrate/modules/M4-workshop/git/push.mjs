@@ -298,7 +298,8 @@ export function createPushScript(deps) {
     if (!SHA256.test(String(sha256)) || !SHA.test(String(blob)) || !Number.isSafeInteger(size) || size <= 0) no(`card ${card} has no proof of the report's bytes`);
     const folder = rules.get('proposals.outbox', { product });
     if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
-    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research: { ask, file, sha256, blob, size, path: d.files[0] } };
+    const research = { ask, file, sha256, blob, size, path: d.files[0] };
+    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
   }
 
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
@@ -368,8 +369,9 @@ export function createPushScript(deps) {
         const ff = await git(['merge-base', '--is-ancestor', remoteTip, tip], { gitDir: mirror, purpose: 'push-fast-forward' });
         if (ff.code !== 0) no('the branch on GitHub has moved; the fix round must start from it (never a force push)');
       }
-      // A research copy's commits are always counted from main: a branch already on GitHub is checked whole.
-      const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip && !research ? [remoteRef] : [])]);
+      // Counted from the branch on GitHub, unless this is that same commit (a retry, after a stop or a refused head write)
+      // or a research copy: those are checked whole, from main, and pushing the same commit changes nothing.
+      const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip && remoteTip !== tip && !research ? [remoteRef] : [])]);
       if (!commits.length) no('the bundle holds no new commits');
       if (research && commits.length !== 1) no('the card\'s branch on GitHub holds more than the one copy commit');
       const why = [];
@@ -427,6 +429,23 @@ export function createPushScript(deps) {
 
   // Runs one door. Never throws: { ok, ... } or { ok: false, reason }. A push or a refusal writes one fact,
   // `push.<card>.<attempt>`; a look writes nothing (the intake records what it decides).
+  // The card's head is the push's to write and no one else's (M9 permissions): the Dispatcher reads it to ask for a
+  // reviewer and to request a merge. Head only, except where M9 asks for more: a new head on a verified or approved
+  // card sends it back to in_review. Tried twice, for the Dispatcher writes the card too. -> null, or why it wasn't.
+  function writeHead(card, tip) {
+    let why = null;
+    for (let i = 0; i < 2; i += 1) {
+      const c = record.read('card', card);
+      if (!c?.doc || c.corrupt) return `card ${card} could not be read`;
+      if (c.doc.head === tip) return null;
+      const back = c.doc.state === 'verified' || c.doc.state === 'approved';
+      const w = record.write({ actor: 'workshop', entity: 'card', id: card, expectRev: c.rev, doc: { ...c.doc, head: tip, ...(back ? { state: 'in_review' } : {}) }, kind: 'push_head' });
+      if (w.ok) return null;
+      why = w.reason;
+    }
+    return why;
+  }
+
   async function settle(inputs, factParts, { look = false, from } = {}) {
     let res;
     try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200)}` }; }
@@ -437,10 +456,13 @@ export function createPushScript(deps) {
     const [card, att] = factParts();
     // Only real text names a fact: String(undefined) or String(null) would pass the id patterns as "undefined" / "null".
     const id = `push.${typeof card === 'string' && CARD.test(card) ? card : 'unknown'}.${typeof att === 'string' && ATTEMPT.test(att) ? att : 'unknown'}`;
+    // Before the fact: a stop between the two leaves no fact, so the retry finds the branch and comes back here.
+    const headRefused = res.ok ? writeHead(card, res.tip) : null;
     const cur = record.read('fact', id);
     let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
     if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
+    if (headRefused) doc.head_refused = headRefused;
     if (from) doc.from = from;
     // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
     if (res.ok && from) doc.product = res.product;
@@ -472,7 +494,7 @@ export function createPushScript(deps) {
         const f = record.read('fact', `push.${inputs.card}.${inputs.att}`);
         done = f?.doc && !f.corrupt ? f.doc : null;
       } catch { done = null; }
-      if (done?.result === 'pushed' && done.product === inputs.product) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+      if (done?.result === 'pushed' && done.product === inputs.product && !done.head_refused) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
     }
     return settle(() => proposalInputs(p), () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
   }
@@ -487,7 +509,7 @@ export function createPushScript(deps) {
       const f = record.read('fact', `push.${inputs.card}.${inputs.att}`);
       done = f?.doc && !f.corrupt ? f.doc : null;
     } catch { done = null; }
-    if (done?.result === 'pushed' && done.product === inputs.product) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+    if (done?.result === 'pushed' && done.product === inputs.product && !done.head_refused) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
     return settle(() => researchInputs(p), () => { let a = null; try { a = researchAttempt(p?.card); } catch { a = null; } return [p?.card, a]; }, { from: 'research' });
   }
 

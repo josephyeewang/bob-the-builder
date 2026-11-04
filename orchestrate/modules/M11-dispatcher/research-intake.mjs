@@ -34,7 +34,7 @@ import { researchBrief, researchFileName, researchPath, landResearch, RESEARCH_I
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
-import { HOLD_FACT } from './pass.mjs';
+import { HOLD_FACT, putFact } from './pass.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export { researchPath };
@@ -150,10 +150,9 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now })
       out.push([c.id, r?.ok ? 'pushed' : `not pushed: ${r?.reason ?? 'no answer'}`]);
       doc = copyDoc(rec, c);
       // Told once (L290): the owner has to act, and the daily tell below keeps saying why it is not copied.
-      const bytes = BYTES_FACT(c.id);
-      if (r?.ok === false && r.reason === REPORT_CHANGED && rec.read('fact', bytes)?.doc?.told_at == null && !isQueued(rec, bytes)) {
+      if (r?.ok === false && r.reason === REPORT_CHANGED && rec.read('fact', BYTES_FACT(c.id))?.doc?.told_at == null && !isQueued(rec, BYTES_FACT(c.id))) {
         const text = `${product}: the report for research ask ${ask} changed after it was taken in, so it was not copied. Put the original back, or ask again.`;
-        tellThen(alert, text, { fact: bytes, fields: { text, told_at: new Date(now).toISOString() }, kind: 'hold_alert' });
+        tellThen(alert, text, { fact: BYTES_FACT(c.id), fields: { text, told_at: new Date(now).toISOString() }, kind: 'hold_alert' });
       }
     }
     if (doc?.result === 'pushed' || !ready) dropCause(rec, BYTES_FACT(c.id));
@@ -171,7 +170,7 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now })
       clear: () => {
         dropCause(rec, mark);
         const cur = rec.read('fact', mark);
-        if (cur?.doc?.told_at != null) rec.write({ actor: 'dispatcher', entity: 'fact', id: mark, expectRev: cur.rev, doc: { ...cur.doc, told_at: null }, kind: 'hold_cleared' });
+        if (cur?.doc?.told_at != null) putFact(rec, mark, { ...cur.doc, told_at: null }, 'hold_cleared');
       },
     });
   }

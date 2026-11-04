@@ -19,6 +19,8 @@ import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
+import { timeLimits } from '../../M11-dispatcher/merges.mjs';
+import { rulesWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
@@ -683,6 +685,7 @@ test('the mirror is checked before every push: a planted alternates file refuses
 import { createSaveWork, CLONE_CONFIG_TEMPLATE } from './save-work.mjs';
 import { prepareWorkerCopy } from '../launcher/worker-copy.mjs';
 import { readdirSync, statSync } from 'node:fs';
+import { fakeAlert } from '../../../test/fake-alert.test-helper.mjs';
 
 const HOOK_NAMES = ['applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit',
   'pre-rebase', 'post-checkout', 'post-merge', 'pre-push', 'pre-receive', 'update', 'proc-receive', 'post-receive', 'post-update', 'reference-transaction',
@@ -1578,4 +1581,113 @@ test('L286: it meets the same core as any commit: the scan, a gitleaks:allow lin
 
 test('SETTLE_MS is one value: the intake\'s is the push script\'s', () => {
   assert.equal(INTAKE_SETTLE_MS, SETTLE_MS);
+});
+
+// ---- The card's head (L387): the merge path reads it for a review ask and a merge request, and only the push may write it ----
+const moveCard = (rec, id, fields) => {
+  const c = rec.read('card', id);
+  const m = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: { ...c.doc, ...fields } });
+  assert.equal(m.ok, true, m.reason);
+};
+const toReview = (rec, id) => {
+  if (rec.read('card', id).doc.state === 'draft') moveCard(rec, id, { state: 'ready' });
+  moveCard(rec, id, { state: 'claimed', claim: { kind: 'tab', claim_id: 'c-1', host: 'the-host' } });
+  moveCard(rec, id, { state: 'running' });
+  moveCard(rec, id, { state: 'in_review' });
+};
+async function askedAfter(rec) {
+  const asked = [];
+  await timeLimits({ rec, rules: rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) }), now: Date.now() + 86_400_000,
+    b: { band: 'green', own_building: 'open', pace: 0.5, prodBlocked: false }, gateAlive: () => true, hasReviewer: async () => false,
+    requestReview: async (x) => { asked.push(x); return { ok: true }; }, alert: fakeAlert() });
+  return asked;
+}
+
+test('L387: a worker\'s push reaches the review request with the pushed head, and nothing here writes it by hand', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const r = await w.push();
+  assert.equal(r.ok, true, r.reason);
+  toReview(w.record, 'C-1');
+  const asked = await askedAfter(w.record);
+  assert.ok(asked.length > 0, 'a reviewer was asked for');
+  for (const a of asked) assert.equal(a.head, r.tip);
+});
+
+test('L387: all three doors write the head they pushed, and a repeat of it writes nothing', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const sha256 = await w.propose();
+  const p = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.equal(p.ok, true, p.reason);
+  assert.equal(w.record.read('card', 'C-1').doc.head, p.tip);
+  const rev = w.record.read('card', 'C-1').rev;
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1', sha256 })).already, true);
+  assert.equal(w.record.read('card', 'C-1').rev, rev);
+  const rw = await researchWorld();
+  const r = await rw.pushR();
+  assert.equal(r.ok, true, r.reason);
+  const card = rw.record.read('card', RC).doc;
+  assert.deepEqual([card.head, card.state], [r.tip, 'ready'], 'the head is written and the card makes no move');
+  // A refused push writes no head.
+  const leak = await researchWorld();
+  leak.fake.setMode('leak');
+  await researchRefused(leak, /secret/i);
+  assert.equal(leak.record.read('card', RC).doc.head, undefined);
+});
+
+test('L387: a new head on a verified card sends it back to in_review, as M9 asks', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const one = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: await w.propose() });
+  assert.equal(one.ok, true, one.reason);
+  toReview(w.record, 'C-1');
+  moveCard(w.record, 'C-1', { state: 'verified' });
+  await w.commit('more', (c) => writeFileSync(join(c, 'app.txt'), 'changed again\n'));
+  const two = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: await w.propose() });
+  assert.equal(two.ok, true, two.reason);
+  assert.notEqual(two.tip, one.tip);
+  const c = w.record.read('card', 'C-1').doc;
+  assert.deepEqual([c.head, c.state], [two.tip, 'in_review']);
+});
+
+test('L387: a refused head write is finished by the next try of the same bytes, at each door that remembers a push', async () => {
+  const refusing = (t) => ({ ...Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]])),
+    write: (x) => (x.entity === 'card' ? { ok: false, reason: 'no push while the card is merging' } : t.write(x)) });
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const sha256 = await w.propose();
+  const input = { product: PRODUCT, card: 'C-1', sha256 };
+  assert.equal((await w.pushP(input, { record: refusing(w.record) })).ok, true);
+  assert.equal(w.record.read('card', 'C-1').doc.head, undefined);
+  const p = await w.pushP(input);
+  assert.deepEqual([p.ok, p.already, w.record.read('card', 'C-1').doc.head], [true, undefined, p.tip], p.reason);
+  assert.equal((await w.pushP(input)).already, true, 'with the head written, the bytes answer the recorded push again');
+  const rw = await researchWorld();
+  assert.equal((await rw.pushR(undefined, { record: refusing(rw.record) })).ok, true);
+  assert.equal(rw.record.read('card', RC).doc.head, undefined);
+  const r = await rw.pushR();
+  assert.deepEqual([r.ok, r.already, rw.record.read('card', RC).doc.head], [true, undefined, r.tip], r.reason);
+});
+
+test('L387: a refused head write leaves the push pushed and says so in its fact; a lost race is tried again', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const t = w.record;
+  const wrap = (write) => ({ ...Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]])), write });
+  let tries = 0;
+  const refused = wrap((x) => { if (x.entity === 'card') { tries += 1; return { ok: false, reason: 'no push while the card is merging' }; } return t.write(x); });
+  const r = await w.push({ record: refused });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(tries, 2);
+  assert.equal(t.read('card', 'C-1').doc.head, undefined);
+  assert.deepEqual([t.read('fact', 'push.C-1.a1').doc.result, t.read('fact', 'push.C-1.a1').doc.head_refused], ['pushed', 'no push while the card is merging']);
+  let first = true;
+  const raced = wrap((x) => { if (x.entity === 'card' && first) { first = false; return { ok: false, reason: 'the card changed' }; } return t.write(x); });
+  const again = await w.push({ record: raced });
+  assert.equal(again.ok, true, again.reason);
+  assert.equal(t.read('card', 'C-1').doc.head, again.tip);
+  assert.equal(t.read('fact', 'push.C-1.a1').doc.head_refused, undefined, 'a later good write clears the note');
 });
