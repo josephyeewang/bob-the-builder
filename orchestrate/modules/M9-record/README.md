@@ -26,6 +26,7 @@ A claim is a field on its card: set by `ready → claimed`, cleared when the car
 A session's claim ends three ways:
 
 - **A release** by its holder.
+- **A plan file makes draft cards (R-0b-170, L460).** `plan-<name>.json` from a Lead goes through `plan-cards.mjs`: every card is checked first, then all are written in one diary line, or none. `plan_sha256` is the hash of the file and `main_commit` the head on the Lead's newest launch record, so neither can be typed: anything under those names in the plan is ignored, and a `roadmap-` file may not set them. The Record takes only the bytes M11's plan check read (`checked_sha256`). A later plan may change only draft cards, never a card's module or depends_on, and a card it leaves out stays as it was and is named in the answer.
 - **A lapse.** A claim that has no process yet and is older than `claims.unlaunched_min` (5 minutes when the rules don't say) goes back to ready. It lapses only once the caller's `stopSession(session_id)` says whatever started under that id is stopped, so the card can't run twice. With no `stopSession`, or one that does not answer true, the claim stays and the owner gets one alert a day.
 - **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one.
 

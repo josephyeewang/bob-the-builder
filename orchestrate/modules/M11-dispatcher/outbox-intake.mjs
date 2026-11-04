@@ -18,9 +18,11 @@ import { join } from 'node:path';
 import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs';
 import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
-import { tellThen, dropCause, isQueued } from './alerts.mjs';
-import { stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
-import { OUTBOX_KINDS } from '../../shared/record.mjs';
+import { checkPlan } from '../M3-lead/lead-wording.mjs';
+import { tellThen, dropCause, isQueued, clearCause, queuedMarks, writeFrom } from './alerts.mjs';
+import { HOLD_FACT, HOLD_REPEAT_MS, causeOf, holdAlert, refusalReport } from './pass.mjs';
+import { stillWaiting, STILL_WAITING_MS, pastTime } from '../../shared/still-waiting.mjs';
+import { OUTBOX_KINDS, leadLaunchHead } from '../../shared/record.mjs';
 import { NEVER_RAN } from '../M9-record/outbox.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
@@ -42,6 +44,39 @@ export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 // What a Lead's waiting request keeps through each write of its fact: when it began, and the mark of its tell.
 const WAIT_FIELDS = ['waiting_since', 'told_at'];
 const appliedId = (sessionId, name) => `intake-applied-${sessionId}-${name}`;
+// A plan file's check (R-0b-170, L460): what the Lead must fix, or nothing. The Record applies only these bytes.
+function planProblems(text) {
+  let plan;
+  try { plan = JSON.parse(text); } catch { return ['it is not JSON']; }
+  return checkPlan(plan);
+}
+
+// What became of a plan, for the Lead. A card a live plan left out stays as it was, and is named, so the Lead can act.
+function planOutcome(name, applied) {
+  if (!applied.ok) return `Your plan ${name} was not applied: ${applied.reason}`;
+  const list = (words, ids) => (ids?.length ? ` ${words} ${ids.join(', ')}.` : '');
+  return `Your plan ${name} was applied.${list('Created:', applied.created)}${list('Updated:', applied.updated)}${list('Not in this plan and left as they were:', applied.dropped)}`;
+}
+
+// A note the Lead must get: if it can't be left, the owner reads it instead.
+async function leaveNote(replyToLead, lead, text) {
+  try { return await replyToLead({ lead, text }); } catch (e) { return { ok: false, reason: e.message }; }
+}
+
+// L475: a file that fails the read step stays in the outbox, so every pass reads it again. Its tell is once per file
+// and reason, then once a day while it stays, on `hold-outbox-read-<session>-<file>-<reason>`. The file is never moved
+// or deleted, and each pass still reports it as refused. Session and file are hashed to one length: a bad file name can
+// hold anything, and a fixed length lets one prefix mean one session.
+const shortHash = (s) => sha256(s).slice(0, 12);
+const readHoldsOf = (sessionId) => HOLD_FACT(`outbox-read-${shortHash(sessionId)}-`);
+const readHoldsOfFile = (sessionId, name) => `${readHoldsOf(sessionId)}${shortHash(name)}-`;
+const readHold = (sessionId, name, why) => `${readHoldsOfFile(sessionId, name)}${why}`.slice(HOLD_FACT('').length);
+
+async function tellLead(replyToLead, alert, lead, text) {
+  const r = await leaveNote(replyToLead, lead, text);
+  return r?.ok === true || alert(`the Lead ${lead} could not be told (${r?.reason ?? 'no answer'}): ${text}`) !== false;
+}
+
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return null; } };
 
 /** The kinds a session may hand in (name prefixes, L82 M-1): its role's, except a read-only request session hands back report-. */
@@ -55,7 +90,8 @@ export function kindsFor(entry) {
  * `wait(ms)`: a sleep (tests pass a fake that moves the fake clock). `alert(text)` reaches Joe.
  * `startReadonly({ lead, profile, kind, brief, product })` starts a read-only session through the wiring
  *   port; the tick puts the start gate in front of it (audit 0b-6 r2 MAT-2), so it answers { ok, reason }.
- * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
+ * `replyToLead({ lead, text })` leaves a report- note for the Lead; a plan's answer needs it to return { ok: true }.
+ * `note(text)` writes a diary line.
  * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
  * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`), now or as a promise: { ok, ended }
@@ -68,12 +104,16 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
   reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }) }) {
   const out = [];
   const seen = [];
+  const listed = [];
+  const held = new Set();
+  const unsettled = new Set();
   // L138 m3: a refused or interrupted hand-in is told until a copy is delivered, from its recorded fact, whether or
   // not its file is still in the outbox (a file removed before the tell went out is still told).
   retellHandIns(rec, alert);
   for (const s of sessions) {
     let names;
     try { names = list(s.outbox).filter((n) => !n.startsWith('.')); } catch { out.push({ session: s.sessionId, skipped: 'outbox unreadable' }); continue; }
+    listed.push(s.sessionId);
     for (const name of names) seen.push({ s, name, first: look(join(s.outbox, name)) });
   }
   if (seen.length) await wait(SETTLE_MS);
@@ -81,16 +121,19 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const path = join(s.outbox, name);
     const r = { session: s.sessionId, name };
     out.push(r);
-    if (first === null || look(path) !== first) { r.waiting = 'still being written'; continue; }
+    if (first === null || look(path) !== first) { r.waiting = 'still being written'; unsettled.add(readHoldsOfFile(s.sessionId, name)); continue; }
     const kinds = kindsFor(s);
     const file = read(s.outbox, name, { kinds, uid: s.uid });
     if (!file.ok) {
       r.refused = file.reason;
       const k = OUTBOX_NAME.test(name) ? outboxKindOf(name) : null;
       note(`outbox file ${name} from ${s.role} ${s.sessionId} refused: ${file.reason}`);
-      if (s.role === 'lead' && OUTBOX_NAME.test(name) && !kinds.includes(k)) {
-        replyToLead({ lead: s.sessionId, text: `Your file ${name} was not used: it is not a kind you can hand in (${kinds.join(', ')}).` });
-      } else alert(`an outbox file from ${s.role} ${s.sessionId} was refused: ${file.reason}`);
+      const notItsKind = s.role === 'lead' && OUTBOX_NAME.test(name) && !kinds.includes(k);
+      const cause = readHold(s.sessionId, name, notItsKind ? 'kind' : causeOf(file.reason));
+      held.add(HOLD_FACT(cause));
+      if (notItsKind) {
+        await tellLeadDaily({ rec, replyToLead, alert, now, lead: s.sessionId, fact: HOLD_FACT(cause), text: `Your file ${name} was not used: it is not a kind you can hand in (${kinds.join(', ')}).` });
+      } else holdAlert({ rec, cause, now, alert, text: `an outbox file from ${s.role} ${s.sessionId} (${name}) was refused: ${file.reason}` });
       continue;
     }
     const hash = sha256(file.text);
@@ -188,11 +231,29 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         continue;
       }
     }
+    const isPlan = file.kind === 'plan-';
+    if (isPlan) {
+      const problems = planProblems(file.text);
+      if (problems.length) {
+        const why = problems.slice(0, 10).join('; ');
+        put({ state: 'refused', reason: why, at: new Date(now).toISOString() }, 'outbox_applied');
+        await tellLead(replyToLead, alert, s.sessionId, `Your plan ${name} was not applied: ${why}. Fix it and hand it in under a new name.`);
+        r.refused = why;
+        continue;
+      }
+      if (!leadLaunchHead(rec, s.sessionId)) {
+        const why = `Lead ${s.sessionId} has no launch record, so its plan ${name} can't say which main commit it was made on and is held`;
+        holdAlert({ rec, cause: `plan-no-launch-${s.sessionId}`, text: why, alert, now });
+        if (prev?.doc?.state !== 'waiting') put({ state: 'waiting', reason: why }, 'outbox_waiting');
+        r.waiting = why;
+        continue;
+      }
+    }
     // Claim the key first, so a crash after the apply cannot apply the file a second time.
     const claim = put({ state: 'applying' }, 'outbox_claim');
     if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
     let applied;
-    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card }, path); }
+    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card, ...(isPlan ? { checked_sha256: hash } : {}) }, path); }
     catch (e) { applied = { ok: false, reason: e.message }; }
     // L140: a kind with no record rule is handled, not refused, so it is no alert.
     if (notARecord(applied)) applied = { ok: true, not_a_record: true };
@@ -207,8 +268,40 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       if (done.ok) tellThen(alert, said, { fact: appliedId(s.sessionId, name), fields: { told_state: 'refused' }, kind: 'outbox_told' });
       else alert(said);
     }
+    // A roadmap file is a plan change too, and the Lead that wrote it hears when it is turned down (L473).
+    if (isPlan || (!applied.ok && file.kind === 'roadmap-')) await tellLead(replyToLead, alert, s.sessionId, planOutcome(name, applied));
   }
+  clearReadHolds({ rec, alert, now, listed, held, unsettled });
   return out;
+}
+
+// holdAlert's once a day, for a tell that goes to the Lead: the mark is written when the Lead, or failing that the owner,
+// has it. tellLead's answer is false only when neither does, and then the next pass asks again. A note to the Lead is no
+// alert, so its mark is `replied_at`: told fields are for what the alert queue delivers.
+async function tellLeadDaily({ rec, replyToLead, alert, lead, fact, text, now }) {
+  const was = rec.read('fact', fact)?.doc;
+  const replied = pastTime(was?.replied_at, now);
+  if (replied !== null && now - replied < HOLD_REPEAT_MS) return;
+  if (await tellLead(replyToLead, alert, lead, text)) writeFrom(rec, fact, was, { ...was, text, replied_at: new Date(now).toISOString() }, 'hold_replied');
+}
+
+// L475: a read-step cause ends when its file is gone or reads cleanly. Only sessions whose outbox was listed this pass
+// are looked at, and a file still being written is left, since neither says anything about the file. A first tell
+// still in the queue has no fact yet, so the queue is walked too (L347 m1).
+function clearReadHolds({ rec, alert, now, listed, held, unsettled }) {
+  const report = refusalReport({ rec, alert, now, lines: [] });
+  const facts = rec.list('fact');
+  for (const sessionId of listed) {
+    const holds = readHoldsOf(sessionId);
+    const told = facts.filter((f) => f.id.startsWith(holds) && (f.doc?.told_at != null || f.doc?.replied_at != null)).map((f) => f.id);
+    for (const id of new Set([...told, ...queuedMarks(rec, holds)])) {
+      if (held.has(id) || unsettled.has(id.slice(0, holds.length + 13))) continue;
+      clearCause(rec, id, () => {
+        const was = rec.read('fact', id)?.doc;
+        if (was) writeFrom(rec, id, was, { ...was, told_at: null, replied_at: null, cleared_at: new Date(now).toISOString() }, 'hold_cleared');
+      }, (line) => report(line, 'outbox-read-clear'));
+    }
+  }
 }
 
 // Each pass, before any file is looked at: every recorded hand-in left refused or interrupted, with its text, not

@@ -4,7 +4,8 @@
 // on is merged, is work the owner never agreed to. Every move into `ready` and the ready list call this one function, so the
 // two can't drift. It fails closed: anything missing or unreadable is "not ready", with the reason.
 //
-//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason }
+//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason, waiting? }
+//     waiting: the ordinary wait for a dependency to merge or a paused product to resume, which nobody has to act on
 //     card = { id, doc }; view = { get(entity, id) → { id, doc } | corrupt | null, list(entity), createdBy(entity, id) }
 //
 // A card may start when all of these hold:
@@ -78,7 +79,7 @@ function depsCheck(card, view) {
     if (d.corrupt) return { ok: false, reason: `dependency ${id} is unreadable` };
     // A dependency that will never merge (cancelled, no answer, failed) can't be waited out: the card waits on the owner.
     if (['cancelled', 'closed_no_answer', 'failed'].includes(d.doc.state)) return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
-    if (d.doc.state !== 'merged' && d.doc.state !== 'closed') return { ok: false, reason: `dependency ${id} is ${d.doc.state}, not merged` };
+    if (d.doc.state !== 'merged' && d.doc.state !== 'closed') return { ok: false, waiting: true, reason: `dependency ${id} is ${d.doc.state}, not merged` };
   }
   return { ok: true };
 }
@@ -88,7 +89,7 @@ function productCheck(card, view, rules, product) {
   const state = p && !p.corrupt && typeof p.doc?.state === 'string' ? p.doc.state : 'paused';
   const start = rules.get(`product_state_rules.${state}.start`, { product });
   if (typeof start !== 'string' || !start) return { ok: false, reason: `the rules say nothing about starting work in a ${state} product` };
-  if (start === 'none') return { ok: false, reason: `product ${card.doc.product} is ${state}${p ? '' : ' (no product record)'}; no work starts` };
+  if (start === 'none') return { ok: false, waiting: Boolean(p), reason: `product ${card.doc.product} is ${state}${p ? '' : ' (no product record)'}; no work starts` };
   return { ok: true };
 }
 

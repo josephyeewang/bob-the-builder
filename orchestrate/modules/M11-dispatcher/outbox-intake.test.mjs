@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
+import { recordLeadLaunch } from './lead-restart.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
-import { setup as setupRecord, outboxFile, runnerLaunch, runnerEndedRecord, seed, HEAD, CLEAN_CHECKLIST } from '../M9-record/fixtures.test-helper.mjs';
+import { PRODUCT, must, setup as setupRecord, outboxFile, product, runnerLaunch, runnerEndedRecord, seed, HEAD, CLEAN_CHECKLIST } from '../M9-record/fixtures.test-helper.mjs';
 import { NEVER_RAN, runnerEnded } from '../M9-record/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
@@ -613,4 +614,275 @@ test('L424: only a verdict waits for the ended record; a report from the same se
   writeFileSync(join(ob, 'report-C-1.md'), 'a note');
   const [r] = await intakePass({ rec: recWith(), sessions: [{ sessionId: 'R-2', role: 'reviewer', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
   assert.equal(r.applied, true, JSON.stringify(r));
+});
+
+// R-0b-170 (L460): a plan file through the real intake and the real Record.
+const DAY = 24 * 3_600_000;
+const planCard = (id, over = {}) => ({ id, wave: 1, tier: 2, module: 'store', brief: { goal: `the goal of ${id}`, done_when: 'tests pass', files: [`src/${id}.mjs`], not_in_scope: 'anything else' }, ...over });
+function planWorld() {
+  const E = setupRecord({ prefix: 'm11-intake-plan-' });
+  product(E);
+  const w = world();
+  const ob = mk(join(E.outRoot, 'lead', 'L-1'));
+  const told = [];
+  const owner = [];
+  const sessions = [{ sessionId: 'L-1', role: 'lead', outbox: ob, uid: UID }];
+  const run = ({ reply } = {}) => withAlerts(E.record, E.clock.t, (t) => { owner.push(typeof t === 'string' ? t : t.text); return true; },
+    (alert) => intakePass({ rec: E.record, sessions, ...w.ports, alert, now: E.clock.t, replyToLead: reply ?? (async (x) => { told.push(x); return { ok: true }; }) }));
+  const launch = (head = HEAD) => recordLeadLaunch({ rec: E.record, now: E.clock.t, alert: fakeAlert(), sessionId: 'L-1', head, product: PRODUCT });
+  const hand = (name, cards) => writeFileSync(join(ob, name), typeof cards === 'string' ? cards : JSON.stringify({ cards }));
+  return { E, rec: E.record, ob, ports: w.ports, sessions, told, owner, run, launch, hand };
+}
+
+test('R-0b-170: a plan that fails the plan check is refused, nothing is written, only the Lead is told, once', async () => {
+  for (const [text, why] of [['{"cards":', /it is not JSON/], [[planCard('C-1', { tier: undefined })], /tier must be 1 or 2/], [[planCard('C-1', { module: undefined })], /needs a module/], [[planCard('C-1', { wave: 0 })], /wave must be/]]) {
+    const p = planWorld();
+    must(p.launch());
+    p.hand('plan-a.json', text);
+    const [r] = await p.run();
+    assert.match(r.refused, why);
+    assert.equal(p.rec.read('card', 'C-1'), null);
+    assert.equal(p.told.length, 1);
+    assert.equal(p.told[0].lead, 'L-1');
+    assert.match(p.told[0].text, /Your plan plan-a\.json was not applied/);
+    assert.match(p.told[0].text, why);
+    assert.deepEqual(p.owner, [], 'the Lead fixes its own plan');
+    p.E.clock.t += DAY;
+    await p.run();
+    assert.equal(p.told.length, 1, 'told once');
+    assert.equal(p.rec.read('card', 'C-1'), null);
+  }
+});
+
+test('R-0b-170: a plan from a Lead with no launch record is held, the owner told once a day, and applied once a launch is there', async () => {
+  const p = planWorld();
+  p.hand('plan-a.json', [planCard('C-1')]);
+  const [r] = await p.run();
+  assert.match(r.waiting, /no launch record/);
+  assert.equal(p.owner.length, 1);
+  assert.match(p.owner[0], /Lead L-1 has no launch record, so its plan plan-a\.json/);
+  assert.equal(p.rec.read('card', 'C-1'), null);
+  p.E.clock.t += 60_000;
+  await p.run();
+  assert.equal(p.owner.length, 1, 'once a day');
+  p.E.clock.t += DAY;
+  await p.run();
+  assert.equal(p.owner.length, 2, 'told again the next day');
+  assert.deepEqual(p.told, []);
+  must(p.launch());
+  const [done] = await p.run();
+  assert.equal(done.applied, true, JSON.stringify(done));
+  assert.equal(p.rec.read('card', 'C-1').doc.main_commit, HEAD);
+  assert.equal(p.rec.read('card', 'C-1').doc.product, PRODUCT);
+  assert.match(p.told[0].text, /plan-a\.json was applied\. Created: C-1\./);
+});
+
+test('R-0b-170: the Lead reads what a plan created and updated, and which cards it left out', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1'), planCard('C-2')]);
+  await p.run();
+  p.hand('plan-b.json', [planCard('C-1', { tier: 1 }), planCard('C-3')]);
+  await p.run();
+  assert.equal(p.told.length, 2);
+  assert.equal(p.told[1].text, 'Your plan plan-b.json was applied. Created: C-3. Updated: C-1. Not in this plan and left as they were: C-2.');
+  assert.equal(p.rec.read('card', 'C-2').doc.state, 'draft');
+});
+
+test('R-0b-170: a plan the Record turns down reaches the Lead with the Record\'s reason', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
+  await p.run();
+  p.hand('plan-b.json', [planCard('C-1', { module: 'other' })]);
+  const [r] = await p.run();
+  assert.notEqual(r.applied, true);
+  assert.match(p.told[1].text, /plan-b\.json was not applied: card C-1 is in module store, and that can't change/);
+  assert.equal(p.rec.read('card', 'C-1').doc.module, 'store');
+});
+
+test('L473: a plan file or a roadmap file changing a card with its go is refused, and the Lead hears which card and why', async () => {
+  const p = planWorld();
+  p.launch();
+  const c = planCard('C-1');
+  p.hand('plan-a.json', [c]);
+  await p.run();
+  const cur = p.rec.read('card', 'C-1');
+  seed(p.E, 'card', 'C-1', { ...cur.doc, state: 'ready' });
+  p.told.length = 0;
+  p.hand('plan-b.json', [{ ...c, brief: { ...c.brief, goal: 'another goal' } }]);
+  await p.run();
+  assert.match(p.told[0].text, /plan-b\.json was not applied: card C-1 already has the owner's go and is ready to start, so its plan can't change/);
+  assert.equal(p.rec.read('card', 'C-1').doc.state, 'ready');
+  const rev = p.rec.read('card', 'C-1').rev;
+  p.hand('roadmap-c.md', `${JSON.stringify({ entity: 'card', id: 'C-1', expectRev: rev, fields: { files: ['src/other.mjs'] } })}\nnotes\n`);
+  await p.run();
+  assert.match(p.told[1].text, /roadmap-c\.md was not applied: card C-1 already has the owner's go and is ready to start, so its plan can't change/);
+  assert.deepEqual(p.rec.read('card', 'C-1').doc.files, cur.doc.files);
+});
+
+const OVER_A_DAY = 25 * 3600 * 1000;
+const passes = async (p, n = 3, opts) => { let last; for (let i = 0; i < n; i++) last = await p.run(opts); return last; };
+const badFile = (p, name = 'plan-z.json') => { symlinkSync(join(p.ob, 'nowhere'), join(p.ob, name)); return name; };
+
+test('L475: a file that fails the read step is told once, then once a day, and stays where it is', async () => {
+  const p = planWorld();
+  const name = badFile(p);
+  const last = await passes(p);
+  assert.equal(p.owner.length, 1, JSON.stringify(p.owner));
+  assert.match(p.owner[0], /plan-z\.json/);
+  assert.match(last.find((r) => r.name === name).refused, /following a link/, 'every pass still reports it');
+  assert.ok(lstatSync(join(p.ob, name)).isSymbolicLink(), 'the file is left alone');
+  await passes(p);
+  assert.equal(p.owner.length, 1);
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p);
+  assert.equal(p.owner.length, 2, 'told again a day later, once');
+});
+
+test('L475: a Lead file of a kind it can\'t hand in is told to the Lead once, then once a day, and stays where it is', async () => {
+  const p = planWorld();
+  p.hand('verdict-a.md', 'x');
+  await passes(p);
+  assert.equal(p.told.length, 1, JSON.stringify(p.told));
+  assert.match(p.told[0].text, /verdict-a\.md was not used/);
+  assert.deepEqual(p.owner, []);
+  assert.ok(existsSync(join(p.ob, 'verdict-a.md')));
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p);
+  assert.equal(p.told.length, 2);
+  rmSync(join(p.ob, 'verdict-a.md'));
+  await p.run();
+  p.hand('verdict-a.md', 'x');
+  await passes(p);
+  assert.equal(p.told.length, 3, 'gone, then back, is told at once');
+});
+
+test('L475: a Lead that can\'t be told means the owner reads it, once; if neither has it, the next pass asks again', async () => {
+  const p = planWorld();
+  p.hand('verdict-a.md', 'x');
+  await passes(p, 3, { reply: async () => ({ ok: false, reason: 'tab closed' }) });
+  assert.equal(p.owner.length, 1, JSON.stringify(p.owner));
+  assert.match(p.owner[0], /could not be told \(tab closed\).*verdict-a\.md/);
+
+  const q = planWorld();
+  q.hand('verdict-a.md', 'x');
+  const alert = fakeAlert({ answer: false });
+  let asked = 0;
+  for (let i = 0; i < 2; i++) await intakePass({ rec: q.rec, sessions: q.sessions, ...q.ports, alert, now: q.E.clock.t, replyToLead: async () => { asked += 1; return { ok: false, reason: 'tab closed' }; } });
+  assert.equal(asked, 2, 'nobody has it, so it is not marked told');
+});
+
+test('L475: each file has its own cause, in each session, and a new reason is a new tell', async () => {
+  const p = planWorld();
+  badFile(p, 'plan-y.json');
+  badFile(p, 'plan-z.json');
+  const other = mk(join(p.E.outRoot, 'lead', 'L-2'));
+  p.sessions.push({ sessionId: 'L-2', role: 'lead', outbox: other, uid: UID });
+  symlinkSync(join(other, 'nowhere'), join(other, 'plan-z.json'));
+  await passes(p);
+  assert.equal(p.owner.length, 3, JSON.stringify(p.owner));
+
+  const q = planWorld();
+  const looks = ['it failed one way', 'it failed another way'];
+  const pass = () => withAlerts(q.rec, q.E.clock.t, (x) => { q.owner.push(x); return true; }, (alert) => intakePass({ rec: q.rec, sessions: q.sessions, ...q.ports,
+    list: () => ['plan-z.json'], look: () => 'same', read: () => ({ ok: false, reason: `plan-z.json: ${looks[0]}` }), alert, now: q.E.clock.t, replyToLead: async () => ({ ok: true }) }));
+  await pass();
+  await pass();
+  looks.shift();
+  await pass();
+  assert.equal(q.owner.length, 2, JSON.stringify(q.owner));
+});
+
+test('L475: two files refused for the same reason are two tells, each naming its file', async () => {
+  const p = planWorld();
+  const pass = () => withAlerts(p.rec, p.E.clock.t, (x) => { p.owner.push(x); return true; }, (alert) => intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports,
+    list: () => ['plan-y.json', 'plan-z.json'], look: () => 'same', read: () => ({ ok: false, reason: 'it is too large' }), alert, now: p.E.clock.t, replyToLead: async () => ({ ok: true }) }));
+  await pass();
+  await pass();
+  assert.equal(p.owner.length, 2, JSON.stringify(p.owner));
+  assert.match(p.owner.join('\n'), /plan-y\.json[^]*plan-z\.json/);
+});
+
+test('L475: a first tell still waiting to go out is dropped when its file goes', async () => {
+  const p = planWorld();
+  const name = badFile(p);
+  await withAlerts(p.rec, p.E.clock.t, () => false, (alert) => intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert, now: p.E.clock.t, replyToLead: async () => ({ ok: true }) }));
+  assert.deepEqual(p.owner, []);
+  rmSync(join(p.ob, name));
+  await passes(p);
+  assert.deepEqual(p.owner, [], 'nothing is told about a file that is gone');
+});
+
+test('L475: the cause ends when the file is gone or reads cleanly, so the same trouble later is told at once', async () => {
+  const p = planWorld();
+  must(p.launch());
+  const name = badFile(p);
+  await passes(p);
+  assert.equal(p.owner.length, 1);
+  rmSync(join(p.ob, name));
+  await p.run();
+  assert.equal(p.owner.length, 1, 'clearing tells nothing');
+  badFile(p);
+  await passes(p);
+  assert.equal(p.owner.length, 2, 'gone, then back');
+
+  rmSync(join(p.ob, name));
+  p.hand(name, [planCard('C-1')]);
+  await passes(p);
+  assert.equal(p.owner.length, 2, 'the same name now reads cleanly');
+  assert.equal(p.rec.read('card', 'C-1').doc.state, 'draft');
+  rmSync(join(p.ob, name));
+  badFile(p);
+  await p.run();
+  assert.equal(p.owner.length, 3, 'read cleanly, then bad again');
+});
+
+test('L475: nothing says a file is fine when its outbox could not be listed or it is still being written', async () => {
+  const p = planWorld();
+  badFile(p);
+  await passes(p);
+  const list = () => { throw new Error('EACCES'); };
+  let flips = 0;
+  const look = () => { flips += 1; return flips; };
+  await withAlerts(p.rec, p.E.clock.t, (x) => { p.owner.push(x); return true; }, async (alert) => {
+    const go = (extra) => intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert, now: p.E.clock.t, replyToLead: async () => ({ ok: true }), ...extra });
+    await go({ list });
+    await go({ look });
+  });
+  await passes(p);
+  assert.equal(p.owner.length, 1, JSON.stringify(p.owner));
+});
+
+test('L474: a refused roadmap file is told to the Lead once, however many passes see it', async () => {
+  const p = planWorld();
+  p.launch();
+  const c = planCard('C-1');
+  p.hand('plan-a.json', [c]);
+  await p.run();
+  const cur = p.rec.read('card', 'C-1');
+  seed(p.E, 'card', 'C-1', { ...cur.doc, state: 'ready' });
+  p.told.length = 0;
+  p.hand('roadmap-c.md', `${JSON.stringify({ entity: 'card', id: 'C-1', expectRev: p.rec.read('card', 'C-1').rev, fields: { files: ['src/other.mjs'] } })}\nnotes\n`);
+  const passes = [];
+  for (let n = 0; n < 3; n++) passes.push((await p.run()).find((r) => r.name === 'roadmap-c.md'));
+  assert.match(passes[0].refused, /already has the owner's go/);
+  assert.deepEqual(passes.slice(1).map((r) => r?.already), [true, true], 'the same file is looked at again on the later passes');
+  assert.equal(p.told.length, 1, JSON.stringify(p.told));
+  assert.match(p.told[0].text, /roadmap-c\.md was not applied/);
+});
+
+test('R-0b-170: a Lead that can\'t be told means the owner reads it instead', async () => {
+  for (const reply of [async () => ({ ok: false, reason: 'the folder is gone' }), async () => { throw new Error('the folder is gone'); }, async () => undefined]) {
+    const p = planWorld();
+    must(p.launch());
+    p.hand('plan-a.json', [planCard('C-1')]);
+    await p.run({ reply });
+    assert.equal(p.rec.read('card', 'C-1').doc.state, 'draft', 'the plan still counts');
+    assert.equal(p.owner.length, 1);
+    assert.match(p.owner[0], /the Lead L-1 could not be told .*plan-a\.json was applied/);
+    p.hand('plan-b.json', '{"cards":');
+    await p.run({ reply });
+    assert.match(p.owner[1], /the Lead L-1 could not be told .*plan-b\.json was not applied/);
+  }
 });

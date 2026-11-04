@@ -72,7 +72,16 @@ const filesLine = (a) => {
   return Array.isArray(a?.files) && a.files.length ? `added files: ${listed(a.files)}` : null;
 };
 /** The outbox `alert` handed to one product's approvals pass: its alerts, as text, into the step's own outbox. */
-export function approvalsAlerts(alert, product) { return (a) => alert(approvalsAlertText(product, a)); }
+// A refused ask write comes back every pass while its cause stands (a close still due, a run-out, a push), and the
+// queue only merges copies not yet sent, so each pass would be one more message. Told once per product and ask, then
+// daily, whichever of M2's writers it came from (L486). The other alerts have their own marks or fire once.
+export function approvalsAlerts(alert, product, rec = null, now = null) {
+  return (a) => {
+    const text = approvalsAlertText(product, a);
+    if (rec === null || a?.type !== 'approvals_write_refused') return alert(text);
+    try { return holdAlert({ rec, cause: `approvals-write-${product}-${a.ask}`, text, alert, now }) !== false; } catch { return alert(text); }
+  };
+}
 export function approvalsAlertText(product, a) {
   if (typeof a === 'string') return `Approvals, ${plain(product, 80)}: ${plain(a, 400)}`;
   if (typeof a?.text === 'string') return plain(a.text, 400);
@@ -110,7 +119,7 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
     let timer;
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${productMs} ms`)), productMs); });
-      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: approvalsAlerts(alert, product) };
+      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: approvalsAlerts(alert, product, rec, now) };
       const r = await Promise.race([Promise.resolve().then(() => pass(ctx)), late]);
       results.push({ product, ok: r?.ok === true, ...(r?.ok === true ? {} : { reason: r?.reason }), events: Array.isArray(r?.events) ? r.events.length : 0 });
     } catch (e) {
@@ -295,7 +304,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     const out = [];
     for (const l of p.leads()) {
       const inFlight = leadInFlight({ rec, sessionId: l.lead.sessionId, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
-      out.push([l.lead.sessionId, await leadRestartStep({ rec, rules, now, lead: l.lead, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, alert })]);
+      out.push([l.lead.sessionId, await leadRestartStep({ rec, rules, now, lead: l.lead, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
     }
     return out;
   });

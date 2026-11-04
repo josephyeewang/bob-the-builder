@@ -89,6 +89,7 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
       if (!spec.roles.includes(role)) { assert.equal(r.ok, false, where); assert.match(r.reason, /is not listed for/, where); continue; }
       if (spec.record === 'none') { assert.deepEqual(r, notARecord(kind), where); assert.ok(!env.record.diary().some((e) => e.actor === `${role}:${sid}`), where); continue; }
       if (!spec.entity) { assert.equal(r.ok, false, where); assert.match(r.reason, /no record rule yet/, where); continue; }
+      if (kind === 'plan-') { assert.equal(r.ok, false, where); assert.match(r.reason, /not the one the plan check read/, where); continue; }
       if (spec.mode === 'create') {
         assert.equal(r.ok, true, where);
         const doc = env.record.list(spec.entity).find((d) => d.doc.session_id === sid);
@@ -234,7 +235,7 @@ test('the Lead: only ordinary and lead_daily_card cards; plan inputs change only
   must(roadmap(env, { id: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields: { files: ['src/b.mjs'] } }), 'draft edit');
   readyCard(env, 'C-2');
   const r = roadmap(env, { id: 'C-2', expectRev: env.record.read('card', 'C-2').rev, fields: { files: ['src/other.mjs'] } });
-  refusedCleanly(env, r, /may not change files/);
+  refusedCleanly(env, r, /C-2 already has the owner's go and is ready to start, so its plan can't change/);
   // A Lead can't move its card past draft by naming a state.
   const r2 = roadmap(env, { id: 'C-1', expectRev: env.record.read('card', 'C-1').rev, to_state: 'ready' });
   refusedCleanly(env, r2, /lead may not move card draft → ready/);

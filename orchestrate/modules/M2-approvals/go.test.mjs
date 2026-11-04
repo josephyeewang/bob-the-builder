@@ -169,11 +169,12 @@ test('at merge: a change M10 computes as Tier 1 is refused on a Tier-2 go', asyn
 
 test('Tier 1: the go is a decision pull request; a listed file changed on main is re-checked; an unchanged plan needs no new go', async () => {
   const w = world();
-  const plan = { tier: 1, plan_sha256: 'e'.repeat(64), main_commit: w.M0, files: ['src/a.mjs'] };
+  const plan = { tier: 1, plan_sha256: 'from the plan file', main_commit: w.M0, files: ['src/a.mjs'] };
   const rows = card(w, 'T', plan, { 'R-1': row('R-1', { tier: 1 }) });
+  const sha = w.t.record.read('card', 'T').doc.plan_sha256;
   const fpT = goFingerprint(w.t.ctx, 'T');
   assert.equal(fpT.ok, true, fpT.reason);
-  const pass = { pass: true, material: 0, card: 'T', fingerprint: fpT.fingerprint, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' };
+  const pass = { pass: true, material: 0, card: 'T', fingerprint: fpT.fingerprint, plan_sha256: sha, reviewer_session: 'S-review', author_session: 'S-lead' };
   // R-0b-138: no go is asked before a fresh plan reviewer passed this plan with 0 Material.
   for (const [bad, why] of [[undefined, /fresh plan reviewer's pass/], [{ ...pass, material: 1 }, /0 Material/], [{ ...pass, pass: false }, /0 Material/],
     [{ ...pass, plan_sha256: 'd'.repeat(64) }, /changed after review/], [{ ...pass, fingerprint: 'd'.repeat(64) }, /changed after review/],
@@ -203,7 +204,7 @@ test('Tier 1: the go is a decision pull request; a listed file changed on main i
   assert.equal(askStore(w.t.record).ask(r.id).doc.kind, 'go_t1');
   const { pr } = await openDecision(w.t.ctx, r.id);
   const file = JSON.parse(w.g.repo.files(w.g.pulls.get(pr).head).get('decisions/go-T.json').text);
-  assert.equal(file.plan.plan_sha256, 'e'.repeat(64), 'the committed file holds the plan the fingerprint binds');
+  assert.equal(file.plan.plan_sha256, sha, 'the committed file holds the plan the fingerprint binds');
   w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: w.t.clock.t + MIN });
   assert.equal((await readDecision(w.t.ctx, r.id)).counted, true);
   assert.equal(recordGo(w.t.ctx, r.id).ok, true);
@@ -213,11 +214,11 @@ test('Tier 1: the go is a decision pull request; a listed file changed on main i
   assert.deepEqual((await tier1Changed(w.t.ctx, { cardId: 'T', view: w.view, mainTip: M1 })).changed, [], 'an unlisted file needs no re-check');
   const M2 = w.g.repo.commit([M1], { 'src/a.mjs': 'two' }, { from: M1 });
   assert.deepEqual((await tier1Changed(w.t.ctx, { cardId: 'T', view: w.view, mainTip: M2 })).changed, ['src/a.mjs']);
-  assert.deepEqual(recordRecheck(w.t.ctx, { cardId: 'T', mainCommit: M2, planSha256: 'e'.repeat(64), files: ['src/a.mjs'] }), { ok: true, newGo: false });
+  assert.deepEqual(recordRecheck(w.t.ctx, { cardId: 'T', mainCommit: M2, planSha256: sha, files: ['src/a.mjs'] }), { ok: true, newGo: false });
   assert.deepEqual((await tier1Changed(w.t.ctx, { cardId: 'T', view: w.view, mainTip: M2 })).changed, [], 'compared from the newest re-check');
   assert.equal(w.t.record.read('go', 'go-T').doc.plan_fingerprint, askStore(w.t.record).ask(r.id).doc.fingerprint, 'the go keeps its fingerprint');
   assert.deepEqual(recordRecheck(w.t.ctx, { cardId: 'T', mainCommit: M2, planSha256: 'd'.repeat(64), files: ['src/a.mjs'] }), { ok: true, newGo: true });
-  assert.deepEqual(recordRecheck(w.t.ctx, { cardId: 'T', mainCommit: M2, planSha256: 'e'.repeat(64), files: ['src/a.mjs', 'src/b.mjs'] }), { ok: true, newGo: true });
+  assert.deepEqual(recordRecheck(w.t.ctx, { cardId: 'T', mainCommit: M2, planSha256: sha, files: ['src/a.mjs', 'src/b.mjs'] }), { ok: true, newGo: true });
 });
 
 test('a go is asked once per plan', async () => {

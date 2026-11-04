@@ -19,9 +19,10 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
 import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
@@ -427,9 +428,27 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   }
 
   // ---- the outbox (R-0b-20, M-3, R2-M8 … R2-M10, R3-M4) ----
+  // A Lead's plan (R-0b-170, L460): every card checked, then all of them in one diary line, as the Lead, so the plan's
+  // author is a named session. Only the bytes M11's intake checked are applied (its plan check is not repeated here).
+  function applyPlan(tx, tag, f, actor) {
+    if (tag.checked_sha256 !== f.sha256) return no('this plan file is not the one the plan check read');
+    const launch = leadLaunchHead(tx, tag.sessionId);
+    if (!launch || tx.current('launch', launch.id)?.tampered) return no(`Lead session ${tag.sessionId} has no launch record naming the main commit it started on`);
+    const p = planCards({ text: f.body, sha256: f.sha256, mainCommit: launch.head, product, read: (id) => tx.current('card', id), cards: tx.list('card') });
+    if (!p.ok) return no(p.reason);
+    const said = { created: p.created, updated: p.updated, dropped: p.dropped };
+    if (!p.writes.length) return { ok: true, ...said };
+    const checked = p.writes.map((w) => check(tx, { entity: 'card', id: w.id, expectRev: w.expectRev, doc: w.doc }, actor));
+    const bad = checked.find((c) => !c.ok);
+    if (bad) return bad;
+    const r = tx.commit(checked.map(({ write }) => write), meta(actor, 'plan', { file: basename(f.realpath), sha256: f.sha256 }));
+    return { ok: true, rev: r.rev, seq: r.seq, ...said };
+  }
+
   function applyParsed(tx, tag, f) {
     const actor = `${tag.role}:${tag.sessionId}`;
     const entity = f.spec.entity;
+    if (f.kind === 'plan-') return applyPlan(tx, tag, f, actor);
     if (f.spec.mode === 'create') {
       // Created once per file content, even if the "seen" note was lost in a crash after the write.
       if (tx.list(entity).some((e) => e.doc.source_key === f.key)) return { ok: true, skipped: true };
@@ -471,7 +490,11 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (f.kind === 'roadmap-') {
       if (typeof h.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(h.id) || h.id.length > 200) return no('bad card id');
       if (!Number.isInteger(h.expectRev) || h.expectRev < 0) return no('the header needs expectRev');
+      // These two are worked out from the plan file and the Lead's launch, never typed (L460): only a plan- file sets them.
+      const typed = ['plan_sha256', 'main_commit'].filter((k) => Object.hasOwn(fields, k));
+      if (typed.length) return no(`a roadmap file may not set ${typed.join(' or ')}; hand in a plan file`);
       const cur = tx.lookup('card', h.id);
+      if (cur?.doc && hasItsGo(cur) && PLAN_INPUTS.some((k) => Object.hasOwn(fields, k) && !same(fields[k], cur.doc[k]))) return no(PLAN_FROZEN(h.id));
       const base = h.expectRev === 0 ? { state: 'draft' } : (cur?.doc ?? {});
       const doc = { ...base, ...fields };
       if (h.to_state !== undefined) doc.state = h.to_state;
