@@ -23,10 +23,17 @@
 // Push requests are facts `push-request-<key>` for the Front Door to deliver (join item with lane 2).
 
 import { createHash } from 'node:crypto';
+import { lineIs, wasTold } from './alerts.mjs';
+import { TROUBLE_SOURCES, wasSaved } from '../M12-sensors/facts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
+const NOT_SAVED = 'alert-not-saved';
+const NOT_TOLD = 'alert-not-told';
+const LOGIN_UNKNOWN = 'robot-login-unknown';
+/** The pinned issue's marker: found again by it when the Record never kept its number. */
+export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 // The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -37,10 +44,17 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const t = now();
   const key = (kind) => `${product}|heartbeat|${kind}`;
   const red = []; const lines = [];
+  // A write the Record refused can't go in an alert (alerts are what it refused), so the pinned issue shows it red (L389).
+  const notSaved = (why) => { if (!red.includes(NOT_SAVED)) { red.push(NOT_SAVED); lines.push(`RED   alerts: ${why}`); } };
+  // An alert GitHub lost, so a notice left owed pass after pass shows here on each of them (L402).
+  const shown = (answer) => {
+    if (answer === false && !red.includes(NOT_TOLD)) { red.push(NOT_TOLD); lines.push(`RED   alerts: ${gh.lastAnswer ?? 'GitHub lost an alert'}; the next pass tries again`); }
+    return answer;
+  };
   const set = async (kind, isRed, line, body) => {
     lines.push(`${isRed ? 'RED  ' : 'ok   '} ${line}`);
-    if (isRed) { red.push(kind); await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status: `red:${kind}` }); }
-    else await alerts.clear({ key: key(kind), note: `${kind} is green again.` });
+    if (isRed) { red.push(kind); shown(await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status: `red:${kind}` })); }
+    else shown(await alerts.clear({ key: key(kind), note: `${kind} is green again.` }));
   };
 
   const d = await probe(probes.dispatcherLastGood);
@@ -107,8 +121,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
         text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
-      told = await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
-        body: `The Mini is now signed in as ${acct.login} (was ${prev}) and no switch was planned.` }) !== false;
+      told = wasTold(shown(await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
+        body: `The Mini is now signed in as ${acct.login} (was ${prev}) and no switch was planned.` })));
     }
   }
   if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login, switches: switched ? nextSwitches : switches });
@@ -119,24 +133,42 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     const step = [...USAGE_STEPS].reverse().find((s) => usage.pct >= s);
     lines.push(`${step ? 'warn ' : 'ok   '} usage: ${Math.round(usage.pct)} % of the ${usage.window} window`);
     const ukey = key(`usage-${usage.window}`);
-    if (step) await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.`, status: `step:${step}` });
-    else await alerts.clear({ key: ukey, note: 'A new usage window has started.' });
+    if (step) shown(await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.`, status: `step:${step}` }));
+    else shown(await alerts.clear({ key: ukey, note: 'A new usage window has started.' }));
   } else {
     lines.push('ok    usage: unknown');
   }
+
+  const trouble = alerts.cacheTrouble();
+  if (trouble) notSaved(`the Record refused to save where an alert is: ${trouble}`);
+  shown(await alerts.reportTrouble(product, TROUBLE_SOURCES.HEARTBEAT));
+  // Asked for first: a client learns the login on its first call, and an all-green pass may not have made one yet.
+  await gh.ready?.();
+  if (gh.loginTrouble) { red.push(LOGIN_UNKNOWN); lines.push(`RED   alerts: ${gh.loginTrouble}`); }
 
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
     front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,
     login_told: signedIn && told ? acct.login : (toldBefore ?? last), red });
 
-  const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
+  const render = () => `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
+  const pinned = () => `${render()}${heartbeatMarker(product)}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, body);
+  if (ISSUE(known) && (await gh.read(known))?.open) await gh.edit(known, pinned());
   else {
+    // The issue is found again by its marker, so a number the Record refused to keep never means a new issue each pass
+    // (L393). A list GitHub refused opens nothing this pass: the next one looks again.
+    const found = await gh.findOpen(lineIs(heartbeatMarker(product)));
+    if (ISSUE(found)) await gh.edit(found, pinned());
     // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
-    const issue = await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] });
-    if (ISSUE(issue)) writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+    const issue = found === false || ISSUE(found) ? found : await gh.open({ title: 'Orchestrate heartbeat (pinned)', body: pinned(), assignee: owner, labels: ['orchestrate-heartbeat'] });
+    if (ISSUE(issue)) {
+      const put = writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+      if (!wasSaved(put)) {
+        notSaved(`the Record refused to save the pinned issue's number: ${String(put?.reason ?? 'no reason given').slice(0, 200)}`);
+        await gh.edit(issue, pinned());
+      }
+    }
   }
-  return { red, body };
+  return { red, body: render() };
 }

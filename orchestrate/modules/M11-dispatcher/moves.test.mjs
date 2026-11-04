@@ -30,3 +30,12 @@ test('audit MIN-20 (V1): a wait missing who or what is refused, and the card is 
   assert.deepEqual([w.who, w.what, w.since, w.next_check, w.resume, w.return_to], ['joe', 'x', iso(T0), iso(T0 + MIN), 'retry', 'ready']);
   assert.match(waitOn(rec, 'C-1', { who: 'lead', what: 'x', now: T0 }).reason, /wait.who must be one of/);
 });
+
+test('L329: ageMs reads the Record\'s time by pastTime: unreadable or more than 60 s ahead is an unknown age (Infinity)', () => {
+  const at = (t) => ({ meta: () => ({ ts: t, stateSince: t }) });
+  assert.equal(ageMs(at('not a time'), 'card', 'C-1', T0), Infinity);
+  assert.equal(ageMs(at(iso(T0 + 60 * MIN)), 'card', 'C-1', T0), Infinity, 'an hour ahead');
+  assert.equal(ageMs(at(iso(T0 + 60 * MIN)), 'card', 'C-1', T0, { since: 'write' }), Infinity, 'an hour ahead, by the last write');
+  assert.equal(ageMs(at(iso(T0 + 60_000)), 'card', 'C-1', T0), -60_000, 'clock skew up to 60 s is read');
+  assert.equal(ageMs(at(iso(T0 - MIN)), 'card', 'C-1', T0), MIN);
+});

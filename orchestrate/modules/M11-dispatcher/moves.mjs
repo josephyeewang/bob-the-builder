@@ -5,6 +5,7 @@
 // (rail A5, WAIT_FIELDS; M9 writer checkWait).
 
 import { WAIT_FIELDS, WAIT_WHO } from '../../shared/record.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -47,13 +48,14 @@ export function note(rec, id, text, { now }) {
 
 /**
  * How long the entry has been as it is, by the Record's clock: `since: 'state'` (default) from the write that put it
- * in its state, `since: 'write'` from its last write. Unknown (absent, or a Record that can't say) is Infinity, so a
- * limit that only alerts or asks fires rather than waiting forever.
+ * in its state, `since: 'write'` from its last write. Unknown (absent, unreadable, more than 60 s in the future by
+ * pastTime's rule, or a Record that can't say) is Infinity, so a limit that only alerts or asks fires rather than
+ * waiting forever (L329: a future time gave a negative age, and the limit never fired).
  */
 export const ageMs = (rec, entity, id, now, { since = 'state' } = {}) => {
   const m = rec.meta?.(entity, id);
-  const t = Date.parse((since === 'write' ? m?.ts : m?.stateSince) ?? '');
-  return Number.isFinite(t) ? now - t : Infinity;
+  const t = pastTime(since === 'write' ? m?.ts : m?.stateSince, now);
+  return t === null ? Infinity : now - t;
 };
 
 // The way a cause is marked told is `tellThen` in alerts.mjs (L47).
