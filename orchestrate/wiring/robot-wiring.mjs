@@ -29,7 +29,7 @@
 //   keyDir         the robot key folder (setup: orchestrate's, 0700). The job starts only when this process's user owns it.
 
 import { lstatSync } from 'node:fs';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, recordAndRules, refusing } from './dispatcher-wiring.mjs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
@@ -38,7 +38,8 @@ import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir']);
+// approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), so the robot config refuses it.
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir'), 'keyDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir']);
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
@@ -50,11 +51,7 @@ const MAX_IDEAS = 100;
 /** Refuses unless this process runs as the Record's owner AND owns the robot key folder, private to it. */
 export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync }) {
   if (uid !== ownerUid) throw new Error(`the robot job runs only as the Record's owner (uid ${ownerUid}), not uid ${uid}`);
-  let st;
-  try { st = lstat(keyDir); } catch (e) { throw new Error(`the robot key folder ${keyDir} can't be read (${e?.code ?? e})`); }
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the robot key folder ${keyDir} is not a plain folder`);
-  if (st.uid !== uid) throw new Error(`the robot key folder ${keyDir} belongs to uid ${st.uid}, not to this job's uid ${uid}`);
-  if (st.mode & 0o077) throw new Error(`the robot key folder ${keyDir} can be read by others (mode ${(st.mode & 0o777).toString(8)}); it must be 700`);
+  privateFolder({ path: keyDir, uid, what: 'the robot key folder', lstat });
 }
 
 /**

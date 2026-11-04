@@ -70,7 +70,7 @@ function retellReconciles(rec, { alert, now }) {
   return out;
 }
 
-const fresh = (rec, prNumber, mergeId) => prReadingAfter(rec, prNumber, mergeId);
+const fresh = (rec, prNumber, mergeId, now) => prReadingAfter(rec, prNumber, mergeId, now);
 
 // The "no fresh reading" wait ended (L342): a queued copy is dropped and the mark's told_at reset, so the next stretch
 // is told at once. The queued copy goes first (L341), so a copy sent late can't put the mark back after the reset.
@@ -92,7 +92,7 @@ function clearUnreads(rec, now) {
   for (const id of new Set([...told, ...queuedMarks(rec, UNREAD_FACT(''))])) {
     const mergeId = id.slice(UNREAD_FACT('').length);
     const m = rec.read('merge', mergeId)?.doc;
-    if (m?.state === 'merging' && !fresh(rec, m.pr, mergeId)) continue;
+    if (m?.state === 'merging' && !fresh(rec, m.pr, mergeId, now)) continue;
     const refused = clearUnread(rec, mergeId, now);
     if (refused) out.push([mergeId, refused]);
   }
@@ -115,7 +115,9 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  * is asked for, and the pass ends with that error once the other limits have run, so the tick tells Joe. Returns the
  * list of moves made, for the diary and the tests.
  */
-export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+// `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
+// refuses a since more than 60 s off its clock). Left out, it is `now`.
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -168,7 +170,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now, alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
+      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now: Math.max(now, clock()), kind: 'no_reviewer_ask', alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
@@ -204,9 +206,9 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
     if (doc.state === 'checking') {
       const lim = limOf(doc.card, 'checkingMaxMin');
       if (lim.none) { done.push([id, lim.none]); continue; }
-      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now, alert }));
+      if (ageMs(rec, 'merge', id, now) >= lim.ms) done.push(...settled(rec, id, settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { reason: 'timeout' }), { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'merging' && !gateAlive()) {
-      const pr = fresh(rec, doc.pr, id);
+      const pr = fresh(rec, doc.pr, id, now);
       if (!pr) {
         // No reading since the merge's last write, so the outcome is unknown and the merge stays merging (never refused
         // on no word). Past the merging limit, Joe is told (L89), then again each day while it stays so (L342): the
@@ -244,10 +246,10 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       }
       const openTooLong = !final && tooLongOpen(rec, id, now, openMs);
       if (!final && !openTooLong) { done.push([id, 'merge outcome not known yet: the PR is still open']); continue; }
-      const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong });
-      // A notice only: the card goes back to be merged again whatever the answer; a lost one is in the list (L130 m3).
-      if (openTooLong && r.ok && r.outcome === 'refused' && alert(`merge ${id}: the Merge Gate stopped mid-merge and PR ${doc.pr} is still open after ${Math.round(openMs / 60_000)} min; recorded as interrupted, and the card goes back to be merged again`) === false) done.push([id, 'not told: the alert could not be queued']);
-      done.push(...settled(rec, id, r, { now, alert }));
+      // The refusal carries its note, and M6's step 3b tells it until it is delivered (L357): one way of telling, whoever settled.
+      const note = openTooLong ? { interrupted_note: `pull request #${doc.pr} is still open after ${Math.round(openMs / 60_000)} min, with no merge; recorded as interrupted, and the card goes back to be merged again`, interrupted_told_at: null } : {};
+      const r = settleMerge({ record: rec, alert: textAlerts(alert), now }, id, { pr, reason: 'interrupted', openTooLong, fields: note });
+      done.push(...settled(rec, id, r, { now: Math.max(now, clock()), alert }));
     } else if (doc.state === 'refused' && !(doc.reasons ?? []).includes(MERGED_OUTSIDE) && !rec.read('fact', RECONCILED_FACT(id)) && !landedElsewhere(rec, id, doc)) {
       // A refused merge whose PR GitHub later shows merged, by a reading after the refusal. An interrupted one goes to
       // M6's reconcile, which records it merged when it was merged at the judged head (L85 M-1 b). Any other refusal, or
@@ -256,7 +258,7 @@ export async function timeLimits({ rec, rules, now, b, running = [], gateAlive, 
       // merged: that merge is the PR's record, so this one is neither reconciled nor told (the PR is merged once).
       // MERGED_OUTSIDE_UNTOLD was written on a merged answer whose alert was not taken (L130 M6): it needs no newer reading.
       const untold = (doc.reasons ?? []).includes(MERGED_OUTSIDE_UNTOLD);
-      const pr = untold ? { merged: true } : fresh(rec, doc.pr, id);
+      const pr = untold ? { merged: true } : fresh(rec, doc.pr, id, now);
       if (pr?.merged === true) {
         let text = untold
           ? `merge ${id}: PR ${doc.pr} merged outside the gate, at a head the gate did not judge; check the card and its audit`

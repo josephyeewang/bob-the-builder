@@ -194,6 +194,7 @@ export const ALLOWED = Object.freeze({
   'modules/M12-sensors/loop.mjs': 1, // R-0b-169: the Sensors job loads the wiring module its config names, as main.mjs does
   'wiring/robot-main.mjs': 1, // the robot job loads the wiring its config names, as main.mjs does (L256; checked by the L253 reader)
   'modules/M11-dispatcher/tick.test.mjs': 1,
+  'modules/M11-dispatcher/stale-now.test.mjs': 1, // #166: loads the wiring module by its computed path, as tick.test.mjs does (L332 m1)
   'modules/M4-workshop/git/refusal-reasons.test.mjs': 1,
   'modules/M4-workshop/hooks/attacks.test.mjs': 1,
   'setup/install.test.mjs': 1, // #81: the stand-in updater's runner text; `script` is the install script the test copies and runs in a child (L160 MAT-1, lead's and lane 1's OK)

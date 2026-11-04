@@ -64,7 +64,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 40)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
@@ -149,7 +149,7 @@ test('L85 M-1 (a): open, then merged: it waits while the PR is open, then ends m
   assert.equal(rec.read('card', 'C-1').doc.merge_commit, MC);
 });
 
-test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the merging write: refused-interrupted, Joe told', async () => {
+test('L85 M-1 (a), L357: still open past timeouts.merging_open_max_min after the merging write: refused-interrupted, with the note M6 tells', async () => {
   const { rec } = gone();
   reading(rec, 14, { state: 'open', merged: false });
   await pass(rec, 14.5, dead);
@@ -158,8 +158,9 @@ test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the mergi
   const { alerts } = await pass(rec, 15.5, dead);
   assert.deepEqual([rec.read('merge', 'M-1').doc.state, rec.read('merge', 'M-1').doc.reasons], ['refused', ['interrupted']]);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
-  assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 is still open after 15 min/);
+  assert.deepEqual(alerts, [], 'one way of telling: M6 step 3b sends it');
+  assert.match(rec.read('merge', 'M-1').doc.interrupted_note, /pull request #7 is still open after 15 min, with no merge; recorded as interrupted/);
+  assert.equal(rec.read('merge', 'M-1').doc.interrupted_told_at, null);
   // a reading with no state is no final answer either
   const u = gone();
   reading(u.rec, 1, { merged: false });
@@ -855,6 +856,17 @@ test('L347 m5 (L341): clearUnread drops the queued copy before it resets the mar
   assert.ok(body.indexOf('dropCause(') < body.indexOf('rec.write('), 'the drop comes first');
 });
 
+// L353: M11 reads with the clock, so a reading stamped in the future is no reading: the merge is not settled on it,
+// and the wait on a real one is told past the limit.
+test('L353: a reading stamped far ahead counts as no reading: still merging, told past the limit', async () => {
+  const { rec } = gone();
+  reading(rec, 5, { state: 'closed', merged: true, merge_commit_sha: MC, observed_at: at(365 * 24 * 60) });
+  const p = await pass(rec, 20, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never settled on it');
+  assert.equal(p.alerts.length, 1);
+  assert.match(p.alerts[0], /no fresh reading for 20 min/);
+});
+
 test('L347 m3: a reading that says open and merged at once is no reading: the merge stays merging', async () => {
   const { rec } = gone();
   reading(rec, 1, { state: 'open', merged: true, merge_commit_sha: MC });
@@ -876,4 +888,18 @@ test('L347 m2: a refused drop of the queued copy is listed in the moves, and the
   const noDrop = { ...rec, base: rec.base, write: (w) => (w.kind === 'alert_cause_cleared' ? { ok: false, reason: 'refused for the test' } : rec.write(w)) };
   const r = await pass(noDrop, 22, dead);
   assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /its queued alert could not be dropped/.test(why)), JSON.stringify(r.moves));
+});
+
+test('L332 m5: a merge refused twice is put on the owner at the time after the reviewer checks, not the step\'s start', async () => {
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
+  await pass(rec, 31, { hasReviewer: () => true });
+  change(rec, 'card', 'C-1', { state: 'merging' }); // the gate takes it again
+  // Each reviewer check takes 80 s on the Record's clock, before the merges are settled.
+  let t = T0 + 71 * MIN;
+  setClock(rec, t);
+  const alerts = [];
+  await withAlerts(rec, t, (x) => { alerts.push(x); return true; }, (alert) => timeLimits({ rec, rules: R, now: T0 + 71 * MIN, clock: () => t, b: GREEN, alert,
+    gateAlive: () => true, requestReview: () => ({ ok: true }), hasReviewer: async () => { t += 80_000; setClock(rec, t); return true; } }));
+  const c = rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait?.who, c.wait?.since], ['waiting', 'joe', iso(t)], alerts.join(' | '));
 });
