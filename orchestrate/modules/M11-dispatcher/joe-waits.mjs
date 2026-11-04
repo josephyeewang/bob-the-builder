@@ -10,7 +10,8 @@
 // wanted the wait sees the card again next pass. A wait that could not be written leaves a tell no wait matches, which
 // retellWaits ignores. A wait written but not yet copied onto its tell (that write failed) is matched by the Record's
 // own window: the Record takes a wait only when its since is within 60 s of the Record's clock, so a joe wait whose
-// since is within 60 s of the tell's asked time is the wait it asked for; retellWaits copies it on, then tells.
+// since is within 60 s of the tell's asked time is the wait it asked for; retellWaits copies it on, then tells, and
+// tells with the refusal in the text if the copy is refused again.
 // A card that already waits on Joe for the same `what` keeps its stored since (L296, M9 guard.mjs keptSince), so the
 // tell's asked time is that kept since, not now (audit #153 m1): the window then matches it, and the new tell is sent.
 
@@ -32,7 +33,7 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   const since = (card?.state === 'waiting' ? keptSince({ wait: { who: 'joe', what: wait.what }, kept: card.wait, nowMs: now }) : null) ?? iso(now);
   const cur = rec.read('fact', WAIT_TELL_FACT(id));
   const req = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(id), expectRev: cur?.rev ?? 0, doc: { since, text }, kind: 'wait_tell' });
-  if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}` };
+  if (!req.ok) return { ok: false, reason: `the tell could not be recorded: ${req.reason}`, ...(req.watched ? { watched: req.watched } : {}) };
   const w = waitOn(rec, id, { who: 'joe', now, ...wait });
   if (!w.ok) return w;
   // The wait just written is this tell's: its stored since is copied on as it is, not matched by the window, which the
@@ -43,10 +44,13 @@ export function waitOnJoe(rec, id, { text, alert, now, ...wait }) {
   const ours = waitOf({}, c, true);
   if (!ours) return w;
   const { stored, refused } = copyOn(rec, id, c, true);
-  const why = stored ? null : `this card's tell could not be kept with its wait (${refused ?? 'no answer'}); it may not be told again if this copy is lost`;
+  const why = stored ? null : notKept(refused);
   tellThen(alert, why ? `${text} (${why})` : text, { fact: WAIT_TELL_FACT(id), fields: { told_since: ours }, kind: 'wait_told' });
   return why ? { ...w, tell_refused: why } : w;
 }
+
+// What the owner reads when the copy was refused (L338): the tell knows its since, so it is told anyway.
+const notKept = (refused) => `this card's tell could not be kept with its wait (${refused ?? 'no answer'}); it may not be told again if this copy is lost`;
 
 // The stored since of the wait tell `f` is for, on card doc `c`: its `wait_since` when copied on, else a joe wait
 // within the Record's window of its asked time (any joe wait, when `ours`). null when the card waits on no such wait.
@@ -58,14 +62,9 @@ function waitOf(f, c, ours = false) {
   return Number.isFinite(gap) && gap <= SINCE_WINDOW_MS ? c.wait.since : null;
 }
 
-// Copies the stored since of the card's wait onto its tell. Returns it, or null when the card waits on no wait the
-// tell is for, or the copy could not be written (the next pass matches by the window and tries again). `ours`: the
-// caller just wrote this card's joe wait for this tell, so its since is taken without the window.
-function confirm(rec, card, c, { ours = false } = {}) {
-  return copyOn(rec, card, c, ours).stored;
-}
-
-// confirm, with why the copy was not written ({ stored, refused }).
+// Copies the stored since of the card's wait onto its tell. Returns { stored }, or { stored: null, refused } when the
+// copy could not be written. `ours`: the caller just wrote this card's joe wait for this tell, so its since is taken
+// without the window.
 function copyOn(rec, card, c, ours) {
   const f = rec.read('fact', WAIT_TELL_FACT(card));
   if (!f?.doc?.since) return { stored: null, refused: 'the tell is not on the Record' };
@@ -84,10 +83,11 @@ export function retellWaits({ rec, alert }) {
     const c = rec.read('card', card)?.doc;
     const at = waitOf(f.doc, c);
     if (!at || f.doc.told_since === at || isQueued(rec, WAIT_TELL_FACT(card))) continue;
-    const stored = confirm(rec, card, c);
-    if (!stored) continue;
-    tellThen(alert, f.doc.text, { fact: WAIT_TELL_FACT(card), fields: { told_since: stored }, kind: 'wait_told' });
-    out.push([card, 'told again: waits on joe']);
+    // A refused copy still tells (L405 m1, as waitOnJoe since L338): the since in hand is the window's match.
+    const { stored, refused } = copyOn(rec, card, c, false);
+    const why = stored ? null : notKept(refused);
+    tellThen(alert, why ? `${f.doc.text} (${why})` : f.doc.text, { fact: WAIT_TELL_FACT(card), fields: { told_since: stored ?? at }, kind: 'wait_told' });
+    out.push([card, why ? `told again: waits on joe; ${why}` : 'told again: waits on joe']);
   }
   return out;
 }

@@ -244,9 +244,9 @@ test('L323: watchWrites notes refused writes of a watched kind with their target
   const answers = { a: { ok: false, reason: 'no' }, b: { ok: true }, c: { ok: false, reason: 'other' } };
   const base = Object.freeze({ write: (x) => answers[x.id], read: (entity, id) => (id === 'a' ? { rev: 1, doc: { state: 'running' } } : null) });
   const w = watchWrites(base);
-  assert.deepEqual(w.rec.write({ entity: 'card', id: 'a', kind: 'park_paused' }), answers.a);
-  w.rec.write({ entity: 'card', id: 'b', kind: 'park_red' });
-  w.rec.write({ entity: 'card', id: 'c', kind: 'note' });
+  assert.deepEqual(w.rec.write({ entity: 'card', id: 'a', kind: 'park_paused' }), { ...answers.a, watched: 'park' });
+  assert.equal(w.rec.write({ entity: 'card', id: 'b', kind: 'park_red' }), answers.b);
+  assert.equal(w.rec.write({ entity: 'card', id: 'c', kind: 'note' }), answers.c, 'not watched, so no one else tells it');
   assert.deepEqual([...w.refused], [['park', [{ entity: 'card', id: 'a', kind: 'park_paused', reason: 'no', from: JSON.stringify(['running', null, null]) }]]]);
   assert.deepEqual([...w.taken].map(([c, s]) => [c, [...s]]), [['park', ['card/b']]]);
 });
@@ -470,6 +470,16 @@ test('L386: a refused copy of a since is told in the card\'s own text, not as "c
   assert.notEqual(askCause(r)[1], 'told', alerts.join(' | '));
   assert.doesNotMatch(alerts.join(' | '), /a card could not be put on you/);
   assert.match(alerts.join(' | '), /card C-9: .*could not be kept with its wait \(refused for the test\)/);
+});
+
+test('L405 c1: a cause told with nothing kept stays kept while any step that makes its writes did not finish', () => {
+  const told = () => {
+    const rec = recWith([['fact', REFUSED_FACT('joe_wait'), { told_at: iso(T0), items: [] }]]);
+    return { rec, alert: fakeAlert() };
+  };
+  const did = ({ rec, alert }, ran) => tellRefused({ rec, alert, now: T0 + H, refused: new Map(), ran }).find(([c]) => c === 'joe_wait')[1];
+  for (const step of ['outage', 'pass', 'limits', 'merges']) assert.equal(did(told(), (s) => s !== step), 'kept', step);
+  assert.equal(did(told(), () => true), 'cleared');
 });
 
 test('L386: the watcher notes a refused tell with its card\'s state, not its fact\'s', () => {

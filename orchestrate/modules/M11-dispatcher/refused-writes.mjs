@@ -39,7 +39,7 @@ export const REFUSED_CAUSES = Object.freeze({
   park: { what: "a stopped session's card could not be parked", steps: ['stops'], kinds: ['park_paused', 'park_red', 'needs_split'] },
   stop_record: { what: 'a session stop could not be recorded', steps: ['stops'], kinds: ['stop_wanted', 'stop_dropped', 'stop_done', 'stop_moved'] },
   joe_wait: { what: 'a card could not be put on you', steps: ['outage', 'pass', 'limits', 'merges'],
-    kinds: ['wait_tell', 'dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask'] },
+    kinds: ['wait_tell', 'dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask', 'merge_repeat_ask'] },
   review_count: { what: "a card's failed review requests could not be counted, so it would never reach you", steps: ['limits'], kinds: ['review_request'] },
   resume: { what: 'a parked card could not be put back in the queue', steps: ['pass'], kinds: ['resume_usage_band', 'resume_limit_hit', 'resume_paused'] },
   // The text names what was refused (L352 c1): a session's end, its card's failing, or both.
@@ -68,7 +68,8 @@ const keyOf = (x) => `${x.entity}/${x.id}`;
 
 /**
  * A Record like `inner` whose write() notes, per cause, each refused write of a watched kind in `refused`
- * (cause → [{ entity, id, kind, reason, from }]) and each one taken in `taken` (cause → Set of `entity/id`).
+ * (cause → [{ entity, id, kind, reason, from }]) and each one taken in `taken` (cause → Set of `entity/id`). A refused
+ * write it noted answers with `watched: cause`.
  */
 export function watchWrites(inner) {
   const refused = new Map();
@@ -88,6 +89,8 @@ export function watchWrites(inner) {
         const list = refused.get(cause) ?? [];
         list.push({ entity: args.entity, id: args.id, kind: args.kind, reason: String(r?.reason ?? 'no answer').slice(0, 300), from });
         refused.set(cause, list);
+        // The refusal is on its way to the owner, so a caller need not tell it again (L405 m2).
+        return { ...r, watched: cause };
       }
       return r;
     },
