@@ -13,7 +13,7 @@ import { askStore } from '../M2-approvals/ask-store.mjs';
 import { doneBar } from '../M2-approvals/go.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS } from './plan-go.mjs';
+import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
 import { approvalsStep, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -1264,13 +1264,98 @@ test('L477 m4: with a little over one port limit left no call goes out, so the n
   assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
 });
 
-test('L477 m1: a card that ran out of time after its own quick calls goes behind the rest too', async () => {
+test('L480 R1: a card that ran out after its own quick calls is told it was starved, under its own cause, and keeps its place', async () => {
   const w = world();
   card(w, 'A');
+  await pass(w, { passMs: 0 });
   // The clock jumps while M2 reads the rows: after the card's calls were timed, before its next one.
   await timeJumps((jump) => pass(w, { portMs: 100, passMs: 1000, planRows: async () => ({ get 'R-1'() { jump(); return ROWS['R-1']; } }) }));
-  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
-  assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
+  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('A')), null);
+  assert.ok(w.sent.some((s) => /card A was not finished: slow calls on other cards used up/.test(s)), w.sent.join(' | '));
+  assert.ok(!w.sent.some((s) => /own calls were slow/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), 'told apart from not reached the same day');
+});
+
+test('L480 R1: a card starved part way names the slow card', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  const hangA = (x) => (x.card === 'A' ? new Promise(() => {}) : w.ports.planRows(x));
+  await timeJumps((jump) => pass(w, { portMs: 20, passMs: 1000, planRows: async (x) => { if (x.card === 'A') return hangA(x); return { get 'R-1'() { jump(); return ROWS['R-1']; } }; } }));
+  assert.ok(w.sent.some((s) => /card B was not finished: slow calls on A used up/.test(s)), w.sent.join(' | '));
+  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('B')), null);
+});
+
+test('L480 R2: at the real limits, moderate cards that never finish take turns, so the tail is reached and none is marked slow', async () => {
+  const w = world();
+  ids10.forEach((id) => t1(w, id));
+  w.answer = { ok: true };
+  const reached = [];
+  // Each call costs 0.6 of a port limit on a clock that moves for nothing else: the ninth call goes out with exactly the
+  // last-call margin left, so real time must not count or the machine's load decides this test.
+  const real = Date.now;
+  let clock = real();
+  Date.now = () => clock;
+  try {
+    const costs = (f) => (x) => { reached.at(-1).push(x.card); clock += PLAN_PORT_MS * 0.6; return f(x); };
+    const ports = { portMs: PLAN_PORT_MS, passMs: APPROVALS_PRODUCT_MS, startPlanReview: costs(w.ports.startPlanReview), planReviewAnswer: costs(w.ports.planReviewAnswer) };
+    for (let i = 0; i < 3; i += 1) {
+      reached.push([]);
+      await pass(w, ports);
+      later(w, HOUR);
+    }
+  } finally { Date.now = real; }
+  assert.deepEqual(reached[0], ids10.slice(0, 9));
+  assert.deepEqual(reached[1], [ids10[9], ...ids10.slice(0, 8)]);
+  // The test's clock stands still within a pass, so cards reached in one pass tie and keep their list order.
+  assert.deepEqual(reached[2], [ids10[8], ...ids10.slice(0, 8)]);
+  assert.deepEqual(ids10.filter((id) => w.t.record.read('fact', PLAN_SLOW_FACT(id))?.doc?.slow_at), []);
+});
+
+test('L480 R2: of the cards not slow, the least recently reached goes first, and any slow card still goes behind them', async () => {
+  const w = world();
+  ['A', 'B', 'C', 'D'].forEach((id) => card(w, id));
+  const fact = (id, doc) => must(w.t.record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: 0, doc }));
+  const ago = (ms) => new Date(w.t.clock.t - ms).toISOString();
+  fact(PLAN_TURN_FACT('A'), { reached_at: ago(HOUR) });
+  fact(PLAN_TURN_FACT('B'), { reached_at: ago(2 * HOUR) });
+  fact(PLAN_TURN_FACT('D'), { reached_at: ago(3 * HOUR) });
+  fact(PLAN_SLOW_FACT('D'), { slow_at: ago(HOUR) });
+  const order = [];
+  await pass(w, { planRows: async (x) => { order.push(x.card); return ROWS; } });
+  assert.deepEqual(order, ['C', 'B', 'A', 'D']);
+});
+
+test('L480 R2: the turn is noted before the first call, so a pass cut off inside it still counts it', async () => {
+  const w = world();
+  card(w, 'A');
+  let inCall = null;
+  await pass(w, { planRows: async () => { inCall = w.t.record.read('fact', PLAN_TURN_FACT('A'))?.doc?.reached_at; return ROWS; } });
+  assert.equal(inCall, new Date(w.t.clock.t).toISOString());
+});
+
+test('L480 R2: a card that makes no call writes no turn, so a waiting card adds nothing each pass', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w);
+  const rev = w.t.record.read('fact', PLAN_TURN_FACT('A')).rev;
+  later(w, HOUR);
+  await pass(w);
+  assert.equal(w.t.record.read('fact', PLAN_TURN_FACT('A')).rev, rev);
+  const b = world();
+  card(b, 'B');
+  await pass(b, { passMs: 0 });
+  assert.equal(b.t.record.read('fact', PLAN_TURN_FACT('B')), null, 'a card not reached has had no turn');
+});
+
+test('L480 R2: a turn the record refuses is told, and the card still runs', async () => {
+  const w = world();
+  card(w, 'A');
+  const base = w.t.record;
+  const rec = Object.create(base, { write: { value: (x) => (x.id === PLAN_TURN_FACT('A') ? { ok: false, reason: 'disk full' } : base.write(x)) } });
+  await pass(w, {}, { record: rec });
+  assert.ok(w.sent.some((s) => /card A's turn in the plan-go order could not be noted: disk full/.test(s)), w.sent.join(' | '));
+  assert.equal(asks(w).length, 1);
 });
 
 test('L477 m3: a close that worked leaves no mark and tells nobody', async () => {
