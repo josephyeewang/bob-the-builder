@@ -1326,36 +1326,52 @@ test('L480 R2: of the cards not slow, the least recently reached goes first, and
   assert.deepEqual(order, ['C', 'B', 'A', 'D']);
 });
 
-test('L480 R2: the turn is noted before the first call, so a pass cut off inside it still counts it', async () => {
-  const w = world();
-  card(w, 'A');
-  let inCall = null;
-  await pass(w, { planRows: async () => { inCall = w.t.record.read('fact', PLAN_TURN_FACT('A'))?.doc?.reached_at; return ROWS; } });
-  assert.equal(inCall, new Date(w.t.clock.t).toISOString());
-});
+const turn = (w, id) => w.t.record.read('fact', PLAN_TURN_FACT(id));
+// A first card whose call uses up the pass, so every card after it is left out.
+const eatsThePass = (w, jump, id = 'A') => async (x) => { if (x.card === id) jump(); return w.ports.planRows(x); };
 
-test('L480 R2: a card that makes no call writes no turn, so a waiting card adds nothing each pass', async () => {
+test('L484 W1: a pass that reaches every card writes no turns, so a healthy product adds nothing to the diary', async () => {
   const w = world();
-  card(w, 'A');
+  ['A', 'B', 'C'].forEach((id) => card(w, id));
   await pass(w);
-  const rev = w.t.record.read('fact', PLAN_TURN_FACT('A')).rev;
   later(w, HOUR);
   await pass(w);
-  assert.equal(w.t.record.read('fact', PLAN_TURN_FACT('A')).rev, rev);
-  const b = world();
-  card(b, 'B');
-  await pass(b, { passMs: 0 });
-  assert.equal(b.t.record.read('fact', PLAN_TURN_FACT('B')), null, 'a card not reached has had no turn');
+  assert.equal(asks(w).length, 3);
+  assert.deepEqual(['A', 'B', 'C'].map((id) => turn(w, id)), [null, null, null]);
 });
 
-test('L480 R2: a turn the record refuses is told, and the card still runs', async () => {
+test('L484 W1: a pass that leaves a card out notes, at its end, only the cards that made a call', async () => {
+  const w = world();
+  card(w, 'WAITS');
+  await pass(w);
+  card(w, 'A');
+  card(w, 'B');
+  let inCall = 'not called';
+  await timeJumps((jump) => pass(w, { planRows: async (x) => { inCall = turn(w, x.card); return eatsThePass(w, jump)(x); } }));
+  assert.equal(inCall, null, 'nothing is written before the pass ends');
+  assert.ok(w.sent.some((s) => /card B was not reached/.test(s)), w.sent.join(' | '));
+  assert.equal(turn(w, 'A').doc.reached_at, new Date(w.t.clock.t).toISOString());
+  assert.equal(turn(w, 'B'), null, 'not reached, so it stays first');
+  assert.equal(turn(w, 'WAITS'), null, 'it made no call, so it had no turn to note');
+});
+
+test('L484 W1: a last card that leaves itself unfinished counts as a card left out, so the turns are noted', async () => {
   const w = world();
   card(w, 'A');
+  card(w, 'B');
+  await timeJumps((jump) => pass(w, { planRows: eatsThePass(w, jump, 'B') }));
+  assert.ok(w.sent.some((s) => /card B was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
+  assert.ok(turn(w, 'A') && turn(w, 'B'));
+});
+
+test('L484 W1: a turn the record refuses is told, once the pass is over', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
   const base = w.t.record;
   const rec = Object.create(base, { write: { value: (x) => (x.id === PLAN_TURN_FACT('A') ? { ok: false, reason: 'disk full' } : base.write(x)) } });
-  await pass(w, {}, { record: rec });
+  await timeJumps((jump) => pass(w, { planRows: eatsThePass(w, jump) }, { record: rec }));
   assert.ok(w.sent.some((s) => /card A's turn in the plan-go order could not be noted: disk full/.test(s)), w.sent.join(' | '));
-  assert.equal(asks(w).length, 1);
 });
 
 test('L477 m3: a close that worked leaves no mark and tells nobody', async () => {

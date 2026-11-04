@@ -17,7 +17,7 @@
 //   card still runs. The race has no cancel, so a late call may still finish.
 //   The pass has a budget too (`passMs`, the product's deadline; L467). With too little left for one more call it stops
 //   calling out: a card that needs a call is told it was not reached, once a day, and one that needs none goes on as usual.
-//   Cards go least recently reached first (PLAN_TURN_FACT). A card whose own calls hung or took a port limit or more goes
+//   Cards go least recently reached first (PLAN_TURN_FACT, noted only after a pass that left a card out). A card whose own calls hung or took a port limit or more goes
 //   behind the others next pass (PLAN_SLOW_FACT, oldest first), so the cards that hang can't keep the healthy ones from
 //   being reached, and cards that each cost a moderate time, or hang, take turns.
 //
@@ -254,8 +254,7 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
 const limitedCtx = (ctx, ports) => ({ ...ctx, checkTime: ports.checkTime, gh: { patch: (...a) => ports.limit('closing a pull request', () => ctx.gh.patch(...a)) } });
 
 // A call that hangs or throws becomes a throw naming it, which the card's own try tells; with the pass's time nearly gone,
-// no call is made at all. `counted` is how the pass sees what each card cost it: its calls, how long they took, how many
-// hung. Its `turn`, if set, runs before the next call and is then dropped.
+// no call is made at all. `counted` is how the pass sees what each card cost it: its calls, how long they took, how many hung.
 function limited(ports) {
   const portMs = ports.portMs ?? PLAN_PORT_MS;
   const ends = Date.now() + (ports.passMs ?? portMs * 6);
@@ -263,8 +262,6 @@ function limited(ports) {
   const checkTime = () => { if (ends - Date.now() < portMs * PLAN_LAST_CALL) throw new OutOfTime('the pass ran out of time'); };
   const limit = async (name, f) => {
     counted.calls += 1;
-    counted.turn?.();
-    counted.turn = null;
     const from = Date.now();
     const r = await guarded(async () => ({ value: await f() }), portMs);
     counted.ms += Date.now() - from;
@@ -289,15 +286,13 @@ function inTurn(ctx, cards) {
     .map((c) => [place(c), c]).sort(([a], [b]) => a[0] - b[0] || a[1] - b[1]).map(([, c]) => c);
 }
 
-// Noted before the card's first call, so a pass cut off inside that call still counts its turn. A card that makes no call
-// costs the pass nothing and writes nothing, so waiting cards don't add a line a pass.
+// The record's diary is never compacted, so turns are noted only when the order matters: at the end of a pass that left a
+// card not reached or not finished, for the cards that made a call. A pass that reaches every card writes none, and a crash
+// mid-pass only costs one pass's order.
 function noteReached(ctx, tell, c) {
   const rec = ctx.record;
   const id = PLAN_TURN_FACT(c.id);
-  const f = rec.read('fact', id);
-  const reached_at = new Date(ctx.now()).toISOString();
-  if (f?.doc?.reached_at === reached_at) return;
-  const w = noteFact(rec, id, f?.rev ?? 0, { reached_at });
+  const w = noteFact(rec, id, rec.read('fact', id)?.rev ?? 0, { reached_at: new Date(ctx.now()).toISOString() });
   if (!w.ok) tell(c.id, 'turn-noted', `card ${c.id}'s turn in the plan-go order could not be noted: ${short(w.reason)}`);
 }
 
@@ -322,13 +317,15 @@ export async function planGoPass(ctx, unlimited) {
   // The cards whose own calls cost this pass its time. A card that used the pass up goes behind the rest, or it would go
   // first every tick and the cards after it would never be reached.
   const slow = [];
+  const reached = [];
+  let leftOut = false;
   for (const c of inTurn(ctx, rec.list('card'))) {
     const was = { ...ports.counted };
-    ports.counted.turn = () => noteReached(ctx, tell, c);
     const ownSlow = () => ports.counted.timeouts > was.timeouts || ports.counted.ms - was.ms >= ports.portMs;
     try { await raiseFor(ctx, ports, tell, view, st, c, events); } catch (e) {
       const why = short(e?.message ?? e);
       if (e instanceof OutOfTime) {
+        leftOut = true;
         if (!ownSlow()) {
           const started = ports.counted.calls > was.calls;
           tell(c.id, started ? 'unfinished' : 'reached', `card ${c.id} was not ${started ? 'finished' : 'reached'}: slow calls on ${slow.length ? slow.join(', ') : 'other cards'} used up this pass's time. It is tried again next pass`);
@@ -337,9 +334,10 @@ export async function planGoPass(ctx, unlimited) {
         tell(c.id, 'own-time', `card ${c.id} was not finished: this card's own calls were slow and used up this pass's time. It goes behind the other cards next pass`);
       } else if (NOT_WIRED.test(why)) tell(whole(ctx.product), 'wiring', `no go can be asked on product ${ctx.product}: ${why}`);
       else tell(c.id, 'failed', `asking for a go on card ${c.id} failed: ${why}`);
-    }
+    } finally { if (ports.counted.calls > was.calls) reached.push(c); }
     if (ownSlow()) slow.push(c.id);
     noteSlow(ctx, tell, c, ownSlow());
   }
+  if (leftOut) for (const c of reached) noteReached(ctx, tell, c);
   return { ok: true, events };
 }
