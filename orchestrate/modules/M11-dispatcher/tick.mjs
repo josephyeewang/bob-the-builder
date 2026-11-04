@@ -8,9 +8,13 @@
 //                  exact reverse of a merge in the record (L40).
 //   1. outage    — first, so a pass during an outage starts nothing and restarts nothing (R-0b-56).
 //                  Outside an outage its answer is acted on here: a dead session's card that is safe to
-//                  re-run goes back to `ready` (the starts below pick it up); any other waits on Joe.
+//                  re-run has its claim broken by the Record (breakIfDead: back to `ready`, the starts below
+//                  pick it up); any other waits on Joe. Then the Record lapses claims whose session never
+//                  started (lapseClaims, claims.unlaunched_min), once that session id is stopped (L72).
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
 //   3. leads     — the Lead restart from its handoff (R-0b-63), after the intake applied the handoff.
+//      approvals — M2's schedule pass per product (L221 MAT-1): run-outs, pushes, and a product record made when its
+//                  rules file turns it on, before the pass so that product can start this tick. Outage or not.
 //   4. pass      — resumes and starts (R-0b-55, 59, 64, 67), on the stops step's bands and sessions.
 //   5. limits    — time limits and reviewer starts, through the start gate (R-0b-57, 67).
 //   6. merges    — merge requests for reviewed changes, through the start gate (R-0b-67, 68).
@@ -30,22 +34,82 @@
 // The signed-in account comes from the record fact `signed-in-account` { account, observed_at }
 // (Sensors, lane 3). Missing, or older than usage.stale_after_min, means nothing new starts.
 
-import { KEYS, minutes } from './keys.mjs';
+import { tellRefused, watchWrites } from './refused-writes.mjs';
+import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
+import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
-import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, HELD_BANDS, HOLD_REPEAT_MS } from './pass.mjs';
+import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
 import { timeLimits, requestMerges } from './merges.mjs';
 import { undoStep } from './undo.mjs';
 import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
-import { move, waitOn, note } from './moves.mjs';
+import { move, note } from './moves.mjs';
+import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { outbox, tellThen, sendAlerts, dropCause } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
+import { schedulePass } from '../M2-approvals/schedule.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+// One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
+// next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
+export const APPROVALS_PRODUCT_MS = 30_000;
+
+// M2's alerts are objects ({ type, ... }); the tick's outbox takes one line of text. The line is built from known
+// fields only, so nothing else an alert carries (a GitHub answer, a token) reaches Joe's phone; a type this list does
+// not know still becomes a line, never dropped (L221, lane 2's ask 5). Outbox's false ("not queued") is passed back,
+// so M2's `=== false` checks (configAlert, the onboard notices) keep working.
+const ALERT_FIELDS = [['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR']];
+const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+/** The outbox `alert` handed to one product's approvals pass: its alerts, as text, into the step's own outbox. */
+export function approvalsAlerts(alert, product) { return (a) => alert(approvalsAlertText(product, a)); }
+export function approvalsAlertText(product, a) {
+  if (typeof a === 'string') return `Approvals, ${plain(product, 80)}: ${plain(a, 400)}`;
+  if (typeof a?.text === 'string') return plain(a.text, 400);
+  const type = typeof a?.type === 'string' && /^[a-z_]{1,60}$/.test(a.type) ? a.type.replace(/_/g, ' ') : 'an alert of an unknown type';
+  const parts = ALERT_FIELDS.filter(([k]) => ['string', 'number'].includes(typeof a?.[k])).map(([k, label]) => `${label} ${plain(a[k], 80)}`);
+  if (Array.isArray(a?.items)) parts.push(`${a.items.length} item${a.items.length === 1 ? '' : 's'}`);
+  const reason = typeof a?.reason === 'string' ? `: ${plain(a.reason)}` : '';
+  return `Approvals, ${plain(product, 80)}: ${type}${parts.length ? ` (${parts.join(', ')})` : ''}${reason}`;
+}
+
+/**
+ * The approvals step: M2's schedule pass (schedule.mjs) for each product the port `approvals()` lists, one at a time,
+ * each with its own deadline and its own try (L221 MAT-1). A product whose pass throws or runs late is failed, the
+ * others still run, and the step then fails with one stable line naming the failed products, sorted, each with a short
+ * cause (numbers out), so the tick's step-error alert tells it once per distinct set. A pass that answers `ok: false`
+ * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), again each day while it stands.
+ *   approvals() → [{ product, gh, owner, repo, stateDir, push, copies }]   per product, everything M2 reaches outside
+ */
+export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass }) {
+  if (typeof approvals !== 'function') throw new Error('the approvals port is missing');
+  const list = await approvals();
+  if (!Array.isArray(list)) throw new Error('the approvals port did not answer a list');
+  const results = [];
+  const failed = [];
+  for (const x of list) {
+    const product = typeof x?.product === 'string' && x.product ? x.product : null;
+    if (!product) { failed.push(['(a product with no name)', 'no product named']); continue; }
+    let timer;
+    try {
+      const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${productMs} ms`)), productMs); });
+      const ctx = { ...x, record: rec, rules, product, now: () => now, alert: approvalsAlerts(alert, product) };
+      const r = await Promise.race([Promise.resolve().then(() => pass(ctx)), late]);
+      results.push({ product, ok: r?.ok === true, ...(r?.ok === true ? {} : { reason: r?.reason }), events: Array.isArray(r?.events) ? r.events.length : 0 });
+    } catch (e) {
+      failed.push([product, plain(e?.message ?? e, 120).replace(/\d+/g, 'N')]);
+      results.push({ product, ok: false, failed: true });
+    } finally { clearTimeout(timer); }
+  }
+  if (failed.length) {
+    const named = failed.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([pr, why]) => `${pr} (${why})`);
+    throw new Error(`the Approvals pass failed for ${named.join(', ')}`);
+  }
+  return results;
+}
 export const ACCOUNT_FACT = 'signed-in-account';
 export const LAST_PASS_FACT = 'last-full-pass';
 export const STEP_ERROR_FACT = (step) => `step-error-${step}`;
@@ -55,7 +119,7 @@ const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity:
 
 /** The signed-in account, or a reason nothing may start (audit MIN-9). */
 export function signedInAccount({ rec, rules, now }) {
-  const d = rec.read('fact', ACCOUNT_FACT)?.doc;
+  const d = sensorsFact(rec, ACCOUNT_FACT)?.doc;
   if (!d?.account || typeof d.account !== 'string') return { account: null, reason: 'the signed-in account is not known' };
   let staleMs;
   try { staleMs = minutes(rules, KEYS.staleAfterMin); } catch { return { account: null, reason: `the rules have no value for ${KEYS.staleAfterMin}`, missing: KEYS.staleAfterMin }; }
@@ -65,27 +129,40 @@ export function signedInAccount({ rec, rules, now }) {
 }
 
 /**
- * Acts on the outage step's answer (M10): safe cards go back to ready; any other card waits on Joe. Each card
- * moved gets its own alert (L43(a), L38: no silent move); a card that already moved on is left alone, with no alert.
+ * Acts on the outage step's answer (M10): a safe card's claim is broken by the Record, which itself checks the owner is
+ * provably dead (breakIfDead: pid and pid_start, the session, no recent activity; L72), and goes back to ready; any
+ * other card waits on Joe. Each card moved gets its own alert (L43(a), L38: no silent move); a card that already moved
+ * on is left alone, with no alert. A break the Record refuses is listed with its reason, never forced.
  */
-export function actOnDead({ rec, now, restart, asks, cards = {}, alert = () => {} }) {
+export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = () => {}, missing = [] }) {
   const done = [];
   for (const sid of restart) {
     const cardId = cards[sid];
     const cur = cardId ? rec.read('card', cardId) : null;
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (move(rec, 'card', cardId, { state: 'ready', session: null, restarted_from: sid }, { now, kind: 'dead_restart' }).ok) {
-      done.push([cardId, 'ready again']);
-      alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`);
+    // No claim is broken without claims.stuck_min (M9 refuses too). It is a per-product key, read for the card's own
+    // product (L110 m-2); the missing value is told with the others.
+    try { need(rules, KEYS.claimsStuckMin, { product: cur.doc.product }); } catch (e) {
+      if (!(e instanceof MissingKey)) throw e;
+      const what = missingFor(e.key, cur.doc.product);
+      if (!missing.includes(what)) missing.push(what);
+      done.push([cardId, `not restarted: the rules have no ${e.key} for ${cur.doc.product ?? 'its product'}`]);
+      continue;
     }
+    const broke = rec.breakIfDead({ card: cardId });
+    if (broke.ok) {
+      done.push([cardId, 'ready again']);
+      // A notice only: the card is back in the queue whatever the answer; a lost one is in the diary (L130 m1).
+      if (alert(`card ${cardId}: its session ${sid} stopped; the card is marked safe to re-run, so it is back in the queue`) === false) done.push([cardId, 'not told: the alert could not be queued']);
+    } else done.push([cardId, `not restarted: ${broke.reason}`]);
   }
   for (const cardId of asks) {
     const cur = rec.read('card', cardId);
     if (!cur || !['running', 'claimed'].includes(cur.doc.state)) continue;
-    if (waitOn(rec, cardId, { who: 'joe', what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask' }).ok) {
-      done.push([cardId, 'waiting on Joe']);
-      alert(`card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you`);
-    }
+    // Told until delivered (L130 M1): waitOnJoe records the tell, and retellWaits asks again while it is not delivered.
+    const w = waitOnJoe(rec, cardId, { what: 'dead_session: its session stopped and the card is not marked safe to re-run', now, link: `card ${cardId}`, kind: 'dead_ask',
+      alert, text: `card ${cardId}: its session stopped and the card is not marked safe to re-run, so it waits on you` });
+    if (w.ok) done.push([cardId, 'waiting on Joe']);
   }
   return done;
 }
@@ -94,7 +171,14 @@ export function actOnDead({ rec, now, restart, asks, cards = {}, alert = () => {
  * One full pass. `ports` holds every outside effect (see README, "The tick's ports"); each step reads
  * only the ports it needs. Returns { steps: { name: { ok, result | error } } }.
  */
-export async function tick({ rec, rules, now, ports: p }) {
+// `clock` (ms): read before each step, so each step's `now` is the time it starts, never before the tick's own (L321:
+// steps run one after another, each up to STEP_DEADLINE_MS, and the Store Writer refuses a wait whose since is more
+// than 60 s off its clock). Left out, it is the tick's fixed `now`.
+export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
+  // Every refused write of a watched kind is noted, and told at the end of the pass (refused-writes.mjs, L323).
+  const base = rec;
+  const watched = watchWrites(rec);
+  rec = watched.rec;
   const res = {};
   // Every alert is queued (alerts.mjs, L47): no step sends or waits on a send.
   const alert = outbox(rec, now);
@@ -111,6 +195,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // A time limit on each stop, save and Lead hand-off call; the defaults are pass.mjs's.
   const portDeadlines = Object.fromEntries([['portDeadlineMs', p.portDeadlineMs], ['saveDeadlineMs', p.saveDeadlineMs]].filter(([, v]) => v !== undefined));
   const run = async (step, f) => {
+    now = Math.max(now, clock());
     let timer;
     try {
       const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`it did not finish within ${deadline} ms`)), deadline); });
@@ -138,7 +223,7 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The safety acts, first and alone (L38).
   let stops = null;
   await run('stops', async () => {
-    stops = await stopPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, ...portDeadlines });
+    stops = await stopPass({ rec, rules, now, clock, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, ...portDeadlines });
     missing.push(...stops.missing);
     return stops;
   });
@@ -153,15 +238,23 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The early send finishes, and is marked, before any other step, so it never races a later step's writes.
   const first = await early;
   first.settle();
-  let outageOpen = false;
-  // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds.
-  try { outageOpen = rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { outageOpen = true; }
+  // A failing outage step falls back on the record (audit 0b-6 r3 MIN-1): an open outage still holds. Read again
+  // once the step has run (L172 follow-up): a step that opened the outage and then threw never set outageOpen, and
+  // the read before it saw no outage. The shared Record's read never throws: a fact it can't read comes back as
+  // { corrupt: true } with no doc, which is not an open outage (L182 m2). The catch is only for a Record that throws.
+  const outageInRecord = () => { try { return rec.read('fact', OUTAGE_FACT)?.doc?.state === 'open'; } catch { return true; } };
+  let outageOpen = outageInRecord();
   await run('outage', async () => {
     const board = p.board();
     const o = outageStep({ rec, rules, board, now, healthy: p.healthy(), resume: p.resume?.() ?? false, alert });
     outageOpen = o.outage;
-    return { ...o, acted: o.outage ? [] : actOnDead({ rec, now, restart: o.restart, asks: o.asks, cards: o.cards, alert }) };
+    const acted = o.outage ? [] : actOnDead({ rec, rules, now, restart: o.restart, asks: o.asks, cards: o.cards, alert, missing });
+    // A claim whose session never started lapses (the Record stops that session id first; L72). Not in an outage.
+    const lapse = o.outage ? null : rec.lapseClaims(now, { stopSession: p.stopSession });
+    if (lapse && !lapse.ok) throw new Error(`claims could not be lapsed: ${lapse.reason}`);
+    return { ...o, acted, lapsed: lapse?.lapsed ?? [] };
   });
+  if (!outageOpen) outageOpen = outageInRecord();
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
   const startReadonly = async (x) => {
@@ -184,6 +277,13 @@ export async function tick({ rec, rules, now, ports: p }) {
     }
     return out;
   });
+  // Approvals (M2's schedule pass), per product (L221 MAT-1). Before the main pass, so a product its rules file just
+  // turned on has its record when the pass reads it and can start this tick. Not before the undo steps: an undo tap is
+  // recorded by M2's binding from the Front Door's session (processSession), not here; this pass only lapses, expires,
+  // pushes, retries a close and onboards, and the undo steps neither need it nor are needed by it. Runs during an
+  // outage too: it starts no session, and asks still lapse and go out on time. Not in `complete` below: M2 tells its
+  // own config problems (approvals_config) and reports no missing rules value to the tick.
+  await run('approvals', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }) }));
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
       saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
@@ -197,9 +297,11 @@ export async function tick({ rec, rules, now, ports: p }) {
   // The time limits themselves still run.
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
-  await run('limits', () => timeLimits({ rec, rules, now, b: bands ?? held, running, hasSession: p.hasSession, gateAlive: p.gateAlive,
+  await run('limits', () => timeLimits({ rec, rules, now, clock, b: bands ?? held, running, gateAlive: p.gateAlive,
     hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
-  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing }));
+  await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
+  // A card put on Joe whose alert was not delivered is told again (L130).
+  await run('waits', () => retellWaits({ rec, alert }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
@@ -208,7 +310,8 @@ export async function tick({ rec, rules, now, ports: p }) {
     // A missing rules value is told by the missing-values alert, not twice.
     if (acct.reason && !acct.missing) holdAlert({ rec, cause: 'account', text: `nothing new starts but undo cards: ${acct.reason}`, alert, now });
     const band = stops?.bands ?? bands;
-    if (!acct.reason && band && ['red', 'unknown'].includes(band.band)) {
+    // One list with the start pass (L305): a held start is folded only under a band this alert tells.
+    if (!acct.reason && band && TOLD_BANDS.includes(band.band)) {
       holdAlert({ rec, cause: `band-${band.band}`, text: `the usage band is ${band.band}${band.reason ? ` (${band.reason})` : ''}: work it holds waits; stops and undo still run`, alert, now });
     }
   } catch (e) { alert(`the Dispatcher could not record a hold: ${e?.message ?? e}`); }
@@ -217,10 +320,15 @@ export async function tick({ rec, rules, now, ports: p }) {
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
   putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass');
+  // Refused writes (L323): told after every step, before this pass's own alerts go out.
+  // watchWrites' whole answer, its refusals and the writes it saw taken, so neither can be left out alone.
+  let refused = [];
+  try { refused = tellRefused({ ...watched, rec: base, alert, now: Math.max(now, clock()), ran: (step) => res[step]?.ok === true }); }
+  catch (e) { alert(`the Dispatcher could not tell its refused writes: ${e?.message ?? e}`); }
   // The one sender (alerts.mjs) again, last: this pass's own alerts.
   const last = await sendAlerts(rec, p.alert, now, sendOpts);
   const alerts = { sent: first.sent + last.sent, failed: first.failed + last.failed, left: last.left };
-  return { steps: res, alerts };
+  return { steps: res, alerts, refused };
 }
 
 /** The login job's entry: one full pass under the single-instance lock (M16). */

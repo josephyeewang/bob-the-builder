@@ -4,7 +4,7 @@
 // WHAT COUNTS. A tap counts only as the answer to a question box M2 worded (payload.mjs), asked in a Front Door or
 // thinking session the Dispatcher launched, read from M2's tamper-checked copy of that session's log. In order:
 //   1. Binding. An AskUserQuestion call whose input canonicalises to exactly the ask's `payload` or `payload_still_open`,
-//      at or after the ask's created_at, while the ask is open or pushed, with no other live box for that ask anywhere and
+//      at or after the ask's created_at (a box older than the ask must not answer it), while the ask is open or pushed, with no other live box for that ask anywhere and
 //      none for any ask in that session. Binding counts as delivering the ask (M5-1): open → pushed in the same write,
 //      first_pushed_at and raised_at set if unset. Anything else that names an ask is `mismatched_question` (binds nothing).
 //   2. The answer. The tool result for exactly that box (tool_use_id), in the same session, while the ask is still
@@ -28,15 +28,22 @@
 //   releaseBoxes(doc, reason, at, { keepState })   used by the schedule when it moves an ask on
 //   ctx = { record, rules, product, copies, now: () => ms, alert }
 //
-// Events tell the Front Door what to say: `answered`, `released_typed` (typedReplyLine), `closed` (CLOSED_LINE),
-// `mismatched_question`, `tampered`.
+// Events tell the Front Door what to say: `answered`, `released_typed` (typedReplyLine), `closed` (CLOSED_LINE, or the
+// event's own `line`), `mismatched_question`, `tampered`.
+//
+// AN ASK WHOSE TIME CAN'T BE READ (L362). A created_at that can't be read, or lies in the future, proves nothing about a
+// box, so the box never binds on it: binding could let an old box approve a new ask. The schedule's pass re-raises the
+// ask with created_at = now and tells Joe (schedule.mjs reaskUnreadable). A tap on a box from before that gets
+// TIME_REASKED_LINE, not CLOSED_LINE.
 
 import { ownerTurns, QUESTION_TOOL } from '../M1-front-door/transcript.mjs';
 import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { activeKind } from '../../shared/asks.mjs';
+import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { askIdOf, payloadSha, renderPayload } from './payload.mjs';
-import { lapseAt, readConfig } from './kinds.mjs';
+import { lapseAt, outsideTime, readConfig, TIME_REASKED_LINE } from './kinds.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const BOX_ROLES = Object.freeze(['front_door', 'thinking']);
 const MAX_MISMATCHED = 20;
@@ -53,7 +60,9 @@ export function boxSession(record, sid) {
   const s = record.read('session', sid);
   if (s?.doc?.state === 'ended') return { ok: false, reason: 'session ended', ended: true };
   if (role === 'front_door') {
-    const latest = launches.filter((l) => l.doc.role === 'front_door').sort((a, b) => (ms(a.doc.launched_at) ?? 0) - (ms(b.doc.launched_at) ?? 0)).at(-1);
+    // Newest by the diary's order (the order list() gives), never a stored launch time: a stale launch stamped days
+    // ahead must not win, and a live one with a garbage time must not sort oldest (L362 m1).
+    const latest = launches.filter((l) => l.doc.role === 'front_door').at(-1);
     if (latest.doc.session_id !== sid) return { ok: false, reason: 'a newer Front Door replaced this session', replaced: true };
   }
   return { ok: true, role };
@@ -121,7 +130,8 @@ export function processSession(ctx, { sessionId, sourcePath }) {
       const w = writeDoc(ctx.record, 'ask', a, doc);
       if (!w.ok) ctx.alert({ type: 'approvals_write_refused', ask: a.id, reason: w.reason });
     }
-    if (synced.first) { ctx.alert({ type: 'transcript_tampered', session: sessionId }); events.push({ type: 'tampered', session: sessionId }); }
+    // Marked told only once delivered: a lost alert (false, or a throw) is sent again next pass (L135 site B).
+    if (synced.untold && ctx.alert({ type: 'transcript_tampered', session: sessionId }) !== false) { ctx.copies.told(sessionId); events.push({ type: 'tampered', session: sessionId }); }
     return { ok: true, events };
   }
   const sess = boxSession(ctx.record, sessionId);
@@ -158,9 +168,9 @@ function tryBind(ctx, sid, role, e, b, events) {
   if (!askId) return;   // not one of M2's boxes (the session's own question)
   const st = askStore(ctx.record);
   const a = st.ask(askId);
-  const at = Math.min(ms(e.timestamp) ?? ctx.now(), ctx.now());
+  const at = outsideTime(e.timestamp, ctx.now());
   const mismatch = (reason) => {
-    events.push({ type: 'mismatched_question', ask: askId, session: sid, reason });
+    events.push({ type: 'mismatched_question', ask: askId, session: sid, reason, ...(reason === TIME_REASKED_LINE ? { line: reason } : {}) });
     if (!a) return;
     if ((a.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.id)) return;
     addMismatch(a.doc, { session_id: sid, tool_use_id: b.id, status: 'mismatched_question', reason, at: iso(at) });
@@ -174,8 +184,10 @@ function tryBind(ctx, sid, role, e, b, events) {
   const version = sha && sha === doc.payload_sha256 ? 'payload' : sha && sha === doc.payload_still_open_sha256 ? 'still_open' : null;
   if (!version) return mismatch('the box is not M2\'s exact question');
   if (doc.state !== 'open' && doc.state !== 'pushed') return mismatch(`the ask is ${doc.state}`);
-  if (ms(doc.created_at) === null || ms(e.timestamp) === null || ms(e.timestamp) < ms(doc.created_at)) return mismatch('asked before the ask was created');
-  if (ms(e.timestamp) >= lapseAt(doc)) return mismatch('the ask has lapsed');
+  const created = pastTime(doc.created_at, ctx.now());
+  if (created === null) return mismatch(TIME_REASKED_LINE);   // the pass re-raises it (L362 MAT-2)
+  if (ms(e.timestamp) === null || ms(e.timestamp) < created) return mismatch(doc.time_reasked_at ? TIME_REASKED_LINE : 'asked before the ask was created');
+  if (ms(e.timestamp) >= lapseAt(doc, ctx.now())) return mismatch('the ask has lapsed');
   if (role === 'thinking' && doc.origin_session !== sid) return mismatch('a thinking room asks only its own questions');
   if (liveBox(doc)) return mismatch('the ask already has a live box');
   const busy = st.asks().some((o) => o.id !== a.id && (o.doc.boxes ?? []).some((x) => x.status === 'bound' && x.session_id === sid));
@@ -202,14 +214,19 @@ function release(ctx, a, reason, sid, events) {
 function answer(ctx, sid, e, b, events) {
   const st = askStore(ctx.record);
   const a = st.asks().find((o) => (o.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id && x.status !== 'mismatched_question'));
-  if (!a) return;
+  if (!a) {
+    // A box refused because the ask's time can't be read: its tap is told so (L362 MAT-2). Any other refused box stays quiet.
+    const old = st.asks().find((o) => (o.doc.boxes ?? []).some((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id && x.reason === TIME_REASKED_LINE));
+    if (old) events.push({ type: 'closed', ask: old.id, card: old.doc.card, session: sid, line: TIME_REASKED_LINE });
+    return;
+  }
   const doc = a.doc;
   const box = doc.boxes.find((x) => x.session_id === sid && x.tool_use_id === b.tool_use_id);
   if (box.status === 'answered') return;   // the same result read again
-  if (box.status !== 'bound') { events.push({ type: 'closed', ask: a.id, card: doc.card, session: sid }); return; }
+  if (box.status !== 'bound') { events.push({ type: 'closed', ask: a.id, card: doc.card, session: sid, ...(box.reason === 'time_unreadable' ? { line: TIME_REASKED_LINE } : {}) }); return; }
   const at = ms(e.timestamp);
   // The ask moved on while the box was open (m4-1): the box is released, nothing counts, and the owner is told.
-  if (doc.state !== 'pushed' || at === null || at >= lapseAt(doc) || at < (ms(box.bound_at) ?? Infinity)) {
+  if (doc.state !== 'pushed' || at === null || at >= lapseAt(doc, ctx.now()) || at < (ms(box.bound_at) ?? Infinity)) {
     const reason = doc.state === 'withdrawn' ? 'withdrawn' : doc.state === 'expired' ? 'expired' : doc.state === 'answered' || doc.state === 'consumed' ? 'answered_elsewhere' : 'lapsed';
     releaseBoxes(doc, reason, ctx.now(), { moveBack: false, session: sid });
     const w = writeDoc(ctx.record, 'ask', a, doc);
@@ -227,14 +244,16 @@ function answer(ctx, sid, e, b, events) {
   const keys = answers && typeof answers === 'object' && !Array.isArray(answers) ? Object.keys(answers) : [];
   const choice = same && keys.length === 1 && keys[0] === q && typeof answers[q] === 'string' ? answers[q] : null;
   if (choice === null || !(doc.choices ?? []).includes(choice)) return release(ctx, a, 'typed', sid, events);
-  const verdict = ctx.rules.may('count_approval', { product: ctx.product, card: doc.card, ask_kind: doc.kind, channel: 'tap', tier: doc.tier ?? null, risky: doc.risky ?? [] });
-  if (verdict.decision !== 'ask' || verdict.tier !== 2) {
-    ctx.alert({ type: 'approval_not_counted', ask: a.id, reason: verdict.reason });
+  // The answer as it will be recorded; the one approval check reads its channel from it (L81).
+  const answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(outsideTime(e.timestamp, ctx.now())) };
+  const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
+  if (!counted.ok) {
+    ctx.alert({ type: 'approval_not_counted', ask: a.id, reason: counted.reason });
     return release(ctx, a, 'declined', sid, events);
   }
   Object.assign(box, { status: 'answered', closed_at: iso(ctx.now()) });
   doc.state = 'answered';
-  doc.answer = { channel: 'tap', choice, approves: choice === doc.choices[0], session_id: sid, tool_use_id: b.tool_use_id, at: iso(at) };
+  doc.answer = answer;
   const w = writeDoc(ctx.record, 'ask', a, doc);
   if (!w.ok) { ctx.alert({ type: 'approvals_write_refused', ask: a.id, reason: w.reason }); return; }
   events.push({ type: 'answered', ask: a.id, card: doc.card, choice, session: sid });
@@ -277,7 +296,7 @@ export function nextBox(ctx, { sessionId, role, card = null, releasedThisReply =
   const open = st.asks().filter(({ id, doc }) => {
     const k = activeKind(doc.kind);
     if (!k || k.channel !== 'tap' || (doc.state !== 'open' && doc.state !== 'pushed')) return false;
-    if (liveBox(doc) || nowMs >= lapseAt(doc)) return false;
+    if (liveBox(doc) || nowMs >= lapseAt(doc, nowMs)) return false;
     if (role === 'thinking' && doc.origin_session !== sessionId) return false;
     if (held.has(id) && !k.urgent) return false;
     return true;

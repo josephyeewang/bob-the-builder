@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
+import { outboxKindOf } from '../../shared/record-names.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { openRecord } from './writer.mjs';
+import { openRecordWithStore } from './writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
 
 export { PRODUCT, HEAD, HEAD2, UID, fullTimeouts, rulesFor } from './rules.test-helper.mjs';
@@ -26,12 +27,12 @@ export function setup({ values, prefix = 'm9-rec-', probe, faultAt, host = 'mac-
   const alerts = [];
   const rules = rulesFor(values);
   const uids = Object.fromEntries(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer', 'front_door', 'thinking', 'learning', 'script'].map((r) => [r, UID]));
-  const opened = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
+  const opened = openRecordWithStore({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
     probe, faultAt, outbox: { root: outRoot, uids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra });
   // The review user (L44): reviewers and auditors write as a Mac user of their own. Tests run as one user, so this second
   // view of the same store calls this test's user the review user and every other role someone else; verdicts go in here.
   const reviewUids = Object.fromEntries(Object.keys(uids).map((r) => [r, r === 'reviewer' || r === 'auditor' ? UID : UID + 1]));
-  const review = openRecord({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
+  const review = openRecordWithStore({ root, product: PRODUCT, ownerUid: UID, rules, alert: (a) => alerts.push(a), now: () => clock.t, host,
     probe, outbox: { root: outRoot, uids: reviewUids, launches: launchRoot, ...(treeOf ? { treeOf } : {}) }, ...extra }).record;
   return { ...opened, review, base, root, outRoot, launchRoot, reviewUids, clock, alerts, rules };
 }
@@ -100,17 +101,26 @@ export function readyCard(env, id, over = {}) {
   must(put(env.record, 'dispatcher', 'card', id, { state: 'ready' }), `${id} ready`);
 }
 
+// A session's claim with its process. The claim has two steps (L72): claimCard writes it without pid and pid_start
+// (ready → claimed), and runCard adds them (claimed → running).
 export function sessionClaim(over = {}) {
   return { kind: 'session', host: 'mac-a', pid: 4242, pid_start: 'Thu Oct  1 11:00:00 2026', session_id: 'S-1', ...over };
 }
-
-export function claimCard(env, id, claim = sessionClaim()) {
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'claimed', claim }), `claim ${id}`);
+export function claimOnly(claim) {
+  if (claim?.kind !== 'session') return claim;
+  const { pid, pid_start, ...rest } = claim;   // eslint-disable-line no-unused-vars
+  return rest;
 }
 
-export function runCard(env, id, claim) {
+export function claimCard(env, id, claim = sessionClaim()) {
+  must(put(env.record, 'dispatcher', 'card', id, { state: 'claimed', claim: claimOnly(claim) }), `claim ${id}`);
+}
+
+export function runCard(env, id, claim = sessionClaim()) {
   claimCard(env, id, claim);
-  must(put(env.record, 'dispatcher', 'card', id, { state: 'running' }), `run ${id}`);
+  const now = env.record.read('card', id).doc.claim;
+  const started = claim.kind === 'session' ? { ...now, pid: claim.pid, pid_start: claim.pid_start } : now;
+  must(put(env.record, 'dispatcher', 'card', id, { state: 'running', claim: started }), `run ${id}`);
 }
 
 // The review runner's launch record for a session (L65): the only launch a verdict counts from.
@@ -130,7 +140,8 @@ export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { t
 export function verdictShaNow(env, role, sid) {
   const dir = join(env.outRoot, role, sid);
   let names = [];
-  try { names = readdirSync(dir).filter((n) => n.startsWith('verdict-')); } catch { names = []; }
+  // The one kind rule (L101): a verdict-compact- note is no verdict.
+  try { names = readdirSync(dir).filter((n) => outboxKindOf(n) === 'verdict-'); } catch { names = []; }
   return names.length === 1 ? createHash('sha256').update(readFileSync(join(dir, names[0]))).digest('hex') : 'none';
 }
 export function runnerEndedRecord(env, card, sid, role = 'reviewer', head = HEAD, { sha, tree } = {}) {

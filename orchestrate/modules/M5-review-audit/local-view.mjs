@@ -1,6 +1,7 @@
-// A git view over a local repository (the review runner's mirror), in the shape the carry-over rule reads (M10
-// git-view.mjs reads the same questions from GitHub). The runner has no token, so it asks its own mirror (L80).
-// Read only. Anything odd throws, and callers treat a throw as "does not carry over" (fail closed).
+// A git view over a local repository (the review runner's mirror), with the same contract as M10 git-view.mjs, which
+// reads the same questions from GitHub (local-view.test.mjs runs both on one repository). The runner has no token, so
+// it asks its own mirror (L80). Read only. Anything odd throws, and callers treat a throw as "does not carry over".
+// isDir is left out: carry-over doesn't ask it. GitHub's 300-file limit on compare has no meaning here.
 
 import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
 
@@ -10,33 +11,42 @@ const sha = (s, what) => { if (typeof s !== 'string' || !SHA.test(s)) throw new 
 
 export function localGitView({ gitDir, timeoutMs = 60_000 }) {
   const run = (args, purpose) => gitOk(args, { gitDir, purpose, timeoutMs });
-  return {
+  const diff = async (b, h) => {
+    const p = (await run(['diff', '--name-status', '-z', '--no-renames', b, h], 'local-view-files')).split('\0').filter(Boolean);
+    const out = [];
+    for (let i = 0; i + 1 < p.length; i += 2) {
+      if (!STATUS[p[i]]) throw new Error(`unknown file status ${p[i]}`);
+      out.push(Object.freeze({ path: p[i + 1], status: STATUS[p[i]] }));
+    }
+    return out;
+  };
+  async function compare(b, h) {
+    sha(b, 'base'); sha(h, 'head');
+    const mergeBase = sha((await run(['merge-base', b, h], 'local-view-base')).trim(), 'merge base');
+    const status = b === h ? 'identical' : mergeBase === b ? 'ahead' : mergeBase === h ? 'behind' : 'diverged';
+    return { status, mergeBase, files: await diff(mergeBase, h) };
+  }
+  return Object.freeze({
     async commit(s) {
-      const t = await run(['cat-file', 'commit', sha(s, 'the commit')], 'local-view-commit');
-      return { sha: s, tree: /^tree ([0-9a-f]{40})$/m.exec(t)[1], parents: [...t.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1]) };
+      const t = await run(['cat-file', 'commit', sha(s, 'commit')], 'local-view-commit');
+      return Object.freeze({ sha: s, tree: /^tree ([0-9a-f]{40})$/m.exec(t)[1], parents: Object.freeze([...t.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((m) => m[1])) });
     },
-    async compare(b, h) {
-      const mergeBase = (await run(['merge-base', sha(b, 'the base'), sha(h, 'the head')], 'local-view-base')).trim();
-      if (!SHA.test(mergeBase)) throw new Error('no common commit');
-      return { mergeBase, status: mergeBase === b && b === h ? 'identical' : mergeBase === b ? 'ahead' : mergeBase === h ? 'behind' : 'diverged' };
-    },
+    compare,
     async files(b, h) {
-      const p = (await run(['diff', '--name-status', '-z', '--no-renames', sha(b, 'the base'), sha(h, 'the head')], 'local-view-files')).split('\0').filter(Boolean);
-      const out = [];
-      for (let i = 0; i + 1 < p.length; i += 2) {
-        if (!STATUS[p[i]]) throw new Error(`unknown file status ${p[i]}`);
-        out.push({ status: STATUS[p[i]], path: p[i + 1] });
-      }
-      return out;
+      const c = await compare(b, h);
+      if (c.mergeBase !== b || (c.status !== 'ahead' && c.status !== 'identical')) throw new Error(`${b.slice(0, 7)} is not an ancestor of ${h.slice(0, 7)}`);
+      return c.files;
     },
     async entry(s, path) {
-      const t = (await run(['ls-tree', '-z', sha(s, 'the commit'), '--', String(path)], 'local-view-entry')).split('\0')[0];
+      const t = (await run(['ls-tree', '-z', sha(s, 'commit'), '--', String(path)], 'local-view-entry')).split('\0')[0];
       if (!t) return null;
-      const [mode, , blob] = t.split('\t')[0].split(' ');
-      return { mode, blob };
+      const [mode, type, blob] = t.split('\t')[0].split(' ');
+      return type === 'tree' ? null : { blob, mode };
     },
     async onHistory(s, tip) {
-      return (await git(['merge-base', '--is-ancestor', sha(s, 'the commit'), sha(tip, 'the tip')], { gitDir, purpose: 'local-view-history', timeoutMs })).code === 0;
+      const r = await git(['merge-base', '--is-ancestor', sha(s, 'commit'), sha(tip, 'tip')], { gitDir, purpose: 'local-view-history', timeoutMs });
+      if (r.code !== 0 && r.code !== 1) throw new Error(`whether ${s.slice(0, 7)} is on ${tip.slice(0, 7)} could not be read (${r.code})`);
+      return r.code === 0;
     },
-  };
+  });
 }

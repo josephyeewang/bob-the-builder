@@ -8,10 +8,18 @@
 //
 //   approveNeeded({ risky, needsJoe, tier, module }, rules, product) → { needed, why: [...] }   the Approve-ask trigger (M6)
 //   doneBar(rows) → string           the rows' done_when texts, sorted by row id, joined with "\n---\n" (m2-8)
-//   await raiseGo(ctx, { cardId, rows, view, mainSha, title }) → { ok, id } | { ok: false, reason }
+//   await raiseGo(ctx, { cardId, rows, view, mainSha, planCheck }) → { ok, id } | { ok: false, reason }
+//     the title shown is the card's own `what` (L84 2): no caller can put a title the reviewer never saw over a pass
 //       Tier 2 → a go_t2 tap ask; Tier 1 → a go_t1 decision pull request (N20). `rows` = { id → row } at go time (m3-4).
+//       A Tier-1 go is asked only after a fresh plan reviewer passed the plan with 0 Material (R-0b-138): `planCheck`
+//       = { pass: true, material: 0, card, fingerprint, plan_sha256, reviewer_session, author_session }, kept on the ask
+//       as plan_check; card and fingerprint must be this card's and its whole plan fingerprint now (audit r1 M-2).
+//   goFingerprint(ctx, cardId) → { ok, card, fingerprint, plan_sha256, inputs } | { ok: false, reason }
+//       what a plan reviewer names in its pass: the plan it read, as the go would bind it
 //   recordGo(ctx, askId) → { ok, go } | { ok: false, reason }           an answered "go" → the go record; the ask consumed
 //   await goCheck({ go, card, changed, headRows, tier, view, mainSha }) → { ok, reasons, newGo }   at merge (refusal 10)
+//       + unreadable: true, cause: <the error> when a GitHub read threw and nothing else is wrong (L205); the
+//         caller classes `cause` (M6 gather failedRead: a 4xx other than 401/403/429 is GitHub's answer)
 //   await tier1Changed(ctx, { cardId, view, mainTip }) → { ok, changed: [paths] }   did a listed file change on main?
 //   recordRecheck(ctx, { cardId, mainCommit, planSha256, files }) → { ok, newGo }   unchanged plan → rechecked (m3-3)
 // ctx = { record, rules, product, now, alert } (+ gh, owner, repo for a Tier-1 go's decision pull request)
@@ -20,6 +28,7 @@ import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mj
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk } from './binding.mjs';
+import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
 export const ROW_STATUS_FIELDS = Object.freeze(['status', 'done', 'receipts', 'progress', 'date', 'done_at']);
@@ -70,13 +79,15 @@ function fingerprintOf(product, cardId, d) {
 }
 
 // No entry in a go's file list may be a folder (M7): a pattern or unsafe path is refused by the fingerprint itself; a
-// plain name that is a folder in main's tree is refused here. Any error reading the tree refuses too.
+// plain name that is a folder in main's tree is refused here. → null, or { reason, unreadable?, cause? }. A tree read
+// that threw says nothing about the change (#108 r2, LEAD-CALLS L205): it is marked `unreadable`, with the error as
+// `cause`, so the Merge Gate waits it out rather than refusing for good; a go is not asked on it either.
 async function folderIn(view, sha, files) {
-  if (!view || !SHA.test(sha ?? '')) return 'no main commit to check the file list against';
+  if (!view || !SHA.test(sha ?? '')) return { reason: 'no main commit to check the file list against' };
   try {
-    for (const f of files) if (await view.isDir(sha, f)) return `${f} is a folder; a go names files`;
+    for (const f of files) if (await view.isDir(sha, f)) return { reason: `${f} is a folder; a go names files` };
   } catch (e) {
-    return `could not check the file list: ${String(e?.message ?? e).slice(0, 200)}`;
+    return { reason: `could not check the file list: ${String(e?.message ?? e).slice(0, 200)}`, unreadable: true, cause: e };
   }
   return null;
 }
@@ -88,7 +99,16 @@ const closedGoAsk = (st, cardId, a) => ['withdrawn', 'expired'].includes(a.doc.s
   || (a.doc.state === 'answered' && a.doc.answer?.approves !== true)
   || (a.doc.state === 'consumed' && st.go(`go-${cardId}`)?.doc.ask !== a.id);
 
-export async function raiseGo(ctx, { cardId, rows, view, mainSha, title } = {}) {
+export function goFingerprint(ctx, cardId) {
+  const c = ctx.record.read('card', cardId);
+  if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
+  if (c.doc.product !== ctx.product) return fail(`card ${cardId} belongs to product ${c.doc.product}`);
+  const fp = fingerprintOf(ctx.product, cardId, c.doc);
+  if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  return { ok: true, card: cardId, fingerprint: fp.sha256, plan_sha256: fp.inputs.plan_sha256, inputs: fp.inputs };
+}
+
+export async function raiseGo(ctx, { cardId, rows, view, mainSha, planCheck } = {}) {
   const c = ctx.record.read('card', cardId);
   if (!c || c.corrupt || !c.doc) return fail(`no card ${cardId}`);
   const d = c.doc;
@@ -99,9 +119,10 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, title } = {}) 
   if (bad) return fail(bad);
   const fp = fingerprintOf(ctx.product, cardId, d);
   if (!fp.ok) return fail(`the plan can't be fingerprinted: ${fp.reason}`);
+  if (d.tier === 1) { const no = planCheckProblem(planCheck, { fingerprint: fp.sha256, card: cardId, planSha256: fp.inputs.plan_sha256 }); if (no) return fail(no); }
   // Tier 1 checks folders at the plan's main commit; Tier 2 at main as it is now.
   const folder = await folderIn(view, d.tier === 1 ? d.main_commit : mainSha, fp.inputs.files);
-  if (folder) return fail(folder);
+  if (folder) return fail(folder.reason, folder.unreadable ? { unreadable: true, cause: folder.cause } : {});
   // One live ask per plan. A plan the owner said "not now" to, or whose ask was withdrawn or ran out, is asked again
   // under a new id when the Lead raises it again (audit round 1 M-3); otherwise the card would hang on a closed ask.
   const base = `go-${cardId}-${fp.sha256.slice(0, 12)}`;
@@ -115,8 +136,8 @@ export async function raiseGo(ctx, { cardId, rows, view, mainSha, title } = {}) 
     id = `${base}-${n}`;
   }
   const kind = d.tier === 1 ? 'go_t1' : 'go_t2';
-  const r = createAsk(ctx, { id, kind, card: cardId, title: title ?? (typeof d.what === 'string' ? d.what : cardId), tier: d.tier,
-    fingerprint: fp.sha256, files: fp.inputs.files, extra: { fingerprint_inputs: fp.inputs, rows: structuredClone(rows) } });
+  const r = createAsk(ctx, { id, kind, card: cardId, title: typeof d.what === 'string' ? d.what : cardId, tier: d.tier,
+    fingerprint: fp.sha256, files: fp.inputs.files, extra: { fingerprint_inputs: fp.inputs, rows: structuredClone(rows), ...(d.tier === 1 ? { plan_check: structuredClone(planCheck) } : {}) } });
   // A Tier-1 go's decision pull request goes out in the next push window (schedule.mjs); its file holds the plan.
   return r.ok ? { ok: true, id } : r;
 }
@@ -203,9 +224,15 @@ export async function goCheck({ go, card, changed, headRows, tier, view, mainSha
     if (tier !== 1 && tier !== 2) reasons.push('the change\'s tier is unknown');
     else if (tier === 1 && go.tier !== 1) reasons.push('the change is Tier 1; the go was for Tier 2');
     const folder = await folderIn(view, mainSha, go.files ?? []);
-    if (folder) reasons.push(folder);
+    // A failed tree read is not a reason about the change. With no other reason, the check could not be done: it
+    // comes back `unreadable` (L205); with one, the change is refused for that.
+    if (folder?.unreadable && !reasons.length) return { ok: false, reasons: [folder.reason], newGo: false, unreadable: true, cause: folder.cause };
+    if (folder && !folder.unreadable) reasons.push(folder.reason);
   } catch (e) {
-    reasons.push(`the go check failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    // Nothing above reads GitHub except folderIn, which doesn't throw; a throw here is the check failing, not the change.
+    // `unreadable` here does not mean held for ever: the Merge Gate classes `cause`, and an error that is not a failed
+    // GitHub read counts toward its wait cap, so the change is refused at the cap (gather.mjs failedRead).
+    return { ok: false, reasons: [`the go check failed: ${String(e?.message ?? e).slice(0, 200)}`], newGo: false, unreadable: true, cause: e };
   }
   return { ok: reasons.length === 0, reasons, newGo: reasons.length > 0 };
 }

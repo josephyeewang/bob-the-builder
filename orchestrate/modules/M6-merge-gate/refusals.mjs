@@ -4,11 +4,21 @@
 // WHY. The gate must say no for a reason a person can read, and every reason must be checkable on its own. So judging is
 // one pure function over a plain facts object (gather.mjs builds it from GitHub, the record and the rules): a planted
 // facts object is refused for exactly one reason in a test, with no network and no record. Anything the gatherer
-// couldn't read arrives as null or { ok: false } and refuses (fail closed); nothing here throws a pass.
+// couldn't read arrives as null or { ok: false } and is never a pass: it holds the change to be judged again (see FINAL
+// OR NOT YET below); nothing here throws a pass.
 //
-//   judge(facts) → { decision: 'merge' | 'hold' | 'refuse', refusals: [{ n, reason }], hold: reason | null, notes: [line] }
+//   judge(facts) → { decision: 'merge' | 'hold' | 'refuse', refusals: [{ n, reason, temporary? }], hold: reason | null, notes: [line] }
 //   verdictProblem(facts) → reason | null        refusal 5 alone: M9's verdict rule plus the four-line checklist (L44)
 //   REFUSALS → { n: short name }                 the numbers are design v4 §14.1.7's
+//   WAITING_HOLD                                  the hold for a change that can't be judged yet (L164)
+//
+// FINAL OR NOT YET (L164). A refusal is final only when it is about the change itself: a red check, a failing review, a
+// draft, a merge conflict, out of lane. A final refusal stays refused until the card changes. Anything that only says
+// "not known yet" is marked temporary: GitHub or the record could not be read, a check or a review session has not
+// finished, GitHub has not worked out yet whether the PR is mergeable, or main is red (main's state, not the change's).
+// A change with temporary refusals and no final one is held (WAITING_HOLD), so the gate judges it again on its next
+// pass instead of refusing it for good. A wait that outlasts the gate's cap with GitHub readable is the gate's to end
+// (gate.mjs, L184), not this file's.
 //
 // THE FACTS (gather.mjs fills them; a missing one refuses whatever reads it):
 //   cutoverStage 'first' | 'second'          product.cutover_stage, missing = first
@@ -21,8 +31,9 @@
 //   statuses [{ context, state }] | null     commit statuses on the PR head (refusal 1)
 //   requiredChecks [name], checksIgnored [{ app_id, name }]
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
-//   carried { review, audit, reasons, head } | null   carry-over from H0 to the PR head (read only when they differ;
-//                                            gather `carriedFrom`); `head` is the head it was worked out for (L80)
+//   carried { review, audit, unread?, reasons, head } | null   carry-over from H0 to the PR head (read only when they
+//                                            differ; gather `carriedFrom`); unread: true when it could not be read,
+//                                            which is not yet; `head` is the head it was worked out for (L80)
 //   reviews [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }] | null   every
 //                                            session the review runner launched for this card at H0 or H0's tree, with
 //                                            its own verdict file (M9 headReviews, L68, L69); null when they could not
@@ -32,17 +43,29 @@
 //   tier 1 | 2 | null                        M10's computed tier for the change
 //   exactReverse bool                        the change recomputes as an exact reverse (M10 exact-reverse.mjs)
 //   reversesGateMerge bool                   the reversed commit carries the robot's mark (first-cutover undo)
+//   exactReverseUnread, reversesGateMergeUnread true | undefined   a read under either check failed: unknown (L205)
 //   lane { decision, reason, tier }          rules.may('merge', subject): M10 picks docs lane or deep by cutover
-//   approve { needed, why, stands, reason }  M2 approveNeeded + approvalStands (refusals 8, 13, 14)
-//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10)
-//   threads { ok, unresolved } | null        unresolved human review threads, GraphQL (refusal 7)
+//   approve { needed, why, stands, reason, unread? }  M2 approveNeeded + approvalStands (refusals 8, 13, 14); unread:
+//                                            the Approve could not be read from GitHub, so it is not known (L205)
+//   go { ok, reasons, skipped } | null       M2 goCheck, or skipped for a go-free kind (refusal 10); null when it could
+//                                            not be read (M2's `unreadable`, L205)
+//   threads { ok, unresolved } | { ok: false, tooLong | incomplete | unreadable }   review threads, GraphQL (refusal 7)
+//   unreadReads [name]                       the reads that FAILED this pass (gather failedRead); the gate reads them (L190)
 //   rulesAdopted bool | null                 the adopted rules blob equals policy.yaml at main (else a hold)
-//   files [{ path, status }] | null          the change's files
+//   files [{ path, status, mode, blob? }] | null   the change's files; blob is GitHub's blob id at the head (compare's sha)
+//   filesProblem 'too_many' | 'no_entry' | 'unread' | null   why there is no file list (L182); filesMissing the file
+//   checksTooLong text | undefined           a check or status list longer than the gate reads (L182)
+//   checksCutOff text | undefined            the head's check runs: GitHub answered, but its count doesn't match its list
+//                                            (L190): a wait, counted toward the cap; final when judgedOnMain
+//   judgedOnMain true | undefined            watch-only: the commit is already on main, so a wait is judged as the
+//                                            gate's verdict at the cap (L190 minor a)
+//   tooLongLists ['checks' | 'statuses']     which of the two it was (gate.mjs reads the other as unread; L187 c1)
 //   firstCustomerNewFiles [prefix] | null    effect_paths.first_customer_visible.new_files_under
 
 import { PASSES, worstVerdict } from '../M9-record/outbox.mjs';
 import { HOLD_REASONS } from '../../shared/rules.mjs';
 import { compileList } from '../M10-rules/paths.mjs';
+import { researchPath } from '../M2-approvals/research-ask.mjs';
 
 export const REFUSALS = Object.freeze({
   1: 'required checks red', 2: 'main red', 3: 'draft, out of date or not mergeable', 4: 'stacked', 5: 'no reviewer verdict',
@@ -54,29 +77,55 @@ export const NOT_BUILT_LINE = 'refusal 13/14 not built: Joe\'s Approve used';
 export const FIRST_LANE_LINE = 'first cutover: docs lane only';
 export const DAILY_CARD_LINE = 'the daily card does not merge through the gate yet (pending the lead\'s call, R3-M2a)';
 
+export const WAITING_HOLD = 'waiting';
+
 const SHA = /^[0-9a-f]{40}$/;
 const GOOD = new Set(['success', 'neutral', 'skipped']);
+const final = (reason) => ({ reason, temporary: false });
+// A list GitHub answered in full but that is too long to judge (L182) is a fact about the change: a later pass reads
+// the same, so waiting never ends. The refusals that need it are final, and the reason tells the builder to split.
+export const SPLIT_LINE = 'split the change into smaller pull requests';
+export function filesFinal(f) {
+  if (f?.filesProblem === 'too_many') return `the change has 300 or more files, more than GitHub lists; ${SPLIT_LINE}`;
+  if (f?.filesProblem === 'no_entry') return `${f.filesMissing ?? 'a changed file'} is not in its commit's file list, so the change's files can't be judged`;
+  return null;
+}
+const notYet = (reason) => ({ reason, temporary: true });
 const MERGEABLE = new Set(['clean', 'unstable', 'has_hooks']);
 
 // A check is ignored only by an exact (app id, name) pair from the rules; a name alone could be any app's.
 const ignored = (c, list) => (Array.isArray(list) ? list : []).some((x) => Number.isInteger(x?.app_id) && x.app_id === c?.app_id && typeof x.name === 'string' && x.name === c?.name);
 
+// Red comes first: a red check or status is about the change, whatever else is still running. What is left after that
+// (a check that has not run or not finished, a pending status) is not known yet.
 function checksProblem(f) {
-  if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return 'the checks could not be read';
-  if (!Array.isArray(f.requiredChecks)) return 'the rules name no required checks';
+  if (typeof f.checksTooLong === 'string') return final(`the commit has ${f.checksTooLong}; run fewer checks on this commit`);
+  // Answered but cut off: the gate waits (counted toward its cap); for a commit already on main, watch-only gives the
+  // gate's verdict at the cap, which is final (L190 minor a).
+  if (typeof f.checksCutOff === 'string') return (f.judgedOnMain === true ? final : notYet)(`${f.checksCutOff}; GitHub's count doesn't match its list`);
+  if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return notYet('the checks could not be read');
+  if (!Array.isArray(f.requiredChecks)) return notYet('the rules name no required checks');
   const runs = f.checks.filter((c) => !ignored(c, f.checksIgnored));
+  const runRed = (c) => c?.status === 'completed' && !GOOD.has(c.conclusion);
+  const stPending = (x) => x?.state === 'pending';
+  const stRed = (x) => x?.state !== 'success' && !stPending(x);
+  for (const name of f.requiredChecks) {
+    if (runs.some((c) => c?.name === name && runRed(c)) || f.statuses.some((x) => x?.context === name && stRed(x))) return final(`required check ${name} is not green`);
+  }
+  const red = runs.find(runRed);
+  if (red) return final(`check ${red.name} concluded ${red.conclusion}`);
+  const bad = f.statuses.find(stRed);
+  if (bad) return final(`status ${bad?.context} is ${bad?.state}`);
   for (const name of f.requiredChecks) {
     const mine = runs.filter((c) => c?.name === name);
-    const st = f.statuses.filter((s) => s?.context === name);
-    if (!mine.length && !st.length) return `required check ${name} has not run`;
-    if (mine.some((c) => c.status !== 'completed' || !GOOD.has(c.conclusion)) || st.some((s) => s.state !== 'success')) return `required check ${name} is not green`;
+    const st = f.statuses.filter((x) => x?.context === name);
+    if (!mine.length && !st.length) return notYet(`required check ${name} has not run`);
+    if (mine.some((c) => c.status !== 'completed') || st.some(stPending)) return notYet(`required check ${name} has not finished`);
   }
-  const red = runs.find((c) => c?.status === 'completed' && !GOOD.has(c.conclusion));
-  if (red) return `check ${red.name} concluded ${red.conclusion}`;
   const pending = runs.find((c) => c?.status !== 'completed');
-  if (pending) return `check ${pending?.name} has not finished`;
-  const bad = f.statuses.find((s) => s?.state !== 'success');
-  if (bad) return `status ${bad?.context} is ${bad?.state}`;
+  if (pending) return notYet(`check ${pending?.name} has not finished`);
+  const waiting = f.statuses.find(stPending);
+  if (waiting) return notYet(`status ${waiting?.context} is pending`);
   return null;
 }
 
@@ -89,55 +138,94 @@ export { PASSES };
 // passes only when one of its sessions passed, none failed, none ended silent and none is unsettled (M9 worstVerdict).
 // An auditor that ran on a Tier-2 change still has its say: a failing one refuses. When the pull request's head is not
 // H0, every session at that head (or its tree) has its say too, even when the review carries over (L69 point 5).
-export function verdictProblem(f) {
+// A role's worst verdict, final or not yet: while one of its sessions is still running, it may yet hand in a pass, so
+// only a failure among the sessions that are settled is final.
+function roleProblem(sessions, role, passes, needPass) {
+  const p = worstVerdict(sessions, role, passes, { needPass });
+  if (!p) return null;
+  const running = (x) => x?.role === role && x.aside !== true && x.never_ran !== true && !x.problem && x.ended !== true;
+  if (!sessions.some(running)) return final(p);
+  const settled = worstVerdict(sessions.filter((x) => !running(x)), role, passes, { needPass: false });
+  return settled ? final(settled) : notYet(p);
+}
+const reworded = (x, text) => ({ ...x, reason: text(x.reason) });
+
+function verdictCheck(f) {
   const head = f.card?.doc?.head;
-  if (!SHA.test(head ?? '')) return 'the card has no head';
-  if (!Array.isArray(f.reviews)) return `the review runner's records could not be read: ${f.reviewsProblem ?? 'not gathered'}`;
+  if (!SHA.test(head ?? '')) return final('the card has no head');
+  if (!Array.isArray(f.reviews)) return notYet(`the review runner's records could not be read: ${f.reviewsProblem ?? 'not gathered'}`);
   const at = ` at ${head.slice(0, 7)}`;
-  const rp = worstVerdict(f.reviews, 'reviewer', PASSES.reviewer);
-  if (rp) return `${rp}${at} (a pass needs a clean four-line checklist)`;
-  if (f.tier !== 1 && f.tier !== 2) return 'the change\'s tier is unknown';
-  const ap = worstVerdict(f.reviews, 'auditor', PASSES.auditor, { needPass: f.tier === 1 });
-  if (ap) return `${f.tier === 1 ? 'Tier 1: ' : ''}${ap}${at} (a pass needs 0 Material)`;
+  const rp = roleProblem(f.reviews, 'reviewer', PASSES.reviewer, true);
+  if (rp) return reworded(rp, (r) => `${r}${at} (a pass needs a clean four-line checklist)`);
+  // M10 gives the tier from the files: with them read, no tier is a fact a later pass reads the same (L187). A guard: the
+  // production classify (makeRules) always answers tier 1 or 2 and reads any doubt as tier 1, so it can't reach the
+  // final branch today; a classifier that could answer neither is refused here rather than judged (L190 cosmetic).
+  if (f.tier !== 1 && f.tier !== 2) return Array.isArray(f.files) ? final('the rules give no tier for the change\'s files') : notYet('the change\'s tier is unknown');
+  const ap = roleProblem(f.reviews, 'auditor', PASSES.auditor, f.tier === 1);
+  if (ap) return reworded(ap, (r) => `${f.tier === 1 ? 'Tier 1: ' : ''}${r}${at} (a pass needs 0 Material)`);
   const prHead = f.pr?.head?.sha;
   if (prHead !== head) {
-    const there = ` at the pull request's head ${String(prHead).slice(0, 7)}`;
-    if (!Array.isArray(f.prReviews)) return `the review runner's records${there} could not be read: ${f.prReviewsProblem ?? 'not gathered'}`;
-    const pp = worstVerdict(f.prReviews, 'reviewer', PASSES.reviewer, { needPass: false }) ?? worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: false });
-    if (pp) return `${pp}${there}`;
-    if (f.carried?.review !== true) return `the review was for ${head.slice(0, 7)}; it does not carry over to ${String(prHead).slice(0, 7)}`;
+    if (!SHA.test(prHead ?? '')) return notYet('the pull request\'s head could not be read');
+    const there = ` at the pull request's head ${prHead.slice(0, 7)}`;
+    if (!Array.isArray(f.prReviews)) return notYet(`the review runner's records${there} could not be read: ${f.prReviewsProblem ?? 'not gathered'}`);
+    const pp = roleProblem(f.prReviews, 'reviewer', PASSES.reviewer, false) ?? roleProblem(f.prReviews, 'auditor', PASSES.auditor, false);
+    if (pp) return reworded(pp, (r) => `${r}${there}`);
+    if (!f.carried || f.carried.unread === true) return notYet(`whether the review carries over to ${prHead.slice(0, 7)} could not be read`);
+    if (f.carried.review !== true) return final(`the review was for ${head.slice(0, 7)}; it does not carry over to ${prHead.slice(0, 7)}`);
     // The short re-audit (L80 (A), R-0b-146): when the review carried over to exactly this head and only the audit did
-    // not, a passing auditor at the pull request's head counts in its place. Every auditor there still has its say.
+    // not, a passing auditor at the pull request's head counts in its place, and until one has it is a wait (L92 M-3),
+    // told and capped like any other. Every auditor there still had its say above, so a failed one is final.
     if (f.tier === 1 && f.carried.audit !== true) {
-      const no = `the Tier-1 audit does not carry over to ${String(prHead).slice(0, 7)}`;
-      if (f.carried.head !== prHead) return no;
-      const re = worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: true });
-      if (re) return `${no}, and no short re-audit passed there (${re})`;
+      const no = `the Tier-1 audit does not carry over to ${prHead.slice(0, 7)}`;
+      if (f.carried.head !== prHead) return final(no);
+      if (worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: true })) return { ...notYet(`${no}; waiting for a short re-audit there`), reAudit: prHead };
     }
   }
   return null;
 }
+export function verdictProblem(f) { return verdictCheck(f)?.reason ?? null; }
 
 function requestProblem(f) {
   const r = f.request;
-  if (!r?.doc) return 'no merge request';
-  if (r.createdBy !== 'dispatcher') return 'the merge request was not written by the Dispatcher';
-  if (r.doc.card !== f.card.id) return 'the merge request is for another card';
-  if (r.doc.pr !== f.pr?.number) return 'the merge request is for another pull request';
-  if (r.doc.head !== f.card.doc.head) return 'the merge request is for another head';
+  if (!r?.doc) return final('no merge request');
+  if (r.createdBy !== 'dispatcher') return final('the merge request was not written by the Dispatcher');
+  if (r.doc.card !== f.card.id) return final('the merge request is for another card');
+  // An unread pull request is refusal 3's to say (not yet), never "another pull request".
+  if (f.pr && r.doc.pr !== f.pr.number) return final('the merge request is for another pull request');
+  if (r.doc.head !== f.card.doc.head) return final('the merge request is for another head');
   // A tab's claim is named tab:<claim_id> and must be the live claim. M9 refuses a request for a card with a claim, so
   // this path is closed today (README, known gaps); the check stays so opening it can't skip it.
   const sid = r.doc.session_id;
-  if (typeof sid !== 'string' || !sid) return 'the merge request names no session';
-  if (sid.startsWith('tab:') && sid !== `tab:${f.card.doc.claim?.claim_id ?? ''}`) return 'the merge request names a tab claim that is not the card\'s claim';
-  if (!Array.isArray(f.movesSinceRequest)) return 'the record since the request could not be read';
+  if (typeof sid !== 'string' || !sid) return final('the merge request names no session');
+  if (sid.startsWith('tab:') && sid !== `tab:${f.card.doc.claim?.claim_id ?? ''}`) return final('the merge request names a tab claim that is not the card\'s claim');
+  if (!Array.isArray(f.movesSinceRequest)) return notYet('the record since the request could not be read');
   const other = f.movesSinceRequest.find((m) => m?.actor !== 'merge_gate');
-  if (other) return `the card moved since the request (${other.actor} wrote ${other.entity} ${other.id})`;
+  if (other) return final(`the card moved since the request (${other.actor} wrote ${other.entity} ${other.id})`);
   return null;
 }
 
 // The list is read as M10 reads it: patterns (M10 paths.mjs), so `app/`, `app/**` and `app/pages/*.tsx` mean what
 // they mean to the classification. A pattern M10 can't read makes this unknown, which refuses.
+// Refusal 10 for a research_copy card (R-0b-135; L284 c, L286). It merges with no go, so the change may touch only the
+// card's one path, the one its ask names, as one plain file whose blob is the owner's report byte for byte (the blob id
+// the intake worked out from the bytes it hashed). Called only with the change's files read.
+const BLOB = /^[0-9a-f]{40}$/;
+export function researchCopyProblem(f) {
+  const d = f.card.doc;
+  const allowed = typeof d.research_ask === 'string' ? researchPath(d.research_ask) : null;
+  if (!allowed || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== allowed) return final(`a research_copy card's one file must be its ask's ${allowed ?? 'docs/research/research-R-<n>.md'}`);
+  const want = d.source?.blob;
+  if (!BLOB.test(String(want ?? ''))) return final('the research_copy card has no blob id for the report');
+  const touched = f.files.flatMap((x) => [x?.path, x?.previous_path].filter((p) => p !== undefined));
+  if (f.files.length !== 1 || touched.length !== 1 || touched[0] !== allowed) return final(`a research copy may change only ${allowed}; this change touches ${touched.length ? touched.slice(0, 5).join(', ') : 'no file'}`);
+  const x = f.files[0];
+  if (x.status !== 'added' && x.status !== 'modified') return final(`a research copy adds or updates ${allowed}; this change has it ${x.status}`);
+  if (x.mode !== '100644') return final(`${allowed} must be a plain file (mode 100644), not ${x.mode}`);
+  if (!BLOB.test(String(x.blob ?? ''))) return notYet(`GitHub gave no blob id for ${allowed}, so its bytes can't be checked yet`);
+  if (x.blob !== want) return final(`${allowed} is not the owner's report byte for byte (blob ${x.blob.slice(0, 12)}, the card's ${want.slice(0, 12)})`);
+  return null;
+}
+
 function customerFiles(f) {
   if (!Array.isArray(f.files) || !Array.isArray(f.firstCustomerNewFiles)) return null;
   let match;
@@ -149,6 +237,11 @@ export function judge(f) {
   const refusals = [];
   const notes = [];
   const no = (n, reason) => refusals.push({ n, reason });
+  const wait = (n, reason) => refusals.push({ n, reason, temporary: true });
+  const add = (n, x) => { if (!x) return; if (!x.temporary) no(n, x.reason); else refusals.push({ n, reason: x.reason, temporary: true, ...(x.reAudit ? { reAudit: x.reAudit } : {}) }); };
+  // A refusal that waits only because there is no file list is final when the list can never be read (L182).
+  const filesGone = filesFinal(f);
+  const waitFiles = (n, reason) => (filesGone ? no(n, filesGone) : wait(n, reason));
   try {
     // A review launch record no card can be tied to was skipped by M9's check (L69 point 3): logged with the decision.
     for (const x of Array.isArray(f?.reviewsSkipped) ? f.reviewsSkipped : []) notes.push(`a review launch record that names no card was skipped (${x})`);
@@ -157,33 +250,43 @@ export function judge(f) {
     const reverse = f.exactReverse === true;
     const kind = f.card.doc.kind ?? 'ordinary';
     if (kind === 'lead_daily_card') return { decision: 'refuse', refusals: [{ n: 9, reason: DAILY_CARD_LINE }], hold: null, notes };
+    // An undo whose own facts could not be read is judged on nothing else: as not a reverse, every other refusal would
+    // apply to it and some are final. It waits for a pass that reads them (L205).
+    if (kind === 'exact_reverse' && (f.exactReverseUnread === true || (first && reverse && f.reversesGateMergeUnread === true))) {
+      return { decision: 'hold', refusals: [{ n: 9, reason: f.exactReverseUnread === true ? 'whether the undo is an exact reverse could not be read' : 'whether the undo reverses a merge the gate made could not be read', temporary: true }], hold: WAITING_HOLD, notes };
+    }
     if (kind === 'exact_reverse' && !reverse) no(9, 'an undo card whose change is not an exact reverse');
     else if (first && kind === 'exact_reverse' && f.reversesGateMerge !== true) no(9, 'first cutover: an undo merges only when it reverses a merge the gate made');
 
     // 1, 6. The checks, on this commit. An exact reverse skips 1 (it must be able to undo a red main), never 6.
-    if (!reverse) { const p = checksProblem(f); if (p) no(1, p); }
+    if (!reverse) add(1, checksProblem(f));
     const prHead = f.pr?.head?.sha;
-    if (!Array.isArray(f.checks)) { if (reverse) no(6, 'the checks could not be read'); } else if (f.checks.some((c) => c?.head_sha !== prHead)) no(6, 'a check result is for another commit');
-    // 2. main.
-    if (f.main?.green !== true) no(2, f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
-    // 3, 4. The pull request.
+    // A PR head that could not be read is refusal 3's to say (not yet); 6 compares only against a head that was read.
+    if (!Array.isArray(f.checks)) { if (reverse) (typeof f.checksTooLong === 'string' ? no : wait)(6, typeof f.checksTooLong === 'string' ? `the commit has ${f.checksTooLong}` : 'the checks could not be read'); } else if (SHA.test(prHead ?? '') && f.checks.some((c) => c?.head_sha !== prHead)) no(6, 'a check result is for another commit');
+    // 2. main. Red or unread, it is main's state, not the change's: not yet.
+    if (f.main?.green !== true) wait(2, f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
+    // 3, 4. The pull request. GitHub works out mergeable in the background, so null or 'unknown' is not yet.
     const pr = f.pr;
-    if (!pr) no(3, 'the pull request could not be read');
+    if (!pr) wait(3, 'the pull request could not be read');
     else {
       if (pr.state !== 'open') no(3, `the pull request is ${pr.state}`);
       else if (pr.draft !== false) no(3, 'the pull request is a draft');
-      else if (pr.mergeable !== true || !MERGEABLE.has(pr.mergeable_state)) no(3, `the pull request is not mergeable (${pr.mergeable_state ?? 'unknown'})`);
+      else if (pr.mergeable == null || pr.mergeable_state == null || pr.mergeable_state === 'unknown') wait(3, `GitHub has not worked out yet whether the pull request is mergeable (${pr.mergeable_state ?? 'unknown'})`);
+      else if (pr.mergeable !== true || !MERGEABLE.has(pr.mergeable_state)) no(3, `the pull request is not mergeable (${pr.mergeable_state})`);
       if (pr.base?.ref !== 'main') no(4, `stacked on ${pr.base?.ref ?? 'an unknown branch'}, not main`);
     }
     // 5. The review (and the Tier-1 audit).
-    if (!reverse) { const p = verdictProblem(f); if (p) no(5, p); }
+    if (!reverse) add(5, verdictCheck(f));
     // 7. Human review threads (fail closed).
-    if (f.threads?.ok !== true) no(7, 'the review threads could not be read');
+    if (f.threads?.ok !== true) {
+      if (typeof f.threads?.tooLong === 'string') no(7, `the pull request has ${f.threads.tooLong}; open a new pull request; resolved threads still count toward GitHub's total`);
+      else wait(7, typeof f.threads?.incomplete === 'string' ? `the review threads came back incomplete (${f.threads.incomplete})` : 'the review threads could not be read');
+    }
     else if (!(f.threads.unresolved === 0)) no(7, `${f.threads.unresolved} review thread(s) unresolved`);
     // 9 and the holds. M10's merge answer; a hold keeps the place in the queue.
     const lane = f.lane;
     let hold = null;
-    if (!lane || !['allow', 'ask', 'deny'].includes(lane.decision)) no(9, 'the rules gave no merge answer');
+    if (!lane || !['allow', 'ask', 'deny'].includes(lane.decision)) (Array.isArray(f.files) ? wait : waitFiles)(9, 'the rules gave no merge answer');
     else if (lane.decision === 'deny') {
       if (HOLD_REASONS.includes(lane.reason)) hold = lane.reason;
       else no(9, first ? `${FIRST_LANE_LINE} (${lane.reason})` : lane.reason);
@@ -193,23 +296,34 @@ export function judge(f) {
     // M10's own ask for a reverse still needs it (R2-M3).
     const ap = f.approve;
     const stands = ap?.stands === true;
+    // An Approve that could not be read from GitHub (ap.unread, L205) is not known to be missing: 8, 13 and 14 wait.
+    const apUnread = ap?.unread === true;
+    const approveWait = (n) => wait(n, ap.reason ?? 'the owner\'s Approve could not be read from GitHub');
     if (!stands) {
-      if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
-      else if (!reverse && ap?.needed !== false) no(8, ap?.needed === true ? `needs the owner's Approve: ${(ap.why ?? []).join('; ')}${ap.reason ? ` (${ap.reason})` : ''}` : 'the Approve check could not run');
+      if (apUnread && (lane?.decision === 'ask' || (!reverse && ap?.needed !== false))) approveWait(8);
+      else if (lane?.decision === 'ask') no(8, `the rules ask for the owner's Approve: ${lane.reason}`);
+      // With the change's files unread, M10 calls every change unclassifiable, so "needs the Approve" is not known yet
+      // (PROBE-D, L164): it waits for a pass that reads them.
+      else if (!reverse && ap?.needed === true && !Array.isArray(f.files)) waitFiles(8, 'the change\'s files could not be read, so whether it needs the owner\'s Approve is not known yet');
+      else if (!reverse && ap?.needed === true) no(8, `needs the owner's Approve: ${(ap.why ?? []).join('; ')}${ap.reason ? ` (${ap.reason})` : ''}`);
+      else if (!reverse && ap?.needed !== false) wait(8, 'the Approve check could not run');
     }
-    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
+    if (kind === 'fix') { if (stands) notes.push(NOT_BUILT_LINE); else if (apUnread) approveWait(13); else no(13, 'a fix card needs the owner\'s Approve until refusal 13 is built'); }
     const cf = customerFiles(f);
-    if (cf === null) no(14, 'the change\'s files or the first-customer paths could not be read');
-    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
+    if (cf === null) (Array.isArray(f.files) ? wait : waitFiles)(14, 'the change\'s files or the first-customer paths could not be read');
+    else if (cf.length) { if (stands) { if (!notes.includes(NOT_BUILT_LINE)) notes.push(NOT_BUILT_LINE); } else if (apUnread) approveWait(14); else no(14, `${cf[0].path} is customer-visible; needs the owner's Approve until refusal 14 is built`); }
     // 10. The go.
-    if (!f.go) no(10, 'the go could not be checked');
+    if (!f.go) (Array.isArray(f.files) ? wait : waitFiles)(10, 'the go could not be checked');
     else if (f.go.ok !== true && f.go.skipped !== true) no(10, (Array.isArray(f.go.reasons) && f.go.reasons.length ? f.go.reasons : ['go mismatch']).join('; '));
+    if (kind === 'research_copy') { if (Array.isArray(f.files)) add(10, researchCopyProblem(f)); else waitFiles(10, 'the change\'s files could not be read, so the research copy can\'t be checked'); }
     // 11. The request.
-    if (!reverse) { const p = requestProblem(f); if (p) no(11, p); }
+    if (!reverse) add(11, requestProblem(f));
     // 12. Behind main.
-    if (f.compareStatus !== 'ahead') no(12, f.compareStatus ? `the branch is ${f.compareStatus} main` : 'the branch could not be compared with main');
+    if (f.compareStatus !== 'ahead') (f.compareStatus ? no : wait)(12, f.compareStatus ? `the branch is ${f.compareStatus} main` : 'the branch could not be compared with main');
 
-    if (refusals.length) return { decision: 'refuse', refusals, hold: null, notes };
+    // Any final refusal refuses, and lists the not-yet ones too; only not-yet ones hold the change to be judged again.
+    if (refusals.some((x) => !x.temporary)) return { decision: 'refuse', refusals, hold: null, notes };
+    if (refusals.length) return { decision: 'hold', refusals, hold: WAITING_HOLD, notes };
     return { decision: hold ? 'hold' : 'merge', refusals, hold, notes };
   } catch (e) {
     return { decision: 'refuse', refusals: [...refusals, { n: 0, reason: `judging failed: ${String(e?.message ?? e).slice(0, 200)}` }], hold: null, notes };

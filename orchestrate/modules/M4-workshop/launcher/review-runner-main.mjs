@@ -24,7 +24,10 @@
 //     "ownerTaps": "/abs",                          optional: Joe's "review again" taps (L70 point 3), a folder of the
 //                                                   owner's that no one else writes, holding <session>.json files of
 //                                                   the owner's; the Front Door, which runs as Joe, writes them
-//     "wiring": "/abs/wiring.mjs",                  exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`)
+//     "wiring": "<installRoot>/modules/M4-workshop/launcher/review-wiring.mjs",
+//                                                   exports `start(x)` (review-runner.mjs `runnerPass`, `ctx.start`);
+//                                                   the wiring and the budget module must be the copy's own .mjs files
+//                                                   under its modules/ or shared/ folder, never copy items (L132 M-1)
 //     "snapshot": "/abs", "bobFolder": "/abs",      the session settings' fixed paths (L67 addendum 2, review-settings.mjs):
 //     "deny": ["/abs", ...],                        the rules snapshot (inside root), the Bob folder, the read-deny list,
 //     "reviewCopies": "/abs", "workerCopies": "/abs",   and the review copies' folder, apart from the workers' copies'
@@ -32,7 +35,7 @@
 //                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
 //     "pin": "x.y.z", "machineWide": "/abs",       the Claude Code version the rules pin (launch checks 0, 6, 7) and the
 //                                                   machine-wide settings file (check 10)
-//     "bobManifest": "/abs", "budget": "/abs",      optional, inside installRoot and root's: the pinned Bob folder's file
+//     "bobManifest": "/abs", "budget": "/abs.mjs",  optional, inside installRoot and root's: the pinned Bob folder's file
 //                                                   list { path: sha256 } (check 13), and a module exporting
 //                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
 //                                                   runningNow } (check 12). Missing, that check has no port and the
@@ -70,9 +73,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
-import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath } from './install-check.mjs';
+import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID, isOpen } from '../../../shared/record.mjs';
+import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } from '../../../shared/job-config.mjs';
 import { carriedFrom } from '../../M6-merge-gate/gather.mjs';
 import { localGitView } from '../../M5-review-audit/local-view.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
@@ -82,7 +86,7 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
-import { finalize, headFileReader } from '../../M5-review-audit/findings.mjs';
+import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -101,7 +105,9 @@ const CHILD_MS = 10_000;
  * role folder renamed away, so a fail would read as silence.
  */
 export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProblem } = {}) {
-  const c = JSON.parse(readFileSync(file, 'utf8'));
+  // Read by descriptor through the shared job-config reader (L253): never a link, a plain file no one else writes.
+  // Its owner and place (root's, inside the copy) are programsProblem's, and main checks the name still names it.
+  const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
@@ -199,13 +205,14 @@ export function programsProblem(c, { self, config, node = realpathSync.native(pr
   const extra = [c.budget, c.bobManifest].filter((p) => typeof p === 'string');
   const bad = installProblem(c.installRoot, [self, config, c.wiring, c.claudeBin, node, c.hooksDir, ...REVIEW_ROLES.map((r) => templateFile(c.installRoot, r)), ...extra], opts);
   if (bad) return bad;
-  const owner = opts.owner ?? 0;
-  const cur = currentCopy(c.installRoot, { owner, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
-  if (!cur.real) return cur.problem;
-  if (!cur.link) return `${c.installRoot} is a plain folder, not the installed copy's link (the install step makes the link)`;
-  const stamp = readInstallStamp(c.installRoot, { owner });
-  if (stamp !== cur.commit) return `the copy's commit stamp (${stamp ?? 'none'}) is not the commit its folder is named for (${cur.commit})`;
-  return null;
+  // The two the runner imports must also be the copy's own code files (L132 M-1). installProblem, just above, has
+  // already refused one outside the copy, missing, a link or not root's alone; this says where inside it may be.
+  for (const k of RUNNER_MODULES) {
+    if (typeof c[k] !== 'string') continue;
+    const why = codeFileProblem(c.installRoot, c[k], opts);
+    if (why) return `the runner's ${k}, ${c[k]}, ${why}`;
+  }
+  return copyReady(c.installRoot, { owner: opts.owner ?? 0, ...(opts.lstat ? { lstat: opts.lstat } : {}), ...(opts.readlink ? { readlink: opts.readlink } : {}) });
 }
 
 // A folder of the Record: a plain folder of the Record's owner that no one else writes. Null, or the problem.
@@ -262,22 +269,26 @@ export function readCardFile({ recordRoot, recordUid, card }) {
   return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
 }
 
-/** Every merge document of the Record, read only (docs/merge/). A Record that can't be read throws. */
+/**
+ * Every merge document of the Record, read only (docs/merge/): { merges, bad: [reason] }. One bad file blocks nothing
+ * (L92 minor 5): it is listed, for the caller to report. A folder that can't be read throws.
+ */
 export function readMergeFiles({ recordRoot, recordUid }) {
   for (const d of [recordRoot, join(recordRoot, 'docs')]) {
     const bad = recordFolderProblem(d, recordUid);
     if (bad) throw new Error(bad);
   }
   const dir = join(recordRoot, 'docs', 'merge');
-  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return []; throw e; }
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return { merges: [], bad: [] }; throw e; }
   const bad = recordFolderProblem(dir, recordUid);
   if (bad) throw new Error(bad);
-  return readdirSync(dir).filter((n) => n.endsWith('.json') && !n.startsWith('.')).map((n) => {
+  const merges = []; const unread = [];
+  for (const n of readdirSync(dir).filter((x) => x.endsWith('.json') && !x.startsWith('.'))) {
     const id = n.slice(0, -'.json'.length);
     const r = readRecordFile(join(dir, n), recordUid, 'merge', id, 'it is gone');
-    if (!r.ok) throw new Error(`merge ${id}: ${r.reason}`);
-    return { id, doc: r.doc };
-  });
+    if (r.ok) merges.push({ id, doc: r.doc }); else unread.push(`merge ${id}: ${r.reason}`);
+  }
+  return { merges, bad: unread };
 }
 
 /**
@@ -285,11 +296,11 @@ export function readMergeFiles({ recordRoot, recordUid }) {
  * one open merge request gives the recorded catch-ups; none, or more than one, throws (no carry-over).
  */
 export async function mirrorCarried({ mirror, recordRoot, recordUid, card, doc, head }) {
-  const merges = readMergeFiles({ recordRoot, recordUid });
+  const { merges, bad } = readMergeFiles({ recordRoot, recordUid });
   const mine = merges.filter((m) => m.doc?.card === card && isOpen('merge', m.doc?.state));
   if (mine.length !== 1) throw new Error(`card ${card} has ${mine.length} open merge requests, not one`);
   const mainSha = (await gitOk(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'review-runner-main', timeoutMs: CHILD_MS })).trim();
-  return carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups });
+  return { ...await carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups }), badMerges: bad };
 }
 
 /**
@@ -489,7 +500,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
-    finalize: ({ role, sessionId, card, head }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], readFile: headFileReader({ gitDir: c.mirror, head }) }),
+    finalize: async ({ role, sessionId, card, head }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], ...await changeReaders({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }
@@ -510,13 +521,17 @@ export function readyProblem(c, wiring, { write = writeSnapshot } = {}) {
 
 // `ports` stand in for the walls in a test (the config reader, the root-owned check and the pass); production leaves them out.
 export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), ports = {} } = {}) {
-  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write } = ports;
+  const { readConfigFn = readConfig, programs = programsProblem, pass = runnerPass, write, lstat } = ports;
   if (!argv[0]) { log('usage: review-runner-main.mjs <config.json>'); return 1; }
   let c;
   try { c = readConfigFn(argv[0]); } catch (e) { log(`review runner: ${e.message}`); return 1; }
   const self = realpathSync.native(fileURLToPath(import.meta.url));
   const bad = programs(c, { self, config: realpathSync.native(argv[0]) });
-  if (bad) { log(`review runner: refused, the installed copy is not root's alone: ${bad}`); return 1; }
+  if (bad) { log(`review runner: refused, the installed copy is not one it may run (root's alone, its link, its stamp): ${bad}`); return 1; }
+  // The file programsProblem checked by name is the one read (L253). Always for the real reader; a test's reader is
+  // checked too when it read by descriptor (audit #144 m3), and one answering a plain object has no read to compare.
+  const swapped = readConfigFn === readConfig || readByDescriptor(c) ? readChangedProblem(argv[0], c, lstat ? { lstat } : {}) : null;
+  if (swapped) { log(`review runner: config ${argv[0]} ${swapped}`); return 1; }
   let wiring;
   try { wiring = await import(pathToFileURL(c.wiring).href); } catch (e) { log(`review runner: the wiring could not be loaded (${e.message})`); return 1; }
   const notReady = readyProblem(c, wiring, write ? { write } : {});

@@ -72,8 +72,8 @@ test('0b-7 audit round 7 M-2: an outside-chosen env id that looks secret-named n
 
 test('0b-7 audit round 7: a planted key in a map key or in declared text is still masked by its shape', () => {
   const rec = memoryRecord(); const writer = makeFactWriter(rec, { masker: makeMasker({ env: {} }) });
-  writer.put('f', { kind: 'fact.prod-watch', product: 'p', env: { [FAKE.github]: { key: `x ${FAKE.github}`, print: 'ab12' } }, settings: { a: 'b' } });
-  assert.equal(JSON.stringify(rec.read('fact', 'f').doc).includes(FAKE.github), false);
+  writer.put('pr-f', { kind: 'fact.prod-watch', product: 'p', env: { [FAKE.github]: { key: `x ${FAKE.github}`, print: 'ab12' } }, settings: { a: 'b' } });
+  assert.equal(JSON.stringify(rec.read('fact', 'pr-f').doc).includes(FAKE.github), false);
 });
 
 test('0b-7 audit round 7 minor: the no-push reason says which token can write, unmasked', async () => {

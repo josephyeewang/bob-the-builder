@@ -4,8 +4,9 @@
 //          use a|b`), read at the start; the result names the folder (`signin`, `configDir`);
 //   list   (sessions, board, outboxSessions, leads): once per account folder, merged, each entry tagged with its folder,
 //          so after a switch the old account's sessions are still seen;
-//   check  (hasSession): yes if either folder says yes; an unclear answer is an error, never a no (L63);
 //   stop   (stopGroup, a Lead's stopSession): through the folder the session runs in, not the one in use;
+//   stop everywhere (stopSession, for the Record's lapse of a claim whose session never started, L72): yes only when
+//          every folder says that session id is stopped there; any other answer (or an error) is a no (L63);
 //   the Front Door: alive only when it runs on the account in use, so after a switch it is restarted there (the old
 //          one is stopped first), and the phone shows it under the account in use. It is the one session a switch
 //          moves (L62); one left running on the old account is stopped (`strayFrontDoor`).
@@ -80,25 +81,22 @@ export function acrossAccounts({ home, listIn, idOf = (s) => s?.id, what = 'sess
 }
 
 /**
- * A check port over every account folder: `checkIn(ctx, ...args)` -> true | false. True if any folder says true; false
- * only if every folder says false. Any other answer (null, undefined, text) from a folder, when none says true, is an
- * error naming the folder and the answer, never a false (L63): the steps read false as "gone" (no session: the card goes
- * back), so an unclear answer must fail the step and tell Joe, not guess absent. A folder whose
- * check fails, or answers late, is an error the same way. These ports answer at once (the wiring runs them through
- * limitedSync).
+ * The Record's `stopSession(sessionId)` for a claim whose session never started (M9 lapseClaims, L72): the claim lapses,
+ * and the card goes back to ready, only once this says yes, so the card can't run twice. `stopIn(ctx, sessionId)` ->
+ * true when that folder has stopped the session or never ran it. Yes only when every set-up folder says true at once;
+ * any other answer (false, null, undefined, a promise, an error) from any folder is a no, never read as "not there"
+ * (L63): after a switch the old account is still asked. The Record calls this synchronously, so it must answer at once.
  */
-export function inAnyAccount({ home, checkIn, what = 'the session' }) {
-  return (...args) => {
-    let unclear = null;
-    for (const n of setUp(home)) {
+export function stopEverywhere({ home, stopIn }) {
+  return (sessionId) => {
+    const folders = setUp(home);
+    if (!folders.length) return false;
+    for (const n of folders) {
       let r;
-      try { r = checkIn(ctxOf(home, n), ...args); } catch (e) { throw new Error(`${where(n)}: ${what} could not be checked (${why(e)})`); }
-      if (thenable(r)) throw new Error(`${where(n)}: ${what} could not be checked (the port must answer at once)`);
-      if (r === true) return true;
-      if (r !== false) unclear ??= `${where(n)}: ${what} gave no clear answer (${r === undefined ? 'undefined' : JSON.stringify(r) ?? String(r)}); not read as "not there"`;
+      try { r = stopIn(ctxOf(home, n), sessionId); } catch { return false; }
+      if (r !== true) return false;
     }
-    if (unclear) throw new Error(unclear);
-    return false;
+    return true;
   };
 }
 
@@ -200,8 +198,7 @@ export function frontDoorPorts({ home, aliveIn, restartIn, stopIn }) {
 export const PER_FOLDER_PORTS = Object.freeze({
   start: ['launch', 'startReadonly', 'startMinibase'],
   list: ['sessions', 'board', 'outboxSessions', 'leads'],
-  check: ['hasSession'],
-  stop: ['stopGroup'],
+  stop: ['stopGroup', 'stopSession'],
   frontDoor: ['frontDoorAlive', 'restartFrontDoor', 'stopFrontDoor'],
 });
 
@@ -218,7 +215,6 @@ export function accountPorts({ home, inFolder }) {
   };
   const start = (name) => startInUse({ home, startIn: (ctx, ...a) => get(ctx, name)(...a) });
   const list = (name, idOf) => acrossAccounts({ home, listIn: (ctx) => get(ctx, name)(), idOf, what: name });
-  const check = (name) => inAnyAccount({ home, checkIn: (ctx, ...a) => get(ctx, name)(...a), what: name });
   return {
     launch: accountLaunch({ home, launch: (x) => get(x, 'launch')(x) }),
     startReadonly: start('startReadonly'),
@@ -227,7 +223,7 @@ export function accountPorts({ home, inFolder }) {
     board: list('board'),
     outboxSessions: list('outboxSessions', (s) => s?.sessionId),
     leads: acrossLeads({ home, listIn: (ctx) => get(ctx, 'leads')() }),
-    hasSession: check('hasSession'),
+    stopSession: stopEverywhere({ home, stopIn: (ctx, sid) => get(ctx, 'stopSession')(sid) }),
     stopGroup: stopInAccount({ home, stopIn: (s, ctx) => get(ctx, 'stopGroup')(s) }),
     ...frontDoorPorts({ home, aliveIn: (ctx) => get(ctx, 'frontDoorAlive')(), restartIn: (ctx, x) => get(ctx, 'restartFrontDoor')(x), stopIn: (ctx) => get(ctx, 'stopFrontDoor')() }),
   };

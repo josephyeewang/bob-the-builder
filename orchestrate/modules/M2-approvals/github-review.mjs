@@ -6,7 +6,7 @@
 // THE RULE. The owner is the account with the numeric id accounts.joe.github_id, of type "User" (a login can be renamed;
 // an app or bot account is never the owner). Only the owner's reviews submitted at or after the ask was raised count;
 // raised = the time GitHub logged the robot's review request for the owner (read back from the timeline, never the
-// Mac's clock). In order, DISMISSED included, the owner's latest review that is not a plain comment decides:
+// Mac's clock), stored as outsideTime (kinds.mjs): no later than the Mac's now (L362). In order, DISMISSED included, the owner's latest review that is not a plain comment decides:
 //   APPROVED       → counts, if its commit is the pull request's head now, or carries over to it (M10 carryOver: the
 //                    change's own files identical, and only recorded catch-up merges between);
 //   CHANGES_REQUESTED → "changes requested" (a decision PR records it as declined);
@@ -14,15 +14,19 @@
 // Any review of the owner's made through an app (performed_via_github_app) refuses the count. An Approve given only
 // before the ask was raised counts nothing; the owner is told APPROVE_AGAIN_LINE. Any GitHub error → no count.
 //
-//   await requestReview({ gh, owner, repo, pr, githubId }) → { ok, raised_at } | { ok: false, reason }
+//   await requestReview({ gh, owner, repo, pr, githubId, now }) → { ok, raised_at } | { ok: false, reason }   now in ms
 //   await ownerVerdict({ gh, owner, repo, pr, githubId, raisedAt }) → { ok, verdict: 'approved'|'changes_requested'|
 //     'none', review?, head, line? } | { ok: false, reason }
 //   await countApprove({ gh, view, owner, repo, pr, githubId, raisedAt, catchUps }) → { ok, head, review, carried }
 //     | { ok: false, reason, line? }            the count for a merge: the exact head it is for is returned (M4)
+// ownerVerdict and countApprove add `unreadable: true, cause: <the error>` when a read of GitHub threw, so the
+// check could not finish (L205). The caller classes `cause`: M6 gather's failedRead holds on a failed read (5xx,
+// 401, 403, 429, no answer) and counts a 4xx GitHub answered (a gone pull request) toward its wait cap. Any other
+// "no" is GitHub's answer about the Approve.
 // `gh` is a GitHub client ({ get, post, … } → { status, json }); `view` is M10's git view of the same repository.
 
 import { carryOver } from '../M10-rules/carry-over.mjs';
-import { APPROVE_AGAIN_LINE } from './kinds.mjs';
+import { APPROVE_AGAIN_LINE, outsideTime } from './kinds.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_PAGES = 10;
@@ -49,7 +53,7 @@ async function pages(gh, path) {
 
 const validPr = (pr) => Number.isSafeInteger(pr) && pr > 0;
 
-export async function requestReview({ gh, owner, repo, pr, githubId }) {
+export async function requestReview({ gh, owner, repo, pr, githubId, now }) {
   try {
     if (!validPr(pr)) return fail('bad pull request number');
     const u = await read(gh, `/user/${githubId}`);
@@ -61,8 +65,8 @@ export async function requestReview({ gh, owner, repo, pr, githubId }) {
     const events = await pages(gh, `${base}/issues/${pr}/timeline`);
     const asked = events.filter((e) => e?.event === 'review_requested' && e.requested_reviewer?.id === githubId && ms(e.created_at) !== null);
     if (!asked.length) return fail('GitHub shows no review request for the owner');
-    const at = asked.map((e) => ms(e.created_at)).sort((a, b) => a - b).at(-1);
-    return { ok: true, raised_at: new Date(at).toISOString() };
+    const at = asked.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1);
+    return { ok: true, raised_at: new Date(outsideTime(at, now)).toISOString() };
   } catch (e) {
     return fail(`could not ask for the review: ${String(e?.message ?? e).slice(0, 200)}`);
   }
@@ -101,7 +105,8 @@ export async function ownerVerdict({ gh, owner, repo, pr, githubId, raisedAt }) 
     if (decisive.state === 'CHANGES_REQUESTED') return { ok: true, verdict: 'changes_requested', review, head };
     return { ok: true, verdict: 'none', review, head };
   } catch (e) {
-    return fail(`could not read the reviews: ${String(e?.message ?? e).slice(0, 200)}`);
+    // A read that threw is not the owner's answer (#108 r2, LEAD-CALLS L205): `unreadable`, with the error as `cause`.
+    return fail(`could not read the reviews: ${String(e?.message ?? e).slice(0, 200)}`, { unreadable: true, cause: e });
   }
 }
 
@@ -137,6 +142,6 @@ export async function countApprove({ gh, view, owner, repo, pr, githubId, raised
     if (!r.review) return fail(`the Approve was on an older commit and does not carry over: ${r.reasons.join('; ')}`);
     return { ok: true, head: H1, review: v.review, carried: true };
   } catch (e) {
-    return fail(`could not check the Approve carries over: ${String(e?.message ?? e).slice(0, 200)}`);
+    return fail(`could not check the Approve carries over: ${String(e?.message ?? e).slice(0, 200)}`, { unreadable: true, cause: e });
   }
 }

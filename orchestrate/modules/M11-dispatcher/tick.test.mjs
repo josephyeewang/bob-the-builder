@@ -6,16 +6,18 @@ import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { RULES_MISSING_FACT } from './pass.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { tick, runTick, signedInAccount, actOnDead, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
+import { dirname, join } from 'node:path';
+import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
 import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
 import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
-import { MERGE_REQUEST } from './merges.mjs';
+import { PR_FACT } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -24,6 +26,16 @@ const allow = { start_session: { decision: 'allow', reason: 'ok' } };
 const card = (id, over = {}) => ['card', id, { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: [`src/${id}.js`], changed_at: iso(T0 - 10 * MIN), ...over }];
 const account = (at = T0) => ['fact', ACCOUNT_FACT, { account: ACCT, observed_at: iso(at) }];
 const usage = (at = T0) => ['fact', USAGE_FACT(ACCT), usageFact({ week: 30, h5: 20, account: ACCT, now: at })];
+
+// A card ready for its merge request, as the Record holds one (L72): verified at its own head, its worker's launch, and
+// Sensors' one PR reading at that head. The card itself has no pr, session or verdict field.
+const headOf = (id) => id.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(40, 'e');
+const workerLaunch = (id, head) => ['launch', `L-${id}`, { session_id: `S-${id}`, role: 'worker', card: id, head, rev: 1, launched_at: iso(T0 - 60 * MIN) }];
+const prAt = (n, head, at = T0 - MIN) => ['fact', PR_FACT(n), { state: 'open', merged: false, head_sha: head, observed_at: iso(at) }];
+const mergeReady = (id, n) => [card(id, { state: 'verified', head: headOf(id) }), workerLaunch(id, headOf(id)), prAt(n, headOf(id))];
+// An undo card ready for its merge: M9's exact_reverse card (undoEntries), verified at its own head, on PR n.
+const undoReady = (id, n) => [...undoEntries(id, { state: 'verified', head: headOf(id) }, { pr: 100 + n }), workerLaunch(id, headOf(id)), prAt(n, headOf(id))];
+const requested = (rec, id) => rec.list('merge_request').find((q) => q.doc.card === id) ?? null;
 
 /** A world with every port faked; `over` replaces ports. */
 function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
@@ -38,29 +50,123 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle,
-    launch: async ({ card: c, kind, product }) => { calls.launched.push(c.id); const id = `S-${++n}`; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pgid: 100 + n, head: HEAD }; },
+    // The launcher starts the session the claim names (L72), as M4's does.
+    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: ({ card }) => { calls.reviewers.push(card); return { ok: true, requestId: `Q-${++n}` }; },
     filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
     frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: empty, sealRoot: empty, mirrorFor: () => null },
+    // No products for Approvals in this world (the test world only: in production a missing port fails the step).
+    approvals: () => [],
     ...over,
   };
   const pass = (min = 0, extra = {}) => tick({ rec, rules: extra.rules ?? rules, now: T0 + min * MIN, ports: { ...ports, ...extra.ports } });
   return { rec, calls, sessions, ports, pass };
 }
 
+// The job's own script must be one of the installed copy's code files (audit #144 m4): a script run spawns the copy's
+// own main.mjs (a layout with source: true); an in-process main() names a stand-in file in the layout as `self`.
+const copyMain = (L) => join(L.copy, 'modules/M11-dispatcher/main.mjs');
+const selfIn = (L) => L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+
 test('MAT-1: one tick runs every step once, in the fixed order, and records the full pass', async () => {
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'pass', 'limits', 'merges', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
   assert.deepEqual(Object.values(last.steps), STEPS.map(() => 'ok'));
   assert.deepEqual(w.calls.alerts, []);
+});
+
+// L221 MAT-1: the approvals step runs M2's schedule pass on the Mini. A product whose rules file says
+// `onboarding.state: active` and that has no record gets one in one real runTick, on the real M9 grant check
+// (memoryRecord), written as approvals, and the main pass of the same tick starts its ready card.
+const M2_RULES = { 'accounts.joe.github_id': 4242, 'accounts.joe.tz': 'America/Los_Angeles', 'approvals.push_windows': ['08:00', '17:00'], 'approvals.decisions_dir': 'decisions' };
+test('L221 MAT-1: one real runTick turns on a product its rules file names, written as approvals, and starts its card', async () => {
+  const w = world([account(), usage(), card('C-2', { product: 'p2' })]);
+  assert.equal(w.rec.read('product', 'p2'), null, 'p2 has no record before the tick');
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const ports = { ...w.ports, approvals: () => [{ product: 'p2', stateDir }] };
+  const r = await runTick({ lockFile: join(tempDir('m11-lock-'), 'pass.lock'), rec: w.rec, rules, now: T0, ports });
+  assert.equal(r.ran, true);
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(r.steps.approvals.result, [{ product: 'p2', ok: true, events: r.steps.approvals.result[0].events }]);
+  assert.equal(w.rec.read('product', 'p2').doc.state, 'active');
+  const lines = w.rec.diary({}).filter((l) => l.entity === 'product' && l.id === 'p2');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].actor, 'approvals', 'the diary line says approvals, not dispatcher');
+  assert.equal(lines[0].kind, 'onboard');
+  assert.ok(w.calls.launched.includes('C-2'), 'the main pass, after approvals, started p2\'s card in the same tick');
+  // The "now on" notice went through the outbox as one line, and a second tick says nothing new.
+  assert.deepEqual(w.calls.alerts, ['p2 is now on: its rules file says onboarding.state: active.']);
+  await runTick({ lockFile: join(tempDir('m11-lock-'), 'pass.lock'), rec: w.rec, rules, now: T0 + MIN, ports });
+  assert.equal(w.rec.diary({}).filter((l) => l.entity === 'product' && l.id === 'p2').length, 1);
+  assert.equal(w.calls.alerts.length, 1);
+});
+
+test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {
+  const order = [];
+  const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
+  const ports = { ...w.ports, approvals: () => { order.push('approvals'); return []; }, launch: async (x) => { order.push('launch'); return w.ports.launch(x); } };
+  const r = await w.pass(0, { ports });
+  assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
+  assert.deepEqual(order, ['approvals'], 'it ran with the outage open');
+  // Before `pass`: its index is just before it in STEPS, and Object.keys(steps) is the run order.
+  const keys = Object.keys(r.steps);
+  assert.equal(keys.indexOf('approvals') + 1, keys.indexOf('pass'));
+  // A failing approvals step does not stop the dropping of rules values already told (not in `complete`).
+  const src = readFileSync(fileURLToPath(new URL('./tick.mjs', import.meta.url)), 'utf8');
+  assert.match(src, /const complete = \['stops', 'undo-starts', 'pass', 'limits', 'merges'\]/);
+});
+
+test('L221: a missing approvals port fails the step (loud); one product failing or hanging never stops the next', async () => {
+  const w = world([account(), usage()]);
+  const r = await w.pass(0, { ports: { approvals: undefined } });
+  assert.equal(r.steps.approvals.ok, false);
+  assert.match(r.steps.approvals.error, /the approvals port is missing/);
+  assert.ok(w.calls.alerts.some((a) => /Dispatcher's approvals step failed: the approvals port is missing/.test(a)));
+  for (const s of STEPS.filter((x) => x !== 'approvals')) assert.equal(r.steps[s].ok, true, s);
+
+  // Per product: one throws, one hangs past its deadline, one runs. Each gets its own try and deadline.
+  const ran = [];
+  const pass = async (ctx) => {
+    ran.push(ctx.product);
+    if (ctx.product === 'p3') throw new Error('rev 17 moved');
+    if (ctx.product === 'p1') await new Promise(() => {});
+    return { ok: true, events: [] };
+  };
+  const rules = rulesWith({}, allow);
+  await assert.rejects(approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p3' }, { product: 'p1' }, { product: 'p2' }], productMs: 30, pass }),
+    (e) => e.message === 'the Approvals pass failed for p1 (it did not finish within N ms), p3 (rev N moved)');
+  assert.deepEqual(ran, ['p3', 'p1', 'p2'], 'the product after a failed and a hung one still ran');
+  // A bad approvals config is M2's to tell (approvals_config), not a step failure.
+  const ok = await approvalsStep({ rec: w.rec, rules, now: T0, alert: fakeAlert(), approvals: () => [{ product: 'p2' }], pass: async () => ({ ok: false, reason: 'bad config', events: [] }) });
+  assert.deepEqual(ok, [{ product: 'p2', ok: false, reason: 'bad config', events: 0 }]);
+});
+
+test('L221: M2\'s object alerts become one line from known fields; an unknown type still becomes a line; false comes back', async () => {
+  assert.equal(approvalsAlertText('p2', { type: 'push_not_sent', ask: 'A-1' }), 'Approvals, p2: push not sent (ask A-1)');
+  assert.equal(approvalsAlertText('p2', { type: 'decision_pr_not_closed', ask: 'A-1', pr: 12, reason: 'status 422' }), 'Approvals, p2: decision pr not closed (ask A-1, PR 12): status 422');
+  assert.equal(approvalsAlertText('p2', { type: 'approvals_untrusted', items: [1, 2] }), 'Approvals, p2: approvals untrusted (2 items)');
+  assert.equal(approvalsAlertText('p2', { type: 'product_on', product: 'p2', text: 'p2 is now on: x.' }), 'p2 is now on: x.');
+  // Unknown fields (a GitHub answer, a token) never reach the line; an odd type is still told.
+  const line = approvalsAlertText('p2', { type: 'Weird-Type!', token: 'secret-value', response: { body: 'gh says' } });
+  assert.equal(line, 'Approvals, p2: an alert of an unknown type');
+  assert.doesNotMatch(line, /secret|gh says/);
+  assert.equal(approvalsAlertText('p2', { type: 'brand_new_kind' }), 'Approvals, p2: brand new kind');
+  // The outbox's false is passed back to M2, so its `=== false` dedup keeps working.
+  const w = world([account(), usage()]);
+  const lost = fakeAlert({ answer: false });
+  let answer;
+  await approvalsStep({ rec: w.rec, rules: rulesWith({}, allow), now: T0, alert: lost, approvals: () => [{ product: 'p2' }],
+    pass: async (ctx) => { answer = ctx.alert({ type: 'push_not_sent', ask: 'A-1' }); return { ok: true, events: [] }; } });
+  assert.deepEqual([lost.texts, answer], [['Approvals, p2: push not sent (ask A-1)'], false]);
 });
 
 test('MAT-1: a failing step never stops the rest; one alert per distinct error; cleared when it works again', async () => {
@@ -85,8 +191,9 @@ test('MAT-1: a failing step never stops the rest; one alert per distinct error; 
 
 test('MAT-1: every step is guarded, not only the first', async () => {
   const thrower = (what) => () => { throw new Error(`${what} broke`); };
-  const w = world([account(), usage(), ['card', 'C-9', { state: 'claimed', module: 'M-test', changed_at: iso(T0 - 60 * MIN) }]], {
-    over: { board: thrower('board'), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasSession: thrower('hasSession') } });
+  // The limits step reads the reviewer port for a card in review past its time (a claim with no session is M9's lapse now).
+  const w = world([account(), usage(), card('C-9', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], {
+    over: { board: thrower('board'), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
   mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
@@ -112,20 +219,21 @@ test('MIN-9: no signed-in account, or a stale one, starts nothing; the stops sti
   assert.match(signedInAccount({ rec: recWith([account()]), rules: rulesWith({ [K.staleAfterMin]: undefined }), now: T0 }).reason, /stale_after_min/);
 });
 
-test('M10: outside an outage a dead session\'s safe card goes back to ready and starts; an unsafe one waits on Joe with a link', async () => {
+// The Record has no rerun_safe field (L72 census, a (b) for the lead): no card can be marked safe, so every dead
+// session's card waits on Joe, never restarts. The restart path waits on M9 (todo below).
+test('M10: outside an outage every dead session\'s card waits on Joe with a link; none restarts', async () => {
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
   const live = (id, c) => ({ id, card: c, alive: true, ended: false, lastWriteAt: T0 - MIN });
-  const w = world([account(), usage(), card('C-1', { state: 'running', rerun_safe: true }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' })],
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' })],
     { over: { board: () => [gone('S-1', 'C-1'), gone('S-2', 'C-2'), live('S-3', 'C-3'), live('S-4', 'C-3'), live('S-5', 'C-3')] } });
   const r = await w.pass();
-  assert.deepEqual(r.steps.outage.result.acted, [['C-1', 'ready again'], ['C-2', 'waiting on Joe']]);
-  assert.deepEqual(w.calls.launched, ['C-1'], 'the safe card started again in the same tick');
+  assert.deepEqual(r.steps.outage.result.acted, [['C-1', 'waiting on Joe'], ['C-2', 'waiting on Joe']]);
+  assert.deepEqual(w.calls.launched, [], 'a dead card is never restarted without Joe');
   // L43(a), L38: each card moved is its own alert to Joe.
-  assert.equal(w.calls.alerts.filter((a) => /card C-1: its session S-1 stopped; .* back in the queue/.test(a)).length, 1, w.calls.alerts.join(' | '));
-  assert.equal(w.calls.alerts.filter((a) => /card C-2: its session stopped .* waits on you/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  for (const c of ['C-1', 'C-2']) assert.equal(w.calls.alerts.filter((a) => new RegExp(`card ${c}: its session stopped .* waits on you`).test(a)).length, 1, w.calls.alerts.join(' | '));
   const c2 = w.rec.read('card', 'C-2').doc;
-  assert.deepEqual([c2.state, c2.waiting.who, c2.waiting.link], ['waiting', 'joe', 'card C-2']);
-  assert.match(c2.waiting.what, /dead_session/);
+  assert.deepEqual([c2.state, c2.wait.who, c2.wait.link], ['waiting', 'joe', 'card C-2']);
+  assert.match(c2.wait.what, /dead_session/);
   // a card that already moved on is left alone
   const rec = recWith([card('C-5', { state: 'in_review' })]);
   const told = [];
@@ -134,32 +242,34 @@ test('M10: outside an outage a dead session\'s safe card goes back to ready and 
   assert.equal(rec.read('card', 'C-5').doc.state, 'in_review');
 });
 
-test('M9: a held session restarts at the outage\'s end even though it left the board', async () => {
+test('M9: a session held through an outage is decided at the outage\'s end even though it left the board', async () => {
   const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
   let board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
-  const w = world([account(), usage(), card('C-1', { state: 'running', rerun_safe: true }), card('C-2', { state: 'running', rerun_safe: true }), card('C-3', { state: 'running', rerun_safe: true })],
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' })],
     { over: { board: () => board } });
   await w.pass();
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
-  assert.deepEqual(w.calls.launched, []);
+  assert.deepEqual(['C-1', 'C-2', 'C-3'].map((c) => w.rec.read('card', c).doc.state), ['running', 'running', 'running'], 'nothing is decided in the outage');
   board = [];
   await w.pass(1);
   await w.pass(2);
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'ended');
-  assert.deepEqual(w.calls.launched.sort(), ['C-1', 'C-2', 'C-3']);
+  assert.deepEqual(w.calls.launched, []);
+  assert.deepEqual(['C-1', 'C-2', 'C-3'].map((c) => w.rec.read('card', c).doc.state), ['waiting', 'waiting', 'waiting']);
 });
+test.todo('M10: a dead card marked safe to re-run goes back to ready and starts in the same tick (needs M9 rerun_safe; a (b) for the lead)');
 
 test('during an outage no reviewer starts and no merge is requested', async () => {
   const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', dead: [] }],
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }),
-    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }]],
+    ...mergeReady('V-1', 7)],
   { over: { healthy: () => false } });
   const r = await w.pass();
   assert.deepEqual(w.calls.reviewers, []);
   assert.equal(r.steps.limits.result.find(([id]) => id === 'R-1')[1], 'reviewer held: outage');
-  assert.equal(w.rec.read('merge_request', MERGE_REQUEST('V-1', HEAD)), null);
+  assert.equal(requested(w.rec, 'V-1'), null);
   // audit 0b-6 r2 MIN-5: an outage-held start is not a failed try, so a long outage does not hand the card to Joe
-  assert.equal(w.rec.read('card', 'R-1').doc.reviewer_start_failures ?? 0, 0);
+  assert.equal(w.rec.read('card', 'R-1').doc.attempts?.reviewer_starts ?? 0, 0);
   for (let i = 1; i <= 3; i += 1) await w.pass(i);
   assert.equal(w.rec.read('card', 'R-1').doc.state, 'in_review');
   assert.match(r.steps.merges.result.find(([id]) => id === 'V-1')[1], /held: outage/);
@@ -176,21 +286,21 @@ test('the limits and merges steps fall back to "hold" when the main pass did not
   assert.match(r.steps.limits.result[0][1], /reviewer held/);
   // audit 0b-6 r2 MIN-4: a Tier-2 review and a merge request are held too, though "unknown" would let them through
   const v = world([account(), usage(), card('R-2', { state: 'in_review', tier: 2, changed_at: iso(T0 - 60 * MIN) }),
-    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }]],
+    ...mergeReady('V-1', 7)],
   { over: { sessions: () => { throw new Error('no session list'); } } });
   const r2 = await v.pass();
   assert.deepEqual(v.calls.reviewers, []);
   assert.match(r2.steps.limits.result[0][1], /reviewer held: the main pass did not finish/);
-  assert.equal(v.rec.read('merge_request', MERGE_REQUEST('V-1', HEAD)), null);
-  assert.equal(v.rec.read('card', 'R-2').doc.reviewer_start_failures ?? 0, 0);
+  assert.equal(requested(v.rec, 'V-1'), null);
+  assert.equal(v.rec.read('card', 'R-2').doc.attempts?.reviewer_starts ?? 0, 0);
   // L31: an undo is never held by the budget: with no bands, and during an outage, its merge request is still made.
   for (const over of [{ sessions: () => { throw new Error('no session list'); } }, { healthy: () => false }]) {
     const u = world([account(), usage(), ...(over.healthy ? [['fact', OUTAGE_FACT, { state: 'open', dead: [] }]] : []),
-      card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }],
-      card('V-2', { state: 'verified', pr: 9, session: 'S-0', head: HEAD }), ['verdict', 'V-2', { session_id: 'S-0', head: HEAD }]], { over });
+      ...undoReady('U-1', 8),
+      ...mergeReady('V-2', 9)], { over });
     const r3 = await u.pass();
-    assert.notEqual(u.rec.read('merge_request', MERGE_REQUEST('U-1', HEAD)), null, Object.keys(over)[0]);
-    assert.equal(u.rec.read('merge_request', MERGE_REQUEST('V-2', HEAD)), null);
+    assert.notEqual(requested(u.rec, 'U-1'), null, Object.keys(over)[0]);
+    assert.equal(requested(u.rec, 'V-2'), null);
     assert.match(r3.steps.merges.result.find(([id]) => id === 'V-2')[1], /merge request held/);
   }
 });
@@ -198,21 +308,26 @@ test('the limits and merges steps fall back to "hold" when the main pass did not
 test('MAT-1 end to end: ready -> started with a launch record -> reviewed -> one merge request, over several ticks', async () => {
   const w = world([account(), usage(), card('C-1')]);
   await w.pass(0);
-  const sid = w.rec.read('card', 'C-1').doc.session;
-  assert.equal(sid, 'S-1');
-  assert.equal(w.rec.read('launch', sid).doc.head, HEAD);
-  // the worker hands in; review passes (written here as the other modules would)
-  const cur = w.rec.read('card', 'C-1');
-  w.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: cur.rev, doc: { ...cur.doc, state: 'verified', pr: 7, head: HEAD, changed_at: iso(T0 + MIN) } });
-  assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'verdict', id: 'C-1', expectRev: 0, doc: { session_id: sid, head: HEAD, result: 'pass' } }).ok, true);
+  const launches = w.rec.list('launch').filter((l) => l.doc.card === 'C-1');
+  assert.equal(launches.length, 1);
+  const sid = launches[0].doc.session_id;
+  assert.equal(sid, w.sessions[0].id, 'the launch names the session the claim named');
+  assert.deepEqual([launches[0].doc.role, launches[0].doc.head], ['worker', HEAD]);
+  // The worker hands in at its head, review passes and Sensors reads the PR, each as its own module would. (The
+  // stand-in does not check the verdict for verified; the contract test runs this on the real Record.)
+  setClock(w.rec, T0 + MIN);
+  change(w.rec, 'card', 'C-1', { head: HEAD });
+  change(w.rec, 'card', 'C-1', { state: 'in_review' });
+  change(w.rec, 'card', 'C-1', { state: 'verified' });
+  assert.equal(w.rec.write({ actor: 'sensors', entity: 'fact', id: PR_FACT(7), expectRev: 0, doc: { state: 'open', merged: false, head_sha: HEAD, observed_at: iso(T0 + 2 * MIN) } }).ok, true);
   w.sessions.length = 0;
   for (const m of [1, 2, 3]) {
     w.rec.write({ actor: 'dispatcher', entity: 'fact', id: ACCOUNT_FACT, expectRev: w.rec.read('fact', ACCOUNT_FACT).rev, doc: { account: ACCT, observed_at: iso(T0 + m * MIN) } });
     await w.pass(m);
   }
-  const mr = w.rec.read('merge_request', MERGE_REQUEST('C-1', HEAD));
+  const mr = requested(w.rec, 'C-1');
   assert.ok(mr, 'merge requested');
-  assert.deepEqual([mr.doc.card, mr.doc.pr, mr.doc.session_id, mr.doc.head, mr.doc.rev], ['C-1', 7, 'S-1', HEAD, w.rec.read('card', 'C-1').rev]);
+  assert.deepEqual([mr.doc.card, mr.doc.pr, mr.doc.session_id, mr.doc.head, mr.doc.rev], ['C-1', 7, sid, HEAD, w.rec.read('card', 'C-1').rev]);
   assert.equal(w.rec.list('merge_request').length, 1, 'one request, not one per tick');
   assert.deepEqual(w.calls.launched, ['C-1'], 'started once');
   assert.deepEqual(w.calls.alerts, []);
@@ -236,8 +351,10 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
 });
 
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
-  const dir = tempDir('m11-main-');
-  const wiring = join(dir, 'wiring.mjs');
+  const L = installedLayout('m11-main-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
+  const wiring = L.path('wiring/wiring.mjs');
   const here = fileURLToPath(new URL('.', import.meta.url));
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 export const seen = [];
@@ -249,40 +366,58 @@ export async function wire(config) {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 export { rec };
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   const logs = [];
-  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 0);
+  // Audit #144 m4: by default main checks its own file, which in a checkout is not inside this layout: refused.
+  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.pop(), /orchestrate\/modules\/M11-dispatcher\/main\.mjs is not inside the installed copy/);
+  assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 0);
   const mod = await import(wiring);
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
   // refusals: no argument, a relative path, a wiring with no wire()
-  assert.equal(await main([], { log: (s) => logs.push(s) }), 1);
-  const rel = join(dir, 'rel.json');
-  writeFileSync(rel, JSON.stringify({ wiring: 'wiring.mjs', lockFile: join(dir, 'x.lock') }));
-  assert.equal(await main([rel], { log: (s) => logs.push(s) }), 1);
-  const bare = join(dir, 'bare.mjs');
+  assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
+  const rel = L.path('rel.json');
+  writeFileSync(rel, JSON.stringify({ installRoot: L.installRoot, wiring: 'wiring.mjs', lockFile: join(dir, 'x.lock') }));
+  assert.equal(await main([rel], { self, log: (s) => logs.push(s) }), 1);
+  const bare = L.path('wiring/bare.mjs');
   writeFileSync(bare, 'export const x = 1;\n');
-  const cfg2 = join(dir, 'c2.json');
-  writeFileSync(cfg2, JSON.stringify({ wiring: bare, lockFile: join(dir, 'y.lock') }));
-  assert.equal(await main([cfg2], { log: (s) => logs.push(s) }), 1);
+  const cfg2 = L.path('c2.json');
+  writeFileSync(cfg2, JSON.stringify({ installRoot: L.installRoot, wiring: bare, lockFile: join(dir, 'y.lock') }));
+  assert.equal(await main([cfg2], { self, log: (s) => logs.push(s) }), 1);
   assert.equal(logs.length, 3);
-  assert.match(logs[1], /wiring must be an absolute path/);
+  assert.match(logs[1], /job config .*rel\.json: wiring must be a full path/);
   assert.match(logs[2], /no wire\(\)/);
+  // audit #127 r2 m-B: a wiring answering more than rec, rules and ports (a `lock` or `now` that would replace main's own)
+  // or less is refused before any pass; with the old `...wired` spread, `now` here ran a pass at the epoch.
+  for (const [body, re] of [['ports: {}, now: 0', /not also now$/], ['ports: {}, lock: "x"', /not also lock$/], ['', /; it left out ports$/]]) {
+    const w = L.path(`wiring/m-b-${logs.length}.mjs`);
+    writeFileSync(w, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+export async function wire() { return { rec: recWith(), rules: rulesWith(), ${body} }; }\n`);
+    const cf = L.path(`m-b-${logs.length}.json`);
+    writeFileSync(cf, JSON.stringify({ installRoot: L.installRoot, wiring: w, lockFile: join(dir, `m-b-${logs.length}.lock`) }));
+    const before = logs.length;
+    assert.equal(await main([cf], { self, now: T0, log: (s) => logs.push(s) }), 1, body || 'no ports');
+    assert.equal(logs.length, before + 1);
+    assert.match(logs[before], /wire\(\) must return exactly rec, rules, ports/);
+    assert.match(logs[before], re);
+  }
 });
 
 test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
-  const dir = tempDir('m11-entry-');
+  const L = installedLayout('m11-entry-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const link = join(dir, 'link');
-  symlinkSync(here, link);
+  symlinkSync(dirname(copyMain(L)), link);
   const out = join(dir, 'ran.json');
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
 import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { LAST_PASS_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
@@ -294,22 +429,23 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
-  for (const script of [join(here, 'main.mjs'), join(link, 'main.mjs')]) {
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
+  for (const script of [copyMain(L), join(link, 'main.mjs')]) {
     rmSync(out, { force: true });
     const r = spawnSync(process.execPath, [script, config], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === join(here, 'main.mjs') ? 'the real path' : 'the symlink'}`);
+    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === copyMain(L) ? 'the copy\'s path' : 'the symlink'}`);
   }
   const bare = spawnSync(process.execPath, [join(link, 'main.mjs')], { encoding: 'utf8' });
   assert.equal(bare.status, 1);
   assert.match(bare.stderr, /usage: main\.mjs <config\.json>/);
 });
 
+// L137, switched on in #95: think- is record: 'none' (handledBy outbox-intake.mjs), so the real Record answers not_a_record.
 test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start gate in the tick: red, the cap of 4, an outage and no signed-in account hold it; green starts it', async () => {
   const lead = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?'); return [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }]; };
   const root = tempDir('m11-ro-');
@@ -317,7 +453,7 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
     const started = [];
     const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
     const r = await w.pass();
-    return { started, fact: w.rec.read('fact', 'outbox-L-1-think-q1.md')?.doc, r };
+    return { started, fact: w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc, r };
   };
   const red = await run('red', [['fact', USAGE_FACT(ACCT), usageFact({ week: 90, h5: 20, account: ACCT, now: T0 })]]);
   assert.deepEqual(red.started, []);
@@ -339,21 +475,22 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
 
 // ---- L27: the fail-open sweep ----
 
-const sweepWorld = (entries, rules) => {
+// `edit` may change or drop (null) any seed entry: the merge sweep takes away one input of a merge at a time.
+const sweepWorld = (entries, rules, edit = (e) => e) => {
   const stops = [];
   const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 99 }];
   const w = world([account(), ...entries,
-    card('X-1', { state: 'cancelled', session: 'S-X' }),
-    card('V-1', { state: 'verified', pr: 7, session: 'S-0', head: HEAD }), ['verdict', 'V-1', { session_id: 'S-0', head: HEAD }],
-    card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }],
-    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })],
+    card('X-1', { state: 'cancelled' }),
+    ...mergeReady('V-1', 7),
+    ...undoReady('U-1', 8),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })].map(edit).filter(Boolean),
   { rules, over: { sessions: () => running, stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
   return { ...w, stops };
 };
 const outcome = async (w) => {
   await w.pass();
   return { launched: w.calls.launched, reviewers: w.calls.reviewers, stops: w.stops,
-    merges: ['V-1', 'U-1'].filter((id) => w.rec.read('merge_request', MERGE_REQUEST(id, HEAD))) };
+    merges: ['V-1', 'U-1'].filter((id) => requested(w.rec, id)) };
 };
 const within = (got, base, what) => {
   for (const k of ['launched', 'reviewers', 'merges']) for (const x of got[k]) assert.ok(base[k].includes(x), `${what}: ${k} ${x} is more than with every value present`);
@@ -388,15 +525,23 @@ test('L27 sweep: a card missing any one field starts no more than the card with 
     const got = await outcome(sweepWorld([usage(), ...order], rulesWith({}, allow)));
     assert.equal(got.launched.length, 1, JSON.stringify(got.launched));
   }
-  // The cards waiting to merge: without any one field, no request beyond the control's.
-  for (const id of ['V-1', 'U-1']) {
-    for (const field of ['pr', 'session', 'head', 'product', 'tier']) {
-      const w = sweepWorld([usage()], rulesWith({}, allow));
-      const c = w.rec.read('card', id);
-      const { [field]: _, ...rest } = c.doc;
-      w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: rest });
-      const got = await outcome(w);
-      if (['pr', 'session', 'head'].includes(field)) assert.ok(!got.merges.includes(id), `${id} without ${field} was requested`);
+  // The cards waiting to merge: without any one input (the PR reading at its head, its worker's launch, its head, its
+  // product or tier), no request beyond the control's; without the first three, none at all.
+  const control = await outcome(sweepWorld([usage()], rulesWith({}, allow)));
+  assert.deepEqual(control.merges, ['V-1', 'U-1'], 'control: both merges are requested');
+  const isCard = (e, id) => e[0] === 'card' && e[1] === id;
+  for (const [id, n] of [['V-1', 7], ['U-1', 8]]) {
+    const without = {
+      'the PR reading': (e) => (e[0] === 'fact' && e[1] === PR_FACT(n) ? null : e),
+      'the worker launch': (e) => (e[0] === 'launch' && e[2].card === id ? null : e),
+      head: (e) => { if (!isCard(e, id)) return e; const { head: _h, ...d } = e[2]; return [e[0], e[1], d]; },
+      product: (e) => { if (!isCard(e, id)) return e; const { product: _p, ...d } = e[2]; return [e[0], e[1], d]; },
+      tier: (e) => { if (!isCard(e, id)) return e; const { tier: _t, ...d } = e[2]; return [e[0], e[1], d]; },
+    };
+    for (const [what, edit] of Object.entries(without)) {
+      const got = await outcome(sweepWorld([usage()], rulesWith({}, allow), edit));
+      within(got, control, `${id} without ${what}`);
+      if (['the PR reading', 'the worker launch', 'head'].includes(what)) assert.ok(!got.merges.includes(id), `${id} without ${what} was requested`);
     }
   }
 });
@@ -415,9 +560,10 @@ test('audit 0b-6 r3 MAT-2: a port that never answers fails its own step at the d
 });
 
 test('audit 0b-6 r3 MAT-2: `node main.mjs` stuck on a port exits 2 at the run deadline, even with a timer left open, and the next start breaks the lock', () => {
-  const dir = tempDir('m11-stuck-');
+  const L = installedLayout('m11-stuck-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
 import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
@@ -432,13 +578,13 @@ export async function wire() {
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 300 }));
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 30_000 });
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 300 }));
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
@@ -447,8 +593,8 @@ export async function wire() {
   const l = takePassLock(lockFile);
   assert.equal(l.ok, true, l.reason);
   l.release();
-  writeFileSync(join(dir, 'bad.json'), JSON.stringify({ wiring, lockFile, runDeadlineMs: -1 }));
-  assert.equal(spawnSync(process.execPath, [join(here, 'main.mjs'), join(dir, 'bad.json')], { encoding: 'utf8' }).status, 1);
+  writeFileSync(L.path('bad.json'), JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: -1 }));
+  assert.equal(spawnSync(process.execPath, [copyMain(L), L.path('bad.json')], { encoding: 'utf8' }).status, 1);
 });
 
 test('audit 0b-6 r3 MAT-3 sweep: with any one rules value missing, either the tick does exactly what it does with all present, or one alert names the value; the undo merge is always requested', async () => {
@@ -510,9 +656,9 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     const stops = [];
     const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }, { id: 'S-E', product: 'p1', kind: 'editing', card: 'E-1', pgid: 99 }];
     const w = world([...facts,
-      card('X-1', { state: 'cancelled', session: 'S-X' }), card('E-1', { state: 'running', session: 'S-E' }),
+      card('X-1', { state: 'cancelled' }), card('E-1', { state: 'running' }),
       ...undoEntries('U-2'),
-      card('U-1', { state: 'verified', kind: 'undo', pr: 8, session: 'S-0', head: HEAD }), ['verdict', 'U-1', { session_id: 'S-0', head: HEAD }]],
+      ...undoReady('U-1', 8)],
     { over: {
       sessions: () => running,
       stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
@@ -526,7 +672,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     assert.ok(stops.includes('S-X'), `${band}: the cancel did not stop`);
     assert.equal(stops.includes('S-E'), band === 'red', `${band}: the red park`);
     assert.ok(w.calls.launched.includes('U-2'), `${band}: the undo card did not start (${JSON.stringify(r1.steps.pass.result?.refused)})`);
-    assert.ok(w.rec.read('merge_request', MERGE_REQUEST('U-1', HEAD)), `${band}: the undo merge was not requested`);
+    assert.ok(requested(w.rec, 'U-1'), `${band}: the undo merge was not requested`);
     assert.deepEqual(r1.steps.leads.result, [['L-1', 'WRAP sent']], `${band}: ${JSON.stringify(r1.steps.leads.result)}`);
     assert.match(sent[0], /queued in your outbox do not carry over/);
     writeFileSync(join(outbox, HANDOFF_NAME('L-1')), 'the hand-off');
@@ -560,7 +706,7 @@ function l38Cases() {
     ['band unknown', (at) => [account(at), unread(at)], {}, /the usage band is unknown/],
     ['rules value missing', (at) => [account(at), usage(at)], { cards: [card('C-1')], rules: rulesWith({ [K.perState]: undefined }, allow) }, new RegExp(`have no value for ${K.perState.replace(/\./g, '\\.')}`)],
     // A cancel whose stop never answers: the stops step hangs on every tick.
-    ['a step that hangs', (at) => [account(at), usage(at)], { cards: [card('X-1', { state: 'cancelled', session: 'S-X' })],
+    ['a step that hangs', (at) => [account(at), usage(at)], { cards: [card('X-1', { state: 'cancelled' })],
       over: { sessions: () => [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }], stopGroup: () => new Promise(() => {}), stepDeadlineMs: 50 } }, /stops step failed: it did not finish within 50 ms/],
     ['a step that throws', (at) => [account(at), usage(at)], { over: { board: () => { throw new Error('board unreadable'); } } }, /outage step failed: board unreadable/],
     ['an undo held', (at) => [account(at), usage(at)], { cards: undoEntries('U-9'), rules: rulesWith({}, deny) }, /your undo \(card U-9\) is waiting: rules: the product is paused/],
@@ -581,10 +727,8 @@ test('L38 sweep: each hold or failure is told exactly once over two ticks, and o
     await w.pass(1);
     assert.equal(w.calls.alerts.length, 1, `${label}: ${w.calls.alerts.join(' | ')}`);
     assert.match(w.calls.alerts[0], told, label);
-    for (const [entity, id, doc] of facts(T0 + H25 * MIN)) {
-      const cur = w.rec.read(entity, id);
-      assert.equal(w.rec.write({ actor: 'dispatcher', entity, id, expectRev: cur?.rev ?? 0, doc }).ok, true);
-    }
+    // Each reading renewed by its own writer (Sensors' usage, the Dispatcher's account): change() picks the one allowed.
+    for (const [entity, id, doc] of facts(T0 + H25 * MIN)) change(w.rec, entity, id, doc);
     await w.pass(H25);
     const later = w.calls.alerts.slice(1);
     assert.equal(later.filter((a) => told.test(a)).length, 1, `${label}, a day later: ${later.join(' | ')}`);
@@ -638,15 +782,15 @@ test('L40: with a cap value missing an exact-reverse undo starts and Joe is told
   }
   // A file list that is not the reversed commit's: held, and told.
   {
-    const [m, [, id, doc]] = undoEntries('U-5');
-    const { w } = await runOne(rulesWith({}, allow), [m, ['card', id, { ...doc, files: [...doc.files, 'src/other.js'] }]]);
+    const e = undoEntries('U-5');
+    const [, id, doc] = e.find((x) => x[0] === 'card' && x[1] === 'U-5');
+    const { w } = await runOne(rulesWith({}, allow), e.map((x) => (x[0] === 'card' && x[1] === id ? ['card', id, { ...doc, files: [...doc.files, 'src/other.js'] }] : x)));
     assert.ok(!w.calls.launched.includes('U-5'));
     assert.ok(w.calls.alerts.some((a) => /your undo \(card U-5\) is waiting: it is not an exact reverse: its file list does not match the reversed commit/.test(a)), w.calls.alerts.join(' | '));
   }
   // No merge in the record for it: held, and told.
   {
-    const [, c] = undoEntries('U-6');
-    const { w } = await runOne(rulesWith({}, allow), [c]);
+    const { w } = await runOne(rulesWith({}, allow), undoEntries('U-6').filter((x) => x[0] !== 'merge'));
     assert.ok(!w.calls.launched.includes('U-6'));
     assert.ok(w.calls.alerts.some((a) => /your undo \(card U-6\) is waiting: it is not an exact reverse: it is not the reverse of a merge in the record/.test(a)), w.calls.alerts.join(' | '));
   }
@@ -669,7 +813,7 @@ test('L38: with the main pass failing (its session list unreadable), a cancel st
   const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
   const stops = [];
   // The first read (the stops step) answers; every later one throws.
-  const w = world([account(), usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+  const w = world([account(), usage(), card('X-1', { state: 'cancelled' }), ...undoEntries('U-1')], { over: {
     sessions: () => { calls += 1; if (calls > 1) throw new Error('session list unreadable'); return running; },
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
   const r = await w.pass();
@@ -690,7 +834,7 @@ test('L38: the account-age rule missing is told even when every step that reads 
 test('r4 MAT-2: an alert that throws, or rejects, skips no step: a cancel that fails to stop, then the undo still starts', async () => {
   for (const [label, alert] of [['throws', () => { throw new Error('no network'); }], ['rejects', () => Promise.reject(new Error('no network'))]]) {
     const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
-    const w = world([account(), usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+    const w = world([account(), usage(), card('X-1', { state: 'cancelled' }), ...undoEntries('U-1')], { over: {
       alert, sessions: () => running, stopGroup: async () => ({ ok: false, reason: 'EPERM' }), board: () => { throw new Error('board unreadable'); } } });
     const r = await w.pass();
     assert.deepEqual(Object.keys(r.steps), STEPS, label);
@@ -698,7 +842,7 @@ test('r4 MAT-2: an alert that throws, or rejects, skips no step: a cancel that f
     assert.equal(r.steps.outage.ok, false, `${label}: control, the outage step failed and its alert failed too`);
     assert.ok(w.calls.launched.includes('U-1'), label);
     await new Promise((ok) => setImmediate(ok));
-    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+    assert.match(w.rec.read('fact', 'unsent-alerts')?.doc?.error ?? '', /no network/, label);
   }
 });
 
@@ -709,19 +853,19 @@ test('r5 MAT-2: an alert that fails once is sent on the next pass, for a hold an
     let down = true;
     const sent = [];
     const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
-    const w = world([usage(), card('X-1', { state: 'cancelled', session: 'S-X' })], { over: {
+    const w = world([usage(), card('X-1', { state: 'cancelled' })], { over: {
       alert: (t) => (down ? bad(t) : sent.push(t)), sessions: () => running, stopGroup: async () => ({ ok: false, reason: 'EPERM' }) } });
     await w.pass();
     await new Promise((ok) => setImmediate(ok));
     assert.deepEqual(sent, [], `${label}: control, nothing got through while alerts were down`);
     // Both are causes told through tellThen: not queued, and not marked told, so their own step tells again.
-    assert.match(w.rec.read('fact', 'alert-unsent')?.doc?.error ?? '', /no network/, label);
+    assert.match(w.rec.read('fact', 'unsent-alerts')?.doc?.error ?? '', /no network/, label);
     assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at && !w.rec.read('fact', 'hold-account')?.doc?.told_at, `${label}: marked told although unsent`);
     down = false;
     await w.pass(1);
     assert.equal(sent.filter((t) => /could not be stopped/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
     assert.equal(sent.filter((t) => /signed-in account/.test(t)).length, 1, `${label}: ${sent.join(' | ')}`);
-    assert.deepEqual(w.rec.read('fact', 'alert-unsent')?.doc?.entries, [], `${label}: the queue is empty once sent`);
+    assert.deepEqual(w.rec.read('fact', 'unsent-alerts')?.doc?.entries, [], `${label}: the queue is empty once sent`);
   }
 });
 
@@ -776,7 +920,7 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   let hang = true;
   const sent = [];
   const running = [{ id: 'S-X', product: 'p1', kind: 'editing', card: 'X-1', pgid: 98 }];
-  const w = world([usage(), card('X-1', { state: 'cancelled', session: 'S-X' }), ...undoEntries('U-1')], { over: {
+  const w = world([usage(), card('X-1', { state: 'cancelled' }), ...undoEntries('U-1')], { over: {
     alert: (t) => { order.push('alert'); return hang ? new Promise(() => {}) : sent.push(t); },
     sessions: () => running,
     stopGroup: async () => { order.push('stop'); return { ok: false, reason: 'EPERM' }; },
@@ -789,8 +933,8 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.ok(order.includes('launch U-1'), order.join(', '));
   assert.ok(order.lastIndexOf('stop') < order.indexOf('alert') && order.indexOf('launch U-1') < order.indexOf('alert'), order.join(', '));
   assert.equal(order.filter((x) => x === 'alert').length, 1, 'a hung send ends the round');
-  assert.deepEqual(r.alerts, { sent: 0, failed: 1, left: w.rec.read('fact', 'alert-unsent').doc.entries.length });
-  assert.match(w.rec.read('fact', 'alert-unsent').doc.error, /did not answer within 50 ms/);
+  assert.deepEqual(r.alerts, { sent: 0, failed: 1, left: w.rec.read('fact', 'unsent-alerts').doc.entries.length });
+  assert.match(w.rec.read('fact', 'unsent-alerts').doc.error, /did not answer within 50 ms/);
   assert.ok(!w.rec.read('fact', 'stop-S-X')?.doc?.told_at, 'marked told although unsent');
   hang = false;
   await w.pass(1, { ports: { alertSendMs: 50 } });
@@ -798,7 +942,7 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.equal(sent.filter((x) => /S-X \(card X-1\) could not be stopped/.test(x)).length, 1, sent.join(' | '));
   assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
   assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
-  assert.deepEqual(w.rec.read('fact', 'alert-unsent').doc.entries, []);
+  assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes
@@ -810,13 +954,14 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
     ['wire() never answers', 'export function wire() { return new Promise(() => {}); }'],
     ['wire() blocks', 'export function wire() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return {}; }'],
   ]) {
-    const dir = tempDir('m11-wiring-hang-');
-    const wiring = join(dir, 'wiring.mjs');
+    const L = installedLayout('m11-wiring-hang-', { dirs: ['wiring'], source: true });
+    const dir = L.base;
+    const wiring = L.path('wiring/wiring.mjs');
     writeFileSync(wiring, `setInterval(() => {}, 1000);\n${body}\n`);
-    const config = join(dir, 'config.json');
-    writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+    const config = L.path('config.json');
+    writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
     const started = Date.now();
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
     assert.ok(Date.now() - started < 30_000, `${label}: ended by the watchdog, not by the test's own limit`);
     assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), `${label}: ${r.status} ${r.signal} ${r.stderr}`);
   }
@@ -825,9 +970,10 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
 // Audit 0b-6 r4 MAT-3: a port that blocks the thread itself. No timer in the main thread can fire, so
 // the watchdog thread ends the process; the next start breaks the lock and tells Joe.
 test('r4 MAT-3: `node main.mjs` blocked inside a synchronous port is ended by the watchdog; the next pass tells Joe', async () => {
-  const dir = tempDir('m11-blocked-');
+  const L = installedLayout('m11-blocked-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 const rec = recWith([['product', 'p1', { state: 'active' }]]);
 export async function wire() {
@@ -838,14 +984,14 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
   const lockFile = join(dir, 'pass.lock');
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 200 }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 200 }));
   const started = Date.now();
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000 });
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000 });
   assert.equal(r.signal, 'SIGKILL', `${r.status} ${r.stderr}`);
   assert.ok(Date.now() - started < 30_000, 'ended by the watchdog, not by the port giving up after a minute');
   assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), r.stderr);
@@ -861,9 +1007,11 @@ export async function wire() {
 });
 
 test('r4 MAT-3: main() ends its watchdog when the pass finishes, so a normal run is never killed', async () => {
-  const dir = tempDir('m11-dog-');
+  const L = installedLayout('m11-dog-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 const rec = recWith();
 export async function wire() {
@@ -872,13 +1020,13 @@ export async function wire() {
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   // In this process: a watchdog left running would kill the test run itself 5.2 s after the start.
-  assert.equal(await main([config], { now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
+  assert.equal(await main([config], { self, now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
   await new Promise((ok) => setTimeout(ok, 6_000));
   assert.ok(true, 'still alive past the watchdog time');
 });
@@ -903,10 +1051,11 @@ test('r5 m4: a step error that changes only in a number is told once; an untold 
 // lock it broke) still reaches the working port, because the tick's first send starts alongside the safety
 // steps instead of after them.
 test('r7 M1: a pass blocked every time still delivers the broken-lock alert to a working port', { timeout: 120_000 }, () => {
-  const dir = tempDir('m11-r7m1-');
+  const L = installedLayout('m11-r7m1-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const sent = join(dir, 'sent.txt');
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { appendFileSync } from 'node:fs';
 const rec = recWith([['product', 'p1', { state: 'active' }]]);
@@ -917,13 +1066,13 @@ export async function wire() {
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
-    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null } } };
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
   for (let i = 0; i < 2; i += 1) {
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(r.signal, 'SIGKILL', r.stderr);
   }
   let got = '';
@@ -981,4 +1130,90 @@ test('r8 MAT-2: a refused text or one timeout ahead of a burst drops nothing whi
     if (how === 'refused') assert.deepEqual(d.entries.map((e) => e.text), ['bad']);
     else assert.ok(got.includes('bad'));
   }
+});
+
+test('L116 m4: a card the gate refused twice the same way is told to Joe through the tick\'s own alert', async () => {
+  const w = world([account(), usage(), ...mergeReady('C-1', 7)]);
+  // The gate's two refusals, as merge_gate writes them (attempts.merge_refusals is the gate's).
+  const cur = w.rec.read('card', 'C-1');
+  const set = w.rec.write({ actor: 'merge_gate', entity: 'card', id: 'C-1', expectRev: cur.rev, doc: { ...cur.doc, attempts: { merge_refusals: ['405', '405'] } } });
+  assert.equal(set.ok, true, set.reason);
+  const r = await w.pass();
+  assert.equal(r.steps.merges.ok, true, r.steps.merges.error);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  const told = w.calls.alerts.filter((a) => /card C-1: the merge was refused twice for the same reason \(405\)/.test(a));
+  assert.equal(told.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(requested(w.rec, 'C-1'), null, 'not requested while it waits on Joe');
+});
+
+// L172 m3, in the tick: the outage step queues its alert in the Record's outbox (tick.mjs `outbox`); the send to the
+// owner is the alert port, here throwing on the first try. The pass that opens the outage still holds every start, and
+// the outage is told once, on a later pass. (outage.test.mjs has the throw from outageStep's own alert.)
+test('L172 m3: an outage opened in a pass whose outage alert send throws still holds starts that pass, and is told once later', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  let throwOnce = true;
+  const textOf = (t) => (typeof t === 'string' ? t : t.text);
+  const stopped = (t) => /stopped at once/.test(textOf(t));
+  const lostPort = fakeAlert({ throws: (t) => stopped(t) && throwOnce && ((throwOnce = false), 'queue gone') });
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
+  { over: { board: () => board, healthy: () => false, alert: lostPort } });
+  // Told: each outage alert the port took (not the one that threw).
+  const told = { get length() { return lostPort.texts.filter((t, i) => stopped(t) && lostPort.answers[i] !== 'threw').length; } };
+  const r = await w.pass();
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, undefined);
+  assert.deepEqual(w.calls.reviewers, [], 'no reviewer starts in the pass the outage opened');
+  assert.deepEqual(w.calls.launched, []);
+  assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+  assert.match(String(r.steps.leads.result), /outage/);
+  for (let i = 1; i <= 3; i += 1) await w.pass(i);
+  assert.equal(told.length, 1, 'told once, on a later pass');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.told_id, w.rec.read('fact', OUTAGE_FACT).doc.id);
+});
+
+// L172 follow-up (the lead's ruling on #105): the outage step writes the open outage, then throws. The tick reads the
+// outage again once the step has run, so in that same pass every outage-aware hold waits: a Lead's read-only request
+// is held with an outage reason (and tried again later), the Lead step waits, no reviewer, start or merge request.
+test('L172 follow-up: an outage step that throws right after writing the open outage still holds everything outage-aware in that pass', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const board = [gone('S-1', 'C-1'), gone('S-2', 'C-2'), gone('S-3', 'C-3')];
+  const dir = join(tempDir('m11-outage-throw-'), 'lead');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?');
+  const started = [];
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
+    card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
+  { over: { board: () => board, healthy: () => false,
+    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
+    startReadonly: async (x) => { started.push(x.kind); return { ok: true }; } } });
+  // The test Record is frozen: the pass gets a copy of it whose write throws once, after the outage is written.
+  let armed = true;
+  const rec = { ...w.rec, write: (x) => {
+    const r = w.rec.write(x);
+    if (armed && x.entity === 'fact' && x.id === OUTAGE_FACT && x.kind === 'outage_start') { armed = false; throw new Error('the disk went away'); }
+    return r;
+  } };
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(armed, false, 'control: the throw came right after the outage was written');
+  assert.equal(r.steps.outage.ok, false, 'the outage step failed');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(started, [], 'the Lead\'s read-only request does not start');
+  assert.match(String(w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc?.reason), /outage/, 'it waits on the outage');
+  assert.match(String(r.steps.leads.result), /outage/, 'the Lead step waits');
+  assert.deepEqual(w.calls.reviewers, [], 'no reviewer is asked for');
+  assert.deepEqual(w.calls.launched, [], 'nothing starts');
+  assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+});
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('m11-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs'), lockFile: L.path('pass.lock') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
 });

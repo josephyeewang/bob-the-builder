@@ -14,6 +14,8 @@ const PEM = privateKey.export({ type: 'pkcs8', format: 'pem' });
 const ME = process.getuid();
 const NOW = Date.UTC(2026, 9, 30, 12, 0, 0);
 const TOKEN = 'ghs_test' + 'x'.repeat(32);
+// The base64url of {"alg":"RS256","typ":"JWT"}: the first part of every signed request makeAppJwt makes.
+const RS256_HEAD = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9';
 
 function keyFolder(mode = 0o600) {
   const dir = tempDir('m6-token-');
@@ -76,11 +78,12 @@ test('mints a token in memory, and no file in the temp folder holds it afterward
   assert.equal(gh.seen[0].okSig, true);
   assert.deepEqual(gh.seen[0].claims, { iat: NOW / 1000 - 60, exp: NOW / 1000 + 540, iss: '12345' });
   assert.equal(anyFileHolds(dir, TOKEN), false, 'the token was written to disk');
-  // The signed request itself, and each of its three parts, in no file. (Not a bare 'eyJ': the key file, made fresh
-  // each run, holds that by chance about 6 runs in 1000.)
-  const { jwt } = gh.seen[0];
-  assert.equal(jwt.split('.').length, 3);
-  for (const part of [jwt, ...jwt.split('.')]) assert.equal(anyFileHolds(dir, part), false, 'the signed request was written to disk');
+  // The exact signed request GitHub received, and the header every one starts with. Not any 'eyJ': about one random
+  // key in 150 holds those three letters, and the test failed on such a key though nothing was written (L246).
+  assert.equal(RS256_HEAD, Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url'));
+  assert.equal(gh.seen[0].jwt.split('.')[0], RS256_HEAD);
+  assert.equal(anyFileHolds(dir, gh.seen[0].jwt), false, 'the signed request was written to disk');
+  assert.equal(anyFileHolds(dir, RS256_HEAD), false, 'a signed request was written to disk');
 });
 
 test('a run as another Mac user, or as root, is refused before the key is read', async () => {
@@ -151,4 +154,21 @@ test('GitHub saying 401, or answering oddly, is no token; a reason never carries
   assert.equal(noClient.ok, false);
   const nothing = await mintInstallationToken();
   assert.equal(nothing.ok, false);
+});
+
+// L246: a file in the scanned folder that holds 'eyJ' (as about one key in 150 does) can't trip the check: only the
+// signed request itself, or its RS256 header, counts. No key is committed for this (the repo is public); the 'eyJ' is
+// seeded in a plain file beside the key, which the old three-letter check also scanned.
+test("L246: 'eyJ' in a file beside the key does not trip the no-request-on-disk check", async () => {
+  const { dir, key } = keyFolder();
+  writeFileSync(join(dir, 'notes.txt'), 'a line with eyJ in it, and eyJzdWIiOiJub3QtYS10b2tlbiJ9\n');
+  const gh = fakeGitHub();
+  assert.equal((await mintInstallationToken(args(key, gh))).ok, true);
+  assert.equal(anyFileHolds(dir, 'eyJ'), true, 'the old check would have failed here');
+  assert.equal(anyFileHolds(dir, gh.seen[0].jwt), false);
+  assert.equal(anyFileHolds(dir, RS256_HEAD), false);
+  // and the new check does catch a request that was written down
+  writeFileSync(join(dir, 'leak.txt'), gh.seen[0].jwt);
+  assert.equal(anyFileHolds(dir, gh.seen[0].jwt), true);
+  assert.equal(anyFileHolds(dir, RS256_HEAD), true);
 });

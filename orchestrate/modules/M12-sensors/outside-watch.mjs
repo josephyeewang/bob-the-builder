@@ -29,6 +29,7 @@
 //     and under 2 hours old.
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9).
 
+import { pastTime } from '../../shared/still-waiting.mjs';
 export const STOPPED_MIN = 90;
 export const ROBOT_GREEN_MIN = 120;
 export const LATCH_RUNS = 2;
@@ -55,12 +56,16 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
     return out;
   }
   out.push(['cannot-read', await homeAlerts.clear({ key: readKey, note: 'The Mini can read the outside check\'s runs again.' })]);
-  const newest = runs.map((r) => Date.parse(r.created_at)).filter(Number.isFinite).sort((a, b) => b - a)[0];
+  // Through pastTime (L329): a run time that can't be read, or is in the future (a clock gone back), is no sign the
+  // check still runs; were it counted, the "stopped" alert would be cleared instead of raised.
+  const times = runs.map((r) => pastTime(r.created_at, now()));
+  const newest = times.filter((x) => x !== null).sort((a, b) => b - a)[0];
+  const unreadTimes = times.some((x) => x === null);
   const age = newest === undefined ? Infinity : Math.round((now() - newest) / 60e3);
   const stoppedKey = 'outside-check|stopped|schedule';
   if (age > STOPPED_MIN) {
     out.push(['stopped', await homeAlerts.raise({ key: stoppedKey, title: 'The hourly outside check has stopped running',
-      body: newest === undefined ? 'The outside-check repo shows no scheduled run at all.' : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.`,
+      body: newest === undefined ? (unreadTimes ? 'The outside-check repo\'s scheduled runs have start times that can\'t be read or are in the future (a clock is off), so none shows the check still running.' : 'The outside-check repo shows no scheduled run at all.') : `The newest scheduled outside-check run started ${age} minutes ago (more than ${STOPPED_MIN}). Open the outside-check repo's Actions tab: the schedule may be switched off.`,
       status: newest === undefined ? 'no-runs' : 'stopped' })]);
   } else {
     out.push(['stopped', await homeAlerts.clear({ key: stoppedKey, note: 'The outside check is running again.' })]);
@@ -87,7 +92,10 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       body: `The newest scheduled outside-check run ended "${String(done.conclusion).replace(/[^a-z_]/g, '')}", so some checks did not run.`, status: 'not-finished' })]);
   } else if (done.conclusion) out.push(['run-not-green', await homeAlerts.clear({ key: runKey, note: 'The outside check finished a run again.' })]);
   if (writer && Object.keys(productNames).length) {
-    const ranAt = Number.isFinite(Date.parse(done.created_at)) ? new Date(Date.parse(done.created_at)).toISOString() : null;
+    // Capped at now (L362): this time comes from GitHub's clock and is stored as a past event. Uncapped, a clock 70 min
+    // ahead reads as a future run on every pass, so the gap latch re-fires and the gate never opens.
+    const createdMs = Date.parse(done.created_at);
+    const ranAt = Number.isFinite(createdMs) ? new Date(Math.min(createdMs, now())).toISOString() : null;
     let ownerFile = null;
     try {
       const c = await fetchJson(`/repos/${repo}/contents/${OWNER_FILE}`);
@@ -117,23 +125,42 @@ export async function watchOutside({ fetchJson, repo, workflow = 'outside-check.
       const redRuns = step?.conclusion === 'success' ? 0 : stepFailed && newRun ? prevRuns + 1 : prevRuns;
       let redSince = prevDoc?.red_since ?? null;
       let latchWhy = prevDoc?.latch_reason ?? null;
-      const passGap = !prevDoc || !(now() - Date.parse(prevDoc.at) <= UNSEEN_GAP_MS);
-      const runGap = !!prevDoc && newRun && ranAt !== null && !(Date.parse(ranAt) - Date.parse(prevDoc.run_at) <= UNSEEN_GAP_MS);
+      // A latch whose start can't be read could never be cleared, since no clear can be shown to come after it (L375 m2).
+      // It stays shut and restarts from this pass, so the owner has a time to clear against.
+      const sinceBad = redSince !== null && pastTime(redSince, now()) === null;
+      if (sinceBad) {
+        redSince = nowIso;
+        latchWhy = `the time this hold began can't be read or is in the future, so it restarts now${latchWhy ? `; before that: ${latchWhy}` : ''}`;
+      }
+      // Through pastTime (L329): a stored time that can't be read, or is in the future, counts as a gap, so the latch
+      // fires; were it counted as recent, a gap of any length would be skipped and robot merges would stay open.
+      const prevAt = prevDoc ? pastTime(prevDoc.at, now()) : null;
+      const prevRunAt = prevDoc ? pastTime(prevDoc.run_at, now()) : null;
+      const passGap = !prevDoc || prevAt === null || now() - prevAt > UNSEEN_GAP_MS;
+      const runGap = !!prevDoc && newRun && ranAt !== null && (prevRunAt === null || Date.parse(ranAt) - prevRunAt > UNSEEN_GAP_MS);
       if (!redSince && (passGap || runGap)) {
         redSince = nowIso;
-        latchWhy = !prevDoc ? 'no earlier result on this Mini' : passGap ? 'the Mini saw nothing for more than 5 days' : 'more than 5 days between outside-check runs';
+        latchWhy = !prevDoc ? 'no earlier result on this Mini'
+          : passGap ? (prevAt === null ? 'the time of the Mini\'s last result can\'t be read or is in the future' : 'the Mini saw nothing for more than 5 days')
+            : prevRunAt === null ? 'the time of the last outside-check run seen can\'t be read or is in the future' : 'more than 5 days between outside-check runs';
       }
       if (!redSince && redRuns >= LATCH_RUNS) { redSince = ranAt ?? nowIso; latchWhy = `failed in ${redRuns} runs in a row`; }
       // The newest run whose result wasn't green (round 6 MAT-A): a clear must come after it too.
-      const lastRed = !stepGreen && newRun ? ranAt ?? nowIso : prevDoc?.last_red_at ?? null;
+      // One that can't be read counts as red, never as "no red", so no clear already written can open the gate (L375 m2).
+      // It restarts from this pass, so the next clear has a time to come after.
+      const newRed = !stepGreen && newRun;
+      const prevRed = prevDoc?.last_red_at ?? null;
+      const redBad = !newRed && prevRed !== null && pastTime(prevRed, now()) === null;
+      const lastRed = newRed ? ranAt ?? nowIso : redBad ? nowIso : prevRed;
+      if (redBad && redSince) latchWhy = `the time of the last failed run can't be read or is in the future, so an earlier clear doesn't count${latchWhy ? `; before that: ${latchWhy}` : ''}`;
       const cleared = Date.parse(ownerFile?.cleared?.[label]);
-      if (redSince && green && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))
+      if (redSince && green && !sinceBad && !redBad && Number.isFinite(cleared) && cleared >= Date.parse(redSince) && !(lastRed && cleared < Date.parse(lastRed))
         && cleared <= now() + 5 * 60e3) { redSince = null; latchWhy = null; }
       const reason = !stepsRead ? 'the Mini could not read the newest run\'s steps' : !ownerFile ? `cannot read ${OWNER_FILE}` : !bound ? 'the slot tag does not match this product' : stepGreen ? 'step passed'
         : guard?.conclusion === 'failure' ? 'the outside repo guard failed' : !guard && rm ? 'no repo-guard step in the newest run'
           : step ? `step ${step.conclusion ?? 'unfinished'}` : 'no robot-merges step in the newest run';
       const doc = { kind: 'fact.outside-robot-merges', product, label, at: nowIso,
-        run_id: stepsRead ? done.id ?? null : prevDoc?.run_id ?? null, run_at: stepsRead ? ranAt : prevDoc?.run_at ?? null, green, last_green_at: green && !(Date.parse(prev) > Date.parse(ranAt)) ? ranAt : prev,
+        run_id: stepsRead ? done.id ?? null : prevDoc?.run_id ?? null, run_at: stepsRead ? ranAt : prevDoc?.run_at ?? null, green, last_green_at: green && !(pastTime(prev, now()) > Date.parse(ranAt)) ? ranAt : prev,
         red_runs: redRuns, red_since: redSince, latch_reason: latchWhy, last_red_at: lastRed, reason };
       out.push([`${label} / robot-merges fact`, writer.put(ROBOT_FACT(product), doc)]);
     }

@@ -612,6 +612,41 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
 - **Revisit trigger:**
   - Bob makes its first release tag: rewrite `SECURITY.md`'s supply-chain advice.
   - Or: the next fresh audit finds another claim Bob's files do not back. Then the gap is in how claims get checked, not in one file.
+### D-035: A test stand-in refuses what the real part refuses, and every hand-off gets one test with no stand-ins (Engineering Principle 10)
+
+- **Date:** 2026-11-01
+- **Status:** Accepted (the owner approved the rule on 2026-11-01)
+- **Context:** While Bob ORCHESTRATE was being built in parallel lanes, fresh-context checks found the same kind of bug more than eight times in two days. A test stand-in accepted inputs the real part refuses, or could only answer success, so the tests passed on code the real part would refuse or that would fail silently live. One class sweep found 12 serious places where a lost alert was counted as delivered. No test saw them, because none of the roughly 70 alert stand-ins could answer "not delivered".
+- **Decision:** Engineering Principle 10. A stand-in must refuse everything the real part refuses and must be able to give every answer the real part gives, failures included. Every pair of parts that pass data gets at least one test with both real parts and no stand-in between them. A stand-in found looser than the real part is fixed at the stand-in, and every stand-in of that part is checked.
+- **Consequences:** Stand-ins get a little more work, because they must model refusals and failures, not just success. Shared stand-in helpers (one per port, able to answer failure) are the cheap way to meet it. A test that only ever sees success no longer counts as covering a hand-off. Audits can now name this principle when they find a permissive stand-in.
+
+### D-036: Capability first — the main roadmap tracks what the product can do, end to end
+
+- **Date:** 2026-11-02
+- **Status:** Accepted (the owner approved it on 2 Nov, with two changes listed under Alternatives)
+- **Context:** A build can pass every check, and every review can come back clean, while the product still can't do the thing it was built for. An autonomous build system built with Bob drifted this way. It passed dozens of reviews, some run to a third round on narrow failure cases. Meanwhile its end-to-end test of a normal day still failed many of its steps, and several finished, tested steps were never called by the running system. Nothing in Bob kept score of whether the normal path works, while every review was told to hunt for what could go wrong. So effort went to edge cases, because that was what got measured.
+- **Decision:**
+  - (1) **Engineering Principle 11, capability first.** The main roadmap is a capability list in the owner's words with one status each: works live / works end-to-end in tests (driven from the real entry point) / built, not connected / partly built / not built. Only the first two count as done. Hardening is its own list with its own owner and does not hold up the main roadmap; an item that could cause harm or hide something from the owner is Material, so it is fixed in the change and never parked there.
+  - (2) **Phase Gate 16:** the capability list is updated each phase and its scoreboard is in the phase report.
+  - (3) **Phase Gate 17, `SCRIPT` in part:** a wiring check, `templates/wired.test.mjs`. It follows the imports from the product's entry points, with comments and strings ignored, and fails when an exported unit of work (a pass, step, job or handler) is not used by any reachable file and is not listed, with its roadmap row, as not wired yet. A listed one that is now used fails as stale. It is generalised from the check the autonomous build system uses; that copy stays where it is. It reads JavaScript (default and named imports, folders that re-export, `import()`, CommonJS), prints the entry points it found, and lets dev-only scripts be left out. With no entry point or no unit it fails saying it cannot judge (Rule 29). A fresh review broke the first draft with 28 small projects (it failed healthy shapes and passed broken ones); the rebuilt check gets 27 right, and the one left needs the project to name its dev-script folder. A second fresh review found five more gaps (exported classes, `module.exports = function …`, names listed in an exported object, two names in one `export const`, and two clashes in the rule text); all are fixed. A third found three shapes that still passed quietly (a unit defined inside an exported object, a name passed on through `module.exports = { x: require(…).x }`, and a file taken for an entry point because it merely mentions `process.argv[1]`); those are fixed, and the header now names, as a plain list, the rarer shapes a text scan can still pass quietly (a local name that shadows the unit, exports the scan cannot see), so a project knows to keep units of work out of them. The Rule 30(h) re-check of those fixes found that they had opened new gaps of their own (a name in an array nested inside an exported object counted as a use; any `if` near `process.argv[1]`, or any helper with "main" in its name, made a file an entry point; and `process.argv[1] === __filename` no longer did); those are fixed too. Twenty-nine self-tests cover it. On the original system's code it matches the original check. Under Rule 30(h) that re-check belonged to the third round; it was not a fourth.
+  - (4) **Phase Gate 18, written only:** one simplicity review per changed part each phase. Is the same job done two ways, and what can be deleted?
+  - (5) **Rule 30(g):** for a product that acts on its own, Material also means it could act wrongly, hide something from the owner (a silent hold counts), lose data, touch production or break a capability. A case where the product already stops and tells the owner is Minor (unless 30(c) already makes it Material) and goes to the hardening list.
+  - (5b) **Rule 30(h):** after round 2 of review on the same change, a new round opens only for a Material finding; the re-checks 30(f) asks for (a different-angle re-run of a clean round, a re-check after a fix) belong to the round they check. It is a clause of its own because it applies to every product, not only those that act on their own.
+  - (6) **Verification Additions:** a hot path is tested from the product's real entry point, not by calling its pieces.
+- **Alternatives considered:**
+  - A new `capability-list.md` template, as first proposed. Changed, with the owner's agreement: the Capability Traceability Matrix already lists every capability, so it gains a Works column, an Evidence column and the scoreboard. Two lists of what is built would drift apart (Principle 1). Its old Status codes stay and now mean what a phase *planned* to build.
+  - A new `hardening-roadmap.md` template. Changed for the same reason: `templates/deferred-actions.md` is already the one register of deferred work with revisit triggers, so it gains a Hardening section with an owner and the three urgency buckets (before first release, before wider release, long tail).
+  - Leave out the simplicity review, which the proposal's summary listed but its detailed part did not. Included, by the owner's choice, as a written-only gate item.
+- **Consequences:**
+  - The phase gate has 18 items. A phase can no longer close with a capability marked done on unit tests alone.
+  - A project in a language other than JavaScript has no ready-made wiring check; it writes one for its stack or records that it has none.
+  - The global meaning of Material, the done tiers and the fresh-review rule are unchanged; 30(g) only adds to them for products that act on their own.
+  - Part II of `build-protocol.md` (the NEW mode) still describes the matrix with its old columns; its owner was told.
+  - `/bob UPGRADE` does not yet copy the wiring check or the new matrix columns into existing projects; until it does, a project adds them by hand.
+- **Revisit trigger:**
+  - The first project that uses the Works column and the wiring check through a full phase: check that the scoreboard moved and the check caught something real, or simplify them.
+  - Or: the wiring check raises a false alarm on a healthy project. Fix the check; never mute it.
+
 ---
 
 ## Anti-pattern reminder
