@@ -971,7 +971,7 @@ test('r5 m3: a quiet pass retries the exact write refused: the alert closes once
   const issue = troubleIssues(w.gh)[0];
   assert.equal(issue.closed, false);
   const own = cached(w.rec, alertKey('p', 'alerts', 'record-refusing:test'));
-  assert.deepEqual([own.retry_key, own.retry_issue], [standing.key, 1], 'kept by the fact shape, which drops what it doesn\'t know');
+  assert.deepEqual([own.retry_key, own.retry_issue, own.retry_status], [standing.key, 1, 'open'], 'kept by the fact shape, which drops what it doesn\'t know');
   let tries = 0;
   w.world.refuse = (doc) => { if (doc.key === standing.key) tries += 1; return doc.key === standing.key; };
   assert.equal(await w.make().reportTrouble('p', 'test'), 'none');
@@ -981,6 +981,31 @@ test('r5 m3: a quiet pass retries the exact write refused: the alert closes once
   assert.equal(await w.make().reportTrouble('p', 'test'), 'cleared');
   assert.equal(issue.closed, true);
   assert.equal(cached(w.rec, standing.key).issue, 1, 'the refused alert has its number at last');
+});
+
+const clearRefused = async (w) => {
+  await w.make().raise(standing);
+  w.world.refuse = (doc) => doc.key === standing.key;
+  await w.make().clear({ key: standing.key });
+  const a = w.make();
+  await a.clear({ key: standing.key }); // GitHub shows it closed and the Record doesn't: the second refusal
+  await a.reportTrouble('p', 'test');
+};
+
+test('L422: a refused clear is retried as a clear, and leaves the entry cleared, whatever the entry says meanwhile', async () => {
+  const w = refusing();
+  await clearRefused(w);
+  assert.equal(w.gh.issues.get(1).closed, true);
+  assert.equal(cached(w.rec, standing.key).status, 'open', 'the refusal: the Record still points at it');
+  const issue = troubleIssues(w.gh)[0];
+  assert.equal(cached(w.rec, alertKey('p', 'alerts', 'record-refusing:test')).retry_status, 'cleared');
+  assert.equal(await w.make().reportTrouble('p', 'test'), 'none', 'still refused');
+  assert.equal(issue.closed, false);
+  w.world.refuse = () => false;
+  assert.equal(await w.make().reportTrouble('p', 'test'), 'cleared');
+  assert.equal(issue.closed, true);
+  assert.equal(cached(w.rec, standing.key).status, 'cleared', 'not open: an open entry would point at a closed issue');
+  assert.equal(await w.make().clear({ key: standing.key }), 'none', 'so the next clear has nothing to do');
 });
 
 test('r5 m3: no retry on a pass that landed a write, or that has trouble of its own, or for an entry that has the number by now', async () => {
@@ -1006,12 +1031,11 @@ test('r5 m3: no retry on a pass that landed a write, or that has trouble of its 
   const c = refusing();
   await oneRefused(c);
   c.world.refuse = () => false;
-  assert.ok(c.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 1, status: 'settled' }).ok);
+  assert.ok(c.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 1, status: 'open' }).ok);
   let writes = 0;
   c.world.refuse = (doc) => { if (doc.key === standing.key) writes += 1; return false; };
   assert.equal(await c.make().reportTrouble('p', 'test'), 'cleared', 'the number landed some other way');
-  assert.equal(writes, 0, 'and a later status isn\'t written over');
-  assert.equal(cached(c.rec, standing.key).status, 'settled');
+  assert.equal(writes, 0, 'the entry holds both already');
 
   const n = refusing();
   await oneRefused(n);

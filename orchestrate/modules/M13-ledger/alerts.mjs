@@ -101,7 +101,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   let trouble = null; // why the Record refused a cache write since the last report
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
-  let refused = null; // the latest cache write refused: which alert, and its issue
+  let refused = null; // the latest cache write refused: which alert, its issue, and the status it was to have
 
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
@@ -112,7 +112,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     if (s?.issue === issue && s?.status === status) return;
     const r = writer.put(id, { kind: 'fact.alert', key, issue, status });
     if (wasSaved(r)) { wrote = true; return; }
-    refused = { key, issue };
+    refused = { key, issue, status };
     trouble = masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200);
     again ||= behind;
   };
@@ -255,10 +255,12 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   // landed says nothing about the Record, and a quiet product can have those for weeks. So the alert's own entry keeps the
   // write that was refused, and such a pass tries that write again, once (#184 r5 m3). Only that write shows the Record
   // takes what it refused: trying any other closed the alert while the Record still refused, and reopened it every pass.
-  // An entry already holding that number needs no write, and writing one could undo a later change to it.
-  const retryRefused = ({ retry_key: key, retry_issue: issue }) => {
+  // The status goes with it: writing 'open' for a clear that was refused would point the cache at a closed issue (L422).
+  // An entry already holding both needs no write.
+  const retryRefused = ({ retry_key: key, retry_issue: issue, retry_status: status }) => {
     const id = idOf(key);
-    return writer.get(id)?.issue === issue || wasSaved(writer.put(id, { kind: 'fact.alert', key, issue, status: 'open' }));
+    const s = writer.get(id);
+    return (s?.issue === issue && s?.status === status) || wasSaved(writer.put(id, { kind: 'fact.alert', key, issue, status }));
   };
 
   async function reportTrouble(product, source) {
@@ -275,7 +277,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
         body: `The Record refused to save where this product's alerts are (${why}). Alerts still go out, but each pass has to look them up on GitHub until it takes them.` });
     if (why !== null && answer !== false && refused) {
       const cur = writer.get(own);
-      if (cur?.status === 'open') writer.put(own, { ...cur, retry_key: refused.key, retry_issue: refused.issue });
+      if (cur?.status === 'open') writer.put(own, { ...cur, retry_key: refused.key, retry_issue: refused.issue, retry_status: refused.status });
     }
     // After the alert, so a refusal of its own number isn't carried into the next pass as that pass's trouble.
     trouble = null; again = false; wrote = false;
