@@ -14,7 +14,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT, HOLD_ABSENT_MS } from './review-requests.mjs';
+import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT, HOLD_ABSENT_MS, MAIN_UNREAD } from './review-requests.mjs';
 import { behindSince, nextMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { outbox, isQueued } from './alerts.mjs';
 import { timeLimits } from './merges.mjs';
@@ -247,7 +247,7 @@ test('L315: a verdict not taken stays a hold on passes with no request, and thro
 });
 
 test('L315: a verdict not taken on a head the card has left is no longer a hold', async () => {
-  const m = mac({ verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict' }) });
+  const m = mac({ verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict' }), treeOf: async (c, h) => (h === HEAD ? TREE : 'd'.repeat(40)) });
   for (const h of [0, 1, 2]) await m.hour(h);
   m.live.splice(0);
   for (const h of [3, 4]) await m.hour(h);
@@ -378,11 +378,11 @@ test('L437: time off the list counts readable passes only', async () => {
   assert.equal(mark().told_at, null);
 });
 
-test('L437 m1: a hold kept because main can\'t be read tells nothing and clears nothing', () => {
+test('L437 m1, L458 m2: a stamp hold never told says nothing while main can\'t be read, and clears nothing', () => {
   const rec = recWith();
   const fact = REVIEW_HOLD_FACT('stamp');
   const hold = { id: 'stamp', hold: true, text: 'The copy is behind.', since: 'aaa' };
-  const keep = { id: 'stamp', hold: true, keep: true, text: '' };
+  const keep = { id: 'stamp', hold: true, keep: true, text: MAIN_UNREAD };
   assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, T0), now: T0 }), 0, 'never told: nothing was queued');
   assert.equal(isQueued(rec, fact), false);
   assert.equal(rec.read('fact', fact), null, 'and no mark written for it');
@@ -391,6 +391,62 @@ test('L437 m1: a hold kept because main can\'t be read tells nothing and clears 
   assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, later), now: later }), 0);
   assert.equal(isQueued(rec, fact), true, 'the queued copy stays');
   assert.equal(rec.read('fact', fact)?.doc?.absent_since, undefined, 'kept is listed, not off the list');
+});
+
+test('L458 m2: a stamp hold told is told each day that main can\'t be read, under the same trouble', async () => {
+  const s = statusMac();
+  s.set({ installed_commit: HEAD });
+  s.setMain({ commit: MAIN, since: T0 - H });
+  assert.deepEqual(await s.run(0, 0, /Its installed copy is at aaaaaaa/), [0]);
+  s.setMain(null);
+  assert.deepEqual(await s.run(1, 72, /Main can't be read/), [24, 48, 72]);
+  s.setMain({ commit: MAIN, since: T0 - H });
+  assert.deepEqual(await s.run(73, 96, /review runner: /), [96], 'main back: the same copy is the same trouble, a day after the last tell');
+});
+
+test('L458 m2: a tell that main can\'t be read counts for the day, even when the hold clears and comes back', async () => {
+  const s = statusMac();
+  s.set({ installed_commit: HEAD });
+  s.setMain({ commit: MAIN, since: T0 - H });
+  await s.hour(0);
+  s.setMain(null);
+  assert.deepEqual(await s.run(1, 24, /Main can't be read/), [24]);
+  s.setMain({ commit: MAIN, since: T0 - H });
+  s.set({ installed_commit: MAIN });
+  await s.run(25, 27, /x/); // level for two hours: the mark clears
+  s.set({ installed_commit: HEAD });
+  assert.deepEqual(await s.run(28, 47, /review runner: /), [], 'the same copy behind again, told 4 hours ago');
+  assert.deepEqual(await s.run(48, 48, /Its installed copy is at aaaaaaa/), [48]);
+});
+
+test('L458 m2: a trouble cleared before main went unreadable is not told as if it still held', async () => {
+  const s = statusMac();
+  s.set({ installed_commit: HEAD });
+  s.setMain({ commit: MAIN, since: T0 - H });
+  await s.hour(0);
+  s.set({ installed_commit: MAIN });
+  await s.run(1, 3, /x/);
+  s.setMain(null);
+  assert.deepEqual(await s.run(30, 60, /Main can't be read/), []);
+});
+
+test('L458 m1: a runner error naming a session id each pass is one trouble', async () => {
+  const s = statusMac();
+  const id = (h) => `${'abcdefghijklm'[h].repeat(8)}-aaaa-bbbb-cccc-dddddddddddd`.replace(/[g-m]/g, 'f');
+  const told = await tellsOver(s, range(12), FAILED_ANY, (h) => s.set({ ok: false, error: `session ${'abcdefghijklm'[h]}${id(h)} could not be marked ended (EIO)` }));
+  assert.deepEqual(told, [0], 'one tell, not 13');
+});
+
+test('L458 m3: two causes taking turns are each told once a day', async () => {
+  const s = statusMac();
+  const told = await tellsOver(s, range(48), FAILED_ANY, (h) => s.set({ ok: false, error: h % 2 === 0 ? EACCES.error : 'the disk is full' }));
+  assert.deepEqual(told, [0, 1, 24, 25, 48]);
+});
+
+test('L458 m5: the told causes are pruned: only the last day\'s stay on the mark', async () => {
+  const s = statusMac();
+  for (const [i, c] of ['one', 'two', 'three', 'four', 'five'].entries()) { s.set({ ok: false, error: `trouble ${c}` }); await s.hour(i * 25); }
+  assert.equal(Object.keys(s.rec.read('fact', REVIEW_HOLD_FACT('runner-failed')).doc.since_times).length, 1);
 });
 
 test('L437: a told time that can\'t be read is not held back: the hold is told', () => {
@@ -460,3 +516,79 @@ test('L437 m2: a verdictTaken that throws counts as not taken, and an unreadable
   assert.equal(held(n).length, 1, 'an unreadable card leaves it held');
 });
 
+// The push script alone moves a head in the Record, so the runner's reads stand in for it, as the test of a card that left its head does.
+const HEAD2 = 'b'.repeat(40);
+const amend = (m) => {
+  const had = m.ctx.readCard;
+  m.ctx.readCard = (c) => { const r = had(c); return { ...r, doc: { ...r.doc, head: HEAD2 } }; };
+  m.ctx.currentHead = () => HEAD2;
+};
+
+test('L458 M1: a card amended to the same tree, then a memory reset: the verdict is still told, at the card\'s head', async () => {
+  const m = await notTakenTold();
+  const seen = [];
+  m.ctx.verdictTaken = (x) => { seen.push(x.head); return { ok: false, reason: 'the Record holds no verdict of session S-1' }; };
+  amend(m);
+  rmSync(join(m.root, 'state.json'));
+  const told = await m.run(5, 52, /handed in a verdict the Record has not taken/);
+  assert.deepEqual(told, [28, 52], 'told within a day');
+  assert.equal(m.starts.length, 1, 'nothing started again');
+  assert.match(held(m)[0].text, /at bbbbbbb/, 'held at the card\'s head, so the kept check does not drop it');
+  assert.ok(seen.every((h) => h === HEAD2));
+});
+
+test('L458 M1 control: a head with another tree, or a tree that can\'t be read, adds nothing', async () => {
+  for (const treeOf of [async () => 'd'.repeat(40), async () => { throw new Error('no'); }]) {
+    const m = await notTakenTold();
+    m.ctx.treeOf = treeOf;
+    amend(m);
+    rmSync(join(m.root, 'state.json'));
+    await runnerPass(m.ctx);
+    assert.deepEqual(held(m), []);
+  }
+});
+
+// One test per place verdictTaken can throw, each set up so the other two can't add the hold back (L458 m4).
+const THROWS = () => { throw new Error('the Record is away'); };
+const noState = (m) => {
+  const file = join(m.root, 'state.json');
+  const st = JSON.parse(readFileSync(file, 'utf8'));
+  delete st.not_taken;
+  writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
+};
+
+test('L458 m4: a throw on the kept check leaves the hold', async () => {
+  const m = await notTakenTold();
+  m.ctx.verdictTaken = THROWS;
+  m.ctx.readCard = THROWS; // so the rebuild adds nothing back; no request is waiting in a pass alone
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+  assert.match(held(m)[0].text, /could not be read/);
+});
+
+test('L458 m4: a throw in the rebuild counts as not taken', async () => {
+  const m = await notTakenTold();
+  m.ctx.verdictTaken = THROWS;
+  rmSync(join(m.root, 'state.json')); // nothing kept, and no request is waiting in a pass alone
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+  assert.match(held(m)[0].text, /could not be read/);
+});
+
+test('L458 m4: a throw on a request counts as not taken', async () => {
+  const m = await notTakenTold();
+  m.ctx.verdictTaken = THROWS;
+  noState(m); // nothing kept
+  rmSync(join(m.root, 'launches', 'S-1.json'), { force: true }); // and nothing for the rebuild to read
+  await m.hour(5);
+  assert.equal(held(m).length, 1);
+  assert.match(held(m)[0].text, /could not be read/);
+});
+
+test('L458 m5: the rebuild skips a session set aside', async () => {
+  const m = await notTakenTold();
+  writeFileSync(join(m.root, 'set-aside', 'S-1.json'), JSON.stringify({ session_id: 'S-1' }), { mode: 0o644 });
+  rmSync(join(m.root, 'state.json'));
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 0);
+});

@@ -484,13 +484,20 @@ export async function runnerPass(ctx) {
 
   // The not-taken list is rebuilt from the launch and ended records on every pass, not only kept in state.json (L437):
   // a memory file moved aside must not lose a verdict that is still not taken. A session counts once it has ended on a
-  // real verdict, its card still wants that role at that head, and the Record has not taken it after the wait. `none`,
+  // real verdict, its card still wants that role at that head or a head with the same tree, as a request reads it
+  // (L458), and the Record has not taken it after the wait. It is held at the card's head. `none`,
   // `refused` and `never_ran` were told when the session ended. A card that can't be read adds nothing here (one read
   // failing must not turn every past session into a hold); a hold already listed stays, as above.
   const cardsRead = new Map();
   const cardOf = async (id) => {
     if (!cardsRead.has(id)) { let c; try { c = await ctx.readCard(id); } catch { c = null; } cardsRead.set(id, c); }
     return cardsRead.get(id);
+  };
+  const treesRead = new Map();
+  const treeAt = async (id, head) => {
+    const k = `${id} ${head}`;
+    if (!treesRead.has(k)) { let tree; try { tree = await ctx.treeOf(id, head); } catch { tree = null; } treesRead.set(k, tree); }
+    return treesRead.get(k);
   };
   for (const { doc: d } of rl.ok ? rl.launches : []) {
     const sid = d.session_id;
@@ -499,11 +506,13 @@ export async function runnerPass(ctx) {
     if (!e.ok || !HEX64.test(e.ended.verdict_sha256)) continue;
     if (now - (pastTime(e.ended.ended_at, now) ?? -Infinity) < INTAKE_WAIT_MS) continue;
     const c = await cardOf(d.card);
-    if (!c?.ok || c.doc?.head !== d.head || !needsRole(c.doc, d.role)) continue;
+    if (!c?.ok || !needsRole(c.doc, d.role)) continue;
+    const head = c.doc.head;
+    if (head !== d.head && (typeof d.tree !== 'string' || await treeAt(d.card, head) !== d.tree)) continue;
     let t;
-    try { t = await ctx.verdictTaken({ role: d.role, sessionId: sid, card: d.card, head: d.head }); } catch (e2) { t = { ok: false, reason: `the Record could not be read (${e2?.message ?? e2})` }; }
+    try { t = await ctx.verdictTaken({ role: d.role, sessionId: sid, card: d.card, head }); } catch (e2) { t = { ok: false, reason: `the Record could not be read (${e2?.message ?? e2})` }; }
     if (t?.ok === true) continue;
-    state.not_taken = { ...state.not_taken, [sid]: { id: `not-taken-${sid}`, session: sid, card: d.card, head: d.head, role: d.role, text: notTakenText({ role: d.role, card: d.card, head: d.head, why: notTakenWhy(t) }) } };
+    state.not_taken = { ...state.not_taken, [sid]: { id: `not-taken-${sid}`, session: sid, card: d.card, head, role: d.role, text: notTakenText({ role: d.role, card: d.card, head, why: notTakenWhy(t) }) } };
   }
 
   // The sweep (L68): a launched session the runner is not running, with no ended record, is one it lost track of (it

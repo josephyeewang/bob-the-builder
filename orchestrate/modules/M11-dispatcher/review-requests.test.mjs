@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { writeReviewRequest, reviewPorts, statusAlerts, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
+import { writeReviewRequest, reviewPorts, statusAlerts, MAIN_UNREAD, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
 import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 
@@ -102,6 +102,14 @@ test('L66, L315: a failed runner pass and an installed copy behind main are hold
   const since = (error) => statusAlerts({ ...ok, ok: false, error }, () => MAIN)[0].since;
   assert.equal(since('the requests could not be listed (EACCES); session 12 could not be marked'), f1[0].since);
   assert.equal(since('card 12 failed'), since('card 345 failed'));
+  // L458: what varies by pass makes no new trouble: an id, or the detail in brackets, even cut off by the 300 limit.
+  const uuid = (n) => `${String(n).repeat(8).slice(0, 8)}-aaaa-bbbb-cccc-dddddddddddd`.replace(/\d/g, (d) => 'abcdef0123'[d]);
+  assert.equal(since(`session ${uuid(1)} could not be marked ended (EIO)`), since(`session ${uuid(2)} could not be marked ended (ENOSPC)`));
+  assert.equal(since(`session S-a could not be set aside (EIO)`), since(`session S-b could not be set aside (EIO)`));
+  assert.equal(since('the review sessions could not be listed (it broke (twice)), so none starts'), since('the review sessions could not be listed (other), so none starts'));
+  assert.equal(since('the review folders could not be made (cut off'), since('the review folders could not be made (EACCES)'));
+  assert.equal(since(`lost ${uuid(1)} here`), since(`lost ${uuid(2)} here`));
+  assert.notEqual(since('session S-a could not be marked ended (EIO)'), since('session S-a could not be set aside (EIO)'), 'another class is another trouble');
   // The stamp: behind main, or none, is named by the installed commit; without main's head, nothing.
   const behind = statusAlerts({ ...ok, installed_commit: HEAD }, () => MAIN);
   assert.equal(behind.length, 1);
@@ -116,7 +124,7 @@ test('L66, L315: a failed runner pass and an installed copy behind main are hold
   assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, undefined), [], 'no port: no stamp check');
   // L437 m1: main can't be read, so the stamp hold is kept as it is: nothing told, nothing cleared.
   for (const mainHead of [() => null, () => 'main', () => ({ commit: null }), () => { throw new Error('no'); }]) {
-    assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, text: '' }]);
+    assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, text: MAIN_UNREAD }]);
   }
   // Through the ports, read from the real status file.
   const dir = tempDir('m11-status-');
