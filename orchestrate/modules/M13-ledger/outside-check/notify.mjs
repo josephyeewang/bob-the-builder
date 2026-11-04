@@ -5,7 +5,8 @@
 // comments again every 24 h (L315: this issue is what still tells the owner when the host is down); a check that passes again closes its issue with a "cleared" comment and a
 // "cleared at <time>" line in the issue's body (the line, not the comment, is what counts; see below); an
 // issue the owner closed while the check still failed stays closed until a run sees it pass and fail again. A body
-// update that fails after its comment can't mean a comment every run: the bot's own comments are read first (L389).
+// update that fails after its comment can't mean a comment every run: the bot's own comments are read first (L389), and
+// a comment found there is what the told line then says (L393).
 // Titles are
 // the step names ("product N / <check>"), so no product data appears.
 import { fileURLToPath } from 'node:url';
@@ -21,12 +22,13 @@ export const dueToTell = (told, nowMs) => {
   return !Number.isFinite(t) || t > nowMs + FUTURE_SKEW_MS || nowMs - t >= RETELL_MS;
 };
 const CLEARED = 'Cleared: the check passes again.';
-// The bot's comment under 24 h old, read from GitHub, because the told line is what may have been lost. Only the bot's
-// count: anyone can comment on a public repo.
+// When the bot last commented, if under 24 h ago, read from GitHub, because the told line is what may have been lost.
+// null if not. Only the bot's count: anyone can comment on a public repo. A time ahead of the run reads as the run's own.
 async function spokeLately(api, number, nowMs) {
   const since = encodeURIComponent(new Date(nowMs - RETELL_MS).toISOString());
   const comments = await api('GET', `/issues/${number}/comments?since=${since}&per_page=100`);
-  return comments.some((c) => c?.user?.login === BOT && nowMs - Date.parse(c.created_at) < RETELL_MS);
+  const times = comments.filter((c) => c?.user?.login === BOT).map((c) => Date.parse(c.created_at)).filter((t) => nowMs - t < RETELL_MS);
+  return times.length ? new Date(Math.min(Math.max(...times), nowMs)).toISOString() : null;
 }
 
 export async function notify({ ran, failed, api, now = () => new Date() }) {
@@ -50,9 +52,11 @@ export async function notify({ ran, failed, api, now = () => new Date() }) {
         // Comment first: the told line goes in only once the comment was taken, so a lost one is sent by the next run.
         // An issue from before the told line is dated from when it opened.
         const due = dueToTell(toldOf(i.body) ?? sinceOf(i.body), Date.parse(stamp));
-        if (due && !(await spokeLately(api, i.number, Date.parse(stamp)))) await api('POST', `/issues/${i.number}/comments`, { body: `Still failing since ${sinceOf(i.body) ?? stamp}.` });
-        await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp, due ? stamp : toldOf(i.body)) });
-        done.push([title, due ? 'reminded' : 'updated']);
+        // A told time already on GitHub means no comment went out this run, so this run reports `updated`.
+        const spoke = due ? await spokeLately(api, i.number, Date.parse(stamp)) : null;
+        if (due && !spoke) await api('POST', `/issues/${i.number}/comments`, { body: `Still failing since ${sinceOf(i.body) ?? stamp}.` });
+        await api('PATCH', `/issues/${i.number}`, { body: bodyOf(title, i.body, stamp, due ? (spoke ?? stamp) : toldOf(i.body)) });
+        done.push([title, due && !spoke ? 'reminded' : 'updated']);
         return;
       }
       if (i && i.state === 'closed' && !clearedByBot(i)) { done.push([title, 'suppressed']); return; }

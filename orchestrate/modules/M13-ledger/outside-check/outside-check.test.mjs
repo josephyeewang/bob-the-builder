@@ -259,6 +259,32 @@ test('L389 notify: a body update that keeps failing after its comment still send
   assert.equal(fresh.issues[0].comments.length, 2);
 });
 
+// L393 m3: GitHub stamps the comment a little after the run's own time, so the next due run can find it just under 24 h old.
+test('L393 notify: a due run the bot already spoke in writes that comment\'s time, answers updated, and the next run reminds', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  const run = (h) => { gh.clock.at = new Date(hours(h).getTime() + 5000).toISOString(); return notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(h) }); };
+  await run(0);
+  assert.deepEqual(await run(24), [[t, 'reminded']]);
+  assert.deepEqual(await run(48), [[t, 'updated']], 'the 24 h comment is 5 s short of a day old');
+  assert.match(gh.issues[0].body, new RegExp(`last told ${new Date(hours(24).getTime() + 5000).toISOString()}`));
+  assert.deepEqual(await run(49), [[t, 'reminded']], 'and the reminder is one run late, not a day');
+  assert.equal(gh.issues[0].comments.length, 2);
+  // Of two bot comments inside the 24 h, the later one is the told time.
+  const two = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: two.api, now: () => hours(0) });
+  two.issues[0].comments.push({ user: { login: BOT }, body: 'x', created_at: hours(2).toISOString() }, { user: { login: BOT }, body: 'x', created_at: hours(20).toISOString() });
+  await notify({ ran: [t], failed: [t], api: two.api, now: () => hours(24) });
+  assert.match(two.issues[0].body, new RegExp(`last told ${hours(20).toISOString()}`));
+  // A bot comment stamped ahead of the run never moves the told line ahead.
+  const ahead = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: ahead.api, now: () => hours(0) });
+  ahead.issues[0].comments.push({ user: { login: BOT }, body: 'x', created_at: hours(26).toISOString() });
+  await notify({ ran: [t], failed: [t], api: ahead.api, now: () => hours(25) });
+  assert.match(ahead.issues[0].body, new RegExp(`last told ${hours(25).toISOString()}`));
+});
+
 test('L315 notify: a told time that cannot be read or is in the future tells now; an issue from before the told line is dated from failing since', async () => {
   const t = 'product 1 / heartbeat';
   for (const [line, h, want] of [['', 2, 'updated'], ['', 25, 'reminded'], ['\nlast told garbage', 2, 'reminded'], ['\nlast told 2099-01-01T00:00:00.000Z', 2, 'reminded']]) {

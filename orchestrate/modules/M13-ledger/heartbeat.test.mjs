@@ -26,6 +26,8 @@ function setup({ wrap = (w) => w } = {}) {
   const tick = (min) => { t += min * 60e3; };
   return { rec, gh, writer, world, pass, tick, plan: (p) => { planned = p; }, now };
 }
+const refusingPin = (world) => (w) => ({ get: w.get, put: (id, doc, kind) => (world.refuse && doc.kind === 'fact.heartbeat-issue' ? { ok: false, reason: 'the store is full' } : w.put(id, doc, kind)) });
+const pinnedIssues = (gh) => [...gh.issues.values()].filter((i) => /heartbeat \(pinned\)/.test(i.title));
 const alertIssues = (gh) => [...gh.issues.values()].filter((i) => !/heartbeat \(pinned\)/.test(i.title));
 
 test('all green: one pinned heartbeat issue whose body is rewritten every 10 min with mini_alive_at', async () => {
@@ -566,4 +568,35 @@ test('P11: A→B told, save refused, signed out, then A: the owner still hears i
   const changes = alertIssues(h.gh).filter((i) => /account changed/.test(i.title));
   assert.equal(changes.length, 2, changes.map((i) => i.body).join(' / '));
   assert.match(changes[1].body, /signed in as account A \(was account B\)/);
+});
+
+// L393: the pinned issue's number is what stops a new issue each pass, so a refused save is found again by its marker.
+test('L393: a pinned issue whose number the Record refused: one issue over many passes, red on it, and the number saved once it takes it', async () => {
+  const world = { refuse: true };
+  const h = setup({ wrap: refusingPin(world) });
+  for (let i = 0; i < 6; i++) {
+    const r = await h.pass();
+    assert.ok(r.red.includes('alert-not-saved'));
+    h.tick(10);
+  }
+  assert.equal(pinnedIssues(h.gh).length, 1);
+  assert.match(pinnedIssues(h.gh)[0].body, /RED +alerts: the Record refused to save the pinned issue's number: the store is full/);
+  world.refuse = false;
+  const r = await h.pass();
+  assert.deepEqual(r.red, []);
+  assert.equal(pinnedIssues(h.gh).length, 1);
+  assert.doesNotMatch(pinnedIssues(h.gh)[0].body, /RED/);
+  assert.doesNotMatch(r.body, /orch:heartbeat/, 'the marker is on the post, not in what the pass answers');
+});
+
+test('L393: a list GitHub refuses opens no pinned issue this pass; the next one does', async () => {
+  const h = setup();
+  const findOpen = h.gh.findOpen;
+  h.gh.findOpen = async () => false;
+  await h.pass();
+  assert.equal(pinnedIssues(h.gh).length, 0);
+  h.gh.findOpen = findOpen;
+  h.tick(10);
+  await h.pass();
+  assert.equal(pinnedIssues(h.gh).length, 1);
 });

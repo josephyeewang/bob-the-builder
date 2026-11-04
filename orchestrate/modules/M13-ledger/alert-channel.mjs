@@ -9,7 +9,7 @@
 //   deliverAlertsPass({ rec, now, recordRoot, product, products, repos, owner, token, fetchFn?, issuesFor?, ... })
 //     → { sent, failed, left, refused?, locked? }               never throws; any alert not delivered → `refused`
 //   deliverWith(bound) → ({ rec, now }) => deliverAlertsPass({ ...bound, rec, now })   (the robot job binds it at start-up)
-//   githubIssues({ repo, owner, token, fetchFn?, timeoutMs? }) → the M13 alerts.mjs client
+//   githubIssues({ repo, token, fetchFn?, timeoutMs? }) → the M13 alerts.mjs client
 //
 // Config (the robot job's private Mac config, never the rules file; L237): `owner` is Joe's GitHub login, the assignee;
 // `repos` maps each product to its "owner/name" repository; `products` is the products list; `product` is the product
@@ -59,6 +59,7 @@ const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const BOB = /^bob-the-builder$/i;
 const COMMENT_PAGE = 100;
 const COMMENT_PAGES = 10;
+const ISSUE_PAGES = 10;
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const TOLD = new Set(['opened', 'updated', 'changed', 'reminded']);
 const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex');
@@ -109,15 +110,19 @@ const once = (token) => {
 
 /**
  * A GitHub issues client for one repository, with the contract M13 alerts.mjs uses: open → the issue number, or false;
- * edit, comment, close → true, or false when GitHub refused; isClosed → boolean, or a throw; findOpen(marker) → the
- * number of an open issue whose body holds `marker`, null when there is none, false when GitHub refused the list;
+ * edit, comment, close → true, or false when GitHub refused; isClosed → boolean, or a throw; closedByOwner(n) → true
+ * only when GitHub shows someone other than the issue's author (the robot) closed it, false when it can't tell;
+ * findOpen(marker) → the number of an open issue a bot wrote whose body holds `marker`, on any page, null when there is
+ * none, false when GitHub refused the list or there are too many to read. Only a bot's issue counts, since anyone can
+ * open an issue on a public repo and quote the marker; the token can't name the robot's own login, and on this repo a
+ * bot is an app the owner installed.
  * latestOwnComment(n, since) → the latest comment since that ISO time by the issue's own author (the robot: a public
  * repo lets anyone comment), as { at, body }; null when there is none; false when GitHub refused a read or there are too
  * many comments to read them all.
  * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell Joe what GitHub said.
  * A missing token throws "alert channel not set up: …". Host fixed; the repository is checked once, here.
  */
-export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, timeoutMs = 15_000 } = {}) {
+export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutMs = 15_000 } = {}) {
   const bad = repoProblem(repo);
   if (bad) throw new Error(`alert channel not set up: ${bad}`);
   if (typeof token !== 'function') throw new Error('alert channel not set up: no token');
@@ -159,11 +164,22 @@ export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, t
       if (r.status !== 200 || !r.json) throw new Error(`GitHub answered ${r.status} for issue ${n}`);
       return r.json.state === 'closed';
     },
+    async closedByOwner(n) {
+      const r = await call('GET', `/issues/${num(n)}`);
+      const by = r.json?.closed_by?.login;
+      const robot = r.json?.user?.login;
+      return r.status === 200 && typeof by === 'string' && typeof robot === 'string' && by !== robot;
+    },
     async findOpen(marker) {
-      const r = await call('GET', `/issues?state=open&per_page=100${owner ? `&assignee=${encodeURIComponent(owner)}` : ''}`);
-      if (r.status !== 200 || !Array.isArray(r.json)) return false;
-      const hit = r.json.find((i) => i && !i.pull_request && typeof i.body === 'string' && i.body.includes(marker) && ISSUE(i.number));
-      return hit ? hit.number : null;
+      for (let page = 1; page <= ISSUE_PAGES; page++) {
+        const r = await call('GET', `/issues?state=open&per_page=${COMMENT_PAGE}&page=${page}`);
+        if (r.status !== 200 || !Array.isArray(r.json)) return false;
+        const hit = r.json.find((i) => i && !i.pull_request && i.user?.type === 'Bot' && typeof i.body === 'string' && i.body.includes(marker) && ISSUE(i.number));
+        if (hit) return hit.number;
+        if (r.json.length < COMMENT_PAGE) return null;
+      }
+      last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues, too many to look through for this alert's`;
+      return false;
     },
     async latestOwnComment(n, since) {
       const issue = await call('GET', `/issues/${num(n)}`);
@@ -180,6 +196,7 @@ export function githubIssues({ repo, owner, token, fetchFn = globalThis.fetch, t
         }
         if (r.json.length < COMMENT_PAGE) return latest;
       }
+      last = `GitHub has more than ${COMMENT_PAGES * COMMENT_PAGE} comments on issue ${n} since ${since}, too many to read`;
       return false;
     },
   });
@@ -295,7 +312,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     const clients = new Map();
     const ghFor = (p) => {
       const repo = repos[p];
-      if (!clients.has(repo)) clients.set(repo, issuesFor ? issuesFor(repo) : githubIssues({ repo, owner, token: tok, fetchFn }));
+      if (!clients.has(repo)) clients.set(repo, issuesFor ? issuesFor(repo) : githubIssues({ repo, token: tok, fetchFn }));
       return clients.get(repo);
     };
 

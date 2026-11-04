@@ -10,6 +10,9 @@
 import { makeMasker } from './mask.mjs';
 import { shapeFact } from './fact-shapes.mjs';
 
+/** Whether the Record holds what put was given: it took the write, or it already holds exactly that (M9's "nothing changed"). */
+export const wasSaved = (answer) => answer?.ok === true || answer?.reason === 'nothing changed';
+
 export function makeFactWriter(rec, { actor = 'sensors', masker = makeMasker(), now = () => new Date() } = {}) {
   function put(id, doc, kind = 'fact') {
     const masked = masker.maskValues(shapeFact({ ...doc, ts: doc.ts ?? now().toISOString() }, (k) => masker.maskSecrets(k).text));

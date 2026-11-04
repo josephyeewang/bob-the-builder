@@ -24,11 +24,14 @@
 
 import { createHash } from 'node:crypto';
 import { wasTold } from './alerts.mjs';
+import { wasSaved } from '../M12-sensors/facts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const NOT_SAVED = 'alert-not-saved';
+/** The pinned issue's marker: found again by it when the Record never kept its number. */
+export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 // The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -137,14 +140,25 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,
     login_told: signedIn && told ? acct.login : (toldBefore ?? last), red });
 
-  const body = `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
+  const render = () => `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
+  const pinned = () => `${render()}${heartbeatMarker(product)}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, body);
+  if (ISSUE(known) && !(await gh.isClosed(known))) await gh.edit(known, pinned());
   else {
+    // The issue is found again by its marker, so a number the Record refused to keep never means a new issue each pass
+    // (L393). A list GitHub refused opens nothing this pass: the next one looks again.
+    const found = await gh.findOpen(heartbeatMarker(product));
+    if (ISSUE(found)) await gh.edit(found, pinned());
     // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
-    const issue = await gh.open({ title: 'Orchestrate heartbeat (pinned)', body, assignee: owner, labels: ['orchestrate-heartbeat'] });
-    if (ISSUE(issue)) writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+    const issue = found === false || ISSUE(found) ? found : await gh.open({ title: 'Orchestrate heartbeat (pinned)', body: pinned(), assignee: owner, labels: ['orchestrate-heartbeat'] });
+    if (ISSUE(issue)) {
+      const put = writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
+      if (!wasSaved(put)) {
+        shown({ refused: `the Record refused to save the pinned issue's number: ${String(put?.reason ?? 'no reason given').slice(0, 200)}` });
+        await gh.edit(issue, pinned());
+      }
+    }
   }
-  return { red, body };
+  return { red, body: render() };
 }

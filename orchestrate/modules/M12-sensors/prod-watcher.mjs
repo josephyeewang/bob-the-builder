@@ -21,6 +21,7 @@
 // Deliberately absent: the N14 ref watch (D15's approved-jobs ref) is second cutover (0b-11); don't add it here.
 
 import { createHash } from 'node:crypto';
+import { wasSaved } from './facts.mjs';
 import { resolveStage, isSupported } from './supported.mjs';
 
 export const stateFactId = (product) => `prod-watch-${String(product).replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -69,7 +70,11 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
     out.push({ kind, subject, result });
     return result !== false && !result?.refused;
   };
-  const readKey = `${product}|watcher-cannot-read|vercel`;
+  // A clear the Record refused shows in the pass's answer, as a raise's does. One with nothing to clear does not show.
+  const clear = async (kind, subject, note) => {
+    const result = await alerts.clear({ key: `${product}|${kind}|${subject}`, note });
+    if (result !== 'none') out.push({ kind, subject, result });
+  };
   let deps; let live; let env; let settings;
   try {
     [deps, live, env, settings] = await Promise.all([vercel.deployments(), vercel.live(), vercel.envMeta(), vercel.settings()]);
@@ -82,12 +87,12 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
     await raise('watcher-cannot-read', 'vercel', 'the production watcher cannot read Vercel', `Vercel answered in a shape the production watcher does not know (${bad.join('; ')}). Production is not being watched until it can.`, 'cannot-read');
     return out;
   }
-  await alerts.clear({ key: readKey, note: 'The production watcher can read Vercel again.' });
+  await clear('watcher-cannot-read', 'vercel', 'The production watcher can read Vercel again.');
   const { stage, fallback } = resolveStage(rulesEntry);
   const judge = (d) => isSupported(d, { stage, mainFirstParent, evidence });
 
   if (fallback) await raise('no-stage', 'rules', 'rules entry has no stage', 'The product\'s rules entry has no stage (first/second), so the watcher uses the strict rule. Add the stage to the rules entry.');
-  else await alerts.clear({ key: `${product}|no-stage|rules`, note: 'The rules entry has a stage again.' });
+  else await clear('no-stage', 'rules', 'The rules entry has a stage again.');
 
   const ready = deps.filter((d) => d.state === 'READY' && d.target === 'production');
   const seen = new Set(prev?.seen ?? []);
@@ -104,11 +109,10 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
   for (const d of deps) if (FINAL.includes(d.state) && !lostDeploys.has(d.uid)) seen.add(d.uid);
 
   const newest = ready.filter((d) => judge(d).ok).sort((a, b) => b.created - a.created)[0] ?? null;
-  const oldKey = `${product}|old-version-live|production`;
   if (prev && live?.uid && newest && live.uid !== newest.uid) {
     await raise('old-version-live', 'production', 'production is not serving the newest supported deploy', `Production serves ${live.uid}; the newest supported main deploy is ${newest.uid}. An older deployment was promoted or rolled back.`);
   } else if (prev && live?.uid && newest && live.uid === newest.uid) {
-    await alerts.clear({ key: oldKey, note: `Production serves the newest supported deploy ${newest.uid} again.` });
+    await clear('old-version-live', 'production', `Production serves the newest supported deploy ${newest.uid} again.`);
   }
 
   const ep = envPrint(env);
@@ -129,7 +133,10 @@ export async function watchOnce({ vercel, rulesEntry, mainFirstParent, evidence,
     }
   }
 
-  writer.put(id, { kind: 'fact.prod-watch', product, stage, live: live?.uid ?? null, newest_supported: newest?.uid ?? null,
+  // A baseline that isn't saved is a silent watcher: with none, every pass is a first pass and alerts on nothing (L393).
+  const put = writer.put(id, { kind: 'fact.prod-watch', product, stage, live: live?.uid ?? null, newest_supported: newest?.uid ?? null,
     env: keepEnv, settings: keepSp, seen: [...seen].slice(-SEEN_KEEP), baseline: !prev });
+  if (wasSaved(put)) await clear('watcher-cannot-save', 'baseline', 'The production watcher can save what it saw again.');
+  else await raise('watcher-cannot-save', 'baseline', 'the production watcher cannot save what it saw', `The Record refused what the production watcher saw (${String(put?.reason ?? 'no reason given').slice(0, 200)}). Production is not being watched properly until it can save it.`, 'cannot-save');
   return out;
 }

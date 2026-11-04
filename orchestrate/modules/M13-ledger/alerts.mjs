@@ -9,7 +9,8 @@
 // telling the owner again, so this goes through the shared stillWaiting); the issue closes when the condition clears. If
 // the owner closes it while the same condition still holds, nothing reopens or comments on it: closing it is their
 // answer. That answer covers that cause only (L371): a different status, or the condition coming back after it cleared,
-// opens a new issue, so a close never silences a later problem.
+// opens a new issue, so a close never silences a later problem. Who closed it is read from GitHub, not the Record: the
+// Record can say "open" over the robot's own close when it refused to save that clear (L393).
 //
 // Every alert is a robot GitHub issue assigned to the owner (login from private config, passed in). No mail, no
 // other channel (design: alerts are only GitHub notices, Actions failure notices or Remote Control pushes).
@@ -17,10 +18,13 @@
 // Injected GitHub client for one product repo (a fake in tests):
 //   open({ title, body, assignee }) → number      edit(number, body)      comment(number, text)
 //   close(number, text)                           isClosed(number) → boolean
+//   closedByOwner(number) → true only when GitHub shows someone other than the robot closed it; can't tell → false
 //   findOpen(marker) → the number of an open issue whose body holds marker, null when there is none
 //   latestOwnComment(number, since) → the robot's latest comment since that time, as { at, body }, or null
 // edit, comment and close answer false when GitHub refused them; open answers the new issue's number, anything else is
-// a lost open (L143). The two reads answer false when GitHub refused them.
+// a lost open (L143). findOpen and latestOwnComment answer false when GitHub refused them. A failed findOpen sends
+// nothing, because a second issue never goes away. A failed latestOwnComment sends anyway: that read only matters when
+// the Record has refused, so a comment too many takes both failing, while holding back would lose real alerts.
 //
 // A write the Record refuses (L389). The Record remembers what was told, so a refused write would otherwise mean the
 // same comment or a new issue on every pass. Two things stop that. raise and clear answer a refusal, { refused: reason },
@@ -30,7 +34,7 @@
 // old, means the owner already has it, while a different status still notifies at once.
 
 import { createHash } from 'node:crypto';
-import { makeFactWriter } from '../M12-sensors/facts.mjs';
+import { makeFactWriter, wasSaved } from '../M12-sensors/facts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { pastTime, STILL_WAITING_MS, stillWaiting } from '../../shared/still-waiting.mjs';
 
@@ -48,16 +52,14 @@ export const wasTold = (answer) => answer !== false && !answer?.refused;
 export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
   const bodyOf = (s) => `${s.body}\n\n---\nfirst seen ${s.since} · last seen ${s.last} · seen ${s.count} times\n${keyMark(idOf(s.key))}`;
   // The answer `answer`, once the Record holds the write; a refusal with its reason, in plain words, when it does not.
-  // "nothing changed" is M9 saying it already holds exactly this.
   const saved = (id, doc, answer) => {
     const r = writer.put(id, doc);
-    if (r?.ok === true || r?.reason === 'nothing changed') return answer;
+    if (wasSaved(r)) return answer;
     return { refused: `the Record refused to save this alert's state: ${masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200)}` };
   };
-  // The robot's latest comment on the issue if it is under 24 h old, null if not, false when GitHub refused the read.
+  // The robot's latest comment on the issue if it is under 24 h old, otherwise null, also when GitHub refused the read.
   const spokeLately = async (issue, tMs) => {
     const last = await gh.latestOwnComment(issue, new Date(tMs - STILL_WAITING_MS).toISOString());
-    if (last === false) return false;
     return last && tMs - Date.parse(last.at) < STILL_WAITING_MS ? last : null;
   };
 
@@ -81,7 +83,9 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     // An open alert saved without an issue number (before L143) is opened again, not read as closed by the owner.
     const known = s && (s.status === 'closed-by-owner' || (s.status === 'open' && ISSUE(s.issue)));
     const closed = known && (s.status === 'closed-by-owner' || await gh.isClosed(s.issue));
-    if (closed && status === (s.status_text ?? s.body)) {
+    // The same cause on a closed issue is held back only when the owner closed it. The robot's own close, or one that
+    // can't be read, goes on to a new issue: noise, never silence (L393).
+    if (closed && status === (s.status_text ?? s.body) && (s.status === 'closed-by-owner' || await gh.closedByOwner(s.issue))) {
       return saved(id, { ...s, kind: 'fact.alert', status: 'closed-by-owner', last: t }, 'suppressed');
     }
     if (known && !closed) {
@@ -91,7 +95,6 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
         const note = rawNote === undefined ? `Changed: ${body.split('\n')[0]}` : masker.maskSecrets(rawNote).text;
         const mark = statusMark(status);
         const last = await spokeLately(s.issue, Date.parse(t));
-        if (last === false) return false;
         if (!last?.body?.includes(mark) && await gh.comment(s.issue, `${note}\n\n${mark}`) === false) return false;
         return saved(id, { ...next, told_at: t }, 'changed');
       }
@@ -104,7 +107,6 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
         read: () => ({ told_at: s.told_at ?? s.since }),
         tell: async ({ told_at }) => {
           const last = await spokeLately(s.issue, Date.parse(t));
-          if (last === false) return false;
           // GitHub's time, kept only when it is a readable past time: an outside clock never moves told_at ahead.
           const seen = pastTime(last?.at, Date.parse(t));
           if (last) return saved(id, { ...next, told_at: seen === null ? told_at : new Date(seen).toISOString() }, 'updated');
@@ -130,7 +132,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 
   // The condition no longer holds. Closes an open issue with a note; re-arms a owner-closed one. Answers false, and
   // keeps the alert open so the next pass closes it, when GitHub answers the close false (L143); { refused: reason } when
-  // the Record refused the write (the next pass finds the issue closed and only tries the write again).
+  // the Record refused the write. The next clear finds the issue closed and only tries the write again; a raise first
+  // finds the robot closed it, so it is not read as the owner's close.
   async function clear({ key, note = 'Cleared: the condition no longer holds.' }) {
     const id = idOf(key);
     const s = writer.get(id);
@@ -144,7 +147,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 }
 
 // A fake GitHub issue client that records every call but its two reads (tests, and the owner's dry runs). With no `now`
-// its comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock.
+// its comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock. close is the
+// robot's and ownerCloses the owner's, as closedByOwner tells them apart.
 export function fakeIssues({ now = null } = {}) {
   const issues = new Map();
   const calls = [];
@@ -156,7 +160,7 @@ export function fakeIssues({ now = null } = {}) {
     async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
     async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); },
-    async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); said(i, text); calls.push(['close', i]); },
+    async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; x.comments.push(text); said(i, text); calls.push(['close', i]); },
     // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about an issue that was never opened, or about
     // something that is not an issue number, is a caller's bug, so it throws rather than answering "closed".
     async isClosed(i) {
@@ -164,8 +168,9 @@ export function fakeIssues({ now = null } = {}) {
       if (!issues.has(i)) throw new Error(`fakeIssues.isClosed: no issue ${i}`);
       return issues.get(i).closed;
     },
+    async closedByOwner(i) { return issues.get(i)?.closed === true && issues.get(i).byOwner === true; },
     async findOpen(marker) { for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
-    ownerCloses(i) { issues.get(i).closed = true; },
+    ownerCloses(i) { const x = issues.get(i); x.closed = true; x.byOwner = true; },
   };
 }

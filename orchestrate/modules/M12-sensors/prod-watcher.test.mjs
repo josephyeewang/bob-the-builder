@@ -460,3 +460,75 @@ test('L376: after a close, a different old deploy live opens a new issue, and th
   t.v.s.live = b.uid; await t.pass();
   assert.equal(t.gh.issues.size, 2);
 });
+
+// L393: what the watcher can't save. The Record refuses what `world.refuse` says; alerts and the watcher share that.
+function refusingWatch() {
+  const t = setup();
+  const world = { refuse: () => false };
+  const refusing = (w) => ({ get: w.get, put: (id, doc) => (world.refuse(doc) ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) });
+  const writer = refusing(t.writer);
+  const alerts = makeAlerts({ rec: t.rec, gh: t.gh, owner: 'owner', writer: refusing(makeFactWriter(t.rec, { actor: 'ledger' })) });
+  const pass = () => watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
+  return { ...t, world, pass };
+}
+const heal = (t) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, writable: true, value: [] });
+const ofKind = (out, kind) => out.filter((o) => o.kind === kind).map((o) => o.result);
+const REFUSED = /the Record refused to save this alert's state: the store is full/;
+
+test('L393 MAT-A: a refused clear shows in the pass, and when reading fails again the owner gets a new issue, never silence', async () => {
+  const t = refusingWatch();
+  await t.pass();
+  failWith(t, 500);
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['opened']);
+  heal(t);
+  t.world.refuse = (doc) => doc.status === 'cleared';
+  const [refused] = ofKind(await t.pass(), 'watcher-cannot-read');
+  assert.match(refused.refused, REFUSED);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  t.world.refuse = () => false;
+  failWith(t, 502);
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['opened']);
+  for (const code of [503, 500]) { failWith(t, code); assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['updated']); }
+  assert.equal(t.gh.issues.get(2).closed, false);
+});
+
+test('L393 MAT-A: the same with the Record still refusing when reading fails again: one new issue, then it goes on', async () => {
+  const t = refusingWatch();
+  await t.pass();
+  failWith(t, 500);
+  await t.pass();
+  heal(t);
+  t.world.refuse = (doc) => doc.kind === 'fact.alert';
+  await t.pass();
+  failWith(t, 502);
+  for (let i = 0; i < 4; i++) assert.match(ofKind(await t.pass(), 'watcher-cannot-read')[0].refused, REFUSED);
+  assert.equal(t.gh.issues.size, 2);
+  t.world.refuse = () => false;
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['updated']);
+  assert.equal(t.gh.issues.size, 2);
+});
+
+test('L393: a baseline the Record refuses is raised, once, and cleared when it saves; the watcher then alerts again', async () => {
+  const t = refusingWatch();
+  const live = dep(MAIN[0]);
+  t.v.s.deployments = [live]; t.v.s.live = live.uid;
+  t.world.refuse = (doc) => doc.kind === 'fact.prod-watch';
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['opened']);
+  assert.match(t.gh.issues.get(1).body, /The Record refused what the production watcher saw \(the store is full\)/);
+  for (let i = 0; i < 4; i++) assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['updated']);
+  assert.equal(t.gh.issues.size, 1);
+  t.world.refuse = () => false;
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['cleared']);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  assert.deepEqual(await t.pass(), [], 'a pass that saved the same again is quiet');
+  const bad = dep(BRANCH, 'cli');
+  t.v.s.deployments = [live, bad];
+  assert.ok(kinds(await t.pass()).includes('unsupported-deploy'));
+});
+
+test('L393: a baseline refused with the alert refused too: one issue, every pass answers the refusal', async () => {
+  const t = refusingWatch();
+  t.world.refuse = () => true;
+  for (let i = 0; i < 5; i++) assert.match(ofKind(await t.pass(), 'watcher-cannot-save')[0].refused, REFUSED);
+  assert.equal(t.gh.issues.size, 1);
+});

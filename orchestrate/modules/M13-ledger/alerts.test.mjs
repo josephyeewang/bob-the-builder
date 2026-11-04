@@ -457,18 +457,64 @@ test('L389: suppressed, updated and cleared each answer a refused save', async (
   assert.equal(opens(x.gh), 1);
 });
 
-test('L389: a read GitHub refuses sends nothing and answers false', async () => {
+// L393 m1: that read only matters once the Record has refused, so holding back on it would lose real alerts.
+test('L393: a comment read GitHub refuses still sends; a refused issue list sends nothing', async () => {
   const w = refusing();
   await w.alerts.raise(standing);
   w.clock.tick(24 * 60);
   w.gh.latestOwnComment = async () => false;
-  assert.equal(await w.alerts.raise(standing), false);
-  assert.equal(await w.alerts.raise({ ...standing, status: 'other cause' }), false);
-  assert.equal(comments(w.gh), 0);
+  assert.equal(await w.alerts.raise(standing), 'reminded');
+  assert.equal(await w.alerts.raise({ ...standing, status: 'other cause' }), 'changed');
+  assert.equal(comments(w.gh), 2);
   const y = refusing();
   y.gh.findOpen = async () => false;
   assert.equal(await y.alerts.raise(standing), false);
   assert.equal(opens(y.gh), 0);
+});
+
+// L393 MAT-A: a clear the Record refused leaves it saying "open" over the robot's own close.
+test('L393: a refused clear, then the cause comes back: a new issue, never suppressed', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.world.refuse = () => true;
+  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
+  w.world.refuse = () => false;
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'opened');
+  assert.equal(w.alerts.state(standing.key).issue, 2);
+  for (let i = 0; i < 5; i++) { w.clock.tick(25 * 60); assert.notEqual(await w.alerts.raise(standing), 'suppressed'); }
+  assert.equal(opens(w.gh), 2);
+});
+
+test('L393: the same, with the Record still refusing when it comes back: one new issue, then it goes on once the Record takes it', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.world.refuse = () => true;
+  await w.alerts.clear({ key: standing.key });
+  for (let i = 0; i < 6; i++) { w.clock.tick(10); assert.match((await w.alerts.raise(standing)).refused, REFUSED); }
+  assert.equal(opens(w.gh), 2);
+  w.world.refuse = () => false;
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(w.alerts.state(standing.key).issue, 2);
+  assert.equal(opens(w.gh), 2);
+});
+
+test('L393: a close only GitHub can name decides: the owner\'s holds, one it can\'t read opens anew', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.gh.ownerCloses(1);
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'suppressed');
+  w.gh.closedByOwner = async () => assert.fail('a saved owner\'s close is not read again');
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'suppressed');
+  const y = refusing();
+  await y.alerts.raise(standing);
+  y.gh.ownerCloses(1);
+  y.gh.closedByOwner = async () => false;
+  y.clock.tick(10);
+  assert.equal(await y.alerts.raise(standing), 'opened');
 });
 
 // L389 m2: with a status, the status alone is the cause, on a closed issue and an open one.

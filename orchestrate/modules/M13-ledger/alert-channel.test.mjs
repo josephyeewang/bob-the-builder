@@ -28,14 +28,15 @@ function fakeGitHub() {
     async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); return true; },
     async comment(i, text) { issues.get(i).comments.push(text); if (gh.clock) spoken.push({ i, at: new Date(gh.clock()).toISOString(), body: text }); calls.push(['comment', i]); return true; },
-    async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); return true; },
+    async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; x.comments.push(text); calls.push(['close', i]); return true; },
     async isClosed(i) {
       if (!Number.isSafeInteger(i) || i <= 0 || !issues.has(i)) throw new Error(`fakeGitHub.isClosed: no issue ${JSON.stringify(i)}`);
       return issues.get(i).closed;
     },
+    async closedByOwner(i) { return issues.get(i)?.closed === true && issues.get(i).byOwner === true; },
     async findOpen(marker) { calls.push(['findOpen']); for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
-    ownerCloses(i) { issues.get(i).closed = true; },
+    ownerCloses(i) { const x = issues.get(i); x.closed = true; x.byOwner = true; },
     openIssues: () => [...issues.values()].filter((x) => !x.closed),
   };
   return gh;
@@ -267,9 +268,10 @@ test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skip
   answers.push([410, null]); assert.equal(await gh.isClosed(7), true);
   answers.push([500, null]); await assert.rejects(gh.isClosed(7), /500/);
   await assert.rejects(gh.edit(0, 'x'), /not an issue number/);
-  answers.push([200, [{ number: 3, body: `x ${lockedMarker('p1')}`, pull_request: {} }, { number: 4, body: 'other' }, { number: 5, body: `y ${lockedMarker('p1')}` }]]);
+  const bot = { user: { type: 'Bot' } };
+  answers.push([200, [{ number: 3, body: `x ${lockedMarker('p1')}`, pull_request: {}, ...bot }, { number: 4, body: 'other', ...bot }, { number: 5, body: `y ${lockedMarker('p1')}`, ...bot }]]);
   assert.equal(await gh.findOpen(lockedMarker('p1')), 5);
-  assert.match(seen.at(-1)[1], /\/issues\?state=open&per_page=100&assignee=o$/);
+  assert.match(seen.at(-1)[1], /\/issues\?state=open&per_page=100&page=1$/);
   answers.push([200, []]); assert.equal(await gh.findOpen(lockedMarker('p1')), null);
   answers.push([401, null]); assert.equal(await gh.findOpen(lockedMarker('p1')), false);
   const none = githubIssues({ repo: 'acme/r', token: async () => ({ ok: false, reason: 'no key' }), fetchFn });
@@ -652,6 +654,58 @@ test('L389: a refused save in a delivery round: red, in plain words, the entry s
   assert.deepEqual(queued(w.rec), []);
 });
 
+// L393 m4: the reason a refused clear gives is the one the round reports.
+test('L393: a clear refused inside a retry names the Record\'s reason, and the entry stays queued', async () => {
+  const w = world();
+  const line = `${JSON.stringify({ id: 'u9', outcome: 'unsent', event: { type: 'tamper' } })}\n`;
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), line);
+  assert.equal((await w.run({ probe: ALIVE })).sent, 1);
+  w.gh.ownerCloses(1);
+  writeFileSync(join(w.root, 'unsent-alerts.jsonl'), line);
+  const write = w.rec.write.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.write = (o) => (o.doc?.status === 'cleared' ? { ok: false, reason: 'the store is full' } : write(o));
+  const r = await w.run({ rec, probe: ALIVE });
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /the Record refused to save this alert's state: the store is full/);
+  assert.equal(readUnsent(w.root).length, 1);
+});
+
+// L393 MAT-A and m2, through the real client.
+test('L393 githubIssues.closedByOwner: only a close GitHub names, by someone other than the issue\'s author', async () => {
+  const answers = [];
+  const fetchFn = async () => { const [status, json] = answers.shift(); return { status, json: async () => json }; };
+  const gh = githubIssues({ repo: 'acme/product-1', token: async () => ({ ok: true, token: 'not-a-real-token' }), fetchFn });
+  const author = { login: 'robot[bot]' };
+  for (const [answer, want, name] of [
+    [[200, { user: author, closed_by: { login: 'owner-login' } }], true, 'the owner'],
+    [[200, { user: author, closed_by: author }], false, 'the robot'],
+    [[200, { user: author, closed_by: null }], false, 'nobody named'],
+    [[200, { closed_by: { login: 'owner-login' } }], false, 'no author'],
+    [[502, null], false, 'a failed read'],
+    [[500, { user: author, closed_by: { login: 'owner-login' } }], false, 'a failed read with a body'],
+    [[404, null], false, 'gone'],
+  ]) { answers.push(answer); assert.equal(await gh.closedByOwner(7), want, name); }
+});
+
+test('L393 githubIssues.findOpen: a bot\'s issue on any page, never a stranger\'s quoting the marker, and a reason when there are too many', async () => {
+  const answers = [];
+  const asked = [];
+  const fetchFn = async (url) => { asked.push(url); const [status, json] = answers.shift(); return { status, json: async () => json }; };
+  const gh = githubIssues({ repo: 'acme/product-1', token: async () => ({ ok: true, token: 'not-a-real-token' }), fetchFn });
+  const MARK = '<!-- alert-key alert-1 -->';
+  const other = (number) => ({ number, body: 'something else', user: { type: 'User' } });
+  const full = Array.from({ length: 100 }, (_, i) => other(i + 100));
+  answers.push([200, [{ number: 9, body: MARK, user: { type: 'User', login: 'someone' } }]]);
+  assert.equal(await gh.findOpen(MARK), null, 'a stranger quoted it');
+  answers.push([200, full], [200, [{ number: 8, body: MARK, user: { type: 'Bot' } }]]);
+  assert.equal(await gh.findOpen(MARK), 8, 'on the second page, whoever it is assigned to');
+  assert.match(asked.at(-1), /&page=2$/);
+  for (let i = 0; i < 10; i++) answers.push([200, full]);
+  assert.equal(await gh.findOpen(MARK), false);
+  assert.match(gh.lastAnswer, /more than 1000 open issues/);
+});
+
 test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page, and false when it can\'t read them all', async () => {
   const answers = [];
   const asked = [];
@@ -674,6 +728,7 @@ test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page
   assert.deepEqual(await gh.latestOwnComment(7, SINCE), { at: '2026-11-03T03:00:00Z', body: 'on page two' });
   answers.push([200, robot], ...Array.from({ length: 10 }, () => [200, flood]));
   assert.equal(await gh.latestOwnComment(7, SINCE), false, 'more than it will read');
+  assert.match(gh.lastAnswer, /more than 1000 comments on issue 7/, 'not "answered 200" (L393 m1)');
   answers.push([500, null]);
   assert.equal(await gh.latestOwnComment(7, SINCE), false);
   answers.push([200, robot], [403, null]);
