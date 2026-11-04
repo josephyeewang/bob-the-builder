@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { writeReviewRequest, reviewPorts, statusAlerts, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
+import { writeReviewRequest, reviewPorts, statusAlerts, MAIN_UNREAD, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
 import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 
@@ -88,33 +88,54 @@ test('L65: hasReviewer reads the runner\'s status: the card, role and head must 
   assert.throws(() => p.hasReviewer('C-1', 'reviewer', HEAD), /written by others/);
 });
 
-test('L66: a failed runner pass and an installed copy behind main are told, each once per cause', () => {
+test('L66, L315: a failed runner pass and an installed copy behind main are holds, each naming its cause', () => {
   const MAIN = 'c'.repeat(40);
   const ok = { ok: true, error: null, installed_commit: MAIN, alerts: [], running: [] };
   assert.deepEqual(statusAlerts(ok, () => MAIN), []);
-  // A failed pass: one alert per cause, the same id each time it is read.
+  // A failed pass: one hold, the same each time it is read; another cause is the same hold with another `since`.
   const f1 = statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN);
   assert.equal(f1.length, 1);
   assert.match(f1[0].text, /last pass failed: the requests could not be listed \(EACCES\)/);
   assert.deepEqual(statusAlerts({ ...ok, ok: false, error: 'the requests could not be listed (EACCES)' }, () => MAIN), f1);
-  assert.notEqual(statusAlerts({ ...ok, ok: false, error: 'another cause' }, () => MAIN)[0].id, f1[0].id);
-  // The stamp: behind main, or none, is told once per installed commit; without main's head, nothing.
+  assert.notEqual(statusAlerts({ ...ok, ok: false, error: 'another cause' }, () => MAIN)[0].since, f1[0].since);
+  // L437: the class of the first error, as pass.mjs causeOf reads it. More errors after it, or other numbers, are the same trouble.
+  const since = (error) => statusAlerts({ ...ok, ok: false, error }, () => MAIN)[0].since;
+  assert.equal(since('the requests could not be listed (EACCES); session 12 could not be marked'), f1[0].since);
+  assert.equal(since('card 12 failed'), since('card 345 failed'));
+  // L458: what varies by pass makes no new trouble: an id, or the detail in brackets, even cut off by the 300 limit.
+  const uuid = (n) => `${String(n).repeat(8).slice(0, 8)}-aaaa-bbbb-cccc-dddddddddddd`.replace(/\d/g, (d) => 'abcdef0123'[d]);
+  assert.equal(since(`session ${uuid(1)} could not be marked ended (EIO)`), since(`session ${uuid(2)} could not be marked ended (ENOSPC)`));
+  assert.equal(since(`session S-a could not be set aside (EIO)`), since(`session S-b could not be set aside (EIO)`));
+  assert.equal(since('the review sessions could not be listed (it broke (twice)), so none starts'), since('the review sessions could not be listed (other), so none starts'));
+  assert.equal(since('the review folders could not be made (cut off'), since('the review folders could not be made (EACCES)'));
+  assert.equal(since(`lost ${uuid(1)} here`), since(`lost ${uuid(2)} here`));
+  assert.notEqual(since('session S-a could not be marked ended (EIO)'), since('session S-a could not be set aside (EIO)'), 'another class is another trouble');
+  // The stamp: behind main, or none, is named by the installed commit; without main's head, nothing.
   const behind = statusAlerts({ ...ok, installed_commit: HEAD }, () => MAIN);
   assert.equal(behind.length, 1);
   assert.match(behind[0].text, /installed copy is at abababa, but main is at ccccccc/);
-  assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].id, behind[0].id, 'main moving on does not tell it again');
+  assert.equal(statusAlerts({ ...ok, installed_commit: HEAD }, () => 'd'.repeat(40))[0].since, behind[0].since, 'main moving on is the same trouble');
   // m-f (audit r2): plain words, and where the runner's log is: the path when the wiring gives it, else the file's name.
   const none = statusAlerts({ ...ok, installed_commit: null }, () => MAIN)[0].text;
   assert.match(none, /no commit stamp \(the file that says which commit of main the copy was made from\).*the review runner says what to do in its log, review-runner\.err\.log, in the folder the Mac setup chose for the review jobs' logs\.$/);
   assert.equal(RUNNER_LOG, 'review-runner.err.log');
   assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN, T0, { runnerLog: '/logs/review-runner.err.log' })[0].text, /says what to do in its log, \/logs\/review-runner\.err\.log\.$/);
   assert.doesNotMatch(none, /<|\.v-|installed-commit|L\d+/, 'no placeholders, folder names or lead-call numbers');
-  for (const mainHead of [undefined, () => null, () => 'main', () => { throw new Error('no'); }]) assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), []);
+  assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, undefined), [], 'no port: no stamp check');
+  // L470 m2: the port's error is in the words, on one line and cut to 100 characters, and never in the cause.
+  const failed = (message) => statusAlerts({ ...ok, installed_commit: HEAD }, () => { throw new Error(message); })[0];
+  assert.equal(failed('no\n  remote').text, `${MAIN_UNREAD} The read said: no remote`);
+  assert.equal(failed('x'.repeat(300)).text, `${MAIN_UNREAD} The read said: ${'x'.repeat(100)}`);
+  assert.equal(failed('one').since, failed('another').since);
+  // L437 m1, L465: main can't be read, so the stamp hold is kept and says so, under one cause whatever went wrong.
+  for (const mainHead of [() => null, () => 'main', () => ({ commit: null })]) {
+    assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, since: 'main-unreadable', text: MAIN_UNREAD }]);
+  }
   // Through the ports, read from the real status file.
   const dir = tempDir('m11-status-');
   const file = status(dir, { written_at: new Date(T0).toISOString(), ok: false, error: 'the review user is an admin', installed_commit: HEAD, running: [], alerts: [{ id: 'x', at: 'y', text: 'z' }] });
   const got = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0, mainHead: () => MAIN }).reviewAlerts();
-  assert.deepEqual(got.map((a) => a.id.replace(/-[0-9a-f]{24}$/, '-#')), ['x', 'runner-failed-#', `stamp-${HEAD}`]);
+  assert.deepEqual(got.map((a) => a.id), ['x', 'runner-failed', 'stamp']);
 });
 
 test('L136 m4: reviewPorts hands runnerLog to the no-stamp alert, so Joe is told where the log really is', () => {
@@ -140,7 +161,7 @@ test('item 20(c) planted: a copy behind main is told only once it has stayed beh
   assert.deepEqual(behindFor(STAMP_GRACE_MS - 1), []);
   const late = behindFor(STAMP_GRACE_MS);
   assert.equal(late.length, 1);
-  assert.equal(late[0].id, `stamp-${HEAD}`);
+  assert.deepEqual([late[0].id, late[0].since], ['stamp', HEAD]);
   assert.match(late[0].text, /installed copy is at abababa, but main is at ccccccc/);
   // The port is asked about the installed commit, so `since` can be when main first moved past it.
   const asked = [];
@@ -175,8 +196,11 @@ test('L75 m-2: the stamp alert waits from root\'s record of main, read the way t
   assert.deepEqual(statusAlerts(ok, port(), T0), [], 'inside the grace');
   assert.equal(statusAlerts(ok, port(), T0 + STAMP_GRACE_MS).length, 1);
   // Main moved after the last fetch: from that fetch.
+  write({ commit: 'd'.repeat(40), since: T0 - 9 * MINUTE, installed: 'd'.repeat(40), checked_at: T0 - 2 * MINUTE });
+  assert.deepEqual(port()('d'.repeat(40)), { commit: MAIN, since: T0 - 2 * MINUTE });
+  // The same copy already behind: main moving on does not start the grace again (L437 MAT-3).
   write({ commit: 'd'.repeat(40), since: T0 - 9 * MINUTE, installed: HEAD, checked_at: T0 - 2 * MINUTE });
-  assert.deepEqual(port()(HEAD), { commit: MAIN, since: T0 - 2 * MINUTE });
+  assert.deepEqual(port()(HEAD), { commit: MAIN, since: T0 - 9 * MINUTE });
   // A record others can write, of another owner's, or missing: no `since`, so the alert is told at once.
   write({ commit: MAIN, since: T0, installed: HEAD, checked_at: T0 }, 0o666);
   assert.deepEqual(port()(HEAD), { commit: MAIN, since: null });
@@ -189,5 +213,5 @@ test('L75 m-2: the stamp alert waits from root\'s record of main, read the way t
   const sfile = join(dir, 'status.json');
   writeFileSync(sfile, JSON.stringify({ written_at: new Date(T0).toISOString(), ...ok }), { mode: 0o644 });
   const got = reviewPorts({ requests: dir, status: sfile, reviewUid: ME, now: () => T0, installRoot, main: () => MAIN }).reviewAlerts();
-  assert.deepEqual(got.map((a) => a.id), [`stamp-${HEAD}`]);
+  assert.deepEqual(got.map((a) => a.id), ['stamp']);
 });

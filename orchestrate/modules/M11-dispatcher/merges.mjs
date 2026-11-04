@@ -19,9 +19,10 @@ import { move, ageMs } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
-import { relayReviewAlerts } from './review-requests.mjs';
+import { relayReviewAlerts, keepReviewHolds } from './review-requests.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
+import { refusalReport } from './pass.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 import { FINAL_STATES, launchesNewestFirst } from '../../shared/record.mjs';
@@ -107,7 +108,7 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  * One pass of the time limits. Ports: `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review
  * runner's (L65, review-requests.mjs): `hasReviewer(cardId, role, head)` (throws when the runner's status can't be
  * trusted), `requestReview({ card, head, role })` -> { ok } | { ok: false, reason } (a request the runner checks; the
- * Dispatcher never starts a review itself), and `reviewAlerts()` (the runner's alerts, told to Joe once). A card in
+ * Dispatcher never starts a review itself), and `reviewAlerts()` (the runner's alerts, each told once, and its holds, told each day they last). A card in
  * review needs a reviewer, and an auditor too on Tier 1 (m-6). `b` = this pass's bands and `running` = the running
  * sessions: a review request goes through the same start gate as every other start (audit MAT-5), so red holds it
  * unless the rules' red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe.
@@ -117,7 +118,7 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  */
 // `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
 // refuses a since more than 60 s off its clock). Left out, it is `now`.
-export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [], failureLog }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -287,7 +288,8 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
   if (reviewAlerts) {
     let list = null;
     try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
-    if (list) relayReviewAlerts({ rec, alerts: list, alert, now });
+    const report = refusalReport({ rec, alert, now, lines: [], failureLog });
+    if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report);
   }
   if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;

@@ -307,7 +307,7 @@ export function packageProblem({ dir, sessionId, uid, kept }) {
 export async function runnerPass(ctx) {
   const now = ctx.now();
   const newId = ctx.newId ?? randomUUID;
-  const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [], setAside: [] };
+  const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [], holds: [], setAside: [] };
   let installed = null;
   try { const c = await ctx.installedCommit?.(); installed = typeof c === 'string' && HEX40.test(c) ? c : null; } catch { installed = null; }
   // Who we are and where we write come first: a runner that is not review, or a folder that is not review's, writes nothing.
@@ -323,8 +323,7 @@ export async function runnerPass(ctx) {
   const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [], packages: {} };
-  // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
-  // saved passes the time it began (the file's), not this pass's.
+  // `at` is the alert's time; the Dispatcher tells each id and time once.
   // `offer` adds what Joe can do about it (L69: { action: 'review-again', session_id }).
   const alert = (id, text, at = iso(now), offer = null) => {
     if (state.told.includes(id)) return;
@@ -333,11 +332,15 @@ export async function runnerPass(ctx) {
     state.alerts = [...state.alerts, a].slice(-KEEP_LIST);
     result.alerts.push(a);
   };
+  // A trouble that lasts is a hold, not an alert (L315): the status lists it on every pass it lasts, and the Dispatcher
+  // tells it through stillWaiting, again each day, until a pass no longer lists it.
+  const hold = (id, text) => { result.holds.push({ id, text }); };
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
       running: state.running.map(({ card, head, role, session_id, started_at }) => ({ card, head, role, session_id, started_at })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
+      holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text }))],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
@@ -346,18 +349,25 @@ export async function runnerPass(ctx) {
     return { ...result, wrote: true, status };
   };
   if (!st.ok) {
-    let since = iso(now);
-    try { since = lstatSync(P.state).mtime.toISOString(); } catch { /* keep now */ }
     fail(st.reason);
-    alert('state-corrupt', `The review runner's memory file can't be read, so it starts nothing: ${st.reason}.`, since);
+    hold('state-corrupt', `The review runner's memory file can't be read, so it starts nothing: ${st.reason}.`);
     return finish();
   }
 
   // m-3: an admin can become anyone, so a review user that is an admin keeps nothing apart.
   let admin; try { admin = await ctx.isAdmin(); } catch { admin = true; }
-  if (admin !== false) { fail('the review user is an admin (or that could not be checked), so no review starts'); alert('review-admin', 'The review user is an admin Mac user (or the check failed). No reviewer or auditor starts until it is a standard user.'); return finish(); }
-  // A trouble that has cleared may be told again if it comes back.
-  state.told = state.told.filter((t) => t !== 'review-admin' && t !== 'state-corrupt');
+  if (admin !== false) { fail('the review user is an admin (or that could not be checked), so no review starts'); hold('review-admin', 'The review user is an admin Mac user (or the check failed). No reviewer or auditor starts until it is a standard user.'); return finish(); }
+  // A verdict not taken stays a hold until the Record takes it or the review is no longer wanted, read on every pass:
+  // requests come far apart, so a check made only on a request would drop the hold between them and tell it afresh.
+  // A card or an answer that can't be read leaves it held.
+  for (const [key, n] of Object.entries(state.not_taken ?? {})) {
+    let c; try { c = await ctx.readCard(n.card); } catch { c = null; }
+    if (c?.ok && (c.doc?.head !== n.head || !needsRole(c.doc, n.role))) { delete state.not_taken[key]; continue; }
+    let t;
+    try { t = await ctx.verdictTaken({ role: n.role, sessionId: n.session, card: n.card, head: n.head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
+    if (t?.ok === true) { delete state.not_taken[key]; continue; }
+    state.not_taken[key] = { ...n, text: notTakenText({ ...n, why: notTakenWhy(t) }) };
+  }
 
   try {
     ensureFolder(P.requests, 0o1733);
@@ -471,6 +481,39 @@ export async function runnerPass(ctx) {
   }
   let asideIds = new Set();
   try { asideIds = new Set(readdirSync(P.aside).filter((n) => !n.startsWith('.')).map((n) => n.replace(/\.json$/, ''))); } catch (e) { fail(`the set-aside records could not be listed (${e?.code ?? e})`); }
+
+  // The not-taken list is rebuilt from the launch and ended records on every pass, not only kept in state.json (L437):
+  // a memory file moved aside must not lose a verdict that is still not taken. A session counts once it has ended on a
+  // real verdict, its card still wants that role at that head or a head with the same tree, as a request reads it
+  // (L458), and the Record has not taken it after the wait. It is held at the card's head. `none`,
+  // `refused` and `never_ran` were told when the session ended. A card that can't be read adds nothing here (one read
+  // failing must not turn every past session into a hold); a hold already listed stays, as above.
+  const cardsRead = new Map();
+  const cardOf = async (id) => {
+    if (!cardsRead.has(id)) { let c; try { c = await ctx.readCard(id); } catch { c = null; } cardsRead.set(id, c); }
+    return cardsRead.get(id);
+  };
+  const treesRead = new Map();
+  const treeAt = async (id, head) => {
+    const k = `${id} ${head}`;
+    if (!treesRead.has(k)) { let tree; try { tree = await ctx.treeOf(id, head); } catch { tree = null; } treesRead.set(k, tree); }
+    return treesRead.get(k);
+  };
+  for (const { doc: d } of rl.ok ? rl.launches : []) {
+    const sid = d.session_id;
+    if (asideIds.has(sid) || state.not_taken?.[sid]) continue;
+    const e = runnerEnded({ root: P.ended, uid, role: d.role, card: d.card, head: d.head, sessionId: sid });
+    if (!e.ok || !HEX64.test(e.ended.verdict_sha256)) continue;
+    if (now - (pastTime(e.ended.ended_at, now) ?? -Infinity) < INTAKE_WAIT_MS) continue;
+    const c = await cardOf(d.card);
+    if (!c?.ok || !needsRole(c.doc, d.role)) continue;
+    const head = c.doc.head;
+    if (head !== d.head && (typeof d.tree !== 'string' || await treeAt(d.card, head) !== d.tree)) continue;
+    let t;
+    try { t = await ctx.verdictTaken({ role: d.role, sessionId: sid, card: d.card, head }); } catch (e2) { t = { ok: false, reason: `the Record could not be read (${e2?.message ?? e2})` }; }
+    if (t?.ok === true) continue;
+    state.not_taken = { ...state.not_taken, [sid]: { id: `not-taken-${sid}`, session: sid, card: d.card, head, role: d.role, text: notTakenText({ role: d.role, card: d.card, head, why: notTakenWhy(t) }) } };
+  }
 
   // The sweep (L68): a launched session the runner is not running, with no ended record, is one it lost track of (it
   // stopped between the launch record and saving its memory, or the start gave a pid that wasn't claude's). It is marked
@@ -588,7 +631,7 @@ export async function runnerPass(ctx) {
     if (a.started || made) {
       // One start per tree, for good (L68, L69): what the Record says is never a reason to start again, since a worker
       // can write the Record, and an amend with no code change keeps its tree. A verdict the Record has not taken 15
-      // minutes after its session ended is told to Joe once; the Merge Gate reads the verdict file itself either way. A
+      // minutes after its session ended is held, so it is told each day it lasts (L315); the Merge Gate reads the verdict file itself either way. A
       // held head (silent, or a verdict that can't be counted) was told already, with the "review again" tap.
       const sid = a.session_id;
       // An ended session's end time by pastTime (L329): one that can't be read or is more than 60 s ahead counts as
@@ -598,8 +641,8 @@ export async function runnerPass(ctx) {
         let t;
         try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
         if (t?.ok !== true) {
-          const why = typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given';
-          alert(`not-taken-${sid ?? k}`, `The ${role} for card ${card} at ${head.slice(0, 7)} handed in a verdict the Record has not taken (${why}). Nothing starts again: the Merge Gate reads the verdict file itself, and the card waits for Joe.`);
+          const why = notTakenWhy(t);
+          state.not_taken = { ...state.not_taken, [sid ?? k]: { id: `not-taken-${sid ?? k}`, session: sid, card, head, role, text: notTakenText({ role, card, head, why }) } };
         }
       }
       refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)} (or a head with the same tree); one start per head and tree`);
@@ -716,10 +759,14 @@ export async function runnerPass(ctx) {
   return finish();
 }
 
+// What a pending hold on a verdict says (L315).
+const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given');
+const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card} at ${head.slice(0, 7)} handed in a verdict the Record has not taken (${why}). Nothing starts again: the Merge Gate reads the verdict file itself, and the card waits for Joe.`;
+
 /**
  * The Dispatcher's read of status.json (for `hasReviewer`): the list of review sessions running, or a throw when the
  * status is missing, unreadable, not the runner's shape or older than 3 minutes (L63: never read as "none").
- * `stat` lets a test stand in for the file's owner. → { running, alerts, ok, error }
+ * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error }
  */
 export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   // The owner check is never skipped: a status anyone could write would say what runs.
@@ -741,6 +788,6 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (!Number.isFinite(at) || !Array.isArray(s.running)) throw new Error('the review runner\'s status is not what the runner writes');
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
-  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], ok: s.ok === true, error: s.error ?? null,
+  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
     installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null };
 }

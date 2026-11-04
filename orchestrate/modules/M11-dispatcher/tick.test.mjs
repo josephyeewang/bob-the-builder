@@ -9,6 +9,7 @@ import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { REVIEW_HOLD_FACT } from './review-requests.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
@@ -1321,6 +1322,15 @@ test('L449: a step\'s refused drop reaches the tick\'s reports, named by its ste
   queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
   const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + MIN, ports: { ...w.ports, alert: fakeAlert({ answer: false }) } });
   assert.ok(r.reports.some((l) => /^outage: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a review hold\'s refused drop reaches the tick\'s reports, named by its step', async () => {
+  const w = world([account(), usage()]);
+  const fact = REVIEW_HOLD_FACT('r1');
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { told_at: iso(T0), absent_since: iso(T0 - 2 * 60 * MIN) }, kind: 'hold_alert' });
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0, ports: { ...w.ports, alert: fakeAlert({ answer: false }), reviewAlerts: () => [] } });
+  assert.ok(r.reports.some((l) => /^limits: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
 });
 
 test('L449: a refused drop in each step that clears reaches the tick\'s reports, named by its step', async () => {

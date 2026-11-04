@@ -324,7 +324,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   const held = { band: 'unknown', own_building: 'unknown', pace: null, prodBlocked: true, reason: 'the main pass did not finish' };
   const startsHeld = outageOpen ? 'outage' : bands ? null : 'the main pass did not finish';
   await run('limits', () => timeLimits({ rec, rules, now, clock, b: bands ?? held, running, gateAlive: p.gateAlive,
-    hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing }));
+    hasReviewer: p.hasReviewer, requestReview: p.requestReview, reviewAlerts: p.reviewAlerts, alert, startsHeld, missing, failureLog: failed('limits') }));
   await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
   // A card put on Joe whose alert was not delivered is told again (L130).
   await run('waits', () => retellWaits({ rec, alert }));
