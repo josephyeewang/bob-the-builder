@@ -82,7 +82,7 @@ export function approvalsAlertText(product, a) {
   if (Array.isArray(a?.items)) parts.push(`${a.items.length} item${a.items.length === 1 ? '' : 's'}`);
   const tail = [
     typeof a?.reason === 'string' ? plain(a.reason) : null,
-    Array.isArray(a?.items) && listed(a.items) ? listed(a.items) : null,
+    Array.isArray(a?.items) && a.items.some((x) => typeof x === 'string') ? listed(a.items) : null,
     filesLine(a),
   ].filter(Boolean).join('; ');
   return `Approvals, ${plain(product, 80)}: ${type}${parts.length ? ` (${parts.join(', ')})` : ''}${tail ? `: ${tail}` : ''}`;
