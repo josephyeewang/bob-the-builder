@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
-import { makeFactWriter } from './facts.mjs';
+import { makeFactWriter, TROUBLE_SOURCES } from './facts.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
 import { makeVercelReader } from './vercel-reader.mjs';
 import { watchOnce, stateFactId } from './prod-watcher.mjs';
@@ -246,9 +246,10 @@ function lossSetup(raise, rulesEntry = { stage: 'first' }) {
   const v = fakeVercel();
   const writer = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
-  const alerts = { raise, clear: async () => false };
+  const reported = [];
+  const alerts = { raise, clear: async () => false, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
   const pass = () => watchOnce({ vercel: v.reader, rulesEntry, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
-  return { v, pass, writer };
+  return { v, pass, writer, reported };
 }
 const subjects = (raise, kind) => raise.texts.filter((a) => a.key.includes(`|${kind}|`)).map((a) => a.key.split('|')[2]);
 
@@ -404,3 +405,207 @@ for (const [name, c] of Object.entries(CONDITIONS)) {
     });
   }
 }
+
+// L376: which HTTP code or shape problem it is goes in the body, not in the cause. Otherwise a flapping upstream opens a
+// new issue on every close. A different deploy live, in old-version-live, is a new event and does open one.
+const failWith = (t, status) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, get() { throw Object.assign(new Error('x'), { status }); } });
+const readsAgain = (t, good) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, writable: true, value: good });
+
+test('L376: 502, closed by the owner, then 503: no new issue; a clean read, then 502 again: one new issue', async () => {
+  const t = setup();
+  await t.pass();
+  const good = t.v.s.deployments;
+  failWith(t, 502); await t.pass();
+  assert.equal(t.gh.issues.size, 1);
+  t.gh.ownerCloses(1);
+  failWith(t, 503); await t.pass(); await t.pass();
+  assert.equal(t.gh.issues.size, 1, 'the same problem, and the owner answered it');
+  readsAgain(t, good); await t.pass();
+  failWith(t, 502); await t.pass();
+  assert.equal(t.gh.issues.size, 2, 'it came back after reading fine');
+  assert.equal(t.gh.issues.get(2).closed, false);
+});
+
+test('L376: a shape problem after a closed HTTP error is the same cause: no new issue', async () => {
+  const t = setup();
+  await t.pass();
+  const good = t.v.s.deployments;
+  failWith(t, 502); await t.pass();
+  t.gh.ownerCloses(1);
+  readsAgain(t, [dep(MAIN[0], 'git', 'NEW_STATE')]);
+  assert.deepEqual(await t.pass(), [{ kind: 'watcher-cannot-read', subject: 'vercel', result: 'suppressed' }]);
+  assert.equal(t.gh.issues.size, 1);
+});
+
+test('L376: on an open issue, 502 then 503 updates the body and sends no comment', async () => {
+  const t = setup();
+  await t.pass();
+  failWith(t, 502); await t.pass();
+  failWith(t, 503); await t.pass();
+  const issue = t.gh.issues.get(1);
+  assert.match(issue.body, /HTTP 503/);
+  assert.equal(issue.comments.length, 0);
+});
+
+test('L376: after a close, a different old deploy live opens a new issue, and the same one stays quiet', async () => {
+  const t = setup();
+  const a = dep(MAIN[0]); const b = dep(MAIN[1]); const c = dep(MAIN[2]);
+  t.v.s.deployments = [a, b, c]; t.v.s.live = c.uid;
+  await t.pass();
+  t.v.s.live = a.uid; await t.pass();
+  const opened = t.gh.issues.size;
+  assert.equal(opened, 1);
+  t.gh.ownerCloses(1);
+  await t.pass();
+  assert.equal(t.gh.issues.size, 1);
+  t.v.s.live = b.uid; await t.pass();
+  assert.equal(t.gh.issues.size, 2);
+});
+
+// L393: what the watcher can't save. The Record refuses what `world.refuse` says; alerts and the watcher share that.
+function refusingWatch() {
+  const t = setup();
+  const world = { refuse: () => false };
+  const refusing = (w) => ({ get: w.get, put: (id, doc) => (world.refuse(doc) ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) });
+  const writer = refusing(t.writer);
+  const alerts = makeAlerts({ rec: t.rec, gh: t.gh, owner: 'owner', writer: refusing(makeFactWriter(t.rec, { actor: 'ledger' })) });
+  const pass = () => watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
+  return { ...t, world, pass };
+}
+const heal = (t) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, writable: true, value: [] });
+const ofKind = (out, kind) => out.filter((o) => o.kind === kind).map((o) => o.result);
+const readIssues = (t) => [...t.gh.issues.values()].filter((i) => /cannot read Vercel/.test(i.title));
+const savedIssues = (t) => [...t.gh.issues.values()].filter((i) => /cannot save what it saw/.test(i.title));
+const troubleIssues = (t) => [...t.gh.issues.values()].filter((i) => /refusing alert writes/.test(i.title));
+
+test('L393 MAT-A, L401: a clear the Record refused stands on the issue, so when reading fails again the owner gets a new issue', async () => {
+  const t = refusingWatch();
+  await t.pass();
+  failWith(t, 500);
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['opened']);
+  heal(t);
+  t.world.refuse = (doc) => doc.kind === 'fact.alert';
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['cleared']);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  t.world.refuse = () => false;
+  failWith(t, 502);
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['opened']);
+  for (const code of [503, 500]) { failWith(t, code); assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-read'), ['updated']); }
+  assert.equal(t.gh.issues.get(2).closed, false);
+  assert.equal(t.gh.issues.get(2).comments.length, 0);
+});
+
+test('L401: the same with the Record still refusing when reading fails again: one new issue, and the Record gets one alert of its own', async () => {
+  const t = refusingWatch();
+  await t.pass();
+  failWith(t, 500);
+  await t.pass();
+  heal(t);
+  t.world.refuse = (doc) => doc.kind === 'fact.alert';
+  await t.pass();
+  failWith(t, 502);
+  const answers = [];
+  for (let i = 0; i < 5; i++) { const out = await t.pass(); answers.push(...ofKind(out, 'watcher-cannot-read')); }
+  assert.deepEqual(answers, ['opened', 'updated', 'updated', 'updated', 'updated']);
+  assert.equal(readIssues(t).length, 2);
+  assert.equal(troubleIssues(t).length, 1);
+  t.world.refuse = () => false;
+  assert.deepEqual(ofKind(await t.pass(), 'alerts'), ['cleared']);
+  assert.equal(troubleIssues(t)[0].closed, true);
+  assert.equal(readIssues(t).length, 2);
+});
+
+test('L393: a baseline the Record refuses is raised, once, and cleared when it saves; the watcher then alerts again', async () => {
+  const t = refusingWatch();
+  const live = dep(MAIN[0]);
+  t.v.s.deployments = [live]; t.v.s.live = live.uid;
+  t.world.refuse = (doc) => doc.kind === 'fact.prod-watch';
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['opened']);
+  assert.match(t.gh.issues.get(1).body, /The Record refused what the production watcher saw \(the store is full\)/);
+  for (let i = 0; i < 4; i++) assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['updated']);
+  assert.equal(t.gh.issues.size, 1);
+  t.world.refuse = () => false;
+  assert.deepEqual(ofKind(await t.pass(), 'watcher-cannot-save'), ['cleared']);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  assert.deepEqual(await t.pass(), [], 'a pass that saved the same again is quiet');
+  const bad = dep(BRANCH, 'cli');
+  t.v.s.deployments = [live, bad];
+  assert.ok(kinds(await t.pass()).includes('unsupported-deploy'));
+});
+
+test('L401: a baseline refused with the alert\'s cache refused too: one issue however many passes', async () => {
+  const t = refusingWatch();
+  t.world.refuse = () => true;
+  const answers = [];
+  for (let i = 0; i < 5; i++) answers.push(...ofKind(await t.pass(), 'watcher-cannot-save'));
+  assert.deepEqual(answers, ['opened', 'updated', 'updated', 'updated', 'updated']);
+  assert.equal(savedIssues(t).length, 1);
+  assert.equal(troubleIssues(t).length, 1);
+});
+
+// L402 m5: which reason the Record gives goes in the body, not in the cause.
+test('L402 m5: two refusal reasons are one cause: no comment on an open issue, and no new issue after the owner closed it', async () => {
+  const t = setup();
+  const reason = { now: 'the store is full' };
+  const writer = { get: t.writer.get, put: () => ({ ok: false, reason: reason.now }) };
+  const alerts = makeAlerts({ rec: t.rec, gh: t.gh, owner: 'owner' });
+  const pass = () => watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
+  assert.deepEqual(ofKind(await pass(), 'watcher-cannot-save'), ['opened']);
+  reason.now = 'a different reason';
+  assert.deepEqual(ofKind(await pass(), 'watcher-cannot-save'), ['updated']);
+  assert.match(t.gh.issues.get(1).body, /a different reason/);
+  assert.equal(t.gh.issues.get(1).comments.length, 0);
+  t.gh.ownerCloses(1);
+  reason.now = 'a third reason';
+  assert.deepEqual(ofKind(await pass(), 'watcher-cannot-save'), ['suppressed']);
+  assert.equal(t.gh.issues.size, 1);
+});
+
+// L402 condition: a notice left owed answers false, and the watcher shows that on every pass.
+test('L402 owed: a daily reminder stuck on a failed read is in the pass\'s answer every time, with one comment over them all', async () => {
+  let at = Date.parse('2026-11-03T12:00:00Z');
+  const now = () => new Date(at);
+  const t = setup();
+  const gh = fakeIssues({ now });
+  const alerts = makeAlerts({ rec: t.rec, gh, owner: 'owner', now });
+  const pass = () => watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
+  await pass();
+  failWith(t, 502);
+  await pass();
+  at += 25 * 3600e3;
+  const { edit, latestOwnComment } = gh;
+  let n = 0;
+  gh.edit = async (...a) => { n += 1; return n === 2 ? false : edit(...a); };
+  assert.deepEqual(ofKind(await pass(), 'watcher-cannot-read'), [false]);
+  gh.edit = edit;
+  gh.latestOwnComment = async () => false;
+  for (let i = 0; i < 3; i++) { at += 60e3; assert.deepEqual(ofKind(await pass(), 'watcher-cannot-read'), [false], `pass ${i}`); }
+  assert.equal(gh.issues.get(1).comments.length, 1);
+  gh.latestOwnComment = latestOwnComment;
+  assert.notDeepEqual(ofKind(await pass(), 'watcher-cannot-read'), [false]);
+  assert.equal(gh.issues.get(1).comments.length, 1, 'found on GitHub, so not sent twice');
+});
+
+test('r5 m2: the watcher reports the Record\'s trouble under its own name', async () => {
+  const t = lossSetup(async () => 'opened');
+  await t.pass();
+  assert.deepEqual(t.reported, [['product 1', TROUBLE_SOURCES.WATCHER]]);
+});
+
+test('r4 m2: a robot login that could not be read is in the pass\'s answer, and a known one is not', async () => {
+  for (const [why, want] of [['the robot\'s own login could not be read', ['the robot\'s own login could not be read']], [null, []]]) {
+    const t = setup();
+    const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => 'none', loginTrouble: async () => why };
+    const out = await watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
+    assert.deepEqual(ofKind(out, 'alerts'), want);
+  }
+});
+
+test('L402: an alert about the Record that GitHub lost is in the pass\'s answer, and a quiet one is not', async () => {
+  for (const [answer, want] of [[false, [false]], ['none', []], ['opened', ['opened']], ['cleared', ['cleared']]]) {
+    const t = setup();
+    const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => answer };
+    const out = await watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
+    assert.deepEqual(ofKind(out, 'alerts'), want);
+  }
+});
