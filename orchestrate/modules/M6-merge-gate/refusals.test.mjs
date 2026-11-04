@@ -228,6 +228,18 @@ test('L69 planted: a fail at the pull request\'s head with a passing carry-over 
   assert.equal(judge(f).decision, 'merge');
 });
 
+test('L92 M-3 planted: the short re-audit is waited for only on a carry-over worked out for this very head', () => {
+  const at = (head) => judge(clean((f) => { pastH0(f); f.tier = 1; f.reviews.push(session('auditor', 'A-1', { pass: true, material: 0 })); f.carried = { review: true, audit: false, head, reasons: [] }; })).refusals.find((r) => r.n === 5);
+  const here = at(H1);
+  assert.equal(here.temporary, true);
+  assert.equal(here.reAudit, H1);
+  assert.match(here.reason, /waiting for a short re-audit there/);
+  const other = at(H0);
+  assert.notEqual(other.temporary, true, 'final');
+  assert.match(other.reason, /the Tier-1 audit does not carry over/);
+  assert.doesNotMatch(other.reason, /waiting/);
+});
+
 test('a caught-up head whose review (and Tier-1 audit) carried over merges', () => {
   const f = clean((f) => { f.pr.head.sha = H1; f.checks[0].head_sha = H1; f.carried = { review: true, audit: true, reasons: [] }; f.prReviews = []; });
   assert.equal(judge(f).decision, 'merge');

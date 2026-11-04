@@ -432,6 +432,11 @@ test('L92 M-3 planted: only a card waiting on its merge request gets a short re-
     assert.match(a.refused[0].reason, state === 'in_review' ? /^the request names head / : /does not need a auditor/, state);
   }
   w.card.state = 'approved';
+  w.card.tier = 2;
+  const notTier1 = await w.ask(['auditor'], H1);
+  assert.equal(notTier1.started.length, 0, 'only a Tier-1 card has an audit to redo');
+  assert.match(notTier1.refused[0].reason, /does not need a auditor/);
+  w.card.tier = 1;
   await w.round(['auditor'], H1);
   assert.match(w.s.launched.at(-1).prompt, /This is a short re-audit/);
   // L92 minor 1: a full audit of a new head, on the card's own head, caught up with main, is not told so.
