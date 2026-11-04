@@ -1398,6 +1398,29 @@ test('L324: an unknown-usage start that is ahead or unreadable counts as over a 
   }
 });
 
+// L386 m1: all seven of dispatcherPass's asks go through askJoe, so none loses a refused copy from the pass's notes.
+const DAY_MIN = 24 * 60;
+const ASK_SITES = [
+  ['usage_unknown', () => world([['card', 'K', { state: 'waiting', product: 'p1', tier: 1, wait: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } }]], { usage: null }), DAY_MIN + 1, (w) => w.pass(0)],
+  [LIMIT_NO_ACCOUNT, () => world(), 1, (w) => parkOnLimit(w.rec, 'K', {})],
+  [LIMIT_NO_RUN, () => world(), 1, (w) => parkOnLimit(w.rec, 'K', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-k' })],
+  [LIMIT_NO_HIT, () => world(), DAY_MIN + 1, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  [`${LIMIT_NO_RESET} (no reset time)`, () => world([['fact', LIMIT_FACT('acct-k'), { observed_at: iso(T0 + MIN) }]]), 2, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  [`${LIMIT_NO_RESET} (past the cap)`, () => world([['fact', LIMIT_FACT('acct-k'), { resets_at: iso(T0 + 10 * DAY_MIN * MIN), observed_at: iso(T0 + 3 * DAY_MIN * MIN) }]]), LIMIT_RESET_MAX_MS / MIN + 1, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  ['limit_reset', () => world([['fact', LIMIT_FACT('acct-k'), { resets_at: iso(T0 + 5 * MIN), observed_at: iso(T0 + MIN) }]]), 6, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k', card: { tier: 1 } })],
+];
+for (const [name, make, min, park] of ASK_SITES) {
+  test(`L343, L386 m1: ${name} puts a refused copy of its since in the pass's notes and the text the owner reads`, async () => {
+    const w = make();
+    await park(w);
+    const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+    const out = await w.pass(min, { rec });
+    assert.equal(w.rec.read('card', 'K').doc.wait?.who, 'joe', name);
+    assert.ok(out.notes.some((n) => /^card K: this card's tell could not be kept with its wait \(busy\)/.test(n)), JSON.stringify(out.notes));
+    assert.ok(w.calls.alerts.some((x) => /^card K: .*could not be kept with its wait \(busy\)/.test(x)), JSON.stringify(w.calls.alerts));
+  });
+}
+
 test('L343: a limit wait put on the owner whose tell could not keep its since says so in the notes and in the text they read', async () => {
   const w = world();
   parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });

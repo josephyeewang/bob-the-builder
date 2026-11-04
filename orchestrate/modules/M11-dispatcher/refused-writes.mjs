@@ -23,6 +23,7 @@
 import { stillWaiting } from '../../shared/still-waiting.mjs';
 import { dropCause, tellThen } from './alerts.mjs';
 import { HOLD_FACT } from './pass.mjs';
+import { WAIT_TELL_FACT } from './joe-waits.mjs';
 
 // A refused write is a hold (L38): its fact is in the Dispatcher's `hold-` family (pass.mjs HOLD_FACT; M9 permissions).
 export const REFUSED_FACT = (cause) => HOLD_FACT(`write-refused-${cause}`);
@@ -37,8 +38,8 @@ export const REFUSED_OVER_MAX = 1000;
 export const REFUSED_CAUSES = Object.freeze({
   park: { what: "a stopped session's card could not be parked", steps: ['stops'], kinds: ['park_paused', 'park_red', 'needs_split'] },
   stop_record: { what: 'a session stop could not be recorded', steps: ['stops'], kinds: ['stop_wanted', 'stop_dropped', 'stop_done', 'stop_moved'] },
-  joe_wait: { what: 'a card could not be put on you', steps: ['outage', 'pass', 'limits'],
-    kinds: ['dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask'] },
+  joe_wait: { what: 'a card could not be put on you', steps: ['outage', 'pass', 'limits', 'merges'],
+    kinds: ['wait_tell', 'dead_ask', 'usage_unknown', 'limit_no_account', 'limit_no_run', 'limit_no_hit', 'limit_no_reset', 'limit_reset', 'no_reviewer_ask'] },
   review_count: { what: "a card's failed review requests could not be counted, so it would never reach you", steps: ['limits'], kinds: ['review_request'] },
   resume: { what: 'a parked card could not be put back in the queue', steps: ['pass'], kinds: ['resume_usage_band', 'resume_limit_hit', 'resume_paused'] },
   // The text names what was refused (L352 c1): a session's end, its card's failing, or both.
@@ -50,6 +51,11 @@ export const REFUSED_CAUSES = Object.freeze({
   }, steps: ['limits'], kinds: ['timeout'] },
 });
 const CAUSE_OF = new Map(Object.entries(REFUSED_CAUSES).flatMap(([cause, c]) => c.kinds.map((k) => [k, cause])));
+
+// What a refused write is about. A refused tell (L386) is about its card, not its fact: a card that moved on needs no
+// tell, and nothing else would ever change that fact. It is still matched by the fact, as a tell taken is not a wait
+// taken (keyOf, `taken`).
+const aboutOf = (x) => (x.kind === 'wait_tell' ? { entity: 'card', id: x.id.slice(WAIT_TELL_FACT('').length) } : x);
 
 // What a refused write's target looked like: a card by its state and wait, anything else by its revision.
 const stateOf = (rec, entity, id) => {
@@ -71,7 +77,8 @@ export function watchWrites(inner) {
   Object.defineProperty(watched, 'write', {
     value: (args) => {
       const cause = CAUSE_OF.get(args?.kind);
-      const from = cause ? stateOf(inner, args.entity, args.id) : null;
+      const about = cause ? aboutOf(args) : null;
+      const from = cause ? stateOf(inner, about.entity, about.id) : null;
       const r = inner.write(args);
       if (cause && r?.ok === true) {
         const set = taken.get(cause) ?? new Set();
@@ -96,7 +103,7 @@ const textOf = (cause, { items, over, more, unreadable }) => {
   const shown = items.slice(-REFUSED_LIST_MAX);
   const hidden = over.length + items.length - shown.length;
   return `the Dispatcher: ${whatOf(cause, [...over, ...items])}: ${[
-    shown.map((x) => (x.reason ? `${x.id} (${x.reason})` : x.id)).join('; ') || null,
+    shown.map((x) => (x.reason ? `${aboutOf(x).id} (${x.reason})` : aboutOf(x).id)).join('; ') || null,
     hidden > 0 ? `and ${hidden} more still refused` : null,
     unreadable ? 'the kept list could not be read' : null,
     more > 0 ? `at least ${more} more refused ${more === 1 ? 'write was' : 'writes were'} not listed, so once the listed ones are fixed the lead resets this reminder (fact ${REFUSED_FACT(cause)})` : null,
@@ -129,7 +136,8 @@ function keptOf(doc) {
 // A kept one stays refused while its target is as it was, unless a write of it was taken since. An 'unreadable' target,
 // now or when it was refused, has not been seen to move (L352 MAT-1).
 const stillRefused = (rec, k) => {
-  const now = stateOf(rec, k.entity, k.id);
+  const { entity, id } = aboutOf(k);
+  const now = stateOf(rec, entity, id);
   return now === k.from || now === 'unreadable' || k.from === 'unreadable';
 };
 

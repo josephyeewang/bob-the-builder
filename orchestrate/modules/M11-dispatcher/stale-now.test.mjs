@@ -12,9 +12,9 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stopPass, STOP_FACT } from './pass.mjs';
-import { REFUSED_FACT, REFUSED_KEEP_MAX, REFUSED_LIST_MAX, REFUSED_OVER_MAX, tellRefused, watchWrites } from './refused-writes.mjs';
-import { timeLimits } from './merges.mjs';
 import { waitOn } from './moves.mjs';
+import { REFUSED_CAUSES, REFUSED_FACT, REFUSED_KEEP_MAX, REFUSED_LIST_MAX, REFUSED_OVER_MAX, tellRefused, watchWrites } from './refused-writes.mjs';
+import { timeLimits } from './merges.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { rulesWith, usageFact, filesOfCommits, recWith, setClock, iso, T0 } from './fixtures.test-helper.mjs';
@@ -419,6 +419,89 @@ test('L332 MAT-1: a refused write taken on a later pass, with its card in the sa
   assert.deepEqual(r2.refused.find(([c]) => c === 'review_count'), ['review_count', 'cleared']);
 });
 
+// L386: a refused tell moves nothing, so no card write is ever tried and nothing else would tell it.
+const tellWorld = () => {
+  const w = world({ pause: false, cards: [], live: [], board: () => [] });
+  const { E, ports, fake, fresh } = w;
+  readyCard(E, 'C-8');
+  seed(E, 'card', 'C-9', { ...E.record.read('card', 'C-8').doc, state: 'waiting', wait: { who: 'usage', what: 'limit_hit', since: iso(E.clock.t), next_check: iso(E.clock.t), account: 'acct-a', resume: 'retry', return_to: 'ready' } });
+  const state = { refuse: (x) => x.kind === 'wait_tell' };
+  const rec = Object.create(E.record);
+  Object.defineProperty(rec, 'write', { value: (x) => (state.refuse(x) ? { ok: false, reason: 'refused for the test' } : E.record.write(x)) });
+  const rules = rulesWith({}, allow);
+  const pass = async () => { fake.reset(); fresh(); return tick({ rec, rules, now: E.clock.t, clock: () => E.clock.t, ports: ports() }); };
+  return { ...w, pass, state };
+};
+const askCause = (r) => r.refused.find(([c]) => c === 'joe_wait');
+
+test('L386: a refused tell at limit_no_run is told at once, quiet at +1 h, told again at +24 h, and cleared once it lands', async () => {
+  const { E, alerts, card, pass, state } = tellWorld();
+  const told = () => alerts.filter((x) => /a card could not be put on you: C-9 \(refused for the test\)/.test(x));
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'told']);
+  assert.equal(told().length, 1, alerts.join(' | '));
+  assert.equal(card('C-9').wait.who, 'usage', 'nothing moved');
+  E.clock.t += H;
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'quiet']);
+  assert.equal(told().length, 0, alerts.join(' | '));
+  E.clock.t += 24 * H;
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'told']);
+  assert.equal(told().length, 1, alerts.join(' | '));
+  state.refuse = () => false;
+  E.clock.t += MIN;
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'cleared']);
+  assert.equal(card('C-9').wait.who, 'joe');
+  assert.ok(alerts.some((x) => /^card C-9: it waits on account acct-a's usage limit/.test(x)), alerts.join(' | '));
+});
+
+test('L386: a refused tell whose card has moved on clears, as nothing will ever write that fact', async () => {
+  const { E, pass } = tellWorld();
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'told']);
+  const w = waitOn(E.record, 'C-9', { who: 'dependency', what: 'another_wait', now: E.clock.t });
+  assert.equal(w.ok, true, w.reason);
+  E.clock.t += MIN;
+  assert.deepEqual(askCause(await pass()), ['joe_wait', 'cleared']);
+});
+
+test('L386: a refused copy of a since is told in the card\'s own text, not as "could not be put on you"', async () => {
+  const { alerts, card, pass, state } = tellWorld();
+  state.refuse = (x) => x.kind === 'wait_tell_copy';
+  const r = await pass();
+  assert.equal(card('C-9').wait.who, 'joe', 'the card is on the owner');
+  assert.notEqual(askCause(r)[1], 'told', alerts.join(' | '));
+  assert.doesNotMatch(alerts.join(' | '), /a card could not be put on you/);
+  assert.match(alerts.join(' | '), /card C-9: .*could not be kept with its wait \(refused for the test\)/);
+});
+
+test('L386: the watcher notes a refused tell with its card\'s state, not its fact\'s', () => {
+  const base = keptWorld(['C-1']).rec;
+  const inner = Object.create(base);
+  Object.defineProperty(inner, 'write', { value: () => ({ ok: false, reason: 'r' }) });
+  const watched = watchWrites(inner);
+  watched.rec.write({ actor: 'dispatcher', entity: 'fact', id: 'wait-tell-C-1', expectRev: 0, doc: { since: iso(T0), text: 't' }, kind: 'wait_tell' });
+  assert.deepEqual(watched.refused.get('joe_wait'), [{ entity: 'fact', id: 'wait-tell-C-1', kind: 'wait_tell', reason: 'r', from: running }]);
+});
+
+test('L386: a refused tell tried only once stays told while its card has not moved, then clears when it does', () => {
+  // The outage step asks about a dead session once, so no later refusal keeps this alive.
+  const w = keptWorld(['C-1']);
+  const tell = { entity: 'fact', id: 'wait-tell-C-1', kind: 'wait_tell', reason: 'r', from: running };
+  assert.equal(tellRefused({ rec: w.rec, alert: w.alert, now: T0, refused: new Map([['joe_wait', [tell]]]), ran: () => true }).find(([c]) => c === 'joe_wait')[1], 'told');
+  const again = (now) => tellRefused({ rec: w.rec, alert: w.alert, now, refused: new Map(), ran: () => true }).find(([c]) => c === 'joe_wait')[1];
+  w.delivered();
+  assert.equal(again(T0 + H), 'quiet');
+  assert.deepEqual(w.rec.read('fact', REFUSED_FACT('joe_wait')).doc.items.map((x) => x.id), ['wait-tell-C-1']);
+  park(w.rec, 'C-1', T0 + 2 * H);
+  assert.equal(again(T0 + 2 * H), 'cleared');
+});
+
+test('L386: a tell taken does not clear a card write still refused, and the ask cause waits on every step that writes a tell', () => {
+  assert.deepEqual(REFUSED_CAUSES.joe_wait.steps, ['outage', 'pass', 'limits', 'merges']);
+  const w = keptWorld(['C-1']);
+  w.tell(w.rec, T0, new Map([['joe_wait', [{ ...w.item('C-1'), kind: 'dead_ask' }]]]));
+  const r = tellRefused({ rec: w.rec, alert: w.alert, now: T0 + MIN, refused: new Map(), taken: new Map([['joe_wait', new Set(['fact/wait-tell-C-1'])]]), ran: () => true });
+  assert.deepEqual(r.find(([c]) => c === 'joe_wait'), ['joe_wait', 'quiet']);
+});
+
 // L352: a kept refusal is never cleared by what can't be read: a target, a kept list or its entries, or the overflow.
 const running = JSON.stringify(['running', null, null]);
 const keptWorld = (ids = ['C-1']) => {
@@ -427,7 +510,7 @@ const keptWorld = (ids = ['C-1']) => {
   const delivered = () => { for (const [, o] of alert.calls.splice(0)) rec.write({ actor: 'dispatcher', entity: 'fact', id: o.mark.fact, expectRev: rec.read('fact', o.mark.fact)?.rev ?? 0, doc: { ...rec.read('fact', o.mark.fact)?.doc, ...o.mark.fields } }); };
   const tell = (r, now, refused = new Map()) => { const out = tellRefused({ rec: r, alert, now, refused, ran: () => true }); delivered(); return out.find(([c]) => c === 'park')[1]; };
   const item = (id, from = running) => ({ entity: 'card', id, kind: 'park_paused', reason: 'r', from });
-  return { rec, alert, tell, item, fact: () => rec.read('fact', REFUSED_FACT('park')) };
+  return { rec, alert, tell, item, delivered, fact: () => rec.read('fact', REFUSED_FACT('park')) };
 };
 
 test('L352 MAT-1: a kept refusal whose target can\'t be read now, or could not be read when refused, is still refused', () => {

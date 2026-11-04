@@ -18,6 +18,9 @@ import { waitOn } from './moves.mjs';
 import { tellThen, isQueued } from './alerts.mjs';
 import { keptSince } from '../M9-record/guard.mjs';
 
+// Two kinds of write on that fact. `wait_tell` records the tell before the card moves; if it is refused nothing has moved,
+// so refused-writes.mjs tells it (L386: nothing else would). `wait_tell_copy` only copies the since on, with the card
+// already waiting: it is told in the card's own text (tell_refused), so it must not read as "could not be put on you".
 export const WAIT_TELL_FACT = (card) => `wait-tell-${card}`;
 const iso = (ms) => new Date(ms).toISOString();
 // The Record's window for a wait's since (M9 writer checkWait: within 60 s of its own clock).
@@ -68,7 +71,7 @@ function copyOn(rec, card, c, ours) {
   if (!f?.doc?.since) return { stored: null, refused: 'the tell is not on the Record' };
   const stored = waitOf(f.doc, c, ours);
   if (!stored || f.doc.wait_since === stored) return { stored, refused: null };
-  const put = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev: f.rev, doc: { ...f.doc, wait_since: stored }, kind: 'wait_tell' });
+  const put = rec.write({ actor: 'dispatcher', entity: 'fact', id: WAIT_TELL_FACT(card), expectRev: f.rev, doc: { ...f.doc, wait_since: stored }, kind: 'wait_tell_copy' });
   return put?.ok ? { stored, refused: null } : { stored: null, refused: String(put?.reason ?? 'no answer').slice(0, 300) };
 }
 
