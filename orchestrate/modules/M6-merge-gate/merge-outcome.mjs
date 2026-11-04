@@ -105,7 +105,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   if (m.doc.state !== 'checking' && m.doc.state !== 'merging') return { ok: false, reason: `merge ${id} is ${m.doc.state}, not checking or merging` };
   const write = (entity, cur, fields) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...cur.doc, ...fields }, kind: 'merge_outcome' });
   // `cardId`: the write refused was the card's, so the line names it (L408 MAT-1): the merge itself may well have moved.
-  const told = (r, what, cardId) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, card: cardId, to: what, reason: r.reason }); return r.ok; };
+  const told = (r, what, cardId) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, ...(cardId ? { card: cardId } : {}), to: what, reason: r.reason }); return r.ok; };
 
   if (pr && pr.merged !== true && pr.state !== 'closed' && !openTooLong) return { ok: false, reason: `merge ${id}'s outcome is not known yet: PR ${m.doc.pr} is still open` };
   if (pr?.merged === true && SHA.test(pr.merge_commit_sha ?? '') && pr.head_sha === m.doc.judged_head) {

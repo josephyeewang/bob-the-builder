@@ -35,6 +35,8 @@ const SHOWN = {
 // On an alert, not on the line, on purpose: which field, on which kinds, and why. By kind, so a new kind carrying one of
 // these fields is looked at, not let through by another kind's reason (L408 m2).
 const NOT_SHOWN = {
+  ask: { why: 'its text names the question by its card, which is what the owner acts on', kinds: ['ask_time_unreadable'] },
+  card: { why: 'its text names it', kinds: ['ask_time_unreadable'] },
   error: { why: "an exception's own text can hold anything, and the fixed reason beside it says what failed", kinds: ['ask_request_refused', 'undo_request_refused'] },
   files_known: { why: 'said by the line when false; see the unreadable-list test', kinds: ['undo_by_hand'] },
   product: { why: "the line starts with it, or the alert's own text names it", kinds: ['onboard_near_miss', 'onboard_refused', 'product_on'] },
@@ -43,7 +45,7 @@ const NOT_SHOWN = {
 const leftOff = (table, kind, field) => table[field]?.kinds.includes(kind) === true;
 // Every kind-and-field a table lists is one the walk found, so the table can't outlive what it speaks for.
 const pairs = (table) => Object.entries(table).flatMap(([field, { kinds }]) => kinds.map((k) => `${k} ${field}`)).sort();
-const carried = (sites, table) => [...new Set(sites.flatMap(({ kind, keys }) => keys.filter((k) => k in table).map((k) => `${kind} ${k}`)))].sort();
+const carried = (sites, table, shown) => [...new Set(sites.flatMap(({ kind, keys }) => keys.filter((k) => k in table && (!(k in shown) || keys.includes('text'))).map((k) => `${kind} ${k}`)))].sort();
 // `...f` on a refused report: research-ask.mjs and undo-flag.mjs build it, and the test below holds it to these.
 const SPREAD_F = ['report', 'reason', 'error'];
 
@@ -84,6 +86,8 @@ function sitesIn(list) {
       assert.ok(name, `${file}: an alert with no name: ${parts.join(', ')}`);
       const keys = parts.flatMap((x) => {
         if (x === '...f') return SPREAD_F;
+        const maybe = /^\.\.\.\(\w+ \? \{ (\w+): \w+ \} : \{\}\)$/.exec(x); // a field there only when it has a value
+        if (maybe) return [maybe[1]];
         assert.ok(!x.startsWith('...'), `${file} ${name[1] ?? name[2]}: a spread this walk can't read: ${x}`);
         return [x.split(':')[0].trim()];
       });
@@ -119,11 +123,19 @@ test('L408: every alert call in M2 and M6 is walked or named as a pass-through, 
   assert.deepEqual(passThroughs(m6Sources), M6_PASS_THROUGHS);
 });
 
+// What a pass-through hands on is what was walked, so nothing may be added to an alert after its object was written (L421 m-B).
+test('L421: no file with a pass-through writes a property onto an alert object', () => {
+  const files = new Set([...PASS_THROUGHS, ...M6_PASS_THROUGHS].map((x) => x.split(' ')[0]));
+  const added = (list) => list.filter(([f]) => files.has(f)).flatMap(([f, src]) => [...noComments(src).matchAll(/\b(?:a|e|alert|notice)\.\w+\s*=(?![=>])/g)].map(([t]) => `${f} ${t}`));
+  assert.deepEqual([...added(sources), ...added(m6Sources)], []);
+});
+
 test('L408 controls: the walk reads a template string, nested braces and a spread, and a hidden object is left for the check above', () => {
   const one = (src) => sitesIn([['x.mjs', src]]);
   assert.deepEqual(one("alert({ type: 'a_kind', card: id, text: `one ${c ? `{${d}}` : '}'}, two`, reason: f({ b: 1, c }) });")[0], { file: 'x.mjs', kind: 'a_kind', keys: ['card', 'text', 'reason'] });
   assert.throws(() => one("alert({ text: 'no name' });"), /an alert with no name/);
   assert.throws(() => one("alert({ type: 'a_kind', ...more });"), /a spread this walk can't read/);
+  assert.deepEqual(one("alert({ type: 'a_kind', ...(x ? { card: x } : {}) });")[0].keys, ['card']);
   assert.deepEqual(one('alert(hidden);'), []);
   assert.deepEqual(passThroughs([['x.mjs', "ctx.alert(hidden);\nalert({ type: 'a_kind' });"]]), ['x.mjs ctx.alert(hidden']);
 });
@@ -145,7 +157,11 @@ test('L373: every field of every M2 alert reaches the delivered line, or is list
   for (const { file, kind, keys } of alertSites()) {
     const unknown = keys.filter((k) => !(k in SHOWN) && !leftOff(NOT_SHOWN, kind, k));
     assert.deepEqual(unknown, [], `${file} ${kind}: shown nowhere and not listed for this kind in NOT_SHOWN`);
-    if (keys.includes('text')) continue;
+    // Its text is the whole line, so nothing else shows: each other field must be listed, for this kind, with why (L421).
+    if (keys.includes('text')) {
+      assert.deepEqual(keys.filter((k) => k !== 'text' && !leftOff(NOT_SHOWN, kind, k)), [], `${file} ${kind}: its text is the whole line, so this field never shows`);
+      continue;
+    }
     const shown = keys.filter((k) => k in SHOWN);
     const line = approvalsAlertText('p-7', { type: kind, ...Object.fromEntries(shown.map((k) => [k, SHOWN[k][0]])) });
     for (const k of shown) assert.ok(line.includes(SHOWN[k][1]), `${file} ${kind}: ${k} is not in: ${line}`);
@@ -192,7 +208,7 @@ const m6Sources = readdirSync(M6).filter((f) => f.endsWith('.mjs') && !f.include
 const M6_SHOWN = {
   ...SHOWN,
   merge: ['M-7', 'merge M-7'],
-  to: ['refused', 'moving to refused'],
+  to: ['merged', 'moving to merged'],
   context: ['ci/audit', 'check ci/audit'],
   status: [422, 'status 422'],
   judged_main: ['aaa111', 'judged main aaa111'],
@@ -209,8 +225,8 @@ const M6_NOT_SHOWN = {
 };
 
 test('L408 m2: every left-off field is listed by the kind that carries it, and no listing is left over', () => {
-  assert.deepEqual(pairs(NOT_SHOWN), carried(alertSites(), NOT_SHOWN));
-  assert.deepEqual(pairs(M6_NOT_SHOWN), carried(m6Sites(), M6_NOT_SHOWN));
+  assert.deepEqual(pairs(NOT_SHOWN), carried(alertSites(), NOT_SHOWN, SHOWN));
+  assert.deepEqual(pairs(M6_NOT_SHOWN), carried(m6Sites(), M6_NOT_SHOWN, M6_SHOWN));
 });
 
 test('L397: the source read holds every M6 alert kind, so the checks below are not checking nothing', () => {
@@ -275,15 +291,25 @@ test('L408 MAT-1: a refused write of the merge itself names no card', () => {
   record.write = (w) => (w.entity === 'merge' ? { ok: false, reason: 'stale rev' } : real(w));
   settleMerge({ record, alert, now: 0 }, 'M-1', { pr: { merged: true, merge_commit_sha: 'a'.repeat(40), head_sha: 'h1', state: 'closed' }, reason: 'x' });
   assert.deepEqual(said.calls.map(([t]) => t), ['merge gate: stale rev (merge M-1, moving to merged)']);
+  const raw = REFUSED_CARD();
+  raw.record.write = (w) => ({ ok: false, reason: `${w.entity} refused` });
+  const got = fakeAlert();
+  settleMerge({ record: raw.record, alert: got, now: 0 }, 'M-1', { pr: { merged: true, merge_commit_sha: 'a'.repeat(40), head_sha: 'h1', state: 'closed' }, reason: 'x' });
+  assert.deepEqual(got.calls.map(([e]) => e), [{ type: 'merge_gate_write_refused', merge: 'M-1', to: 'merged', reason: 'merge refused' }]);
+  assert.ok(!Object.hasOwn(got.calls[0][0], 'card'), 'no card field at all');
 });
 
 // m3: every value a site gives `to` reads true: a state is moved to, anything else is only being written.
 test('L408 m3: `to` says moving only for a state of a merge or a card', () => {
   const tos = [...m6Sources.flatMap(([, src]) => [...noComments(src).matchAll(/type: 'merge_gate_write_refused'[^}]*\bto: '([^']+)'/g)].map((m) => m[1]))];
   assert.ok(tos.length > 10, 'the walk found them');
-  for (const to of new Set(tos)) assert.match(alertText({ merge: 'M-1', to }), STATES.merge.includes(to) || STATES.card.includes(to) ? /moving to / : /writing /, to);
+  for (const to of new Set(tos)) assert.match(alertText({ merge: 'M-1', to }), STATES.merge.includes(to) ? /moving to / : /writing /, to);
   assert.equal(alertText({ type: 't', merge: 'M-1', to: 'late mark told', reason: 'r' }), 'merge gate: r (merge M-1, writing late mark told)');
-  assert.equal(alertText({ type: 't', merge: 'M-1', to: 'in_review', reason: 'r' }), 'merge gate: r (merge M-1, moving to in_review)');
+  // By the record the alert names: a card has an in_review state, a merge does not.
+  assert.equal(alertText({ type: 't', merge: 'M-1', to: 'in_review', reason: 'r' }), 'merge gate: r (merge M-1, writing in_review)');
+  assert.equal(alertText({ type: 't', merge: 'M-1', card: 'C-1', to: 'in_review', reason: 'r' }), 'merge gate: r (merge M-1, card C-1, moving to in_review)');
+  assert.equal(alertText({ type: 't', card: 'C-1', to: 'merging', reason: 'r' }), 'merge gate: r (card C-1, moving to merging)');
+  assert.equal(alertText({ type: 't', merge: 'M-1', to: 'merging', reason: 'r' }), 'merge gate: r (merge M-1, moving to merging)');
 });
 
 test('L408 m1: a question that is not text stays off the line, and an item that is not text is counted, never dropped', () => {

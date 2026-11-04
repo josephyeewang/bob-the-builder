@@ -161,8 +161,10 @@ export const heldAlerts = (into) => (e) => { into.push(e); return true; };
 // nothing else it carries (a GitHub answer, a token) reaches the owner's phone. approvalsAlertText (tick.mjs) and
 // alertText both read it, and alert-fields.test.mjs holds every field of every M2 and M6 alert to it. A named list is
 // capped so a long one can't bury the line; the record holds the rest.
+// `to` reads "moving to" only for a state of the record the alert names, a card if it names one (L421 m-A).
+const shows = (v) => ['string', 'number'].includes(typeof v);
 export const ALERT_FIELDS = [['merge', 'merge'], ['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR'], ['commit', 'commit'],
-  ['report', 'report'], ['to', (v) => (STATES.merge.includes(v) || STATES.card.includes(v) ? 'moving to' : 'writing')], ['context', 'check'], ['status', 'status'], ['judged_main', 'judged main'], ['parent', 'parent'],
+  ['report', 'report'], ['to', (v, e) => (STATES[shows(e.card) ? 'card' : 'merge'].includes(v) ? 'moving to' : 'writing')], ['context', 'check'], ['status', 'status'], ['judged_main', 'judged main'], ['parent', 'parent'],
   ['waiting_since', 'waiting since']];
 export const ALERT_LIST_MAX = 50;
 export const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
@@ -173,8 +175,8 @@ export const listed = (list) => {
   return [names.join(', '), left > 0 ? `${left} more` : ''].filter(Boolean).join(names.length ? ' and ' : '');
 };
 /** The list's fields an alert has, as `label value`. */
-export const alertFields = (e, skip = []) => ALERT_FIELDS.filter(([k]) => !skip.includes(k) && ['string', 'number'].includes(typeof e?.[k]))
-  .map(([k, label]) => `${typeof label === 'function' ? label(e[k]) : label} ${plain(e[k], 80)}`);
+export const alertFields = (e, skip = []) => ALERT_FIELDS.filter(([k]) => !skip.includes(k) && shows(e?.[k]))
+  .map(([k, label]) => `${typeof label === 'function' ? label(e[k], e) : label} ${plain(e[k], 80)}`);
 const listedAs = (label, list) => (Array.isArray(list) && listed(list) ? `${label}: ${listed(list)}` : null);
 
 /** An alert object (or text) as the text the outbox sends: textAlerts' words, for a step that sends it itself. */
