@@ -7,12 +7,18 @@
 //
 //   planGoPass(ctx, { alert, startPlanReview, planReviewAnswer, planRows, planView, mainSha, replyToLead }) → { ok: true, events }
 //     ctx: one product's Approvals context (tick.mjs approvalsStep). The ports take { product, card, ... }:
-//     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording }) → { ok: true, session } | { ok: false, reason }
+//     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording, key }) → { ok: true, session } | { ok: false, reason }
+//       key is the same for a card's plan: a port that can use it gives a repeated start the same session
 //     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works | { ok: false, reason }
 //     planRows({ product, card }) → { <row id>: row }      planView({ product }) → a repo view      mainSha({ product }) → sha
 //     replyToLead({ lead, text }) → { ok: true } | { ok: false, reason }      leaves a note for the Lead whose session wrote the plan
-//   Each port call has a time limit (PLAN_PORT_MS): a port that hangs costs its card that limit, is told under that card's
-//   cause, and the next card still runs. The race has no cancel, so a late call may still finish.
+//   Each port call has a time limit (PLAN_PORT_MS), and so has each call raiseGo makes: the repo view's isDir and the close
+//   of an older pull request. A call that hangs costs its card that limit, is told under that card's cause, and the next
+//   card still runs. The race has no cancel, so a late call may still finish.
+//   The pass has a budget too (`passMs`, the product's deadline; L467). With too little left for one more call it stops
+//   calling out: a card that needs a call is told it was not reached, once a day, and one that needs none goes on as usual.
+//   A card whose last call timed out goes behind the others next pass (PLAN_SLOW_FACT, oldest timeout first), so the
+//   cards that hang can't keep the healthy ones from being reached, and those that hang take turns.
 //
 // First the answered gos: each approved ask on the card's current plan becomes the go record, once, and a refused one is
 // told. An answer on a plan the card has moved on from, or on a plan it already has a go for, is left alone. Then each
@@ -21,6 +27,8 @@
 //   Tier 2: raised, no plan check (L443 ruling 4).
 //   Tier 1: raised only with a pass. Its plan hash or main commit missing: left alone, invents nothing, told. Else one
 //   fresh reviewer per fingerprint, its answer read through the port, the author taken from the Record's latest plan write.
+//   A start is marked before the call. If the call timed out it may still have started, so for PLAN_START_HOLD_MS the
+//   mark counts as started: no second start, and the owner told daily that it is unconfirmed (L467).
 // One ask per card and plan (L450), the time of it kept in a fact. The plan's latest ask says what happens next:
 //   Live for over GO_REASK_MS: the owner is told daily, naming the ask. M2 pushes a go ask once and never lapses it (L462).
 //   Live for less, or a go it gave: nothing.
@@ -53,10 +61,19 @@ export const PLAN_ASK_FACT = (card) => HOLD_FACT(`plan-ask-${card}`);
 export const GO_REASK_MS = 24 * 60 * 60 * 1000;
 // One port call's limit. Several hung cards must fit the product's 30 s (tick.mjs APPROVALS_PRODUCT_MS).
 export const PLAN_PORT_MS = 5_000;
+// The pass stops calling out with less than this many port limits left: a little over one, so the last call and the
+// notes after it finish before the deadline ends the pass.
+const PLAN_LAST_CALL = 1.2;
+export const PLAN_SLOW_FACT = (card) => HOLD_FACT(`plan-slow-${card}`);
+export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
 const PLAN_PORTS = ['startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha', 'replyToLead'];
 // The words every unwired port throws (wiring/dispatcher-wiring.mjs): told once per product, not once per card.
 const NOT_WIRED = /not wired yet: /;
+class TimedOut extends Error {}
+class OutOfTime extends Error {}
 const cause = (card, why) => `plan-go-${card}-${why}`;
+// A card id has no dot (M3 lead-wording ID), so a product's cause can't be a card's.
+const whole = (product) => `product.${product}`;
 // The step's one write: its notes on a card's plan facts.
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
@@ -109,11 +126,23 @@ async function reviewed(ctx, ports, tell, c, fp) {
   const fact = rec.read('fact', id);
   const f = fact?.doc;
   if (f?.fingerprint !== fp.fingerprint || typeof f?.session !== 'string' || !f.session) {
-    const s = await ports.startPlanReview({ lead: PLAN_REVIEW_LEAD, product: ctx.product, card: c.id, fingerprint: fp.fingerprint, plan_sha256: fp.plan_sha256,
-      inputs: fp.inputs, wording: PLAN_REVIEW_WORDING });
-    if (s?.ok !== true || typeof s.session !== 'string' || !s.session) { tell(c.id, 'start', `no plan reviewer could start for card ${c.id}, so it can't be asked for a go: ${short(s?.reason)}`); return null; }
-    const doc = { fingerprint: fp.fingerprint, session: s.session, started_at: new Date(ctx.now()).toISOString() };
-    const w = noteFact(rec, id, fact?.rev ?? 0, doc);
+    const marked = f?.fingerprint === fp.fingerprint ? pastTime(f.starting_at, ctx.now()) : null;
+    if (marked !== null && ctx.now() - marked < PLAN_START_HOLD_MS) { tell(c.id, 'unconfirmed', `the plan reviewer for card ${c.id} may have started, but that was never confirmed, so none is started again for now and the card can't be asked for a go`); return null; }
+    const at = new Date(ctx.now()).toISOString();
+    const mark = noteFact(rec, id, fact?.rev ?? 0, { fingerprint: fp.fingerprint, starting_at: at });
+    if (!mark.ok) { tell(c.id, 'start-marked', `no plan reviewer was started for card ${c.id}: the start could not be noted first: ${short(mark.reason)}`); return null; }
+    // A clear no means nothing started, so the next pass may try. Any other failure keeps the mark: it may have.
+    const unmark = () => noteFact(rec, id, rec.read('fact', id)?.rev ?? 0, { fingerprint: fp.fingerprint });
+    let s;
+    try {
+      s = await ports.startPlanReview({ lead: PLAN_REVIEW_LEAD, product: ctx.product, card: c.id, fingerprint: fp.fingerprint, plan_sha256: fp.plan_sha256,
+        inputs: fp.inputs, wording: PLAN_REVIEW_WORDING, key: `${c.id}-${fp.fingerprint}` });
+    } catch (e) {
+      if (e instanceof OutOfTime || NOT_WIRED.test(String(e?.message))) unmark();
+      throw e;
+    }
+    if (s?.ok !== true || typeof s.session !== 'string' || !s.session) { unmark(); tell(c.id, 'start', `no plan reviewer could start for card ${c.id}, so it can't be asked for a go: ${short(s?.reason)}`); return null; }
+    const w = noteFact(rec, id, rec.read('fact', id)?.rev ?? 0, { fingerprint: fp.fingerprint, session: s.session, started_at: at });
     if (!w.ok) tell(c.id, 'start-noted', `the plan reviewer for card ${c.id} started but could not be noted, so another may start: ${short(w.reason)}`);
     return null;
   }
@@ -148,7 +177,7 @@ async function tellLead(ctx, ports, tell, c, fp) {
     const r = await ports.replyToLead({ lead, text: `The owner declined the plan for card ${c.id}. It won't be asked again until the plan changes.` });
     if (r?.ok !== true) { failed(r?.reason); return; }
   } catch (e) {
-    if (NOT_WIRED.test(String(e?.message))) throw e;
+    if (NOT_WIRED.test(String(e?.message)) || e instanceof OutOfTime) throw e;
     failed(e?.message ?? e);
     return;
   }
@@ -198,7 +227,7 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const n = goNeeded(c, view, rules, product);
   if (!n.needed) return;
   if (!n.root) { tell(c.id, 'chain', `card ${c.id} can't be asked for a go: ${short(n.reason)}`); return; }
-  if (n.root.id !== c.id) { tell(c.id, 'root', `card ${c.id} runs on root card ${n.root.id}'s go, which doesn't cover it, so it waits: ${short(n.reason)}`); return; }
+  if (n.root.id !== c.id) { tell(c.id, 'root', `card ${c.id} runs on root card ${n.root.id}'s go, so it waits: ${short(n.reason)}`); return; }
   const d = c.doc;
   if (d.tier === 1 && (!d.plan_sha256 || !d.main_commit)) { tell(c.id, 'plan', `card ${c.id} is Tier 1 but its plan hash or main commit is missing, so it can't be asked for a go`); return; }
   const fp = goFingerprint(ctx, c.id);
@@ -209,19 +238,51 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
     planCheck = await reviewed(ctx, ports, tell, c, fp);
     if (!planCheck) return;
   }
-  const r = await raiseGo(ctx, { cardId: c.id, rows: await ports.planRows({ product, card: c.id }), view: await ports.planView({ product }), mainSha: await ports.mainSha({ product }), planCheck });
+  const rows = await ports.planRows({ product, card: c.id });
+  const repo = await ports.planView({ product });
+  const mainSha = await ports.mainSha({ product });
+  const r = await raiseGo(limitedCtx(ctx, ports), { cardId: c.id, rows, view: repo && { isDir: (sha, f) => ports.timed('isDir', () => repo.isDir(sha, f)) }, mainSha, planCheck });
+  if (r.cause instanceof OutOfTime) throw r.cause;
   if (r.ok && !r.existing) { events.push(`asked ${r.id}`); noteAsked(ctx, tell, c, fp); }
   else if (!r.ok) tell(c.id, 'raise', `card ${c.id} could not be asked for a go: ${short(r.reason)}`);
 }
 
-// A port that hangs or throws becomes a throw naming it, which the card's own try tells.
+// What raiseGo reaches outside, each call limited. M2 closes a pull request and catches what the call throws, so running out
+// of time is asked before the call (`checkTime`), and that throw goes through M2 to the card's own try.
+const limitedCtx = (ctx, ports) => ({ ...ctx, checkTime: ports.checkTime, gh: { patch: (...a) => ports.limit('closing a pull request', () => ctx.gh.patch(...a)) } });
+
+// A call that hangs or throws becomes a throw naming it, which the card's own try tells; with the pass's time nearly gone,
+// no call is made at all. `timeouts` counts the calls that hung, which is how the pass sees which card they cost.
 function limited(ports) {
-  const within = (name) => async (x) => {
-    const r = await guarded(async () => ({ value: await ports[name](x) }), ports.portMs ?? PLAN_PORT_MS);
+  const portMs = ports.portMs ?? PLAN_PORT_MS;
+  const ends = Date.now() + (ports.passMs ?? portMs * 6);
+  const counted = { timeouts: 0 };
+  const checkTime = () => { if (ends - Date.now() < portMs * PLAN_LAST_CALL) throw new OutOfTime('the pass ran out of time'); };
+  const limit = async (name, f) => {
+    const r = await guarded(async () => ({ value: await f() }), portMs);
     if ('value' in r) return r.value;
-    throw new Error(`${name}: ${r.reason}`);
+    if (!/^it did not answer within /.test(r.reason)) throw new Error(`${name}: ${r.reason}`);
+    counted.timeouts += 1;
+    throw new TimedOut(`${name}: ${r.reason}`);
   };
-  return { ...ports, ...Object.fromEntries(PLAN_PORTS.map((n) => [n, within(n)])) };
+  const timed = async (name, f) => { checkTime(); return limit(name, f); };
+  return { ...ports, counted, checkTime, limit, timed, ...Object.fromEntries(PLAN_PORTS.map((n) => [n, (x) => timed(n, () => ports[n](x))])) };
+}
+
+// The cards of this product waiting in draft: those whose last call timed out behind the rest, oldest timeout first.
+function inTurn(ctx, cards) {
+  const slowAt = (c) => pastTime(ctx.record.read('fact', PLAN_SLOW_FACT(c.id))?.doc?.slow_at, ctx.now()) ?? -1;
+  return cards.filter((c) => !c.corrupt && c.doc && c.doc.product === ctx.product && c.doc.state === 'draft')
+    .map((c) => [slowAt(c), c]).sort(([a], [b]) => a - b).map(([, c]) => c);
+}
+
+function noteSlow(ctx, tell, c, slow) {
+  const rec = ctx.record;
+  const id = PLAN_SLOW_FACT(c.id);
+  const f = rec.read('fact', id);
+  if (!slow && !f?.doc?.slow_at) return;
+  const w = noteFact(rec, id, f?.rev ?? 0, { slow_at: slow ? new Date(ctx.now()).toISOString() : null });
+  if (!w.ok) tell(c.id, 'slow-noted', `card ${c.id}'s turn in the plan-go order could not be noted: ${short(w.reason)}`);
 }
 
 export async function planGoPass(ctx, unlimited) {
@@ -230,16 +291,18 @@ export async function planGoPass(ctx, unlimited) {
   const { alert } = ports;
   const tell = (card, why, text) => holdAlert({ rec, cause: cause(card, why), text, alert, now: ctx.now() });
   const events = [];
-  try { recordGos(ctx, tell, events); } catch (e) { tell(ctx.product, 'record', `product ${ctx.product}'s answered gos could not be read: ${short(e?.message ?? e)}`); }
+  try { recordGos(ctx, tell, events); } catch (e) { tell(whole(ctx.product), 'record', `product ${ctx.product}'s answered gos could not be read: ${short(e?.message ?? e)}`); }
   const view = { get: (e, id) => rec.read(e, id), list: (e) => rec.list(e), createdBy: (e, id) => rec.meta(e, id)?.createdBy ?? null };
   const st = askStore(rec);
-  for (const c of rec.list('card')) {
-    if (c.corrupt || !c.doc || c.doc.product !== ctx.product || c.doc.state !== 'draft') continue;
+  for (const c of inTurn(ctx, rec.list('card'))) {
+    const hungBefore = ports.counted.timeouts;
     try { await raiseFor(ctx, ports, tell, view, st, c, events); } catch (e) {
       const why = short(e?.message ?? e);
-      if (NOT_WIRED.test(why)) tell(ctx.product, 'wiring', `no go can be asked on product ${ctx.product}: ${why}`);
+      if (e instanceof OutOfTime) { tell(c.id, 'reached', `card ${c.id} was not reached: slow calls on other cards used up this pass's time. It is tried again next pass`); continue; }
+      if (NOT_WIRED.test(why)) tell(whole(ctx.product), 'wiring', `no go can be asked on product ${ctx.product}: ${why}`);
       else tell(c.id, 'failed', `asking for a go on card ${c.id} failed: ${why}`);
     }
+    noteSlow(ctx, tell, c, ports.counted.timeouts > hungBefore);
   }
   return { ok: true, events };
 }

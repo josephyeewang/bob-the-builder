@@ -127,6 +127,18 @@ test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan r
   assert.match(replies[0].text, /declined the plan for card C-3/);
 });
 
+test('L467: the plan-go step gets the same deadline as its product, so a short one stops the calls and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const calls = [];
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const planRows = async (x) => { calls.push(x); return {}; };
+  await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows, approvalsProductMs: 1_000 } });
+  assert.deepEqual(calls, []);
+  assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
+});
+
 test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
   const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
   const started = [];

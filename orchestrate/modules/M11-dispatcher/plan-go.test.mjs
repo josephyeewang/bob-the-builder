@@ -13,7 +13,8 @@ import { askStore } from '../M2-approvals/ask-store.mjs';
 import { doneBar } from '../M2-approvals/go.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS } from './plan-go.mjs';
+import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS } from './plan-go.mjs';
+import { approvalsStep, APPROVALS_PRODUCT_MS } from './tick.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -631,7 +632,7 @@ test('L462 m3: a fix card its root\'s go doesn\'t cover is told daily, naming th
   answer(w, asks(w)[0].id, 'Go', true);
   await pass(w, {}, { record: rec });
   assert.ok(w.t.record.read('go', 'go-A'));
-  const told = () => w.sent.filter((s) => /card B runs on root card A's go, which doesn't cover it.*no go from the owner matches/.test(s)).length;
+  const told = () => w.sent.filter((s) => /card B runs on root card A's go, so it waits.*no go from the owner matches/.test(s)).length;
   await pass(w, {}, { record: rec });
   assert.equal(told(), 1, w.sent.join(' | '));
   later(w, 23 * HOUR);
@@ -656,7 +657,7 @@ for (const [port, setup] of [
     const real = w.ports[port];
     let first = true;
     const hangsOnce = (x) => { if (!first) return real(x); first = false; return new Promise(() => {}); };
-    await pass(w, { portMs: 20, [port]: hangsOnce });
+    await pass(w, { portMs: 20, passMs: 2000, [port]: hangsOnce });
     assert.ok(w.sent.some((s) => new RegExp(`card A failed: ${port}: it did not answer within 20 ms`).test(s)), w.sent.join(' | '));
     assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
   });
@@ -666,13 +667,13 @@ test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit
   const w = world();
   t1(w, 'A');
   await pass(w);
-  await pass(w, { portMs: 20, planReviewAnswer: () => new Promise(() => {}) });
+  await pass(w, { portMs: 20, passMs: 2000, planReviewAnswer: () => new Promise(() => {}) });
   assert.ok(w.sent.some((s) => /card A failed: planReviewAnswer: it did not answer within 20 ms/.test(s)), w.sent.join(' | '));
   const v = world();
   card(v, 'A');
   await pass(v);
   answer(v, asks(v)[0].id, 'Not now', false);
-  await pass(v, { portMs: 20, replyToLead: () => new Promise(() => {}) });
+  await pass(v, { portMs: 20, passMs: 2000, replyToLead: () => new Promise(() => {}) });
   assert.ok(v.sent.some((s) => /Lead could not be told .*replyToLead: it did not answer within 20 ms/.test(s)), v.sent.join(' | '));
 });
 
@@ -695,9 +696,12 @@ test('L462: a port not wired yet is told once for the product, not once per card
 test('L462: a review that started but could not be noted has its own tell, and hides no refused start', async () => {
   const w = world();
   t1(w, 'A');
-  const rec = { ...w.t.record, write: (x) => (x.entity === 'fact' && x.id === PLAN_REVIEW_FACT('A') ? { ok: false, reason: 'disk full' } : w.t.record.write(x)) };
+  const rec = { ...w.t.record, write: (x) => (x.entity === 'fact' && x.id === PLAN_REVIEW_FACT('A') && x.doc?.session ? { ok: false, reason: 'disk full' } : w.t.record.write(x)) };
   await pass(w, {}, { record: rec });
   assert.ok(w.sent.some((s) => /started but could not be noted/.test(s)), w.sent.join(' | '));
+  await pass(w);
+  assert.equal(w.started.length, 1, 'the unconfirmed start is not repeated');
+  later(w, PLAN_START_HOLD_MS);
   await pass(w, { startPlanReview: async () => ({ ok: false, reason: 'outage' }) });
   assert.ok(w.sent.some((s) => /no plan reviewer could start/.test(s)), w.sent.join(' | '));
 });
@@ -749,4 +753,280 @@ test('a card past draft is not asked', async () => {
   const rec = { ...w.t.record, list: (e) => w.t.record.list(e).map((c) => (e === 'card' ? { ...c, doc: { ...c.doc, state: 'ready' } } : c)) };
   await pass(w, {}, { record: rec });
   assert.equal(asks(w).length, 0);
+});
+
+// ---- L467: a pass under a hang. Each tick is its own process: when the step ends, main exits, so a pass cut off by the
+// product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits; much further and
+// the Record's own writes would take up too much of a port's limit.
+const SCALED = { portMs: PLAN_PORT_MS / 20, productMs: APPROVALS_PRODUCT_MS / 20 };
+const ids10 = Array.from({ length: 10 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`);
+
+async function tickAsProcess(w, over) {
+  const now = w.t.clock.t;
+  let alive = true;
+  const base = w.t.record;
+  const rec = Object.create(base, { write: { value: (x) => (alive ? base.write(x) : { ok: false, reason: 'process gone' }) } });
+  const before = w.sent.length;
+  await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: SCALED.productMs,
+    pass: (ctx) => planGoPass(ctx, { ...w.ports, alert: outbox(rec, now), portMs: SCALED.portMs, passMs: SCALED.productMs, ...over }) });
+  alive = false;
+  await sendAlerts(base, async (text) => { w.sent.push(text); return true; }, now);
+  const told = w.sent.slice(before);
+  return ids10.filter((id) => told.some((s) => new RegExp(`card ${id}\\b`).test(s)));
+}
+
+const hangsFor = (w, who) => (x) => (who(x.card) ? new Promise(() => {}) : w.ports.planRows(x));
+
+test('L467: with every card hanging, a tick names all of them or the rest the next, and the step never fails', async () => {
+  const w = world();
+  ids10.forEach((id) => card(w, id));
+  const planRows = hangsFor(w, () => true);
+  const named = new Set(await tickAsProcess(w, { planRows }));
+  assert.ok(named.size >= 5, `first tick named ${[...named]}`);
+  later(w, HOUR);
+  (await tickAsProcess(w, { planRows })).forEach((id) => named.add(id));
+  assert.deepEqual([...named].sort(), ids10, 'every card is named within a day');
+  assert.ok(w.sent.some((s) => /card C10 was not reached/.test(s)), w.sent.join(' | '));
+});
+
+test('L467: with the first six hanging, all are named at once, the healthy four are asked next, and the turn is kept in a fact', async () => {
+  const w = world();
+  ids10.forEach((id) => card(w, id));
+  const planRows = hangsFor(w, (id) => Number(id.slice(1)) <= 6);
+  const first = await tickAsProcess(w, { planRows });
+  assert.deepEqual(first, ids10, 'all ten named in the first tick');
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at);
+  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('C10')), null);
+  for (let n = 0; n < 3 && asks(w).length < 4; n++) {
+    later(w, HOUR);
+    await tickAsProcess(w, { planRows });
+  }
+  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C07', 'C08', 'C09', 'C10']);
+});
+
+test('L467: a card that hung stops being slow once its calls answer, and a not-reached card is told only once a day', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  await pass(w, { portMs: 20, passMs: 1000, planRows: (x) => (x.card === 'A' ? new Promise(() => {}) : w.ports.planRows(x)) });
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
+  await pass(w, { portMs: 20, passMs: 1000 });
+  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at, null);
+  const v = world();
+  card(v, 'A');
+  await pass(v, { portMs: 20, passMs: 1 });
+  await pass(v, { portMs: 20, passMs: 1 });
+  assert.equal(v.sent.filter((s) => /card A was not reached/.test(s)).length, 1, v.sent.join(' | '));
+  later(v, 25 * HOUR);
+  await pass(v, { portMs: 20, passMs: 1 });
+  assert.equal(v.sent.filter((s) => /card A was not reached/.test(s)).length, 2);
+  assert.deepEqual(asks(v), []);
+});
+
+test('L467: a card that needs no call still goes on once the time is up', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w);
+  answer(w, asks(w)[0].id, 'Go', true);
+  await pass(w, { portMs: 20, passMs: 1 });
+  assert.ok(askStore(w.t.record).go('go-A'), 'the go is recorded with no port at all');
+  assert.ok(!w.sent.some((s) => /not reached/.test(s)), w.sent.join(' | '));
+});
+
+test('L467: a card told as not reached while time is up has no start mark left behind', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { portMs: 20, passMs: 1 });
+  assert.equal(w.started.length, 0);
+  await pass(w);
+  assert.equal(w.started.length, 1);
+  assert.ok(!w.sent.some((s) => /never confirmed/.test(s)), w.sent.join(' | '));
+});
+
+test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the next card still runs', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  let first = true;
+  const hung = { isDir: () => { if (first) { first = false; return new Promise(() => {}); } return false; } };
+  await pass(w, { portMs: 20, passMs: 1000, planView: async () => hung });
+  assert.ok(w.sent.some((s) => /card A could not be asked for a go: .*isDir: it did not answer within 20 ms/.test(s)), w.sent.join(' | '));
+  assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
+});
+
+test('L467 m-a: time up before isDir counts as not reached, not as a failed read', async () => {
+  const w = world();
+  card(w, 'A');
+  const asked = [];
+  const planView = async () => ({ isDir: (sha, f) => { asked.push(f); return false; } });
+  await timeJumps((jump) => pass(w, { portMs: 100, passMs: 1000, planView, mainSha: async () => { jump(); return w.M0; } }));
+  assert.deepEqual(asked, []);
+  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+  assert.ok(!w.sent.some((s) => /could not be asked/.test(s)), w.sent.join(' | '));
+});
+
+// Runs f with a jump in the clock the budget reads, so which call runs out of time doesn't depend on how fast the test runs.
+async function timeJumps(f) {
+  const real = Date.now;
+  let extra = 0;
+  Date.now = () => real() + extra;
+  try { return await f(() => { extra = 60_000; }); } finally { Date.now = real; }
+}
+
+// A Tier-1 ask with a pull request, asked for plan A, and the plan moved on.
+async function askWithPr(w) {
+  t1(w, 'A');
+  await pass(w);
+  w.answer = { ok: true, answer: 'PASS' };
+  await pass(w);
+  const [a] = asks(w);
+  must(w.t.record.write({ actor: 'approvals', entity: 'ask', id: a.id, expectRev: a.rev, doc: { ...a.doc, state: 'pushed', pr: 7, raised_at: new Date(w.t.clock.t).toISOString(), raised_reask: 0 } }));
+  replan(w, 'A');
+  await pass(w);
+  return a.id;
+}
+
+test('L467 m-a: a close of an old pull request that hangs is limited, and the card is told and marked slow', async () => {
+  const w = world();
+  await askWithPr(w);
+  const gh = { ...w.t.ctx.gh, patch: () => new Promise(() => {}) };
+  await pass(w, { portMs: 20, passMs: 1000 }, { gh });
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
+});
+
+test('L467 m-a: with no time left for the close, the old ask stays and the card is told as not reached', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const calls = [];
+  const gh = { ...w.t.ctx.gh, patch: async (...a) => { calls.push(a); return { status: 200 }; } };
+  const dirs = w.t.record.read('card', 'A').doc.files.length;
+  let read = 0;
+  await timeJumps((jump) => pass(w, { portMs: 100, passMs: 1000, planView: async () => ({ isDir: () => { read += 1; if (read === dirs) jump(); return false; } }) }, { gh }));
+  assert.equal(read, dirs, 'every file was read, so it is the close that was stopped');
+  assert.deepEqual(calls, []);
+  assert.equal(askStore(w.t.record).ask(id).doc.state, 'pushed');
+  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+});
+
+test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', async () => {
+  const w = world();
+  t1(w, 'A');
+  const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
+  await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
+  assert.equal(w.started.length, 1);
+  assert.equal(w.started[0].key, `A-${w.started[0].fingerprint}`);
+  const told = () => w.sent.filter((s) => /plan reviewer for card A may have started, but that was never confirmed/.test(s)).length;
+  await pass(w);
+  await pass(w);
+  assert.equal(w.started.length, 1, 'a mark under a day old counts as started');
+  assert.equal(told(), 1);
+  later(w, PLAN_START_HOLD_MS - HOUR);
+  await pass(w);
+  assert.equal(w.started.length, 1);
+  later(w, HOUR);
+  await pass(w);
+  assert.equal(w.started.length, 2, 'after the hold the start is tried again');
+});
+
+test('L467 m-b: the mark is on the Record before the start is called, and a mark that can\'t be written starts nothing', async () => {
+  const w = world();
+  t1(w, 'A');
+  let seen = null;
+  await pass(w, { startPlanReview: async () => { seen = w.t.record.read('fact', PLAN_REVIEW_FACT('A'))?.doc; return { ok: true, session: 'S-review' }; } });
+  assert.ok(seen.starting_at);
+  assert.ok(!seen.session);
+  const v = world();
+  t1(v, 'A');
+  const rec = { ...v.t.record, write: (x) => (x.entity === 'fact' && x.id === PLAN_REVIEW_FACT('A') ? { ok: false, reason: 'disk full' } : v.t.record.write(x)) };
+  await pass(v, {}, { record: rec });
+  assert.equal(v.started.length, 0);
+  assert.ok(v.sent.some((s) => /no plan reviewer was started for card A: the start could not be noted first: disk full/.test(s)), v.sent.join(' | '));
+});
+
+test('L467 m-b: a clear no clears the mark, so the next pass tries; a start that threw keeps it', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { startPlanReview: async () => ({ ok: false, reason: 'outage' }) });
+  await pass(w);
+  assert.equal(w.started.length, 1);
+  const v = world();
+  t1(v, 'A');
+  await pass(v, { startPlanReview: async () => { throw new Error('connection lost'); } });
+  await pass(v);
+  assert.equal(v.started.length, 0);
+  assert.ok(v.sent.some((s) => /never confirmed/.test(s)), v.sent.join(' | '));
+});
+
+test('L467 m-b: a start port not wired yet started nothing, so it leaves no mark', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { startPlanReview: async () => { throw new Error('not wired yet: startPlanReview (R-0b-162)'); } });
+  await pass(w);
+  assert.equal(w.started.length, 1);
+});
+
+test('L467 m-b: a new plan is not held by the old plan\'s mark', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { portMs: 20, passMs: 1000, startPlanReview: () => new Promise(() => {}) });
+  replan(w, 'A');
+  await pass(w);
+  assert.equal(w.started.length, 1);
+});
+
+test('L467 m-c: a close that fails and can\'t be told stops the raise, naming the ask, and leaves it live', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const alerts = [];
+  const gh = { ...w.t.ctx.gh, patch: async () => ({ status: 500 }) };
+  const base = outbox(w.t.record, w.t.clock.t);
+  const alert = (x) => { alerts.push(x); return x?.type === 'decision_pr_not_closed' ? false : base(x); };
+  const ctx = { ...w.t.ctx, gh, alert };
+  await planGoPass(ctx, { ...w.ports, alert: base });
+  await sendAlerts(w.t.record, async (text) => { w.sent.push(text); return true; }, w.t.clock.t);
+  assert.ok(alerts.some((x) => x?.type === 'decision_pr_not_closed'));
+  assert.ok(w.sent.some((s) => new RegExp(`card A could not be asked for a go: the pull request of ask ${id} could not be closed`).test(s)), w.sent.join(' | '));
+  assert.equal(askStore(w.t.record).ask(id).doc.state, 'pushed');
+  assert.equal(asks(w).length, 1);
+});
+
+test('L467 m-c: six calls at the port limit fit inside the product\'s deadline', () => {
+  assert.ok(PLAN_PORT_MS * 6 <= APPROVALS_PRODUCT_MS);
+});
+
+test('L467: an answered go on a plan the card left counts again if the plan comes back', async () => {
+  const w = world();
+  const files = card(w, 'A').files;
+  await pass(w);
+  const first = asks(w)[0].id;
+  answer(w, first, 'Go', true);
+  replan(w, 'A');
+  await pass(w);
+  assert.equal(askStore(w.t.record).ask(first).doc.state, 'answered', 'an answered ask is not withdrawn');
+  replan(w, 'A', files);
+  await pass(w);
+  assert.equal(askStore(w.t.record).go('go-A')?.doc.ask, first);
+});
+
+test('L467: one answered go that can\'t be recorded is told under its card, and the next is still recorded', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  await pass(w);
+  for (const a of asks(w)) answer(w, a.id, 'Go', true);
+  const bad = asks(w).find((a) => a.doc.card === 'A').id;
+  const rec = Object.create(w.t.record, { read: { value: (e, id) => { if (e === 'ask' && id === bad && rec.armed) throw new Error('ask unreadable'); return w.t.record.read(e, id); } } });
+  rec.armed = true;
+  await pass(w, {}, { record: rec });
+  assert.ok(w.sent.some((s) => /the owner's go on card A could not be recorded: ask unreadable/.test(s)), w.sent.join(' | '));
+  assert.ok(askStore(w.t.record).go('go-B'));
+  assert.equal(askStore(w.t.record).go('go-A'), null);
+});
+
+test('L467: a product\'s causes can\'t be a card\'s: they carry a dot, which no card id may', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w, { planRows: async () => { throw new Error('not wired yet: planRows (R-0b-162)'); } });
+  assert.match(JSON.stringify(w.t.record.list('fact').map((f) => f.id)), /hold-plan-go-product\./);
 });

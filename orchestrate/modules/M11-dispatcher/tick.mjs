@@ -291,7 +291,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // Answered gos become go records, and cards wanting a go are asked (plan-go.mjs). After Approvals, so a go is on record
   // before the main pass reads it. Runs during an outage: only a plan reviewer starts here, and the read-only gate holds it.
   await run('plan-go', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, what: 'plan-go', ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }),
-    pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x) }) }));
+    pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x), passMs: p.approvalsProductMs ?? APPROVALS_PRODUCT_MS }) }));
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
       saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });

@@ -103,10 +103,11 @@ const closedGoAsk = (st, cardId, a) => ['withdrawn', 'expired'].includes(a.doc.s
 // A new plan's ask replaces the card's older live ones (L462 m2): their boxes are released and a Tier-1 go's pull request
 // closed, so the owner isn't left answering a plan that has gone. `withdrawn_for` tells this from any other withdrawal:
 // if the plan comes back, it is asked again. → null, or the reason one could not be withdrawn (raiseGo then raises nothing
-// and the next raise tries again).
+// and the next raise tries again). `ctx.checkTime`, if given, throws when the caller has no time left for a close.
 async function withdrawOlder(ctx, st, cardId, fingerprint) {
   for (const a of st.asks()) {
     if (a.doc.card !== cardId || !activeKind(a.doc.kind)?.go || a.doc.fingerprint === fingerprint || !['open', 'pushed'].includes(a.doc.state)) continue;
+    ctx.checkTime?.();
     if (!(await closeDecisionPr(ctx, a.id, a.doc))) return `the pull request of ask ${a.id} could not be closed`;
     const next = structuredClone(a.doc);
     releaseBoxes(next, 'withdrawn', ctx.now(), { moveBack: false });
