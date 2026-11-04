@@ -449,6 +449,13 @@ test('L72: the session is the newest worker launch for the card, and the pull re
   assert.match(requestMerges({ alert: noAlert, rec: readyRec({}, [launch('C-1', 'S-9'), prSeen(7), prSeen(9)]), rules: R, now: T0, b: GREEN })[0][1], /2 pull requests show head aaaaaaa/);
 });
 
+// L367: the Record's order decides which launch is newest, so a launch stamped far ahead doesn't outrank a later one.
+test('L367: the session is the launch the Record took last, whatever launched_at says', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-8', 365 * 24 * 60), launch('C-1', 'S-9', -30), prSeen(7)]);
+  assert.deepEqual(requestMerges({ alert: noAlert, rec, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(requests(rec).map((q) => q.session_id), ['S-9']);
+});
+
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
   // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, outboxLeft } from './review-runner.mjs';
+import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { createHash } from 'node:crypto';
@@ -1227,4 +1227,13 @@ test('L83 M-1 (c): a session the runner lost track of is swept, and its pinned p
   await runnerPass(w.ctx);
   assert.equal(w.ended('S-1').ended.how, 'swept');
   assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/);
+});
+
+// L367: the runner's launches are outside the Record, so their stored time orders them, read by pastTime's rule.
+test('L367: a launched_at that lies ahead or cannot be read sorts oldest', () => {
+  const now = Date.parse('2026-11-03T12:00:00Z');
+  const l = (id, launched_at) => ({ doc: { session_id: id, launched_at } });
+  const order = newestFirst([l('old', '2026-11-01T12:00:00Z'), l('ahead', '2027-11-03T12:00:00Z'), l('new', '2026-11-03T11:00:00Z'), l('bad', 'not a time'), l('none')], now);
+  assert.deepEqual(order.slice(0, 2).map((x) => x.doc.session_id), ['new', 'old']);
+  assert.deepEqual(order.slice(2).map((x) => x.doc.session_id).sort(), ['ahead', 'bad', 'none']);
 });

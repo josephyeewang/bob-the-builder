@@ -25,7 +25,7 @@ import { join, resolve, sep } from 'node:path';
 import { git as safeGit } from '../M4-workshop/git/safe-git.mjs';
 import { readBundleHeader } from '../M4-workshop/git/push.mjs';
 import { isProtectedName } from '../M4-workshop/launcher/worker-copy.mjs';
-import { PR_FACT } from './merges.mjs';
+import { PR_FACT, workerLaunches } from './merges.mjs';
 import { note } from './moves.mjs';
 import { createAsk } from '../M2-approvals/binding.mjs';
 import { consumeAsk } from '../M2-approvals/ask-store.mjs';
@@ -236,10 +236,8 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
 }
 
 // The copy folder the newest worker launch for the card names, or null when no launch names one.
-function namedCopy(rec, card) {
-  const mine = rec.list('launch').filter((l) => l.doc?.card === card && l.doc.role === 'worker')
-    .sort((a, b) => String(b.doc.launched_at ?? '').localeCompare(String(a.doc.launched_at ?? '')));
-  return mine[0]?.doc?.copy ?? null;
+export function namedCopy(rec, card) {
+  return workerLaunches(rec, card)[0]?.doc?.copy ?? null;
 }
 
 /** (e) The folder is copiesRoot/<card>, a real folder, and the one the record names for the card (`named.copy`). */

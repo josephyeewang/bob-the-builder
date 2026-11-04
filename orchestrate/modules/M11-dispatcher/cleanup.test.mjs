@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, ownCopy, STALE_STAGING_MS } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -411,4 +411,10 @@ test("audit 0b-6 r3 MIN-5 (J7): Joe's delete is refused when the record now name
   assert.equal(r.result, 'refused');
   assert.match(r.reasons.join(' '), /record names another copy/);
   assert.ok(existsSync(w.copy));
+});
+
+// L367: the copy is the one on the launch the Record took last, whatever launched_at says.
+test('L367: a launch stamped far ahead does not outrank a later launch', () => {
+  const rec = recWith([launchFor('/copies/old', 'L-1', T0 + 365 * 24 * 60 * MIN), launchFor('/copies/new', 'L-2', T0 - MIN)]);
+  assert.equal(namedCopy(rec, 'C-1'), '/copies/new');
 });

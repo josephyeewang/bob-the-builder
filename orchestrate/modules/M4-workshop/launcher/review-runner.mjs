@@ -55,6 +55,7 @@ import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSy
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { pastTime } from '../../../shared/still-waiting.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
@@ -80,6 +81,12 @@ const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 // The earlier failing verdicts' notes a new reviewer gets in its prompt (L69 point 4): the newest few, each cut short.
 export const MAX_EARLIER = 5;
+// The runner's launch records, newest first. They live in its own folder, outside the Record, so there is no diary
+// order to use (L367). A launched_at that can't be read or lies ahead counts as oldest, so it can't crowd out real ones.
+export function newestFirst(launches, now) {
+  const at = (l) => pastTime(l.doc.launched_at, now) ?? -1;
+  return [...launches].sort((x, y) => at(y) - at(x));
+}
 export const MAX_EARLIER_NOTES = 4000;
 export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, packages: 'packages', status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
@@ -621,7 +628,7 @@ export async function runnerPass(ctx) {
     // settled verdict counts, read from the bytes its ended record pins (L70 point 5); a file changed since says nothing.
     // The wiring shows them as quoted data from an earlier reviewer, never as instructions (`earlierBlock`).
     const earlier = [];
-    for (const { doc: d } of [...rl.launches].sort((x, y) => String(y.doc.launched_at).localeCompare(String(x.doc.launched_at)))) {
+    for (const { doc: d } of newestFirst(rl.launches, now)) {
       if (earlier.length >= MAX_EARLIER) break;
       if (d.card !== card || d.role !== role || d.head === head || d.tree === tree || asideIds.has(d.session_id)) continue;
       const pin = runnerEnded({ root: P.ended, uid, role, card, head: d.head, sessionId: d.session_id });

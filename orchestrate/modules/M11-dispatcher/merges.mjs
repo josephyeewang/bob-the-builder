@@ -362,9 +362,15 @@ export function endedMerges(rec, card, head) {
 
 // The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
 function workerSession(rec, cardId) {
-  const mine = rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId && typeof l.doc.session_id === 'string');
-  mine.sort((x, y) => String(y.doc.launched_at ?? '').localeCompare(String(x.doc.launched_at ?? '')));
-  return mine[0]?.doc.session_id ?? null;
+  return workerLaunches(rec, cardId).find((l) => typeof l.doc.session_id === 'string')?.doc.session_id ?? null;
+}
+// A card's worker launches, newest first, in the order the Record took them: launched_at is a stored time, and one
+// stamped ahead by a clock that went back must not outrank a later launch (L367).
+export function workerLaunches(rec, cardId) {
+  const seq = new Map();
+  for (const line of rec.diary({ since: 0 })) for (const w of line.writes ?? []) if (w.entity === 'launch') seq.set(w.id, line.seq);
+  return rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId)
+    .sort((x, y) => (seq.get(y.id) ?? 0) - (seq.get(x.id) ?? 0));
 }
 // The card's pull request: the one Sensors reading whose head is the card's head (a card carries no PR number; no
 // script may write one on it).
