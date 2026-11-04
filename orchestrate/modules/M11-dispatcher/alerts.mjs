@@ -11,10 +11,48 @@
 // delivered later can neither mark the next occurrence as told nor tell Joe about what has passed.
 
 import { randomUUID } from 'node:crypto';
+import { note } from './moves.mjs';
 import { STATES } from '../../shared/record.mjs';
 
 const iso = (ms) => new Date(ms).toISOString();
-export const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+// Every write here is "only if unchanged since read" (L288 MAT-4): `change(doc)` builds the new doc from the one
+// read, and it is written at that read's rev. The rev used to be read again at write time, so a write from another
+// process in between (the alert channel's robot job beside the Dispatcher) was silently overwritten. If another
+// writer got in first, the fact is read and the doc built again, up to WRITE_TRIES times; `change` returning null
+// writes nothing. Any other refusal is returned as it is.
+export const WRITE_TRIES = 5;
+function updateFact(rec, id, change, kind) {
+  for (let i = 0; i < WRITE_TRIES; i += 1) {
+    const cur = rec.read('fact', id);
+    const doc = change(cur?.doc);
+    if (doc === null) return { ok: true, unchanged: true };
+    const r = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0, doc, kind });
+    if (r?.ok === true || (rec.read('fact', id)?.rev ?? 0) === (cur?.rev ?? 0)) return r;
+  }
+  return { ok: false, reason: `${id} kept changing under the write (${WRITE_TRIES} tries)` };
+}
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+/**
+ * Writes `doc` over fact `id` as a change from `base`, the doc the caller read (L335 m-1): through updateFact, so at
+ * the version it reads and again on a conflict, and on each try only what the caller changed (the keys where `doc`
+ * differs from `base`, set or removed) goes onto the doc as it is now. Nothing else written: exactly `doc`; something
+ * else written meanwhile: its own fields stay. A key in `force` is written as `doc` has it even when `base` had the same
+ * (a clear that must win over a mark written after the read). Answers updateFact's answer; a read or write that throws fails the step, as a direct write does.
+ */
+export function writeFrom(rec, id, base, doc, kind, { force = [] } = {}) {
+  const was = base ?? {};
+  const keys = new Set([...Object.keys(was), ...Object.keys(doc), ...force]);
+  return updateFact(rec, id, (cur) => {
+    const next = { ...(cur ?? {}) };
+    for (const k of keys) {
+      if (same(was[k], doc[k]) && !force.includes(k)) continue;
+      if (Object.hasOwn(doc, k)) next[k] = doc[k]; else delete next[k];
+    }
+    // The Record refuses a write that changes nothing; here that is nothing to do.
+    return cur && same(next, cur) ? null : next;
+  }, kind);
+}
 
 export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
@@ -91,15 +129,20 @@ const withDrops = (rec, d, entries, dropped) => ({ ...d, entries, dropped: (d.dr
  * drop is still counted, but the caller is not told it was queued).
  */
 export function queueAlert(rec, text, { now, mark = null } = {}) {
-  const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
   const key = keyOf(mark);
-  const next = (d.next ?? 0) + 1;
-  const entry = { id: `a${next}`, key, text: String(text), mark, queued_at: iso(now) };
-  const all = entriesOf(d).slice();
-  const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
-  if (i >= 0) all[i] = entry; else all.push(entry);
-  const { entries, dropped } = capQueue(rec, all);
-  const kept = putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), next }, 'alert_queued').ok === true;
+  let entry;
+  let dropped = [];
+  const kept = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+    const d = doc ?? {};
+    const next = (d.next ?? 0) + 1;
+    entry = { id: `a${next}`, key, text: String(text), mark, queued_at: iso(now) };
+    const all = entriesOf(d).slice();
+    const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
+    if (i >= 0) all[i] = entry; else all.push(entry);
+    const capped = capQueue(rec, all);
+    dropped = capped.dropped;
+    return { ...withDrops(rec, d, capped.entries, dropped), next };
+  }, 'alert_queued').ok === true;
   return kept && !dropped.some((e) => e.id === entry.id) ? entry.id : null;
 }
 
@@ -109,21 +152,35 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
  * mark goes on has a step that calls this where the cause clears, or a line in alert-sites.test.mjs saying
  * why a late mark there is harmless. Returns whether the queue was written; never throws.
  */
-export function dropCause(rec, fact) {
+export function dropCause(rec, fact) { return dropAnswer(rec, fact).ok; }
+
+/** dropCause's answer in full: `removed` says the queue held something of this cause (L449 m2). */
+export function dropAnswer(rec, fact) {
+  let removed = false;
   try {
-    const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc;
-    const left = entriesOf(d).filter((e) => e.mark?.fact !== fact);
-    const causes = causesOf(d).filter((c) => c.fact !== fact);
-    if (left.length === entriesOf(d).length && causes.length === causesOf(d).length) return true;
-    return putFact(rec, ALERT_QUEUE_FACT, { ...d, entries: left, dropped_causes: causes }, 'alert_cause_cleared').ok === true;
-  } catch { return false; }
+    const ok = updateFact(rec, ALERT_QUEUE_FACT, (d) => {
+      const left = entriesOf(d).filter((e) => e.mark?.fact !== fact);
+      const causes = causesOf(d).filter((c) => c.fact !== fact);
+      removed = left.length !== entriesOf(d).length || causes.length !== causesOf(d).length;
+      return removed ? { ...d, entries: left, dropped_causes: causes } : null;
+    }, 'alert_cause_cleared').ok === true;
+    return { ok, removed };
+  } catch { return { ok: false, removed }; }
 }
 
-/** The wait on `fact` has ended (still-waiting's clear): its queued copy is dropped, and the mark cleared only if set. */
-export function clearTold(rec, fact, kind = 'hold_cleared') {
-  dropCause(rec, fact);
-  const cur = rec.read('fact', fact)?.doc;
-  if (cur != null && !(typeof cur === 'object' && cur.told_at == null)) putFact(rec, fact, { ...(typeof cur === 'object' ? cur : {}), told_at: null }, kind);
+/**
+ * The one order where a cause clears (L335 M-1, L354): its queued alert leaves first, then `clear` runs, so no told mark
+ * can land after the clear. A drop that fails is told through `report`. With `hold` (the default, for a step that comes
+ * back to this cause next pass) the clear waits for a drop that works; `hold: false` is for a clear with no next pass,
+ * which goes ahead. A clear that writes told fields forces them (writeFrom): a diff would keep a mark.
+ * `clear(moved)`: `moved` says something of this cause was in the queue, so a mark may be on its way and the clear must
+ * write, moving the fact's version so that mark conflicts (L449 m1, m2). With nothing queued and no mark there is
+ * nothing to race, and a clear that runs every pass writes nothing. `report(line, fact)`.
+ */
+export function clearCause(rec, fact, clear, report, { hold = true } = {}) {
+  const { ok, removed } = dropAnswer(rec, fact);
+  if (!ok) report(`the queued alert for ${fact} could not be dropped; ${hold ? 'the clear waits for the next pass' : 'the cause was cleared anyway, so it may still be sent'}`, fact);
+  return ok || !hold ? clear(removed) : undefined;
 }
 
 /** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */
@@ -228,24 +285,40 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
  * dropped while the send was out are told on the next one (#39 check, M1), and its own cause's drop is cleared.
  */
 export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
+  if (!ok) {
+    const held = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+      const d = doc ?? {};
+      const e = entriesOf(d).find(sameAs(sent));
+      if (!e) return null;
+      // Only the entry that was tried is held, so the held cap counts it; an entry not yet tried counts only
+      // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
+      // ahead of a burst).
+      const { entries, dropped } = capQueue(rec, [...entriesOf(d).filter((x) => x.id !== e.id), { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
+      return { ...withDrops(rec, d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) };
+    }, 'alert_failed');
+    return held?.ok === true ? { ok: true } : { ok: false, reason: `the queue (holding it): ${held?.reason ?? 'no answer'}` };
+  }
   const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
   const e = entriesOf(d).find(sameAs(sent));
-  if (!ok) {
-    if (!e) return;
-    // Only the entry that was tried is held, so the held cap counts it; an entry not yet tried counts only
-    // against the larger untried cap (audit 0b-6 r8 MAT-2: one text the port always refuses, or one timeout,
-    // ahead of a burst).
-    const { entries, dropped } = capQueue(rec, [...entriesOf(d).filter((x) => x.id !== e.id), { ...e, held: true, tries: (e.tries ?? 0) + 1 }]);
-    putFact(rec, ALERT_QUEUE_FACT, { ...withDrops(rec, d, entries, dropped), error: `an alert could not be sent: ${why}`, at: iso(now) }, 'alert_failed');
-    return;
-  }
   const told = new Set([...(sent.carried?.causes ?? []), ...(sent.carried?.own ?? [])]);
-  if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.id))) return;
-  if (e && sent.mark?.fact) putFact(rec, sent.mark.fact, { ...rec.read('fact', sent.mark.fact)?.doc, ...sent.mark.fields }, sent.mark.kind ?? 'alert_told');
-  const cur = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
-  const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
-  const causes = causesOf(cur).filter((c) => !told.has(c.id));
-  putFact(rec, ALERT_QUEUE_FACT, { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) }, 'alert_sent');
+  if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.id))) return { ok: true };
+  const gave = [];
+  // The mark goes on only while the entry is still queued, read after the fact and written at the fact's version
+  // read (updateFact's loop): every clear site drops its cause before its clear write, so a mark that would land
+  // after the clear finds the entry gone (L335 M-1, L341).
+  if (e && sent.mark?.fact) {
+    const queued = () => entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((x) => x.id === e.id);
+    const m = updateFact(rec, sent.mark.fact, (doc) => (queued() ? { ...doc, ...sent.mark.fields } : null), sent.mark.kind ?? 'alert_told');
+    if (m?.ok !== true) gave.push(`its mark on ${sent.mark.fact}: ${m?.reason ?? 'no answer'}`);
+  }
+  const q = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+    const cur = doc ?? {};
+    const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
+    const causes = causesOf(cur).filter((c) => !told.has(c.id));
+    return { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
+  }, 'alert_sent');
+  if (q?.ok !== true) gave.push(`the queue: ${q?.reason ?? 'no answer'}`);
+  return gave.length ? { ok: false, reason: gave.join('; ') } : { ok: true };
 }
 
 // Why one send failed, or null when it was delivered: it threw, answered false, or did not answer within `ms`.
@@ -268,13 +341,21 @@ const LATE = Symbol('late');
  * steps then changes none of their facts under them (audit 0b-6 r7 M1).
  * Returns { sent, failed, left, settle }; never throws.
  */
-export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budgetMs = ALERT_BUDGET_MS, clock = Date.now, later = false } = {}) {
+export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budgetMs = ALERT_BUDGET_MS, clock = Date.now, later = false, report = (line) => process.stderr.write(`${line}\n`) } = {}) {
   const done = [];
   const inFlight = outFor(rec);
   const settle = () => {
     for (const [e, ok, why] of done.splice(0)) {
       inFlight.delete(e);
-      try { settleAlert(rec, e, ok, now, why); } catch { /* the next pass sends it again */ }
+      let r;
+      try { r = settleAlert(rec, e, ok, now, why); } catch (err) { r = { ok: false, reason: String(err?.message ?? err) }; }
+      // A settle that gave up is a diary line, never ignored (L335 m-2, L323): the entry may be sent again.
+      if (r?.ok === false) {
+        let noted;
+        try { noted = note(rec, `step-error-alert-settle-${e.id}` /* the Dispatcher's own family (alert- is the ledger's) */, `alert ${e.id} was ${ok ? 'sent' : 'not sent'}, but its record could not be written (${String(r.reason).slice(0, 300)}); it may be sent again`, { now }); } catch (err) { noted = { ok: false, reason: String(err?.message ?? err) }; }
+        // Refused too: the log line is what is left (L354 item 6).
+        if (noted?.ok !== true) report(`alert ${e.id}: the settle gave up (${String(r.reason).slice(0, 300)}) and its note was refused (${noted?.reason ?? 'no answer'})`);
+      }
     }
   };
   const out = Object.defineProperty({ sent: 0, failed: 0, left: 0 }, 'settle', { value: settle });

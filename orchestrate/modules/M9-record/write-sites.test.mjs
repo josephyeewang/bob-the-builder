@@ -34,7 +34,7 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 20, 'alerts, joe-waits ×2, lead-restart, merges ×2, moves, outage, outbox-intake, pass, phone-link ×2, proposals-intake ×4, refused-writes ×2, tick, usage');
+  assert.equal(n('dispatcher', 'fact'), 14, 'alerts, joe-waits ×2, lead-restart, merges ×2, moves, outage, outbox-intake, proposals-intake ×4, usage (pass, tick and phone-link write through writeFrom, L335 m-1, L354)');
   // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
@@ -59,9 +59,8 @@ test('L112, L118 m4, c3: an update is checked where the call passes a read rev, 
     assert.equal(lines.length, 1, `${file}: ${JSON.stringify(text)} is found on exactly one line (found on: ${lines.join(', ') || 'none'})`);
     return lines[0];
   };
-  const alerts = 'modules/M11-dispatcher/alerts.mjs', phone = 'modules/M11-dispatcher/phone-link.mjs', gate = 'modules/M6-merge-gate/gate.mjs';
-  assert.deepEqual(at(alerts, lineOf(alerts, "const putFact = (rec, id, doc, kind) => rec.write(")).modes, ['create', 'update'], 'rec.read(...)?.rev ?? 0');
-  assert.deepEqual(at(phone, lineOf(phone, "expectRev: c.rev, doc: { ...c.doc, told: false")).modes, ['update'], 'c.rev');
+  const alerts = 'modules/M11-dispatcher/alerts.mjs', gate = 'modules/M6-merge-gate/gate.mjs';
+  assert.deepEqual(at(alerts, lineOf(alerts, "rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0")).modes, ['create', 'update'], 'cur?.rev ?? 0');
   assert.deepEqual(at(gate, lineOf(gate, "entity: 'merge', id, expectRev: 0, doc: { state: 'requested'")).modes, ['create'], '0');
   // c3: gate.mjs's write() helper passes cur.rev, so it is an update, and the table says so.
   const gateHelper = scan.sites.filter((s) => s.file === 'modules/M6-merge-gate/gate.mjs' && s.via === 'write()');

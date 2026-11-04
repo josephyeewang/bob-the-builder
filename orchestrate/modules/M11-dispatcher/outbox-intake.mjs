@@ -21,6 +21,7 @@ import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
 import { stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { OUTBOX_KINDS } from '../../shared/record.mjs';
+import { NEVER_RAN } from '../M9-record/outbox.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
 export const SETTLE_MS = 2000;
@@ -57,10 +58,14 @@ export function kindsFor(entry) {
  * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
  * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
+ * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`), now or as a promise: { ok, ended }
+ * | { ok: false, none?, reason }. Left out, its stand-in answers "not ended" with a reason, noted every pass. A session's
+ * `head` comes from the runner's launch record.
  * Returns what happened to each file.
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead, now = Date.now(),
-  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null }) {
+  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null,
+  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }) }) {
   const out = [];
   const seen = [];
   // L138 m3: a refused or interrupted hand-in is told until a copy is delivered, from its recorded fact, whether or
@@ -115,6 +120,31 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       if (prev.doc.sha256 !== hash && !['refused', 'interrupted'].includes(was)) {
         r.refused = 'the same name with new content';
         alert(`${s.role} ${s.sessionId} handed in ${name} again with different content; the second copy was not used`);
+        continue;
+      }
+    }
+    // L424: a verdict is taken only once its session's ended record exists, never because the file sat still for
+    // SETTLE_MS. The runner finalizes the file (it may rewrite it) and only then writes that record. Anything short of
+    // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner,
+    // once until #181 lands its daily re-tell.
+    // The file was read above, before this question: the runner may have finalized it in between, so a record naming
+    // other bytes also waits (L445 m2). A claim on the old bytes would make every later pass say "new content".
+    // Taken only as M9 sessionVerdict counts it (L446): the file the record names, or a file found after a start that
+    // never ran. Everything else waits and is noted, a value not known yet too.
+    if (file.kind === 'verdict-') {
+      let e;
+      try { e = await reviewEnded(s); } catch (err) { e = { ok: false, reason: err.message }; }
+      const want = e?.ended?.verdict_sha256;
+      const held = e?.ok !== true ? (e?.reason ?? 'no answer from the ended record')
+        : want === hash || want === NEVER_RAN ? null
+          : typeof want !== 'string' ? 'its ended record does not say what verdict file it ended with'
+            : want === 'none' ? 'its ended record says it ended with no verdict file'
+              : want === 'refused' ? 'its ended record says its verdict could not be counted'
+                : /^[0-9a-f]{64}$/.test(want) ? 'this is not the file its ended record names'
+                  : 'its ended record names a verdict in a way this does not know';
+      if (held) {
+        r.waiting = e?.ok === true ? held : 'its session has not ended';
+        if (!e?.none) note(`verdict ${name} from ${s.role} ${s.sessionId} waits: ${held}`);
         continue;
       }
     }

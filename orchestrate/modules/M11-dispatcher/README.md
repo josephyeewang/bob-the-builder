@@ -42,7 +42,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 |---|---|---|
 | `alert(text)` | the one sender, `sendAlerts` (`alerts.mjs`), at the start of each pass (alongside the safety steps) and at its end | One plain-text message to Joe. No step calls it: each step gets the outbox instead (L47). It must start its send and return a promise at once (an `async` function): the first send calls it in the tick's first moment, so a port that does its work before returning would hold up the stops (audit 0b-6 r7 M1) |
 | `board()`, `healthy()`, `resume()` | outage | The running sessions with their liveness; whether network, sign-in and usage are fine; whether Joe said resume |
-| `outboxSessions()`, `wait(ms)`, `startReadonly(x)`, `replyToLead(x)`, `intakeFs` | intake | The sessions and their outbox folders; the settle wait; a Lead's read-only start; a note back to the Lead; optional file-reading overrides for tests |
+| `outboxSessions()`, `wait(ms)`, `startReadonly(x)`, `replyToLead(x)`, `reviewEnded(session)`, `intakeFs` | intake | The sessions and their outbox folders (a review session's entry carries `head` from the runner's launch record); the settle wait; a Lead's read-only start; a note back to the Lead; the runner's ended record for a review session (M9 `runnerEnded`), which a verdict waits for (L424); optional file-reading overrides for tests |
 | `leads()` | leads | Per Lead: `{ lead, size, outboxNames, questionOpen, send, stopSession, startLead }` |
 | `approvals()`, `approvalsProductMs` | approvals | Per product: `{ product, gh, owner, repo, stateDir, push, copies }`, what M2's `schedulePass` reaches outside (L221). The tick adds the record, the rules, the clock and an alert that turns M2's object alerts into one line from known fields. Required: a missing port fails the step. Each product has its own deadline (default `APPROVALS_PRODUCT_MS`, 30 s) and try |
 | `sessions()`, `probe`, `launch`, `stopGroup`, `saveWork`, `hostLock`, `pauseLead` | pass | As in `pass.mjs` |
@@ -77,6 +77,7 @@ For a fact M12 writes, the shape is the fields this folder reads, the same list 
 | `reverse-<undo card>` | M6 (lane 1, 0b-9) | `{ state: clean / not_clean, reason }` |
 | `intake-applied-<session>-<file>` | this folder | `{ state: applying / applied / refused / interrupted / waiting, sha256, ... }` |
 | `step-error-<step>`, `last-full-pass` | this folder | the tick's memory |
+| `step-error-alert-settle-<id>` | this folder | a diary line: alert `<id>` was sent or not, but its settle could not write the queue or its mark, so it may be sent again (L335 m-2) |
 | `rules-missing-alert`, `undo-held-<card>`, `hold-<cause>` | this folder | the rules values already told to Joe; the reason an undo card last waited; when each hold was last told (L38) |
 
 Record entries this folder writes besides cards and facts: `launch` (one per start: `{ session_id, role, kind, card, head, rev, product, signin, config_dir, copy, launched_at }`; `signin` (a or b) and `config_dir` are the sign-in folder the session started in, `copy` the worker's copy folder, null when the launch port does not say, R-1-89) and `merge_request` (`mr-<card>-<first 12 of head>-<rev>`: `{ card, pr, session_id, head, rev, product, requested_at }`; create-only, one record per request, so a new rev of the card is a new request, L74).
