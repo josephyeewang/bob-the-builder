@@ -8,13 +8,18 @@
 // intake hands it the sha256, git blob id and size of the raw bytes, all from its one read of one handle, and the card
 // carries them as proof. The merge gate's refusal 10 lets the change touch only the card's
 // one path and only with that blob (M6 refusals.mjs researchCopyProblem), and the commit is made mechanically from the
-// proposals file, the sha256 checked again first (lane 2's push.mjs copier, L286; not built yet). The start loop never
-// hands a research_copy card to a worker (pass.mjs starts).
+// proposals file, the sha256 checked again first (M4 push.mjs pushResearch, L286). The start loop never hands a
+// research_copy card to a worker (pass.mjs starts), so researchCopyPass is what stops one sitting in ready untold (L313).
 //
 //   researchHandler({ rules }) → the proposals intake's `research` handler:
 //     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` is read only to see that it is not blank; `now` is the pass's clock, required; an empty or blank report is refused)
 //   researchPass({ rec, now })  (now required) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
 //                                                  an ask whose card exists leaves the waiting list (restart-safe)
+//   researchCopyPass({ rec, rules, pushResearch, alert, now })  (now required) → [[card, what]]   each pass, for each
+//                                                  ready card: not yet pushed, it is pushed, at most every RETRY_MS while
+//                                                  refused and never while the rules have copies off. A report whose bytes
+//                                                  changed is told once, at once. A card a day in ready is told, then daily,
+//                                                  until it leaves ready, pushed or not (L313, shared stillWaiting)
 //   researchCardDoc({ askId, product, name, sha256, blob, size }) → the one card shape (tests build theirs with it)
 //   researchPath(askId) → the card's one allowed path (M2's); the blob id is M10 reader.mjs blobSha's, made by the intake
 //
@@ -27,6 +32,10 @@
 import { move } from './moves.mjs';
 import { researchBrief, researchFileName, researchPath, landResearch, RESEARCH_ID } from '../M2-approvals/research-ask.mjs';
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
+import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
+import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { HOLD_FACT } from './pass.mjs';
+import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export { researchPath };
 export const RESEARCH_CARD = (askId) => `research-${askId}`;
@@ -34,6 +43,10 @@ export const RESEARCH_CARD = (askId) => `research-${askId}`;
 export const RESEARCH_TIER = 2;
 /** The Record needs a card's module; a copy belongs to the product's docs. */
 export const RESEARCH_MODULE = 'docs';
+/** M10's push_branch denies a card with no lane; a copy lands in docs/, the docs lane's. */
+export const RESEARCH_LANE = 'docs';
+/** How long a refused copy rests before the next try: each try reads GitHub. */
+export const RETRY_MS = 15 * 60_000;
 export const RESEARCH_OFF = `research copies are off: the rules don't set ${GO_FREE_KEY}.research_copy to true`;
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -51,7 +64,7 @@ export function fencedBlank(fenced) {
 
 /** The one shape of a research_copy card, written in draft. */
 export function researchCardDoc({ askId, product, name, sha256, blob, size }) {
-  return { state: 'draft', kind: 'research_copy', research_ask: askId, product, module: RESEARCH_MODULE, tier: RESEARCH_TIER,
+  return { state: 'draft', kind: 'research_copy', research_ask: askId, product, module: RESEARCH_MODULE, lane: RESEARCH_LANE, tier: RESEARCH_TIER,
     files: [researchPath(askId)], source: { file: name, sha256, blob, size }, what: `copy research ask ${askId}'s report to ${researchPath(askId)}` };
 }
 
@@ -107,6 +120,60 @@ export function researchPass({ rec, now }) {
     if (c.doc?.kind !== 'research_copy' || typeof c.doc.research_ask !== 'string') continue;
     if (c.doc.state !== 'draft' && !researchBrief(rec, c.doc.research_ask).ok) continue;
     for (const what of settle(rec, c.id, c.doc.research_ask, now)) out.push([c.id, what]);
+  }
+  return out;
+}
+
+// The copy's fact, as the push script names it: one per card and bytes.
+function copyDoc(rec, c) {
+  const sha = c.doc.source?.sha256;
+  const f = typeof sha === 'string' ? rec.read('fact', `push.${c.id}.r-${sha.slice(0, 12)}`) : null;
+  return f?.corrupt ? null : f?.doc ?? null;
+}
+/** The two causes, on holds' own facts (hold_alert): the bytes changed, and a day in ready. */
+export const BYTES_FACT = (cardId) => HOLD_FACT(`research-bytes-${cardId}`);
+export const READY_FACT = (cardId) => HOLD_FACT(`research-ready-${cardId}`);
+
+export async function researchCopyPass({ rec, rules, pushResearch, alert, now }) {
+  if (!Number.isFinite(now)) throw new Error('researchCopyPass needs the pass\'s clock (now)');
+  const out = [];
+  for (const c of rec.list('card')) {
+    if (c.corrupt || c.doc?.kind !== 'research_copy') continue;
+    const { product, research_ask: ask, state } = c.doc;
+    const ready = state === 'ready';
+    const on = goFreeOn(rules, product, 'research_copy');
+    let doc = ready ? copyDoc(rec, c) : null;
+    const lastTry = doc?.result === 'refused' ? pastTime(doc.at, now) : null;
+    if (ready && on && doc?.result !== 'pushed' && (lastTry === null || now - lastTry >= RETRY_MS)) {
+      let r;
+      try { r = await pushResearch({ product, card: c.id }); } catch (e) { r = { ok: false, reason: String(e?.message ?? e) }; }
+      out.push([c.id, r?.ok ? 'pushed' : `not pushed: ${r?.reason ?? 'no answer'}`]);
+      doc = copyDoc(rec, c);
+      // Told once (L290): the owner has to act, and the daily tell below keeps saying why it is not copied.
+      const bytes = BYTES_FACT(c.id);
+      if (r?.ok === false && r.reason === REPORT_CHANGED && rec.read('fact', bytes)?.doc?.told_at == null && !isQueued(rec, bytes)) {
+        const text = `${product}: the report for research ask ${ask} changed after it was taken in, so it was not copied. Put the original back, or ask again.`;
+        tellThen(alert, text, { fact: bytes, fields: { text, told_at: new Date(now).toISOString() }, kind: 'hold_alert' });
+      }
+    }
+    if (doc?.result === 'pushed' || !ready) dropCause(rec, BYTES_FACT(c.id));
+    const mark = READY_FACT(c.id);
+    stillWaiting({
+      now,
+      waiting: ready,
+      after: { since: rec.meta?.('card', c.id)?.stateSince, limit: STILL_WAITING_MS },
+      read: () => rec.read('fact', mark)?.doc,
+      tell: (fields) => {
+        const why = doc?.result === 'pushed' ? `it is on branch ${doc.branch} but has not merged` : `it has not been copied (${on ? doc?.reason ?? 'not tried yet' : RESEARCH_OFF})`;
+        const text = `${product}: the report for research ask ${ask} has waited over a day: ${why}.`;
+        return tellThen(alert, text, { fact: mark, fields: { text, ...fields }, kind: 'hold_alert' });
+      },
+      clear: () => {
+        dropCause(rec, mark);
+        const cur = rec.read('fact', mark);
+        if (cur?.doc?.told_at != null) rec.write({ actor: 'dispatcher', entity: 'fact', id: mark, expectRev: cur.rev, doc: { ...cur.doc, told_at: null }, kind: 'hold_cleared' });
+      },
+    });
   }
   return out;
 }

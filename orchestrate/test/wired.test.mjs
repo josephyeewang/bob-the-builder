@@ -64,6 +64,7 @@ export const UNWIRED = Object.freeze({
   installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
   proposalsPass: 'L233: R-0b-162 wiring, lane 4',
   researchPass: 'R-0b-135: R-0b-162 wiring beside proposalsPass, lane 4',
+  researchCopyPass: 'L286: R-0b-162 wiring beside researchPass, with the push script\'s pushResearch, lane 4',
   researchHandler: 'R-0b-135: R-0b-162 wiring, handed to proposalsPass as its research handler, lane 4 (L303)',
 });
 // ────────────────────────────────────────────────────────────────────────────

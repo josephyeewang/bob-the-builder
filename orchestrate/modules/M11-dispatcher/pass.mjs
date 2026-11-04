@@ -607,7 +607,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
   // The Lead's own daily card is never started as a worker (audit MAT-4; M9 lets only the Lead make one). A fix
   // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
-  // either: its commit is the owner's file, copied mechanically (research-intake.mjs; lane 2's copier, L286).
+  // either: its commit is the owner's file, copied mechanically (M4 push.mjs pushResearch, L286).
   const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
   const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
