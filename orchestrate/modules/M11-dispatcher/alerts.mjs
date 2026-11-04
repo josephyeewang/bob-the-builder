@@ -11,6 +11,7 @@
 // delivered later can neither mark the next occurrence as told nor tell Joe about what has passed.
 
 import { randomUUID } from 'node:crypto';
+import { STATES } from '../../shared/record.mjs';
 
 const iso = (ms) => new Date(ms).toISOString();
 const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
@@ -156,9 +157,35 @@ export const textAlerts = (alert, who = 'merge gate') => (e) => alert(alertText(
  * never sends: the sweep in alert-sites.test.mjs allows `heldAlerts(` beside `textAlerts(alert)`.
  */
 export const heldAlerts = (into) => (e) => { into.push(e); return true; };
+// The one list of what an alert object shows the owner (L373, L397): its line is built from these known fields only, so
+// nothing else it carries (a GitHub answer, a token) reaches the owner's phone. approvalsAlertText (tick.mjs) and
+// alertText both read it, and alert-fields.test.mjs holds every field of every M2 and M6 alert to it. A named list is
+// capped so a long one can't bury the line; the record holds the rest.
+// `to` reads "moving to" only for a state of the record the alert names, a card if it names one (L421 m-A).
+const shows = (v) => ['string', 'number'].includes(typeof v);
+export const ALERT_FIELDS = [['merge', 'merge'], ['ask', 'ask'], ['card', 'card'], ['session', 'session'], ['kind', 'kind'], ['pr', 'PR'], ['commit', 'commit'],
+  ['report', 'report'], ['to', (v, e) => (STATES[shows(e.card) ? 'card' : 'merge'].includes(v) ? 'moving to' : 'writing')], ['context', 'check'], ['status', 'status'], ['judged_main', 'judged main'], ['parent', 'parent'],
+  ['waiting_since', 'waiting since']];
+export const ALERT_LIST_MAX = 50;
+export const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+// What is left off is counted, a capped name or an item that isn't text alike (L408 m1): no list reads shorter than it is.
+export const listed = (list) => {
+  const names = list.filter((x) => typeof x === 'string').slice(0, ALERT_LIST_MAX).map((x) => plain(x));
+  const left = list.length - names.length;
+  return [names.join(', '), left > 0 ? `${left} more` : ''].filter(Boolean).join(names.length ? ' and ' : '');
+};
+/** The list's fields an alert has, as `label value`. */
+export const alertFields = (e, skip = []) => ALERT_FIELDS.filter(([k]) => !skip.includes(k) && shows(e?.[k]))
+  .map(([k, label]) => `${typeof label === 'function' ? label(e[k], e) : label} ${plain(e[k], 80)}`);
+const listedAs = (label, list) => (Array.isArray(list) && listed(list) ? `${label}: ${listed(list)}` : null);
+
 /** An alert object (or text) as the text the outbox sends: textAlerts' words, for a step that sends it itself. */
-export const alertText = (e, who = 'merge gate') => (typeof e === 'string' ? e
-  : `${who}: ${e?.note ?? e?.reason ?? e?.type ?? 'no detail'}${e?.merge ? ` (merge ${e.merge})` : ''}`);
+export function alertText(e, who = 'merge gate') {
+  if (typeof e === 'string') return e;
+  const parts = alertFields(e);
+  const tail = [listedAs('reasons', e?.reasons), typeof e?.ask_owner === 'string' ? plain(e.ask_owner) : null].filter(Boolean).join('; ');
+  return `${who}: ${plain(e?.note ?? e?.reason ?? e?.type ?? 'no detail', Infinity)}${parts.length ? ` (${parts.join(', ')})` : ''}${tail ? `: ${tail}` : ''}`;
+}
 
 export function tellThen(alert, text, mark) {
   return alert(text, { mark });
