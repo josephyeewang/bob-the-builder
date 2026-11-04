@@ -14,9 +14,10 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT, HOLD_ABSENT_MS, MAIN_UNREAD } from './review-requests.mjs';
+import { reviewPorts, relayReviewAlerts, keepReviewHolds, REVIEW_HOLD_FACT, HOLD_ABSENT_MS, MAIN_UNREAD } from './review-requests.mjs';
 import { behindSince, nextMainSeen } from '../M4-workshop/launcher/install-check.mjs';
-import { outbox, isQueued } from './alerts.mjs';
+import { outbox, isQueued, ALERT_QUEUE_FACT } from './alerts.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { timeLimits } from './merges.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { rulesWith, recWith, setClock, withAlerts, iso, T0 } from './fixtures.test-helper.mjs';
@@ -384,6 +385,111 @@ test('L465: main unreadable from the first pass is told at once and each day, an
   s.setMain(null);
   assert.deepEqual(await s.run(0, 24, /review runner: /), [0, 24], 'told at h0 and h24, nothing between');
   assert.deepEqual(await s.run(25, 48, /Main can't be read/), [48]);
+});
+
+// #181 overlap: a told mark that lands while a hold's write is on its way, from the alert channel's own process.
+const markLands = (rec, fact, kind, fields) => {
+  let landed = false;
+  return { ...rec, write: (w) => {
+    if (w.kind === kind && !landed) {
+      landed = true;
+      const c = rec.read('fact', fact);
+      rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...c?.doc, ...fields }, kind: 'hold_alert' });
+    }
+    return rec.write(w);
+  } };
+};
+const told = (rec, fact, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc, kind: 'hold_alert' });
+const lines = () => { const out = []; const report = (line, fact) => out.push([line, fact]); report.out = out; return report; };
+
+test('L288 MAT-4: a mark landing during the off-list write is kept', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  told(rec, fact, { told_at: iso(T0), since: 'a', since_times: { a: iso(T0) } });
+  const late = { a: iso(T0), b: iso(T0 + H) };
+  relayReviewAlerts({ rec: markLands(rec, fact, 'hold_absent', { since_times: late }), alerts: [], alert: outbox(rec, T0 + H), now: T0 + H, report: lines() });
+  const doc = rec.read('fact', fact).doc;
+  assert.deepEqual(doc.since_times, late);
+  assert.equal(doc.absent_since, iso(T0 + H));
+});
+
+test('L288 MAT-4: a mark landing as a hold comes back on the list is kept', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  told(rec, fact, { told_at: iso(T0), since: 'a', since_times: { a: iso(T0) }, absent_since: iso(T0) });
+  const late = { a: iso(T0), b: iso(T0 + H) };
+  relayReviewAlerts({ rec: markLands(rec, fact, 'hold_back', { since_times: late }), alerts: [{ id: 'r1', hold: true, since: 'a', text: 'x' }], alert: outbox(rec, T0 + H), now: T0 + H, report: lines() });
+  const doc = rec.read('fact', fact).doc;
+  assert.deepEqual(doc.since_times, late);
+  assert.equal(doc.absent_since, undefined);
+});
+
+test('L288 MAT-4, L354: a clear wins over a mark landing with it, and keeps the sinces told', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  const times = { a: iso(T0) };
+  told(rec, fact, { told_at: iso(T0), since_times: times, absent_since: iso(T0) });
+  const at = T0 + HOLD_ABSENT_MS;
+  relayReviewAlerts({ rec: markLands(rec, fact, 'hold_cleared', { told_at: iso(at) }), alerts: [], alert: outbox(rec, at), now: at, report: lines() });
+  const doc = rec.read('fact', fact).doc;
+  assert.equal(doc.told_at, null);
+  assert.deepEqual(doc.since_times, times);
+  assert.equal(doc.cleared_at, iso(at));
+});
+
+test('L354: with a copy queued and the mark already clear, a mark landing during the clear loses', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  relayReviewAlerts({ rec, alerts: [{ id: 'r1', hold: true, text: 'x' }], alert: outbox(rec, T0), now: T0, report: lines() });
+  told(rec, fact, { told_at: null, absent_since: iso(T0) });
+  const at = T0 + HOLD_ABSENT_MS;
+  relayReviewAlerts({ rec: markLands(rec, fact, 'hold_cleared', { told_at: iso(at) }), alerts: [], alert: outbox(rec, at), now: at, report: lines() });
+  assert.equal(rec.read('fact', fact).doc.told_at, null);
+});
+
+test('L449: a clear with a copy queued and no mark yet still writes, so a mark on its way conflicts', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  relayReviewAlerts({ rec, alerts: [{ id: 'r1', hold: true, text: 'x' }], alert: outbox(rec, T0), now: T0, report: lines() });
+  assert.equal(rec.read('fact', fact), null);
+  relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, T0 + H), now: T0 + H, report: lines() });
+  const later = T0 + H + HOLD_ABSENT_MS;
+  relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, later), now: later, report: lines() });
+  assert.equal(rec.read('fact', fact).doc.cleared_at, iso(later));
+});
+
+test('L354: a drop that fails holds the clear for the next pass, and is said', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('r1');
+  relayReviewAlerts({ rec, alerts: [{ id: 'r1', hold: true, text: 'x' }], alert: outbox(rec, T0), now: T0, report: lines() });
+  relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, T0 + H), now: T0 + H, report: lines() });
+  const report = lines();
+  const later = T0 + H + HOLD_ABSENT_MS;
+  const refusing = { ...rec, write: (w) => (w.id === ALERT_QUEUE_FACT ? { ok: false, reason: 'refused' } : rec.write(w)) };
+  relayReviewAlerts({ rec: refusing, alerts: [], alert: outbox(rec, later), now: later, report });
+  assert.match(report.out[0][0], /could not be dropped; the clear waits/);
+  assert.equal(report.out[0][1], fact);
+  assert.equal(isQueued(rec, fact), true);
+  assert.equal(rec.read('fact', fact).doc.cleared_at, undefined, 'not cleared');
+  relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, later + H), now: later + H, report });
+  assert.equal(isQueued(rec, fact), false);
+  assert.equal(rec.read('fact', fact).doc.cleared_at, iso(later + H), 'cleared on the next pass');
+});
+
+test('L354 item 6: each hold write the Record refuses is said', () => {
+  const refuse = (rec) => ({ ...rec, write: () => ({ ok: false, reason: 'refused' }) });
+  const fact = REVIEW_HOLD_FACT('r1');
+  const said = (doc, run) => {
+    const rec = recWith();
+    told(rec, fact, doc);
+    const report = lines();
+    run(refuse(rec), report);
+    assert.deepEqual(report.out, [[`${fact} could not be written (refused)`, fact]]);
+  };
+  const absent = { told_at: iso(T0), absent_since: iso(T0) };
+  said({ told_at: iso(T0) }, (rec, report) => relayReviewAlerts({ rec, alerts: [], alert: fakeAlert(), now: T0 + H, report }));
+  said(absent, (rec, report) => keepReviewHolds(rec, report));
+  said(absent, (rec, report) => relayReviewAlerts({ rec, alerts: [], alert: fakeAlert(), now: T0 + HOLD_ABSENT_MS, report }));
 });
 
 test('L470 m1: a kept hold told, cleared and back the same day stays quiet until the day is up', async () => {

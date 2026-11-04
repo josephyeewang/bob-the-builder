@@ -37,7 +37,7 @@ import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/r
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
-import { tellThen, clearTold, queuedMarks, putFact } from './alerts.mjs';
+import { tellThen, clearCause, writeFrom, queuedMarks } from './alerts.mjs';
 import { causeOf } from './pass.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
@@ -148,11 +148,25 @@ export const REVIEW_HOLD_FACT = (id) => `${REVIEW_HOLD_PREFIX}${sha(id)}`;
 export const HOLD_ABSENT_MS = 60 * 60_000;
 const NO_SINCE = 'none'; // the key in since_times of a hold with no `since`
 const markOf = (rec, fact) => { try { return rec.read('fact', fact)?.doc ?? null; } catch { return null; } };
-const backOnList = (rec, fact, mark) => {
+// Every write here is from the mark read (writeFrom, L288 MAT-4), so a told mark landing between read and write stays.
+// A refused one reaches the log and the owner (L354 item 6).
+const writeMark = (rec, fact, base, doc, kind, report, opts) => {
+  const r = writeFrom(rec, fact, base, doc, kind, opts);
+  if (r?.ok !== true) report(`${fact} could not be written (${r?.reason ?? 'no answer'})`, fact);
+};
+const backOnList = (rec, fact, mark, report) => {
   if (mark?.absent_since === undefined) return;
   const { absent_since: _, ...rest } = mark;
-  putFact(rec, fact, rest, 'hold_back');
+  writeMark(rec, fact, mark, rest, 'hold_back', report);
 };
+// The hold has ended: its queued copy leaves first, then the mark clears, told_at winning over a mark on its way, and
+// cleared_at moving the version so that mark conflicts (L354, L449). since_times stays: it outlasts a clear.
+const clearHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
+  const cur = markOf(rec, fact);
+  if (!moved && (cur === null || (typeof cur === 'object' && cur.told_at == null))) return;
+  const was = typeof cur === 'object' ? cur : undefined;
+  writeMark(rec, fact, was ?? undefined, { ...was, told_at: null, cleared_at: new Date(now).toISOString() }, 'hold_cleared', report, { force: ['told_at'] });
+}, report);
 // The sinces told in the last day, by when. A time that can't be read or lies ahead is not kept: told, never held back.
 const recentSinces = (mark, now) => Object.fromEntries(Object.entries(mark?.since_times ?? {}).filter(([, at]) => {
   const t = pastTime(at, now);
@@ -160,8 +174,8 @@ const recentSinces = (mark, now) => Object.fromEntries(Object.entries(mark?.sinc
 }));
 
 /** A pass whose status could not be read tells nothing and clears nothing: time off the list starts again (L437). */
-export function keepReviewHolds(rec) {
-  for (const { id } of rec.list('fact')) if (id.startsWith(REVIEW_HOLD_PREFIX)) backOnList(rec, id, markOf(rec, id));
+export function keepReviewHolds(rec, report) {
+  for (const { id } of rec.list('fact')) if (id.startsWith(REVIEW_HOLD_PREFIX)) backOnList(rec, id, markOf(rec, id), report);
 }
 
 /**
@@ -169,10 +183,10 @@ export function keepReviewHolds(rec) {
  * outbox (marked once a copy is delivered). A hold whose `since` was told in the last day is not told again (L437). A
  * hold off the list for HOLD_ABSENT_MS is cleared, its queued copy dropped, so a later return is told. A `keep` hold
  * counts as listed, under the `since` it was last told by, if any. What it needs could not be read, so it is told on
- * first sight and each day in its own words, never silent (L458, L465). Only a status that was read gets here; a read that failed goes to
- * keepReviewHolds. Returns how many were queued.
+ * first sight and each day in its own words, never silent (L458, L465). Only a status that was read gets here; a read
+ * that failed goes to keepReviewHolds. `report(line, fact)` hears a refused drop or write. Returns how many were queued.
  */
-export function relayReviewAlerts({ rec, alerts, alert, now }) {
+export function relayReviewAlerts({ rec, alerts, alert, now, report }) {
   let n = 0;
   const listed = new Set();
   const tell = ({ fact, waiting, since, text }) => stillWaiting({
@@ -182,7 +196,7 @@ export function relayReviewAlerts({ rec, alerts, alert, now }) {
       const since_times = { ...recentSinces(markOf(rec, fact), now), [since ?? NO_SINCE]: fields.told_at };
       return tellThen(alert, text, { fact, fields: { ...fields, since_times }, kind: 'hold_alert' });
     },
-    clear: () => clearTold(rec, fact),
+    clear: () => clearHold(rec, fact, now, report),
   });
   for (const a of alerts ?? []) {
     if (!a || typeof a.id !== 'string' || typeof a.text !== 'string') continue;
@@ -190,7 +204,7 @@ export function relayReviewAlerts({ rec, alerts, alert, now }) {
       const fact = REVIEW_HOLD_FACT(a.id);
       listed.add(fact);
       const mark = markOf(rec, fact);
-      backOnList(rec, fact, mark);
+      backOnList(rec, fact, mark, report);
       const since = (a.keep && mark?.told_at ? mark.since : undefined) ?? (typeof a.since === 'string' ? a.since : undefined);
       if (recentSinces(mark, now)[since ?? NO_SINCE] !== undefined) continue;
       if (tell({ fact, waiting: true, since, text: `review runner: ${a.text.slice(0, 500)}` }).did === 'told') n += 1;
@@ -209,7 +223,7 @@ export function relayReviewAlerts({ rec, alerts, alert, now }) {
     const object = typeof mark === 'object' && mark !== null;
     if (!queued.includes(fact) && (mark === null || (object && mark.told_at == null))) continue; // nothing to clear
     const gone = pastTime(mark?.absent_since, now);
-    if (gone === null) putFact(rec, fact, { ...(object ? mark : {}), absent_since: new Date(now).toISOString() }, 'hold_absent');
+    if (gone === null) writeMark(rec, fact, object ? mark : undefined, { ...(object ? mark : {}), absent_since: new Date(now).toISOString() }, 'hold_absent', report);
     else if (now - gone >= HOLD_ABSENT_MS) tell({ fact, waiting: false });
   }
   return n;

@@ -22,6 +22,7 @@ import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts, keepReviewHolds } from './review-requests.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
+import { refusalReport } from './pass.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
 import { FINAL_STATES, launchesNewestFirst } from '../../shared/record.mjs';
@@ -117,7 +118,7 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  */
 // `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
 // refuses a since more than 60 s off its clock). Left out, it is `now`.
-export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [] }) {
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [], failureLog }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -287,7 +288,8 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
   if (reviewAlerts) {
     let list = null;
     try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
-    if (list) relayReviewAlerts({ rec, alerts: list, alert, now }); else keepReviewHolds(rec);
+    const report = refusalReport({ rec, alert, now, lines: [], failureLog });
+    if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report);
   }
   if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;
