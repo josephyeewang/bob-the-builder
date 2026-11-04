@@ -31,6 +31,7 @@ export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const NOT_SAVED = 'alert-not-saved';
 const NOT_TOLD = 'alert-not-told';
+const LOGIN_UNKNOWN = 'robot-login-unknown';
 /** The pinned issue's marker: found again by it when the Record never kept its number. */
 export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -140,7 +141,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
 
   const trouble = alerts.cacheTrouble();
   if (trouble) notSaved(`the Record refused to save where an alert is: ${trouble}`);
-  shown(await alerts.reportTrouble(product));
+  shown(await alerts.reportTrouble(product, 'heartbeat'));
+  if (gh.loginTrouble) { red.push(LOGIN_UNKNOWN); lines.push(`RED   alerts: ${gh.loginTrouble}`); }
 
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
     front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,

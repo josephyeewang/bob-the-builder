@@ -633,6 +633,17 @@ test('L402 owed: a notice stuck on a failed read is red on every pass, with GitH
   assert.doesNotMatch(pinnedIssues(h.gh)[0].body, /RED/);
 });
 
+test('r4 m2: a robot login that could not be read is red on the pinned issue, with why', async () => {
+  const h = setup();
+  h.gh.loginTrouble = 'the robot\'s own login could not be read (GitHub answered 401), so any bot\'s issue counts';
+  const { red, body } = await h.pass();
+  assert.ok(red.includes('robot-login-unknown'));
+  assert.match(body, /RED +alerts: the robot's own login could not be read/);
+  h.gh.loginTrouble = null;
+  h.tick(10);
+  assert.ok(!(await h.pass()).red.includes('robot-login-unknown'));
+});
+
 test('L402: any alert lost shows red once a pass, with no reason given or several lost', async () => {
   const h = lossSetup(sink(() => false));
   h.world.fd = false;

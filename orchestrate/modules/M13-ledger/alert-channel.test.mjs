@@ -267,6 +267,7 @@ test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skip
   answers.push([403, null]); assert.equal(await gh.edit(7, 'x'), false);
   answers.push([201, {}], [200, {}]); assert.equal(await gh.close(7, 'bye'), true);
   answers.push([500, null]); assert.equal(await gh.close(7, 'bye'), false, 'no close after a refused comment');
+  answers.push([200, {}]); assert.equal(await gh.close(7, null), true, 'r4 m1: no text, no comment: one PATCH is all it asks for');
   // A comment answers GitHub's time for it, or false.
   answers.push([201, { created_at: '2026-11-03T01:00:00Z' }]); assert.deepEqual(await gh.comment(7, 'x'), { at: '2026-11-03T01:00:00Z' });
   answers.push([201, {}]); assert.deepEqual(await gh.comment(7, 'x'), { at: undefined });

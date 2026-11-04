@@ -34,7 +34,7 @@
 // nothing, so raise and clear still give their real answer; it only costs reads, and cacheTrouble reports it.
 //
 // Injected GitHub client for one product repo (a fake in tests):
-//   open({ title, body, assignee, labels }) → number      edit(number, body)      close(number, text)
+//   open({ title, body, assignee, labels }) → number      edit(number, body)      close(number, text), text null to say nothing
 //   comment(number, text) → { at } (GitHub's time for it, when it gives one)
 //   read(number) → { open, body, ours, closedByOwner }, null when the issue is gone, false when GitHub refused the read.
 //     ours: the robot wrote it. closedByOwner: GitHub shows a person other than the robot closed it.
@@ -54,8 +54,10 @@ const idOf = (key) => `alert-${hashOf(key)}`;
 
 /** GitHub refuses a body over 65,536 characters, and the footer has to survive whatever the alert says. */
 const TEXT_MAX = 64_000;
-/** The clocks differ, so a notice's comment is looked for from a little before `owed_at`. */
-const CLOCK_SKEW_MS = 5 * 60_000;
+/** The clocks differ, so a comment is looked for from well before the time this side noted. The mark or note it is
+ * matched on decides, so looking further back costs nothing. */
+const LOOK_BACK_MS = 30 * 60_000;
+const lookFrom = (at) => { const t = Date.parse(at); return new Date(Number.isFinite(t) ? t - LOOK_BACK_MS : 0).toISOString(); };
 const NONE = '-';
 const FOOTER = /^<!-- orch:alert v1 key=(alert-[0-9a-f]{16}) status=([0-9a-f]{16}) since=(\S+) told=(\S+) cleared=(\S+) count=(\d+) owed=([0-9a-f]{16}|-) owed_at=(\S+) -->$/;
 const footerOf = (id, f) => `<!-- orch:alert v1 key=${id} status=${f.status} since=${f.since} told=${f.told} cleared=${f.cleared} count=${f.count} owed=${f.owed} owed_at=${f.owed_at} -->`;
@@ -82,7 +84,7 @@ export const wasTold = (answer) => answer !== false;
 function oldState(s, t) {
   const text = s?.status_text ?? s?.body;
   return { status: typeof text === 'string' ? hashOf(text) : null, since: s?.since ?? t, told: s?.told_at ?? s?.since ?? t,
-    cleared: s?.status === 'cleared' ? s.cleared ?? t : NONE, count: s?.count ?? 1, owed: NONE, owed_at: NONE, ownerAnswered: s?.status === 'closed-by-owner' };
+    cleared: s?.status === 'cleared' ? s.cleared ?? t : NONE, count: s?.count ?? 1, owed: NONE, owed_at: NONE, old: true };
 }
 
 // The state an issue holds, or null when it belongs to another key. A robot's issue with no footer (edited away by hand)
@@ -160,7 +162,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     if (at === false) return false;
     if (at && !at.i.open) {
       const same = at.f.status === null || at.f.status === status;
-      if (at.f.cleared === NONE && same && (at.f.ownerAnswered || at.i.closedByOwner)) return 'suppressed';
+      if (at.f.cleared === NONE && same && at.i.closedByOwner) return 'suppressed';
       at = null;
     }
     if (!at) {
@@ -173,30 +175,34 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       cache(id, s, key, issue, 'open', false);
       return 'opened';
     }
-    cache(id, s, key, at.n, 'open', true);
-
-    let f = { ...at.f, count: at.f.count + 1 };
-    let owedNow = false;
-    if (f.owed !== NONE) {
-      const last = await gh.latestOwnComment(at.n, new Date(Date.parse(f.owed_at) - CLOCK_SKEW_MS).toISOString());
-      if (last === false) return false;
-      if (last?.body?.includes(toldMark(f.owed))) {
-        const same = f.owed === owedFor(id, status, f.owed_at);
-        f = { ...f, owed: NONE, owed_at: NONE, told: toldAt(last.at, t), ...(same ? { status, cleared: NONE } : {}) };
-      } else owedNow = true;
-    }
-    const back = f.cleared !== NONE;
-    const changed = f.lost || back || (f.status !== null && f.status !== status);
-    const next = { status, since: f.since, told: f.told, cleared: NONE, count: f.count, owed: NONE, owed_at: NONE };
-    const still = `Still open since ${f.since}: ${first}`;
-    const tell = (note, answer) => notice(at.n, id, f, next, body, note, t).then((ok) => (ok ? answer : false));
-    if (changed) return tell(rawNote === undefined ? `${back ? 'Back' : 'Changed'}: ${first}` : masker.maskSecrets(rawNote).text, 'changed');
-    if (owedNow) return tell(still, 'reminded');
-    // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
-    // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
-    const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
-    if (told.did !== 'quiet') return told.answer;
-    return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
+    // An old-form issue's Record fields are all that says what it held, so they stay until its new footer has landed.
+    if (!at.f.old) cache(id, s, key, at.n, 'open', true);
+    const answer = await (async () => {
+      let f = { ...at.f, count: at.f.count + 1 };
+      let owedNow = false;
+      if (f.owed !== NONE) {
+        const last = await gh.latestOwnComment(at.n, lookFrom(f.owed_at));
+        if (last === false) return false;
+        if (last?.body?.includes(toldMark(f.owed))) {
+          const same = f.owed === owedFor(id, status, f.owed_at);
+          f = { ...f, owed: NONE, owed_at: NONE, told: toldAt(last.at, t), ...(same ? { status, cleared: NONE } : {}) };
+        } else owedNow = true;
+      }
+      const back = f.cleared !== NONE;
+      const changed = f.lost || back || (f.status !== null && f.status !== status);
+      const next = { status, since: f.since, told: f.told, cleared: NONE, count: f.count, owed: NONE, owed_at: NONE };
+      const still = `Still open since ${f.since}: ${first}`;
+      const tell = (note, answer) => notice(at.n, id, f, next, body, note, t).then((ok) => (ok ? answer : false));
+      if (changed) return tell(rawNote === undefined ? `${back ? 'Back' : 'Changed'}: ${first}` : masker.maskSecrets(rawNote).text, 'changed');
+      if (owedNow) return tell(still, 'reminded');
+      // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
+      // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
+      const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
+      if (told.did !== 'quiet') return told.answer;
+      return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
+    })();
+    if (at.f.old && answer !== false) cache(id, s, key, at.n, 'open', true);
+    return answer;
   }
 
   // The condition no longer holds. The footer says so first, then an open issue closes with a note. Answers 'none' with
@@ -226,23 +232,32 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       const text = cut < 0 ? old : old.slice(0, cut);
       if (await gh.edit(at.n, bodyOf(id, { ...at.f, status: at.f.status ?? hashOf(text), cleared: t, owed: NONE, owed_at: NONE }, text, t)) === false) return false;
     }
-    if (at.i.open && await gh.close(at.n, note) === false) return false;
+    // A close refused last pass may have said its note already: then only the close is left.
+    const said = settled && at.i.open ? await gh.latestOwnComment(at.n, lookFrom(at.f.cleared)) : null;
+    if (said === false) return false;
+    if (at.i.open && await gh.close(at.n, said?.body?.trim() === note.trim() ? null : note) === false) return false;
     cache(id, s, key, at.n, 'cleared', settled && !at.i.open);
     return 'cleared';
   }
 
   /** Why the Record refused to keep where an alert is, since the last report, or null. */
   const cacheTrouble = () => trouble;
+  /** Why the robot's login is unknown, so any bot counts as the robot (L399), or null. */
+  const loginTrouble = () => gh.loginTrouble ?? null;
 
   // Called once at the end of a pass. A Record that refuses twice in a row gets one alert of its own, which needs nothing
   // from the Record, and it clears once a write lands (L402). The second refusal is read from GitHub showing the Record
-  // behind, not counted: a count would have to be saved in the Record that is refusing. Only a pass where a write landed
-  // looks for that issue, because most passes write nothing.
-  async function reportTrouble(product) {
-    const key = alertKey(product, 'alerts', 'record-refusing');
+  // behind, not counted: a count would have to be saved in the Record that is refusing. `source` names the caller, and
+  // each has its own alert, because the Record can refuse one caller's alert and take another's: one key let a clean pass
+  // of the heartbeat close what the watcher had just opened, every 10 minutes (#184 r4 MAT-1). A pass where no write
+  // landed says nothing about the Record, so it leaves the alert as it is.
+  async function reportTrouble(product, source) {
+    if (!source) throw new Error('reportTrouble needs the caller\'s name');
+    const key = alertKey(product, 'alerts', `record-refusing:${source}`);
     const why = again ? trouble : null;
+    const recovered = () => (wrote ? clear({ key, note: 'The Record is taking alert writes again.', look: true }) : 'none');
     const answer = why === null
-      ? await clear({ key, note: 'The Record is taking alert writes again.', look: wrote })
+      ? await recovered()
       : await raise({ key, title: `${product}: the Record is refusing alert writes`, status: 'refusing',
         body: `The Record refused to save where this product's alerts are (${why}). Alerts still go out, but each pass has to look them up on GitHub until it takes them.` });
     // After the alert, so a refusal of its own number isn't carried into the next pass as that pass's trouble.
@@ -250,7 +265,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return answer;
   }
 
-  return Object.freeze({ raise, clear, cacheTrouble, reportTrouble });
+  return Object.freeze({ raise, clear, cacheTrouble, loginTrouble, reportTrouble });
 }
 
 // A fake GitHub issue client that records every call but its reads (tests, and the owner's dry runs). With no `now` its
@@ -267,7 +282,7 @@ export function fakeIssues({ now = null } = {}) {
     async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
     async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: now?.().toISOString() }; },
-    async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; x.comments.push(text); said(i, text); calls.push(['close', i]); },
+    async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; if (text != null) { x.comments.push(text); said(i, text); } calls.push(['close', i]); },
     // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about something that is not an issue number is a
     // caller's bug, so it throws rather than answering "gone".
     async read(i) {

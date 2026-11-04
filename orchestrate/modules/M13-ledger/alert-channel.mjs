@@ -167,7 +167,7 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
     async edit(n, body) { return (await call('PATCH', `/issues/${num(n)}`, { body: String(body) })).status === 200; },
     comment,
     async close(n, text) {
-      if ((await comment(n, text)) === false) return false;
+      if (text != null && (await comment(n, text)) === false) return false;
       return (await call('PATCH', `/issues/${num(n)}`, { state: 'closed' })).status === 200;
     },
     async read(n) {
@@ -382,7 +382,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
     const plus = [];
     try {
-      if (await within(sendMs, () => alerts.reportTrouble(target)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
+      if (await within(sendMs, () => alerts.reportTrouble(target, 'alert-channel')) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
     } catch (e) { plus.push(`the alert about the Record refusing writes did not go out: ${msg(e)}`); }
     if (gh?.loginTrouble) plus.push(gh.loginTrouble);
     if (plus.length) out.refused = [out.refused, ...plus].filter(Boolean).join('; ');

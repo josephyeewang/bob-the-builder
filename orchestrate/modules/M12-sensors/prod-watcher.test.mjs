@@ -585,6 +585,15 @@ test('L402 owed: a daily reminder stuck on a failed read is in the pass\'s answe
   assert.equal(gh.issues.get(1).comments.length, 1, 'found on GitHub, so not sent twice');
 });
 
+test('r4 m2: a robot login that could not be read is in the pass\'s answer, and a known one is not', async () => {
+  for (const [why, want] of [['the robot\'s own login could not be read', ['the robot\'s own login could not be read']], [null, []]]) {
+    const t = setup();
+    const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => 'none', loginTrouble: () => why };
+    const out = await watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
+    assert.deepEqual(ofKind(out, 'alerts'), want);
+  }
+});
+
 test('L402: an alert about the Record that GitHub lost is in the pass\'s answer, and a quiet one is not', async () => {
   for (const [answer, want] of [[false, [false]], ['none', []], ['opened', ['opened']], ['cleared', ['cleared']]]) {
     const t = setup();

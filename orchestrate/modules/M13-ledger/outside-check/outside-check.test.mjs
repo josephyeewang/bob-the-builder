@@ -275,7 +275,9 @@ test('L402 c3 notify: the told line takes GitHub\'s time for a past comment, and
   };
   const before = new Date(hours(24).getTime() - 3000).toISOString();
   assert.equal(await told(before), before);
-  assert.equal(await told(new Date(hours(24).getTime() + 60e3).toISOString()), stamp, 'ahead of the run');
+  const slightly = new Date(hours(24).getTime() + 5000).toISOString();
+  assert.equal(await told(slightly), slightly, 'r4 c1: GitHub a little ahead is still GitHub\'s time');
+  assert.equal(await told(new Date(hours(24).getTime() + 61e3).toISOString()), stamp, 'ahead of the run');
   assert.equal(await told('not a time'), stamp);
   assert.equal(await told(undefined), stamp);
 });

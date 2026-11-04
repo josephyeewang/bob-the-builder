@@ -60,8 +60,10 @@ export function shapeProblems({ deps, live, settings }) {
 export async function watchOnce(pass) {
   const out = await watch(pass);
   // The Record refusing alert writes gets its own alert (L402), and either answer shows like any other.
-  const result = await pass.alerts.reportTrouble(pass.product);
+  const result = await pass.alerts.reportTrouble(pass.product, 'prod-watcher');
   if (result !== 'none') out.push({ kind: 'alerts', subject: 'record-refusing', result });
+  const login = pass.alerts.loginTrouble?.();
+  if (login) out.push({ kind: 'alerts', subject: 'robot-login', result: login });
   return out;
 }
 

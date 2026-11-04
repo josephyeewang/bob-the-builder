@@ -771,10 +771,80 @@ test('L402 old issues: closed, and the Record says cleared: it is honoured, so a
   assert.equal(w.gh.issues.size, 2);
 });
 
-test('L402 old issues: closed, and the Record says the owner closed it: honoured, so quiet, for that cause only', async () => {
-  const w = oldIssue({ record: { ...oldOpen, status: 'closed-by-owner' }, closed: true });
-  assert.equal(await w.alerts.raise(standing), 'suppressed');
-  assert.equal(await w.alerts.raise({ ...standing, status: 'other' }), 'opened');
+test('r4 m5: an old issue the Record says the owner closed: GitHub decides who closed it, never the Record', async () => {
+  const owner = oldIssue({ record: { ...oldOpen, status: 'closed-by-owner' }, closed: true, byOwner: true });
+  assert.equal(await owner.alerts.raise(standing), 'suppressed');
+  assert.equal(await owner.alerts.raise({ ...standing, status: 'other' }), 'opened', 'for that cause only');
+  const app = oldIssue({ record: { ...oldOpen, status: 'closed-by-owner' }, closed: true, byOwner: false });
+  assert.equal(await app.alerts.raise(standing), 'opened', 'another app closing it is no answer from the owner');
+});
+
+test('r4 m4: an old issue keeps its Record fields until its new footer has landed', async () => {
+  // Reopened, so the Record's status differs and a cache write would replace its fields.
+  const w = oldIssue({ record: { ...oldOpen, status: 'closed-by-owner' } });
+  const { edit } = w.gh;
+  w.gh.edit = async () => false;
+  assert.equal(await w.alerts.raise(standing), false);
+  assert.equal(cached(w.rec, standing.key).told_at, oldOpen.told_at, 'nothing lost when the edit is refused');
+  w.gh.edit = edit;
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(foot(w.gh).told, oldOpen.told_at);
+  assert.equal(cached(w.rec, standing.key).status, 'open', 'cached once it landed');
+});
+
+test('r4 c5: a line the owner adds under the footer: it is a lost footer, told once, and the footer is last again', async () => {
+  const { gh, alerts } = setup();
+  await alerts.raise(standing);
+  gh.issues.get(1).body += '\nthanks, looking at it';
+  assert.equal(await alerts.raise(standing), 'changed');
+  assert.equal(comments(gh), 1);
+  assert.equal(foot(gh).status, hashOf(standing.status));
+  assert.equal(await alerts.raise(standing), 'updated');
+  assert.equal(comments(gh), 1);
+});
+
+test('r4 m1: a close refused after its note went out says nothing more on the retry', async () => {
+  const { gh, alerts } = setup();
+  await alerts.raise(standing);
+  const said = (t) => gh.issues.get(1).comments.filter((c) => c === t).length;
+  const note = 'Cleared: the condition no longer holds.';
+  const { close } = gh;
+  gh.close = async (i, text) => { await gh.comment(i, text); return false; };
+  assert.equal(await alerts.clear({ key: standing.key }), false);
+  gh.close = close;
+  assert.equal(await alerts.clear({ key: standing.key }), 'cleared');
+  assert.equal(said(note), 1);
+  assert.equal(gh.issues.get(1).closed, true);
+});
+
+test('r4 m1: a close whose note never went out still says it, and a read that fails retries next pass', async () => {
+  const { gh, alerts } = setup();
+  await alerts.raise(standing);
+  const { close, latestOwnComment } = gh;
+  gh.close = async () => false;
+  assert.equal(await alerts.clear({ key: standing.key }), false);
+  gh.close = close;
+  gh.latestOwnComment = async () => false;
+  assert.equal(await alerts.clear({ key: standing.key }), false);
+  assert.equal(gh.issues.get(1).closed, false);
+  gh.latestOwnComment = latestOwnComment;
+  assert.equal(await alerts.clear({ key: standing.key }), 'cleared');
+  assert.deepEqual(gh.issues.get(1).comments, ['Cleared: the condition no longer holds.']);
+});
+
+test('r4 m3: GitHub\'s clock 20 minutes behind and a lost answer: the comment is still found, so no second one', async () => {
+  const { gh, alerts, clock } = setup();
+  await alerts.raise(standing);
+  clock.tick(60);
+  const spoke = [];
+  const { comment } = gh;
+  gh.comment = async (i, text) => { await comment(i, text); spoke.push({ at: new Date(clock.now().getTime() - 20 * 60000).toISOString(), body: text }); return false; };
+  gh.latestOwnComment = async (i, since) => spoke.filter((c) => c.at >= since).at(-1) ?? null;
+  assert.equal(await alerts.raise({ ...standing, status: 'worse' }), false);
+  gh.comment = comment;
+  clock.tick(1);
+  assert.equal(await alerts.raise({ ...standing, status: 'worse' }), 'updated');
+  assert.equal(comments(gh), 1);
 });
 
 test('L402 old issues: closed, and the Record says only open: the closer decides', async () => {
@@ -850,14 +920,14 @@ test('L402 cacheTrouble: one refusal raises nothing; the second pass raises one 
   let a = w.make();
   assert.equal(await a.raise(standing), 'opened');
   assert.match(a.cacheTrouble(), /the store is full/);
-  assert.equal(await a.reportTrouble('p'), 'none');
+  assert.equal(await a.reportTrouble('p', 'test'), 'none');
   assert.equal(troubleIssues(w.gh).length, 0, 'one refusal may be nothing');
   assert.equal(a.cacheTrouble(), null, 'reported');
   for (let i = 0; i < 3; i++) {
     w.clock.tick(10);
     a = w.make();
     await a.raise(standing);
-    await a.reportTrouble('p');
+    await a.reportTrouble('p', 'test');
   }
   assert.equal(troubleIssues(w.gh).length, 1, 'one alert however long it lasts');
   const issue = troubleIssues(w.gh)[0];
@@ -868,7 +938,7 @@ test('L402 cacheTrouble: one refusal raises nothing; the second pass raises one 
   w.clock.tick(10);
   a = w.make();
   await a.raise(standing);
-  assert.equal(await a.reportTrouble('p'), 'cleared');
+  assert.equal(await a.reportTrouble('p', 'test'), 'cleared');
   assert.equal(issue.closed, true);
   assert.match(issue.comments.at(-1), /taking alert writes again/);
 });
@@ -876,26 +946,75 @@ test('L402 cacheTrouble: one refusal raises nothing; the second pass raises one 
 test('L402 cacheTrouble: a clean pass makes no GitHub call for it', async () => {
   const { gh, alerts } = setup();
   await alerts.raise(standing);
-  await alerts.reportTrouble('p'); // the pass that opened it: a write landed, so this one looks
+  await alerts.reportTrouble('p', 'test'); // the pass that opened it: a write landed, so this one looks
   const seen = gh.calls.length;
   let lists = 0;
   gh.findOpen = async () => { lists += 1; return null; };
   await alerts.raise(standing);
-  await alerts.reportTrouble('p');
+  await alerts.reportTrouble('p', 'test');
   assert.equal(lists, 0);
   assert.equal(gh.calls.length, seen + 1);
 });
 
-test('L402 cacheTrouble: a Record that heals and stays quiet still clears the alert when its number is cached', async () => {
+test('r4 MAT-1: a pass where no write landed leaves the alert as it is, so no false "taking writes again"', async () => {
   const w = refusing();
   w.world.refuse = () => true;
   await w.make().raise(standing);
   const a = w.make();
   await a.raise(standing);
   w.world.refuse = () => false; // it heals in time to keep the alert's own number
-  await a.reportTrouble('p');
+  await a.reportTrouble('p', 'test');
   assert.equal(troubleIssues(w.gh).length, 1);
+  assert.equal(await w.make().reportTrouble('p', 'test'), 'none');
+  assert.equal(troubleIssues(w.gh)[0].closed, false, 'nothing here shows the Record took anything');
   const b = w.make();
-  assert.equal(await b.reportTrouble('p'), 'cleared');
+  await b.raise({ ...standing, key: alertKey('p', 'kind', 'y') });
+  assert.equal(await b.reportTrouble('p', 'test'), 'cleared');
   assert.equal(troubleIssues(w.gh)[0].closed, true);
+});
+
+test('r4 MAT-1: two callers, the Record refusing one alert of one of them: one issue, not hundreds, and no false notes', async () => {
+  const w = refusing();
+  const stuck = { ...standing, key: alertKey('p', 'watcher', 'cannot-read') };
+  const clean = { ...standing, key: alertKey('p', 'heartbeat', 'x') };
+  w.world.refuse = (doc) => doc.key === stuck.key;
+  await w.make().raise(clean);
+  let closes = 0;
+  const { close } = w.gh;
+  w.gh.close = async (i, t) => { closes += 1; return close(i, t); };
+  for (let min = 0; min < 600; min++) {
+    w.clock.tick(1);
+    const watcher = w.make();
+    await watcher.raise(stuck);
+    await watcher.reportTrouble('p', 'prod-watcher');
+    if (min % 10 === 0) {
+      const heart = w.make();
+      // A new alert each time, so the heartbeat's pass has a write land and does look for its own trouble alert.
+      await heart.raise({ ...clean, key: alertKey('p', 'heartbeat', `y${min}`) });
+      await heart.reportTrouble('p', 'heartbeat');
+    }
+  }
+  assert.equal(troubleIssues(w.gh).length, 1);
+  assert.equal(closes, 0);
+  assert.equal(troubleIssues(w.gh)[0].closed, false);
+});
+
+test('r4 MAT-1: each caller has its own alert, and one that doesn\'t say who it is is a caller\'s bug', async () => {
+  const { alerts } = setup();
+  await assert.rejects(alerts.reportTrouble('p'), /the caller's name/);
+  const w = refusing();
+  w.world.refuse = () => true;
+  for (const who of ['heartbeat', 'prod-watcher', 'heartbeat', 'prod-watcher']) {
+    const a = w.make();
+    await a.raise(standing);
+    await a.raise(standing);
+    await a.reportTrouble('p', who);
+  }
+  assert.equal(troubleIssues(w.gh).length, 2);
+});
+
+test('r4 m2: the alerts object says why the robot\'s login is unknown', () => {
+  const gh = { ...fakeIssues(), loginTrouble: 'the robot\'s own login could not be read' };
+  assert.match(makeAlerts({ rec: memoryRecord(), gh, owner: 'o' }).loginTrouble(), /could not be read/);
+  assert.equal(makeAlerts({ rec: memoryRecord(), gh: fakeIssues(), owner: 'o' }).loginTrouble(), null);
 });

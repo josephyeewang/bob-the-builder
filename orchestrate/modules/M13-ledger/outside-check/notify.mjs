@@ -22,7 +22,7 @@ export const dueToTell = (told, nowMs) => {
   return !Number.isFinite(t) || t > nowMs + FUTURE_SKEW_MS || nowMs - t >= RETELL_MS;
 };
 const CLEARED = 'Cleared: the check passes again.';
-const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) ? new Date(Date.parse(at)).toISOString() : stamp);
+const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) + FUTURE_SKEW_MS ? new Date(Date.parse(at)).toISOString() : stamp);
 // When the bot last commented, if under 24 h ago, read from GitHub, because the told line is what may have been lost.
 // null if not. Only the bot's count: anyone can comment on a public repo. A time ahead of the run reads as the run's own.
 async function spokeLately(api, number, nowMs) {
