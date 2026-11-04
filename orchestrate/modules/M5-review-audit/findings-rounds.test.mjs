@@ -14,13 +14,13 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, sy
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { mirrorCarried, readMergeFiles } from '../M4-workshop/launcher/review-runner-main.mjs';
+import { mirrorCarried, readMergeFiles, realPorts } from '../M4-workshop/launcher/review-runner-main.mjs';
 import { standInStart } from './stand-in-start.test-helper.mjs';
 import { MAX_OUTBOX_BYTES, PASSES, headReviews, sessionVerdict, verdictContent, verdictFields } from '../M9-record/outbox.mjs';
 import { verdictProblem } from '../M6-merge-gate/refusals.mjs';
 import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { QUOTE_NOTE, changeReaders, finalize, labelled, quoteFound } from './findings.mjs';
+import { MAX_CHECKED_PATHS, QUOTE_NOTE, changeReaders, finalize, labelled, quoteFound } from './findings.mjs';
 import { finalizeMark } from '../M4-workshop/launcher/review-runner.mjs';
 import { verdictFileText, verdictFormat } from './verdict-file.mjs';
 import { VERDICT_CHECKLIST } from '../../shared/record.mjs';
@@ -889,5 +889,47 @@ for (const [over, labels] of [[0, true], [1, false]]) {
     assert.equal(Object.hasOwn(w.fields('auditor', 'S-2').notes[0], 'quote_found'), labels);
     assert.equal((said.match(/labels skipped: the file would be too large/g) ?? []).length, labels ? 0 : 1);
     assert.equal(w.gate(), null);
+  });
+}
+
+// L487 (2): the pass has so many file reads for finalize. Past them a file stays as written, with one alert.
+const gone = (n, tag) => Array.from({ length: n }, (_, i) => ({ level: 'minor', says: 'x', file: `gone/${tag}${i}.mjs` }));
+const SKIPPED = /labels skipped: the review names more files than this pass can check/g;
+const twoSessions = async (dir, reviewerNotes, auditorNotes, checkedPaths) => {
+  const act = (l) => (l.role === 'reviewer' ? writeFileSync(l.path, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: l.head, pass: true, checklist: CLEAN, notes: reviewerNotes } })}\n`, { mode: 0o644 }) : passingFile(l, auditorNotes));
+  const w = await world(tempDir(dir), { act });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': A_CHANGE });
+  w.ctx.finalize = realPorts({ outboxRoot: w.outboxRoot, uids: UIDS, mirror: w.gd }, {}, { checkedPaths }).finalize;
+  const { alerts } = await w.round(['reviewer', 'auditor']);
+  return { w, said: JSON.stringify(alerts) };
+};
+
+for (const [left, labels] of [[4, true], [3, false]]) {
+  test(`L487 planted: a pass with reads for ${left} files of the 4 two sessions name ${labels ? 'labels both' : 'labels the first, skips the second and says so'}`, async () => {
+    const { w, said } = await twoSessions('m5-cap-', gone(2, 'a'), gone(2, 'b'), left);
+    assert.equal(w.fields('reviewer', 'S-1').notes[0].quote_found, false);
+    assert.equal(Object.hasOwn(w.fields('auditor', 'S-2').notes[0], 'quote_found'), labels);
+    assert.equal((said.match(SKIPPED) ?? []).length, labels ? 0 : 1);
+    assert.equal(w.gate(), null, 'a pass stays a pass');
+  });
+}
+
+test('L487 planted: findings on one file count as one file', async () => {
+  const { w, said } = await twoSessions('m5-cap1-', [], [...gone(1, 'a'), ...gone(1, 'a'), ...gone(1, 'a')], 1);
+  assert.equal(w.fields('auditor', 'S-2').notes[2].quote_found, false);
+  assert.doesNotMatch(said, SKIPPED);
+});
+
+for (const [paths, labels] of [[MAX_CHECKED_PATHS, true], [MAX_CHECKED_PATHS + 1, false]]) {
+  test(`L487 planted: left alone, finalize ${labels ? 'checks' : 'reads nothing for'} ${paths} files`, async () => {
+    const act = (l) => (l.role === 'reviewer' ? writeVerdict(l, { pass: true, checklist: CLEAN }) : passingFile(l, gone(paths, 'a')));
+    const w = await world(tempDir('m5-capmax-'), { act });
+    w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': A_CHANGE });
+    let reads = 0;
+    const read = async () => { reads += 1; return null; };
+    w.ctx.finalize = ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: w.outboxRoot, uids: UIDS, role, sessionId, card, head, owner: ME, mark, readFile: read, readBase: read });
+    await w.round(['reviewer', 'auditor']);
+    assert.equal(reads, labels ? paths * 2 : 0);
+    assert.equal(Object.hasOwn(w.fields('auditor', 'S-2').notes[0], 'quote_found'), labels);
   });
 }

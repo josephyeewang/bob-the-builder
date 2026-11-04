@@ -86,7 +86,7 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
-import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
+import { MAX_CHECKED_PATHS, changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -431,8 +431,9 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
 }
 
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
+export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, checkedPaths = MAX_CHECKED_PATHS, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
+  const checks = { left: checkedPaths };   // these ports last one pass, so this is the pass's own (L487)
   // What the launch checks read for one session (review-launch.mjs reviewChecks, L83 M-3).
   const launchInputs = (x, hooksDir) => {
     const card = readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card: x.card });
@@ -500,7 +501,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
-    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, ...await changeReaders({ gitDir: c.mirror, head }) }),
+    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, checks, ...await changeReaders({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }
