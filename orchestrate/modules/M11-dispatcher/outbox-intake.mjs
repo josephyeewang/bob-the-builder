@@ -20,6 +20,7 @@ import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { tellThen, isQueued } from './alerts.mjs';
 import { OUTBOX_KINDS } from '../../shared/record.mjs';
+import { NEVER_RAN } from '../M9-record/outbox.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
 export const SETTLE_MS = 2000;
@@ -125,14 +126,19 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     // once until #181 lands its daily re-tell.
     // The file was read above, before this question: the runner may have finalized it in between, so a record naming
     // other bytes also waits (L445 m2). A claim on the old bytes would make every later pass say "new content".
+    // Taken only as M9 sessionVerdict counts it (L446): the file the record names, or a file found after a start that
+    // never ran. Everything else waits and is noted, a value not known yet too.
     if (file.kind === 'verdict-') {
       let e;
       try { e = await reviewEnded(s); } catch (err) { e = { ok: false, reason: err.message }; }
       const want = e?.ended?.verdict_sha256;
       const held = e?.ok !== true ? (e?.reason ?? 'no answer from the ended record')
-        : typeof want !== 'string' ? 'its ended record does not say what verdict file it ended with'
-          : want === 'none' ? 'its ended record says it ended with no verdict file'
-            : /^[0-9a-f]{64}$/.test(want) && want !== hash ? 'this is not the file its ended record names' : null;
+        : want === hash || want === NEVER_RAN ? null
+          : typeof want !== 'string' ? 'its ended record does not say what verdict file it ended with'
+            : want === 'none' ? 'its ended record says it ended with no verdict file'
+              : want === 'refused' ? 'its ended record says its verdict could not be counted'
+                : /^[0-9a-f]{64}$/.test(want) ? 'this is not the file its ended record names'
+                  : 'its ended record names a verdict in a way this does not know';
       if (held) {
         r.waiting = e?.ok === true ? held : 'its session has not ended';
         if (!e?.none) note(`verdict ${name} from ${s.role} ${s.sessionId} waits: ${held}`);

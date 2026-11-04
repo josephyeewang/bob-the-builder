@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
 import { setup as setupRecord, outboxFile, runnerLaunch, runnerEndedRecord, seed, HEAD, CLEAN_CHECKLIST } from '../M9-record/fixtures.test-helper.mjs';
-import { runnerEnded } from '../M9-record/outbox.mjs';
+import { NEVER_RAN, runnerEnded } from '../M9-record/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -508,7 +508,7 @@ test('L424: an ended record for another head does not let a verdict through, and
 });
 
 test('L424: a verdict waits when the ended check is missing, throws or answers nothing', async () => {
-  for (const reviewEnded of [undefined, () => { throw new Error('boom'); }, () => null, () => ({ ok: true }).nope, () => ({ ok: 1 }), () => ({ ok: 'true' }), () => ({ ok: 1, ended: { verdict_sha256: 'refused' } }), () => ({ ok: 'true', ended: { verdict_sha256: 'refused' } }), async () => { throw new Error('boom'); }]) {
+  for (const reviewEnded of [undefined, () => { throw new Error('boom'); }, () => null, () => ({ ok: true }).nope, () => ({ ok: 1 }), () => ({ ok: 'true' }), () => ({ ok: 1, ended: { verdict_sha256: NEVER_RAN } }), () => ({ ok: 'true', ended: { verdict_sha256: NEVER_RAN } }), async () => { throw new Error('boom'); }]) {
     const { pass, verdicts } = endedWorld('m11-intake-ended-port-');
     const [r] = await pass({ reviewEnded });
     assert.equal(r.waiting, 'its session has not ended');
@@ -580,6 +580,31 @@ test('L445 m2: an ended record saying no verdict, with a file there, waits and i
   assert.equal(r.waiting, 'its ended record says it ended with no verdict file');
   assert.equal(verdicts(), 0);
   assert.match(w.calls.notes.join(' | '), /ended with no verdict file/);
+});
+
+test('L446: an ended record saying refused waits and is noted, as M9 never counts that verdict', async () => {
+  const { E, w, sid, pass, verdicts } = endedWorld('m11-intake-ended-refused-');
+  runnerEndedRecord(E, 'C-1', sid, 'reviewer', HEAD, { sha: 'refused' });
+  const [r] = await pass();
+  assert.equal(r.waiting, 'its ended record says its verdict could not be counted');
+  assert.equal(verdicts(), 0);
+  assert.match(w.calls.notes.join(' | '), /could not be counted/);
+});
+
+test('L446: a value the check does not know yet waits and is noted', async () => {
+  const { w, pass, verdicts } = endedWorld('m11-intake-ended-later-');
+  const [r] = await pass({ reviewEnded: () => ({ ok: true, ended: { verdict_sha256: 'something_later' } }) });
+  assert.equal(r.waiting, 'its ended record names a verdict in a way this does not know');
+  assert.equal(verdicts(), 0);
+  assert.match(w.calls.notes.join(' | '), /does not know/);
+});
+
+test('L446: a file found after a start that never ran is taken, as M9 counts it', async () => {
+  const { E, sid, pass, verdicts } = endedWorld('m11-intake-ended-never-');
+  runnerEndedRecord(E, 'C-1', sid, 'reviewer', HEAD, { sha: NEVER_RAN });
+  const [r] = await pass();
+  assert.equal(r.applied, true, JSON.stringify(r));
+  assert.equal(verdicts(), 1);
 });
 
 test('L424: only a verdict waits for the ended record; a report from the same session goes through', async () => {
