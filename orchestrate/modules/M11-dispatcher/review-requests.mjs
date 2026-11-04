@@ -73,7 +73,8 @@ const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0,
  * pass.mjs causeOf reads it: `A` and `A; B` are one trouble, and numbers in the text don't make a new one.
  */
 export const STAMP_GRACE_MS = 30 * 60_000;
-export const MAIN_UNREAD = 'Main can\'t be read, so whether its installed copy is behind can\'t be checked. The copy was behind when last checked.';
+export const MAIN_UNREAD = 'Main can\'t be read, so whether its installed copy is behind can\'t be checked.';
+const MAIN_UNREAD_SINCE = 'main-unreadable';
 // One trouble, whatever varies from pass to pass (L458): the first error, without the detail in brackets or an id.
 const failureClass = (why) => causeOf(why
   .replace(/\((?:[^()]|\([^()]*\))*(?:\)|$)/g, '').split('; ')[0]
@@ -89,7 +90,7 @@ export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) 
   let head = null;
   try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch { head = null; }
   const main = typeof head === 'string' ? head : head?.commit;
-  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, text: MAIN_UNREAD }];
+  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: MAIN_UNREAD }];
   if (main && s?.installed_commit !== main) {
     const at = s?.installed_commit ?? null;
     const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;
@@ -165,8 +166,8 @@ export function keepReviewHolds(rec) {
  * Each runner alert to Joe once, and each hold (`hold: true`) at once, then each day while it is listed, through the
  * outbox (marked once a copy is delivered). A hold whose `since` was told in the last day is not told again (L437). A
  * hold off the list for HOLD_ABSENT_MS is cleared, its queued copy dropped, so a later return is told. A `keep` hold
- * counts as listed, under the `since` it was told by: what it needs could not be read, so it is told each day in its
- * own words, and one never told says nothing (L458). Only a status that was read gets here; a read that failed goes to
+ * counts as listed, under the `since` it was last told by, if any. What it needs could not be read, so it is told on
+ * first sight and each day in its own words, never silent (L458, L465). Only a status that was read gets here; a read that failed goes to
  * keepReviewHolds. Returns how many were queued.
  */
 export function relayReviewAlerts({ rec, alerts, alert, now }) {
@@ -188,8 +189,7 @@ export function relayReviewAlerts({ rec, alerts, alert, now }) {
       listed.add(fact);
       const mark = markOf(rec, fact);
       backOnList(rec, fact, mark);
-      if (a.keep && !mark?.told_at) continue;
-      const since = a.keep ? mark.since : typeof a.since === 'string' ? a.since : undefined;
+      const since = (a.keep && mark?.told_at ? mark.since : undefined) ?? (typeof a.since === 'string' ? a.since : undefined);
       if (recentSinces(mark, now)[since ?? NO_SINCE] !== undefined) continue;
       if (tell({ fact, waiting: true, since, text: `review runner: ${a.text.slice(0, 500)}` }).did === 'told') n += 1;
       continue;

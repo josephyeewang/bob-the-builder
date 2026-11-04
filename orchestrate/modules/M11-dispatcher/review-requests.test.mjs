@@ -124,7 +124,7 @@ test('L66, L315: a failed runner pass and an installed copy behind main are hold
   assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, undefined), [], 'no port: no stamp check');
   // L437 m1: main can't be read, so the stamp hold is kept as it is: nothing told, nothing cleared.
   for (const mainHead of [() => null, () => 'main', () => ({ commit: null }), () => { throw new Error('no'); }]) {
-    assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, text: MAIN_UNREAD }]);
+    assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, since: 'main-unreadable', text: MAIN_UNREAD }]);
   }
   // Through the ports, read from the real status file.
   const dir = tempDir('m11-status-');

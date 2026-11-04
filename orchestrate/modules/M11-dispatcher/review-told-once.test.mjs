@@ -378,17 +378,36 @@ test('L437: time off the list counts readable passes only', async () => {
   assert.equal(mark().told_at, null);
 });
 
-test('L437 m1, L458 m2: a stamp hold never told says nothing while main can\'t be read, and clears nothing', () => {
+test('L465: main unreadable from the first pass is told at once and each day, and clears nothing', async () => {
+  const s = statusMac();
+  s.set({ installed_commit: HEAD });
+  s.setMain(null);
+  assert.deepEqual(await s.run(0, 24, /review runner: /), [0, 24], 'told at h0 and h24, nothing between');
+  assert.deepEqual(await s.run(25, 48, /Main can't be read/), [48]);
+});
+
+test('L465: when main reads again, a copy behind is told at once, as news; a copy level ends it', async () => {
+  const behind = statusMac();
+  behind.set({ installed_commit: HEAD });
+  behind.setMain(null);
+  await behind.hour(0);
+  behind.setMain({ commit: MAIN, since: T0 - H });
+  assert.deepEqual(await behind.run(1, 2, /Its installed copy is at aaaaaaa/), [1]);
+  const level = statusMac();
+  level.setMain(null);
+  await level.hour(0);
+  level.setMain({ commit: MAIN, since: T0 - H });
+  assert.deepEqual(await level.run(1, 40, /review runner: /), []);
+  assert.equal(level.rec.read('fact', REVIEW_HOLD_FACT('stamp')).doc.told_at, null, 'cleared');
+});
+
+test('L437 m1: a kept hold leaves a queued copy alone and stays on the list', () => {
   const rec = recWith();
   const fact = REVIEW_HOLD_FACT('stamp');
   const hold = { id: 'stamp', hold: true, text: 'The copy is behind.', since: 'aaa' };
-  const keep = { id: 'stamp', hold: true, keep: true, text: MAIN_UNREAD };
-  assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, T0), now: T0 }), 0, 'never told: nothing was queued');
-  assert.equal(isQueued(rec, fact), false);
-  assert.equal(rec.read('fact', fact), null, 'and no mark written for it');
+  const keep = { id: 'stamp', hold: true, keep: true, since: 'main-unreadable', text: MAIN_UNREAD };
   assert.equal(relayReviewAlerts({ rec, alerts: [hold], alert: outbox(rec, T0), now: T0 }), 1);
-  const later = T0 + 3 * H;
-  assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, later), now: later }), 0);
+  relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, T0 + 3 * H), now: T0 + 3 * H });
   assert.equal(isQueued(rec, fact), true, 'the queued copy stays');
   assert.equal(rec.read('fact', fact)?.doc?.absent_since, undefined, 'kept is listed, not off the list');
 });
@@ -419,7 +438,7 @@ test('L458 m2: a tell that main can\'t be read counts for the day, even when the
   assert.deepEqual(await s.run(48, 48, /Its installed copy is at aaaaaaa/), [48]);
 });
 
-test('L458 m2: a trouble cleared before main went unreadable is not told as if it still held', async () => {
+test('L465: main unreadable after a trouble cleared is a new tell, in its own words', async () => {
   const s = statusMac();
   s.set({ installed_commit: HEAD });
   s.setMain({ commit: MAIN, since: T0 - H });
@@ -427,7 +446,7 @@ test('L458 m2: a trouble cleared before main went unreadable is not told as if i
   s.set({ installed_commit: MAIN });
   await s.run(1, 3, /x/);
   s.setMain(null);
-  assert.deepEqual(await s.run(30, 60, /Main can't be read/), []);
+  assert.deepEqual(await s.run(4, 28, /Main can't be read/), [4, 28]);
 });
 
 test('L458 m1: a runner error naming a session id each pass is one trouble', async () => {
