@@ -22,7 +22,7 @@
 //   chainProblem(path)                  → null, or why `path` and every folder above it is not root's alone
 //   aclProblem(paths)                   → null, or the first path that has an access list (ACL)
 //   readInstallStamp(installRoot)       → the 40-hex commit stamp, or null
-//   readMainSeen(file), nextMainSeen(prev, now), behindSince(state, main) → root's record of when main moved ahead
+//   readMainSeen(file), nextMainSeen(prev, now), behindSince(state, main, installed) → root's record of when main moved ahead
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
@@ -51,7 +51,8 @@ export const RUNNER_MODULES = Object.freeze(['wiring', 'budget']);
 // Each must be one of the copy's own code files from the repository: a .mjs file under one of these folders of the
 // copy. A copy item the install step puts at the top of the copy (`keep`), a folder or the config is refused: the
 // runner imports the module from the copy, and only a file among the copy's own finds the files it imports.
-export const MODULE_HOMES = Object.freeze(['modules', 'shared']);
+// wiring/ too (LEAD-CALLS L257 (B)): the Dispatcher's and the robot job's wiring live there, read through shared/job-config.mjs.
+export const MODULE_HOMES = Object.freeze(['modules', 'shared', 'wiring']);
 // A test file, a test helper, or anything in a test or fixtures folder is in the copy too, but it is never a program
 // the runner may load: a test imports the test runner, and a fixture may exit as soon as it loads, so a config naming
 // one by mistake would leave the runner quiet with nothing useful said (L136 m2).
@@ -303,11 +304,14 @@ export function nextMainSeen(prev, { commit, installed, now }) {
 }
 
 /**
- * The `since` the Dispatcher's stamp alert waits from (M11 review-requests.mjs `mainHead`), for main at `main`: the
- * record's own `since` when the updater has seen that head; otherwise the updater's last fetch, since main moved after
- * it (an updater that stops fetching is then told once the grace is over). No record → null (told at once).
+ * The `since` the Dispatcher's stamp alert waits from (M11 review-requests.mjs `mainHead`), for main at `main` and the
+ * copy at `installed`: the record's own `since` when the updater has seen that head, or when the record already has this
+ * same copy behind (L437: the grace only delays the first tell, so main moving on does not start it again); otherwise
+ * the updater's last fetch, since main moved after it (an updater that stops fetching is then told once the grace is
+ * over). No record → null (told at once).
  */
-export function behindSince(state, main) {
+export function behindSince(state, main, installed) {
   if (!state) return null;
-  return state.commit === main ? state.since : state.checked_at;
+  const alreadyBehind = state.installed !== state.commit && state.installed === installed;
+  return state.commit === main || alreadyBehind ? state.since : state.checked_at;
 }

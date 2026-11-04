@@ -1,6 +1,7 @@
 // Test-only: the design's numbers (v4 §14.1.6 and the review's new keys), passed to fakeRules so no
 // Dispatcher file holds them. A test that wants a different number overrides one key.
 
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,7 @@ import { SCRIPT_ACTORS, STATES, memoryRecord } from '../../shared/record.mjs';
 import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from '../M9-record/moves.mjs';
 import { factFamilyOf, fieldsAllowed } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
-import { outbox, sendAlerts } from './alerts.mjs';
+import { outbox, sendAlerts, queueAlert, ALERT_QUEUE_FACT } from './alerts.mjs';
 import { undoCardDoc } from './undo.mjs';
 
 export const VALUES = Object.freeze({
@@ -245,3 +246,26 @@ export async function withAlerts(rec, now, port, f) {
   await sendAlerts(rec, port, now, { sendMs: 200, budgetMs: 10_000 });
   return r;
 }
+
+// The order a clear site really runs in (L354): a view of `rec` that logs each write as `kind:id`. With `refuseDrop`
+// the queue refuses the drop, so a site's answer to a refused drop can be seen.
+export const writeLog = (rec, log, { refuseDrop = false } = {}) => ({ ...rec, write: (x) => {
+  log.push(`${x.kind}:${x.id}`);
+  return refuseDrop && x.kind === 'alert_cause_cleared' ? { ok: false, reason: 'the queue refused' } : rec.write(x);
+} });
+// A copy of an alert waiting in the queue, its mark on `fact`.
+export const queueFor = (rec, fact, field, value, now) => assert.notEqual(queueAlert(rec, `about ${fact}`, { now, mark: { fact, fields: { [field]: value } } }), null);
+// The queued copy left before the clear was written.
+export const assertDropFirst = (log, clear) => {
+  const drop = log.indexOf(`alert_cause_cleared:${ALERT_QUEUE_FACT}`);
+  assert.ok(drop >= 0 && log.includes(clear) && drop < log.indexOf(clear), `${clear}: ${log.join(' | ')}`);
+};
+
+// A told mark landing in the moment a clear is written (L354 item 3): the clear's first write loses to it, and goes again.
+export const lateMark = (rec, kind, fact, fields) => {
+  let fired = false;
+  return { ...rec, write: (x) => {
+    if (!fired && x.kind === kind && x.id === fact) { fired = true; change(rec, 'fact', fact, fields); }
+    return rec.write(x);
+  } };
+};

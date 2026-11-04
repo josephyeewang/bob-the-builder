@@ -4,11 +4,14 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
-import { RULES_MISSING_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { REVIEW_HOLD_FACT } from './review-requests.mjs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
 import { queueAlert, sendAlerts, ALERT_QUEUE_MAX, ALERT_QUEUE_FACT, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
 import { main, WATCHDOG_MARGIN_MS, RUN_DEADLINE_MS } from './main.mjs';
@@ -16,7 +19,10 @@ import { PR_FACT } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
+import { goFingerprint } from '../M2-approvals/go.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -65,11 +71,16 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
   return { rec, calls, sessions, ports, pass };
 }
 
+// The job's own script must be one of the installed copy's code files (audit #144 m4): a script run spawns the copy's
+// own main.mjs (a layout with source: true); an in-process main() names a stand-in file in the layout as `self`.
+const copyMain = (L) => join(L.copy, 'modules/M11-dispatcher/main.mjs');
+const selfIn = (L) => L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+
 test('MAT-1: one tick runs every step once, in the fixed order, and records the full pass', async () => {
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -104,16 +115,67 @@ test('L221 MAT-1: one real runTick turns on a product its rules file names, writ
   assert.equal(w.calls.alerts.length, 1);
 });
 
+test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan reaches its Lead', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const replies = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const fp = goFingerprint({ record: w.rec, product: 'p2' }, 'C-3');
+  assert.equal(fp.ok, true, fp.reason);
+  seed(w.rec, 'ask', 'go-C-3', { kind: 'go_t2', product: 'p2', card: 'C-3', title: 'C-3', state: 'answered', fingerprint: fp.fingerprint, created_at: iso(T0 - MIN), answer: { approves: false, choice: 'Not now' } });
+  // recWith seeds a card as a script; a Lead's session wrote this plan.
+  const rec = Object.create(w.rec, { diary: { value: (...x) => [...w.rec.diary(...x), { actor: 'lead:L-1', writes: [{ entity: 'card', id: 'C-3', doc: { files: ['changed'] } }] }] } });
+  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); return { ok: true }; } } });
+  assert.equal(replies.length, 1, w.calls.alerts.join(' | '));
+  assert.match(replies[0].text, /declined the plan for card C-3/);
+});
+
+test('L467: the plan-go step gets the same deadline as its product, so a short one stops the calls and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const calls = [];
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const planRows = async (x) => { calls.push(x); return {}; };
+  await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows, approvalsProductMs: 1_000 } });
+  assert.deepEqual(calls, []);
+  assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
+});
+
+test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const started = [];
+  const seen = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
+    planReviewAnswer: async (x) => { seen.push(x); return { ok: true }; } };
+  const open = world([account(), usage(), card('C-3', plan), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
+  const held = await open.pass(0, { rules, ports: planPorts });
+  assert.equal(held.steps['plan-go'].ok, true, held.steps['plan-go'].error);
+  assert.equal(started.length, 0, 'an outage holds it');
+  assert.ok(open.calls.alerts.some((t) => /no plan reviewer could start for card C-3.*outage: nothing starts/.test(t)), open.calls.alerts.join(' | '));
+  const w = world([account(), usage(), card('C-3', plan)]);
+  await w.pass(0, { rules, ports: planPorts });
+  assert.equal(started.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(started[0].lead, 'plan-review');
+  await w.pass(1, { rules, ports: planPorts });
+  assert.equal(started.length, 1);
+  assert.equal(seen[0].session, 'S-review');
+});
+
 test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {
   const order = [];
   const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
   const ports = { ...w.ports, approvals: () => { order.push('approvals'); return []; }, launch: async (x) => { order.push('launch'); return w.ports.launch(x); } };
   const r = await w.pass(0, { ports });
   assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
-  assert.deepEqual(order, ['approvals'], 'it ran with the outage open');
-  // Before `pass`: its index is just before it in STEPS, and Object.keys(steps) is the run order.
+  assert.deepEqual(order, ['approvals', 'approvals'], 'it ran with the outage open, and plan-go after it');
+  // Before `pass`: Object.keys(steps) is the run order.
   const keys = Object.keys(r.steps);
-  assert.equal(keys.indexOf('approvals') + 1, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('approvals') + 2, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('plan-go') + 1, keys.indexOf('pass'));
   // A failing approvals step does not stop the dropping of rules values already told (not in `complete`).
   const src = readFileSync(fileURLToPath(new URL('./tick.mjs', import.meta.url)), 'utf8');
   assert.match(src, /const complete = \['stops', 'undo-starts', 'pass', 'limits', 'merges'\]/);
@@ -125,7 +187,7 @@ test('L221: a missing approvals port fails the step (loud); one product failing 
   assert.equal(r.steps.approvals.ok, false);
   assert.match(r.steps.approvals.error, /the approvals port is missing/);
   assert.ok(w.calls.alerts.some((a) => /Dispatcher's approvals step failed: the approvals port is missing/.test(a)));
-  for (const s of STEPS.filter((x) => x !== 'approvals')) assert.equal(r.steps[s].ok, true, s);
+  for (const s of STEPS.filter((x) => !['approvals', 'plan-go'].includes(x))) assert.equal(r.steps[s].ok, true, s);
 
   // Per product: one throws, one hangs past its deadline, one runs. Each gets its own try and deadline.
   const ran = [];
@@ -345,8 +407,10 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
 });
 
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
-  const dir = tempDir('m11-main-');
-  const wiring = join(dir, 'wiring.mjs');
+  const L = installedLayout('m11-main-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
+  const wiring = L.path('wiring/wiring.mjs');
   const here = fileURLToPath(new URL('.', import.meta.url));
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 export const seen = [];
@@ -362,36 +426,54 @@ export async function wire(config) {
 }
 export { rec };
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   const logs = [];
-  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 0);
+  // Audit #144 m4: by default main checks its own file, which in a checkout is not inside this layout: refused.
+  assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.pop(), /orchestrate\/modules\/M11-dispatcher\/main\.mjs is not inside the installed copy/);
+  assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 0);
   const mod = await import(wiring);
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
   // refusals: no argument, a relative path, a wiring with no wire()
-  assert.equal(await main([], { log: (s) => logs.push(s) }), 1);
-  const rel = join(dir, 'rel.json');
-  writeFileSync(rel, JSON.stringify({ wiring: 'wiring.mjs', lockFile: join(dir, 'x.lock') }));
-  assert.equal(await main([rel], { log: (s) => logs.push(s) }), 1);
-  const bare = join(dir, 'bare.mjs');
+  assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
+  const rel = L.path('rel.json');
+  writeFileSync(rel, JSON.stringify({ installRoot: L.installRoot, wiring: 'wiring.mjs', lockFile: join(dir, 'x.lock') }));
+  assert.equal(await main([rel], { self, log: (s) => logs.push(s) }), 1);
+  const bare = L.path('wiring/bare.mjs');
   writeFileSync(bare, 'export const x = 1;\n');
-  const cfg2 = join(dir, 'c2.json');
-  writeFileSync(cfg2, JSON.stringify({ wiring: bare, lockFile: join(dir, 'y.lock') }));
-  assert.equal(await main([cfg2], { log: (s) => logs.push(s) }), 1);
+  const cfg2 = L.path('c2.json');
+  writeFileSync(cfg2, JSON.stringify({ installRoot: L.installRoot, wiring: bare, lockFile: join(dir, 'y.lock') }));
+  assert.equal(await main([cfg2], { self, log: (s) => logs.push(s) }), 1);
   assert.equal(logs.length, 3);
-  assert.match(logs[1], /wiring must be an absolute path/);
+  assert.match(logs[1], /job config .*rel\.json: wiring must be a full path/);
   assert.match(logs[2], /no wire\(\)/);
+  // audit #127 r2 m-B: a wiring answering more than rec, rules and ports (a `lock` or `now` that would replace main's own)
+  // or less is refused before any pass; with the old `...wired` spread, `now` here ran a pass at the epoch.
+  for (const [body, re] of [['ports: {}, now: 0', /not also now$/], ['ports: {}, lock: "x"', /not also lock$/], ['', /; it left out ports$/]]) {
+    const w = L.path(`wiring/m-b-${logs.length}.mjs`);
+    writeFileSync(w, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+export async function wire() { return { rec: recWith(), rules: rulesWith(), ${body} }; }\n`);
+    const cf = L.path(`m-b-${logs.length}.json`);
+    writeFileSync(cf, JSON.stringify({ installRoot: L.installRoot, wiring: w, lockFile: join(dir, `m-b-${logs.length}.lock`) }));
+    const before = logs.length;
+    assert.equal(await main([cf], { self, now: T0, log: (s) => logs.push(s) }), 1, body || 'no ports');
+    assert.equal(logs.length, before + 1);
+    assert.match(logs[before], /wire\(\) must return exactly rec, rules, ports/);
+    assert.match(logs[before], re);
+  }
 });
 
 test('audit 0b-6 r2 MAT-1: `node main.mjs <config>` runs a tick as a script, also through a symlinked folder; with no config it exits 1', () => {
-  const dir = tempDir('m11-entry-');
+  const L = installedLayout('m11-entry-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const link = join(dir, 'link');
-  symlinkSync(here, link);
+  symlinkSync(dirname(copyMain(L)), link);
   const out = join(dir, 'ran.json');
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { writeFileSync } from 'node:fs';
 import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { LAST_PASS_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
@@ -406,13 +488,13 @@ export async function wire() {
     cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
-  for (const script of [join(here, 'main.mjs'), join(link, 'main.mjs')]) {
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
+  for (const script of [copyMain(L), join(link, 'main.mjs')]) {
     rmSync(out, { force: true });
     const r = spawnSync(process.execPath, [script, config], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === join(here, 'main.mjs') ? 'the real path' : 'the symlink'}`);
+    assert.match(JSON.parse(readFileSync(out, 'utf8'))?.at ?? '', /^\d{4}-/, `a tick ran via ${script === copyMain(L) ? 'the copy\'s path' : 'the symlink'}`);
   }
   const bare = spawnSync(process.execPath, [join(link, 'main.mjs')], { encoding: 'utf8' });
   assert.equal(bare.status, 1);
@@ -534,9 +616,10 @@ test('audit 0b-6 r3 MAT-2: a port that never answers fails its own step at the d
 });
 
 test('audit 0b-6 r3 MAT-2: `node main.mjs` stuck on a port exits 2 at the run deadline, even with a timer left open, and the next start breaks the lock', () => {
-  const dir = tempDir('m11-stuck-');
+  const L = installedLayout('m11-stuck-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
 import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
@@ -555,9 +638,9 @@ export async function wire() {
 }
 `);
   const lockFile = join(dir, 'pass.lock');
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 300 }));
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 30_000 });
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 300 }));
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
@@ -566,8 +649,8 @@ export async function wire() {
   const l = takePassLock(lockFile);
   assert.equal(l.ok, true, l.reason);
   l.release();
-  writeFileSync(join(dir, 'bad.json'), JSON.stringify({ wiring, lockFile, runDeadlineMs: -1 }));
-  assert.equal(spawnSync(process.execPath, [join(here, 'main.mjs'), join(dir, 'bad.json')], { encoding: 'utf8' }).status, 1);
+  writeFileSync(L.path('bad.json'), JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: -1 }));
+  assert.equal(spawnSync(process.execPath, [copyMain(L), L.path('bad.json')], { encoding: 'utf8' }).status, 1);
 });
 
 test('audit 0b-6 r3 MAT-3 sweep: with any one rules value missing, either the tick does exactly what it does with all present, or one alert names the value; the undo merge is always requested', async () => {
@@ -927,13 +1010,14 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
     ['wire() never answers', 'export function wire() { return new Promise(() => {}); }'],
     ['wire() blocks', 'export function wire() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return {}; }'],
   ]) {
-    const dir = tempDir('m11-wiring-hang-');
-    const wiring = join(dir, 'wiring.mjs');
+    const L = installedLayout('m11-wiring-hang-', { dirs: ['wiring'], source: true });
+    const dir = L.base;
+    const wiring = L.path('wiring/wiring.mjs');
     writeFileSync(wiring, `setInterval(() => {}, 1000);\n${body}\n`);
-    const config = join(dir, 'config.json');
-    writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+    const config = L.path('config.json');
+    writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
     const started = Date.now();
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000, killSignal: 'SIGKILL' });
     assert.ok(Date.now() - started < 30_000, `${label}: ended by the watchdog, not by the test's own limit`);
     assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), `${label}: ${r.status} ${r.signal} ${r.stderr}`);
   }
@@ -942,9 +1026,10 @@ test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by th
 // Audit 0b-6 r4 MAT-3: a port that blocks the thread itself. No timer in the main thread can fire, so
 // the watchdog thread ends the process; the next start breaks the lock and tells Joe.
 test('r4 MAT-3: `node main.mjs` blocked inside a synchronous port is ended by the watchdog; the next pass tells Joe', async () => {
-  const dir = tempDir('m11-blocked-');
+  const L = installedLayout('m11-blocked-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 const rec = recWith([['product', 'p1', { state: 'active' }]]);
 export async function wire() {
@@ -959,10 +1044,10 @@ export async function wire() {
 }
 `);
   const lockFile = join(dir, 'pass.lock');
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile, runDeadlineMs: 200 }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile, runDeadlineMs: 200 }));
   const started = Date.now();
-  const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 40_000 });
+  const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 40_000 });
   assert.equal(r.signal, 'SIGKILL', `${r.status} ${r.stderr}`);
   assert.ok(Date.now() - started < 30_000, 'ended by the watchdog, not by the port giving up after a minute');
   assert.ok(r.stderr.includes(`the pass was blocked past ${200 + WATCHDOG_MARGIN_MS} ms; the watchdog ends it`), r.stderr);
@@ -978,9 +1063,11 @@ export async function wire() {
 });
 
 test('r4 MAT-3: main() ends its watchdog when the pass finishes, so a normal run is never killed', async () => {
-  const dir = tempDir('m11-dog-');
+  const L = installedLayout('m11-dog-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 const rec = recWith();
 export async function wire() {
@@ -992,10 +1079,10 @@ export async function wire() {
     cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock') }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock') }));
   // In this process: a watchdog left running would kill the test run itself 5.2 s after the start.
-  assert.equal(await main([config], { now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
+  assert.equal(await main([config], { self, now: T0, log: () => {}, watchdog: true, runDeadlineMs: 200 }), 0);
   await new Promise((ok) => setTimeout(ok, 6_000));
   assert.ok(true, 'still alive past the watchdog time');
 });
@@ -1020,10 +1107,11 @@ test('r5 m4: a step error that changes only in a number is told once; an untold 
 // lock it broke) still reaches the working port, because the tick's first send starts alongside the safety
 // steps instead of after them.
 test('r7 M1: a pass blocked every time still delivers the broken-lock alert to a working port', { timeout: 120_000 }, () => {
-  const dir = tempDir('m11-r7m1-');
+  const L = installedLayout('m11-r7m1-', { dirs: ['wiring'], source: true });
+  const dir = L.base;
   const here = fileURLToPath(new URL('.', import.meta.url));
   const sent = join(dir, 'sent.txt');
-  const wiring = join(dir, 'wiring.mjs');
+  const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { appendFileSync } from 'node:fs';
 const rec = recWith([['product', 'p1', { state: 'active' }]]);
@@ -1037,10 +1125,10 @@ export async function wire() {
     cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
 }
 `);
-  const config = join(dir, 'config.json');
-  writeFileSync(config, JSON.stringify({ wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 200 }));
   for (let i = 0; i < 2; i += 1) {
-    const r = spawnSync(process.execPath, [join(here, 'main.mjs'), config], { encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(process.execPath, [copyMain(L), config], { encoding: 'utf8', timeout: 60_000 });
     assert.equal(r.signal, 'SIGKILL', r.stderr);
   }
   let got = '';
@@ -1173,4 +1261,160 @@ test('L172 follow-up: an outage step that throws right after writing the open ou
   assert.deepEqual(w.calls.reviewers, [], 'no reviewer is asked for');
   assert.deepEqual(w.calls.launched, [], 'nothing starts');
   assert.equal(requested(w.rec, 'V-1'), null, 'no merge is requested');
+});
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('m11-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs'), lockFile: L.path('pass.lock') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
+});
+
+// L329: a step error's told time that can't be read, or lies more than a minute ahead, does not keep it quiet.
+test('L329: a step error whose told_at is unreadable or an hour ahead is told again, not held until that time', async () => {
+  for (const told_at of [new Date(T0 + 60 * MIN).toISOString(), 'not a time']) {
+    const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at }]], { over: {
+      sessions: () => { throw new Error('no session list'); } } });
+    await w.pass(0);
+    assert.equal(w.calls.alerts.filter((t) => /stops step failed: no session list/.test(t)).length, 1, told_at);
+  }
+  // A told_at within the day is still quiet.
+  const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at: new Date(T0 - 60 * MIN).toISOString() }]], { over: {
+    sessions: () => { throw new Error('no session list'); } } });
+  await w.pass(0);
+  assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
+});
+
+test('L354 step ok: the queued copy leaves first and the told fields go; a refused drop keeps the error for the next tick, and says so', async () => {
+  const failed = async () => {
+    let boom = true;
+    const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+    await w.pass();
+    boom = false;
+    queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  // The channel is down, so the copy is still queued when the step comes back.
+  const at = (w, rec, min) => tick({ rec, rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, alert: () => false } });
+  const a = await failed();
+  const log = [];
+  await at(a, writeLog(a.rec, log), 1);
+  assertDropFirst(log, `step_ok:${STEP_ERROR_FACT('outage')}`);
+  const cleared = a.rec.read('fact', STEP_ERROR_FACT('outage')).doc;
+  assert.deepEqual([cleared.error, cleared.told_cause, cleared.told_at], [null, undefined, undefined]);
+  const b = await failed();
+  const r = await at(b, writeLog(b.rec, [], { refuseDrop: true }), 1);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, 'board unreadable', 'held');
+  assert.match(r.steps.outage.note, /could not be dropped.*next pass/);
+  await at(b, b.rec, 2);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, null, 'the next tick clears it');
+});
+
+test('L449: a step\'s refused drop reaches the tick\'s reports, named by its step, so main can log it', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+  await w.pass();
+  boom = false;
+  queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + MIN, ports: { ...w.ports, alert: fakeAlert({ answer: false }) } });
+  assert.ok(r.reports.some((l) => /^outage: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a review hold\'s refused drop reaches the tick\'s reports, named by its step', async () => {
+  const w = world([account(), usage()]);
+  const fact = REVIEW_HOLD_FACT('r1');
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { told_at: iso(T0), absent_since: iso(T0 - 2 * 60 * MIN) }, kind: 'hold_alert' });
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0, ports: { ...w.ports, alert: fakeAlert({ answer: false }), reviewAlerts: () => [] } });
+  assert.ok(r.reports.some((l) => /^limits: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a refused drop in each step that clears reaches the tick\'s reports, named by its step', async () => {
+  const dropped = /the queued alert for .* could not be dropped/;
+  const refusedTick = (w, min, ports = {}) => tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, ...ports } });
+  // The channel is down where a step runs after the tick's first send, so the copy is still queued when it clears.
+  const said = (r, step) => r.reports.some((l) => l.startsWith(`${step}: `) && dropped.test(l));
+
+  const stops = world([account(), usage(), card('C-1')]);
+  await stops.pass(0);
+  const sid = stops.sessions[0].id;
+  change(stops.rec, 'card', 'C-1', { state: 'cancelled' });
+  queueFor(stops.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+  const r1 = await refusedTick(stops, 1);
+  assert.ok(said(r1, 'stops'), r1.reports.join(' | '));
+
+  const undo = world([account(), usage(), ...undoEntries('U-1')]);
+  await undo.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }) });
+  queueFor(undo.rec, UNDO_HELD_FACT('U-1'), 'told_at', iso(T0), T0);
+  const r2 = await refusedTick(undo, 1);
+  assert.ok(said(r2, 'undo-starts'), r2.reports.join(' | '));
+
+  const pause = world([account(), usage()]);
+  change(pause.rec, 'product', 'p1', { state: 'paused' });
+  queueFor(pause.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+  const r3 = await refusedTick(pause, 0, { alert: fakeAlert({ answer: false }) });
+  assert.ok(said(r3, 'pass'), r3.reports.join(' | '));
+
+  const phone = world([account(), usage()]);
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) assert.equal(phone.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+  queueFor(phone.rec, FD_RESTART_FACT, 'told', true, T0);
+  const r4 = await refusedTick(phone, 0, { alert: fakeAlert({ answer: false }), frontDoorAlive: () => true });
+  assert.ok(said(r4, 'phone'), r4.reports.join(' | '));
+});
+
+test('L449: main logs each failure report of a tick that ran', async () => {
+  // The channel stays down: the tick's first send would deliver the queued copy, and then no drop is left to refuse.
+  const L = installedLayout('m11-main-report-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const wiring = L.path('wiring/wiring.mjs');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  writeFileSync(wiring, `import { recWith, rulesWith, writeLog, queueFor, T0 } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { fakeAlert } from ${JSON.stringify(join(here, '../../test/fake-alert.test-helper.mjs'))};
+const fact = ${JSON.stringify(STEP_ERROR_FACT('outage'))};
+const real = recWith([['fact', fact, { error: 'it failed' }]]);
+queueFor(real, fact, 'told_at', 'x', T0);
+export async function wire() {
+  const noop = () => [];
+  return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(L.base, 'pass.lock') }));
+  const logs = [];
+  const code = await main([config], { self, now: T0, log: (s) => logs.push(s) });
+  assert.equal(code, 0, logs.join(' | '));
+  assert.ok(logs.some((l) => /^dispatcher: [a-z-]+: the queued alert for .* could not be dropped/.test(l)), logs.join(' | '));
+});
+
+test('L354 item 3: a mark landing as a step clears does not outlive the clear', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; }, alert: () => false } });
+  await w.pass();
+  boom = false;
+  const fact = STEP_ERROR_FACT('outage');
+  await tick({ rec: lateMark(w.rec, 'step_ok', fact, { told_cause: 'board unreadable', told_at: iso(T0) }), rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  const doc = w.rec.read('fact', fact).doc;
+  assert.deepEqual([doc.error, doc.told_cause, doc.told_at], [null, undefined, undefined]);
+});
+
+test('L424: the tick asks the reviewEnded port before a review session\'s verdict is taken', async () => {
+  const dir = tempDir('m11-tick-verdict-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'not read past the ended check\n');
+  const asked = [];
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+    reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  await w.pass();
+  assert.deepEqual(asked, ['R-1']);
+  assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
 });

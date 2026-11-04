@@ -14,6 +14,7 @@ import { STAMP, installStamp } from './review-daemons.mjs';
 import { reviewDaemonPlists } from './review-daemons.mjs';
 import { readAccountFile, copyAccountTo, copyFromInstalledCopy, useAccount, ACCOUNT_FILE } from './accounts.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { openJobJson } from '../../../shared/job-config.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
@@ -102,7 +103,7 @@ test('L66 M2: what a review runs (claude, node, the hooks folder) must be inside
   // L132 M-1: the wiring and the budget module, which the runner imports, must be the copy's own code files, .mjs files
   // under its modules/ or shared/ folder. A copy item the install step put at the top of the copy, a folder or the
   // config is refused: the runner would import it and fail on its first import of the copy's own files.
-  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ folder\)/;
+  const own = /is not one of the copy's own code files \(a \.mjs file under its modules\/ or shared\/ or wiring\/ folder\)/;
   writeFileSync(join(base, 'kept-wiring.mjs'), '', { mode: 0o644 });
   writeFileSync(join(base, 'modules', 'x.js'), '', { mode: 0o644 });
   mkdirSync(join(base, 'shared'), { mode: 0o755 });
@@ -251,6 +252,7 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   const read = (card, uid = ME) => readCardFile({ recordRoot: root, recordUid: uid, card });
   assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 }, rev: 3 });
   assert.match(read('C-2').reason, /no such card/);
+  assert.equal(read('C-2').missing, true, 'said in a field, so nothing reads the wording (R-0b-171)');
   assert.match(read('../x').reason, /not a card id/);
   assert.match(read('C-1', ME + 1).reason, /not the Record owner's alone/);
   put('C-3', { entity: 'card', id: 'C-1', doc: {} });
@@ -259,6 +261,19 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   assert.match(read('C-4').reason, /not JSON/);
   put('C-5', { entity: 'card', id: 'C-5', doc: {} }, 0o666);
   assert.match(read('C-5').reason, /not the Record's own plain file/);
+  for (const id of ['C-4', 'C-5']) assert.equal(read(id).missing, undefined, 'a file that is there but can\'t be read is never missing');
+  put('C-10', { entity: 'other', id: 'C-10', doc: {} });
+  assert.equal(read('C-10').missing, undefined, 'its own id, the wrong kind');
+  put('C-11', { entity: 'other', id: 'X', doc: {} });
+  assert.equal(read('C-11').missing, undefined, 'another id, the wrong kind');
+  put('C-12', '{}');
+  assert.equal(read('C-12').missing, undefined);
+  assert.equal(read('c-12').missing, true, 'only the exact name is that card, even when its file is ruined');
+  for (const id of ['C-3', '../x', '.C-1', '']) assert.equal(read(id).missing, true, 'no card has this id (L489)');
+  for (const bad of ['null', '{}', '{"entity":"card"}']) { put('C-8', bad); assert.equal(read('C-8').missing, undefined, `a ruined file, ${bad}`); }
+  put('C-9', { entity: 'card', id: 'C-9', doc: {} });
+  assert.equal(read('c-9').missing, true, 'an id that differs only in case is another id');
+  assert.equal(read('C-1', ME + 1).missing, undefined, 'a folder that fails its checks is never missing');
   symlinkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-6.json'));
   assert.match(read('C-6').reason, /ELOOP/);
   linkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-7.json'));
@@ -303,6 +318,15 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   // The runner's port: the copy first (root's, so here it fails), then the owner's file.
   const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: ME }, recordRoot: '/x', recordUid: ME, mirror: '/m', claudeBin: '/c', accountCopy: to, ownerHome: home, ownerUid: ME };
   assert.equal(realPorts(c, {}).accountInUse(), 'b');
+  // The Dispatcher's own rules key, per product as the real engine answers it (R-0b-171).
+  const asked = [];
+  const rules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 60, p2: 2880 })[o.product] };
+  const ruled = (products) => realPorts(c, {}, { budget: { rules, rec: { list: (e) => (e === 'product' ? products : []) } } });
+  assert.equal(ruled([]).requestGapMs('p1'), 60 * 60_000);
+  assert.deepEqual(asked[0], ['timeouts.in_review_no_reviewer_min', 'p1']);
+  assert.equal(ruled([{ id: 'p1' }, { id: 'p2' }]).requestGapMs(undefined), 2880 * 60_000, 'a request with no card takes the longest');
+  assert.equal(ruled([]).requestGapMs(undefined), Infinity, 'no product listed is no answer, and ends nothing');
+  assert.throws(() => realPorts(c, {}).requestGapMs('p1'), 'with no budget module it throws, and the runner ends nothing on silence');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
 });
@@ -670,6 +694,26 @@ test('L83 minor 3 planted: readConfig refuses / itself, and a review copies fold
   assert.throws(cfg({ ...good, reviewCopies: join(d, 'bob', 'rc') }), /bobFolder and reviewCopies must be two separate folders/, 'the copies inside the Bob folder');
 });
 
+test('audit #144 m3: main() refuses a config whose name no longer names the file read (a swap between the read and the checks)', async () => {
+  const d = realpathSync(tempDir('m4-swap-'));
+  const one = join(d, 'one.mjs'); writeFileSync(one, 'export function start() { return { ok: false, reason: "x" }; }\n');
+  const config = join(d, 'c.json');
+  writeFileSync(config, JSON.stringify({ wiring: one, snapshot: join(d, 'rules.json'), rules: { production: { env_files: [], programs: [], hosts: [] } }, uids: { reviewer: ME } }), { mode: 0o644 });
+  // The reader reads by descriptor, as the real one does; the walls are stood in for.
+  const readConfigFn = (f) => openJobJson(f, (why) => { throw new Error(`config: ${why}`); }).value;
+  const run = async (extra = {}) => {
+    const logs = []; const passes = [];
+    const code = await main([config], { log: (s) => logs.push(s), ports: { readConfigFn, programs: () => null, write: () => {}, pass: async () => { passes.push(1); return { ok: true, started: [], refused: [] }; }, ...extra } });
+    return { code, logs, passes };
+  };
+  const same = await run();
+  assert.equal(same.code, 0, same.logs.join('\n'));
+  const swapped = await run({ lstat: (p) => (p === config ? Object.assign(lstatSync(p), { ino: lstatSync(p).ino + 1 }) : lstatSync(p)) });
+  assert.equal(swapped.code, 1);
+  assert.match(swapped.logs.join('\n'), /config .*c\.json changed while it was read/);
+  assert.equal(swapped.passes.length, 0, 'no pass runs');
+});
+
 test('L83 minor 1 planted: main() refuses a wiring with a second export before any pass, and writes the snapshot before one', async () => {
   const d = realpathSync(tempDir('m4-main-'));
   const config = join(d, 'c.json'); writeFileSync(config, '{}');
@@ -750,6 +794,7 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   const head = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
   const dest = join(d, 'copies', 'S-1');
   mkdirSync(join(d, 'copies'));
+  assert.match((await prepareReviewCopy({ mirror: gd, card: '.C-1', head, dest })).reason, /not a card id/);
   const r = await prepareReviewCopy({ mirror: gd, card: 'C-1', head, dest });
   assert.equal(r.ok, true, r.reason);
   assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'card\n');

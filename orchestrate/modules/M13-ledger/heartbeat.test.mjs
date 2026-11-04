@@ -1,18 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
-import { makeFactWriter } from '../M12-sensors/facts.mjs';
+import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
 import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 
 // `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
-function setup({ wrap = (w) => w } = {}) {
+function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
   let t = Date.parse('2026-11-03T12:00:00Z');
   const now = () => new Date(t);
   const rec = memoryRecord();
-  const gh = fakeIssues();
+  const gh = fakeIssues({ now });
   const writer = wrap(makeFactWriter(rec, { actor: 'ledger', now }));
-  const alerts = makeAlerts({ rec, gh, owner: 'owner', now });
+  const alerts = makeAlerts({ rec, gh, owner: 'owner', now, writer: alertWrap(makeFactWriter(rec, { actor: 'ledger', now })) });
   const world = { lastPass: () => new Date(t - 60e3).toISOString(), rules: true, fd: true, account: { signedIn: true, login: 'account A' }, usage: null, dispatcherRunning: true };
   const probes = {
     dispatcherLastGood: async () => (world.dispatcherRunning ? new Date(t - 60e3).toISOString() : world.stoppedAt),
@@ -26,6 +26,8 @@ function setup({ wrap = (w) => w } = {}) {
   const tick = (min) => { t += min * 60e3; };
   return { rec, gh, writer, world, pass, tick, plan: (p) => { planned = p; }, now };
 }
+const refusingPin = (world) => (w) => ({ get: w.get, put: (id, doc, kind) => (world.refuse && doc.kind === 'fact.heartbeat-issue' ? { ok: false, reason: 'the store is full' } : w.put(id, doc, kind)) });
+const pinnedIssues = (gh) => [...gh.issues.values()].filter((i) => /heartbeat \(pinned\)/.test(i.title));
 const alertIssues = (gh) => [...gh.issues.values()].filter((i) => !/heartbeat \(pinned\)/.test(i.title));
 
 test('all green: one pinned heartbeat issue whose body is rewritten every 10 min with mini_alive_at', async () => {
@@ -182,12 +184,13 @@ function lossSetup(raise, refuse = () => false) {
   };
   let planned = null;
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
-  const alerts = { raise, clear: async () => false };
+  const reported = [];
+  const alerts = { raise, clear: async () => false, cacheTrouble: () => null, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
   // One GitHub for the whole test: a fresh one per pass forgot the pinned issue the last pass opened (the strict
-  // isClosed found it, #98 r1 m2).
+  // read found it, #98 r1 m2).
   const gh = fakeIssues();
   const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
-  return { base, writer, world, pass, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
+  return { base, writer, world, pass, reported, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
 }
 const changed = (raise) => raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key.split('-').pop());
 const savedLogin = (h) => h.writer.get('heartbeat-account-product-1')?.login;
@@ -415,8 +418,8 @@ test('L158 m2: a saved pinned issue that is not an issue number reopens without 
     const h = setup();
     h.writer.put('heartbeat-issue-product-1', { kind: 'fact.heartbeat-issue', product: 'product 1', issue: bad });
     const asked = [];
-    const isClosed = h.gh.isClosed;
-    h.gh.isClosed = async (i) => { asked.push(i); if (typeof i !== 'number') throw new Error(`asked GitHub about ${JSON.stringify(i)}`); return isClosed(i); };
+    const { read } = h.gh;
+    h.gh.read = async (i) => { asked.push(i); return read(i); };
     await h.pass();
     assert.deepEqual(asked, [], `issue ${JSON.stringify(bad)}: never asked`);
     assert.equal(h.gh.calls.filter(([c]) => c === 'open').length, 1, 'opened a fresh pinned issue');
@@ -424,12 +427,12 @@ test('L158 m2: a saved pinned issue that is not an issue number reopens without 
   }
 });
 
-test('L158 m2: the stand-in GitHub refuses questions about issues it never opened', async () => {
+test('L158 m2: the stand-in GitHub refuses questions that are not about an issue number, and an issue it never opened is gone', async () => {
   const gh = fakeIssues();
-  await assert.rejects(gh.isClosed(1), /no issue 1/);
-  await assert.rejects(gh.isClosed('[REDACTED:wrong-shape]'), /not an issue number/);
+  assert.equal(await gh.read(1), null);
+  await assert.rejects(gh.read('[REDACTED:wrong-shape]'), /not an issue number/);
   const i = await gh.open({ title: 't', body: 'b' });
-  assert.equal(await gh.isClosed(i), false);
+  assert.equal((await gh.read(i)).open, true);
 });
 
 test('L152 m3: a pinned-issue open with no issue number is not saved, and the next pass opens it again', async () => {
@@ -566,4 +569,119 @@ test('P11: A→B told, save refused, signed out, then A: the owner still hears i
   const changes = alertIssues(h.gh).filter((i) => /account changed/.test(i.title));
   assert.equal(changes.length, 2, changes.map((i) => i.body).join(' / '));
   assert.match(changes[1].body, /signed in as account A \(was account B\)/);
+});
+
+// L393: the pinned issue's number is what stops a new issue each pass, so a refused save is found again by its marker.
+test('L393: a pinned issue whose number the Record refused: one issue over many passes, red on it, and the number saved once it takes it', async () => {
+  const world = { refuse: true };
+  const h = setup({ wrap: refusingPin(world) });
+  for (let i = 0; i < 6; i++) {
+    const r = await h.pass();
+    assert.ok(r.red.includes('alert-not-saved'));
+    h.tick(10);
+  }
+  assert.equal(pinnedIssues(h.gh).length, 1);
+  assert.match(pinnedIssues(h.gh)[0].body, /RED +alerts: the Record refused to save the pinned issue's number: the store is full/);
+  world.refuse = false;
+  const r = await h.pass();
+  assert.deepEqual(r.red, []);
+  assert.equal(pinnedIssues(h.gh).length, 1);
+  assert.doesNotMatch(pinnedIssues(h.gh)[0].body, /RED/);
+  assert.doesNotMatch(r.body, /orch:heartbeat/, 'the marker is on the post, not in what the pass answers');
+});
+
+test('L393: a list GitHub refuses opens no pinned issue this pass; the next one does', async () => {
+  const h = setup();
+  const findOpen = h.gh.findOpen;
+  h.gh.findOpen = async () => false;
+  await h.pass();
+  assert.equal(pinnedIssues(h.gh).length, 0);
+  h.gh.findOpen = findOpen;
+  h.tick(10);
+  await h.pass();
+  assert.equal(pinnedIssues(h.gh).length, 1);
+});
+
+// L402: alerts the owner can't be told show on the pinned issue, since an alert is what failed.
+const NOT_TOLD = 'alert-not-told';
+
+test('L402 owed: a notice stuck on a failed read is red on every pass, with GitHub\'s answer, and one comment over them all', async () => {
+  const h = setup();
+  h.world.usage = { window: 'weekly', pct: 60 };
+  await h.pass();
+  h.world.usage = { window: 'weekly', pct: 80 }; h.tick(10);
+  const usage = issuesFor(h, /usage past/)[0];
+  const { edit, latestOwnComment } = h.gh;
+  let n = 0;
+  h.gh.edit = async (i, b) => { if (h.gh.issues.get(i) === usage) { n += 1; if (n === 2) return false; } return edit(i, b); };
+  assert.ok((await h.pass()).red.includes(NOT_TOLD), 'the note went out, its last edit did not');
+  h.gh.edit = edit;
+  h.gh.lastAnswer = 'GitHub answered 403 to GET /issues/1/comments';
+  h.gh.latestOwnComment = async () => false;
+  for (let i = 0; i < 3; i++) {
+    h.tick(10);
+    const r = await h.pass();
+    assert.ok(r.red.includes(NOT_TOLD), `pass ${i}`);
+    assert.match(r.body, /RED +alerts: GitHub answered 403 to GET \/issues\/1\/comments; the next pass tries again/);
+    assert.match(pinnedIssues(h.gh)[0].body, /RED: .*alert-not-told/);
+  }
+  assert.equal(usage.comments.length, 1);
+  h.gh.latestOwnComment = latestOwnComment;
+  h.tick(10);
+  assert.deepEqual((await h.pass()).red, []);
+  assert.equal(usage.comments.length, 1, 'found on GitHub, so not sent twice');
+  h.tick(10);
+  assert.doesNotMatch(pinnedIssues(h.gh)[0].body, /RED/);
+});
+
+test('r4 m2: a robot login that could not be read is red on the pinned issue, with why', async () => {
+  const h = setup();
+  h.gh.loginTrouble = 'the robot\'s own login could not be read (GitHub answered 401), so any bot\'s issue counts';
+  const { red, body } = await h.pass();
+  assert.ok(red.includes('robot-login-unknown'));
+  assert.match(body, /RED +alerts: the robot's own login could not be read/);
+  h.gh.loginTrouble = null;
+  h.tick(10);
+  assert.ok(!(await h.pass()).red.includes('robot-login-unknown'));
+});
+
+test('r5 m1: a client that only learns the login on its first call: the first check of the pass still shows it red', async () => {
+  const h = setup();
+  h.gh.loginTrouble = null;
+  h.gh.ready = async () => { h.gh.loginTrouble = 'the robot\'s own login could not be read (GitHub answered 401)'; };
+  const { red, body } = await h.pass();
+  assert.ok(red.includes('robot-login-unknown'));
+  assert.match(body, /RED +alerts: the robot's own login could not be read/);
+});
+
+test('r5 m2: the heartbeat reports the Record\'s trouble under its own name', async () => {
+  const h = lossSetup(sink(() => 'opened'));
+  await h.pass();
+  assert.deepEqual(h.reported, [['product 1', TROUBLE_SOURCES.HEARTBEAT]]);
+});
+
+test('L402: any alert lost shows red once a pass, with no reason given or several lost', async () => {
+  const h = lossSetup(sink(() => false));
+  h.world.fd = false;
+  const { red, body } = await h.pass();
+  assert.equal(red.filter((k) => k === NOT_TOLD).length, 1);
+  assert.match(body, /RED +alerts: GitHub lost an alert; the next pass tries again/);
+});
+
+test('L402: the Record refusing alert writes: red on the pinned issue every pass, one alert from the second on, and both go when it recovers', async () => {
+  const world = { refuse: true };
+  const h = setup({ alertWrap: (w) => ({ get: w.get, put: (id, doc) => (world.refuse && doc.kind === 'fact.alert' ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) }) });
+  await h.pass();
+  h.world.fd = false; h.tick(10);
+  const first = await h.pass();
+  assert.ok(first.red.includes('alert-not-saved'));
+  assert.match(first.body, /RED +alerts: the Record refused to save where an alert is: the store is full/);
+  for (let i = 0; i < 3; i++) { h.tick(10); await h.pass(); }
+  assert.equal(issuesFor(h, /refusing alert writes/).length, 1);
+  assert.equal(issuesFor(h, /red: front-door/).length, 1, 'found on GitHub each pass');
+  world.refuse = false; h.tick(10);
+  const r = await h.pass();
+  assert.ok(!r.red.includes('alert-not-saved'));
+  assert.equal(issuesFor(h, /refusing alert writes/)[0].closed, true);
+  assert.equal(issuesFor(h, /red: front-door/).length, 1);
 });

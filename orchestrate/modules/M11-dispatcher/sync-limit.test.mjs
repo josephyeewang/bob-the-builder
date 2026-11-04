@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { limitedSync, SYNC_PORT_MAX_BUFFER } from './sync-limit.mjs';
 import { main } from './main.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 
 const node = process.execPath;
 // A mark of its own, so the clean-up below ends only this file's children.
@@ -80,11 +81,14 @@ test('every failure is "no answer", never a throw', () => {
 });
 
 test('main hands limitedSync to the wiring', async () => {
-  const dir = tempDir('m11-sync-limit-main-');
+  const L = installedLayout('m11-sync-limit-main-');
+  const dir = L.base;
   try {
-    writeFileSync(join(dir, 'wiring.mjs'), "export async function wire(config, helpers) { globalThis.__helpers = helpers; throw new Error('stop here'); }\n");
-    writeFileSync(join(dir, 'config.json'), JSON.stringify({ wiring: join(dir, 'wiring.mjs'), lockFile: join(dir, 'l.lock') }));
-    assert.equal(await main([join(dir, 'config.json')], { log: () => {} }), 1);
+    const wiring = L.write('wiring/wiring.mjs', "export async function wire(config, helpers) { globalThis.__helpers = helpers; throw new Error('stop here'); }\n");
+    const config = L.write('config.json', { installRoot: L.installRoot, wiring, lockFile: join(dir, 'l.lock') });
+    // The job's own script must be one of the copy's code files (audit #144 m4): a stand-in in the layout.
+    const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+    assert.equal(await main([config], { self, log: () => {} }), 1);
     assert.equal(globalThis.__helpers?.limitedSync, limitedSync);
   } finally {
     delete globalThis.__helpers;

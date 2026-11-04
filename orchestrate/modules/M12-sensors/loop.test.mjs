@@ -4,10 +4,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setup } from '../M9-record/fixtures.test-helper.mjs';
+import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { sensorsPass, timed, EVERY_S, PROBE_DEADLINE_MS, RUN_DEADLINE_MS, main, LOOP, EVENT } from './loop.mjs';
 import { sensorsJobPlist } from './sensors-job.mjs';
 import { prsToRead, prReader, MAX_PRS } from './probes/github-pr.mjs';
@@ -238,6 +239,7 @@ test('the Sensors job file is the Dispatcher\'s layout: only the label and the l
   const o = { label: 'org.sample.sensors', node: '/opt/node/bin/node', script: '/srv/orchestrate/modules/M12-sensors/loop.mjs', config: '/srv/sensors.json',
     path: '/usr/bin:/bin', logDir: '/srv/logs', workDir: '/srv' };
   const s = sensorsJobPlist(o).split('\n'); const d = loginJobPlist(o).split('\n');
+  assert.equal(sensorsJobPlist({ ...o, logName: 'dispatcher' }), sensorsJobPlist(o), 'a caller can\'t put the Sensors in the Dispatcher\'s log');
   assert.equal(s.length, d.length);
   const diff = s.map((l, i) => [l, d[i]]).filter(([a, b]) => a !== b);
   assert.deepEqual(diff.map(([a]) => a.trim()), ['<key>StandardOutPath</key><string>/srv/logs/sensors.out.log</string>', '<key>StandardErrorPath</key><string>/srv/logs/sensors.err.log</string>']);
@@ -256,4 +258,32 @@ test('main refuses a missing config or a wiring without wire(), exit 1', async (
   assert.equal(await main([], { log: (s) => lines.push(s) }), 1);
   assert.equal(await main(['/no/such/file.json'], { log: (s) => lines.push(s) }), 1);
   assert.ok(lines.every((l) => /sensors: not started/.test(l)));
+});
+
+test('L253: main reads its config through the checked reader: the copy\'s own script and wiring pass; a checkout script or a config outside the copy is refused', async () => {
+  const L = installedLayout('m12-loop-', { files: { 'wiring/sensors.mjs': 'export async function wire() { return {}; }\n' } });
+  const config = L.write('sensors.json', { installRoot: L.installRoot, wiring: L.path('wiring/sensors.mjs') });
+  const self = L.write('modules/M12-sensors/loop.mjs', 'export {};\n');
+  const lines = [];
+  // Past the reader: the stand-in wiring answers nothing, so the wiring's shape is what stops it.
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.pop(), /wire\(\) must return/);
+  // The default self is this checkout's loop.mjs, not a file of the copy.
+  assert.equal(await main([config], { log: (s) => lines.push(s) }), 1);
+  assert.match(lines.pop(), /M12-sensors\/loop\.mjs is not inside the installed copy/);
+  const outside = join(L.base, 'outside.json');
+  writeFileSync(outside, JSON.stringify({ installRoot: L.installRoot, wiring: L.path('wiring/sensors.mjs') }), { mode: 0o644 });
+  assert.equal(await main([outside], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.pop(), /outside\.json is not inside the installed copy/);
+});
+
+test('audit #144 r2 n1: a config that names no installRoot is refused by main, which says installRoot', async () => {
+  const L = installedLayout('m12-noroot-', { files: { 'wiring/w.mjs': 'export async function wire() { return {}; }\n' } });
+  const self = L.write('modules/M12-sensors/loop.mjs', 'export {};\n');
+  // Everything else as a working config has it: only the reader can refuse this one (a job that read its own file
+  // first and returned it when it named no installRoot would go on to the wiring instead).
+  const config = L.write('job.json', { wiring: L.path('wiring/w.mjs') });
+  const lines = [];
+  assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
+  assert.match(lines.join('\n'), /installRoot must be a full path/);
 });

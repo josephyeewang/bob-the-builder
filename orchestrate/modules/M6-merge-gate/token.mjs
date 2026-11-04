@@ -9,8 +9,11 @@
 //
 //   makeAppJwt({ appId, privateKeyPem, now }) → string   (RS256; iat = now − 60 s, exp = now + 9 min; now in ms)
 //   await mintInstallationToken({ keyDir, keyFile?, appId, installationId, http, uid?, scriptsUid, now? })
-//     → { ok: true, token, expires_at } | { ok: false, reason }
-// `http` is a GitHub client ({ post(path, body, headers) } → { status, json }). Any error → no token (fail closed),
+//     → { ok: true, token, expires_at, login, login_reason? } | { ok: false, reason }
+// `login` is the robot's own name on GitHub, "<slug>[bot]", read with the same signed request (GET /app) because an
+// installation token can't ask who it is, and the alert channel needs it to tell the robot's issues from another app's
+// (L399). A login that can't be read doesn't stop the mint: login is null and login_reason says why.
+// `http` is a GitHub client ({ post(path, body, headers), get(path, headers) } → { status, json }). Any error → no token (fail closed),
 // and a reason never carries the token, the signed request or key text. makeAppJwt throws on bad input (a string
 // builder: a throw can't be read as a pass); mintInstallationToken never throws.
 
@@ -21,6 +24,7 @@ import { join } from 'node:path';
 const APP_ID = /^[A-Za-z0-9.]{1,64}$/;           // a numeric App id or an App's client id
 const INSTALL_ID = /^[1-9][0-9]{0,19}$/;
 const KEY_FILE = /^[A-Za-z0-9._-]{1,128}$/;       // a bare name inside the key folder, never a path
+const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,99})$/i;     // an App's name in its URL
 const b64url = (x) => Buffer.from(x).toString('base64url');
 
 export function makeAppJwt({ appId, privateKeyPem, now }) {
@@ -61,21 +65,32 @@ export async function mintInstallationToken({ keyDir, keyFile = 'robot-app.pem',
 
     const jwt = makeAppJwt({ appId, privateKeyPem: pem, now: now() });
     secrets.push(jwt);
-    const r = await http.post(`/app/installations/${installationId}/access_tokens`, {}, {
-      Authorization: `Bearer ${jwt}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    });
+    const signed = { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+    const r = await http.post(`/app/installations/${installationId}/access_tokens`, {}, signed);
     const token = r?.json?.token;
     if (typeof token === 'string') secrets.push(token);
     if (r?.status !== 201) return no(`GitHub refused the token request (${r?.status})`);
     if (typeof token !== 'string' || !/^[A-Za-z0-9_.-]{20,512}$/.test(token)) return no('GitHub gave no usable token');
     const expires_at = typeof r.json.expires_at === 'string' ? r.json.expires_at : null;
-    return { ok: true, token, expires_at };
+    const who = await robotLogin(http, signed);
+    return { ok: true, token, expires_at, login: who.login, ...(who.login ? {} : { login_reason: scrub(who.reason, secrets) }) };
   } catch (e) {
     let why = 'unknown error';
     try { const m = e?.message; if (typeof m === 'string') why = m.slice(0, 200); } catch { /* keep the fixed text */ }
     return no(`token mint failed: ${why}`);
+  }
+}
+
+// The App's own login. Never throws: a mint with no login is still a mint.
+async function robotLogin(http, signed) {
+  try {
+    if (typeof http.get !== 'function') return { login: null, reason: 'this GitHub client cannot read the App' };
+    const r = await http.get('/app', signed);
+    if (r?.status !== 200) return { login: null, reason: `GitHub answered ${r?.status} to GET /app` };
+    const slug = r.json?.slug;
+    return SLUG.test(String(slug ?? '')) ? { login: `${slug}[bot]`, reason: null } : { login: null, reason: 'GitHub gave no App name' };
+  } catch (e) {
+    return { login: null, reason: `GET /app failed: ${String(e?.message ?? 'unknown error').slice(0, 200)}` };
   }
 }
 

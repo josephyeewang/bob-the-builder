@@ -9,19 +9,23 @@
 //                                                             → { requestReview, hasReviewer, reviewAlerts }
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
-//   relayReviewAlerts({ rec, alerts, alert, now })            → tells Joe each runner alert once (a fact per alert)
+//   relayReviewAlerts({ rec, alerts, alert, now, report })    → tells each runner alert once, and each hold while it lasts
+//   keepReviewHolds(rec, report)                              → a pass whose status could not be read clears nothing
 //
-// Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each once:
-//   - a pass that failed (`ok: false`), once per cause (its error text);
-//   - an installed copy whose commit stamp is not main's (or has no stamp), once per installed commit: reviews then run
-//     old code until the copy is updated. `mainHead(installed)` is the wiring's port: `{ commit, since }`, main's commit
+// Besides the runner's own alerts, the Dispatcher tells Joe two things it reads in the status (L66), each a hold, told at
+// once and then each day it lasts (L315):
+//   - a pass that failed (`ok: false`), named by its first error's class (pass.mjs causeOf, L437);
+//   - an installed copy whose commit stamp is not main's (or has no stamp), named by the installed commit: reviews then
+//     run old code until the copy is updated. `mainHead(installed)` is the wiring's port: `{ commit, since }`, main's commit
 //     (40 hex) and, in ms, since when the copy has been behind it. `since` comes from root's own record, which the updater
-//     writes after each fetch (M4 install-check.mjs: `behindSince(readMainSeen(mainSeenFile(installRoot)), commit)`):
+//     writes after each fetch (M4 install-check.mjs: `behindSince(readMainSeen(mainSeenFile(installRoot)), commit, installed)`):
 //     when the updater first saw main ahead of the copy, by its own clock, or its last fetch when it has not yet seen
 //     this head. Never a commit's date, which the commit's author sets (L73 point 7(b)). The updater copies main every
 //     10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
 //     STAMP_GRACE_MS (item 20(c)); no stamp, or no `since` (or one dated ahead), is told at once. A plain commit string
-//     counts as no `since`. Without the port, or when it fails, there is no stamp check. `mainSeenHead` builds the port
+//     counts as no `since`. Without the port there is no stamp check. A port that fails or names no commit keeps the
+//     stamp hold as it is (`keep`, L437): main can't be read, so nothing is cleared, and that is told on first sight and
+//     each day (L465), with the port's error in the words only, so it makes no new trouble. `mainSeenHead` builds the port
 //     from that record (L75 m-2), and reviewPorts builds it when given `installRoot` and `main` (main's commit, a port).
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
@@ -33,7 +37,9 @@ import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/r
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
-import { tellThen } from './alerts.mjs';
+import { tellThen, clearCause, writeFrom, queuedMarks } from './alerts.mjs';
+import { causeOf } from './pass.mjs';
+import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 const HEX40 = /^[0-9a-f]{40}$/;
 
@@ -62,27 +68,37 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
 
 /**
- * The Dispatcher's own alerts from a status (readReviewStatus's answer), in the runner's alert shape. `at` is fixed, so
- * each is told once per id (REVIEW_ALERT_FACT keys on id and at).
+ * The Dispatcher's own holds from a status (readReviewStatus's answer), in the shape the relay takes: listed on every
+ * pass they last, so each is told again each day and cleared when it ends (L315). `since` names this trouble: another
+ * class of error, or another installed commit, is told at once. A failure's class is its first error's (L437), as
+ * pass.mjs causeOf reads it: `A` and `A; B` are one trouble, and numbers in the text don't make a new one.
  */
 export const STAMP_GRACE_MS = 30 * 60_000;
+export const MAIN_UNREAD = 'Main can\'t be read, so whether its installed copy is behind can\'t be checked.';
+const MAIN_UNREAD_SINCE = 'main-unreadable';
+// One trouble, whatever varies from pass to pass (L458): the first error, without the detail in brackets or an id.
+const failureClass = (why) => causeOf(why
+  .replace(/\((?:[^()]|\([^()]*\))*(?:\)|$)/g, '').split('; ')[0]
+  .replace(/\bsession \S+/g, 'session').replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, 'id').trim());
 const AHEAD_MS = 5 * 60_000;
 
 export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) {
   const out = [];
   if (s?.ok === false) {
     const why = typeof s.error === 'string' && s.error ? s.error.slice(0, 300) : 'no reason given';
-    out.push({ id: `runner-failed-${sha(why)}`, at: 'once', text: `Its last pass failed: ${why}.` });
+    out.push({ id: 'runner-failed', hold: true, since: failureClass(why), text: `Its last pass failed: ${why}.` });
   }
   let head = null;
-  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch { head = null; }
+  let readError = '';
+  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch (e) { head = null; readError = String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 100); }
   const main = typeof head === 'string' ? head : head?.commit;
-  if (typeof main === 'string' && HEX40.test(main) && s?.installed_commit !== main) {
+  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: readError ? `${MAIN_UNREAD} The read said: ${readError}` : MAIN_UNREAD }];
+  if (main && s?.installed_commit !== main) {
     const at = s?.installed_commit ?? null;
     const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;
     // Behind main for less than the grace: the updater has not had its turn yet.
     if (at && since !== null && now - since < STAMP_GRACE_MS) return out;
-    out.push({ id: `stamp-${at ?? 'none'}`, at: 'once', text: at
+    out.push({ id: 'stamp', hold: true, since: at ?? 'none', text: at
       ? `Its installed copy is at ${at.slice(0, 7)}, but main is at ${main.slice(0, 7)}: reviews run the old code until the copy is updated.`
       : `Its installed copy has no commit stamp (the file that says which commit of main the copy was made from), so whether reviews run main's code can't be told. A copy installed before the copy's layout changed has none; the review runner says what to do in its log, ${logWhere(runnerLog)}.` });
   }
@@ -98,9 +114,9 @@ const logWhere = (p) => (typeof p === 'string' && p.startsWith('/') ? p : `${RUN
  * told at once). `owner` and `top` stand in for root and `/` in a test.
  */
 export function mainSeenHead({ installRoot, main, owner = 0, top = '/' }) {
-  return () => {
+  return (installed) => {
     const commit = main();
-    return { commit, since: behindSince(readMainSeen(mainSeenFile(installRoot), { owner, top }), commit) };
+    return { commit, since: behindSince(readMainSeen(mainSeenFile(installRoot), { owner, top }), commit, installed) };
   };
 }
 
@@ -116,22 +132,99 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
-    reviewAlerts: () => { const s = read(); return [...s.alerts, ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
+    reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
   };
 }
 
 /** The fact that marks one runner alert as sent to Joe: its id and time, so the same trouble coming back later is sent again. */
 export const REVIEW_ALERT_FACT = (a) => `review-alert-${createHash('sha256').update(`${a.id}|${a.at}`).digest('hex').slice(0, 24)}`;
 
-/** Each runner alert to Joe once, through the outbox (marked once a copy is delivered). Returns how many were queued. */
-export function relayReviewAlerts({ rec, alerts, alert, now }) {
+// The mark of one hold, in pass.mjs's hold- family: one per id, so a hold that ends clears its own mark (L315).
+const REVIEW_HOLD_PREFIX = 'hold-review-';
+export const REVIEW_HOLD_FACT = (id) => `${REVIEW_HOLD_PREFIX}${sha(id)}`;
+
+// A hold that comes and goes is one trouble, not a new one each time (L437). Its mark clears only after this long off
+// the list, and a `since` told in the last STILL_WAITING_MS is not told again, whatever happened to the mark between.
+export const HOLD_ABSENT_MS = 60 * 60_000;
+const NO_SINCE = 'none'; // the key in since_times of a hold with no `since`
+const markOf = (rec, fact) => { try { return rec.read('fact', fact)?.doc ?? null; } catch { return null; } };
+// Every write here is from the mark read (writeFrom, L288 MAT-4), so a told mark landing between read and write stays.
+// A refused one reaches the log and the owner (L354 item 6).
+const writeMark = (rec, fact, base, doc, kind, report, opts) => {
+  const r = writeFrom(rec, fact, base, doc, kind, opts);
+  if (r?.ok !== true) report(`${fact} could not be written (${r?.reason ?? 'no answer'})`, fact);
+};
+const backOnList = (rec, fact, mark, report) => {
+  if (mark?.absent_since === undefined) return;
+  const { absent_since: _, ...rest } = mark;
+  writeMark(rec, fact, mark, rest, 'hold_back', report);
+};
+// The hold has ended: its queued copy leaves first, then the mark clears, told_at winning over a mark on its way, and
+// cleared_at moving the version so that mark conflicts (L354, L449). since_times stays: it outlasts a clear.
+const clearHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
+  const cur = markOf(rec, fact);
+  if (!moved && (cur === null || (typeof cur === 'object' && cur.told_at == null))) return;
+  const was = typeof cur === 'object' ? cur : undefined;
+  writeMark(rec, fact, was ?? undefined, { ...was, told_at: null, cleared_at: new Date(now).toISOString() }, 'hold_cleared', report, { force: ['told_at'] });
+}, report);
+// The sinces told in the last day, by when. A time that can't be read or lies ahead is not kept: told, never held back.
+const recentSinces = (mark, now) => Object.fromEntries(Object.entries(mark?.since_times ?? {}).filter(([, at]) => {
+  const t = pastTime(at, now);
+  return t !== null && now - t < STILL_WAITING_MS;
+}));
+
+/** A pass whose status could not be read tells nothing and clears nothing: time off the list starts again (L437). */
+export function keepReviewHolds(rec, report) {
+  for (const { id } of rec.list('fact')) if (id.startsWith(REVIEW_HOLD_PREFIX)) backOnList(rec, id, markOf(rec, id), report);
+}
+
+/**
+ * Each runner alert to Joe once, and each hold (`hold: true`) at once, then each day while it is listed, through the
+ * outbox (marked once a copy is delivered). A hold whose `since` was told in the last day is not told again (L437). A
+ * hold off the list for HOLD_ABSENT_MS is cleared, its queued copy dropped, so a later return is told. A `keep` hold
+ * counts as listed, under the `since` it was last told by, if any. What it needs could not be read, so it is told on
+ * first sight and each day in its own words, never silent (L458, L465). Only a status that was read gets here; a read
+ * that failed goes to keepReviewHolds. `report(line, fact)` hears a refused drop or write. Returns how many were queued.
+ */
+export function relayReviewAlerts({ rec, alerts, alert, now, report }) {
   let n = 0;
+  const listed = new Set();
+  const tell = ({ fact, waiting, since, text }) => stillWaiting({
+    now, waiting, ...(since !== undefined ? { since } : {}),
+    read: () => rec.read('fact', fact)?.doc,
+    tell: (fields) => {
+      const since_times = { ...recentSinces(markOf(rec, fact), now), [since ?? NO_SINCE]: fields.told_at };
+      return tellThen(alert, text, { fact, fields: { ...fields, since_times }, kind: 'hold_alert' });
+    },
+    clear: () => clearHold(rec, fact, now, report),
+  });
   for (const a of alerts ?? []) {
     if (!a || typeof a.id !== 'string' || typeof a.text !== 'string') continue;
+    if (a.hold) {
+      const fact = REVIEW_HOLD_FACT(a.id);
+      listed.add(fact);
+      const mark = markOf(rec, fact);
+      backOnList(rec, fact, mark, report);
+      const since = (a.keep && mark?.told_at ? mark.since : undefined) ?? (typeof a.since === 'string' ? a.since : undefined);
+      if (recentSinces(mark, now)[since ?? NO_SINCE] !== undefined) continue;
+      if (tell({ fact, waiting: true, since, text: `review runner: ${a.text.slice(0, 500)}` }).did === 'told') n += 1;
+      continue;
+    }
     const fact = REVIEW_ALERT_FACT(a);
     if (rec.read('fact', fact)?.doc?.told_at) continue;
     // Only an alert the queue took is counted (L130 c1).
     if (tellThen(alert, `review runner: ${a.text.slice(0, 500)}`, { fact: REVIEW_ALERT_FACT(a), fields: { told_at: new Date(now).toISOString() }, kind: 'review_alert' }) !== false) n += 1;
+  }
+  const queued = queuedMarks(rec, REVIEW_HOLD_PREFIX);
+  const marked = rec.list('fact').map((f) => f.id).filter((id) => id.startsWith(REVIEW_HOLD_PREFIX));
+  for (const fact of new Set([...marked, ...queued])) {
+    if (listed.has(fact)) continue;
+    const mark = markOf(rec, fact);
+    const object = typeof mark === 'object' && mark !== null;
+    if (!queued.includes(fact) && (mark === null || (object && mark.told_at == null))) continue; // nothing to clear
+    const gone = pastTime(mark?.absent_since, now);
+    if (gone === null) writeMark(rec, fact, object ? mark : undefined, { ...(object ? mark : {}), absent_since: new Date(now).toISOString() }, 'hold_absent', report);
+    else if (now - gone >= HOLD_ABSENT_MS) tell({ fact, waiting: false });
   }
   return n;
 }

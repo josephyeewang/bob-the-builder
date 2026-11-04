@@ -2,10 +2,13 @@
 // The script the login job runs (R-0b-55, R-0b-65; audit 0b-6 MAT-1): `node main.mjs <config.json>`.
 //
 // The config names every path; nothing here names a machine:
-//   { "wiring": "/abs/path/wiring.mjs", "lockFile": "/abs/path/dispatcher.lock" }
+//   { "installRoot": "/abs/install", "wiring": "/abs/install/<code file>.mjs", "lockFile": "/abs/path/dispatcher.lock" }
+// It is read through shared/job-config.mjs (L253): the config and the wiring must be the installed copy's own, root's
+// or this job's user's alone, never links, or nothing starts.
 // and, optionally, "runDeadlineMs" (a positive number; RUN_DEADLINE_MS when absent).
 // The wiring module (built with the module that joins the real ports, not in this folder) exports
-// `async function wire(config, { limitedSync })` returning { rec, rules, ports } — see README, "The tick's ports".
+// `async function wire(config, { limitedSync })` returning exactly { rec, rules, ports } — see README, "The tick's ports".
+// Any other key is refused (audit #127 r2 m-B): a wiring answering `lock` or `now` must not replace the lock or the clock.
 // One run is one full pass under the single-instance lock. Exit 0 when the pass ran or another pass
 // was running; exit 1 when the config or the wiring could not be loaded (launchd logs stderr); exit 2
 // when the pass ran past RUN_DEADLINE_MS (audit 0b-6 r3 MAT-2), and Joe is told once a day (L38). The script then exits outright, so a
@@ -16,8 +19,9 @@
 // run deadline it ends the process from outside. The next start breaks the lock and tells Joe (tick.mjs
 // `runTick`).
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import { readJobConfig } from '../../shared/job-config.mjs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
@@ -29,6 +33,8 @@ import { limitedSync } from './sync-limit.mjs';
 export const RUN_DEADLINE_MS = STEPS.length * STEP_DEADLINE_MS + 2 * ALERT_BUDGET_MS + 20_000;
 // Room for the late alert's one send before the watchdog ends the process (audit 0b-6 r7 m1).
 export const WATCHDOG_MARGIN_MS = ALERT_SEND_MS + 5_000;
+// What wire() returns, and all it may return (audit #127 r2 m-B).
+export const WIRED_KEYS = Object.freeze(['rec', 'rules', 'ports']);
 
 /** A thread of its own that kills this process after `ms`, however blocked the main thread is. */
 export function startWatchdog(ms) {
@@ -39,14 +45,24 @@ setTimeout(() => { require('node:fs').writeSync(2, 'dispatcher: the pass was blo
   return w;
 }
 
-export function readConfig(file) {
-  const c = JSON.parse(readFileSync(file, 'utf8'));
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+const SELF = realOf(fileURLToPath(import.meta.url));
+
+export function readConfig(file, opts = {}) {
+  const c = readJobConfig(file, { code: ['wiring'], ...opts });
   for (const k of ['wiring', 'lockFile']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.runDeadlineMs !== undefined && !(Number.isFinite(c.runDeadlineMs) && c.runDeadlineMs > 0)) throw new Error('config: runDeadlineMs must be a positive number');
   return c;
 }
 
-export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false } = {}) {
+// `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4); a test names a
+// file inside its own layout.
+export async function main(argv, { now, clock, log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false, readConfigFn = readConfig, self = SELF } = {}) {
+  // The clock is main's own, never the wiring's (audit #127 r2 m-B). The tick reads it before each step, so no wait is
+  // written with a `now` gone stale over a long pass (L321: the Store Writer refuses a since more than 60 s off its
+  // clock). A test that names a fixed `now` and no clock keeps a fixed clock.
+  const clockFn = clock ?? (now === undefined ? () => Date.now() : () => now);
+  now ??= clockFn();
   let config;
   let wired;
   // The watchdog starts first (audit 0b-6 r5 MAT-1): a wiring whose import or wire() never finishes would
@@ -57,12 +73,16 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   let dog = watchdog ? startWatchdog((runDeadlineMs ?? RUN_DEADLINE_MS) + WATCHDOG_MARGIN_MS) : null;
   try {
     if (!argv[0]) throw new Error('usage: main.mjs <config.json>');
-    config = readConfig(argv[0]);
+    config = readConfigFn(argv[0], { self });
     if (dog && runDeadlineMs === undefined && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(config.runDeadlineMs + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
     // Every synchronous port runs its command through limitedSync (sync-limit.mjs): a time limit each.
     wired = await mod.wire(config, { limitedSync });
+    const keys = wired && typeof wired === 'object' ? Object.keys(wired) : [];
+    const extra = keys.filter((k) => !WIRED_KEYS.includes(k));
+    const missing = WIRED_KEYS.filter((k) => !keys.includes(k));
+    if (extra.length || missing.length) throw new Error(`wire() must return exactly ${WIRED_KEYS.join(', ')}${extra.length ? `, not also ${extra.join(', ')}` : ''}${missing.length ? `; it left out ${missing.join(', ')}` : ''}`);
   } catch (e) {
     log(`dispatcher: not started: ${e.message}`);
     dog?.terminate();
@@ -72,7 +92,7 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
-  try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, ...wired }), late]); } finally { clearTimeout(timer); }
+  try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, clock: clockFn, rec: wired.rec, rules: wired.rules, ports: wired.ports }), late]); } finally { clearTimeout(timer); }
   // Past the deadline the watchdog stays: the late alert below could block too.
   if (!r.late) dog?.terminate();
   if (r.late) {
@@ -85,15 +105,15 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
     return 2;
   }
   if (!r.ran) log(`dispatcher: ${r.reason}`);
+  // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
+  for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
   return 0;
 }
 
 // Run as a script, not when imported. Real paths on both sides (audit 0b-6 r2 MAT-1): a folder reached
 // through a symlink spells the path differently, and a mismatch here would exit 0 having done nothing.
-const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
-const self = realOf(fileURLToPath(import.meta.url));
 // A port left hanging keeps handles open; the unref'd timer exits a second later, after stderr is written.
-if (self && process.argv[1] && self === realOf(process.argv[1])) {
+if (SELF && process.argv[1] && SELF === realOf(process.argv[1])) {
   const code = await main(process.argv.slice(2), { watchdog: true });
   process.exitCode = code;
   setTimeout(() => process.exit(code), 1000).unref();

@@ -21,7 +21,7 @@ import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { ownerVerdict, requestReview } from './github-review.mjs';
 import { goMarkdown, goView } from './go-view.mjs';
-import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, readConfig } from './kinds.mjs';
+import { GO_EMPTY_LINE, LETTER_LINE, lapseAt, outsideTime, readConfig } from './kinds.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const LETTERS = 'ABCDEFGHIJ';
@@ -92,7 +92,7 @@ export async function openDecision(ctx, id) {
     const pr = await ctx.gh.post(`${base}/pulls`, { title: title(a.doc), head: branch, base: 'main', body });
     const number = pr?.json?.number;
     if (pr?.status !== 201 || !Number.isSafeInteger(number)) return fail(`could not open the pull request (${pr?.status})`);
-    const req = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: number, githubId: cfg.githubId });
+    const req = await requestReview({ gh: ctx.gh, owner: ctx.owner, repo: ctx.repo, pr: number, githubId: cfg.githubId, now: ctx.now() });
     // The pull request exists either way; its number is kept so it is never opened twice.
     const doc = { ...a.doc, pr: number, file: path };
     if (req.ok) Object.assign(doc, { state: 'pushed', raised_at: req.raised_at, raised_reask: doc.reask_count, first_pushed_at: doc.first_pushed_at ?? iso(ctx.now()) });
@@ -110,16 +110,24 @@ export async function openDecision(ctx, id) {
 // answered ask (L135). Before, both ignored the alert's answer, so a lost alert left the pull request open with
 // nothing to retry it, and Joe never told.
 export async function closeDecisionPr(ctx, id, doc) {
-  if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return true;
+  const failed = await closePr(ctx, doc);
+  if (failed === null) return true;
+  try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: failed }) !== false; } catch { return false; }
+}
+// Does this ask have a pull request of its own to close?
+export const hasDecisionPr = (doc) => activeKind(doc.kind)?.decision_pr === true && Number.isSafeInteger(doc.pr);
+// One try at the close, telling nobody. → null when there is none to close or it closed, else why not.
+export async function closePr(ctx, doc) {
+  if (!hasDecisionPr(doc)) return null;
   // A client that throws before it returns a promise (a bug, a missing method) is a failed close too, never a stopped
   // pass: retryClose runs this every pass, so a throw here would stop every push (L142 m4).
   let c;
   try { c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }); } catch (e) { c = { status: String(e?.message ?? e) }; }
-  if (c?.status === 200) return true;
-  try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) }) !== false; } catch { return false; }
+  return c?.status === 200 ? null : String(c?.status);
 }
-// The mark on an answered decision whose close is still due. It is written with the answer, before the close, so a
-// crash between the two leaves it too; schedule.mjs schedulePass retries the close and takes it off (L135).
+// The mark on a decision whose close is still due. On an answer it is written with the answer, before the close, so a
+// crash between the two leaves it too (L135); on a withdrawn ask it is written with the withdrawal (L477). schedule.mjs
+// schedulePass retries the close and takes it off.
 export const CLOSE_DUE = 'pr_close_due';
 
 export async function readDecision(ctx, id) {
@@ -133,7 +141,7 @@ export async function readDecision(ctx, id) {
   if (!v.ok) return v;
   if (v.verdict === 'none') return { ok: true, counted: false, ...(v.line ? { line: v.line } : {}), ...(v.blocked ? { reason: v.blocked } : {}) };
   // An answer given after the ask lapsed counts nothing, even if no pass ran in between (the Mini was down; R-0b-51).
-  if (Date.parse(v.review.submitted_at) >= lapseAt(doc)) return { ok: true, counted: false, lapsed: true };
+  if (Date.parse(v.review.submitted_at) >= lapseAt(doc, ctx.now())) return { ok: true, counted: false, lapsed: true };
   const go = doc.kind === 'go_t1';
   let choice; let approves;
   if (v.verdict === 'changes_requested') { choice = go ? 'Not now' : null; approves = false; } else {
@@ -144,7 +152,7 @@ export async function readDecision(ctx, id) {
       approves = true;
     }
   }
-  const binding = { kind: 'github_review', pr: doc.pr, review_id: v.review.id, commit_id: v.review.commit_id, submitted_at: v.review.submitted_at };
+  const binding = { kind: 'github_review', pr: doc.pr, review_id: v.review.id, commit_id: v.review.commit_id, submitted_at: iso(outsideTime(v.review.submitted_at, ctx.now())) };
   const answer = { channel: 'github_review', choice, approves, declined: v.verdict === 'changes_requested', binding, at: iso(ctx.now()) };
   // The one approval check, on the answer as it will be recorded (L81).
   const counted = answerCounts(ctx.rules, { ...doc, answer }, { product: ctx.product });
