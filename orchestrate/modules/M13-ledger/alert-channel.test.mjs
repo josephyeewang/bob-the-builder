@@ -21,18 +21,20 @@ const MIN = 60_000;
 function fakeGitHub() {
   const issues = new Map();
   const calls = [];
+  const spoken = [];
   let n = 0;
   const gh = {
-    calls, issues,
+    calls, issues, clock: null,
     async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); return true; },
-    async comment(i, text) { issues.get(i).comments.push(text); calls.push(['comment', i]); return true; },
+    async comment(i, text) { issues.get(i).comments.push(text); if (gh.clock) spoken.push({ i, at: new Date(gh.clock()).toISOString(), body: text }); calls.push(['comment', i]); return true; },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); return true; },
     async isClosed(i) {
       if (!Number.isSafeInteger(i) || i <= 0 || !issues.has(i)) throw new Error(`fakeGitHub.isClosed: no issue ${JSON.stringify(i)}`);
       return issues.get(i).closed;
     },
     async findOpen(marker) { calls.push(['findOpen']); for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
+    async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
     ownerCloses(i) { issues.get(i).closed = true; },
     openIssues: () => [...issues.values()].filter((x) => !x.closed),
   };
@@ -43,6 +45,7 @@ function world({ products = ['p1'], product = 'p1', gh = fakeGitHub() } = {}) {
   const root = tempDir('m13-chan-');
   writeFileSync(join(root, 'unsent-alerts.jsonl'), '', { mode: 0o644 });
   let t = T0;
+  gh.clock = () => t;
   const rec = memoryRecord({ now: () => t });
   const repos = Object.fromEntries(products.map((p, i) => [p, `acme/product-${i + 1}`]));
   const bound = { recordRoot: root, product, products, repos, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 };
@@ -219,7 +222,10 @@ test('Bob\'s own repository, a bad repo name, no owner or no repo for the produc
 test('L237, L288 MAT-3: with no token (the App not set up) the round says so and calls nothing; the store\'s own alert goes to this Record\'s product\'s repo, naming it', async () => {
   const w = world({ products: ['p1', 'p2'], product: 'p2' });
   const fetched = [];
-  const fetchFn = async (url) => { fetched.push(url); return { status: 201, json: async () => ({ number: 1 }) }; };
+  const fetchFn = async (url, o) => {
+    fetched.push(url);
+    return o.method === 'GET' ? { status: 200, json: async () => [] } : { status: 201, json: async () => ({ number: 1 }) };
+  };
   const nb = { ...w.bound, issuesFor: undefined, fetchFn };
   let r = await deliverAlertsPass({ ...nb, rec: w.rec, token: async () => ({ ok: false, reason: 'no key file' }) });
   assert.equal(r.refused, 'alert channel not set up: no key file');
@@ -455,7 +461,7 @@ test('L288 plants: a store backlog bigger than one round goes out over later rou
   const w = world();
   appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
   // Each issue write takes a second of the round's clock; a round's budget fits two.
-  const clock = () => w.gh.calls.length * 1000;
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
   const rounds = [];
   for (let i = 0; i < 4 && readUnsent(w.root).length; i += 1) {
     const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
@@ -527,7 +533,7 @@ test('L298 Minor 2 (N1): different entries for the same cause, back to back with
   assert.deepEqual(per, ['open:1', 'comment:1', 'comment:1', 'comment:1']);
 });
 
-test('L298 Minor 2 (N2): a crash after GitHub took the comment but before the alert state was saved re-comments once, then stops; never skipped', async () => {
+test('L298 Minor 2 (N2), L389: a crash after GitHub took the comment but before the alert state was saved repeats nothing: GitHub already holds that comment', async () => {
   const w = world();
   outbox(w.rec, w.now())('cause', { mark: markOf(1) });
   await w.run({ probe: ALIVE });
@@ -536,7 +542,7 @@ test('L298 Minor 2 (N2): a crash after GitHub took the comment but before the al
   let crashed = false;
   w.gh.comment = async (i, t) => { await comment(i, t); if (!crashed) { crashed = true; throw new Error('the process died after GitHub took the comment'); } return true; };
   for (let i = 0; i < 4; i++) await w.run({ probe: ALIVE });
-  assert.equal(w.gh.issues.get(1).comments.length, 2, 'the lost save costs one repeat comment, no more and no fewer');
+  assert.equal(w.gh.issues.get(1).comments.length, 1, 'the entry\'s one comment, and no repeat');
   assert.deepEqual(queued(w.rec), []);
 });
 
@@ -622,4 +628,56 @@ test('L298 cosmetic: whose Record it is is checked before the lock, and a produc
   assert.equal(w.gh.calls.length, 0, 'a locked Record of another product tells no repository anything');
   const rec = { list: () => [{ id: null, doc: {} }] };
   assert.equal(recordProductProblem(rec, 'p2'), 'this Record\'s product can\'t be read, so it can\'t be told apart from p2\'s');
+});
+
+// L389: the channel's rounds, with the Record refusing the alert's state. The entry stays queued and the round is red,
+// saying so; GitHub's own state keeps it to one issue and one comment.
+test('L389: a refused save in a delivery round: red, in plain words, the entry stays queued, one issue and one comment over many rounds', async () => {
+  const w = world();
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  const write = w.rec.write.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.write = (o) => (o.doc?.kind === 'fact.alert' ? { ok: false, reason: 'the store is full' } : write(o));
+  for (let i = 0; i < 6; i++) {
+    const r = await w.run({ rec, probe: ALIVE });
+    assert.equal(r.failed, 1);
+    assert.match(r.refused, /the Record refused to save this alert's state: the store is full/);
+    w.tick(10);
+  }
+  assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 1);
+  assert.equal(queued(w.rec).length, 1);
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ probe: ALIVE });
+  assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 1, 'once the Record takes it, the same issue goes on');
+  assert.deepEqual(queued(w.rec), []);
+});
+
+test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page, and false when it can\'t read them all', async () => {
+  const answers = [];
+  const asked = [];
+  const fetchFn = async (url) => {
+    asked.push(url);
+    const [status, json] = answers.shift();
+    return { status, json: async () => json };
+  };
+  const gh = githubIssues({ repo: 'acme/product-1', owner: 'owner-login', token: async () => ({ ok: true, token: 'not-a-real-token' }), fetchFn });
+  const robot = { user: { login: 'robot[bot]' } };
+  const said = (login, at, body) => ({ user: { login }, created_at: at, body });
+  const SINCE = '2026-11-02T08:00:00.000Z';
+  answers.push([200, robot], [200, [said('robot[bot]', '2026-11-03T01:00:00Z', 'old'), said('someone', '2026-11-03T02:00:00Z', 'not me'), said('robot[bot]', '2026-11-03T01:30:00Z', 'new')]]);
+  assert.deepEqual(await gh.latestOwnComment(7, SINCE), { at: '2026-11-03T01:30:00Z', body: 'new' });
+  assert.ok(asked[1].includes(`/issues/7/comments?since=${encodeURIComponent(SINCE)}&per_page=100&page=1`));
+  answers.push([200, robot], [200, [said('someone', '2026-11-03T02:00:00Z', 'not me')]]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), null);
+  const flood = Array.from({ length: 100 }, () => said('someone', '2026-11-03T02:00:00Z', 'flood'));
+  answers.push([200, robot], [200, flood], [200, [said('robot[bot]', '2026-11-03T03:00:00Z', 'on page two')]]);
+  assert.deepEqual(await gh.latestOwnComment(7, SINCE), { at: '2026-11-03T03:00:00Z', body: 'on page two' });
+  answers.push([200, robot], ...Array.from({ length: 10 }, () => [200, flood]));
+  assert.equal(await gh.latestOwnComment(7, SINCE), false, 'more than it will read');
+  answers.push([500, null]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
+  answers.push([200, robot], [403, null]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
+  answers.push([200, robot], [200, [said('robot[bot]', 'no time', 'x')]]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
 });

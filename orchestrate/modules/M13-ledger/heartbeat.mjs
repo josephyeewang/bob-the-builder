@@ -23,10 +23,12 @@
 // Push requests are facts `push-request-<key>` for the Front Door to deliver (join item with lane 2).
 
 import { createHash } from 'node:crypto';
+import { wasTold } from './alerts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
+const NOT_SAVED = 'alert-not-saved';
 const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 // The status fact the Front Door's trip check reads (review-0b-8 MAT-9): green only while `at` is under an hour old.
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -37,10 +39,16 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const t = now();
   const key = (kind) => `${product}|heartbeat|${kind}`;
   const red = []; const lines = [];
+  // A write the Record refused can't go in an alert (alerts are what it refused), so the pinned issue shows it red (L389).
+  const shown = (answer) => {
+    if (!answer?.refused) return answer;
+    if (!red.includes(NOT_SAVED)) { red.push(NOT_SAVED); lines.push(`RED   alerts: ${answer.refused}`); }
+    return answer;
+  };
   const set = async (kind, isRed, line, body) => {
     lines.push(`${isRed ? 'RED  ' : 'ok   '} ${line}`);
-    if (isRed) { red.push(kind); await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status: `red:${kind}` }); }
-    else await alerts.clear({ key: key(kind), note: `${kind} is green again.` });
+    if (isRed) { red.push(kind); shown(await alerts.raise({ key: key(kind), title: `${product}: heartbeat red: ${kind}`, body, status: `red:${kind}` })); }
+    else shown(await alerts.clear({ key: key(kind), note: `${kind} is green again.` }));
   };
 
   const d = await probe(probes.dispatcherLastGood);
@@ -107,8 +115,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       if (!writer.get(pid)) told = writer.put(pid, { kind: 'fact.push-request', idempotency_key: idem, state: 'requested', product,
         text: `The Mini switched to ${acct.login}: switch the phone app to ${acct.login} too.` })?.ok === true;
     } else {
-      told = await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
-        body: `The Mini is now signed in as ${acct.login} (was ${prev}) and no switch was planned.` }) !== false;
+      told = wasTold(shown(await alerts.raise({ key: key(`account-changed-${seq}-${acct.login}`), title: `${product}: the Mini's Claude account changed`,
+        body: `The Mini is now signed in as ${acct.login} (was ${prev}) and no switch was planned.` })));
     }
   }
   if (signedIn && told) writer.put(lastId, { kind: 'fact.heartbeat-account', product, login: acct.login, switches: switched ? nextSwitches : switches });
@@ -119,8 +127,8 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     const step = [...USAGE_STEPS].reverse().find((s) => usage.pct >= s);
     lines.push(`${step ? 'warn ' : 'ok   '} usage: ${Math.round(usage.pct)} % of the ${usage.window} window`);
     const ukey = key(`usage-${usage.window}`);
-    if (step) await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.`, status: `step:${step}` });
-    else await alerts.clear({ key: ukey, note: 'A new usage window has started.' });
+    if (step) shown(await alerts.raise({ key: ukey, title: `${product}: Claude usage past ${USAGE_STEPS[0]} % (${usage.window})`, body: `Usage has passed ${step} % of the ${usage.window} window${usage.resets_at ? `; it resets ${usage.resets_at}` : ''}.`, status: `step:${step}` }));
+    else shown(await alerts.clear({ key: ukey, note: 'A new usage window has started.' }));
   } else {
     lines.push('ok    usage: unknown');
   }

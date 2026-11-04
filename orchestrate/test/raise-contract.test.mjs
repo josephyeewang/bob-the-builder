@@ -9,7 +9,8 @@
 // Where each wrapper stands (L170, 1 Nov 2026):
 //   - tellThen (M11): return alert(text, { mark }): the alert's own answer, and a throw passes. Ruled.
 //   - M13 `raise` (alerts.mjs): a GitHub call that answers false (or `open` with no issue number) makes raise answer
-//     false; one that throws makes raise throw; nothing is saved before the call succeeds. Ruled.
+//     false; one that throws makes raise throw; nothing is saved before the call succeeds. Ruled. A write the Record
+//     refuses makes raise and clear answer { refused: reason } (L389), which wasTold reads as a lost alert.
 //   - prod-watcher `raise`: answers result !== false; a setting change whose raise answered false keeps its old
 //     baseline and is raised again next pass; a throw stops the pass. Ruled (the r4 hand-check).
 //   - heartbeat `set`: answers nothing; it raises a red fact again every pass, whatever raise answered. Open (lane 3).
@@ -144,6 +145,34 @@ test('heartbeat account-changed: the new login is saved only when the raise was 
   await h.pass();
   await h.pass();
   assert.equal(switchRaises(lost, 'account B'), 2, 'answered false: the change is raised again on the next pass');
+});
+
+const NOT_SAVED = { refused: 'the Record refused to save this alert\'s state: test' };
+test('L389: a refused save counts as a lost alert: the setting change and the login are raised again', async () => {
+  const lost = fakeAlert({ answer: NOT_SAVED });
+  const v = watcher(lost);
+  await v.pass();
+  v.change();
+  await v.pass();
+  lost.reset();
+  await v.pass();
+  assert.equal(settingChanges(lost), 1, 'the old baseline stays');
+  const hurt = fakeAlert({ answer: NOT_SAVED });
+  const h = heart(hurt);
+  await h.pass();
+  h.world.login = 'account B';
+  await h.pass();
+  await h.pass();
+  assert.equal(switchRaises(hurt, 'account B'), 2);
+});
+
+test('L389: a refused save shows red on the heartbeat, in plain words, once a pass; other passes do not', async () => {
+  const h = heart(fakeAlert({ answer: NOT_SAVED }));
+  const r = await h.pass();
+  assert.equal(r.red.filter((k) => k === 'alert-not-saved').length, 1);
+  assert.match(r.body, /RED +alerts: the Record refused to save this alert's state: test/);
+  const fine = await heart(fakeAlert({ answer: 'opened' })).pass();
+  assert.ok(!fine.red.includes('alert-not-saved'));
 });
 
 test('tellThen hands the mark to the alert, which writes it only on delivery (L143)', () => {

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
-import { makeAlerts, alertKey, fakeIssues } from './alerts.mjs';
+import { makeAlerts, alertKey, fakeIssues, wasTold } from './alerts.mjs';
+import { makeMasker } from '../M12-sensors/mask.mjs';
 import { makeFactWriter } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
 import { dueToTell as notifyDue, RETELL_MS, FUTURE_SKEW_MS as NOTIFY_SKEW } from './outside-check/notify.mjs';
@@ -12,7 +13,7 @@ const idFor = (key) => `alert-${createHash('sha256').update(key).digest('hex').s
 function setup() {
   let t = Date.parse('2026-11-03T08:00:00Z');
   const clock = { now: () => new Date(t), tick: (min) => { t += min * 60000; } };
-  const gh = fakeIssues();
+  const gh = fakeIssues({ now: clock.now });
   const rec = memoryRecord();
   const alerts = makeAlerts({ rec, gh, owner: 'owner-login', now: clock.now });
   return { gh, alerts, clock, rec };
@@ -110,7 +111,7 @@ test('L143: a change notice whose comment answered false answers false, keeps th
   assert.equal(l.alerts.state('k').count, 1, 'the lost pass is not counted');
   l.gh.comment = comment;
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'second', status: 's2' }), 'changed');
-  assert.deepEqual(l.gh.issues.get(1).comments, ['Changed: second']);
+  assert.deepEqual(l.gh.issues.get(1).comments.map((c) => c.split('\n')[0]), ['Changed: second']);
   assert.equal(await l.alerts.raise({ key: 'k', title: 't', body: 'second', status: 's2' }), 'updated', 'sent once, not again');
   assert.equal(l.gh.issues.get(1).comments.length, 1);
 });
@@ -260,7 +261,8 @@ test('L371: notify.mjs\'s copy of the 24 h rule answers as the shared rule does'
   const H = 60 * 60_000;
   // The number and the Date are recent on purpose: only ISO text can be read, so both must tell, and a copy that reads
   // them would call them fresh. An old number tells either way, and would hide that.
-  const table = [null, undefined, '', 'garbage', now - H, new Date(now - H), ago(-30_000), ago(-59_999), ago(-60_000), ago(-60_001), ago(-H), ago(0), ago(23 * H), ago(24 * H - 1), ago(24 * H), ago(25 * H)];
+  // The offset row is an hour ago as a time, but sorts after now as text, so a copy comparing text reads it as ahead and says due.
+  const table = [null, undefined, '', 'garbage', now - H, new Date(now - H), ago(-30_000), ago(-59_999), ago(-60_000), ago(-60_001), ago(-H), ago(0), ago(23 * H), ago(24 * H - 1), ago(24 * H), ago(25 * H), '2026-11-03T13:00:00+02:00'];
   for (const told of table) assert.equal(notifyDue(told, now), dueToTell({ told_at: told }, now), `told ${String(told)}`);
   assert.equal(RETELL_MS, STILL_WAITING_MS);
   assert.equal(NOTIFY_SKEW, FUTURE_SKEW_MS);
@@ -323,4 +325,162 @@ test('L371: opening the new issue when GitHub loses it answers false, and the ne
   assert.equal(alerts.state(standing.key).status, 'closed-by-owner', 'nothing saved');
   gh.open = open;
   assert.equal(await alerts.raise(other), 'opened');
+});
+
+// L389 MAT-1: the Record is what remembers what was told, so when it refuses, the limit has to come from GitHub.
+const writerOf = (rec, clock) => makeFactWriter(rec, { actor: 'ledger', now: clock.now, masker: makeMasker() });
+
+// `refuse` says which writes the Record refuses right now; everything else goes through.
+function refusing() {
+  let t = Date.parse('2026-11-03T08:00:00Z');
+  const clock = { now: () => new Date(t), tick: (min) => { t += min * 60000; } };
+  const gh = fakeIssues({ now: clock.now });
+  const rec = memoryRecord();
+  const real = writerOf(rec, clock);
+  const world = { refuse: () => false };
+  const writer = { get: real.get, put: (id, doc) => (world.refuse(doc) ? { ok: false, reason: 'the store is full' } : real.put(id, doc)) };
+  const alerts = makeAlerts({ rec, gh, owner: 'o', now: clock.now, writer });
+  return { gh, alerts, clock, world };
+}
+const REFUSED = /the Record refused to save this alert's state: the store is full/;
+const perDay = (at) => { for (let i = 1; i < at.length; i++) assert.ok(at[i] - at[i - 1] >= 24 * 60, `comments at ${at[i - 1]} and ${at[i]} min`); };
+
+// 120 one-minute passes, then to 50 h in 10-minute passes.
+async function overTime({ gh, alerts, clock }, alert) {
+  const at = []; const answers = [];
+  let m = 0;
+  while (m < 50 * 60) {
+    const step = m < 120 ? 1 : 10;
+    clock.tick(step); m += step;
+    const before = comments(gh);
+    answers.push(await alerts.raise(alert()));
+    if (comments(gh) > before) at.push(m);
+  }
+  return { at, answers };
+}
+
+test('L389: a refused reminder save: one comment a day over 120 passes and 50 h, and every pass answers the refusal', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(24 * 60);
+  w.world.refuse = () => true;
+  const { at, answers } = await overTime(w, () => standing);
+  assert.equal(comments(w.gh), 3, 'due on the first pass, then every 24 h over the next 50 h');
+  perDay(at);
+  assert.equal(opens(w.gh), 1);
+  for (const a of answers) { assert.equal(wasTold(a), false); assert.match(a.refused, REFUSED); }
+});
+
+test('L389: a refused save on a status change: one comment a day, and every pass answers the refusal', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.world.refuse = () => true;
+  const changed = { ...standing, status: 'other cause' };
+  const { at, answers } = await overTime(w, () => changed);
+  assert.equal(comments(w.gh), 3, 'at the first pass, and 24 h and 48 h on');
+  perDay(at);
+  assert.equal(opens(w.gh), 1);
+  for (const a of answers) assert.match(a.refused, REFUSED);
+});
+
+test('L389: a refused save on opening: one issue over 120 passes and 50 h, no comments, and every pass answers the refusal', async () => {
+  const w = refusing();
+  w.world.refuse = () => true;
+  const { answers } = await overTime(w, () => standing);
+  assert.equal(opens(w.gh), 1);
+  assert.equal(comments(w.gh), 0);
+  for (const a of answers) assert.match(a.refused, REFUSED);
+});
+
+test('L389: once the Record takes writes again, the alert goes on from the issue GitHub already holds', async () => {
+  const w = refusing();
+  w.world.refuse = () => true;
+  await w.alerts.raise(standing);
+  w.world.refuse = () => false;
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(w.alerts.state(standing.key).issue, 1);
+  assert.equal(opens(w.gh), 1);
+  w.clock.tick(10);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+});
+
+test('L389: a save lost after the reminder went out is made good next pass, and the next reminder runs from that comment', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(24 * 60);
+  w.world.refuse = () => true;
+  assert.ok((await w.alerts.raise(standing)).refused);
+  w.world.refuse = () => false;
+  w.clock.tick(60);
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.equal(w.alerts.state(standing.key).told_at, '2026-11-04T08:00:00.000Z', 'GitHub\'s comment time, not this pass');
+  assert.equal(comments(w.gh), 1);
+  w.clock.tick(23 * 60);
+  assert.equal(await w.alerts.raise(standing), 'reminded');
+});
+
+test('L389: a comment time from the future never moves told_at ahead', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  const first = w.alerts.state(standing.key).told_at;
+  w.clock.tick(25 * 60);
+  const ahead = '2026-11-20T00:00:00.000Z';
+  w.gh.latestOwnComment = async () => ({ at: ahead, body: '' });
+  assert.equal(await w.alerts.raise(standing), 'updated');
+  assert.notEqual(w.alerts.state(standing.key).told_at, ahead);
+  assert.notEqual(w.alerts.state(standing.key).told_at, first);
+});
+
+test('L389: a new status still notifies at once; only the same status is held back', async () => {
+  const { gh, alerts, clock } = setup();
+  await alerts.raise({ ...standing, status: 'A' });
+  for (const status of ['B', 'C', 'B', 'A']) { clock.tick(10); assert.equal(await alerts.raise({ ...standing, status }), 'changed'); }
+  assert.equal(comments(gh), 4);
+});
+
+test('L389: suppressed, updated and cleared each answer a refused save', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.world.refuse = () => true;
+  w.clock.tick(10);
+  assert.match((await w.alerts.raise(standing)).refused, REFUSED);
+  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
+  assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 1);
+  assert.match((await w.alerts.clear({ key: standing.key })).refused, REFUSED);
+  assert.equal(w.gh.calls.filter(([c]) => c === 'close').length, 1, 'the second try only writes again');
+  const x = refusing();
+  await x.alerts.raise(standing);
+  x.gh.ownerCloses(1);
+  x.world.refuse = () => true;
+  assert.match((await x.alerts.raise(standing)).refused, REFUSED);
+  assert.equal(opens(x.gh), 1);
+});
+
+test('L389: a read GitHub refuses sends nothing and answers false', async () => {
+  const w = refusing();
+  await w.alerts.raise(standing);
+  w.clock.tick(24 * 60);
+  w.gh.latestOwnComment = async () => false;
+  assert.equal(await w.alerts.raise(standing), false);
+  assert.equal(await w.alerts.raise({ ...standing, status: 'other cause' }), false);
+  assert.equal(comments(w.gh), 0);
+  const y = refusing();
+  y.gh.findOpen = async () => false;
+  assert.equal(await y.alerts.raise(standing), false);
+  assert.equal(opens(y.gh), 0);
+});
+
+// L389 m2: with a status, the status alone is the cause, on a closed issue and an open one.
+test('L389: once a status is passed, a body change is never a new cause', async () => {
+  const { gh, alerts, clock } = setup();
+  const red = (m) => ({ key: standing.key, title: 't', body: `down ${m} minutes`, status: 'red' });
+  await alerts.raise(red(1));
+  clock.tick(10);
+  assert.equal(await alerts.raise(red(11)), 'updated');
+  assert.equal(comments(gh), 0);
+  gh.ownerCloses(1);
+  for (const m of [21, 31, 41]) { clock.tick(10); assert.equal(await alerts.raise(red(m)), 'suppressed'); }
+  assert.equal(opens(gh), 1);
+  assert.equal(comments(gh), 0);
 });

@@ -167,18 +167,19 @@ test('collect: step lines → ran / failed lists', () => {
 
 function fakeRepoIssues() {
   const issues = []; const calls = [];
+  const clock = { at: '2000-01-01T00:00:00.000Z' };
   const api = async (method, path, body) => {
     calls.push([method, path]);
     if (method === 'GET' && path.startsWith('/issues?')) return issues.map((i) => ({ ...i }));
     const cm = /^\/issues\/(\d+)\/comments/.exec(path);
     if (cm && method === 'GET') return issues[cm[1] - 1].comments;
-    if (cm && method === 'POST') { issues[cm[1] - 1].comments.push({ user: { login: BOT }, body: body.body }); return {}; }
+    if (cm && method === 'POST') { issues[cm[1] - 1].comments.push({ user: { login: BOT }, body: body.body, created_at: clock.at }); return {}; }
     if (method === 'POST' && path === '/issues') { issues.push({ number: issues.length + 1, title: body.title, body: body.body, state: 'open', comments: [] }); return {}; }
     const pm = /^\/issues\/(\d+)$/.exec(path);
     if (pm && method === 'PATCH') { Object.assign(issues[pm[1] - 1], body); return {}; }
     throw new Error(`unexpected ${method} ${path}`);
   };
-  return { issues, calls, api };
+  return { issues, calls, api, clock };
 }
 
 test('notify: Wi-Fi off for 3 hours → one "heartbeat stale" issue, updated hourly, not re-opened; cleared on return', async () => {
@@ -234,6 +235,28 @@ test('L315 notify: a comment that fails is an error, the told time stays, and th
   assert.match(gh.issues[0].body, /last told 2026-11-03T12:00:00.000Z/, 'the told time stays');
   assert.deepEqual(await notify(at(26)), [[t, 'reminded']]);
   assert.equal(gh.issues[0].comments.length, 1);
+});
+
+test('L389 notify: a body update that keeps failing after its comment still sends one comment a day; only the bot\'s comments count', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  await notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(0) });
+  const noBody = async (m, p, b) => { if (m === 'PATCH') throw new Error('GitHub refused the update'); return gh.api(m, p, b); };
+  const answers = [];
+  for (let h = 25; h <= 75; h += 1) {
+    gh.clock.at = hours(h).toISOString();
+    answers.push(...await notify({ ran: [t], failed: [t], api: noBody, now: () => hours(h) }));
+  }
+  assert.equal(gh.issues[0].comments.length, 3, 'at +25 h, +49 h and +73 h');
+  assert.ok(answers.every(([, what]) => what === 'error'), 'and every run ends red');
+  // An outsider's comment is not the bot telling the owner.
+  const fresh = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: fresh.api, now: () => hours(0) });
+  fresh.issues[0].comments.push({ user: { login: 'someone' }, body: 'hello', created_at: hours(24.5).toISOString() });
+  fresh.clock.at = hours(25).toISOString();
+  assert.deepEqual(await notify({ ran: [t], failed: [t], api: fresh.api, now: () => hours(25) }), [[t, 'reminded']]);
+  assert.equal(fresh.issues[0].comments.length, 2);
 });
 
 test('L315 notify: a told time that cannot be read or is in the future tells now; an issue from before the told line is dated from failing since', async () => {
