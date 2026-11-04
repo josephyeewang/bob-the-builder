@@ -252,6 +252,7 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   const read = (card, uid = ME) => readCardFile({ recordRoot: root, recordUid: uid, card });
   assert.deepEqual(read('C-1'), { ok: true, doc: { state: 'in_review', head: 'a'.repeat(40), tier: 1 }, rev: 3 });
   assert.match(read('C-2').reason, /no such card/);
+  assert.equal(read('C-2').missing, true, 'said in a field, so nothing reads the wording (R-0b-171)');
   assert.match(read('../x').reason, /not a card id/);
   assert.match(read('C-1', ME + 1).reason, /not the Record owner's alone/);
   put('C-3', { entity: 'card', id: 'C-1', doc: {} });
@@ -260,6 +261,8 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   assert.match(read('C-4').reason, /not JSON/);
   put('C-5', { entity: 'card', id: 'C-5', doc: {} }, 0o666);
   assert.match(read('C-5').reason, /not the Record's own plain file/);
+  for (const id of ['C-3', 'C-4', 'C-5', '../x']) assert.equal(read(id).missing, undefined, 'there, or unknown, is never missing');
+  assert.equal(read('C-1', ME + 1).missing, undefined, 'a folder that fails its checks is never missing');
   symlinkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-6.json'));
   assert.match(read('C-6').reason, /ELOOP/);
   linkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-7.json'));
@@ -304,6 +307,15 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   // The runner's port: the copy first (root's, so here it fails), then the owner's file.
   const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: ME }, recordRoot: '/x', recordUid: ME, mirror: '/m', claudeBin: '/c', accountCopy: to, ownerHome: home, ownerUid: ME };
   assert.equal(realPorts(c, {}).accountInUse(), 'b');
+  // The Dispatcher's own rules key, per product as the real engine answers it (R-0b-171).
+  const asked = [];
+  const rules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 60, p2: 2880 })[o.product] };
+  const ruled = (products) => realPorts(c, {}, { budget: { rules, rec: { list: (e) => (e === 'product' ? products : []) } } });
+  assert.equal(ruled([]).requestGapMs('p1'), 60 * 60_000);
+  assert.deepEqual(asked[0], ['timeouts.in_review_no_reviewer_min', 'p1']);
+  assert.equal(ruled([{ id: 'p1' }, { id: 'p2' }]).requestGapMs(undefined), 2880 * 60_000, 'a request with no card takes the longest');
+  assert.equal(ruled([]).requestGapMs(undefined), 0);
+  assert.throws(() => realPorts(c, {}).requestGapMs('p1'), 'with no budget module it throws, and the runner ends nothing on silence');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
 });

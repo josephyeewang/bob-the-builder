@@ -84,6 +84,7 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
+import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -223,7 +224,7 @@ function recordFolderProblem(d, recordUid) {
 // One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
 function readRecordFile(p, recordUid, entity, id, missing) {
   let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, ...(e?.code === 'ENOENT' ? { missing: true } : {}), reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
@@ -413,6 +414,13 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    // The Dispatcher's own rules key, for how long a request may go unrenewed (R-0b-171). The key is per product; a request
+    // that names no card has none, so it takes the longest. With no budget module it throws, and the runner then ends
+    // nothing on silence; no review starts then either, and each refusal says so.
+    requestGapMs: (product) => {
+      const gap = (p) => minutes(budget.rules, KEYS.inReviewNoReviewerMin, { product: p });
+      return product ? gap(product) : Math.max(0, ...budget.rec.list('product').map((x) => gap(x.id)));
+    },
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });
