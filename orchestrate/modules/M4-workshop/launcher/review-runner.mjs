@@ -237,7 +237,7 @@ export const finalizeMark = ({ dir, uid, role, card, head, sessionId }) => ({
     if (r.none) return null;
     throw new Error(r.reason);
   },
-  write: (sha) => { writeLaunch(dir, sessionId, { session_id: sessionId, role, card, head, verdict_sha256: sha }); },
+  keep: (sha) => { writeLaunch(dir, sessionId, { session_id: sessionId, role, card, head, verdict_sha256: sha }); },
 });
 
 // The review package's pin (audit R-0b-147 M-1 (c), L83, L91 m-2). The wiring writes a session's package into

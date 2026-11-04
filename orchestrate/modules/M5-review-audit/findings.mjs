@@ -105,13 +105,13 @@ export function settle({ role, pass, checklist, material, kept, dropped }) {
 
 /**
  * Finalize one session's verdict file. `owner` is the review user's uid, given back to the rewritten file. `mark` is
- * the runner's own record of what it finalized: read() → the sha256, or null when there is none; write(sha256), once.
+ * the runner's own record of what it finalized: read() → the sha256, or null when there is none; keep(sha256), once.
  * → { ok, changed, kept?, dropped? } | { ok: false, none?, reason } (a file that can't be finalized is left as it is,
  * for the runner's own read to judge)
  */
 export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark }) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
-  if (typeof mark?.read !== 'function' || typeof mark?.write !== 'function') return no('the runner gave no record to mark what it finalizes');
+  if (typeof mark?.read !== 'function' || typeof mark?.keep !== 'function') return no('the runner gave no record to mark what it finalizes');
   const dir = join(outboxRoot, role, sessionId);
   let names;
   try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return no(`its outbox folder could not be listed (${e?.code ?? e})`); }
@@ -151,7 +151,7 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   // The record comes first: a stop before the rename leaves a record of a file not there yet, and a run after it works
   // out the same bytes. The other way round, a stop would leave a marked file the runner could not tell from a forged one.
   const sha = createHash('sha256').update(text).digest('hex');
-  try { if (mark.read() !== sha) mark.write(sha); } catch (e) { return no(`the runner's record of it could not be written (${e?.code ?? e?.message})`); }
+  try { if (mark.read() !== sha) mark.keep(sha); } catch (e) { return no(`the runner's record of it could not be written (${e?.code ?? e?.message})`); }
   const tmp = join(dir, `.finalize-${sessionId}`);
   let fd;
   try {

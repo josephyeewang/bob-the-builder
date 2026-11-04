@@ -425,20 +425,20 @@ test('L424: finalize run again on a file it marked changes nothing, so what it d
 });
 
 test('L432 planted: a file listing a kept Material finding that says pass: true or material: 0 is refused, so one finalize could not settle never passes', async () => {
-  const say = (fields) => verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), ...fields } });
+  const reads = (fields) => verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), ...fields } });
   for (const f of [{ pass: true, material: 0, notes: [real1] }, { pass: true, material: 1, notes: [real1] }, { pass: false, material: 0, notes: [real1] }, { pass: true, checklist: CLEAN, notes: [real1] }]) {
-    assert.match(say(f).reason ?? '', /lists a Material finding/, JSON.stringify(f));
+    assert.match(reads(f).reason ?? '', /lists a Material finding/, JSON.stringify(f));
   }
   // A fail that says so stands; so does a pass with nothing Material kept, or a finding dropped in a marked file.
-  assert.equal(say({ pass: false, material: 1, notes: [real1] }).ok, true);
-  assert.equal(say({ pass: false, notes: [real1] }).ok, true);
-  assert.equal(say({ pass: true, material: 0, notes: [real2] }).ok, true);
-  assert.equal(say({ pass: true, material: 0, notes: [{ ...noise1, dropped: 'x' }], finalized: true }).ok, true);
+  assert.equal(reads({ pass: false, material: 1, notes: [real1] }).ok, true);
+  assert.equal(reads({ pass: false, notes: [real1] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0, notes: [real2] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0, notes: [{ ...noise1, dropped: 'x' }], finalized: true }).ok, true);
   // settle and M9 agree: what settle says of a kept Material finding, M9 takes.
   const a = settle({ role: 'auditor', pass: true, material: 0, kept: [real1], dropped: [] });
-  assert.equal(say({ ...a, notes: [real1] }).ok, true);
+  assert.equal(reads({ ...a, notes: [real1] }).ok, true);
   const r = settle({ role: 'reviewer', pass: true, checklist: CLEAN, kept: [real1], dropped: [] });
-  assert.equal(say({ ...r, notes: [real1] }).ok, true);
+  assert.equal(reads({ ...r, notes: [real1] }).ok, true);
   // Finalize can't run, here the mirror is down: the file stays as written, the end refuses it, and the gate with it.
   const w = await world(tempDir('m5-l432-'), { act: (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: true, material: 0, findings: [real1] }) });
   w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
