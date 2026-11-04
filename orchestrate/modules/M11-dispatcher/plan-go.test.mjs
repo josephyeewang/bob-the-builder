@@ -15,6 +15,7 @@ import { outbox, sendAlerts } from './alerts.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS } from './plan-go.mjs';
 import { approvalsStep, APPROVALS_PRODUCT_MS } from './tick.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -978,14 +979,10 @@ test('L467 m-b: a new plan is not held by the old plan\'s mark', async () => {
 test('L467 m-c: a close that fails and can\'t be told stops the raise, naming the ask, and leaves it live', async () => {
   const w = world();
   const id = await askWithPr(w);
-  const alerts = [];
   const gh = { ...w.t.ctx.gh, patch: async () => ({ status: 500 }) };
-  const base = outbox(w.t.record, w.t.clock.t);
-  const alert = (x) => { alerts.push(x); return x?.type === 'decision_pr_not_closed' ? false : base(x); };
-  const ctx = { ...w.t.ctx, gh, alert };
-  await planGoPass(ctx, { ...w.ports, alert: base });
-  await sendAlerts(w.t.record, async (text) => { w.sent.push(text); return true; }, w.t.clock.t);
-  assert.ok(alerts.some((x) => x?.type === 'decision_pr_not_closed'));
+  const alert = fakeAlert({ answer: false });
+  await pass(w, {}, { gh, alert });
+  assert.ok(alert.texts.some((x) => x?.type === 'decision_pr_not_closed'));
   assert.ok(w.sent.some((s) => new RegExp(`card A could not be asked for a go: the pull request of ask ${id} could not be closed`).test(s)), w.sent.join(' | '));
   assert.equal(askStore(w.t.record).ask(id).doc.state, 'pushed');
   assert.equal(asks(w).length, 1);
