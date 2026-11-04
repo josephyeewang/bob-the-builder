@@ -134,7 +134,7 @@ test('an alert the sink did not take is sent again next pass, then kept quiet (L
   assert.equal(told(t, 'onboard_near_miss').length, 1);
 });
 
-// L221 m-2: a refused create is told once per distinct reason, its numbers out.
+// L221 m-2: a refused create is told at once for each new reason, its numbers out.
 test('a refused create sends one alert per distinct reason, naming the product (L221 m-2)', () => {
   const t = world();
   let reason = 'changed since read (rev 1, expected 0)';
@@ -399,7 +399,7 @@ test('L315: a near-miss value is told again each day while it stands, and its ma
   // L317: a told time 30 days ahead (a clock set back) is not "told": Joe is told now, and the mark is set to now.
   const f = join(t.ctx.stateDir, 'onboard-notices.json');
   const n = JSON.parse(readFileSync(f, 'utf8'));
-  writeFileSync(f, JSON.stringify({ ...n, near: { ...n.near, at: t.clock.t + 30 * 24 * H } }));
+  writeFileSync(f, JSON.stringify({ ...n, held: { ...n.held, told_at: new Date(t.clock.t + 30 * 24 * H).toISOString() } }));
   await schedulePass(t.ctx);
   assert.equal(nm(), 3, 'a told time 30 days ahead: told now');
   await schedulePass(t.ctx);
@@ -408,7 +408,126 @@ test('L315: a near-miss value is told again each day while it stands, and its ma
   t.ctx.rules = rulesOf(t, ON);
   await schedulePass(t.ctx);
   assert.equal(t.record.read('product', PRODUCT).doc.state, 'active');
-  assert.equal(JSON.parse(readFileSync(f, 'utf8')).near, null);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).held, null);
+});
+
+// L340 Minor 1 (L323): once "is now on" is told, its mark is cleared by writing false. A write that fails then is never
+// silent: the pass rejects, so the step's failure alert tells Joe. The mark stays due, so the next pass that can write
+// tells once more and clears it (told twice rather than a failure nobody hears of).
+test('L340 Minor 1: a state folder made read-only after the turn-on fails the pass that clears the mark', async () => {
+  const t = world();
+  t.sink.answer = false;
+  await schedulePass(t.ctx);
+  assert.equal(t.record.read('product', PRODUCT).doc.state, 'active');
+  assert.equal(told(t, 'product_on').length, 0, 'made, not yet told');
+  t.sink.answer = true;
+  chmodSync(t.ctx.stateDir, 0o500);
+  try {
+    await assert.rejects(schedulePass(t.ctx), /EACCES|EPERM/);
+    assert.equal(told(t, 'product_on').length, 1, 'told, then the clear failed');
+  } finally { chmodSync(t.ctx.stateDir, 0o700); }
+  await schedulePass(t.ctx);
+  await schedulePass(t.ctx);
+  assert.equal(told(t, 'product_on').length, 2, 'the mark stayed due: told once more, then cleared');
+  assert.equal(JSON.parse(readFileSync(join(t.ctx.stateDir, 'onboard-notices.json'), 'utf8')).due, false);
+});
+
+// L326: a refused create never turns the product on, so it joins the L315 class: told once, then each day while it
+// stands; a new reason is told at once; the mark goes once the cause goes.
+function refusing(t, start) {
+  const s = { reason: start, made: false };
+  const ctx = { ...t.ctx, record: { read: () => (s.made ? { doc: { state: 'active' }, rev: 1 } : null), write: () => ({ ok: false, reason: s.reason }) } };
+  return { s, ctx, pass: () => onboardNotices(ctx, onboard(ctx)), count: () => told(t, 'onboard_refused').length };
+}
+
+test('L326: a refused create is quiet at +2 h, told again at +25 h, and a moving rev is still one reason', () => {
+  const H = 3600000;
+  const t = world();
+  const { s, pass, count } = refusing(t, 'changed since read (rev 1, expected 0)');
+  pass();
+  assert.equal(count(), 1);
+  t.clock.t += 2 * H;
+  s.reason = 'changed since read (rev 2, expected 0)';
+  pass();
+  assert.equal(count(), 1, '+2 h: quiet');
+  t.clock.t += 23 * H;
+  pass();
+  assert.equal(count(), 2, '+25 h: told again');
+  pass();
+  assert.equal(count(), 2, 'and quiet again');
+  assert.equal(told(t, 'onboard_refused').at(-1).text, ONBOARD_SHOWN.refused(PRODUCT, s.reason), 'the reason as it stands now');
+});
+
+test('L326: a new reason is told at once, and the same reason coming back after the product is on is told at once', () => {
+  const t = world();
+  const { s, pass, count } = refusing(t, 'rev moved');
+  pass();
+  s.reason = 'a damaged diary';
+  pass();
+  assert.equal(count(), 2, 'another reason, no time later');
+  pass();
+  assert.equal(count(), 2);
+  const f = join(t.ctx.stateDir, 'onboard-notices.json');
+  s.made = true;
+  pass();
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).held, null, 'on: the mark goes');
+  s.made = false;
+  pass();
+  assert.equal(count(), 3, 'the same reason back: told at once');
+});
+
+for (const [name, say] of [['refuses', () => false], ['throws', () => { throw new Error('sink down'); }]]) {
+  test(`L326: a refused create the sink ${name} on is told next pass, and no mark is kept`, () => {
+    const t = world();
+    const { pass, ctx, count } = refusing(t, 'rev moved');
+    const real = ctx.alert;
+    ctx.alert = say;
+    pass();
+    assert.equal(count(), 0);
+    ctx.alert = real;
+    pass();
+    assert.equal(count(), 1, 'told as soon as the sink takes it');
+    pass();
+    assert.equal(count(), 1);
+  });
+}
+
+// A told mark that can't be kept is loud: the pass stops, so a write that failed is never taken for a told one.
+// The state folder turns into a file as the alert goes out, so the told mark is the write that fails.
+const markWillFail = (t) => {
+  const sink = t.ctx.alert;
+  t.ctx.alert = fakeAlert({
+    answer: (a) => {
+      rmSync(t.ctx.stateDir, { recursive: true, force: true });
+      writeFileSync(t.ctx.stateDir, '');
+      return sink(a);
+    },
+  });
+};
+
+test('L326: a near miss whose told mark cannot be written is loud', () => {
+  const t = world({ [ONBOARD_KEY]: 'Activ' });
+  markWillFail(t);
+  assert.throws(() => onboardNotices(t.ctx, onboard(t.ctx)), /EEXIST/);
+  assert.equal(told(t, 'onboard_near_miss').length, 1, 'told first, then the mark failed');
+});
+
+test('L326: a refused create whose told mark cannot be written is loud', () => {
+  const t = world();
+  markWillFail(t);
+  const { pass, count } = refusing(t, 'changed since read');
+  assert.throws(pass, /EEXIST/);
+  assert.equal(count(), 1, 'told first, then the mark failed');
+});
+
+test('L326: a near miss and a refusal are one wait, so moving from one to the other is told at once', () => {
+  const t = world();
+  const { pass, ctx, count } = refusing(t, 'rev moved');
+  pass();
+  onboardNotices(ctx, { type: 'onboard_near_miss', product: PRODUCT, value: 'Active' });
+  assert.equal(told(t, 'onboard_near_miss').length, 1);
+  pass();
+  assert.equal(count(), 2);
 });
 
 // L340 Minor 1 (L323): once "is now on" is told, its mark is cleared by writing false. A write that fails then is never
