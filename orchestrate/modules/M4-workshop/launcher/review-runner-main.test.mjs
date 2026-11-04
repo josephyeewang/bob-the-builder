@@ -264,6 +264,11 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   for (const id of ['C-4', 'C-5']) assert.equal(read(id).missing, undefined, 'a file that is there but can\'t be read is never missing');
   put('C-10', { entity: 'other', id: 'C-10', doc: {} });
   assert.equal(read('C-10').missing, undefined, 'its own id, the wrong kind');
+  put('C-11', { entity: 'other', id: 'X', doc: {} });
+  assert.equal(read('C-11').missing, undefined, 'another id, the wrong kind');
+  put('C-12', '{}');
+  assert.equal(read('C-12').missing, undefined);
+  assert.equal(read('c-12').missing, true, 'only the exact name is that card, even when its file is ruined');
   for (const id of ['C-3', '../x', '.C-1', '']) assert.equal(read(id).missing, true, 'no card has this id (L489)');
   for (const bad of ['null', '{}', '{"entity":"card"}']) { put('C-8', bad); assert.equal(read('C-8').missing, undefined, `a ruined file, ${bad}`); }
   put('C-9', { entity: 'card', id: 'C-9', doc: {} });
@@ -320,7 +325,7 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   assert.equal(ruled([]).requestGapMs('p1'), 60 * 60_000);
   assert.deepEqual(asked[0], ['timeouts.in_review_no_reviewer_min', 'p1']);
   assert.equal(ruled([{ id: 'p1' }, { id: 'p2' }]).requestGapMs(undefined), 2880 * 60_000, 'a request with no card takes the longest');
-  assert.equal(ruled([]).requestGapMs(undefined), 0);
+  assert.equal(ruled([]).requestGapMs(undefined), Infinity, 'no product listed is no answer, and ends nothing');
   assert.throws(() => realPorts(c, {}).requestGapMs('p1'), 'with no budget module it throws, and the runner ends nothing on silence');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
@@ -789,6 +794,7 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   const head = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
   const dest = join(d, 'copies', 'S-1');
   mkdirSync(join(d, 'copies'));
+  assert.match((await prepareReviewCopy({ mirror: gd, card: '.C-1', head, dest })).reason, /not a card id/);
   const r = await prepareReviewCopy({ mirror: gd, card: 'C-1', head, dest });
   assert.equal(r.ok, true, r.reason);
   assert.equal(readFileSync(join(dest, 'a.txt'), 'utf8'), 'card\n');

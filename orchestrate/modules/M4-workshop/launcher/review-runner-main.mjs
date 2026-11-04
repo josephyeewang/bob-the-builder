@@ -265,7 +265,13 @@ export function readCardFile({ recordRoot, recordUid, card }) {
     const bad = recordFolderProblem(d, recordUid);
     if (bad) return { ok: false, reason: bad };
   }
-  return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
+  // The exact name, before anything opens it: on a disk that ignores case, `c-1` would open `C-1.json`, and a ruined
+  // file then counts as a read failure for every spelling of it.
+  const dir = join(recordRoot, 'docs', 'card');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the card folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${card}.json`)) return { ok: false, missing: true, reason: 'no such card' };
+  return readRecordFile(join(dir, `${card}.json`), recordUid, 'card', card, 'no such card');
 }
 
 /**
@@ -373,7 +379,7 @@ export function reviewCopyPath(c, sessionId) {
  * back, as for a worker's copy (worker-copy.mjs). A folder already there is refused, never reused. → { ok } | { ok: false, reason }
  */
 export async function prepareReviewCopy({ mirror, card, head, dest }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
   if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
   try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
   mkdirSync(dest, { mode: 0o700 });
@@ -420,7 +426,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     // nothing on silence; no review starts then either, and each refusal says so.
     requestGapMs: (product) => {
       const gap = (p) => minutes(budget.rules, KEYS.inReviewNoReviewerMin, { product: p });
-      return product ? gap(product) : Math.max(0, ...budget.rec.list('product').map((x) => gap(x.id)));
+      if (product) return gap(product);
+      const listed = budget.rec.list('product');
+      return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
     },
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {

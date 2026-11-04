@@ -80,6 +80,7 @@ const KEEP_LIST = 50;
 // ever with nothing asking: after this long, or two of the Dispatcher's gaps between requests if that is longer, so a
 // raised limit in the rules can't end a streak between two requests (`quietMs`).
 export const REFUSED_QUIET_MS = 2 * STILL_WAITING_MS;
+const HEAD_UNREAD_MS = 60 * 60 * 1000;
 // At most this many cards are told one by one; the rest are one hold that counts them, and only this many are counted.
 export const MAX_STREAKS = 50;
 export const MAX_MORE_STREAKS = 200;
@@ -377,7 +378,11 @@ export async function runnerPass(ctx) {
   keepGood('no_verdict', goodNoVerdict, 'hold_unread_at');
   // A verdict dropped here comes back from its launch and ended records, if it is still not taken.
   keepGood('not_taken', goodNotTaken, 'hold_unread_at');
+  keepGood('head_unread', stamp, 'hold_unread_at');
   for (const told of ['entry_unread_at', 'hold_unread_at']) if (now - (pastTime(state[told], now) ?? -Infinity) >= REFUSED_QUIET_MS) delete state[told];
+  // Stamped on every pass while it holds, so a head put right stops being told at once.
+  for (const [card, at] of Object.entries(state.head_unread ?? {})) if (!CARD_ID.test(card) || now - (pastTime(at, now) ?? -Infinity) >= HEAD_UNREAD_MS) delete state.head_unread[card];
+  const headUnread = (card) => { state.head_unread = { ...state.head_unread, [card]: iso(now) }; };
 
   // m-3: an admin can become anyone, so a review user that is an admin keeps nothing apart.
   let admin; try { admin = await ctx.isAdmin(); } catch { admin = true; }
@@ -403,16 +408,16 @@ export async function runnerPass(ctx) {
     let gap; try { gap = await ctx.requestGapMs?.(product); } catch { gap = undefined; }
     return Number.isFinite(gap) && gap >= 0 ? Math.max(REFUSED_QUIET_MS, 2 * gap) : Infinity;
   };
-  // A card that can't be read has no product to go by, so it gets the longest wait: a real failure still being asked
-  // about is renewed in time, and an id nothing will ask for again ends (N1).
-  const quietFor = async (c) => quietMs(c?.ok ? c.doc?.product : undefined);
+  // A card that can't be read gets the longest wait, and its own product's if a refusal saw one: a real failure still
+  // being asked about is renewed in time, and an id nothing will ask for again ends (N1).
+  const quietFor = async (c, r) => (c?.ok ? quietMs(c.doc?.product) : Math.max(await quietMs(), r.product === undefined ? 0 : await quietMs(r.product)));
   const lastAskOver = (r, quiet) => now - (pastTime(r.last_at, now) ?? now) >= quiet;
   // A request refused again and again stays a streak until a request is accepted, the card is gone or stops needing the
   // role, or no request has renewed it (R-0b-171).
   for (const map of [state.refused_streaks, state.refused_more]) {
     for (const [key, r] of Object.entries(map ?? {})) {
       const c = await cardOf(r.card);
-      if (c?.missing === true || (c?.ok && !needsRole(c.doc, r.role)) || lastAskOver(r, await quietFor(c))) delete map[key];
+      if (c?.missing === true || (c?.ok && !needsRole(c.doc, r.role)) || lastAskOver(r, await quietFor(c, r))) delete map[key];
     }
   }
   if (state.unread_requests) {
@@ -427,7 +432,7 @@ export async function runnerPass(ctx) {
   for (const [key, n] of Object.entries(state.not_taken ?? {})) {
     let c; try { c = await ctx.readCard(n.card); } catch { c = null; }
     if (c?.ok && !needsRole(c.doc, n.role)) { delete state.not_taken[key]; continue; }
-    if (c?.ok && !isHead(c.doc.head)) { state.hold_unread_at = iso(now); continue; }
+    if (c?.ok && !isHead(c.doc.head)) { headUnread(n.card); continue; }
     const recheck = c?.ok && (c.doc?.head !== n.head || n.tree_unread === true);
     if (recheck && (typeof n.tree !== 'string' || await treeAt(n.card, c.doc.head) !== null)) { delete state.not_taken[key]; continue; }
     const at = recheck ? { ...n, head: c.doc.head, tree_unread: true } : n;
@@ -440,7 +445,9 @@ export async function runnerPass(ctx) {
   // every pass; a card or an answer that can't be read leaves it held (R-0b-171).
   for (const [key, n] of Object.entries(state.no_verdict ?? {})) {
     const c = await cardOf(n.card);
-    if (c?.missing === true || (c?.ok && (!needsRole(c.doc, n.role) || c.doc.head !== n.head))) { delete state.no_verdict[key]; continue; }
+    if (c?.missing === true || (c?.ok && !needsRole(c.doc, n.role))) { delete state.no_verdict[key]; continue; }
+    if (c?.ok && !isHead(c.doc.head)) { headUnread(n.card); continue; }
+    if (c?.ok && c.doc.head !== n.head) { delete state.no_verdict[key]; continue; }
     if (notTakenCovers(state, n) || state.running.some((r) => r.card === n.card && r.role === n.role)) { delete state.no_verdict[key]; continue; }
     let t; try { t = await ctx.verdictTaken({ role: n.role, sessionId: n.session, card: n.card, head: n.head }); } catch { t = null; }
     if (t?.ok === true) delete state.no_verdict[key];
@@ -576,8 +583,8 @@ export async function runnerPass(ctx) {
     const c = await cardOf(d.card);
     if (!c?.ok || !needsRole(c.doc, d.role)) continue;
     const head = c.doc.head;
-    // A head that can't be a head is no place to hold a verdict: the card is skipped and told as a bad entry (L489).
-    if (!isHead(head)) { state.hold_unread_at = iso(now); continue; }
+    // A head that can't be a head is no place to hold a verdict: the card is skipped and told by name (L489).
+    if (!isHead(head)) { headUnread(d.card); continue; }
     if (head !== d.head && typeof d.tree !== 'string') continue;
     const treeNow = head === d.head ? d.tree : await treeAt(d.card, head);
     if (head !== d.head && treeNow !== null && treeNow !== d.tree) continue;
@@ -692,12 +699,14 @@ export async function runnerPass(ctx) {
     const { card, head, role, request_id: rid } = got.req;
     // A refusal that says the review can't go ahead, as opposed to a request that was stale or not needed (R-0b-171).
     const streakKey = `${card} ${role}`;
+    let product;
     const stuck = (reason) => {
       refuse(reason);
       state.refused_streaks ??= {};
       state.refused_more ??= {};
       const was = state.refused_streaks[streakKey] ?? state.refused_more[streakKey];
-      const entry = { card, role, head, reason: String(reason).slice(0, 300), first_at: was?.first_at ?? iso(now), last_at: iso(now) };
+      const remembered = product ?? was?.product;
+      const entry = { card, role, head, reason: String(reason).slice(0, 300), first_at: was?.first_at ?? iso(now), last_at: iso(now), ...(remembered === undefined ? {} : { product: remembered }) };
       delete state.refused_more[streakKey];
       if (state.refused_streaks[streakKey] || Object.keys(state.refused_streaks).length < MAX_STREAKS) state.refused_streaks[streakKey] = entry;
       else if (Object.keys(state.refused_more).length < MAX_MORE_STREAKS) state.refused_more[streakKey] = entry;
@@ -709,6 +718,7 @@ export async function runnerPass(ctx) {
     let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
     // A card that isn't there is no streak: anyone may write a request, so made-up ids must not reach the owner. It is
     // read from `missing`, never from the wording of the reason.
+    if (c?.ok && typeof c.doc?.product === 'string') product = c.doc.product;
     if (!c?.ok) { (c?.missing === true ? refuse : stuck)(`card ${card} is not in the Record${c?.reason ? ` (${c.reason})` : ''}`); continue; }
     if (!needsRole(c.doc, role)) { refuse(`card ${card} does not need a ${role} (it is ${c.doc?.state ?? 'in no state'}${role === 'auditor' ? `, tier ${c.doc?.tier ?? 'none'}` : ''})`); continue; }
     if (c.doc.head !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`); continue; }
@@ -875,7 +885,7 @@ const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason
 const isHead = (h) => typeof h === 'string' && HEX40.test(h);
 const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
 const isObject = (v) => v !== null && typeof v === 'object';
-const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
+const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && (r.product === undefined || typeof r.product === 'string') && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
 const goodNoVerdict = (n) => isObject(n) && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head) && stamp(n.first_at);
 const goodNotTaken = (n) => isObject(n) && typeof n.id === 'string' && typeof n.text === 'string' && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head);
 const goodUnread = (u) => isObject(u) && typeof u.cause === 'string' && typeof u.file === 'string' && stamp(u.first_at) && stamp(u.last_at);
@@ -899,6 +909,8 @@ const stuckHolds = (state, now) => {
     holds.push({ id: `no-verdict-${n.card}-${n.role}`, text: `The ${n.role} for card ${n.card} at ${n.head.slice(0, 7)} started but gave no counted verdict. One start per head and tree, so it won't start again: the owner needs to act.` });
   }
   if (typeof state.entry_unread_at === 'string') holds.push({ id: 'refused-entry-unread', text: 'A streak entry could not be read and was dropped, so a refused review request may have lost its place in these alerts.' });
+  const heads = Object.keys(state.head_unread ?? {}).sort();
+  if (heads.length) holds.push({ id: 'hold-head-unread', text: `A hold entry could not be read for ${heads.length === 1 ? 'card' : 'cards'} ${heads.slice(0, 5).join(', ')}${heads.length > 5 ? ` and ${heads.length - 5} more` : ''}: the card's head is not a commit id. The hold is kept.` });
   if (typeof state.hold_unread_at === 'string') holds.push({ id: 'hold-entry-unread', text: 'A hold entry could not be read and was dropped, so a review the runner was holding may have lost its place in these alerts.' });
   return holds;
 };

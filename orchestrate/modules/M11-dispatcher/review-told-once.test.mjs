@@ -900,16 +900,87 @@ test('L489 n2: a Record card head that isn\'t a head never stops a pass; it is t
     m.ctx.readCard = (c) => { const r = had(c); return r.ok ? { ...r, doc: { ...r.doc, head: bad } } : r; };
     await runnerPass(m.ctx);
     assert.equal(held(m).length, 1, 'the kept hold stays');
-    assert.ok(statusHolds(m).some((h) => h.id === 'hold-entry-unread'), `kept loop, ${JSON.stringify(bad)}`);
+    assert.match(statusHolds(m).find((h) => h.id === 'hold-head-unread')?.text ?? '', /for card C-1: .*The hold is kept/, `kept loop, ${JSON.stringify(bad)}`);
     rmSync(join(m.root, 'state.json'));
     await runnerPass(m.ctx);
     assert.deepEqual(held(m), [], 'the rebuild skips it');
-    assert.ok(statusHolds(m).some((h) => h.id === 'hold-entry-unread'), `rebuild, ${JSON.stringify(bad)}`);
+    assert.match(statusHolds(m).find((h) => h.id === 'hold-head-unread')?.text ?? '', /for card C-1:/, `rebuild, ${JSON.stringify(bad)}`);
   }
   const told = await notTakenTold();
   const had = told.ctx.readCard;
   told.ctx.readCard = (c) => { const r = had(c); return r.ok ? { ...r, doc: { ...r.doc, head: 5 } } : r; };
-  assert.deepEqual(await told.run(5, 60, /A hold entry could not be read/), [5, 29, 53]);
+  assert.deepEqual(await told.run(5, 60, /A hold entry could not be read for card C-1/), [5, 29, 53]);
+  told.ctx.readCard = had;
+  told.clock.t += 2 * H;
+  await runnerPass(told.ctx);
+  assert.deepEqual(statusHolds(told).filter((h) => h.id === 'hold-head-unread'), [], 'put right, it stops being told');
+  assert.equal(held(told).length, 1);
+});
+
+test('L493: a bad head leaves a no-verdict hold in place and says so, and never stops a pass', async () => {
+  const m = await silent();
+  await m.run(2, 30, NO_VERDICT);
+  const first = Object.values(stateOf(m).no_verdict)[0].first_at;
+  const had = m.ctx.readCard;
+  m.ctx.readCard = (c) => { const r = had(c); return r.ok ? { ...r, doc: { ...r.doc, head: 5 } } : r; };
+  await runnerPass(m.ctx);
+  assert.equal(noVerdictHeld(m).length, 1);
+  assert.equal(Object.values(stateOf(m).no_verdict)[0].first_at, first);
+  assert.match(statusHolds(m).find((h) => h.id === 'hold-head-unread').text, /for card C-1: .*The hold is kept/);
+  assert.equal(statusHolds(m).some((h) => h.id === 'hold-entry-unread'), false, 'nothing was dropped');
+});
+
+test('L493 m3: the kept-hold line names the cards, and only the first few', async () => {
+  const m = mac();
+  await m.hour(0);
+  await runnerPass(m.ctx);
+  editState(m, (st) => { st.head_unread = Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((i) => [`C-${i}`, iso(m.clock.t - 60_000)])); });
+  await runnerPass(m.ctx);
+  assert.match(statusHolds(m).find((h) => h.id === 'hold-head-unread').text, /for cards C-1, C-2, C-3, C-4, C-5 and 2 more:/);
+  for (const bad of ['x', 5, null, { 'C-1': 5 }, { '../x': iso(m.clock.t) }]) {
+    editState(m, (st) => { st.head_unread = bad; });
+    await runnerPass(m.ctx);
+    assert.equal(statusHolds(m).some((h) => h.id === 'hold-head-unread'), false, JSON.stringify(bad));
+  }
+});
+
+test('L493 m1 Q3: the case spellings of a ruined real card make no streak', async () => {
+  const m = mac({ treeOf: async () => TREE });
+  realRecord(m);
+  writeFileSync(join(m.base, 'record', 'docs', 'card', 'ABCDEFG.json'), '{}', { mode: 0o644 });
+  await m.hour(0);
+  for (let b = 0; b < 128; b += 1) {
+    const v = [...'ABCDEFG'].map((ch, i) => ((b >> i) & 1 ? ch.toLowerCase() : ch)).join('');
+    if (v !== 'ABCDEFG') ask(m, v, 9000 + b);
+  }
+  await m.hour(1);
+  assert.deepEqual(stateOf(m).refused_streaks ?? {}, {});
+  assert.deepEqual(stateOf(m).refused_more ?? {}, {});
+});
+
+test('L493 m2 Q2: no product listed is no answer, so a real failure at a long rules value stays told daily', async () => {
+  const m = mac({ readCard: () => ({ ok: false, reason: 'the Record is away' }), requestGapMs: (p) => (p ? 4320 * 60_000 : Infinity) }, rulesWith({ 'timeouts.in_review_no_reviewer_min': 4320 }));
+  const tells = await m.run(0, 288, /reviewer request for card C-1 .* refused for a day/);
+  assert.ok(tells.length >= 7, `told ${tells}`);
+  assert.deepEqual(tells.slice(1).map((h, i) => h - tells[i]), Array(tells.length - 1).fill(24));
+});
+
+test('L493 m2: a streak keeps the product a refusal saw, and its wait counts once the card can\'t be read', async () => {
+  const m = mac({ currentHead: async () => { throw new Error('no branch'); } });
+  await m.hour(0);
+  await runnerPass(m.ctx);
+  assert.equal(stateOf(m).refused_streaks['C-1 reviewer'].product, 'p1');
+  m.ctx.readCard = () => ({ ok: false, reason: 'the Record is away' });
+  ask(m, 'C-1', 500);
+  await runnerPass(m.ctx);
+  assert.equal(stateOf(m).refused_streaks['C-1 reviewer'].product, 'p1', 'a failed read forgets nothing');
+  m.ctx.requestGapMs = (p) => (p ? 100 * H : 0);
+  m.clock.t += 199 * H;
+  await runnerPass(m.ctx);
+  assert.ok(stateOf(m).refused_streaks['C-1 reviewer'], 'the product\'s own wait');
+  m.clock.t += H;
+  await runnerPass(m.ctx);
+  assert.equal(stateOf(m).refused_streaks['C-1 reviewer'], undefined);
 });
 
 test('R-0b-171: the overflow itself is capped, and says so', async () => {
