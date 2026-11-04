@@ -601,7 +601,7 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
   'modules/M11-dispatcher/': { files: 5, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake, R-0b-135 research-intake' },
   'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
-  'modules/M13-ledger/': { files: 3, why: 'L237: alerts.mjs and alert-channel.mjs through lane 3 deliverAlertsPass; R-0b-77 waiting' },
+  'modules/M13-ledger/': { files: 2, why: 'L237: alert-channel.mjs through lane 3 deliverAlertsPass (alerts.mjs is reached since #184, L428); R-0b-77 waiting' },
 });
 const isFixture = (f) => /(?:^|[/-])(?:fixtures?|fakes?|png-fixture|test-tmp)\.mjs$/.test(f);
 const unreachedFiles = () => {
