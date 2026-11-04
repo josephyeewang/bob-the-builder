@@ -15,11 +15,14 @@
 //     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` is read only to see that it is not blank; `now` is the pass's clock, required; an empty or blank report is refused)
 //   researchPass({ rec, now })  (now required) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
 //                                                  an ask whose card exists leaves the waiting list (restart-safe)
-//   researchCopyPass({ rec, rules, pushResearch, alert, now })  (now required) → [[card, what]]   each pass, for each
+//   researchCopyPass({ rec, rules, pushResearch, alert, now, host })  (now required) → [[card, what]]   each pass, for each
 //                                                  ready card: not yet pushed, it is pushed, at most every RETRY_MS while
 //                                                  refused and never while the rules have copies off. A report whose bytes
 //                                                  changed is told once, at once. A card a day in ready is told, then daily,
 //                                                  until it leaves ready, pushed or not (L313, shared stillWaiting)
+//                                                  A pushed card whose head is written goes to review in the same pass
+//                                                  (routeCopy, L387), with a launch record, role copy_run. A failed move
+//                                                  stays told by that same daily tell.
 //   researchCardDoc({ askId, product, name, sha256, blob, size }) → the one card shape (tests build theirs with it)
 //   researchPath(askId) → the card's one allowed path (M2's); the blob id is M10 reader.mjs blobSha's, made by the intake
 //
@@ -34,7 +37,8 @@ import { researchBrief, researchFileName, researchPath, landResearch, RESEARCH_I
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
-import { HOLD_FACT, putFact } from './pass.mjs';
+import { HOLD_FACT, putFact, writeLaunch } from './pass.mjs';
+import { hostname } from 'node:os';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export { researchPath };
@@ -134,17 +138,54 @@ function copyDoc(rec, c) {
 export const BYTES_FACT = (cardId) => HOLD_FACT(`research-bytes-${cardId}`);
 export const READY_FACT = (cardId) => HOLD_FACT(`research-ready-${cardId}`);
 
-export async function researchCopyPass({ rec, rules, pushResearch, alert, now }) {
+/** The copy's run: names the tab claim and the launch record. One per card and bytes, so a retry finds its own. */
+export const COPY_RUN = (cardId, sha) => `copy-${cardId}-r-${sha.slice(0, 12)}`;
+export const COPY_ROLE = 'copy_run';
+const ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running']);
+
+/**
+ * A pushed copy goes to review by the three existing moves (L387), in one pass; a stop between them is picked up next
+ * pass from wherever the card is. -> null, or why it stopped. readyCheck runs again at claimed, in the Record.
+ */
+function routeCopy(rec, c, doc, { host, now }) {
+  const run = COPY_RUN(c.id, c.doc.source.sha256);
+  const step = (patch, kind) => { const m = move(rec, 'card', c.id, patch, { kind }); return m.ok ? { rev: m.rev } : { why: m.reason }; };
+  let state = c.doc.state;
+  let rev = c.rev;
+  if (state === 'ready') {
+    const r = step({ state: 'claimed', claim: { kind: 'tab', claim_id: run, host } }, 'claim');
+    if (r.why) return r.why;
+    state = 'claimed';
+  }
+  if (state === 'claimed') {
+    const r = step({ state: 'running' }, 'started');
+    if (r.why) return r.why;
+    state = 'running';
+    rev = r.rev;
+  }
+  if (!rec.read('launch', run)) {
+    const l = writeLaunch(rec, { sessionId: run, role: COPY_ROLE, kind: COPY_ROLE, card: c.id, head: doc.tip, rev, product: c.doc.product, now });
+    if (!l.ok) return `its launch could not be recorded (${l.reason})`;
+  }
+  const r = step({ state: 'in_review' }, 'copy_handed_in');
+  return r.why ?? null;
+}
+
+export async function researchCopyPass({ rec, rules, pushResearch, alert, now, host = hostname() }) {
   if (!Number.isFinite(now)) throw new Error('researchCopyPass needs the pass\'s clock (now)');
   const out = [];
   for (const c of rec.list('card')) {
     if (c.corrupt || c.doc?.kind !== 'research_copy') continue;
     const { product, research_ask: ask, state } = c.doc;
     const ready = state === 'ready';
+    const ours = c.doc.source?.sha256 && c.doc.claim?.claim_id === COPY_RUN(c.id, c.doc.source.sha256);
+    const held = ready || (ours && ROUTE_STATES.includes(state));
     const on = goFreeOn(rules, product, 'research_copy');
-    let doc = ready ? copyDoc(rec, c) : null;
-    const lastTry = doc?.result === 'refused' ? pastTime(doc.at, now) : null;
-    if (ready && on && doc?.result !== 'pushed' && (lastTry === null || now - lastTry >= RETRY_MS)) {
+    let doc = held ? copyDoc(rec, c) : null;
+    // A refused head write is retried like a refused push: the next try of the same bytes finishes it.
+    const redo = doc?.result !== 'pushed' || doc.head_refused;
+    const lastTry = doc?.result === 'refused' || doc?.head_refused ? pastTime(doc.at, now) : null;
+    if (ready && on && redo && (lastTry === null || now - lastTry >= RETRY_MS)) {
       let r;
       try { r = await pushResearch({ product, card: c.id }); } catch (e) { r = { ok: false, reason: String(e?.message ?? e) }; }
       out.push([c.id, r?.ok ? 'pushed' : `not pushed: ${r?.reason ?? 'no answer'}`]);
@@ -156,14 +197,25 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now })
       }
     }
     if (doc?.result === 'pushed' || !ready) dropCause(rec, BYTES_FACT(c.id));
+    // Held at the card's head: a push with no head goes nowhere, and the daily tell below says so.
+    const fresh = rec.read('card', c.id);
+    const headed = doc?.result === 'pushed' && fresh?.doc?.head === doc.tip;
+    let stopped = null;
+    let waiting = held;
+    if (on && held && headed) {
+      stopped = routeCopy(rec, fresh, doc, { host, now });
+      out.push([c.id, stopped ? `not sent to review: ${stopped}` : 'sent to review']);
+      waiting = Boolean(stopped);
+    }
     const mark = READY_FACT(c.id);
     stillWaiting({
       now,
-      waiting: ready,
+      waiting,
       after: { since: rec.meta?.('card', c.id)?.stateSince, limit: STILL_WAITING_MS },
       read: () => rec.read('fact', mark)?.doc,
       tell: (fields) => {
-        const why = doc?.result === 'pushed' ? `it is on branch ${doc.branch} but has not merged` : `it has not been copied (${on ? doc?.reason ?? 'not tried yet' : RESEARCH_OFF})`;
+        const pushed = doc?.result === 'pushed' && (stopped ? `it is on branch ${doc.branch} but could not go to review (${stopped})` : headed ? `it is on branch ${doc.branch} but has not merged` : `it is on branch ${doc.branch} but its card could not take the new head (${doc.head_refused ?? 'the card names another head'})`);
+        const why = pushed || `it has not been copied (${on ? doc?.reason ?? 'not tried yet' : RESEARCH_OFF})`;
         const text = `${product}: the report for research ask ${ask} has waited over a day: ${why}.`;
         return tellThen(alert, text, { fact: mark, fields: { text, ...fields }, kind: 'hold_alert' });
       },

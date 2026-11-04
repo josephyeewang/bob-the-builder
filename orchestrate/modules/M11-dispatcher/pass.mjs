@@ -150,6 +150,9 @@ const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
 export const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+/** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
+export const writeLaunch = (rec, { sessionId, role, kind, card, head, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+  doc: { session_id: sessionId, role, kind, card, head: head ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
@@ -709,8 +712,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, onlyUnd
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
-    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
-      doc: { session_id: sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, copy: l.copy ?? null, launched_at: iso(now) } });
+    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`);
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });

@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
+import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { isQueued } from './alerts.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
@@ -288,7 +288,7 @@ test('refusal 10 end to end: the real handler, gather and judge refuse a copy wh
 // ---- the copy pass (L286, L290, L313, L384 4): pushes the card, and it never sits in ready untold ----
 const DAY = 24 * 3_600_000;
 // The real queue and a fake push door that records its fact under the name the real one does.
-function copyWorld({ answer = () => ({ ok: true, branch: 'card/research-r-1', tip: 'a'.repeat(40) }), ...opts } = {}) {
+function copyWorld({ answer = () => ({ ok: true, branch: 'card/research-r-1', tip: 'a'.repeat(40) }), writeHead = false, ...opts } = {}) {
   const w = world(opts);
   assert.equal(w.hand('R-1', REPORT).ok, true);
   const card = RESEARCH_CARD('R-1');
@@ -300,6 +300,7 @@ function copyWorld({ answer = () => ({ ok: true, branch: 'card/research-r-1', ti
     const now = w.t.clock.t;
     const r = { reason: undefined, ...answer(calls.length) };
     if (r.ok === undefined) return r;
+    if (r.ok && writeHead) { const k = w.rec.read('card', card); must(w.rec.write({ actor: 'workshop', entity: 'card', id: card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: r.tip } })); }
     const cur = w.rec.read('fact', fact);
     must(w.rec.write({ actor: 'workshop', entity: 'fact', id: fact, expectRev: cur?.rev ?? 0, kind: 'push',
       doc: r.ok ? { result: 'pushed', branch: r.branch, tip: r.tip, at: new Date(now).toISOString(), from: 'research', product: PRODUCT } : { result: 'refused', reason: r.reason, at: new Date(now).toISOString(), from: 'research' } }), 'push fact');
@@ -398,12 +399,114 @@ test('L313: a card a day in ready is told, then daily, whether it could not be c
   const p = copyWorld();
   await p.pass();
   await p.pass(p.T + DAY);
-  assert.equal(p.alerts.length, 1, 'L384 4: a pushed copy still in ready is still told');
-  assert.match(p.alerts[0], /it is on branch card\/research-r-1 but has not merged\.$/);
+  assert.equal(p.alerts.length, 1, 'L384 4: a pushed copy still in ready is still told, and a card with no head never moves');
+  assert.match(p.alerts[0], /it is on branch card\/research-r-1 but its card could not take the new head \(the card names another head\)\.$/);
   // A start time that can't be read is told, never waited out.
   const u = copyWorld();
   await researchCopyPass({ rec: { list: (...a) => u.rec.list(...a), read: (...a) => u.rec.read(...a), write: (...a) => u.rec.write(...a), meta: () => ({ stateSince: 'not a time' }) }, rules: u.t.rules, pushResearch: async () => ({ ok: true }), alert: outbox(u.rec, u.T), now: u.T });
   assert.equal(isQueued(u.rec, READY_FACT(u.card)), true);
+});
+
+// A Record that refuses one kind of write, `times` times.
+const refusing = (rec, kind, times = 1) => { let left = times; return { ...Object.fromEntries(['list', 'read', 'meta'].map((k) => [k, (...a) => rec[k](...a)])), write: (w) => {
+  if ((w.kind === kind || w.entity === kind) && left > 0) { left -= 1; return { ok: false, reason: `no ${kind}` }; }
+  return rec.write(w);
+} }; };
+const TIP = 'a'.repeat(40);
+const routed = () => {
+  const w = copyWorld({ writeHead: true });
+  const run = COPY_RUN(w.card, sha(REPORT));
+  const passOn = (rec, at = w.t.clock.t) => { w.t.clock.t = at; return researchCopyPass({ rec, rules: w.t.rules, pushResearch: async () => assert.fail('pushed twice'), alert: outbox(w.rec, at), now: at, host: 'the-host' }); };
+  return { ...w, run, passOn, state: () => w.rec.read('card', w.card).doc.state };
+};
+
+test('L387: a pushed copy goes to review in one pass, on a tab claim, with one launch record of the start loop\'s shape', async () => {
+  const w = routed();
+  await w.pass();
+  const c = w.rec.read('card', w.card);
+  assert.equal(c.doc.state, 'in_review');
+  assert.equal(c.doc.head, TIP);
+  assert.equal(c.doc.claim, undefined, 'the claim ends at the hand-in, so M9 will take a merge request');
+  assert.match(w.run, new RegExp(`^copy-${w.card}-r-[0-9a-f]{12}$`));
+  const l = w.rec.read('launch', w.run).doc;
+  assert.deepEqual(Object.keys(l).sort(), ['card', 'config_dir', 'copy', 'head', 'kind', 'launched_at', 'product', 'rev', 'role', 'session_id', 'signin']);
+  assert.deepEqual([l.session_id, l.role, l.kind, l.card, l.head, l.product], [w.run, 'copy_run', 'copy_run', w.card, TIP, PRODUCT]);
+  assert.ok(Number.isInteger(l.rev) && l.rev > 0);
+  await w.pass(w.T + 5 * DAY);
+  assert.equal(w.calls.length, 1, 'pushed once');
+  assert.deepEqual(w.alerts, [], 'nothing to tell once it is with review');
+  assert.equal(w.rec.list('launch').length, 1);
+});
+
+test('L387: the pass that sends a stopped copy to review, on the day its tell falls due, tells nothing', async () => {
+  const u = routed();
+  u.t.clock.t = u.T;
+  await researchCopyPass({ rec: refusing(u.rec, 'claim'), rules: u.t.rules, pushResearch: async () => { const k = u.rec.read('card', u.card); must(u.rec.write({ actor: 'workshop', entity: 'card', id: u.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } })); must(u.rec.write({ actor: 'workshop', entity: 'fact', id: u.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(u.T).toISOString(), from: 'research', product: PRODUCT } })); return { ok: true }; }, alert: outbox(u.rec, u.T), now: u.T, host: 'the-host' });
+  assert.equal(u.state(), 'ready');
+  const later = u.T + DAY + 1;
+  await u.passOn(u.rec, later);
+  await sendAlerts(u.rec, u.port, later);
+  assert.equal(u.state(), 'in_review');
+  assert.deepEqual(u.alerts, []);
+});
+
+for (const [stop, at] of [['claim', 'ready'], ['started', 'claimed'], ['launch', 'running'], ['copy_handed_in', 'running']]) {
+  test(`L387: a stop at ${stop} leaves the card ${at}, is told daily, and the next pass goes on from there`, async () => {
+    const w = routed();
+    await w.pass();
+    assert.equal(w.state(), 'in_review');
+    const v = routed();
+    v.t.clock.t = v.T;
+    const pushOnly = await researchCopyPass({ rec: refusing(v.rec, stop), rules: v.t.rules, pushResearch: async () => { const k = v.rec.read('card', v.card); must(v.rec.write({ actor: 'workshop', entity: 'card', id: v.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } })); must(v.rec.write({ actor: 'workshop', entity: 'fact', id: v.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(v.T).toISOString(), from: 'research', product: PRODUCT } })); return { ok: true }; }, alert: outbox(v.rec, v.T), now: v.T, host: 'the-host' });
+    assert.match(pushOnly.at(-1)[1], /^not sent to review: /);
+    assert.equal(v.state(), at);
+    const later = v.T + DAY + 1;
+    await v.passOn(refusing(v.rec, stop), later);
+    await sendAlerts(v.rec, v.port, later);
+    assert.equal(v.state(), at, 'still stopped');
+    assert.match(v.alerts.at(-1), /but could not go to review \(/);
+    await v.passOn(v.rec, later + 1);
+    assert.equal(v.state(), 'in_review');
+    assert.equal(v.rec.list('launch').length, 1);
+    assert.equal(v.rec.read('fact', READY_FACT(v.card)).doc.told_at, null, 'the tell ends with the wait');
+  });
+}
+
+test('L387: a card over a day old that goes to review in this pass is not told it is waiting', async () => {
+  const w = routed();
+  await w.pass(w.T + 2 * DAY);
+  assert.equal(w.state(), 'in_review');
+  assert.deepEqual(w.alerts, []);
+});
+
+test('L387: rules off, a pushed card is not sent to review', async () => {
+  const w = routed();
+  w.t.clock.t = w.T;
+  const k = w.rec.read('card', w.card);
+  must(w.rec.write({ actor: 'workshop', entity: 'card', id: w.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } }));
+  must(w.rec.write({ actor: 'workshop', entity: 'fact', id: w.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(w.T).toISOString(), from: 'research', product: PRODUCT } }));
+  await researchCopyPass({ rec: w.rec, rules: { flag: () => false, get: () => undefined }, pushResearch: async () => assert.fail('off'), alert: outbox(w.rec, w.T), now: w.T });
+  assert.equal(w.state(), 'ready');
+});
+
+test('L387: a pushed card whose head write was refused is pushed again after the wait, and only then goes to review', async () => {
+  const w = copyWorld({ writeHead: true });
+  must(w.rec.write({ actor: 'workshop', entity: 'fact', id: w.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, head_refused: 'the card moved', at: new Date(w.T).toISOString(), from: 'research', product: PRODUCT } }));
+  await w.pass(w.T + RETRY_MS - 1);
+  assert.equal(w.calls.length, 0, 'not before the wait');
+  assert.equal(w.rec.read('card', w.card).doc.state, 'ready');
+  await w.pass(w.T + RETRY_MS);
+  assert.equal(w.calls.length, 1);
+  assert.equal(w.rec.read('card', w.card).doc.state, 'in_review');
+});
+
+test('L387: another claim is not ours: a card someone else holds is never moved', async () => {
+  const w = copyWorld({ writeHead: true });
+  const k = w.rec.read('card', w.card);
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id: w.card, expectRev: k.rev, kind: 'test', doc: { ...k.doc, state: 'claimed', claim: { kind: 'tab', claim_id: 'someone-else', host: 'the-host' } } }));
+  await w.pass();
+  assert.equal(w.rec.read('card', w.card).doc.state, 'claimed');
+  assert.equal(w.calls.length, 0);
 });
 
 test('L384 4: the tell stops when the card leaves ready, a queued one is dropped, and a later wait in ready is told afresh', async () => {

@@ -315,9 +315,10 @@ export function endedMerges(rec, card, head) {
   return { n, rev };
 }
 
-// The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
+// The session that made the card's work: its newest worker launch, or a research copy's run (the Dispatcher's own
+// launch records).
 function workerSession(rec, cardId) {
-  const mine = rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId && typeof l.doc.session_id === 'string');
+  const mine = rec.list('launch').filter((l) => (l.doc?.role === 'worker' || l.doc?.role === 'copy_run') && l.doc.card === cardId && typeof l.doc.session_id === 'string');
   mine.sort((x, y) => String(y.doc.launched_at ?? '').localeCompare(String(x.doc.launched_at ?? '')));
   return mine[0]?.doc.session_id ?? null;
 }
