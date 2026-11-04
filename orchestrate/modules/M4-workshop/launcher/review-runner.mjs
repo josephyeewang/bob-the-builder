@@ -56,7 +56,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
-import { pastTime } from '../../../shared/still-waiting.mjs';
+import { pastTime, STILL_WAITING_MS } from '../../../shared/still-waiting.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
@@ -74,6 +74,9 @@ export const MAX_STARTS_PER_PASS = 50;
 export const MAX_PENDING = 200;
 const KEEP_SEEN = 500;
 const KEEP_LIST = 50;
+// A review request refused for a day, and asked again in that time, is a hold (R-0b-171). One no request has renewed
+// for this long is over: nothing is asking any more, so it would otherwise be told for ever.
+export const REFUSED_QUIET_MS = 2 * STILL_WAITING_MS;
 export const REQUEST_NAME = /^[A-Za-z0-9-]{1,64}\.json$/;
 export const REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
 export { CARD_ID };
@@ -340,7 +343,7 @@ export async function runnerPass(ctx) {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
       running: state.running.map(({ card, head, role, session_id, started_at }) => ({ card, head, role, session_id, started_at })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
-      holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text }))],
+      holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...refusedHolds(state.refused_streaks, now)],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
@@ -357,16 +360,42 @@ export async function runnerPass(ctx) {
   // m-3: an admin can become anyone, so a review user that is an admin keeps nothing apart.
   let admin; try { admin = await ctx.isAdmin(); } catch { admin = true; }
   if (admin !== false) { fail('the review user is an admin (or that could not be checked), so no review starts'); hold('review-admin', 'The review user is an admin Mac user (or the check failed). No reviewer or auditor starts until it is a standard user.'); return finish(); }
+  const cardsRead = new Map();
+  const cardOf = async (id) => {
+    if (!cardsRead.has(id)) { let c; try { c = await ctx.readCard(id); } catch { c = null; } cardsRead.set(id, c); }
+    return cardsRead.get(id);
+  };
+  const treesRead = new Map();
+  // null: the tree can't be read, which says nothing about whether it changed.
+  const treeAt = async (id, head) => {
+    const k = `${id} ${head}`;
+    if (!treesRead.has(k)) {
+      let tree; try { tree = await ctx.treeOf(id, head); } catch { tree = null; }
+      treesRead.set(k, typeof tree === 'string' && HEX40.test(tree) ? tree : null);
+    }
+    return treesRead.get(k);
+  };
+  // A request refused again and again stays a streak until a request is accepted, the card stops needing the role, or
+  // no request has renewed it (R-0b-171).
+  for (const [key, r] of Object.entries(state.refused_streaks ?? {})) {
+    const c = await cardOf(r.card);
+    if ((c?.ok && !needsRole(c.doc, r.role)) || now - (pastTime(r.last_at, now) ?? now) >= REFUSED_QUIET_MS) delete state.refused_streaks[key];
+  }
   // A verdict not taken stays a hold until the Record takes it or the review is no longer wanted, read on every pass:
   // requests come far apart, so a check made only on a request would drop the hold between them and tell it afresh.
-  // A card or an answer that can't be read leaves it held.
+  // A card or an answer that can't be read leaves it held. So does a card that moved to a head whose tree can't be read:
+  // whether the verdict still counts can't be checked, so it is told as that, at the card's head (R-0b-171). With the
+  // tree read, the rebuild below decides at the card's head.
   for (const [key, n] of Object.entries(state.not_taken ?? {})) {
     let c; try { c = await ctx.readCard(n.card); } catch { c = null; }
-    if (c?.ok && (c.doc?.head !== n.head || !needsRole(c.doc, n.role))) { delete state.not_taken[key]; continue; }
+    if (c?.ok && !needsRole(c.doc, n.role)) { delete state.not_taken[key]; continue; }
+    const recheck = c?.ok && (c.doc?.head !== n.head || n.tree_unread === true);
+    if (recheck && (typeof n.tree !== 'string' || await treeAt(n.card, c.doc.head) !== null)) { delete state.not_taken[key]; continue; }
+    const at = recheck ? { ...n, head: c.doc.head, tree_unread: true } : n;
     let t;
-    try { t = await ctx.verdictTaken({ role: n.role, sessionId: n.session, card: n.card, head: n.head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
+    try { t = await ctx.verdictTaken({ role: at.role, sessionId: at.session, card: at.card, head: at.head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
     if (t?.ok === true) { delete state.not_taken[key]; continue; }
-    state.not_taken[key] = { ...n, text: notTakenText({ ...n, why: notTakenWhy(t) }) };
+    state.not_taken[key] = { ...at, text: notTakenText({ ...at, why: notTakenWhyAt(at, t) }) };
   }
 
   try {
@@ -488,17 +517,6 @@ export async function runnerPass(ctx) {
   // (L458), and the Record has not taken it after the wait. It is held at the card's head. `none`,
   // `refused` and `never_ran` were told when the session ended. A card that can't be read adds nothing here (one read
   // failing must not turn every past session into a hold); a hold already listed stays, as above.
-  const cardsRead = new Map();
-  const cardOf = async (id) => {
-    if (!cardsRead.has(id)) { let c; try { c = await ctx.readCard(id); } catch { c = null; } cardsRead.set(id, c); }
-    return cardsRead.get(id);
-  };
-  const treesRead = new Map();
-  const treeAt = async (id, head) => {
-    const k = `${id} ${head}`;
-    if (!treesRead.has(k)) { let tree; try { tree = await ctx.treeOf(id, head); } catch { tree = null; } treesRead.set(k, tree); }
-    return treesRead.get(k);
-  };
   for (const { doc: d } of rl.ok ? rl.launches : []) {
     const sid = d.session_id;
     if (asideIds.has(sid) || state.not_taken?.[sid]) continue;
@@ -508,11 +526,13 @@ export async function runnerPass(ctx) {
     const c = await cardOf(d.card);
     if (!c?.ok || !needsRole(c.doc, d.role)) continue;
     const head = c.doc.head;
-    if (head !== d.head && (typeof d.tree !== 'string' || await treeAt(d.card, head) !== d.tree)) continue;
+    const treeNow = head === d.head ? d.tree : typeof d.tree === 'string' ? await treeAt(d.card, head) : undefined;
+    if (head !== d.head && treeNow !== null && treeNow !== d.tree) continue;
     let t;
     try { t = await ctx.verdictTaken({ role: d.role, sessionId: sid, card: d.card, head }); } catch (e2) { t = { ok: false, reason: `the Record could not be read (${e2?.message ?? e2})` }; }
     if (t?.ok === true) continue;
-    state.not_taken = { ...state.not_taken, [sid]: { id: `not-taken-${sid}`, session: sid, card: d.card, head, role: d.role, text: notTakenText({ role: d.role, card: d.card, head, why: notTakenWhy(t) }) } };
+    const held = { id: `not-taken-${sid}`, session: sid, card: d.card, head, role: d.role, tree: d.tree, ...(treeNow === null ? { tree_unread: true } : {}) };
+    state.not_taken = { ...state.not_taken, [sid]: { ...held, text: notTakenText({ ...held, why: notTakenWhyAt(held, t) }) } };
   }
 
   // The sweep (L68): a launched session the runner is not running, with no ended record, is one it lost track of (it
@@ -609,26 +629,35 @@ export async function runnerPass(ctx) {
     const refuse = (reason, req = got.req) => result.refused.push({ at: iso(now), request: name, card: req?.card ?? null, role: req?.role ?? null, request_id: req?.request_id ?? null, reason });
     if (!got.ok) { refuse(`the request ${got.reason}`); continue; }
     const { card, head, role, request_id: rid } = got.req;
+    // A refusal that says the review can't go ahead, as opposed to a request that was stale or not needed (R-0b-171).
+    const streakKey = `${card} ${role}`;
+    const stuck = (reason) => {
+      refuse(reason);
+      const was = state.refused_streaks?.[streakKey];
+      state.refused_streaks = { ...state.refused_streaks, [streakKey]: { card, role, head, reason: String(reason).slice(0, 300), first_at: was?.first_at ?? iso(now), last_at: iso(now), count: (was?.count ?? 0) + 1 } };
+    };
+    const accepted = () => { if (state.refused_streaks) delete state.refused_streaks[streakKey]; };
     if (state.seen.includes(rid)) { refuse(`request id ${rid} was seen before`); continue; }
     state.seen = [...state.seen, rid].slice(-KEEP_SEEN);
     if (!REVIEW_ROLES.includes(role)) { refuse(`"${role}" is not a review role`); continue; }
     let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
-    if (!c?.ok) { refuse(`card ${card} is not in the Record${c?.reason ? ` (${c.reason})` : ''}`); continue; }
+    if (!c?.ok) { (c?.reason ? stuck : refuse)(`card ${card} is not in the Record${c?.reason ? ` (${c.reason})` : ''}`); continue; }
     if (!needsRole(c.doc, role)) { refuse(`card ${card} does not need a ${role} (it is ${c.doc?.state ?? 'in no state'}${role === 'auditor' ? `, tier ${c.doc?.tier ?? 'none'}` : ''})`); continue; }
     if (c.doc.head !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`); continue; }
-    let gitHead; try { gitHead = await ctx.currentHead(card, c.doc); } catch (e) { gitHead = null; refuse(`the card's head in git could not be read (${e?.message ?? e})`); continue; }
-    if (gitHead !== head) { refuse(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }
-    let tree; try { tree = await ctx.treeOf(card, head); } catch (e) { refuse(`the tree of ${head.slice(0, 7)} could not be read (${e?.message ?? e})`); continue; }
-    if (typeof tree !== 'string' || !HEX40.test(tree)) { refuse(`the tree of ${head.slice(0, 7)} could not be read`); continue; }
-    if (!rl.ok) { refuse(`the launch records could not be read, so no ${role} starts`); continue; }
+    let gitHead; try { gitHead = await ctx.currentHead(card, c.doc); } catch (e) { gitHead = null; stuck(`the card's head in git could not be read (${e?.message ?? e})`); continue; }
+    if (gitHead !== head) { stuck(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }
+    let tree; try { tree = await ctx.treeOf(card, head); } catch (e) { stuck(`the tree of ${head.slice(0, 7)} could not be read (${e?.message ?? e})`); continue; }
+    if (typeof tree !== 'string' || !HEX40.test(tree)) { stuck(`the tree of ${head.slice(0, 7)} could not be read`); continue; }
+    if (!rl.ok) { stuck(`the launch records could not be read, so no ${role} starts`); continue; }
     const k = keyOf(card, tree, role);
-    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) { refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
+    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) { accepted(); refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
     let a = state.attempts[k] ?? { failures: 0 };
     // The launch records say it too, whatever the runner's memory says: a session on this card's tree (or head) for this
     // role, not set aside by Joe, is a start already made. So is one marked never ran (L71 point 2) once anything is in
     // its outbox, or its outbox fails its checks.
     const made = rl.launches.some(({ doc: d }) => d.card === card && d.role === role && (d.head === head || d.tree === tree) && !asideIds.has(d.session_id) && !stillNeverRan(d));
     if (a.started || made) {
+      accepted();
       // One start per tree, for good (L68, L69): what the Record says is never a reason to start again, since a worker
       // can write the Record, and an amend with no code change keeps its tree. A verdict the Record has not taken 15
       // minutes after its session ended is held, so it is told each day it lasts (L315); the Merge Gate reads the verdict file itself either way. A
@@ -642,28 +671,28 @@ export async function runnerPass(ctx) {
         try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
         if (t?.ok !== true) {
           const why = notTakenWhy(t);
-          state.not_taken = { ...state.not_taken, [sid ?? k]: { id: `not-taken-${sid ?? k}`, session: sid, card, head, role, text: notTakenText({ role, card, head, why }) } };
+          state.not_taken = { ...state.not_taken, [sid ?? k]: { id: `not-taken-${sid ?? k}`, session: sid, card, head, role, tree, text: notTakenText({ role, card, head, why }) } };
         }
       }
       refuse(`a ${role} was already started for card ${card} at ${head.slice(0, 7)} (or a head with the same tree); one start per head and tree`);
       continue;
     }
     if ((a.failures ?? 0) >= MAX_FAILED_STARTS) {
-      refuse(`${MAX_FAILED_STARTS} starts of a ${role} for card ${card} at ${head.slice(0, 7)} failed; Joe is told`);
+      stuck(`${MAX_FAILED_STARTS} starts of a ${role} for card ${card} at ${head.slice(0, 7)} failed; Joe is told`);
       alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${a.last_reason ?? 'ended with no verdict'}).`);
       continue;
     }
     // pastTime (L329): a failure time that can't be read or is more than 60 s ahead counts as old enough, so the
     // retry is not held for ever.
     const failedAt = a.last_failed_at ? pastTime(a.last_failed_at, now) : null;
-    if (failedAt !== null && now - failedAt < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
+    if (failedAt !== null && now - failedAt < RETRY_MS) { stuck(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
 
     // Start it: the session id is the runner's own, the outbox is made fresh, the launch record is written before the start.
     starts += 1;
     const sid = newId();
     const failStart = (reason) => {
       state.attempts[k] = { ...a, started: false, failures: (a.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: reason };
-      refuse(`the ${role} could not be started: ${reason}`);
+      stuck(`the ${role} could not be started: ${reason}`);
       if (state.attempts[k].failures >= MAX_FAILED_STARTS) alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${reason}).`);
     };
     if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { failStart('the new session id is not letters, digits and dashes'); continue; }
@@ -753,6 +782,7 @@ export async function runnerPass(ctx) {
       continue;
     }
     state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };
+    accepted();
     state.running.push({ card, head, tree, role, session_id: sid, pid: r.pid, started_at: iso(now) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
   }
@@ -761,6 +791,12 @@ export async function runnerPass(ctx) {
 
 // What a pending hold on a verdict says (L315).
 const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given');
+// The hold for a request refused for a day (R-0b-171): under its own cause, so a new reason is no new tell, and only once
+// a later request was refused too, so one stray request is never a hold.
+const refusedHolds = (streaks, now) => Object.values(streaks ?? {})
+  .filter((r) => r.count >= 2 && now - (pastTime(r.first_at, now) ?? -Infinity) >= STILL_WAITING_MS)
+  .map((r) => ({ id: `refused-${r.card}-${r.role}`, text: `The ${r.role} request for card ${r.card} at ${r.head.slice(0, 7)} has been refused for a day (last: ${r.reason}). No ${r.role} starts until one is accepted.` }));
+const notTakenWhyAt = (n, t) => (n.tree_unread ? `the tree of ${n.head.slice(0, 7)} can't be read, so whether the verdict still counts can't be checked; ${notTakenWhy(t)}` : notTakenWhy(t));
 const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card} at ${head.slice(0, 7)} handed in a verdict the Record has not taken (${why}). Nothing starts again: the Merge Gate reads the verdict file itself, and the card waits for Joe.`;
 
 /**

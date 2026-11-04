@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
+import { runnerPass, REFUSED_QUIET_MS } from '../M4-workshop/launcher/review-runner.mjs';
 import { reviewPorts, relayReviewAlerts, keepReviewHolds, REVIEW_HOLD_FACT, HOLD_ABSENT_MS, MAIN_UNREAD } from './review-requests.mjs';
 import { behindSince, nextMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { outbox, isQueued, ALERT_QUEUE_FACT } from './alerts.mjs';
@@ -667,6 +667,7 @@ test('L437 m2: a verdictTaken that throws counts as not taken, and an unreadable
 
 // The push script alone moves a head in the Record, so the runner's reads stand in for it, as the test of a card that left its head does.
 const HEAD2 = 'b'.repeat(40);
+const NOT_TAKEN_ANY = /handed in a verdict the Record has not taken/;
 const amend = (m) => {
   const had = m.ctx.readCard;
   m.ctx.readCard = (c) => { const r = had(c); return { ...r, doc: { ...r.doc, head: HEAD2 } }; };
@@ -686,15 +687,171 @@ test('L458 M1: a card amended to the same tree, then a memory reset: the verdict
   assert.ok(seen.every((h) => h === HEAD2));
 });
 
-test('L458 M1 control: a head with another tree, or a tree that can\'t be read, adds nothing', async () => {
-  for (const treeOf of [async () => 'd'.repeat(40), async () => { throw new Error('no'); }]) {
-    const m = await notTakenTold();
-    m.ctx.treeOf = treeOf;
-    amend(m);
-    rmSync(join(m.root, 'state.json'));
-    await runnerPass(m.ctx);
-    assert.deepEqual(held(m), []);
+test('L458 M1 control: a head with another tree adds nothing', async () => {
+  const m = await notTakenTold();
+  m.ctx.treeOf = async () => 'd'.repeat(40);
+  amend(m);
+  rmSync(join(m.root, 'state.json'));
+  await runnerPass(m.ctx);
+  assert.deepEqual(held(m), []);
+});
+
+// R-0b-171: a request the runner keeps refusing is told; so is a held verdict whose new head's tree can't be read.
+const REFUSED = /review runner: The reviewer request for card C-1 at aaaaaaa has been refused for a day/;
+const NO_TREE = async () => { throw new Error('git is away'); };
+const treeAway = (m) => { m.ctx.treeOf = async (c, h) => { if (h === HEAD2) throw new Error('git is away'); return TREE; }; };
+const stateOf = (m) => JSON.parse(readFileSync(join(m.root, 'state.json'), 'utf8'));
+const editState = (m, change) => { const st = stateOf(m); change(st); writeFileSync(join(m.root, 'state.json'), JSON.stringify(st), { mode: 0o600 }); };
+const statusHolds = (m) => JSON.parse(readFileSync(join(m.root, 'status.json'), 'utf8')).holds;
+
+test('R-0b-171 A7: a card whose tree can\'t be read is told a day after the first refusal, then each day, and nothing between', async () => {
+  const m = mac({ treeOf: NO_TREE });
+  const told = [];
+  for (let h = 0; h <= 80; h += 1) for (const t of await m.hour(h)) if (REFUSED.test(t)) told.push([h, t]);
+  assert.deepEqual(told.map(([h]) => h), [25, 49, 73]);
+  assert.match(told[0][1], /last: the tree of aaaaaaa could not be read \(git is away\)/);
+  assert.equal(m.starts.length, 0);
+});
+
+test('R-0b-171: each refusal that says the review can\'t go ahead is told', async () => {
+  for (const [over, why] of [
+    [{ treeOf: async () => 'not a tree' }, /the tree of aaaaaaa could not be read\)?\./],
+    [{ currentHead: () => { throw new Error('git is away'); } }, /the card's head in git could not be read/],
+    [{ currentHead: () => HEAD2 }, /the card's branch is at bbbbbbb/],
+    [{ accountInUse: () => null }, /(could not be started|starts of a reviewer|last start of a reviewer)/],
+  ]) {
+    const m = mac(over);
+    const told = [];
+    for (let h = 0; h <= 26; h += 1) for (const t of await m.hour(h)) if (REFUSED.test(t)) told.push(t);
+    assert.equal(told.length, 1, String(why));
+    assert.match(told[0], why);
   }
+});
+
+test('R-0b-171: a card the Record could not read is told; a card it does not hold is not a streak', async () => {
+  const away = mac();
+  await away.hour(0);
+  const had = away.ctx.readCard;
+  let reading = false;
+  away.ctx.readCard = (c) => (reading ? { ok: false, reason: 'the Record is away' } : had(c));
+  const told = [];
+  reading = true;
+  await away.hour(1);
+  assert.equal(stateOf(away).refused_streaks?.['C-1 reviewer']?.count, 1);
+  const gone = mac();
+  gone.ctx.readCard = () => ({ ok: false });
+  await gone.hour(0);
+  await gone.hour(1);
+  assert.deepEqual(stateOf(gone).refused_streaks ?? {}, {});
+  assert.deepEqual(told, []);
+});
+
+test('R-0b-171: another reason each pass is the one hold, told once a day', async () => {
+  let n = 0;
+  const m = mac({ treeOf: async () => { n += 1; throw new Error(`away ${n}`); } });
+  assert.deepEqual(await m.run(0, 50, REFUSED), [25, 49]);
+});
+
+test('R-0b-171: an accepted request ends it: the hold leaves, and a later streak has its own day', async () => {
+  const m = mac({ treeOf: NO_TREE });
+  assert.deepEqual(await m.run(0, 26, REFUSED), [25]);
+  m.ctx.treeOf = async () => TREE;
+  await m.hour(27);
+  assert.equal(m.starts.length, 1, 'accepted');
+  assert.deepEqual(stateOf(m).refused_streaks, {});
+  assert.deepEqual(statusHolds(m).filter((h) => h.id.startsWith('refused-')), []);
+  assert.deepEqual(await m.run(28, 60, REFUSED), []);
+  assert.equal(m.rec.read('fact', REVIEW_HOLD_FACT('refused-C-1-reviewer')).doc.told_at, null, 'cleared after the hour');
+});
+
+test('R-0b-171: a review already started or running ends it, and is no refusal to tell', async () => {
+  const m = mac();
+  await m.hour(0); await m.hour(1);
+  assert.equal(m.starts.length, 1);
+  m.live.splice(0);
+  editState(m, (st) => { st.refused_streaks = { 'C-1 reviewer': { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'x', first_at: iso(T0 - 20 * H), last_at: iso(T0), count: 3 } }; });
+  assert.deepEqual(await m.run(2, 60, REFUSED), [], 'one start per tree: asked again, it is no trouble');
+  assert.deepEqual(stateOf(m).refused_streaks, {});
+  assert.equal(m.starts.length, 1);
+});
+
+test('R-0b-171: a streak ends when the card stops needing the role, whatever was refused', async () => {
+  const m = mac({ treeOf: NO_TREE });
+  await m.run(0, 26, REFUSED);
+  m.ctx.readCard = () => ({ ok: true, doc: { state: 'done', head: HEAD, tier: 2 } });
+  await runnerPass(m.ctx);
+  assert.deepEqual(stateOf(m).refused_streaks, {});
+});
+
+test('R-0b-171: one stray refusal is no hold, and one nothing has renewed for two days is over', async () => {
+  const m = mac();
+  await m.hour(0);
+  await runnerPass(m.ctx); // the request is taken, so none is waiting below
+  const streak = (over) => ({ 'C-1 reviewer': { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'x', first_at: iso(T0 - 30 * H), last_at: iso(T0 - H), count: 2, ...over } });
+  const pass = async (over) => { editState(m, (st) => { st.refused_streaks = streak(over); }); await runnerPass(m.ctx); return statusHolds(m).map((h) => h.id); };
+  assert.deepEqual(await pass({}), ['refused-C-1-reviewer']);
+  assert.deepEqual(await pass({ count: 1 }), [], 'one stray request');
+  assert.deepEqual(await pass({ first_at: iso(T0 - 23 * H) }), [], 'less than a day');
+  assert.deepEqual(await pass({ first_at: 'not a time' }), ['refused-C-1-reviewer'], 'a time that can\'t be read counts as old enough');
+  assert.deepEqual(await pass({ last_at: 'not a time' }), ['refused-C-1-reviewer'], 'and is not over');
+  assert.deepEqual(await pass({ last_at: iso(T0 - REFUSED_QUIET_MS) }), [], 'over');
+  assert.deepEqual(stateOf(m).refused_streaks, {});
+});
+
+test('R-0b-171 A5: a same-tree amend, a memory reset and the new tree unreadable: the verdict is told each day, not dropped', async () => {
+  const m = await notTakenTold();
+  amend(m); treeAway(m);
+  rmSync(join(m.root, 'state.json'));
+  assert.deepEqual(await m.run(5, 80, NOT_TAKEN_ANY), [28, 52, 76]);
+  assert.match(held(m)[0].text, /at bbbbbbb .*the tree of bbbbbbb can't be read, so whether the verdict still counts can't be checked/);
+  assert.equal(m.starts.length, 1, 'nothing started again');
+});
+
+test('R-0b-171 A6: the same with no reset: the kept hold stays, at the card\'s head', async () => {
+  const m = await notTakenTold();
+  const asked = [];
+  m.ctx.verdictTaken = (x) => { asked.push(x.head); return { ok: false, reason: 'no verdict' }; };
+  amend(m); treeAway(m);
+  assert.deepEqual(await m.run(5, 80, NOT_TAKEN_ANY), [28, 52, 76]);
+  assert.match(held(m)[0].text, /at bbbbbbb/);
+  assert.ok(asked.every((h) => h === HEAD2), 'asked at the card\'s head');
+});
+
+test('R-0b-171: a pass that stops before the rebuild still keeps a hold whose tree can\'t be read', async () => {
+  const m = await notTakenTold();
+  amend(m); treeAway(m);
+  m.ctx.sessions = async () => { throw new Error('no list'); };
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+});
+
+test('R-0b-171: when the tree reads again the verdict is judged by it', async () => {
+  for (const [tree, left] of [[TREE, 1], ['d'.repeat(40), 0]]) {
+    const m = await notTakenTold();
+    amend(m); treeAway(m);
+    await runnerPass(m.ctx);
+    assert.equal(held(m).length, 1);
+    assert.equal(stateOf(m).not_taken['S-1'].tree_unread, true);
+    m.ctx.treeOf = async () => tree;
+    await runnerPass(m.ctx);
+    assert.equal(held(m).length, left);
+    if (left) assert.doesNotMatch(held(m)[0].text, /can't be read/);
+  }
+});
+
+test('R-0b-171: a verdict taken at the new head, or a card done, ends a hold whose tree can\'t be read', async () => {
+  const m = await notTakenTold();
+  amend(m); treeAway(m);
+  await runnerPass(m.ctx);
+  m.ctx.verdictTaken = () => ({ ok: true });
+  await runnerPass(m.ctx);
+  assert.deepEqual(held(m), []);
+  const d = await notTakenTold();
+  amend(d); treeAway(d);
+  await runnerPass(d.ctx);
+  d.ctx.readCard = () => ({ ok: true, doc: { state: 'done', head: HEAD2, tier: 2 } });
+  await runnerPass(d.ctx);
+  assert.deepEqual(held(d), []);
 });
 
 // One test per place verdictTaken can throw, each set up so the other two can't add the hold back (L458 m4).
