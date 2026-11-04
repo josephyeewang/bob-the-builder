@@ -11,7 +11,8 @@
 // now, and Joe is told why, before anything else happens to it (reaskUnreadable, L362).
 //
 //   await schedulePass(ctx) → { ok, events } | { ok: false, reason, events }    one pass; the dispatcher runs it often
-//     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs)
+//     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs),
+//     then applies the owner's pause and trip requests (state-request.mjs)
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 //     + unreadable: true, cause when a GitHub read threw (L205); the Merge Gate classes `cause`
@@ -35,6 +36,7 @@ import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
+import { stateRequestStep } from './state-request.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
@@ -268,6 +270,9 @@ export async function schedulePass(ctx) {
   const made = onboard(ctx);
   if (made) events.push(made);
   onboardNotices(ctx, made);
+  // The owner's pause and trip requests (M1 join item 13), before the product read below: the window it picks follows
+  // the state just written.
+  events.push(...stateRequestStep(ctx));
   const nowMs = ctx.now();
   const p = ctx.record.read('product', ctx.product);
   const win = dueWindow(nowMs, zoneFor(cfg, p && !p.corrupt ? p.doc : null), cfg.windows);

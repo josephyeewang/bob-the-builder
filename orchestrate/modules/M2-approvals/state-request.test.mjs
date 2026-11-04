@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { outboxFile } from '../M1-front-door/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { env as m2env, must, PRODUCT } from './fixtures.test-helper.mjs';
+import { schedulePass } from './schedule.mjs';
 import { STATE_ANSWERS, applyStateRequests, markStateAnswerSent } from './state-request.mjs';
 
 let seq = 0;
@@ -28,7 +29,7 @@ function setup({ state = 'active', reports = [], stateDir = true, doc = {} } = {
   const rec = t.record;
   const box = { write: (w) => rec.write(w) };
   const record = { list: (e) => (e === 'report' ? [...rec.list('report'), ...extra] : rec.list(e)), read: (e, i) => rec.read(e, i), write: (w) => box.write(w), diary: (o) => rec.diary(o) };
-  const ctx = { ...t.ctx, record, ...(stateDir ? { stateDir: join(tempDir('orch-state-req-'), 'state') } : {}) };
+  const ctx = { ...t.ctx, now: () => Date.UTC(2026, 10, 3, 12), record, ...(stateDir ? { stateDir: join(tempDir('orch-state-req-'), 'state') } : {}) };
   return { t, ctx, extra, box, product: () => rec.read('product', PRODUCT) };
 }
 const pass = (s) => applyStateRequests(s.ctx);
@@ -187,4 +188,55 @@ test('every answer the pass gives is one of STATE_ANSWERS (the list shared/no-pr
     report('20261103-0913-ay', { state: 'paused' }, { role: 'worker' })] });
   const allowed = new Set(Object.values(STATE_ANSWERS).map((f) => f(PRODUCT)));
   for (const a of pass(s).answers) assert.ok(allowed.has(a.push), a.push);
+});
+
+// L219 + L221's class: the pass is run by what runs in production, and its answers reach the owner.
+const told = (s, took = () => true) => {
+  const seen = [];
+  s.ctx.alert = (a) => { if (a.type === 'state_answer') seen.push(a); return a.type === 'state_answer' ? took(a) : true; };
+  return seen;
+};
+
+test('schedulePass applies a pause, tells the owner once, and the product it reads is the paused one', async () => {
+  const rep = report('20261103-0915-aa', { state: 'paused' });
+  const s = setup({ reports: [rep] });
+  const seen = told(s);
+  const r = await schedulePass(s.ctx);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(s.product().doc.state, 'paused');
+  assert.deepEqual(r.events.filter((e) => e.type === 'state_applied'), [{ type: 'state_applied', report: rep.id, state: 'paused' }]);
+  assert.deepEqual(seen, [{ type: 'state_answer', product: PRODUCT, report: rep.id, text: STATE_ANSWERS.paused(PRODUCT) }]);
+  await schedulePass(s.ctx);
+  assert.equal(seen.length, 1, 'told once');
+});
+
+for (const [name, took] of [['answers false', () => false], ['answers nothing', () => undefined], ['throws', () => { throw new Error('down'); }]]) {
+  test(`schedulePass: a sink that ${name} leaves the answer unmarked, so it is told again next pass`, async () => {
+    const rep = report('20261103-0915-ab', { state: 'paused' });
+    const s = setup({ reports: [rep] });
+    const seen = told(s, took);
+    const r = await schedulePass(s.ctx);
+    assert.equal(r.ok, true, r.reason);
+    assert.deepEqual(r.events.filter((e) => e.type === 'state_answer_not_told'), [{ type: 'state_answer_not_told', report: rep.id }]);
+    await schedulePass(s.ctx);
+    assert.equal(seen.length, 2);
+  });
+}
+
+test('a request dated more than a day ahead is unreadable, is never stored, and holds no real request back', () => {
+  const ahead = report('20991103-0915-aa', { state: 'away', tz: 'Asia/Tokyo', until: '2099-11-20' });
+  const real = report('20261103-0915-ab', { state: 'paused' });
+  const s = setup({ reports: [ahead, real] });
+  const r = pass(s);
+  assert.equal(s.product().doc.state, 'paused');
+  assert.deepEqual(s.product().doc.request, { id: real.id, at: '20261103-0915' });
+  assert.deepEqual(r.refused.map((x) => [x.report, x.reason]), [[ahead.id, 'the request\'s time lies in the future']]);
+  assert.equal(r.answers.find((a) => a.report === ahead.id).push, STATE_ANSWERS.unreadable());
+});
+
+test('a request a few hours ahead, an owner in a later zone, is read', () => {
+  const rep = report('20261104-0200-aa', { state: 'paused' });
+  const s = setup({ reports: [rep] });
+  assert.deepEqual(pass(s).refused, []);
+  assert.equal(s.product().doc.state, 'paused');
 });

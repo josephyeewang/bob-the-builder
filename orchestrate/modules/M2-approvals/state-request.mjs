@@ -3,9 +3,9 @@
 // the record keeps it as an inert report; this pass is the one place that turns it into the product's state, after
 // checking its text again with the Front Door's own check (M1 outbox.mjs). Only approvals writes a product.
 //
-// NOT LIVE YET. The record still refuses `state-` (shared OUTBOX_KINDS, refused until a lead call unrefuses it), so in
-// the real flow no state- report reaches this pass today. The pass, its answers and its tests are built ahead of that
-// call; the trip push (M1 join item 4) waits on it too. Nothing moves a product from away back to active at `until`:
+// NOT LIVE YET. schedulePass runs this pass (stateRequestStep), but the record still refuses `state-` (shared
+// OUTBOX_KINDS, refused until a lead call unrefuses it), so in the real flow no state- report reaches it today; the
+// trip push (M1 join item 4) waits on that call too. Nothing moves a product from away back to active at `until`:
 // `until` is stored only, and the way back (the owner's "I'm back", a request- file) is lane 2's.
 //
 //   applyStateRequests(ctx) → { applied: [{ report, state }], answers: [{ report, push }], refused: [{ report, reason }] }
@@ -29,6 +29,12 @@
 //   mode → not applied (M9 has no paused → away for a request, and none from light), and the request recorded so it
 //   is not applied later by surprise.
 //   A product with no record yet is not applied: its record is made by onboarding (onboard.mjs), not by a request.
+//   A request whose time is more than a day ahead of the Mini's clock is unreadable: as the newest it would pass over
+//   every real request, and as the stored marker hold them all back (L329's class).
+//
+//   stateRequestStep(ctx) → events   the pass inside schedulePass: applies, then tells the owner each answer as an alert
+//     { type: 'state_answer', product, report, text }, the phone push not being wired (approvals_no_push). An answer is
+//     marked sent only when the sink took it, so a lost one is told again next pass.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +45,8 @@ import { onceAlerts, safeAlert } from './research-ask.mjs';
 export const STATE_REPORT_KIND = 'state-';
 const SENT_FILE = 'state-answers-sent.json';
 const MAX_SENT = 500;
+// The name's time is the owner's own clock in any zone, so only a time past every zone counts as ahead of the Mini's.
+const AHEAD_MS = 26 * 3600 * 1000;
 // checkOutboxFile has already passed the name; this reads the time out of it.
 const TIME_OF = /^state-(\d{8}-\d{4})-[a-z]{2}\.json$/;
 
@@ -57,6 +65,7 @@ export const STATE_ANSWERS = Object.freeze({
 
 // Newer: by the report's own time, then by its record id.
 const newer = (a, b) => !b || a.at > b.at || (a.at === b.at && a.id > b.id);
+const stampMs = (t) => Date.UTC(+t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8), +t.slice(9, 11), +t.slice(11, 13));
 
 function readSent(ctx) {
   if (!ctx.stateDir) return {};
@@ -119,6 +128,7 @@ export function applyStateRequests(ctx) {
       if (r.doc.product !== product) { no('that product is not this record\'s'); continue; }
       const t = TIME_OF.exec(String(d.source))?.[1];
       if (!t) { no('the request has no time in its name'); continue; }
+      if (stampMs(t) > ctx.now() + AHEAD_MS) { no('the request\'s time lies in the future'); continue; }
       ok.push({ rep, req: r.doc, at: { id: rep.id, at: t } });
     } catch (e) {
       refused.push({ report: rep.id, reason: 'the pass failed on it', error: String(e?.message ?? e) });
@@ -150,4 +160,17 @@ export function applyStateRequests(ctx) {
   onceAlerts(ctx, refused, { file: 'state-refused.json', make: (f) => ({ kind: 'state_request_refused', ...f }), alert,
     notSaved: 'state_refused_state_not_saved' });
   return { applied, answers, refused, ...(failed.n ? { alerts_failed: failed.n } : {}) };
+}
+
+export function stateRequestStep(ctx) {
+  const r = applyStateRequests(ctx);
+  const events = r.applied.map((a) => ({ type: 'state_applied', ...a }));
+  for (const { report, push } of r.answers) {
+    let took = false;
+    try { took = ctx.alert({ type: 'state_answer', product: ctx.product, report, text: push }) === true; } catch { took = false; }
+    if (!took) { events.push({ type: 'state_answer_not_told', report }); continue; }
+    const m = markStateAnswerSent(ctx, report);
+    if (!m.ok) events.push({ type: 'state_answer_not_marked', report, reason: m.reason });
+  }
+  return events;
 }
