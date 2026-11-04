@@ -7,7 +7,6 @@ import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const R = rulesWith();
 // Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
