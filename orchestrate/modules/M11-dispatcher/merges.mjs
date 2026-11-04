@@ -24,7 +24,7 @@ import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen
 import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
-import { FINAL_STATES } from '../../shared/record.mjs';
+import { FINAL_STATES, launchesNewestFirst } from '../../shared/record.mjs';
 
 // The pull request reading and the open-too-long clock are M6's, shared with the gate's own recover() (L94).
 export { PR_FACT };
@@ -170,7 +170,8 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     // A count that drives a decision lives in the card's attempts, the Dispatcher's own key (L74).
     const fails = doc.attempts?.reviewer_starts ?? 0;
     if (fails >= 2) {
-      if (waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now: Math.max(now, clock()), kind: 'no_reviewer_ask', alert, text: `card ${id}: no reviewer could be asked for twice` }).ok) done.push([id, 'in_review->waiting']);
+      const w = waitOnJoe(rec, id, { what: 'no reviewer could be asked for', now: Math.max(now, clock()), kind: 'no_reviewer_ask', alert, text: `card ${id}: no reviewer could be asked for twice` });
+      if (w.ok) done.push([id, w.tell_refused ? `in_review->waiting; ${w.tell_refused}` : 'in_review->waiting']);
       continue;
     }
     const g = startGate({ rules, rec, card: { id, ...doc }, kind: 'review', product: doc.product, b, running });
@@ -300,24 +301,26 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
 // refusals (check() finding the card not ready, recover() putting back a merge left in checking) add no reason, so
 // they never count toward a repeat (L116 m7 ruling). The reasons carry over to a new head: after a new head, one
 // refusal that matches the last one before it asks Joe at once (L116 c3; reasons that alternate never ask).
-// When the Record refuses the ask (a rev race, or a move it does not allow), Joe is told once per
-// card and refusal count, so no card stalls without him knowing (L116 M-1).
+// When the Record refuses the ask (a rev race, or a move it does not allow), the owner is told at once and each day
+// while it lasts: its writes are watched, under joe_wait (refused-writes.mjs, L405 m3), so a tell that lands while the
+// card write is still refused keeps the cause open. An ask refused where no watcher saw it (`w.watched` unset) is told
+// here, once per card and refusal count, so no card stalls without the owner knowing (L116 M-1).
 function askOnRepeat(rec, id, { now, alert, pr }) {
   const card = rec.read('card', id);
   const why = card?.doc ? refusedTwice(card.doc) : null;
   if (!why) return null;
   const n = card.doc.attempts.merge_refusals.length;
-  const w = waitOnJoe(rec, id, { what: `merge refused twice: ${why}`, now, link: pr != null ? `PR ${pr}` : undefined,
+  const w = waitOnJoe(rec, id, { what: `merge refused twice: ${why}`, now, kind: 'merge_repeat_ask', link: pr != null ? `PR ${pr}` : undefined,
     attempts: { merge_asks: n }, alert, text: `card ${id}: the merge was refused twice for the same reason (${why})` });
   if (!w.ok) {
     const told = ASK_REFUSED_FACT(id, n);
-    if (!rec.read('fact', told)) {
+    if (!w.watched && !rec.read('fact', told)) {
       const say = `card ${id}: the merge was refused twice for the same reason (${why}), but the card could not be put on you to decide (${w.reason}); it is not merged or asked for again until you look at it`;
       tellThen(alert, say, { fact: ASK_REFUSED_FACT(id, n), fields: noted(`card ${id}: the ask after ${n} refusals was refused (${w.reason}); the owner was told`, now), kind: 'note' });
     }
     return [id, `not sent to joe: ${w.reason}`];
   }
-  return [id, 'waiting on joe'];
+  return [id, w.tell_refused ? `waiting on joe; ${w.tell_refused}` : 'waiting on joe'];
 }
 
 // What M6's settleMerge did, for the list. A card put back with the same refusal reason twice in a row goes to Joe.
@@ -362,10 +365,10 @@ export function endedMerges(rec, card, head) {
 
 // The worker session that made the card's work: its newest worker launch (the Dispatcher's own launch records).
 function workerSession(rec, cardId) {
-  const mine = rec.list('launch').filter((l) => l.doc?.role === 'worker' && l.doc.card === cardId && typeof l.doc.session_id === 'string');
-  mine.sort((x, y) => String(y.doc.launched_at ?? '').localeCompare(String(x.doc.launched_at ?? '')));
-  return mine[0]?.doc.session_id ?? null;
+  return workerLaunches(rec, cardId).find((l) => typeof l.doc.session_id === 'string')?.doc.session_id ?? null;
 }
+// A card's worker launches, newest first, by the Record's order.
+export const workerLaunches = (rec, cardId) => launchesNewestFirst(rec, (l) => l.doc.role === 'worker' && l.doc.card === cardId);
 // The card's pull request: the one Sensors reading whose head is the card's head (a card carries no PR number; no
 // script may write one on it).
 function prOf(rec, head) {
