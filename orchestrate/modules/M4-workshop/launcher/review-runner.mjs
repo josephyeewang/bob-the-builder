@@ -55,8 +55,8 @@ import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSy
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
-import { pastTime } from '../../../shared/still-waiting.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
+import { pastTime } from '../../../shared/still-waiting.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
@@ -485,7 +485,7 @@ export async function runnerPass(ctx) {
       if (runningIds.has(sid)) continue;
       try { lstatSync(join(P.ended, `${sid}.json`)); delete seen[sid]; continue; } catch { /* not marked */ }
       // A stamp that can't be read or lies ahead says nothing about the launch's age: the 5 minutes run from the pass
-      // that first saw it, so it is neither held off for ever (L403) nor swept at once (L412 m1).
+      // that first saw it, so it is neither held off for ever (L403) nor swept at once (L412 m1). The stamp itself is read by shared pastTime (L329).
       let from = pastTime(doc.launched_at, now);
       if (from === null) {
         from = pastTime(seen[sid], now);
@@ -591,8 +591,10 @@ export async function runnerPass(ctx) {
       // minutes after its session ended is told to Joe once; the Merge Gate reads the verdict file itself either way. A
       // held head (silent, or a verdict that can't be counted) was told already, with the "review again" tap.
       const sid = a.session_id;
-      // An ended time that can't be read or lies ahead counts as long ago (L412 m2): the telling can't wait on a clock.
-      if (!a.held && typeof a.ended_at === 'string' && now - (pastTime(a.ended_at, now) ?? -Infinity) >= INTAKE_WAIT_MS) {
+      // An ended session's end time by pastTime (L329): one that can't be read or is more than 60 s ahead counts as
+      // old enough, so its untaken verdict is told now, not never. No ended_at at all is a session not yet ended.
+      const ended = a.ended_at == null ? null : (pastTime(a.ended_at, now) ?? -Infinity);
+      if (!a.held && ended !== null && now - ended >= INTAKE_WAIT_MS) {
         let t;
         try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
         if (t?.ok !== true) {
@@ -608,7 +610,9 @@ export async function runnerPass(ctx) {
       alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${a.last_reason ?? 'ended with no verdict'}).`);
       continue;
     }
-    const failedAt = pastTime(a.last_failed_at, now);   // can't be read or lies ahead: long ago, so try now (L412 m2)
+    // pastTime (L329): a failure time that can't be read or is more than 60 s ahead counts as old enough, so the
+    // retry is not held for ever.
+    const failedAt = a.last_failed_at ? pastTime(a.last_failed_at, now) : null;
     if (failedAt !== null && now - failedAt < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
 
     // Start it: the session id is the runner's own, the outbox is made fresh, the launch record is written before the start.

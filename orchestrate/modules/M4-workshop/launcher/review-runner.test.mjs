@@ -1298,3 +1298,53 @@ test('L412 m2 planted: a verdict the Record has not taken is told though its end
   editState(w, (s) => { for (const a of Object.values(s.attempts)) a.ended_at = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
   assert.equal(await told(), 1);
 });
+
+// L329: each stored time is read by shared pastTime. One that can't be read, or is more than 60 s ahead, counts as old
+// enough (act or tell now), never as "not yet": a time an hour ahead must not hold a retry, a tell or a sweep (a sweep waits 5 minutes from first sight, L412 m1).
+const BAD_TIMES = [['unreadable', () => 'not a time'], ['an hour ahead', (now) => new Date(now + 60 * MIN).toISOString()]];
+
+test('L329: a failed start whose failure time is unreadable or an hour ahead is tried again, not held', async () => {
+  for (const [what, bad] of BAD_TIMES) {
+    let tries = 0;
+    const w = await ready({ start: async () => { tries += 1; return { ok: false, reason: 'claude would not start' }; } });
+    w.ask();
+    await runnerPass(w.ctx);
+    assert.equal(tries, 1, what);
+    w.clock.t += MIN;
+    editState(w, (s) => { for (const a of Object.values(s.attempts)) a.last_failed_at = bad(w.clock.t); });
+    w.ask();
+    const r = await runnerPass(w.ctx);
+    assert.ok(!r.refused.some((x) => /failed less than 15 minutes ago/.test(x.reason)), `${what}: ${r.refused.map((x) => x.reason).join(' | ')}`);
+    assert.equal(tries, 2, what);
+  }
+});
+
+test('L329: a verdict the Record has not taken, from a session whose end time is unreadable or an hour ahead, is told now', async () => {
+  for (const [what, bad] of BAD_TIMES) {
+    const w = await ready({ handedIn: () => ({ ok: true, verdict: { sha256: 'e'.repeat(64) } }), verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict of session S-1' }) });
+    w.ask(); await runnerPass(w.ctx); w.end('S-1'); await runnerPass(w.ctx);
+    editState(w, (s) => { for (const a of Object.values(s.attempts)) a.ended_at = bad(w.clock.t); });
+    w.clock.t += MIN;
+    w.ask();
+    const r = await runnerPass(w.ctx);
+    assert.ok(r.alerts.some((a) => /handed in a verdict the Record has not taken/.test(a.text)), `${what}: ${r.alerts.map((a) => a.text).join(' | ')}`);
+  }
+});
+
+test('L329: a lost session whose launch time is unreadable or an hour ahead is swept 5 minutes after first sight, not held', async () => {
+  for (const [what, bad] of BAD_TIMES) {
+    const v = await ready({ start: async (x) => { v.starts.push(x); return { ok: true, pid: 4242, ...pkg(x) }; } });
+    v.ask();
+    await runnerPass(v.ctx);
+    assert.equal(v.ended('S-1').none, true, what);
+    const p = join(v.root, 'launches', 'S-1.json');
+    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), launched_at: bad(v.clock.t) }), { mode: 0o644 });
+    v.clock.t += MIN;
+    await runnerPass(v.ctx);
+    // L412 m1: not at once, but 5 minutes from the pass that first saw the bad stamp.
+    assert.equal(v.ended('S-1').none, true, `${what}: not on the pass that first sees it`);
+    v.clock.t += SWEEP_AFTER_MS;
+    await runnerPass(v.ctx);
+    assert.equal(v.ended('S-1').ended?.how, 'swept', what);
+  }
+});
