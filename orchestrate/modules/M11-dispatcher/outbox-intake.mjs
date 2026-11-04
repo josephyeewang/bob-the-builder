@@ -54,10 +54,13 @@ export function kindsFor(entry) {
  * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
  * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
+ * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`): { ok, ended } |
+ * { ok: false, none?, reason }. A session's `head` comes from the runner's launch record.
  * Returns what happened to each file.
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead, now = Date.now(),
-  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null }) {
+  list = (d) => readdirSync(d), look = statOf, read = readOutboxFile, vet = () => null,
+  reviewEnded = () => ({ ok: false, reason: 'nothing can read the ended records' }) }) {
   const out = [];
   const seen = [];
   // L138 m3: a refused or interrupted hand-in is told until a copy is delivered, from its recorded fact, whether or
@@ -112,6 +115,18 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       if (prev.doc.sha256 !== hash && !['refused', 'interrupted'].includes(was)) {
         r.refused = 'the same name with new content';
         alert(`${s.role} ${s.sessionId} handed in ${name} again with different content; the second copy was not used`);
+        continue;
+      }
+    }
+    // L424: a verdict is taken only once its session's ended record exists, never because the file sat still for
+    // SETTLE_MS. The runner finalizes the file (it may rewrite it) and only then writes that record. Anything short of
+    // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner.
+    if (file.kind === 'verdict-') {
+      let e;
+      try { e = reviewEnded(s); } catch (err) { e = { ok: false, reason: err.message }; }
+      if (e?.ok !== true) {
+        r.waiting = 'its session has not ended';
+        if (!e?.none) note(`verdict ${name} from ${s.role} ${s.sessionId} waits: ${e?.reason ?? 'no answer from the ended record'}`);
         continue;
       }
     }

@@ -4,7 +4,8 @@ import { writeFileSync, symlinkSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { intakePass, kindsFor } from './outbox-intake.mjs';
 import { change, recWith, withAlerts, setClock, T0 } from './fixtures.test-helper.mjs';
-import { setup as setupRecord, outboxFile } from '../M9-record/fixtures.test-helper.mjs';
+import { setup as setupRecord, outboxFile, runnerLaunch, runnerEndedRecord, seed, HEAD, CLEAN_CHECKLIST } from '../M9-record/fixtures.test-helper.mjs';
+import { runnerEnded } from '../M9-record/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -461,3 +462,64 @@ for (const [path, place] of [['a hand-in for a card the Record does not have', '
     });
   }
 }
+
+// L424/L425: the real Record, the real ended-record reader and the real outbox folders. Only the session entry is built
+// here, as the wiring builds it from the runner's launch record.
+function endedWorld(prefix) {
+  const E = setupRecord({ prefix });
+  const w = world();
+  const sid = 'R-1';
+  seed(E, 'card', 'C-1', { state: 'in_review', head: HEAD });
+  runnerLaunch(E, 'C-1', sid, 'reviewer', HEAD);
+  const name = `verdict-${sid}.md`;
+  outboxFile(E, 'reviewer', sid, name, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: true, checklist: CLEAN_CHECKLIST } })}\n`);
+  const session = { sessionId: sid, role: 'reviewer', outbox: join(E.outRoot, 'reviewer', sid), uid: UID, card: 'C-1', head: HEAD };
+  const reviewEnded = (s) => runnerEnded({ root: join(E.base, 'ended'), uid: UID, role: s.role, card: s.card, head: s.head, sessionId: s.sessionId });
+  const pass = (over = {}) => intakePass({ rec: E.review, sessions: [session], now: E.clock.t, ...w.ports, reviewEnded, ...over });
+  return { E, w, sid, name, pass, verdicts: () => E.record.list('verdict').length };
+}
+
+test('L424: a verdict sitting still before its ended record exists waits and takes nothing, then is taken once it exists', async () => {
+  const { E, w, sid, name, pass, verdicts } = endedWorld('m11-intake-ended-');
+  const [r] = await pass();
+  assert.equal(r.waiting, 'its session has not ended');
+  assert.equal(r.applied, undefined);
+  assert.equal(verdicts(), 0);
+  assert.equal(E.record.read('fact', `intake-applied-${sid}-${name}`), null, 'no claim, so nothing stops the finalized file being taken');
+  assert.deepEqual(w.calls.alerts, []);
+  assert.deepEqual(w.calls.notes, [], 'a session still running is no event');
+  // The runner finalizes (the file changes), then writes the ended record: the new file is what is taken.
+  const p = join(E.outRoot, 'reviewer', sid, name);
+  writeFileSync(p, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: HEAD, pass: true, checklist: CLEAN_CHECKLIST, notes: [] } })}\n`);
+  runnerEndedRecord(E, 'C-1', sid, 'reviewer', HEAD);
+  const [t] = await pass();
+  assert.equal(t.applied, true, JSON.stringify(t));
+  assert.equal(verdicts(), 1);
+  assert.deepEqual(w.calls.alerts, [], 'never "the same name with new content"');
+});
+
+test('L424: an ended record for another head does not let a verdict through, and the reason is noted', async () => {
+  const { E, w, sid, pass, verdicts } = endedWorld('m11-intake-ended-head-');
+  runnerEndedRecord(E, 'C-1', sid, 'reviewer', 'b'.repeat(40));
+  const [r] = await pass();
+  assert.equal(r.waiting, 'its session has not ended');
+  assert.equal(verdicts(), 0);
+  assert.match(w.calls.notes.join(' | '), /waits: .*another role, card or head/);
+});
+
+test('L424: a verdict waits when the ended check is missing, throws or answers nothing', async () => {
+  for (const reviewEnded of [undefined, () => { throw new Error('boom'); }, () => null, () => ({ ok: true }).nope]) {
+    const { pass, verdicts } = endedWorld('m11-intake-ended-port-');
+    const [r] = await pass({ reviewEnded });
+    assert.equal(r.waiting, 'its session has not ended');
+    assert.equal(verdicts(), 0);
+  }
+});
+
+test('L424: only a verdict waits for the ended record; a report from the same session goes through', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'reviewer'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'a note');
+  const [r] = await intakePass({ rec: recWith(), sessions: [{ sessionId: 'R-2', role: 'reviewer', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
+  assert.equal(r.applied, true, JSON.stringify(r));
+});

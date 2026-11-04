@@ -1232,3 +1232,17 @@ test('L329: a step error whose told_at is unreadable or an hour ahead is told ag
   await w.pass(0);
   assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
 });
+
+test('L424: the tick asks the reviewEnded port before a review session\'s verdict is taken', async () => {
+  const dir = tempDir('m11-tick-verdict-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'not read past the ended check\n');
+  const asked = [];
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+    reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  await w.pass();
+  assert.deepEqual(asked, ['R-1']);
+  assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
+});
