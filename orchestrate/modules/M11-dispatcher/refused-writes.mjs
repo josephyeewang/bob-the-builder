@@ -21,7 +21,7 @@
 // repeated each pass is one refusal, and the count falls as they move (L366 m-A). `more` is "at least": its highest
 // count, never a sum, as what it counts can't be told apart from a repeat.
 import { stillWaiting } from '../../shared/still-waiting.mjs';
-import { dropAnswer, tellThen } from './alerts.mjs';
+import { dropAnswer, tellThen, writeFrom } from './alerts.mjs';
 import { HOLD_FACT } from './pass.mjs';
 import { WAIT_TELL_FACT } from './joe-waits.mjs';
 
@@ -172,7 +172,8 @@ function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
       const c = rec.read('fact', fact);
       // Written when something shows or was queued, so a mark on its way conflicts (L449 m1, m2); this runs every pass.
       if (!d.removed && c?.doc?.told_at == null && !(c?.doc?.items ?? []).length && !(c?.doc?.over ?? []).length && !c?.doc?.more) return;
-      cleared = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...c?.doc, items: [], over: [], more: 0, unreadable: false, told_at: null, cleared_at: iso(now) }, kind: 'write_refused_cleared' });
+      // Through writeFrom (L454): a mark that lands during this write is a lost race to try again, and told_at must win.
+      cleared = writeFrom(rec, fact, c?.doc, { ...c?.doc, items: [], over: [], more: 0, unreadable: false, told_at: null, cleared_at: iso(now) }, 'write_refused_cleared', { force: ['told_at'] });
       // A refused clear keeps the cause (L332 m6): a stale told_at would keep a refusal within 24 h quiet.
       if (cleared?.ok !== true) throw new Error(`its clear was refused (${cleared?.reason ?? 'no answer'})`);
     },
@@ -180,7 +181,7 @@ function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
   const c = rec.read('fact', fact);
   const keep = { items, over, more, unreadable };
   if ((items.length || more) && Object.entries(keep).some(([k, v]) => JSON.stringify(c?.doc?.[k]) !== JSON.stringify(v))) {
-    const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...(c?.doc ?? {}), ...keep }, kind: 'write_refused_kept' });
+    const w = writeFrom(rec, fact, c?.doc, { ...(c?.doc ?? {}), ...keep }, 'write_refused_kept');
     if (w?.ok !== true) throw new Error(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused`);
   }
   return r.did;

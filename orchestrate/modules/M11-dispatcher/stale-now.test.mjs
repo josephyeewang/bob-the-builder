@@ -637,6 +637,44 @@ test('L352 m2: a kept list the Record will not write throws for its cause, so th
   assert.throws(() => tellRefused({ rec: refusing, alert: w.alert, now: T0, refused: new Map([['park', [w.item('C-1')]]]), ran: () => true }), /park: its list could not be kept \(refused for the test\)/);
 });
 
+// The other process's told mark lands just before this write of `kind`, the first time, so the write loses the race.
+const markLandsFirst = (rec, kind, fact, at) => {
+  let landed = false;
+  const racing = Object.create(rec);
+  Object.defineProperty(racing, 'write', { value: (x) => {
+    if (x.kind === kind && !landed) {
+      landed = true;
+      const c = rec.read('fact', fact);
+      rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c?.rev ?? 0, doc: { ...c?.doc, told_at: at } });
+    }
+    return rec.write(x);
+  } });
+  return racing;
+};
+
+test('L454: a clear that loses the race with a told mark tries again, and the mark does not stay', () => {
+  const w = keptWorld();
+  const fact = REFUSED_FACT('park');
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { items: [w.item('C-1', 'moved on')], over: [], more: 0, told_at: null } });
+  const rec = markLandsFirst(w.rec, 'write_refused_cleared', fact, iso(T0));
+  tellRefused({ rec, alert: w.alert, now: T0, refused: new Map(), ran: () => true });
+  const { doc } = w.rec.read('fact', fact);
+  assert.equal(doc.told_at, null);
+  assert.deepEqual(doc.items, []);
+  assert.equal(doc.cleared_at, iso(T0));
+});
+
+test('L454: a kept list that loses the race with a told mark tries again, and keeps the list and the mark', () => {
+  const w = keptWorld();
+  const fact = REFUSED_FACT('park');
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { items: [], over: [], more: 0, told_at: iso(T0) } });
+  const rec = markLandsFirst(w.rec, 'write_refused_kept', fact, iso(T0 + H));
+  tellRefused({ rec, alert: w.alert, now: T0 + 2 * H, refused: new Map([['park', [w.item('C-1')]]]), ran: () => true });
+  const { doc } = w.rec.read('fact', fact);
+  assert.deepEqual(doc.items.map((x) => x.id), ['C-1']);
+  assert.equal(doc.told_at, iso(T0 + H));
+});
+
 test('L354 item 2: a cause whose queued alert cannot be dropped stays, and the step fails saying so', () => {
   const rec = recWith();
   const fact = REFUSED_FACT('park');
