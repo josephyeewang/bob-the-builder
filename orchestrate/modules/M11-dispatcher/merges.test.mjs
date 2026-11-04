@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT } from './merges.mjs';
+import { readFileSync } from 'node:fs';
+import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
@@ -63,7 +64,7 @@ test('v3 §2.4, L74 b3: checking over 30 min is refused (timeout) by the Merge G
 });
 
 test('the same refusal reason twice goes to Joe (the gate counts it in attempts.merge_refusals)', async () => {
-  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 40)]);
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]); // M-2 is 21 min old at the first pass, 61 at the second (a time ahead counts as old: L329)
   await pass(rec, 31);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
   assert.equal(rec.read('merge', 'M-2').doc.state, 'checking');
@@ -118,7 +119,7 @@ test('R-0b-57: the Merge Gate killed mid-merge: the next pass hands the PR readi
 });
 
 test('m16, L74 b3: merged at a head the gate did not judge is refused by the gate, told, and the card put back', async () => {
-  const rec = recWith([cardMerging, merging(), ['fact', PR_FACT(7), { merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(1) }]]);
+  const rec = recWith([cardMerging, merging(), ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(1) }]]);
   const { alerts } = await pass(rec, 2, dead);
   assert.equal(rec.read('merge', 'M-1').doc.state, 'refused');
   assert.match(rec.read('merge', 'M-1').doc.reasons[0], /merged outside the gate/);
@@ -148,7 +149,7 @@ test('L85 M-1 (a): open, then merged: it waits while the PR is open, then ends m
   assert.equal(rec.read('card', 'C-1').doc.merge_commit, MC);
 });
 
-test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the merging write: refused-interrupted, Joe told', async () => {
+test('L85 M-1 (a), L357: still open past timeouts.merging_open_max_min after the merging write: refused-interrupted, with the note M6 tells', async () => {
   const { rec } = gone();
   reading(rec, 14, { state: 'open', merged: false });
   await pass(rec, 14.5, dead);
@@ -157,8 +158,9 @@ test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the mergi
   const { alerts } = await pass(rec, 15.5, dead);
   assert.deepEqual([rec.read('merge', 'M-1').doc.state, rec.read('merge', 'M-1').doc.reasons], ['refused', ['interrupted']]);
   assert.equal(rec.read('card', 'C-1').doc.state, 'verified');
-  assert.equal(alerts.length, 1);
-  assert.match(alerts[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 is still open after 15 min/);
+  assert.deepEqual(alerts, [], 'one way of telling: M6 step 3b sends it');
+  assert.match(rec.read('merge', 'M-1').doc.interrupted_note, /pull request #7 is still open after 15 min, with no merge; recorded as interrupted/);
+  assert.equal(rec.read('merge', 'M-1').doc.interrupted_told_at, null);
   // a reading with no state is no final answer either
   const u = gone();
   reading(u.rec, 1, { merged: false });
@@ -166,7 +168,7 @@ test('L85 M-1 (a): still open past timeouts.merging_open_max_min after the mergi
   assert.deepEqual(states(u.rec), ['merging', 'merging']);
 });
 
-test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging, Joe told once', async () => {
+test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging, Joe told (and not again within the day)', async () => {
   // The Merge Gate stopped mid-merge and the Sensors never read the PR again (the limit is 15 min).
   const { rec } = gone();
   const p1 = await pass(rec, 14, dead);
@@ -176,7 +178,7 @@ test('L89: no fresh PR reading past timeouts.merging_open_max_min: still merging
   assert.equal(p2.alerts.length, 1);
   assert.match(p2.alerts[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min/);
   const p3 = await pass(rec, 40, dead);
-  assert.deepEqual([states(rec), p3.alerts], [['merging', 'merging'], []], 'told once');
+  assert.deepEqual([states(rec), p3.alerts], [['merging', 'merging'], []], 'not told again within the day (L342)');
   // A reading that comes after all settles it as before.
   reading(rec, 41, { state: 'closed', merged: true, merge_commit_sha: MC });
   await pass(rec, 42, dead);
@@ -216,7 +218,7 @@ test('L85 M-1 (b): an interrupted merge GitHub shows merged at an unjudged head 
   const rec = recWith([
     ['card', 'C-1', { state: 'verified', head: HA }],
     ['merge', 'M-1', { card: 'C-1', pr: 7, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(5) }],
-    ['fact', PR_FACT(7), { merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(4) }],
+    ['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HB, observed_at: at(4) }],
   ]);
   assert.deepEqual((await pass(rec, 6)).alerts, [], 'the reading predates the refusal');
   change(rec, 'fact', PR_FACT(7), { observed_at: at(7) });
@@ -228,11 +230,11 @@ test('L85 M-1 (b): an interrupted merge GitHub shows merged at an unjudged head 
   assert.ok(rec.read('fact', RECONCILED_FACT('M-1')));
   assert.deepEqual((await pass(rec, 9)).alerts, [], 'told once');
   // no merge commit in the reading: the same
-  const r3 = recWith([['card', 'C-3', { state: 'verified', head: HA }], ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }], ['fact', PR_FACT(9), { merged: true, head_sha: HA, observed_at: at(1) }]]);
+  const r3 = recWith([['card', 'C-3', { state: 'verified', head: HA }], ['merge', 'M-3', { card: 'C-3', pr: 9, state: 'refused', reasons: ['interrupted'], judged_head: HA, changed_at: at(0) }], ['fact', PR_FACT(9), { state: 'closed', merged: true, head_sha: HA, observed_at: at(1) }]]);
   assert.equal((await pass(r3, 2)).alerts.length, 1);
   assert.equal(r3.read('merge', 'M-3').doc.state, 'refused');
   // a refused{timeout} merge is not reconciled, but no refusal wording is silent (L94 point 3): the owner is told once
-  const r2 = recWith([['merge', 'M-2', { pr: 8, state: 'refused', reasons: ['timeout'], changed_at: at(0) }], ['fact', PR_FACT(8), { merged: true, observed_at: at(1) }]]);
+  const r2 = recWith([['merge', 'M-2', { pr: 8, state: 'refused', reasons: ['timeout'], changed_at: at(0) }], ['fact', PR_FACT(8), { state: 'closed', merged: true, observed_at: at(1) }]]);
   const told = (await pass(r2, 2)).alerts;
   assert.deepEqual(told, ['merge M-2 was refused (timeout) but PR 8 shows merged; check the card and its audit']);
   assert.equal(r2.read('merge', 'M-2').doc.state, 'refused');
@@ -449,17 +451,18 @@ test('L72: the session is the newest worker launch for the card, and the pull re
 
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
-  for (const merged of [undefined, 'true', 1]) {
+  // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and
+  // never refused on it. (Before L246 a closed reading with such a merged was refused as interrupted.)
+  for (const merged of [undefined, 'true', 1, null]) {
     const rec = mk({ state: 'closed', ...(merged === undefined ? {} : { merged }), merge_commit_sha: MC, head_sha: HA, observed_at: at(1) });
-    await pass(rec, 2, dead);
-    assert.deepEqual([rec.read('merge', 'M-1').doc.state, rec.read('merge', 'M-1').doc.reasons], ['refused', ['interrupted']], String(merged));
-    assert.notEqual(rec.read('card', 'C-1').doc.state, 'merged');
+    assert.deepEqual((await pass(rec, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']], String(merged));
+    assert.deepEqual(states(rec), ['merging', 'merging'], String(merged));
   }
   // a reading at the same moment as the last write is not fresh
-  const same = mk({ merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(0) });
+  const same = mk({ state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA, observed_at: at(0) });
   assert.deepEqual((await pass(same, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']]);
   // a reading with no time is never fresh
-  const none = mk({ merged: true, merge_commit_sha: MC, head_sha: HA });
+  const none = mk({ state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA });
   assert.deepEqual((await pass(none, 2, dead)).moves, [['M-1', 'waiting for a fresh PR reading']]);
 });
 
@@ -553,6 +556,29 @@ test('L110 m-6 (G13): a pull request reading counts only when Sensors made it, a
   assert.equal(prReadingAfter(recBy(null), 7, 'M-1'), null, 'a maker the Record can\'t name is not Sensors');
   assert.equal(prReadingAfter(recBy('sensors', at(6)), 7, 'M-1'), null, 'a reading from before the merge\'s last write');
   assert.equal(prReadingAfter(recBy('sensors'), null, 'M-1'), null, 'no pull request number');
+});
+
+test('L246: a reading whose state is not open or closed, or whose merged is not true or false, is no reading', () => {
+  const recOf = (doc) => ({
+    read: (e, id) => (e === 'fact' && id === PR_FACT(7) ? { id, rev: 1, doc: { observed_at: at(5), ...doc } } : null),
+    meta: (e) => (e === 'fact' ? { createdBy: 'sensors' } : { ts: at(0) }),
+  });
+  for (const [doc, ok] of [[{ state: 'open', merged: false }, true], [{ state: 'closed', merged: true }, true], [{ state: 'closed', merged: false }, true],
+    [{ state: null, merged: null }, false], [{ state: 'open', merged: null }, false], [{ state: 'merged', merged: true }, false],
+    [{ state: 'closed', merged: 'true' }, false], [{ merged: false }, false], [{ state: 'open' }, false],
+    [{ state: 'open', merged: true }, false]]) {   // L347 m3: a contradiction GitHub never gives
+    assert.equal(prReadingAfter(recOf(doc), 7, 'M-1') !== null, ok, JSON.stringify(doc));
+  }
+});
+
+test('L246: an all-null reading past the merging limit leaves the merge merging; a later real merged reading settles it', async () => {
+  const { rec } = gone();
+  reading(rec, 1, { state: null, merged: null, merge_commit_sha: null, head_sha: null });
+  await pass(rec, 20, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'no reading is never refused as open too long');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  await pass(rec, 22, dead);
+  assert.deepEqual(states(rec), ['merged', 'merged']);
 });
 
 test('audit 0b-6 r3 MAT-3: a rules value the gate lacks is handed back to the tick, by the time limits and by the merge requests', async () => {
@@ -700,3 +726,215 @@ for (const lost of ['send refused', 'queue refused']) {
     assert.equal(got.length, n, 'told exactly once once delivered (P20)');
   });
 }
+
+// L246 MIN-18: a closed reading whose merged is not true or false now waits instead of being refused. The wait is
+// bounded by the same merging limit as no reading at all: past it, Joe is told once (the L89 alert, whose mark is the
+// UNREAD note), even while the Sensors keep bringing the same half answer every pass; the card never sits there untold.
+test('L246 MIN-18: GitHub answering closed with a non-boolean merged, pass after pass, is told once a day past the merging limit', async () => {
+  const { rec } = gone();
+  const half = (m) => reading(rec, m - 0.5, { state: 'closed', merged: 'true', merge_commit_sha: MC, head_sha: HA });
+  half(14);
+  const p1 = await pass(rec, 14, dead);
+  assert.deepEqual([p1.moves, p1.alerts], [[['M-1', 'waiting for a fresh PR reading']], []], 'under the limit: wait, no alert');
+  const told = [];
+  for (const m of [20, 21, 40, 120]) { half(m); told.push(...(await pass(rec, m, dead)).alerts); }
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never merged and never refused on a half answer');
+  assert.equal(told.length, 1, 'told once within the day (L342: again each day while it stays so)');
+  assert.match(told[0], /merge M-1: the Merge Gate stopped mid-merge and PR 7 has had no fresh reading for 20 min; .*merged true or false/);
+  // GitHub answers in full: settled as before.
+  reading(rec, 121, { state: 'closed', merged: true, merge_commit_sha: MC, head_sha: HA });
+  await pass(rec, 122, dead);
+  assert.deepEqual(states(rec), ['merged', 'merged']);
+});
+
+// L342 (the L315 class): a merge stuck in merging with no fresh reading is told at once past the limit, then again each
+// day while it stays so, never told once and then left (shared stillWaiting). A fresh reading, or the merge leaving
+// merging, clears the mark, so a new stretch is told afresh.
+test('L342: still merging with no reading at +25 h is told a second time; a fresh reading clears the mark', async () => {
+  const { rec } = gone();
+  const told = [];
+  for (const m of [20, 40, 24 * 60 + 15]) told.push(...(await pass(rec, m, dead)).alerts);
+  assert.equal(told.length, 1, 'told at 20 min, quiet for the rest of the day');
+  const p = await pass(rec, 25 * 60, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging']);
+  assert.equal(p.alerts.length, 1, 'still merging a day later: told a second time');
+  assert.match(p.alerts[0], /no fresh reading for 1500 min; .*Told again each day while it stays so/);
+  assert.equal((await pass(rec, 25 * 60 + 30, dead)).alerts.length, 0, 'and not every pass');
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, 'the mark is set');
+  // A fresh reading arrives: the merge settles, and the mark is cleared.
+  reading(rec, 25 * 60 + 31, { state: 'closed', merged: true, merge_commit_sha: MC });
+  await pass(rec, 25 * 60 + 32, dead);
+  await pass(rec, 25 * 60 + 33, dead);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null, 'cleared once the wait ended');
+});
+
+// L329/L321: the merge's last write is read through pastTime. One that can't be read, or lies an hour ahead (a clock
+// that went back), counts as past the limit: told at once and then daily, never waited out.
+for (const [name, ts] of [['unreadable', 'not a time'], ['1 h ahead', iso(T0 + 61 * MIN)]]) {
+  test(`L342 + L329: a merge whose last write time is ${name} is told at once, then daily, never waited out`, async () => {
+    const { rec: r0 } = gone();
+    const rec = { ...r0, meta: (e, id) => (e === 'merge' ? { ...r0.meta(e, id), ts } : r0.meta(e, id)) };
+    const p1 = await pass(rec, 1, dead);
+    assert.equal(p1.alerts.length, 1, 'told at once');
+    assert.match(p1.alerts[0], /no fresh reading for longer than the merging limit/);
+    assert.equal((await pass(rec, 30, dead)).alerts.length, 0, 'not every pass');
+    assert.equal((await pass(rec, 24 * 60 + 2, dead)).alerts.length, 1, 'told again a day later');
+    assert.deepEqual(states(rec), ['merging', 'merging']);
+  });
+}
+
+// ---- L347 (the #171 audit): the clear of the "no fresh reading" mark ----
+
+// A pass whose outbox delivers through `port` (answering true or false), as the tick does.
+const passVia = async (rec, minutesLater, port, over = dead) => {
+  const now = T0 + minutesLater * MIN;
+  setClock(rec.base ?? rec, now);
+  const { p } = ports(over);
+  return withAlerts(rec.base ?? rec, now, port, (alert) => timeLimits({ rec, rules: R, now, b: GREEN, ...p, alert }));
+};
+// The Record with the clear write (told_at back to null on a merge-unread- fact) refused.
+const refuseClear = (rec) => ({ ...rec, base: rec.base ?? rec, write: (w) => (w.entity === 'fact' && w.id.startsWith(UNREAD_FACT('')) && w.doc?.told_at === null
+  ? { ok: false, reason: 'refused for the test' } : rec.write(w)) });
+
+test('L347 m1: a first tell still queued when the merge settles is dropped, never delivered about a merged PR', async () => {
+  const { rec } = gone();
+  const refused = [];
+  await passVia(rec, 20, (x) => { refused.push(x); return false; });
+  assert.equal(refused.length, 1, 'the first tell was tried and not delivered');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1'))?.doc?.told_at ?? null, null, 'not marked told: it is only in the queue');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const sent = [];
+  await passVia(rec, 22, (x) => { sent.push(x); return true; });
+  await passVia(rec, 23, (x) => { sent.push(x); return true; });
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merged');
+  assert.deepEqual(sent.filter((x) => /no fresh reading/.test(x)), [], 'the queued copy was dropped when the wait ended');
+});
+
+test('L347 m2/m5: a refused clear write is listed in the moves, from the start-of-pass sweep and from the in-loop clear', async () => {
+  // The sweep: the merge settles on a fresh reading, and the mark's reset is refused.
+  const { rec } = gone();
+  await pass(rec, 20, dead);
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, 'told');
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const r = await pass(refuseClear(rec), 22, dead);
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /"no fresh reading" mark could not be cleared/.test(why)), JSON.stringify(r.moves));
+  // The in-loop port: still merging with no reading, but the merge was written again, so it is back under the limit.
+  const { rec: r2 } = gone();
+  await pass(r2, 20, dead);
+  setClock(r2.base, T0 + 30 * MIN);
+  change(r2.base, 'merge', 'M-1', { changed_at: at(30) });
+  const q = await pass(refuseClear(r2), 31, dead);
+  assert.ok(q.moves.some(([id, why]) => id === 'M-1' && /could not be cleared/.test(why)), JSON.stringify(q.moves));
+});
+
+test('L347 m5: back under the limit while still merging, the in-loop clear resets the mark, so the next stretch is told at once', async () => {
+  const { rec } = gone();
+  assert.equal((await pass(rec, 20, dead)).alerts.length, 1);
+  setClock(rec.base, T0 + 30 * MIN);
+  change(rec.base, 'merge', 'M-1', { changed_at: at(30) });
+  await pass(rec, 31, dead);
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merging');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null, 'cleared by the in-loop port');
+  assert.equal((await pass(rec, 60, dead)).alerts.length, 1, 'past the limit again: told at once, not a day later');
+});
+
+test('L347 m5: a fresh reading while the merge stays merging clears the mark', async () => {
+  const { rec } = gone();
+  await pass(rec, 20, dead);
+  assert.ok(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at);
+  reading(rec, 21, { state: 'open', merged: false });
+  await pass(rec, 22, { gateAlive: () => true });   // the gate is back: the merge is its own, and stays merging
+  assert.equal(rec.read('merge', 'M-1').doc.state, 'merging');
+  assert.equal(rec.read('fact', UNREAD_FACT('M-1')).doc.told_at, null);
+});
+
+test('L347 m5 (L341): clearUnread drops the queued copy before it resets the mark', () => {
+  const src = readFileSync(new URL('./merges.mjs', import.meta.url), 'utf8');
+  const body = src.slice(src.indexOf('function clearUnread('), src.indexOf('function clearUnreads('));
+  assert.ok(body.includes('dropCause(') && body.includes('rec.write('), 'both steps are in clearUnread');
+  assert.ok(body.indexOf('dropCause(') < body.indexOf('rec.write('), 'the drop comes first');
+});
+
+// L353: M11 reads with the clock, so a reading stamped in the future is no reading: the merge is not settled on it,
+// and the wait on a real one is told past the limit.
+test('L353: a reading stamped far ahead counts as no reading: still merging, told past the limit', async () => {
+  const { rec } = gone();
+  reading(rec, 5, { state: 'closed', merged: true, merge_commit_sha: MC, observed_at: at(365 * 24 * 60) });
+  const p = await pass(rec, 20, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never settled on it');
+  assert.equal(p.alerts.length, 1);
+  assert.match(p.alerts[0], /no fresh reading for 20 min/);
+});
+
+test('L347 m3: a reading that says open and merged at once is no reading: the merge stays merging', async () => {
+  const { rec } = gone();
+  reading(rec, 1, { state: 'open', merged: true, merge_commit_sha: MC });
+  assert.equal(prReadingAfter(rec, 7, 'M-1'), null);
+  await pass(rec, 5, dead);
+  assert.deepEqual(states(rec), ['merging', 'merging'], 'never recorded merged on a contradiction');
+});
+
+test('L347 cosmetic: a tell the queue refused is listed as unsent in the moves', async () => {
+  const { rec } = gone();
+  const r = await pass(rec, 20, { ...dead, alert: () => false });
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /the alert could not be queued/.test(why)), JSON.stringify(r.moves));
+});
+
+test('L347 m2: a refused drop of the queued copy is listed in the moves, and the mark is not reset past it', async () => {
+  const { rec } = gone();
+  await passVia(rec, 20, () => false);
+  reading(rec, 21, { state: 'closed', merged: true, merge_commit_sha: MC });
+  const noDrop = { ...rec, base: rec.base, write: (w) => (w.kind === 'alert_cause_cleared' ? { ok: false, reason: 'refused for the test' } : rec.write(w)) };
+  const r = await pass(noDrop, 22, dead);
+  assert.ok(r.moves.some(([id, why]) => id === 'M-1' && /its queued alert could not be dropped/.test(why)), JSON.stringify(r.moves));
+});
+
+test('L332 m5: a merge refused twice is put on the owner at the time after the reviewer checks, not the step\'s start', async () => {
+  const rec = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10), ['card', 'C-5', { state: 'in_review', head: HB, changed_at: at(0) }]]);
+  await pass(rec, 31, { hasReviewer: () => true });
+  change(rec, 'card', 'C-1', { state: 'merging' }); // the gate takes it again
+  // Each reviewer check takes 80 s on the Record's clock, before the merges are settled.
+  let t = T0 + 71 * MIN;
+  setClock(rec, t);
+  const alerts = [];
+  await withAlerts(rec, t, (x) => { alerts.push(x); return true; }, (alert) => timeLimits({ rec, rules: R, now: T0 + 71 * MIN, clock: () => t, b: GREEN, alert,
+    gateAlive: () => true, requestReview: () => ({ ok: true }), hasReviewer: async () => { t += 80_000; setClock(rec, t); return true; } }));
+  const c = rec.read('card', 'C-1').doc;
+  assert.deepEqual([c.state, c.wait?.who, c.wait?.since], ['waiting', 'joe', iso(t)], alerts.join(' | '));
+});
+
+// L329: ageMs reads the Record's times by shared pastTime. One that can't be read, or is more than 60 s ahead, is an
+// unknown age (Infinity), so each limit that uses it fires rather than waiting for a time that has not come.
+test('L329: a limit whose entry\'s time is unreadable or an hour ahead still times it out (checking, reporting, no reviewer)', async () => {
+  const NOW = T0 + 60 * MIN;
+  for (const [what, bad] of [['unreadable', 'not a time'], ['an hour ahead', iso(NOW + 60 * MIN)]]) {
+    for (const key of [K.checkingMaxMin, K.reportingMaxMin, K.inReviewNoReviewerMin]) {
+      const w = LIMIT_WORLDS[key];
+      const base = recWith(w.rows({}));
+      setClock(base, NOW);
+      const rec = Object.create(base);
+      Object.defineProperty(rec, 'meta', { value: (entity, id) => ({ ...base.meta(entity, id), ts: bad, stateSince: bad }) });
+      await timeLimits({ rec, rules: R, now: NOW, b: GREEN, ...ports({ hasReviewer: () => false, ...dead }).p, missing: [] });
+      assert.equal(w.timed(base), true, `${key}, ${what}`);
+    }
+  }
+});
+
+// L343: a refused copy of a wait's since (joe-waits.mjs tell_refused) is in the step's moves as well as in the owner's text.
+const noCopy = (rec) => ({ ...rec, base: rec, write: (w) => (w.doc?.wait_since ? { ok: false, reason: 'busy' } : rec.write(w)) });
+
+test('L343: a merge put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const base = recWith([cardMerging, checking('M-1', 0), checking('M-2', 10)]);
+  const rec = noCopy(base);
+  await pass(rec, 31);
+  change(base, 'card', 'C-1', { state: 'merging' });
+  const { moves } = await pass(rec, 71);
+  assert.match(moves.at(-1)[1], /^waiting on joe; this card's tell could not be kept with its wait \(busy\)/);
+});
+
+test('L343: a card with no reviewer put on the owner whose tell could not keep its since says so in the moves', async () => {
+  const rec = noCopy(recWith([['card', 'C-1', { state: 'in_review', head: HA, product: 'p1', attempts: { reviewer_starts: 2 } }]]));
+  const { moves } = await pass(rec, 300, { hasReviewer: () => false });
+  assert.match(moves.find(([id]) => id === 'C-1')?.[1] ?? '', /^in_review->waiting; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(moves));
+});

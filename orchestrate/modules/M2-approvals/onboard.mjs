@@ -8,7 +8,7 @@
 //
 //   onboard(ctx) → null | { type: 'onboarded', product } | { type: 'onboard_refused', product, reason }
 //                       | { type: 'onboard_near_miss', product, value }
-//   onboardNotices(ctx, made)   what Joe is told about it, each once (below)
+//   onboardNotices(ctx, made)   what Joe is told about it (below)
 //   ctx = { record, rules, product, alert, stateDir }
 //
 // Create-if-missing only (L209 1): a record in any state, a corrupt one included, is never touched, so a product the
@@ -26,17 +26,18 @@
 //   - the key is there but is not exactly `active` (`Active`, `[active]`, `active `) and there is no record: told at
 //     once for each new value, then again each day while it stands (L315). A missing key stays silent: a product not
 //     yet onboarded is normal (L129);
-//   - the create was refused: one alert per distinct reason (its numbers out, so a moving rev is one reason). M9's own
-//     `refused` alert still goes out from the store each time; this one says which product was not turned on.
+//   - the create was refused: told at once for each new reason (its numbers out, so a moving rev is one reason), then
+//     again each day while it stands (L326): the product never turns on, so a once-ever message is a silent hold. M9's
+//     own `refused` alert still goes out from the store each time; this one says which product was not turned on.
+//   Both are one wait on shared stillWaiting, with one mark. It goes once the product is on or the cause goes.
 // Kept in ctx.stateDir (onboard-notices.json). With no stateDir nothing is kept, so each is told every pass.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { toldRecently } from './told.mjs';
+import { stillWaiting } from '../../shared/still-waiting.mjs';
 
 export const ONBOARD_KEY = 'onboarding.state';
 const NOTICES = 'onboard-notices.json';
-const MAX_SEEN = 200;
 
 const shownValue = (v) => {
   let s;
@@ -90,18 +91,18 @@ const DUE = (v) => (v && typeof v === 'object' && Number.isSafeInteger(v.after) 
 // may have been made on a pass whose mark is now unreadable, so a product made by approvals is told once more rather
 // than never; the file is then rewritten whole.
 const UNSURE = Object.freeze({ after: 0, ts: null, unsure: true });
-// The near-miss mark (L315): the value shown and when it was told (told.mjs says how long that counts).
-const NEAR = (v) => (v && typeof v === 'object' && typeof v.value === 'string' && Number.isFinite(v.at) ? { value: v.value, at: v.at } : null);
+// The mark of the wait (L315, L326): stillWaiting's own, its `since` naming the cause. Any other shape counts as not told.
+const HELD = (v) => (v && typeof v === 'object' && typeof v.since === 'string' && typeof v.told_at === 'string' ? { since: v.since, told_at: v.told_at } : null);
 
 function readNotices(ctx) {
-  if (!ctx.stateDir) return { seen: [], due: false, near: null };
+  if (!ctx.stateDir) return { due: false, held: null };
   try {
     const f = join(ctx.stateDir, NOTICES);
     const v = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : null;
     // Nothing due is written as false. No file, or a mark of any other shape ({after:"3"}, null, []), is UNSURE (L331 Minor 1).
     const due = v?.due === false ? false : DUE(v?.due) || UNSURE;
-    return { seen: Array.isArray(v?.seen) ? v.seen.filter((x) => typeof x === 'string') : [], due, near: NEAR(v?.near) };
-  } catch { return { seen: [], due: UNSURE, near: null }; }
+    return { due, held: HELD(v?.held) };
+  } catch { return { due: UNSURE, held: null }; }
 }
 
 function saveNotices(ctx, n) {
@@ -110,7 +111,7 @@ function saveNotices(ctx, n) {
   // Replaced whole (written beside, then renamed over), so a file that could not be read is replaced by one that can.
   const f = join(ctx.stateDir, NOTICES);
   const due = n.due && { after: n.due.after, ts: n.due.ts };
-  writeFileSync(`${f}.new`, `${JSON.stringify({ seen: n.seen.slice(-MAX_SEEN), due, near: n.near ?? null })}\n`, { mode: 0o600 });
+  writeFileSync(`${f}.new`, `${JSON.stringify({ due, held: n.held ?? null })}\n`, { mode: 0o600 });
   renameSync(`${f}.new`, f);
 }
 
@@ -130,25 +131,29 @@ export function onboardNotices(ctx, made) {
       else if (sent(ctx, { type: 'product_on', product: p, text: ONBOARD_SHOWN.on(p) })) { n.due = false; saveNotices(ctx, n); }
     }
   }
-  // A near miss (a value like Active) is told, then again each day while that value stands (L315: the product never
-  // turns on, so a once-ever message is a silent hold). The mark is the value and when it was told; it goes once the
-  // product is on or the value changes, so a new value is told at once.
+  // A near miss or a refused create: the product never turns on, so it is told again each day while the cause stands
+  // (L315, L326). A new cause is told at once; with no stateDir nothing is kept, so it is told every pass.
+  let cause;
+  let notice;
   if (made?.type === 'onboard_near_miss') {
-    const value = shownValue(made.value);
-    const now = ctx.now?.() ?? Date.now();
-    const at = n.near?.value === value ? n.near.at : null;
-    if (ctx.stateDir && toldRecently(at, now)) return;
-    if (sent(ctx, { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) })) { n.near = { value, at: now }; saveNotices(ctx, n); }
-    return;
-  }
-  if (n.near) { n.near = null; saveNotices(ctx, n); }
-  let key = null;
-  let notice = null;
-  if (made?.type === 'onboard_refused') {
+    cause = `near:${shownValue(made.value)}`;
+    notice = { type: 'onboard_near_miss', product: p, text: ONBOARD_SHOWN.nearMiss(p, made.value) };
+  } else if (made?.type === 'onboard_refused') {
     const reason = String(made.reason ?? 'no reason given');
-    key = `refused:${reason.replace(/\d+/g, 'N')}`;
+    cause = `refused:${reason.replace(/\d+/g, 'N')}`;
     notice = { type: 'onboard_refused', product: p, text: ONBOARD_SHOWN.refused(p, reason) };
   }
-  if (!key || n.seen.includes(key)) return;
-  if (sent(ctx, notice)) { n.seen.push(key); saveNotices(ctx, n); }
+  stillWaiting({
+    waiting: cause !== undefined,
+    since: cause,
+    now: ctx.now?.() ?? Date.now(),
+    read: () => n.held,
+    tell: (mark) => {
+      if (!sent(ctx, notice)) return false;
+      n.held = mark;
+      saveNotices(ctx, n);
+      return true;
+    },
+    clear: () => { if (n.held) { n.held = null; saveNotices(ctx, n); } },
+  });
 }

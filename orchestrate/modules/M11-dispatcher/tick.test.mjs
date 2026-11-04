@@ -1217,3 +1217,18 @@ test('audit #144 r2 n1: a config that names no installRoot is refused by main, w
   assert.equal(await main([config], { self, log: (s) => lines.push(s) }), 1);
   assert.match(lines.join('\n'), /installRoot must be a full path/);
 });
+
+// L329: a step error's told time that can't be read, or lies more than a minute ahead, does not keep it quiet.
+test('L329: a step error whose told_at is unreadable or an hour ahead is told again, not held until that time', async () => {
+  for (const told_at of [new Date(T0 + 60 * MIN).toISOString(), 'not a time']) {
+    const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at }]], { over: {
+      sessions: () => { throw new Error('no session list'); } } });
+    await w.pass(0);
+    assert.equal(w.calls.alerts.filter((t) => /stops step failed: no session list/.test(t)).length, 1, told_at);
+  }
+  // A told_at within the day is still quiet.
+  const w = world([account(), usage(), ['fact', STEP_ERROR_FACT('stops'), { error: 'no session list', told_cause: 'no session list', told_at: new Date(T0 - 60 * MIN).toISOString() }]], { over: {
+    sessions: () => { throw new Error('no session list'); } } });
+  await w.pass(0);
+  assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
+});

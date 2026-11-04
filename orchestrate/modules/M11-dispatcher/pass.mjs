@@ -172,7 +172,10 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
  * this as its own first step (LEAD-CALLS L38), so no other step's failure, an unreadable file or a bad
  * rule, can skip a cancel. Returns { stopping, stopped, running, bands, unknownSince, missing }.
  */
-export async function stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
+// `clock` (ms) is read again once the stops and saves are back (up to PORT_DEADLINE_MS + SAVE_DEADLINE_MS later): the
+// park is written at that time, since the Store Writer refuses a wait whose since is more than 60 s off its clock (L321).
+// Left out, it is `now`.
+export async function stopPass({ rec, rules, now, clock = () => now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
   const out = { stopping: [], stopped: [] };
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
   // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
@@ -260,11 +263,14 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
     if (dueToTell(pending, now, HOLD_REPEAT_MS)) tellThen(alert, `session ${s.id} (card ${s.card}) could not be stopped: ${stopped?.reason ?? 'no answer'}`, { fact: STOP_FACT(s.id), fields: { told_at: iso(now) }, kind: 'stop_failed' });
   }
   const saves = await Promise.all(done.map(({ s }) => guarded(() => saveWork(s), saveDeadlineMs)));
+  const after = Math.max(now, clock());
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
-    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((now - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now });
-    moveAfterStop(rec, s.card, pending.reason, now);
-    putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(now), how: stopped.how, hard: late, saved: !!saved?.ok, ...(saved?.ok ? {} : { save_reason: saved?.reason ?? 'no answer' }) }, 'stop_done');
+    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((after - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now: after });
+    // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
+    // and told to the owner while it lasts (refused-writes.mjs), never dropped.
+    const moved = moveAfterStop(rec, s.card, pending.reason, after);
+    putFact(rec, STOP_FACT(s.id), { ...pending, state: 'done', stopped_at: iso(after), how: stopped.how, hard: late, saved: !!saved?.ok, ...(saved?.ok ? {} : { save_reason: saved?.reason ?? 'no answer' }), ...movedFields(moved) }, 'stop_done');
     dropCause(rec, STOP_FACT(s.id));
     // Work not saved is told until delivered (L130 M9): the stop is done either way, and tellUnsaved asks again each pass.
     if (!saved?.ok) tellThen(alert, unsavedText(s.id, saved?.reason), { fact: UNSAVED_FACT(s.id), fields: { told_at: iso(now) }, kind: 'unsaved_told' });
@@ -273,7 +279,31 @@ export async function stopPass({ rec, rules, now, account, sessions, probe, stop
   }
 
   tellUnsaved({ rec, alert, now });
+  reparkStopped({ rec, now: Math.max(after, clock()) });
   return { ...out, running, bands: b, unknownSince, missing };
+}
+
+// A stop's record of its card's move: moved true, or false with the Record's reason; nothing when no move was due.
+const movedFields = (m) => (m == null ? {} : m.ok ? { moved: true } : { moved: false, move_reason: m.reason ?? 'refused' });
+
+// A done stop whose card's park the Record refused (L323) is parked again each pass while its card still runs under
+// the stopped session. Each refusal is told through refused-writes.mjs; once the card moves on, by this or anything
+// else, the stop says so. A card that runs under another session now was started again: the stop no longer speaks for
+// it, and is marked superseded, never parked over the new run (L332 m3).
+function reparkStopped({ rec, now }) {
+  for (const f of rec.list('fact')) {
+    if (!f.id.startsWith(STOP_FACT('')) || f.doc?.state !== 'done' || f.doc.moved !== false) continue;
+    const card = rec.read('card', f.doc.card)?.doc;
+    const sid = f.id.slice(STOP_FACT('').length);
+    const runSid = card?.claim?.session_id;
+    if (card?.state === 'running' && typeof runSid === 'string' && runSid !== sid) {
+      putFact(rec, f.id, { ...f.doc, moved: 'superseded', move_reason: `the card runs under session ${runSid} now` }, 'stop_moved');
+      continue;
+    }
+    const m = card?.state === 'running' ? moveAfterStop(rec, f.doc.card, f.doc.reason, now) : { ok: true };
+    if (m?.ok) putFact(rec, f.id, { ...f.doc, moved: true, move_reason: null }, 'stop_moved');
+    else if (m && m.reason !== f.doc.move_reason) putFact(rec, f.id, { ...f.doc, move_reason: m.reason ?? 'refused' }, 'stop_moved');
+  }
 }
 
 // A done stop whose work was not saved, with no delivered alert for it, is told again (L130 M9).
@@ -305,9 +335,11 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
-  const st = stops === undefined ? await stopPass({ rec, rules, now, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [] };
+  // A tell whose since could not be kept goes in the pass's notes as well as in the owner's text (L343).
+  const askJoe = (id, ask) => { const w = waitOnJoe(rec, id, ask); if (w.tell_refused) out.notes.push(`card ${id}: ${w.tell_refused}`); return w; };
   const missing = [...(st?.missing ?? [])];
   const read = readOr(missing);
   const unknownMaxMs = read(() => minutes(rules, KEYS.usageUnknownMaxMin), Infinity);
@@ -342,7 +374,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
     if (what === 'usage_band') {
       // No card waits on Joe silently (L138 m4): this one is told, until delivered, besides the stretch's own alert below.
       if (unknownLong) {
-        waitOnJoe(rec, id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
+        askJoe(id, { what: 'usage_unknown: usage has been unreadable for over a day', now, kind: 'usage_unknown', alert,
           text: `card ${id}: usage has been unreadable for over a day, so it can't resume by itself; it waits on you` });
         continue;
       }
@@ -367,14 +399,14 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       const acct = doc.wait?.account;
       if (typeof acct !== 'string' || !acct) {
         // Told until delivered (L130 M12): the card is waiting on Joe from here on, so this branch never sees it again.
-        waitOnJoe(rec, id, { what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account', alert,
+        askJoe(id, { what: LIMIT_NO_ACCOUNT, now, kind: 'limit_no_account', alert,
           text: `card ${id}: it waits on a usage limit but the wait does not say which account's, so it can't resume by itself; it waits on you` });
         continue;
       }
       // The same rule on run_started (#153 audit MAT-1): one in the future is as good as none.
       const runStarted = pastTime(doc.wait?.run_started, now);
       if (runStarted === null) {
-        waitOnJoe(rec, id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
+        askJoe(id, { what: LIMIT_NO_RUN, now, kind: 'limit_no_run', alert,
           text: `card ${id}: it waits on account ${acct}'s usage limit but the record has no time its run began, so no limit hit can be matched to it; it waits on you` });
         continue;
       }
@@ -382,7 +414,7 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       const seen = Date.parse(lf?.observed_at ?? '');
       if (!(seen > runStarted)) {
         if (now - waitedFrom(doc, runStarted, now) > unknownMaxMs) {
-          waitOnJoe(rec, id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
+          askJoe(id, { what: LIMIT_NO_HIT, now, kind: 'limit_no_hit', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit with no limit hit recorded for its run, so it can't resume by itself; it waits on you` });
         }
         continue;
@@ -392,20 +424,20 @@ export async function dispatcherPass({ rec, rules, now, account, sessions, probe
       // first pass after still judges the reset against the hit's own time.
       if (!Number.isFinite(resets) || resets > seen + LIMIT_RESET_MAX_MS) {
         const why = Number.isFinite(resets) ? `the reset time it gave (${lf.resets_at}) is more than a week after the hit` : 'the reset time could not be read';
-        waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+        askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
           text: `card ${id}: account ${acct} hit its usage limit but ${why}, so it can't resume by itself; it waits on you` });
         continue;
       }
       if (now < resets) {
         if (now - waitedFrom(doc, runStarted, now) > LIMIT_RESET_MAX_MS) {
-          waitOnJoe(rec, id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
+          askJoe(id, { what: LIMIT_NO_RESET, now, kind: 'limit_no_reset', alert,
             text: `card ${id}: it has waited on account ${acct}'s usage limit since ${iso(waitedFrom(doc, runStarted, now))}, longer than any real limit window, and the reset it gives (${lf.resets_at}) is still ahead, so it can't resume by itself; it waits on you` });
         }
         continue;
       }
       if (doc.tier === 2) { if (move(rec, 'card', id, { state: 'ready' }, { kind: 'resume_limit_hit' }).ok) out.resumed.push(id); }
       // No card waits on Joe silently (L130): this one is told, until delivered.
-      else waitOnJoe(rec, id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
+      else askJoe(id, { what: 'limit_hit: the limit reset; Tier-1 work does not resume by itself', now, kind: 'limit_reset', alert,
         text: `card ${id}: the usage limit it waited on reset, but Tier-1 work does not resume by itself; it waits on you` });
     } else if (what === PAUSED_WAIT_WHAT) {
       // A card parked for a paused product goes back to ready once the product is no longer paused.
