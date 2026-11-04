@@ -61,7 +61,7 @@ const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tok
 export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
   'sessions', 'probe', 'launch', 'stopGroup', 'saveWork', 'hostLock', 'pauseLead', 'gateAlive', 'stopSession', 'hasReviewer',
   'requestReview', 'reviewAlerts', 'filesOf', 'sendFrontDoor', 'restartFrontDoor', 'startMinibase', 'frontDoorAlive',
-  'strayFrontDoor', 'frontDoorHandoff',
+  'strayFrontDoor', 'frontDoorHandoff', 'reviewEnded',
   'startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['mirrorFor', 'git', 'saveWork']);
 export const notWiredText = (port) => `not wired yet: ${port} (R-0b-162)`;

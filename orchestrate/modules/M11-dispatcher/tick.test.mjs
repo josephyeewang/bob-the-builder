@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
-import { RULES_MISSING_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
@@ -18,6 +19,8 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
 const ACCT = 'acct-a';
@@ -1283,4 +1286,125 @@ test('L329: a step error whose told_at is unreadable or an hour ahead is told ag
     sessions: () => { throw new Error('no session list'); } } });
   await w.pass(0);
   assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
+});
+
+test('L354 step ok: the queued copy leaves first and the told fields go; a refused drop keeps the error for the next tick, and says so', async () => {
+  const failed = async () => {
+    let boom = true;
+    const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+    await w.pass();
+    boom = false;
+    queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  // The channel is down, so the copy is still queued when the step comes back.
+  const at = (w, rec, min) => tick({ rec, rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, alert: () => false } });
+  const a = await failed();
+  const log = [];
+  await at(a, writeLog(a.rec, log), 1);
+  assertDropFirst(log, `step_ok:${STEP_ERROR_FACT('outage')}`);
+  const cleared = a.rec.read('fact', STEP_ERROR_FACT('outage')).doc;
+  assert.deepEqual([cleared.error, cleared.told_cause, cleared.told_at], [null, undefined, undefined]);
+  const b = await failed();
+  const r = await at(b, writeLog(b.rec, [], { refuseDrop: true }), 1);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, 'board unreadable', 'held');
+  assert.match(r.steps.outage.note, /could not be dropped.*next pass/);
+  await at(b, b.rec, 2);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, null, 'the next tick clears it');
+});
+
+test('L449: a step\'s refused drop reaches the tick\'s reports, named by its step, so main can log it', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+  await w.pass();
+  boom = false;
+  queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + MIN, ports: { ...w.ports, alert: fakeAlert({ answer: false }) } });
+  assert.ok(r.reports.some((l) => /^outage: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a refused drop in each step that clears reaches the tick\'s reports, named by its step', async () => {
+  const dropped = /the queued alert for .* could not be dropped/;
+  const refusedTick = (w, min, ports = {}) => tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, ...ports } });
+  // The channel is down where a step runs after the tick's first send, so the copy is still queued when it clears.
+  const said = (r, step) => r.reports.some((l) => l.startsWith(`${step}: `) && dropped.test(l));
+
+  const stops = world([account(), usage(), card('C-1')]);
+  await stops.pass(0);
+  const sid = stops.sessions[0].id;
+  change(stops.rec, 'card', 'C-1', { state: 'cancelled' });
+  queueFor(stops.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+  const r1 = await refusedTick(stops, 1);
+  assert.ok(said(r1, 'stops'), r1.reports.join(' | '));
+
+  const undo = world([account(), usage(), ...undoEntries('U-1')]);
+  await undo.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }) });
+  queueFor(undo.rec, UNDO_HELD_FACT('U-1'), 'told_at', iso(T0), T0);
+  const r2 = await refusedTick(undo, 1);
+  assert.ok(said(r2, 'undo-starts'), r2.reports.join(' | '));
+
+  const pause = world([account(), usage()]);
+  change(pause.rec, 'product', 'p1', { state: 'paused' });
+  queueFor(pause.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+  const r3 = await refusedTick(pause, 0, { alert: fakeAlert({ answer: false }) });
+  assert.ok(said(r3, 'pass'), r3.reports.join(' | '));
+
+  const phone = world([account(), usage()]);
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) assert.equal(phone.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+  queueFor(phone.rec, FD_RESTART_FACT, 'told', true, T0);
+  const r4 = await refusedTick(phone, 0, { alert: fakeAlert({ answer: false }), frontDoorAlive: () => true });
+  assert.ok(said(r4, 'phone'), r4.reports.join(' | '));
+});
+
+test('L449: main logs each failure report of a tick that ran', async () => {
+  // The channel stays down: the tick's first send would deliver the queued copy, and then no drop is left to refuse.
+  const L = installedLayout('m11-main-report-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const wiring = L.path('wiring/wiring.mjs');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  writeFileSync(wiring, `import { recWith, rulesWith, writeLog, queueFor, T0 } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { fakeAlert } from ${JSON.stringify(join(here, '../../test/fake-alert.test-helper.mjs'))};
+const fact = ${JSON.stringify(STEP_ERROR_FACT('outage'))};
+const real = recWith([['fact', fact, { error: 'it failed' }]]);
+queueFor(real, fact, 'told_at', 'x', T0);
+export async function wire() {
+  const noop = () => [];
+  return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(L.base, 'pass.lock') }));
+  const logs = [];
+  const code = await main([config], { self, now: T0, log: (s) => logs.push(s) });
+  assert.equal(code, 0, logs.join(' | '));
+  assert.ok(logs.some((l) => /^dispatcher: [a-z-]+: the queued alert for .* could not be dropped/.test(l)), logs.join(' | '));
+});
+
+test('L354 item 3: a mark landing as a step clears does not outlive the clear', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; }, alert: () => false } });
+  await w.pass();
+  boom = false;
+  const fact = STEP_ERROR_FACT('outage');
+  await tick({ rec: lateMark(w.rec, 'step_ok', fact, { told_cause: 'board unreadable', told_at: iso(T0) }), rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  const doc = w.rec.read('fact', fact).doc;
+  assert.deepEqual([doc.error, doc.told_cause, doc.told_at], [null, undefined, undefined]);
+});
+
+test('L424: the tick asks the reviewEnded port before a review session\'s verdict is taken', async () => {
+  const dir = tempDir('m11-tick-verdict-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'not read past the ended check\n');
+  const asked = [];
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+    reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  await w.pass();
+  assert.deepEqual(asked, ['R-1']);
+  assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
 });

@@ -24,8 +24,9 @@
 import { KEYS, minutes } from './keys.mjs';
 import { note } from './moves.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
-import { tellThen, dropCause } from './alerts.mjs';
+import { tellThen, clearCause, writeFrom } from './alerts.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
+import { refusalReport } from './pass.mjs';
 
 export const LINK_FACT = 'phone-link';
 // Once-per-cause marks (L63): a failed Front Door restart, and a Front Door left on another account that won't stop.
@@ -39,10 +40,18 @@ export const REMOTE_CONTROL = '/remote-control';
 export const READING_MAX_AGE_MS = 5 * 60_000;
 const iso = (ms) => new Date(ms).toISOString();
 const toldOn = (rec, fact) => rec.read('fact', fact)?.doc?.told === true;
-// The cause cleared: its mark is reset, so the next time it happens Joe is told again.
-function clearTold(rec, now, fact) {
-  const c = rec.read('fact', fact);
-  if (c?.doc?.told) rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: c.rev, doc: { ...c.doc, told: false, changed_at: iso(now) }, kind: 'phone_link' });
+// The cause cleared: its mark is reset, so the next time it happens the owner is told again. Written when a mark shows
+// or something of the cause was queued (L354 item 1, L449 m2): changed_at moves the fact's version (the Record refuses a
+// write that changes nothing), so a mark already on its way conflicts, looks again and finds its alert gone. With
+// neither, nothing is written: this runs every pass.
+function clearTold(rec, now, fact, report) {
+  clearCause(rec, fact, (moved) => {
+    const c = rec.read('fact', fact);
+    if (!moved && c?.doc?.told !== true) return;
+    const doc = { ...c?.doc, told: false, changed_at: iso(now) };
+    const r = writeFrom(rec, fact, c?.doc, doc, 'phone_link', { force: ['told'] });
+    if (r?.ok !== true) report(`${fact} could not be cleared (${r?.reason ?? 'no answer'})`, fact);
+  }, report);
 }
 
 const reading = (rec, id, now) => {
@@ -58,27 +67,39 @@ const reading = (rec, id, now) => {
  * handoff })` and `startMinibase()` -> { ok, reason }; `frontDoorAlive()` -> true | false | null (from
  * the session list; null = not known); `strayFrontDoor()` -> { ok, stopped, reason } (two accounts: stops a Front
  * Door left on another account; optional); `lastHandoff()` -> the Front Door's last handoff id or null;
- * `alert(text)`. Returns the list of actions taken.
+ * `alert(text)`. `failureLog(line)` hears each failure report, for the log (L449). Returns the list of actions taken.
  */
-export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert }) {
+export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert, failureLog = () => {} }) {
   const stuckMs = minutes(rules, KEYS.frontDoorStuckMin);
   const cur = rec.read('fact', LINK_FACT);
   const st = { false_streak: 0, attempts: 0, failures: 0, ...(cur?.doc ?? {}) };
   const done = [];
-  const save = () => rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: rec.read('fact', LINK_FACT)?.rev ?? 0, doc: { ...st, changed_at: iso(now) }, kind: 'phone_link' });
+  const report = refusalReport({ rec, alert, now, lines: done, failureLog });
+  // Each save writes only what this step changed since the doc it read (or last saved), at the version it reads and
+  // again on a conflict, so a mark or clear written meanwhile (the step awaits its ports) is kept (L335 m-1).
+  let base = cur?.doc;
+  // `force` names keys written even when unchanged since the read: the cause clearing writes told: false over a mark.
+  const save = (force) => {
+    const doc = { ...st, changed_at: iso(now) };
+    const r = writeFrom(rec, LINK_FACT, base, doc, 'phone_link', { force });
+    if (r?.ok === true) base = doc; else report(`the phone link's state could not be saved (${r?.reason ?? 'no answer'})`, LINK_FACT);
+    return r;
+  };
+  // A note the Record refuses is said in the step's answer (L354 item 6).
+  const writeNote = (text) => { const r = note(rec, 'phone-link-note', text, { now }); if (r?.ok !== true) report(`a phone link note could not be written (${r?.reason ?? 'no answer'})`, 'phone-link-note'); };
 
   const net = reading(rec, FACTS.network, now);
   if (net.value !== true) {
     // A refusal from before the drop says nothing about after it (audit MIN-14).
     if (st.refused_since || st.false_streak) { Object.assign(st, { refused_since: null, false_streak: 0 }); save(); }
-    if (net.value === 'unknown' && st.net_unknown_at !== net.at) { note(rec, 'phone-link-note', 'network state unknown; no action', { now }); st.net_unknown_at = net.at; save(); }
+    if (net.value === 'unknown' && st.net_unknown_at !== net.at) { writeNote('network state unknown; no action'); st.net_unknown_at = net.at; save(); }
     return net.value === false ? ['network down: nothing done'] : ['network unknown: nothing done'];
   }
 
   // The Front Door gone: restart it, whether or not anything was sent to it (audit MAT-10). A failed restart is told
   // once per cause (L63 m4), not every 5 minutes; the cause clears when a restart works or it runs again.
   const alive = frontDoorAlive();
-  if (alive === true) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
+  if (alive === true) clearTold(rec, now, FD_RESTART_FACT, report);
   if (alive === false) {
     // A stored time that can't be read or lies ahead counts as long ago (L412 m2): a retry never waits on a clock.
     const restarted = pastTime(st.fd_restarted_at, now);
@@ -87,8 +108,8 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
       let r;
       try { r = await restartFrontDoor({ handoff: lastHandoff() }); } catch (e) { r = { ok: false, reason: e.message }; }
       st.fd_restarted_at = iso(now);
-      note(rec, 'phone-link-note', 'the Front Door was not running; restarted under its fixed name', { now });
-      if (r?.ok) { clearTold(rec, now, FD_RESTART_FACT); dropCause(rec, FD_RESTART_FACT); }
+      writeNote('the Front Door was not running; restarted under its fixed name');
+      if (r?.ok) clearTold(rec, now, FD_RESTART_FACT, report);
       else if (!toldOn(rec, FD_RESTART_FACT)) tellThen(alert, `the Front Door was not running and did not restart: ${r?.reason ?? 'no answer'}`, { fact: FD_RESTART_FACT, fields: { told: true }, kind: 'front_door_restart' });
       done.push(r?.ok ? 'Front Door was missing; restarted' : 'Front Door was missing; restart failed');
       save();
@@ -103,10 +124,10 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     try { r = await strayFrontDoor(); } catch (e) { r = { ok: false, stopped: [], reason: e.message }; }
     st.stray_checked_at = iso(now);
     if (r?.stopped?.length) {
-      note(rec, 'phone-link-note', `a Front Door left running on account ${r.stopped.join(', ')} was stopped; it runs on the account in use`, { now });
+      writeNote(`a Front Door left running on account ${r.stopped.join(', ')} was stopped; it runs on the account in use`);
       done.push('Front Door left on another account; stopped');
     }
-    if (r?.ok) { clearTold(rec, now, FD_STRAY_FACT); dropCause(rec, FD_STRAY_FACT); }
+    if (r?.ok) clearTold(rec, now, FD_STRAY_FACT, report);
     else {
       if (!toldOn(rec, FD_STRAY_FACT)) tellThen(alert, `a Front Door may still run on the other account: ${r?.reason ?? 'no answer'}; two under the one name can confuse the phone`, { fact: FD_STRAY_FACT, fields: { told: true }, kind: 'front_door_stray' });
       done.push('Front Door on another account: not stopped');
@@ -120,7 +141,7 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
     st.minibase_started_at = iso(now);
     done.push(r?.ok ? 'Mini Base started' : 'Mini Base start failed');
     // A notice only: the start is tried again after RETRY_MS whatever the answer; a lost one is in the list (L130 m8).
-    if (!r?.ok && alert(`Mini Base is not running and did not start: ${r?.reason ?? 'no answer'}`) === false) done.push('not told: the alert could not be queued');
+    if (!r?.ok && alert(`Mini Base is not running and did not start: ${r?.reason ?? 'no answer'}`) === false) { done.push('not told: the alert could not be queued'); failureLog('not told: the alert could not be queued'); }
   }
 
   const fd = reading(rec, FACTS.reachable, now);
@@ -129,12 +150,11 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   if (fd.value === true) {
     if (st.false_streak || st.refused_since) done.push('phone link back');
     Object.assign(st, { false_streak: 0, attempts: 0, failures: 0, told: false, refused_since: null, last_try_at: null });
-    save();
-    dropCause(rec, LINK_FACT);
+    clearCause(rec, LINK_FACT, () => save(['told']), (line) => done.push(line));
     return done;
   }
   if (fd.value === 'unknown') {
-    if (fresh) note(rec, 'phone-link-note', 'phone link state unknown; no action', { now });
+    if (fresh) writeNote('phone link state unknown; no action');
     save();
     return [...done, 'link unknown: diary line only'];
   }
@@ -144,9 +164,9 @@ export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, s
   // L15: the Front Door refused and unreachable for too long -> restart it.
   if (st.refused_since && now - Date.parse(st.refused_since) >= stuckMs) {
     const r = await restartFrontDoor({ handoff: lastHandoff() });
-    note(rec, 'phone-link-note', `the Front Door was unreachable and could not be reconnected for ${Math.round((now - Date.parse(st.refused_since)) / 60_000)} min; restarted under its fixed name`, { now });
+    writeNote(`the Front Door was unreachable and could not be reconnected for ${Math.round((now - Date.parse(st.refused_since)) / 60_000)} min; restarted under its fixed name`);
     // A notice only: a link still down is tried again; a lost one is in the list (L130 m9).
-    if (!r?.ok && alert(`the Front Door could not be reconnected or restarted: ${r?.reason ?? 'no answer'}`) === false) done.push('not told: the alert could not be queued');
+    if (!r?.ok && alert(`the Front Door could not be reconnected or restarted: ${r?.reason ?? 'no answer'}`) === false) { done.push('not told: the alert could not be queued'); failureLog('not told: the alert could not be queued'); }
     Object.assign(st, { refused_since: null, attempts: 0, failures: 0, last_try_at: iso(now), restarted_at: iso(now) });
     save();
     return [...done, r?.ok ? 'Front Door restarted' : 'Front Door restart failed'];
