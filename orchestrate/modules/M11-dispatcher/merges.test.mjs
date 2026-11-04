@@ -457,6 +457,14 @@ test('L367: the session is the launch the Record took last, whatever launched_at
   assert.deepEqual(requests(rec).map((q) => q.session_id), ['S-9']);
 });
 
+// L412 m3: launches that can't be read never read as none, so no request goes out on an older session or on none.
+test('L412 m3 planted: a failed read of the launches throws, and no merge request is stored', () => {
+  const rec = readyRec({}, [launch('C-1', 'S-9'), prSeen(7)]);
+  const broken = Object.create(rec, { list: { value: (e) => { if (e === 'launch') throw new Error('the launches could not be read'); return rec.list(e); } } });
+  assert.throws(() => requestMerges({ alert: fakeAlert(), rec: broken, rules: R, now: T0, b: GREEN }), /the launches could not be read/);
+  assert.deepEqual(requests(rec), []);
+});
+
 test('audit MIN-18 / MIN-19: after a gate crash only merged === true counts, and only a reading newer than the last write', async () => {
   const mk = (pr) => recWith([cardMerging, merging(), ['fact', PR_FACT(7), pr]]);
   // A merged that is not true or false is no reading at all (L246): the merge waits for a real one, never merged and

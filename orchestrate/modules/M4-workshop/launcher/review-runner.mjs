@@ -479,11 +479,19 @@ export async function runnerPass(ctx) {
   // read as at any end, so a session that handed in a pass before it was lost still counts.
   if (!strayClaude && rl.ok) {
     const runningIds = new Set(state.running.map((x) => x.session_id));
+    const seen = state.sweep_seen && typeof state.sweep_seen === 'object' ? state.sweep_seen : (state.sweep_seen = {});
     for (const { doc } of rl.launches) {
-      if (runningIds.has(doc.session_id)) continue;
-      const at = pastTime(doc.launched_at, now);   // unreadable or ahead counts as long past, so it can't be held off for ever (L403)
-      if (at !== null && now - at < SWEEP_AFTER_MS) continue;
-      try { lstatSync(join(P.ended, `${doc.session_id}.json`)); continue; } catch { /* not marked */ }
+      const sid = doc.session_id;
+      if (runningIds.has(sid)) continue;
+      try { lstatSync(join(P.ended, `${sid}.json`)); delete seen[sid]; continue; } catch { /* not marked */ }
+      // A stamp that can't be read or lies ahead says nothing about the launch's age: the 5 minutes run from the pass
+      // that first saw it, so it is neither held off for ever (L403) nor swept at once (L412 m1).
+      let from = pastTime(doc.launched_at, now);
+      if (from === null) {
+        from = pastTime(seen[sid], now);
+        if (from === null) { seen[sid] = iso(now); from = now; }
+      }
+      if (now - from < SWEEP_AFTER_MS) continue;
       if (await endSession(doc, 'swept')) alert(`swept-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for card ${doc.card} at ${doc.head.slice(0, 7)} was not being tracked by the review runner; it is now marked ended.`);
     }
   }
@@ -583,8 +591,8 @@ export async function runnerPass(ctx) {
       // minutes after its session ended is told to Joe once; the Merge Gate reads the verdict file itself either way. A
       // held head (silent, or a verdict that can't be counted) was told already, with the "review again" tap.
       const sid = a.session_id;
-      const ended = Date.parse(a.ended_at ?? '');
-      if (!a.held && Number.isFinite(ended) && now - ended >= INTAKE_WAIT_MS) {
+      // An ended time that can't be read or lies ahead counts as long ago (L412 m2): the telling can't wait on a clock.
+      if (!a.held && typeof a.ended_at === 'string' && now - (pastTime(a.ended_at, now) ?? -Infinity) >= INTAKE_WAIT_MS) {
         let t;
         try { t = await ctx.verdictTaken({ role, sessionId: sid, card, head }); } catch (e) { t = { ok: false, reason: `the Record could not be read (${e?.message ?? e})` }; }
         if (t?.ok !== true) {
@@ -600,7 +608,8 @@ export async function runnerPass(ctx) {
       alert(`gave-up-${k}`, `No ${role} could be started for card ${card} at ${head.slice(0, 7)} after ${MAX_FAILED_STARTS} tries (last: ${a.last_reason ?? 'ended with no verdict'}).`);
       continue;
     }
-    if (a.last_failed_at && now - Date.parse(a.last_failed_at) < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
+    const failedAt = pastTime(a.last_failed_at, now);   // can't be read or lies ahead: long ago, so try now (L412 m2)
+    if (failedAt !== null && now - failedAt < RETRY_MS) { refuse(`the last start of a ${role} for card ${card} failed less than 15 minutes ago`); continue; }
 
     // Start it: the session id is the runner's own, the outbox is made fresh, the launch record is written before the start.
     starts += 1;
@@ -693,7 +702,7 @@ export async function runnerPass(ctx) {
     if (!isClaudeCommand(cmd, ctx.claudeBin)) {
       state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid, last_reason: `the start gave process ${r.pid}, which is not claude` };
       refuse(`the ${role} start gave process ${r.pid}, which is not claude; the session is held until the runner marks it ended`);
-      alert(`untracked-${sid}`, `The ${role} session ${sid} for card ${card} at ${head.slice(0, 7)} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it; it is marked ended after ${SWEEP_AFTER_MS / 60_000} minutes, and what it handed in by then counts.`);
+      alert(`untracked-${sid}`, `The ${role} session ${sid} for card ${card} at ${head.slice(0, 7)} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it: a live claude of review's is stopped on the next pass, and the session is marked ended at least ${SWEEP_AFTER_MS / 60_000} minutes after it started, once no such claude is left. What it handed in by then counts.`);
       continue;
     }
     state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };

@@ -417,4 +417,7 @@ test("audit 0b-6 r3 MIN-5 (J7): Joe's delete is refused when the record now name
 test('L367: a launch stamped far ahead does not outrank a later launch', () => {
   const rec = recWith([launchFor('/copies/old', 'L-1', T0 + 365 * 24 * 60 * MIN), launchFor('/copies/new', 'L-2', T0 - MIN)]);
   assert.equal(namedCopy(rec, 'C-1'), '/copies/new');
+  // L412 m3: launches that can't be read never read as none.
+  const broken = Object.create(rec, { list: { value: (e) => { if (e === 'launch') throw new Error('the launches could not be read'); return rec.list(e); } } });
+  assert.throws(() => namedCopy(broken, 'C-1'), /the launches could not be read/);
 });

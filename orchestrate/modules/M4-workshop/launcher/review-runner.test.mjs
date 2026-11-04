@@ -1239,17 +1239,62 @@ test('L367: a launched_at that lies ahead or cannot be read sorts oldest', () =>
 });
 
 // L403: a launch stamped ahead would otherwise look young for ever, and its lost session would never be ended.
-test('L403: a lost session whose launched_at lies ahead is still swept', async () => {
-  const w = await ready();
+// L412 m1: nor is it swept at once: the 5 minutes run from the pass that first saw it.
+for (const [name, stamp] of [['lies ahead', (w) => new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString()], ['cannot be read', () => 'not a time']]) {
+  test(`L403, L412 m1 planted: a lost session whose launched_at ${name} is swept 5 minutes after the runner first saw it`, async () => {
+    const w = await ready();
+    w.ask();
+    await runnerPass(w.ctx);
+    editState(w, (s) => { s.running = []; });   // the memory lost it
+    w.end('S-1');
+    const f = join(w.root, 'launches', 'S-1.json');
+    const doc = JSON.parse(readFileSync(f, 'utf8'));
+    chmodSync(f, 0o644);
+    writeFileSync(f, JSON.stringify({ ...doc, launched_at: stamp(w) }));
+    w.clock.t += SWEEP_AFTER_MS + MIN;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true, 'not on the pass that first sees it');
+    w.clock.t += SWEEP_AFTER_MS - MIN;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true, 'not a minute early');
+    // The mark is itself a stored time: one that lies ahead starts the 5 minutes again, and can't hold it off for ever.
+    editState(w, (s) => { s.sweep_seen['S-1'] = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').none, true);
+    w.clock.t += SWEEP_AFTER_MS;
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').ended.how, 'swept');
+    w.clock.t += MIN;
+    await runnerPass(w.ctx);
+    assert.deepEqual(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).sweep_seen, {}, 'the mark goes with the session');
+  });
+}
+
+test('L412 m2 planted: a last failure stamped ahead does not hold new starts off until the clock catches up', async () => {
+  let tries = 0;
+  const w = await ready({ start: async () => { tries += 1; return { ok: false, reason: 'claude would not start' }; } });
   w.ask();
   await runnerPass(w.ctx);
-  editState(w, (s) => { s.running = []; });   // the memory lost it
-  w.end('S-1');
-  const f = join(w.root, 'launches', 'S-1.json');
-  const doc = JSON.parse(readFileSync(f, 'utf8'));
-  chmodSync(f, 0o644);
-  writeFileSync(f, JSON.stringify({ ...doc, launched_at: new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString() }));
-  w.clock.t += SWEEP_AFTER_MS + MIN;
+  assert.equal(tries, 1);
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) a.last_failed_at = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+  w.ask();
   await runnerPass(w.ctx);
-  assert.equal(w.ended('S-1').ended.how, 'swept');
+  assert.equal(tries, 2);
+});
+
+test('L412 m2 planted: a verdict the Record has not taken is told though its ended time lies ahead; a session with no ended time is not', async () => {
+  const w = await ready();
+  w.ctx.handedIn = (x) => sessionVerdict({ outboxRoot: w.outboxRoot, uids: UIDS, ...x });
+  w.ctx.verdictTaken = () => ({ ok: false, reason: 'the Record holds no verdict of session S-1' });
+  w.ask();
+  await runnerPass(w.ctx);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 4, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).alerts.filter((a) => /has not taken/.test(a.text)).length; };
+  assert.equal(await told(), 0, 'inside the wait');
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) delete a.ended_at; });
+  assert.equal(await told(), 0, 'no ended time: nothing has ended');
+  editState(w, (s) => { for (const a of Object.values(s.attempts)) a.ended_at = new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString(); });
+  assert.equal(await told(), 1);
 });
