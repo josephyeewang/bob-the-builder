@@ -47,7 +47,7 @@ import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
-import { researchPath, researchFileName } from '../../M2-approvals/research-ask.mjs';
+import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
@@ -294,7 +294,7 @@ export function createPushScript(deps) {
     if (d.state !== 'ready') no(`card ${card} is ${d.state}, not ready`);
     const ask = d.research_ask;
     const { file, sha256, blob, size } = d.source ?? {};
-    if (typeof ask !== 'string' || file !== researchFileName(ask) || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== researchPath(ask)) no(`card ${card} does not name its ask's one file`);
+    if (typeof ask !== 'string' || !RESEARCH_ID.test(ask) || file !== researchFileName(ask) || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== researchPath(ask)) no(`card ${card} does not name its ask's one file`);
     if (!SHA256.test(String(sha256)) || !SHA.test(String(blob)) || !Number.isSafeInteger(size) || size <= 0) no(`card ${card} has no proof of the report's bytes`);
     const folder = rules.get('proposals.outbox', { product });
     if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');

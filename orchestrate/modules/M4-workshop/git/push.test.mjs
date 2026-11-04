@@ -1465,6 +1465,9 @@ test('L286: a card branch on GitHub holding anything else is refused and left th
     ['other bytes at the path', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), 'not the report\n'); }, /not exactly the report/],
     ['the report plus another file', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); writeFileSync(join(c, 'app.txt'), 'and this\n'); }, /not exactly the report/],
     ['another file only', (c) => { writeFileSync(join(c, 'app.txt'), 'only this\n'); }, /not exactly the report/],
+    // L441 m1, m2: the report is first by name here, so only the count and the mode refuse these.
+    ['the report plus a later file', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); writeFileSync(join(c, 'z-later.txt'), 'and this\n'); }, /not exactly the report/],
+    ['the report, executable', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); chmodSync(join(c, RPATH), 0o755); }, /not exactly the report/],
   ];
   for (const [name, fn, re] of cases) {
     const w = await researchWorld();
@@ -1472,6 +1475,15 @@ test('L286: a card branch on GitHub holding anything else is refused and left th
     await researchRefused(w, re, undefined, undefined);
     assert.equal(w.prs.length, 0, name);
   }
+  // L441 m1: a file renamed onto the path, the report's bytes and all, takes the old name off main with it.
+  const moved = await researchWorld();
+  await moved.onGitHub('refs/heads/main', (c) => writeFileSync(join(c, 'z-plan.md'), REPORT_BYTES));
+  mkdirSync(join(moved.clone, 'docs/research'), { recursive: true });
+  renameSync(join(moved.clone, 'z-plan.md'), join(moved.clone, RPATH));
+  await gitOk(['add', '-A'], moved.cg);
+  await gitOk(['commit', '-q', '-m', 'renamed'], moved.cg);
+  await gitOk(['push', '-q', '-f', moved.gh, `HEAD:refs/heads/${RBRANCH}`], moved.cg);
+  await researchRefused(moved, /not exactly the report/, undefined, undefined);
   // The right net change, in two commits, is still not the one copy commit.
   const w = await researchWorld();
   await w.onGitHub(`refs/heads/${RBRANCH}`, (c) => writeFileSync(join(c, 'app.txt'), 'first\n'));
@@ -1544,6 +1556,8 @@ test('L286: the card alone says what is copied: only a ready research_copy card 
     [{ files: [RPATH, 'app.txt'] }, /does not name its ask's one file/],
     [{ files: ['docs/research/research-R-2.md'] }, /does not name its ask's one file/],
     [{ research_ask: 'R-2' }, /does not name its ask's one file/],
+    // L441 m8: names that agree with each other, for an ask id that is no id.
+    [{ research_ask: '../../x', files: ['docs/research/research-../../x.md'], source: { file: 'research-../../x.md', sha256: sha256Of(REPORT_BYTES), blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /does not name its ask's one file/],
     [{ source: { file: 'other.md', sha256: sha256Of(REPORT_BYTES), blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /does not name its ask's one file/],
     [{ source: { file: 'research-R-1.md', sha256: 'x', blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /no proof of the report's bytes/],
     [{ source: { file: 'research-R-1.md', sha256: sha256Of(REPORT_BYTES), blob: 'x', size: REPORT_BYTES.length } }, /no proof of the report's bytes/],

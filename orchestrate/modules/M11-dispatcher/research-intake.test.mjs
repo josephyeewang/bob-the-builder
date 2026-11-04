@@ -472,11 +472,103 @@ for (const [stop, at] of [['claim', 'ready'], ['started', 'claimed'], ['launch',
   });
 }
 
+// L441: the real lapse step between passes, as the tick runs it. A stop at `stop` that never clears. Six-hourly, so four
+// days stay quick: a claim goes stale in 10 minutes, so each tick still lapses what the last one moved.
+const TICK = 6 * 3_600_000;
+const stuck = async (stop, days) => {
+  const v = routed();
+  v.t.clock.t = v.T;
+  const push = async () => { const k = v.rec.read('card', v.card); must(v.rec.write({ actor: 'workshop', entity: 'card', id: v.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } })); must(v.rec.write({ actor: 'workshop', entity: 'fact', id: v.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(v.T).toISOString(), from: 'research', product: PRODUCT } })); return { ok: true }; };
+  await researchCopyPass({ rec: refusing(v.rec, stop, Infinity), rules: v.t.rules, pushResearch: push, alert: outbox(v.rec, v.T), now: v.T, host: 'the-host' });
+  const seen = new Set();
+  let lapses = 0;
+  const end = v.T + days * DAY;
+  for (let at = v.T + TICK; at < end; at += TICK) {
+    v.t.clock.t = at;
+    lapses += must(v.rec.lapseClaims(at)).lapsed.length;
+    seen.add(v.state());
+    await v.passOn(refusing(v.rec, stop, Infinity), at);
+    await sendAlerts(v.rec, v.port, at);
+  }
+  return { v, seen, lapses, end };
+};
+const lifted = async ({ v, end }) => {
+  must(v.rec.lapseClaims(end));
+  await v.passOn(v.rec, end);
+  await sendAlerts(v.rec, v.port, end);
+};
+
+for (const stop of ['launch', 'copy_handed_in']) {
+  test(`L441 M1: a run stopped at ${stop} lapses to waiting, is taken back each time, is told daily, and goes to review once the step works`, async () => {
+    const r = await stuck(stop, 4);
+    assert.ok(r.seen.has('waiting'), 'the lapse step really did park it');
+    assert.equal(r.v.state(), 'running', 'not left in waiting');
+    assert.equal(r.v.alerts.length, 3, 'at one, two and three days');
+    assert.match(r.v.alerts[0], /has waited over a day: it is on branch b but could not go to review \(/);
+    await lifted(r);
+    assert.equal(r.v.state(), 'in_review');
+    assert.equal(r.v.rec.list('launch').length, 1, 'one run for these bytes');
+    const f = r.v.rec.read('fact', READY_FACT(r.v.card)).doc;
+    assert.equal(f.told_at, null);
+    assert.equal(f.waiting_since, undefined);
+  });
+}
+
+test('L441 M1: a lapsed run that can\'t be taken back stays told, and is not sent on from waiting', async () => {
+  const r = await stuck('launch', 1);
+  const { v, end } = r;
+  must(v.rec.lapseClaims(end + 2 * TICK));
+  assert.equal(v.state(), 'waiting');
+  const late = end + 2 * DAY;
+  const out = await v.passOn(refusing(v.rec, 'copy_run_lapsed', Infinity), late);
+  await sendAlerts(v.rec, v.port, late);
+  assert.equal(v.state(), 'waiting');
+  assert.match(out.at(-1)[1], /its lapsed run could not be taken back/);
+  assert.match(v.alerts.at(-1), /could not go to review \(its lapsed run could not be taken back \(/);
+});
+
+test('L441 M1: a card waiting on something else is left alone', async () => {
+  const { v, end } = await stuck('launch', 1);
+  must(v.rec.lapseClaims(end + 2 * TICK));
+  const k = v.rec.read('card', v.card);
+  v.t.clock.t = end + 3 * TICK;
+  must(v.rec.write({ actor: 'dispatcher', entity: 'card', id: v.card, expectRev: k.rev, kind: 'test', doc: { ...k.doc, wait: { ...k.doc.wait, what: 'something else', since: new Date(v.t.clock.t).toISOString() } } }));
+  await v.passOn(v.rec, end + 3 * TICK);
+  assert.equal(v.state(), 'waiting');
+});
+
+test('L441 M2: a step refused for four days bounces ready and claimed, and is told at a day, then daily', async () => {
+  const r = await stuck('started', 4);
+  assert.ok(r.lapses > 10, `it did bounce (${r.lapses} lapses)`);
+  assert.equal(r.v.alerts.length, 3, 'at one, two and three days, from the first held pass');
+  await lifted(r);
+  assert.equal(r.v.state(), 'in_review');
+  assert.equal(r.v.rec.read('fact', READY_FACT(r.v.card)).doc.waiting_since, undefined, 'over, so a later wait starts afresh');
+});
+
+test('L441 M2: not told before the day, however many moves it made', async () => {
+  const r = await stuck('started', 1);
+  assert.ok(r.lapses > 1);
+  assert.deepEqual(r.v.alerts, []);
+});
+
 test('L387: a card over a day old that goes to review in this pass is not told it is waiting', async () => {
   const w = routed();
   await w.pass(w.T + 2 * DAY);
   assert.equal(w.state(), 'in_review');
   assert.deepEqual(w.alerts, []);
+});
+
+test('L441 m5: the Record checks ready again at the claim: a card that stopped being ready stays ready and is not sent on', async () => {
+  const w = routed();
+  w.t.clock.t = w.T;
+  const k = w.rec.read('card', w.card);
+  must(w.rec.write({ actor: 'workshop', entity: 'card', id: w.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } }));
+  must(w.rec.write({ actor: 'workshop', entity: 'fact', id: w.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(w.T).toISOString(), from: 'research', product: PRODUCT } }));
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
+  const out = await w.passOn(w.rec, w.T);
+  assert.equal(w.state(), 'ready');
+  assert.match(out.at(-1)[1], /^not sent to review: .*no work starts/);
 });
 
 test('L387: rules off, a pushed card is not sent to review', async () => {

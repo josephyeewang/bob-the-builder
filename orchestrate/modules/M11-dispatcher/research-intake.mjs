@@ -22,7 +22,9 @@
 //                                                  until it leaves ready, pushed or not (L313, shared stillWaiting)
 //                                                  A pushed card whose head is written goes to review in the same pass
 //                                                  (routeCopy, L387), with a launch record, role copy_run. A failed move
-//                                                  stays told by that same daily tell.
+//                                                  stays told by that same daily tell. A run that lapsed to waiting is
+//                                                  taken back to ready and goes on (L441 M1). The tell's clock starts at
+//                                                  the first held pass and survives every move on the way (L441 M2).
 //   researchCardDoc({ askId, product, name, sha256, blob, size }) → the one card shape (tests build theirs with it)
 //   researchPath(askId) → the card's one allowed path (M2's); the blob id is M10 reader.mjs blobSha's, made by the intake
 //
@@ -142,6 +144,10 @@ export const READY_FACT = (cardId) => HOLD_FACT(`research-ready-${cardId}`);
 export const COPY_RUN = (cardId, sha) => `copy-${cardId}-r-${sha.slice(0, 12)}`;
 export const COPY_ROLE = 'copy_run';
 const ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running']);
+// M9's wait for a lapsed tab claim (writer.mjs lapseClaims). A lapse ends the claim, so this is how the card is known;
+// only researchCopyPass makes tab claims, so on a research_copy card it can only be this card's own run.
+const LAPSED_RUN = 'tab claim lapsed';
+const lapsedRun = (doc) => doc.state === 'waiting' && doc.wait?.what === LAPSED_RUN && doc.wait?.return_to === 'ready';
 
 /**
  * A pushed copy goes to review by the three existing moves (L387), in one pass; a stop between them is picked up next
@@ -174,12 +180,20 @@ function routeCopy(rec, c, doc, { host, now }) {
 export async function researchCopyPass({ rec, rules, pushResearch, alert, now, host = hostname() }) {
   if (!Number.isFinite(now)) throw new Error('researchCopyPass needs the pass\'s clock (now)');
   const out = [];
-  for (const c of rec.list('card')) {
-    if (c.corrupt || c.doc?.kind !== 'research_copy') continue;
+  for (const listed of rec.list('card')) {
+    if (listed.corrupt || listed.doc?.kind !== 'research_copy') continue;
+    let c = listed;
+    let stopped = null;
+    if (lapsedRun(c.doc)) {
+      const back = move(rec, 'card', c.id, { state: 'ready' }, { kind: 'copy_run_lapsed' });
+      if (back.ok) c = rec.read('card', c.id);
+      else stopped = `its lapsed run could not be taken back (${back.reason})`;
+      out.push([c.id, stopped ?? 'taken back after its run lapsed']);
+    }
     const { product, research_ask: ask, state } = c.doc;
     const ready = state === 'ready';
     const ours = c.doc.source?.sha256 && c.doc.claim?.claim_id === COPY_RUN(c.id, c.doc.source.sha256);
-    const held = ready || (ours && ROUTE_STATES.includes(state));
+    const held = ready || Boolean(stopped) || (ours && ROUTE_STATES.includes(state));
     const on = goFreeOn(rules, product, 'research_copy');
     let doc = held ? copyDoc(rec, c) : null;
     // A refused head write is retried like a refused push: the next try of the same bytes finishes it.
@@ -200,18 +214,23 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now, h
     // Held at the card's head: a push with no head goes nowhere, and the daily tell below says so.
     const fresh = rec.read('card', c.id);
     const headed = doc?.result === 'pushed' && fresh?.doc?.head === doc.tip;
-    let stopped = null;
     let waiting = held;
-    if (on && held && headed) {
+    if (on && held && headed && !stopped) {
       stopped = routeCopy(rec, fresh, doc, { host, now });
       out.push([c.id, stopped ? `not sent to review: ${stopped}` : 'sent to review']);
       waiting = Boolean(stopped);
     }
     const mark = READY_FACT(c.id);
+    // The card's own clock restarts at every move, and a failing route moves it every tick, so the wait's start is kept
+    // on the fact, from the first held pass (L441 M2). A card has one set of bytes (researchHandler), so this start is
+    // theirs. A refused write leaves the card's clock for this pass, and the next pass tries again.
+    const stateSince = rec.meta?.('card', c.id)?.stateSince;
+    const seen = rec.read('fact', mark)?.doc;
+    if (waiting && seen?.waiting_since === undefined) putFact(rec, mark, { ...seen, waiting_since: stateSince ?? new Date(now).toISOString() }, 'hold_waiting', seen);
     stillWaiting({
       now,
       waiting,
-      after: { since: rec.meta?.('card', c.id)?.stateSince, limit: STILL_WAITING_MS },
+      after: { since: rec.read('fact', mark)?.doc?.waiting_since ?? stateSince, limit: STILL_WAITING_MS },
       read: () => rec.read('fact', mark)?.doc,
       tell: (fields) => {
         const pushed = doc?.result === 'pushed' && (stopped ? `it is on branch ${doc.branch} but could not go to review (${stopped})` : headed ? `it is on branch ${doc.branch} but has not merged` : `it is on branch ${doc.branch} but its card could not take the new head (${doc.head_refused ?? 'the card names another head'})`);
@@ -222,9 +241,15 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now, h
       clear: () => {
         dropCause(rec, mark);
         const cur = rec.read('fact', mark);
-        if (cur?.doc?.told_at != null) putFact(rec, mark, { ...cur.doc, told_at: null }, 'hold_cleared');
+        if (cur?.doc?.told_at != null) putFact(rec, mark, { ...cur.doc, told_at: null }, 'hold_cleared', cur.doc, ['told_at']);
       },
     });
+    // Over: the start goes too, so a card that comes back to ready later starts a new wait.
+    const done = rec.read('fact', mark)?.doc;
+    if (!waiting && done?.waiting_since !== undefined) {
+      const { waiting_since: _, ...rest } = done;
+      putFact(rec, mark, rest, 'hold_cleared', done);
+    }
   }
   return out;
 }
