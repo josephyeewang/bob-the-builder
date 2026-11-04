@@ -22,6 +22,9 @@ export const DIFF_NAME = 'change.diff';
 // The diff git hands over is plain text, never shaped by the tree under review (M-1 (a)).
 export const DIFF_FLAGS = Object.freeze(['--no-color', '--text', '--no-textconv', '--no-ext-diff', '--no-renames', '--ignore-submodules=none']);
 
+/** How many names main brought in the prompt lists. */
+export const MAX_BROUGHT = 200;
+
 /** Throws on the first name holding a control character; → the list. */
 export function plainNames(list, what = 'the file name') {
   const bad = list.find((p) => CONTROL.test(p));
@@ -48,13 +51,15 @@ export async function reviewPackage({ copy, head, dir, since }) {
     const diff = await gitOk(['diff', ...DIFF_FLAGS, base, head], opts('review-package-diff'));
     // The short re-audit (R-0b-146): `since` is a head of this card an auditor passed. When this head was caught up
     // with main after it, what main brought in between the two is listed, so the audit checks the combined change.
-    // Those names go into the prompt too, so they are held to the same rule (M-1 (b)).
+    // Those names go into the prompt too: a name with a control character is left out (M-1 (b)), and neither that nor a
+    // long list refuses the package (L92 minor 5). What is left out is counted, so the prompt says so.
     let reAudit = null;
     if (typeof since === 'string' && HEX40.test(since) && since !== head
         && (await git(['merge-base', '--is-ancestor', since, head], opts('review-package-since'))).code === 0) {
       const was = (await gitOk(['merge-base', 'refs/heads/main', since], opts('review-package-since-base'))).trim();
-      const brought = plainNames((await gitOk(['diff', '--name-only', '-z', '--no-renames', was, base], opts('review-package-brought'))).split('\0').filter(Boolean), 'the file main brought in');
-      if (brought.length) reAudit = { since, brought };
+      const all = (await gitOk(['diff', '--name-only', '-z', '--no-renames', was, base], opts('review-package-brought'))).split('\0').filter(Boolean);
+      const brought = all.filter((p) => !CONTROL.test(p)).slice(0, MAX_BROUGHT);
+      if (all.length) reAudit = { since, brought, unlisted: all.length - brought.length };
     }
     // A folder of its own, made fresh: one already there is never written into.
     mkdirSync(dir, { mode: 0o755 });

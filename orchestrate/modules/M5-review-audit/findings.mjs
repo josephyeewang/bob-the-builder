@@ -1,13 +1,17 @@
 // The finding-checker and finalize (R-0b-145, L76 (4)). When a review session ends, before its verdict file's sha256
 // goes into its ended record (review-runner.mjs `endSession`), the runner finalizes that one session's own file:
-//   - each finding is checked against the head reviewed and where the change began; one whose file is on neither,
-//     whose line is past the file's end on both, or whose quote neither bears out, is noise, and is marked dropped (it
-//     stays in the notes, last, with the reason, so the next round and Joe can see it);
+//   - each finding is checked against the head reviewed and where the change began; one whose file is on neither, or
+//     whose quote stands nowhere in either whole file, is noise, and is marked dropped (it stays in the notes, last, with
+//     the reason, so the next round and Joe can see it). A line number is never a reason to drop (L424): a real quote on
+//     a wrong line is kept, which costs a false fail, never a false pass;
 //   - repeats of the same finding are combined into one;
 //   - what the verdict says is worked out again from what is left: an auditor's Material count loses the dropped
 //     Material findings but never falls below the Material findings kept; a reviewer's checklist line that only noise
 //     put at its level comes down to the worst finding left on it. pass turns true only when dropped noise was the whole
-//     reason it was false, so never while a Material finding is kept, whether or not it names a line (L92 M-1).
+//     reason it was false. Any kept Material finding makes the verdict a fail, whatever pass and the count say, whether
+//     or not it names a line and whether or not anything was dropped (L92 M-1, L424);
+//   - a file it rewrites is marked `finalized`, and only such a file may hold a finding with a `dropped` key (M9
+//     verdictFields refuses any other), so a mark copied from an earlier round's notes never hides a finding.
 // finalize reads and writes only the one verdict file in that session's own folder, in place (a temporary dot-named
 // file, renamed over it, which the gate never lists). It never writes a second verdict, and it never reads or changes
 // another session's: under L68 each launched session's own verdict counts and the worst wins, so nothing here can let
@@ -20,17 +24,15 @@ import { kindOf, readOutboxFile, verdictFields } from '../M9-record/outbox.mjs';
 import { VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
 import { FINDING_LEVELS, findingProblem, verdictFileText } from './verdict-file.mjs';
 
-/** How far from its line a quote may be found, in lines either way. */
-export const QUOTE_NEAR = 3;
 /** What a reader gives for a path that is at the commit but is not a plain file (a link, say): no text to check. */
 export const NOT_TEXT = Symbol('not a plain file');
 const RANK = Object.freeze({ clean: 0, cosmetic: 1, minor: 2, material: 3 });
 const worst = (levels) => levels.reduce((w, l) => (RANK[l] > RANK[w] ? l : w), 'clean');
 const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
 
-/** Does the quote stand in one of these runs of lines? Line by line, a line may carry its diff marker, and each may stand in a different run. */
-function quoteHolds(quote, runs) {
-  const hays = runs.map((lines) => squash(lines.join('\n')));
+/** Does the quote stand in one of these texts? Line by line, a line may carry its diff marker, and each may stand in a different one. */
+function quoteHolds(quote, texts) {
+  const hays = texts.map(squash);
   const on = (t) => hays.some((h) => h.includes(t));
   if (on(squash(quote))) return true;
   const parts = quote.split('\n').map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
@@ -41,28 +43,16 @@ function quoteHolds(quote, runs) {
  * Why a finding is noise, or null when it is kept. `readFile(path)` gives the file's text at the head reviewed and
  * `readBase(path)` where the change began: null when that commit has no such file, NOT_TEXT when the path is there but
  * is not a plain file. A review is of a diff, so a finding may be about what the change removes (L92 M-2): it is noise
- * only when neither side bears it out. A file the change deletes is never noise, and neither is a path with no text to check.
+ * only when neither side bears it out, in the whole of either file (L424). A path with no text to check is never noise.
  */
 export async function noiseReason(f, readFile, readBase) {
   if (f.file === undefined) return null;
-  const head = await readFile(f.file);
-  const base = await readBase(f.file);
-  if (head === NOT_TEXT || base === NOT_TEXT) return null;
-  if (typeof head !== 'string') return typeof base === 'string' ? null : `${f.file} is not in the head reviewed or where the change began`;
-  const toLines = (text) => { const l = text.split('\n'); if (text.endsWith('\n')) l.pop(); return l; };
-  const headLines = toLines(head);
-  const baseLines = typeof base === 'string' ? toLines(base) : null;
-  const sides = baseLines ? [headLines, baseLines] : [headLines];
-  if (f.line !== undefined && sides.every((l) => f.line > l.length)) return `${f.file} has ${headLines.length} lines, not ${f.line}`;
-  if (f.quote !== undefined) {
-    const near = (lines) => (f.line === undefined ? lines : lines.slice(Math.max(0, f.line - 1 - QUOTE_NEAR), f.line + QUOTE_NEAR));
-    if (quoteHolds(f.quote, sides.map(near))) return null;
-    // Gone from the head but in the base: the change took it out. Its line may be counted on either side, so the whole
-    // of the base is looked at. A quote the head still has elsewhere is only on the wrong line.
-    if (baseLines && !quoteHolds(f.quote, [headLines]) && quoteHolds(f.quote, [headLines, baseLines])) return null;
-    return `the quote is not in ${f.file}${f.line === undefined ? '' : ` near line ${f.line}`}`;
-  }
-  return null;
+  const sides = [await readFile(f.file), await readBase(f.file)];
+  if (sides.includes(NOT_TEXT)) return null;
+  const texts = sides.filter((t) => typeof t === 'string');
+  if (!texts.length) return `${f.file} is not in the head reviewed or where the change began`;
+  if (f.quote === undefined || quoteHolds(f.quote, texts)) return null;
+  return `the quote is not in ${f.file}`;
 }
 
 /** → { kept, dropped: [{ ...finding, dropped: reason }] }; repeats are combined, first one kept. */
@@ -84,10 +74,10 @@ export function settle({ role, pass, checklist, material, kept, dropped }) {
   const keptMaterial = kept.filter((f) => f.level === 'material').length;
   if (role === 'auditor') {
     const out = dropped.filter((f) => f.level === 'material').length;
-    if (!out) return { pass, material };
-    // The kept ones count whatever was written; a count above the list keeps what no finding accounts for.
-    const left = Math.max(keptMaterial, material - out);
-    return { pass: pass || (material > 0 && left === 0), material: left };
+    // The kept ones count whatever was written; a count above the list keeps what no finding accounts for. A verdict
+    // that gave no count gains none: it stays one M9 does not pass.
+    const left = Math.max(keptMaterial, (material ?? 0) - out);
+    return { pass: !keptMaterial && (pass || (material > 0 && left === 0)), material: material === null && !left ? null : left };
   }
   const next = { ...checklist };
   let lowered = false;
@@ -100,7 +90,7 @@ export function settle({ role, pass, checklist, material, kept, dropped }) {
     if (RANK[next[line]] <= RANK[worst(gone)] && RANK[next[line]] > RANK[left] && !(next[line] === 'material' && keptMaterial)) { if (next[line] === 'material') lowered = true; next[line] = left; }
   }
   const clean = VERDICT_CHECKLIST.every((l) => CHECKLIST_LEVELS.includes(next[l]) && next[l] !== 'material');
-  return { pass: pass || (lowered && clean), checklist: next };
+  return { pass: !keptMaterial && (pass || (lowered && clean)), checklist: next };
 }
 
 /**
@@ -126,7 +116,7 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   if (!Array.isArray(notes)) return no('its notes are not a list');
   const fresh = []; const before = [];
   for (const n of notes) {
-    if (n && typeof n === 'object' && typeof n.dropped === 'string') { before.push(n); continue; }   // finalized before
+    if (n && typeof n === 'object' && Object.hasOwn(n, 'dropped')) { before.push(n); continue; }   // finalized before: M9 refuses the key in any other file
     const p = findingProblem(n);
     if (p) return no(`a finding can't be checked: ${p}`);
     fresh.push(n);
@@ -135,10 +125,12 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   const said = settle({ role, pass: v.pass, checklist: v.checklist, material: v.material, kept, dropped });
   const order = (a, b) => FINDING_LEVELS.indexOf(a.level) - FINDING_LEVELS.indexOf(b.level);
   const findings = [...kept.sort(order), ...dropped, ...before];
-  // Nothing dropped and no repeats: the file stays exactly as the session wrote it.
-  if (!dropped.length && kept.length === fresh.length) return { ok: true, changed: false, kept: kept.length, dropped: 0 };
+  // Nothing dropped, no repeats and nothing to correct: the file stays exactly as the session wrote it. So a second run on
+  // a file finalized before changes nothing, and what it dropped then stays dropped.
+  const same = said.pass === v.pass && (role === 'reviewer' || said.material === v.material);
+  if (!dropped.length && kept.length === fresh.length && same) return { ok: true, changed: false, kept: kept.length, dropped: 0 };
   let text;
-  try { text = verdictFileText({ role, card, head, pass: said.pass, ...(role === 'reviewer' ? { checklist: said.checklist } : { material: said.material }), findings }); } catch (e) { return no(e?.message ?? String(e)); }
+  try { text = verdictFileText({ role, card, head, pass: said.pass, ...(role === 'reviewer' ? { checklist: said.checklist } : { material: said.material }), findings, finalized: true }); } catch (e) { return no(e?.message ?? String(e)); }
   const tmp = join(dir, `.finalize-${sessionId}`);
   let fd;
   try {

@@ -32,11 +32,11 @@ export function findingProblem(f) {
  * The file's text. A reviewer says the four checklist lines, an auditor its Material count; both say pass true or
  * false, and list their findings. Throws when M9 would refuse the header, so nothing writes a verdict the gate can't count.
  */
-export function verdictFileText({ role, card, head, pass, checklist, material, findings = [] }) {
+export function verdictFileText({ role, card, head, pass, checklist, material, findings = [], finalized = false }) {
   if (!REVIEW_ROLES_HERE.includes(role)) throw new Error(`${role} is not a review role`);
   if (!Array.isArray(findings)) throw new Error('findings are a list');
   for (const f of findings) { const p = findingProblem(f); if (p) throw new Error(p); }
-  const fields = { head, pass, ...(role === 'reviewer' ? { checklist } : { material }), notes: findings };
+  const fields = { head, pass, ...(role === 'reviewer' ? { checklist } : { material }), notes: findings, ...(finalized ? { finalized: true } : {}) };
   const header = { entity: 'verdict', card, expectRev: 0, fields };
   const v = verdictFields(header);
   if (!v.ok) throw new Error(`not a verdict the gate can count: ${v.reason}`);
@@ -60,7 +60,7 @@ export function verdictFormat({ role, card, head }) {
     'The file is JSON on one line, shaped like the example below, with your own values; nothing else may be added to it. The example only shows the shape: its pass, checklist and finding are made up, not a judgment of this change.',
     JSON.stringify(example),
     say,
-    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote can't be found at the head you review, or where the change began, is dropped as noise. For code the change removes, quote the removed line.`,
+    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}. "dropped" is the runner's own mark: leave it off every finding, even one taken from an earlier round.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote can't be found at the head you review, or where the change began, is dropped as noise. For code the change removes, quote the removed line.`,
     `"head" stays exactly ${head}: a verdict for any other commit is not counted.`,
   ].join('\n');
 }

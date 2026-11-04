@@ -41,7 +41,8 @@
 // it sits in. A session folder holding more than one verdict file counts none (one verdict per session, D12), so a row
 // can't pick the file the intake refused. The Merge Gate (M6 gather.mjs) and the record's verdict rule call it.
 //
-//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }
+//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }; a finding
+//     marked `dropped` stands only in a file the runner's finalize marked `finalized` (M5 findings.mjs, L424)
 //   verdictFromFile({ outboxRoot, uids, row }) →
 //     { ok, verdict: { role, session_id, card, head, pass, checklist, material, created_by, outbox_uid, source_key } } | { ok: false, reason }
 //
@@ -459,7 +460,7 @@ export function verdictFields(h) {
   if (!h || typeof h !== 'object' || Array.isArray(h) || h.entity !== 'verdict') return no('the header is not a verdict\'s');
   const fields = h.fields ?? {};
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return no('header fields must be an object');
-  const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material'].includes(k));
+  const extra = Object.keys(fields).filter((k) => !['head', 'pass', 'notes', 'checklist', 'material', 'finalized'].includes(k));
   if (extra.length) return no(`a verdict may not set ${extra.join(', ')}`);
   if (typeof h.card !== 'string' || !CARD_ID.test(h.card) || h.card.split('.').includes('')) return no('a verdict names its card');
   if (typeof fields.head !== 'string' || !HEX40.test(fields.head)) return no('a verdict names the 40-hex head it reviewed');
@@ -470,6 +471,8 @@ export function verdictFields(h) {
       || Object.values(cl).some((v) => !CHECKLIST_LEVELS.includes(v))) return no(`checklist lines are ${VERDICT_CHECKLIST.join(', ')}, each ${CHECKLIST_LEVELS.join('|')}`);
   }
   if (fields.material !== undefined && !(Number.isInteger(fields.material) && fields.material >= 0)) return no('material is a whole-number count');
+  if (fields.finalized !== undefined && fields.finalized !== true) return no('finalized is only ever true');
+  if (fields.finalized !== true && Array.isArray(fields.notes) && fields.notes.some((n) => n && typeof n === 'object' && Object.hasOwn(n, 'dropped'))) return no('only the runner marks a finding dropped, and this file is not one it finalized');
   return { ok: true, card: h.card, head: fields.head, pass: fields.pass, notes: fields.notes ?? null, checklist: fields.checklist ?? null, material: fields.material ?? null };
 }
 

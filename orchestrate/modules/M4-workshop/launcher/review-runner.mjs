@@ -629,20 +629,15 @@ export async function runnerPass(ctx) {
     // either is a send-back for both): the new session's prompt holds their notes, so a new push is checked against what failed before. Joe's set-aside sessions are left out. Only a
     // settled verdict counts, read from the bytes its ended record pins (L70 point 5); a file changed since says nothing.
     // The wiring shows them as quoted data from an earlier reviewer, never as instructions (`earlierBlock`).
-    // An auditor also gets the newest head of this card an earlier auditor passed (`audited`, R-0b-146): on a head
-    // caught up with main since, its package lists what main brought in, so the new audit is a short re-audit of the
-    // combined change (no Tier-1 audit carries over a Tier-1 merge, M10 carry-over.mjs).
     const earlier = [];
-    let audited = null;
     for (const { doc: d } of [...rl.launches].sort((x, y) => String(y.doc.launched_at).localeCompare(String(x.doc.launched_at)))) {
-      if (earlier.length >= MAX_EARLIER && (role !== 'auditor' || audited)) break;
+      if (earlier.length >= MAX_EARLIER) break;
       if (d.card !== card || d.head === head || d.tree === tree || asideIds.has(d.session_id)) continue;
       const pin = runnerEnded({ root: P.ended, uid, role: d.role, card, head: d.head, sessionId: d.session_id });
       if (!pin.ok || !HEX64.test(pin.ended.verdict_sha256)) continue;
       let h; try { h = await ctx.handedIn({ role: d.role, sessionId: d.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: d.role, sessionId: d.session_id }), card, head: d.head }); } catch { continue; }
       if (h?.ok !== true || h.verdict?.sha256 !== pin.ended.verdict_sha256) continue;
-      if (PASSES[d.role]?.(h.verdict)) { if (role === 'auditor' && d.role === 'auditor' && !audited) audited = d.head; continue; }
-      if (earlier.length >= MAX_EARLIER) continue;
+      if (PASSES[d.role]?.(h.verdict)) continue;
       const n = h.verdict?.notes;
       earlier.push({ session_id: d.session_id, head: d.head, notes: (typeof n === 'string' ? n : JSON.stringify(n ?? null)).slice(0, MAX_EARLIER_NOTES) });
     }
@@ -650,7 +645,7 @@ export async function runnerPass(ctx) {
       writeLaunch(P.launches, sid, { session_id: sid, role, card, head, tree, request_id: rid, launched_at: iso(now), signin: acct, config_dir: configDir });
     } catch (e) { failStart(`its launch record could not be written (${e?.code ?? e?.message})`); continue; }
     let r;
-    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid), ...(audited ? { audited } : {}) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    try { r = await ctx.start({ role, card, head, tree, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: earlierBlock(earlier), packageDir: join(P.packages, sid) }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
     // The package's sha256 is pinned at once, whatever the start says next, so any end of this session checks it.
     // The runner keeps the sha256 in its state too, and whether the pin was written: a session whose pin failed is
     // refused at its end whatever the pin file then says (L91 m-2).
