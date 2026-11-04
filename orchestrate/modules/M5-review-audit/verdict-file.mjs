@@ -2,9 +2,9 @@
 // the Merge Gate reads (refusal 5, through M9 `sessionVerdict` and `verdictFields`). It is one line of JSON naming the
 // card and the head reviewed. Its findings go in `fields.notes`, a list: the runner hands a failing verdict's notes to
 // the next round's prompt (review-runner.mjs `earlier`), and the finding-checker reads them (R-0b-145). Built here and
-// checked with M9's own reading, so the format the reviewer is told is the format the gate counts (M9 verdictFields).
+// checked with M9's own reading, so the format the reviewer is told is the format the gate counts (M9 verdictAsWritten: finalize settles a file that says two things at once).
 
-import { verdictFields } from '../M9-record/outbox.mjs';
+import { verdictAsWritten } from '../M9-record/outbox.mjs';
 import { SESSION_ID, VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
 
 export const REVIEW_ROLES_HERE = Object.freeze(['reviewer', 'auditor']);
@@ -38,7 +38,7 @@ export function verdictFileText({ role, card, head, pass, checklist, material, f
   for (const f of findings) { const p = findingProblem(f); if (p) throw new Error(p); }
   const fields = { head, pass, ...(role === 'reviewer' ? { checklist } : { material }), notes: findings, ...(finalized ? { finalized: true } : {}) };
   const header = { entity: 'verdict', card, expectRev: 0, fields };
-  const v = verdictFields(header);
+  const v = verdictAsWritten(header);
   if (!v.ok) throw new Error(`not a verdict the gate can count: ${v.reason}`);
   return `${JSON.stringify(header)}\n`;
 }

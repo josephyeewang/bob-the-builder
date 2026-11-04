@@ -11,16 +11,20 @@
 //     reason it was false. Any kept Material finding makes the verdict a fail, whatever pass and the count say, whether
 //     or not it names a line and whether or not anything was dropped (L92 M-1, L424);
 //   - a file it rewrites is marked `finalized`, and only such a file may hold a finding with a `dropped` key (M9
-//     verdictFields refuses any other), so a mark copied from an earlier round's notes never hides a finding.
+//     verdictFields refuses any other), so a mark copied from an earlier round's notes never hides a finding. The file
+//     is the session's to write, so that mark alone proves nothing: finalize first writes the new file's sha256 into the
+//     runner's own record (`mark`, finalized/ in the runner's folder, which no session can write), and M9 trusts a
+//     `dropped` finding only in the file that record names (headReviews, L432).
 // finalize reads and writes only the one verdict file in that session's own folder, in place (a temporary dot-named
 // file, renamed over it, which the gate never lists). It never writes a second verdict, and it never reads or changes
 // another session's: under L68 each launched session's own verdict counts and the worst wins, so nothing here can let
 // one session's pass stand in for another's fail. A finding with nothing to check (no file named) is kept.
 
+import { createHash } from 'node:crypto';
 import { closeSync, fchmodSync, fchownSync, fsyncSync, openSync, readdirSync, renameSync, unlinkSync, writeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
-import { kindOf, readOutboxFile, verdictFields } from '../M9-record/outbox.mjs';
+import { keptMaterial, kindOf, readOutboxFile, verdictAsWritten } from '../M9-record/outbox.mjs';
 import { VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
 import { FINDING_LEVELS, findingProblem, verdictFileText } from './verdict-file.mjs';
 
@@ -29,14 +33,20 @@ export const NOT_TEXT = Symbol('not a plain file');
 const RANK = Object.freeze({ clean: 0, cosmetic: 1, minor: 2, material: 3 });
 const worst = (levels) => levels.reduce((w, l) => (RANK[l] > RANK[w] ? l : w), 'clean');
 const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
+// A diff's hunk header stands in neither file, so a quote pasted from a diff is read without it (L432).
+const HUNK = /^@@ .* @@/;
 
-/** Does the quote stand in one of these texts? Line by line, a line may carry its diff marker, and each may stand in a different one. */
+/**
+ * Does the quote stand in one of these texts? Line by line, a line may carry its diff marker or be a hunk header, and
+ * each may stand in a different one. A quote that is only hunk headers has nothing to check, so it holds.
+ */
 function quoteHolds(quote, texts) {
   const hays = texts.map(squash);
   const on = (t) => hays.some((h) => h.includes(t));
   if (on(squash(quote))) return true;
-  const parts = quote.split('\n').map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
-  return parts.length > 0 && parts.every(on);
+  const lines = quote.split('\n');
+  const parts = lines.filter((l) => !HUNK.test(l)).map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
+  return parts.length ? parts.every(on) : lines.some((l) => HUNK.test(l));
 }
 
 /**
@@ -71,13 +81,13 @@ export async function checkFindings(findings, readFile, readBase) {
 
 /** What the verdict says once the noise is out (see the top). Pure. */
 export function settle({ role, pass, checklist, material, kept, dropped }) {
-  const keptMaterial = kept.filter((f) => f.level === 'material').length;
+  const stays = keptMaterial(kept);
   if (role === 'auditor') {
     const out = dropped.filter((f) => f.level === 'material').length;
     // The kept ones count whatever was written; a count above the list keeps what no finding accounts for. A verdict
     // that gave no count gains none: it stays one M9 does not pass.
-    const left = Math.max(keptMaterial, (material ?? 0) - out);
-    return { pass: !keptMaterial && (pass || (material > 0 && left === 0)), material: material === null && !left ? null : left };
+    const left = Math.max(stays, (material ?? 0) - out);
+    return { pass: !stays && (pass || (material > 0 && left === 0)), material: material === null && !left ? null : left };
   }
   const next = { ...checklist };
   let lowered = false;
@@ -87,19 +97,21 @@ export function settle({ role, pass, checklist, material, kept, dropped }) {
     const left = worst(kept.filter((f) => f.on === line).map((f) => f.level));
     // Only a line the noise explains comes down: its level is no worse than the worst dropped finding, and worse than
     // anything left on it.
-    if (RANK[next[line]] <= RANK[worst(gone)] && RANK[next[line]] > RANK[left] && !(next[line] === 'material' && keptMaterial)) { if (next[line] === 'material') lowered = true; next[line] = left; }
+    if (RANK[next[line]] <= RANK[worst(gone)] && RANK[next[line]] > RANK[left] && !(next[line] === 'material' && stays)) { if (next[line] === 'material') lowered = true; next[line] = left; }
   }
   const clean = VERDICT_CHECKLIST.every((l) => CHECKLIST_LEVELS.includes(next[l]) && next[l] !== 'material');
-  return { pass: !keptMaterial && (pass || (lowered && clean)), checklist: next };
+  return { pass: !stays && (pass || (lowered && clean)), checklist: next };
 }
 
 /**
- * Finalize one session's verdict file. `owner` is the review user's uid, given back to the rewritten file.
- * → { ok, changed, kept, dropped } | { ok: false, none?, reason } (a file that can't be finalized is left as it is, for
- * the runner's own read to judge)
+ * Finalize one session's verdict file. `owner` is the review user's uid, given back to the rewritten file. `mark` is
+ * the runner's own record of what it finalized: read() → the sha256, or null when there is none; write(sha256), once.
+ * → { ok, changed, kept?, dropped? } | { ok: false, none?, reason } (a file that can't be finalized is left as it is,
+ * for the runner's own read to judge)
  */
-export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner }) {
+export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark }) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
+  if (typeof mark?.read !== 'function' || typeof mark?.write !== 'function') return no('the runner gave no record to mark what it finalizes');
   const dir = join(outboxRoot, role, sessionId);
   let names;
   try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return no(`its outbox folder could not be listed (${e?.code ?? e})`); }
@@ -108,15 +120,21 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   const file = join(dir, names[0]);
   const f = readOutboxFile({ outboxRoot, uids, tag: { role, sessionId }, file });
   if (!f.ok) return no(f.reason);
-  const v = verdictFields(f.header);
+  // As written: a file that says two things at once is what finalize settles.
+  const v = verdictAsWritten(f.header);
   if (!v.ok) return no(v.reason);
   if (v.card !== card || v.head !== head) return no('the verdict is for another card or head');
   if (f.body.trim()) return no('the verdict file has more than its one line');
+  // A file that says it was finalized: only the runner's record can say so. Run again on a file it did mark, nothing
+  // changes, so what it dropped stays dropped.
+  if (f.header.fields.finalized === true) {
+    let own; try { own = mark.read(); } catch (e) { return no(e?.message ?? String(e)); }
+    return own === f.sha256 ? { ok: true, changed: false } : no('the file says it was finalized, but the runner holds no record of that file');
+  }
   const notes = v.notes ?? [];
   if (!Array.isArray(notes)) return no('its notes are not a list');
-  const fresh = []; const before = [];
+  const fresh = [];
   for (const n of notes) {
-    if (n && typeof n === 'object' && Object.hasOwn(n, 'dropped')) { before.push(n); continue; }   // finalized before: M9 refuses the key in any other file
     const p = findingProblem(n);
     if (p) return no(`a finding can't be checked: ${p}`);
     fresh.push(n);
@@ -124,13 +142,16 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
   const { kept, dropped } = await checkFindings(fresh, readFile, readBase);
   const said = settle({ role, pass: v.pass, checklist: v.checklist, material: v.material, kept, dropped });
   const order = (a, b) => FINDING_LEVELS.indexOf(a.level) - FINDING_LEVELS.indexOf(b.level);
-  const findings = [...kept.sort(order), ...dropped, ...before];
-  // Nothing dropped, no repeats and nothing to correct: the file stays exactly as the session wrote it. So a second run on
-  // a file finalized before changes nothing, and what it dropped then stays dropped.
+  const findings = [...kept.sort(order), ...dropped];
+  // Nothing dropped, no repeats and nothing to correct: the file stays exactly as the session wrote it.
   const same = said.pass === v.pass && (role === 'reviewer' || said.material === v.material);
   if (!dropped.length && kept.length === fresh.length && same) return { ok: true, changed: false, kept: kept.length, dropped: 0 };
   let text;
   try { text = verdictFileText({ role, card, head, pass: said.pass, ...(role === 'reviewer' ? { checklist: said.checklist } : { material: said.material }), findings, finalized: true }); } catch (e) { return no(e?.message ?? String(e)); }
+  // The record comes first: a stop before the rename leaves a record of a file not there yet, and a run after it works
+  // out the same bytes. The other way round, a stop would leave a marked file the runner could not tell from a forged one.
+  const sha = createHash('sha256').update(text).digest('hex');
+  try { if (mark.read() !== sha) mark.write(sha); } catch (e) { return no(`the runner's record of it could not be written (${e?.code ?? e?.message})`); }
   const tmp = join(dir, `.finalize-${sessionId}`);
   let fd;
   try {
