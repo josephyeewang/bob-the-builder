@@ -10,9 +10,11 @@
 
 export { ASK_KINDS, BOX_STATUSES, RELEASE_REASONS, ASK_FIELDS, URGENT_DEFAULT, activeKind } from '../../shared/asks.mjs';
 import { ASK_KINDS, URGENT_DEFAULT } from '../../shared/asks.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const STILL_OPEN_LINE = 'Still open: a typed answer doesn\'t count, tap a choice';
 export const CLOSED_LINE = 'that question had closed; nothing was recorded';
+export const TIME_REASKED_LINE = 'that question was asked again because its time could not be read; nothing was recorded, so answer the new one';
 export const typedReplyLine = (card) => `Your typed reply didn't answer the question about ${card}; nothing was recorded. I'll ask again next time — tap a choice.`;
 export const otherCardLine = (card) => `The question below is about ${card}`;
 export const OTHER_ROOM_LINE = 'you have an open question in your thinking room';
@@ -30,9 +32,20 @@ export const WINDOW_GRACE_MS = 60 * 60_000;
 
 // When this round of an ask lapses: 12 hours after it was raised in this round (raised_reask = reask_count). A lapsed ask
 // sent back to open is not raised again until its next push or box, so until then nothing lapses it a second time.
-export function lapseAt(doc) {
-  const t = Date.parse(doc?.raised_at ?? '');
-  return ASK_KINDS[doc?.kind]?.lapse && Number.isFinite(t) && doc.raised_reask === doc.reask_count ? t + LAPSE_MS : Infinity;
+// An ask not raised this round (no raised_at, or another round's) never lapses. A raised_at that can't be read, or lies
+// more than a minute ahead of `now`, lapses now (L329: shared pastTime; an expiry fails closed, never "not yet").
+export function lapseAt(doc, now) {
+  if (!ASK_KINDS[doc?.kind]?.lapse || doc.raised_at == null || doc.raised_reask !== doc.reask_count) return Infinity;
+  const t = pastTime(doc.raised_at, now);
+  return t === null ? -Infinity : t + LAPSE_MS;
+}
+
+// A time from outside the Mini's clock (GitHub, the phone, any remote), as it is STORED: min(theirs, now), or now if it
+// can't be read (L362, a standing rule). Reading stays strict (pastTime), so a clock running ahead of the Mini must not
+// reach the record: a stored time read as "in the future" lapses an ask at the next pass, and the re-ask too.
+export function outsideTime(theirs, now) {
+  const t = Date.parse(theirs ?? '');
+  return Number.isFinite(t) ? Math.min(t, now) : now;
 }
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;

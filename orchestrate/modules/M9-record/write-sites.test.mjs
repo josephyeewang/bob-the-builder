@@ -34,7 +34,7 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 17, 'alerts, joe-waits ×2, lead-restart, merges, moves, outage, outbox-intake, pass, phone-link ×2, proposals-intake ×4, tick, usage');
+  assert.equal(n('dispatcher', 'fact'), 15, 'alerts, joe-waits ×2, lead-restart, merges ×2, moves, outage, outbox-intake, plan-go, proposals-intake ×4, usage (pass, tick and phone-link write through writeFrom, L335 m-1, L354)');
   // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
@@ -53,14 +53,15 @@ test('L112: the scan sees the writes the lead counted, so an empty answer is not
 
 test('L112, L118 m4, c3: an update is checked where the call passes a read rev, a create where it may be new', () => {
   const at = (file, line) => scan.sites.find((s) => s.file === file && s.line === line);
-  assert.deepEqual(at('modules/M11-dispatcher/alerts.mjs', 16).modes, ['create', 'update'], 'rec.read(...)?.rev ?? 0');
-  assert.deepEqual(at('modules/M11-dispatcher/phone-link.mjs', 44).modes, ['update'], 'c.rev');
-  // The gate's create, found by its text, so an edit above it does not move the check.
-  const gateSrc = SOURCES.find((f) => f.file === 'modules/M6-merge-gate/gate.mjs').src.split('\n');
-  const createLines = gateSrc.map((l, i) => (l.includes("entity: 'merge', id, expectRev: 0, doc: { state: 'requested'") ? i + 1 : 0)).filter(Boolean);
-  assert.equal(createLines.length, 1, `the gate's create write is found on exactly one line (found on: ${createLines.join(', ') || 'none'})`);
-  const [createLine] = createLines;
-  assert.deepEqual(at('modules/M6-merge-gate/gate.mjs', createLine).modes, ['create'], '0');
+  // Each site is found by its text, on exactly one line, so an edit above it does not move the check (L351, lane 5's #175).
+  const lineOf = (file, text) => {
+    const lines = SOURCES.find((f) => f.file === file).src.split('\n').map((l, i) => (l.includes(text) ? i + 1 : 0)).filter(Boolean);
+    assert.equal(lines.length, 1, `${file}: ${JSON.stringify(text)} is found on exactly one line (found on: ${lines.join(', ') || 'none'})`);
+    return lines[0];
+  };
+  const alerts = 'modules/M11-dispatcher/alerts.mjs', gate = 'modules/M6-merge-gate/gate.mjs';
+  assert.deepEqual(at(alerts, lineOf(alerts, "rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: cur?.rev ?? 0")).modes, ['create', 'update'], 'cur?.rev ?? 0');
+  assert.deepEqual(at(gate, lineOf(gate, "entity: 'merge', id, expectRev: 0, doc: { state: 'requested'")).modes, ['create'], '0');
   // c3: gate.mjs's write() helper passes cur.rev, so it is an update, and the table says so.
   const gateHelper = scan.sites.filter((s) => s.file === 'modules/M6-merge-gate/gate.mjs' && s.via === 'write()');
   assert.ok(gateHelper.length >= 5, `${gateHelper.length} write() calls in gate.mjs`);

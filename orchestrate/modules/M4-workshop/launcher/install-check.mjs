@@ -22,7 +22,7 @@
 //   chainProblem(path)                  → null, or why `path` and every folder above it is not root's alone
 //   aclProblem(paths)                   → null, or the first path that has an access list (ACL)
 //   readInstallStamp(installRoot)       → the 40-hex commit stamp, or null
-//   readMainSeen(file), nextMainSeen(prev, now), behindSince(state, main) → root's record of when main moved ahead
+//   readMainSeen(file), nextMainSeen(prev, now), behindSince(state, main, installed) → root's record of when main moved ahead
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
@@ -304,11 +304,14 @@ export function nextMainSeen(prev, { commit, installed, now }) {
 }
 
 /**
- * The `since` the Dispatcher's stamp alert waits from (M11 review-requests.mjs `mainHead`), for main at `main`: the
- * record's own `since` when the updater has seen that head; otherwise the updater's last fetch, since main moved after
- * it (an updater that stops fetching is then told once the grace is over). No record → null (told at once).
+ * The `since` the Dispatcher's stamp alert waits from (M11 review-requests.mjs `mainHead`), for main at `main` and the
+ * copy at `installed`: the record's own `since` when the updater has seen that head, or when the record already has this
+ * same copy behind (L437: the grace only delays the first tell, so main moving on does not start it again); otherwise
+ * the updater's last fetch, since main moved after it (an updater that stops fetching is then told once the grace is
+ * over). No record → null (told at once).
  */
-export function behindSince(state, main) {
+export function behindSince(state, main, installed) {
   if (!state) return null;
-  return state.commit === main ? state.since : state.checked_at;
+  const alreadyBehind = state.installed !== state.commit && state.installed === installed;
+  return state.commit === main || alreadyBehind ? state.since : state.checked_at;
 }

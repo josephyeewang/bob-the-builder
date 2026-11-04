@@ -13,7 +13,7 @@ import {
 } from './proposals-intake.mjs';
 import { cleanOutside, SOURCES, SINGLE_LINE, isFenced } from '../M12-sensors/escape.mjs';
 import { FAKE } from '../M12-sensors/fakes.mjs';
-import { recWith, seed } from './fixtures.test-helper.mjs';
+import { recWith, seed, writeLog, queueFor } from './fixtures.test-helper.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -1069,4 +1069,15 @@ test('L329: a lone bundle with an unreadable or future file time is refused, not
     const out = await w.pass({ look: (p) => (/bundle-C-2/.test(p) ? `5:${mtime}:77` : null) });
     assert.equal(one(out, 'bundle-C-2.bundle').refused, 'no proposal-C-2.md names this bundle\'s card', label);
   }
+});
+
+test('L354 item 2: a cause cleared whose queued alert cannot be dropped is told, not lost', async () => {
+  const w = world();
+  chmodSync(w.dirs.a, 0o755);
+  await w.pass();
+  chmodSync(w.dirs.a, 0o750);
+  queueFor(w.rec, folderFactId('a'), 'told_why', 'x', NOW);
+  const told = fakeAlert();
+  await proposalsPass({ ...w.base, rec: writeLog(w.rec, [], { refuseDrop: true }), alert: told });
+  assert.ok(told.texts.some((t) => t === `the queued alert for ${folderFactId('a')} could not be dropped`), told.texts.join(' | '));
 });

@@ -48,7 +48,7 @@ export const BOX_STATUSES = Object.freeze({
 
 // Why a box was released (round 3 M3-1, round 4 m4-1, round 5 M5-1 — a closed list; a push or re-push is never one).
 export const RELEASE_REASONS = Object.freeze(['typed', 'declined', 'session_replaced', 'session_ended', 'tampered',
-  'lapsed', 'withdrawn', 'expired', 'answered_elsewhere']);
+  'lapsed', 'withdrawn', 'expired', 'answered_elsewhere', 'time_unreadable']);
 
 // The ask document's fields, written only by `approvals` (round 1 m6). Listed so a reader knows what it may rely on.
 export const ASK_FIELDS = Object.freeze([
@@ -56,4 +56,5 @@ export const ASK_FIELDS = Object.freeze([
   'choices', 'recommended', 'payload', 'payload_sha256', 'payload_still_open', 'payload_still_open_sha256',
   'origin_session', 'boxes', 'released_typed', 'answer', 'pr', 'fingerprint', 'fingerprint_inputs', 'rows', 'files',
   'modules', 'window_pushes', 'last_push_at', 'lapsed_at', 'push_sent_at', 'main_alert_sent_at', 'pr_close_due',
+  'time_reasked_at', 'withdrawn_for', 'pr_open_told_at',
 ]);

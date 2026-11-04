@@ -5,16 +5,18 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { env, OWNER_ID, session, write, box, PRODUCT, must } from './fixtures.test-helper.mjs';
+import { env, OWNER_ID, session, write, box, tap, PRODUCT, must } from './fixtures.test-helper.mjs';
 import { leadCard, put } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { askStore, consumeAsk, writeDoc } from './ask-store.mjs';
-import { createAsk, processSession } from './binding.mjs';
+import { boxSession, createAsk, processSession, nextBox } from './binding.mjs';
 import { readDecision } from './decision.mjs';
 import { approvalStands, heldBy, readApprove, schedulePass } from './schedule.mjs';
-import { UNDO_OPEN_QUESTION_LINE } from './kinds.mjs';
+import { approvalsAlertText } from '../M11-dispatcher/tick.mjs';
+import { TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, lapseAt } from './kinds.mjs';
 
 const MIN = 60_000; const HOUR = 60 * MIN;
 // 2026-10-01 is summer time in Los Angeles (UTC-7): 08:00 local = 15:00Z, 17:00 local = 00:00Z next day.
@@ -24,11 +26,12 @@ const W8 = AT('2026-10-01T15:00:00Z'); const W17 = AT('2026-10-02T00:00:00Z');
 function world(values = {}) {
   const t = env({ values });
   const pushes = [];
-  const g = fakeGitHub({ ownerId: OWNER_ID, now: () => t.clock.t });
+  let ahead = 0;   // how far GitHub's clock runs ahead of the Mini's
+  const g = fakeGitHub({ ownerId: OWNER_ID, now: () => t.clock.t + ahead });
   g.repo.main = g.repo.commit([], { 'src/a.mjs': 'one' });
   Object.assign(t.ctx, { gh: g.gh, owner: 'sample-org', repo: 'sample-app', stateDir: join(t.base, 'm2-state'), push: (e) => { pushes.push({ ...e, at: t.clock.t }); return true; } });
   const at = (ms) => { t.clock.t = ms; return schedulePass(t.ctx); };
-  return { t, g, pushes, at };
+  return { t, g, pushes, at, setAhead: (ms) => { ahead = ms; } };
 }
 const ask = (w, id) => askStore(w.t.record).ask(id).doc;
 const yesNo = (w, id = 'Q-1', over = {}) => must(createAsk(w.t.ctx, { id, kind: 'tap_yes_no', card: 'C-1', title: 'Ship the export', ...over }));
@@ -543,3 +546,495 @@ test('L205: an Approve whose GitHub read fails is unreadable, not withdrawn; onc
   assert.deepEqual([no.ok, no.unreadable], [false, undefined], 'GitHub\'s answer: changes asked for');
 });
 
+// L295 Minor 1: a push that can't go out is told once per ask and cause, not every pass. An urgent undo is tried every
+// pass; with no phone channel it was told every minute. A push that goes through clears the ask's marks, so a later
+// failure is told again; an alert the sink did not take is not marked, and is told next pass.
+test('L295 Minor 1: a refused push is told once per ask and cause; a push that goes through clears the marks', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = (id) => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === id).length;
+  w.t.sink.answer = false;
+  await w.at(W8);
+  assert.equal(noPush('U-1'), 0, 'the sink refused: not marked');
+  w.t.sink.answer = true;
+  for (let i = 1; i <= 5; i++) await w.at(W8 + i * MIN);
+  assert.equal(noPush('U-1'), 1, 'told once over five passes');
+  must(createAsk(w.t.ctx, { id: 'U-2', kind: 'undo', card: 'C-2', title: 'Undo two' }));
+  await w.at(W8 + 6 * MIN);
+  await w.at(W8 + 7 * MIN);
+  assert.deepEqual([noPush('U-1'), noPush('U-2')], [1, 1], 'once per ask');
+  // The channel comes: both go out, and their marks go.
+  let up = true;
+  w.t.ctx.push = () => up;
+  await w.at(W8 + 8 * MIN);
+  assert.equal(ask(w, 'U-1').state, 'pushed');
+  assert.deepEqual(JSON.parse(readFileSync(join(w.t.ctx.stateDir, 'ask-alerts.json'), 'utf8')), {});
+  // A later failure of the re-push is a new cause, told once.
+  up = false;
+  const notSent = () => w.t.alerts.filter((a) => a.type === 'push_not_sent' && a.ask === 'U-1').length;
+  await w.at(W8 + 8 * MIN + 2 * HOUR);
+  await w.at(W8 + 8 * MIN + 2 * HOUR + MIN);
+  await w.at(W8 + 8 * MIN + 4 * HOUR);
+  assert.equal(notSent(), 1);
+  // L309 MAT-2: told again each day while the ask still waits: not at +2 h, again past +24 h.
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 23 * HOUR);
+  assert.equal(notSent(), 1, 'under a day: not again');
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 25 * HOUR);
+  assert.equal(notSent(), 2, 'a day on and still waiting: told again');
+  await w.at(W8 + 8 * MIN + 2 * HOUR + 26 * HOUR);
+  assert.equal(notSent(), 2);
+});
+
+// L309 MAT-2: an ask never pushed has no time limit, so its cause is re-told each day, not once ever.
+test('L309 MAT-2: an ask with no phone channel is told again each day while it waits', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(noPush(), 1, '+2 h: not again');
+  await w.at(W8 + 25 * HOUR);
+  assert.equal(noPush(), 2, '+25 h: again');
+  await w.at(W8 + 26 * HOUR);
+  assert.equal(noPush(), 2);
+  await w.at(W8 + 50 * HOUR);
+  assert.equal(noPush(), 3);
+});
+
+// L309 Minor 2: an ask-alerts file that can't be read or parsed is "nothing told", never "already told", and is
+// replaced by a readable one, so the cause is told once more, not every pass.
+test('L309 Minor 2: a corrupt or unreadable ask-alerts.json tells again, once', async () => {
+  for (const how of ['corrupt', 'unreadable']) {
+    const w = world();
+    delete w.t.ctx.push;
+    must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+    const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+    await w.at(W8);
+    assert.equal(noPush(), 1);
+    const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+    if (how === 'corrupt') writeFileSync(f, '{ not json');
+    else chmodSync(f, 0o200);
+    await w.at(W8 + MIN);
+    assert.equal(noPush(), 2, `${how}: told again`);
+    await w.at(W8 + 2 * MIN);
+    assert.equal(noPush(), 2, `${how}: the file was replaced, so not every pass`);
+    assert.equal(typeof JSON.parse(readFileSync(f, 'utf8'))['U-1'], 'object');
+  }
+});
+
+// L315: a bad rules config raises no asks, so it is told again each day while the same problem stands, and its mark goes
+// once the config reads fine. L317: a told time more than a minute ahead counts as not told.
+test('L315: a bad config is told again each day while it stands; L317: a told time 30 days ahead is not "told"', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  yesNo(w);
+  const cfg = () => w.t.alerts.filter((a) => a.type === 'approvals_config').length;
+  await w.at(W8);
+  assert.equal(cfg(), 1);
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(cfg(), 1, '+2 h: quiet');
+  await w.at(W8 + 25 * HOUR);
+  assert.equal(cfg(), 2, '+25 h: told again');
+  await w.at(W8 + 26 * HOUR);
+  assert.equal(cfg(), 2);
+  const f = join(w.t.ctx.stateDir, 'config-alert.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  writeFileSync(f, JSON.stringify({ ...m, told_at: new Date(Date.parse(m.told_at) + 30 * 24 * HOUR).toISOString() }));
+  await w.at(W8 + 27 * HOUR);
+  assert.equal(cfg(), 3, 'a told time 30 days ahead: told now');
+  await w.at(W8 + 28 * HOUR);
+  assert.equal(cfg(), 3);
+});
+
+// L331 Minor 2: the config mark goes once the config reads fine, so the same problem coming back is told at once,
+// not held back by the day an earlier copy of it was told.
+test('L331 Minor 2: a fixed config clears its mark, and the same problem coming back is told at once', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  const bad = w.t.ctx.rules;
+  yesNo(w);
+  const cfg = () => w.t.alerts.filter((a) => a.type === 'approvals_config').length;
+  const f = join(w.t.ctx.stateDir, 'config-alert.json');
+  await w.at(W8);
+  assert.equal(cfg(), 1);
+  assert.ok(existsSync(f));
+  w.t.ctx.rules = env().ctx.rules;   // the same rules with a config that reads fine
+  await w.at(W8 + HOUR);
+  assert.equal(existsSync(f), false, 'the mark is gone once the config reads fine');
+  assert.equal(cfg(), 1);
+  w.t.ctx.rules = bad;
+  await w.at(W8 + 2 * HOUR);
+  assert.equal(cfg(), 2, 'the same problem again, an hour later: told at once');
+});
+
+test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that cannot be pushed is told now', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  assert.equal(noPush(), 1);
+  const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] = { told_at: new Date(Date.parse(m['U-1'][k].told_at) + 30 * 24 * HOUR).toISOString() };
+  writeFileSync(f, JSON.stringify(m));
+  await w.at(W8 + MIN);
+  assert.equal(noPush(), 2);
+  await w.at(W8 + 2 * MIN);
+  assert.equal(noPush(), 2);
+});
+
+// L321's rule on the ask marks: no mark to read is "not told". It tells, and never counts as told a moment ago.
+test('L326: an ask-alerts mark that is null is due', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  assert.equal(noPush(), 1);
+  const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] = null;
+  writeFileSync(f, JSON.stringify(m));
+  await w.at(W8 + MIN);
+  assert.equal(noPush(), 2, 'a null mark is not told');
+  await w.at(W8 + 2 * MIN);
+  assert.equal(noPush(), 2, 'and it is marked again');
+});
+
+// L329 (L321 sweep): every stored time M2 reads for "has it lapsed / is a push due" goes through shared pastTime. A time
+// that can't be read, or lies an hour ahead (a clock that went back, a bad write), counts as long past: an expiry lapses
+// now and a push goes out now, never waits on a time it can't trust. Two plants per site.
+const PLANTS = (now) => [['unreadable', 'not a time'], ['1 h ahead', new Date(now + HOUR).toISOString()]];
+const plant = (w, id, fields) => {
+  const c = w.t.record.read('ask', id);
+  must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: c.rev, doc: { ...c.doc, ...fields } }), `plant ${id}`);
+};
+
+for (const [name, at] of PLANTS(W8 + HOUR)) {
+  test(`L329 kinds lapseAt + runOut: a raised_at ${name} lapses the ask at the next pass`, async () => {
+    const w = world();
+    yesNo(w);
+    await w.at(W8);
+    assert.equal(ask(w, 'Q-1').state, 'pushed');
+    plant(w, 'Q-1', { raised_at: at });
+    await w.at(W8 + HOUR);
+    assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').reask_count], ['open', 1], 'lapsed now, not never (or an hour late)');
+  });
+
+  test(`L329 binding nextBox and tryBind: an ask whose raised_at is ${name} is not offered, and a box for it is refused as lapsed`, async () => {
+    const w = world();
+    session(w.t, 'FD-1');
+    yesNo(w);
+    await w.at(W8);
+    w.t.clock.t = W8 + HOUR;
+    assert.equal(nextBox(w.t.ctx, { sessionId: 'FD-1', role: 'front_door' })?.ask, 'Q-1', 'control: offered while it stands');
+    plant(w, 'Q-1', { raised_at: at });
+    assert.equal(nextBox(w.t.ctx, { sessionId: 'FD-1', role: 'front_door' }), null);
+    const b = box(ask(w, 'Q-1').payload, W8 + HOUR);
+    write(w.t, 'FD-1', b.entry);
+    const r = must(processSession(w.t.ctx, { sessionId: 'FD-1', sourcePath: w.t.log('FD-1') }));
+    assert.ok(r.events.some((e) => e.type === 'mismatched_question' && e.reason === 'the ask has lapsed'), JSON.stringify(r.events));
+  });
+
+  test(`L329 schedule: an urgent ask whose last_push_at is ${name} is re-pushed now`, async () => {
+    const w = world();
+    const t0 = AT('2026-10-01T12:00:00Z');
+    must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo the export' }));
+    await w.at(t0);
+    assert.equal(w.pushes.length, 1);
+    plant(w, 'U-1', { last_push_at: at === 'not a time' ? at : new Date(t0 + 30 * MIN + HOUR).toISOString() });
+    await w.at(t0 + 30 * MIN);
+    assert.equal(w.pushes.length, 2, 'pushed again at once, not held back by the stored time');
+  });
+
+  test(`L329 schedule: a non-urgent ask whose created_at is ${name} goes out in the next window`, async () => {
+    const w = world();
+    yesNo(w);
+    plant(w, 'Q-1', { created_at: at === 'not a time' ? at : new Date(W8 + HOUR).toISOString() });
+    await w.at(W8);
+    assert.deepEqual(w.pushes.map((p) => p.ask), ['Q-1'], 'never kept out of every window');
+  });
+
+  test(`L329 schedule: a merge approval whose raised_at is ${name} no longer stands, and goes back at the next pass`, async () => {
+    const w = riskyWorld();
+    await w.at(W8);
+    w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR });
+    w.t.clock.t = W8 + HOUR;
+    assert.equal((await readApprove(w.t.ctx, 'R-1', { view: w.view })).counted, true);
+    assert.equal((await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view })).ok, true, 'control');
+    plant(w, 'R-1', { raised_at: at === 'not a time' ? at : new Date(W8 + 2 * HOUR).toISOString() });
+    const s = await approvalStands(w.t.ctx, 'R-1', { head: w.H, view: w.view });
+    assert.deepEqual([s.ok, s.reason], [false, 'the approval lapsed: no merge within 24 hours']);
+    await w.at(W8 + HOUR + MIN);
+    assert.deepEqual([ask(w, 'R-1').state, ask(w, 'R-1').reask_count], ['open', 1], 'an unused approval never outlives a time it cannot trust');
+  });
+}
+
+// L362 MAT-1, a standing rule: a time from outside the Mini's clock is stored as min(theirs, now). With GitHub ahead, a
+// stored raised_at read strictly (pastTime) would lapse the ask at the next pass, and the re-ask too, so Joe's Approve
+// could never count. Every outside-sourced stored time, with a clock 10 minutes ahead.
+const AHEAD = 10 * MIN;
+const iso = (ms) => new Date(ms).toISOString();
+const run = (w, sid = 'FD-1') => must(processSession(w.t.ctx, { sessionId: sid, sourcePath: w.t.log(sid) }));
+
+test('L362 GitHub 10 min ahead: a risky ask raised on its time is stored at the Mini\'s now, stays raised, and its Approve counts', async () => {
+  const w = riskyWorld();
+  w.setAhead(AHEAD);
+  await w.at(W8);
+  assert.equal(ask(w, 'R-1').raised_at, iso(W8), 'raised_at from schedule.mjs: not ahead of now');
+  await w.at(W8 + MIN);
+  assert.deepEqual([ask(w, 'R-1').state, ask(w, 'R-1').reask_count], ['pushed', 0], 'never lapsed by GitHub\'s clock');
+  w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR + AHEAD });
+  w.t.clock.t = W8 + HOUR;
+  assert.equal((await readApprove(w.t.ctx, 'R-1', { view: w.view })).counted, true);
+  assert.equal(ask(w, 'R-1').answer.binding.submitted_at, iso(W8 + HOUR), 'submitted_at: not ahead of now');
+});
+
+test('L362 GitHub 10 min ahead: a decision raised on its time stays raised, and its answer is stored at the Mini\'s now', async () => {
+  const w = world();
+  w.setAhead(AHEAD);
+  must(createAsk(w.t.ctx, { id: 'D-1', kind: 'decision', card: 'C-1', title: 'Which format', choices: ['CSV', 'JSON'], recommended: 'CSV' }));
+  await w.at(W8);
+  assert.equal(ask(w, 'D-1').raised_at, iso(W8), 'raised_at from decision.mjs: not ahead of now');
+  await w.at(W8 + MIN);
+  assert.deepEqual([ask(w, 'D-1').state, ask(w, 'D-1').reask_count], ['pushed', 0]);
+  const pr = ask(w, 'D-1').pr;
+  w.g.review(pr, { state: 'APPROVED', commit_id: w.g.pulls.get(pr).head, submitted_at: W8 + HOUR + AHEAD });
+  w.t.clock.t = W8 + HOUR;
+  assert.equal((await readDecision(w.t.ctx, 'D-1')).counted, true);
+  assert.equal(ask(w, 'D-1').answer.binding.submitted_at, iso(W8 + HOUR), 'submitted_at: not ahead of now');
+});
+
+test('L362 a session log 10 min ahead: the box\'s times and the tap\'s are stored at the Mini\'s now', async () => {
+  const w = world();
+  session(w.t, 'FD-1');
+  yesNo(w);
+  w.t.clock.t = W8 + HOUR;
+  const input = ask(w, 'Q-1').payload;
+  const b = box(input, W8 + HOUR + AHEAD);
+  write(w.t, 'FD-1', b.entry);
+  run(w);
+  const d = ask(w, 'Q-1');
+  assert.deepEqual([d.boxes[0].bound_at, d.first_pushed_at, d.raised_at], [iso(W8 + HOUR), iso(W8 + HOUR), iso(W8 + HOUR)]);
+  await w.at(W8 + HOUR + MIN);
+  assert.equal(ask(w, 'Q-1').state, 'pushed', 'never lapsed by the log\'s clock');
+  write(w.t, 'FD-1', tap(b.id, input, 'Yes', W8 + HOUR + AHEAD + MIN));
+  run(w);
+  assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').answer.at], ['answered', iso(W8 + HOUR + MIN)]);
+});
+
+// L362 MAT-2: a created_at that can't be read proves nothing about a box. The box never binds (an old box must not answer
+// a new ask); the pass raises the ask afresh and tells Joe, and a tap on the old box is told why.
+const NOW = W8 + 2 * HOUR;   // outside a window, so the pass only re-raises
+const reasked = (w) => w.t.alerts.filter((a) => a.type === 'ask_time_unreadable');
+for (const [name, bad] of [['null', null], ['garbage', 'not a time'], ['1 h ahead', iso(NOW + HOUR)]]) {
+  test(`L362 a created_at that is ${name}: a box never binds on it, Joe is told, the ask is raised afresh, and a new box answers it`, async () => {
+    const w = world();
+    session(w.t, 'FD-1');
+    yesNo(w);
+    w.t.clock.t = NOW;
+    plant(w, 'Q-1', { created_at: bad });
+    const input = ask(w, 'Q-1').payload;
+    const old = box(input, NOW);
+    write(w.t, 'FD-1', old.entry);
+    const r = run(w);
+    assert.deepEqual(r.events.map((e) => [e.type, e.line]), [['mismatched_question', TIME_REASKED_LINE]], 'never bound');
+    assert.equal(ask(w, 'Q-1').state, 'open');
+
+    const e = await w.at(NOW + MIN);
+    assert.ok(e.events.some((x) => x.type === 'reasked_time_unreadable' && x.line === TIME_REASKED_LINE), JSON.stringify(e.events));
+    assert.equal(reasked(w).length, 1);
+    assert.equal(approvalsAlertText('sample-app', reasked(w)[0]), 'The question about C-1 [ask Q-1] is being asked again because its time could not be read. An earlier copy of it no longer counts.', 'what Joe actually receives');
+    const d = ask(w, 'Q-1');
+    assert.deepEqual([d.state, d.created_at, d.time_reasked_at, d.reask_count, d.raised_at], ['open', iso(NOW + MIN), iso(NOW + MIN), 0, undefined], 'raised afresh; the one re-ask is not spent');
+
+    await w.at(NOW + 2 * MIN);
+    assert.equal(reasked(w).length, 1, 'told once: its time reads now');
+
+    write(w.t, 'FD-1', tap(old.id, input, 'Yes', NOW + 3 * MIN));
+    const closed = run(w).events;
+    assert.deepEqual(closed.map((x) => [x.type, x.line]), [['closed', TIME_REASKED_LINE]], 'the old tap is told why, and counts nothing');
+    assert.equal(ask(w, 'Q-1').state, 'open');
+
+    w.t.clock.t = NOW + 4 * MIN;
+    const fresh = box(input, NOW + 4 * MIN);
+    write(w.t, 'FD-1', fresh.entry, tap(fresh.id, input, 'Yes', NOW + 4 * MIN));
+    run(w);
+    assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').answer.choice], ['answered', 'Yes']);
+  });
+}
+
+test('L362 a box already live when the time goes bad is released, and its tap gets the asked-again line, not "had closed"', async () => {
+  const w = world();
+  session(w.t, 'FD-1');
+  yesNo(w);
+  w.t.clock.t = NOW;
+  const input = ask(w, 'Q-1').payload;
+  const b = box(input, NOW);
+  write(w.t, 'FD-1', b.entry);
+  run(w);
+  assert.equal(ask(w, 'Q-1').state, 'pushed', 'control: bound');
+  plant(w, 'Q-1', { created_at: 'not a time' });
+  await w.at(NOW + MIN);
+  const d = ask(w, 'Q-1');
+  assert.deepEqual([d.state, d.boxes[0].status, d.boxes[0].reason, d.raised_at, d.raised_reask], ['open', 'released', 'time_unreadable', undefined, undefined], 'its old raise is gone, so this round is raised afresh');
+  write(w.t, 'FD-1', tap(b.id, input, 'Yes', NOW + 2 * MIN));
+  assert.deepEqual(run(w).events.map((e) => [e.type, e.line]), [['closed', TIME_REASKED_LINE]]);
+  assert.equal(ask(w, 'Q-1').answer, undefined);
+});
+
+test('L362 a box from before the re-raise, first read after it, is refused and its tap told the same', async () => {
+  const w = world();
+  session(w.t, 'FD-1');
+  yesNo(w);
+  w.t.clock.t = NOW;
+  plant(w, 'Q-1', { created_at: 'not a time' });
+  await w.at(NOW + MIN);
+  const input = ask(w, 'Q-1').payload;
+  const old = box(input, NOW);
+  write(w.t, 'FD-1', old.entry, tap(old.id, input, 'Yes', NOW + 2 * MIN));
+  assert.deepEqual(run(w).events.map((e) => [e.type, e.line]), [['mismatched_question', TIME_REASKED_LINE], ['closed', TIME_REASKED_LINE]]);
+  assert.equal(ask(w, 'Q-1').answer, undefined);
+});
+
+test('L362 a healthy ask keeps its refusal: a box older than the ask binds nothing, with no asked-again line', async () => {
+  const w = world();
+  session(w.t, 'FD-1');
+  w.t.clock.t = NOW;
+  yesNo(w);
+  const input = ask(w, 'Q-1').payload;
+  const old = box(input, NOW - MIN);
+  write(w.t, 'FD-1', old.entry, tap(old.id, input, 'Yes', NOW));
+  const events = run(w).events;
+  assert.deepEqual(events.map((e) => [e.type, e.reason, e.line]), [['mismatched_question', 'asked before the ask was created', undefined]]);
+});
+
+for (const answer of [false, 'throws']) {
+  test(`L362 a tell the sink refuses (${answer}) leaves the ask as it is, and the next pass tells and re-raises`, async () => {
+    const w = world();
+    yesNo(w);
+    w.t.clock.t = NOW;
+    plant(w, 'Q-1', { created_at: 'not a time' });
+    w.t.sink.answer = answer;
+    await w.at(NOW + MIN);
+    assert.equal(ask(w, 'Q-1').created_at, 'not a time', 'never raised without Joe being told');
+    delete w.t.sink.answer;
+    await w.at(NOW + 2 * MIN);
+    assert.equal(ask(w, 'Q-1').created_at, iso(NOW + 2 * MIN));
+    assert.equal(reasked(w).length, 1);
+  });
+}
+
+test('L362 only a waiting tap ask is re-raised: a GitHub ask and an answered ask keep their created_at', async () => {
+  const w = riskyWorld();
+  yesNo(w);
+  await w.at(W8);
+  must(writeDoc(w.t.record, 'ask', askStore(w.t.record).ask('Q-1'), { ...ask(w, 'Q-1'), state: 'answered', answer: { choice: 'Yes' } }));
+  plant(w, 'R-1', { created_at: 'not a time' });
+  plant(w, 'Q-1', { created_at: 'not a time' });
+  await w.at(W8 + MIN);
+  assert.deepEqual([ask(w, 'R-1').created_at, ask(w, 'Q-1').created_at, reasked(w).length], ['not a time', 'not a time', 0]);
+});
+
+// L362 m1: the newest Front Door is the diary's newest, never the one with the latest stored launch time.
+const launchAt = (w, sid, launched_at) => must(w.t.record.write({ actor: 'dispatcher', entity: 'launch', id: `launch-${sid}`, expectRev: 0,
+  doc: { session_id: sid, role: 'front_door', card: 'C-0', head: 'a'.repeat(40), rev: 1, launched_at } }), 'launch');
+
+test('L362 m1: a stale launch stamped days ahead does not beat the live one', () => {
+  const w = world();
+  launchAt(w, 'FD-1', iso(w.t.clock.t + 72 * HOUR));
+  launchAt(w, 'FD-2', iso(w.t.clock.t));
+  assert.equal(boxSession(w.t.record, 'FD-2').ok, true);
+  assert.equal(boxSession(w.t.record, 'FD-1').replaced, true);
+});
+
+test('L362 m1: a live launch with a garbage time does not sort oldest', () => {
+  const w = world();
+  launchAt(w, 'FD-1', iso(w.t.clock.t));
+  launchAt(w, 'FD-2', 'not a time');
+  assert.equal(boxSession(w.t.record, 'FD-2').ok, true);
+  assert.equal(boxSession(w.t.record, 'FD-1').replaced, true);
+});
+
+test('L412 c1 planted: a session launched twice is what its newest launch says', () => {
+  const again = (w, id, role) => must(w.t.record.write({ actor: 'dispatcher', entity: 'launch', id, expectRev: 0,
+    doc: { session_id: 'FD-1', role, card: 'C-0', head: 'a'.repeat(40), rev: 1, launched_at: iso(w.t.clock.t) } }), 'launch');
+  const boxFirst = world();
+  again(boxFirst, 'launch-1', 'front_door');
+  again(boxFirst, 'launch-2', 'reviewer');
+  assert.match(boxSession(boxFirst.t.record, 'FD-1').reason, /a reviewer session holds no approval box/);
+  const boxLast = world();
+  again(boxLast, 'launch-1', 'reviewer');
+  again(boxLast, 'launch-2', 'front_door');
+  assert.equal(boxSession(boxLast.t.record, 'FD-1').ok, true);
+});
+
+// L362 m2, m3: the plants that survived the audit of #180.
+test('L362 m2 and P9: a pushed merge approval with no readable raised time says why it counted nothing', async () => {
+  for (const raised_at of [null, 'not a time']) {
+    const w = riskyWorld();
+    await w.at(W8);
+    w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR });
+    w.t.clock.t = W8 + HOUR;
+    plant(w, 'R-1', { raised_at });
+    const r = await readApprove(w.t.ctx, 'R-1', { view: w.view });
+    assert.deepEqual([r.counted, r.reason], [false, 'the ask has no readable raised time this round']);
+  }
+});
+
+test('L362 P9: a raised_at an hour ahead counts no Approve, even one stamped after it', async () => {
+  const w = riskyWorld();
+  await w.at(W8);
+  w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + 3 * HOUR });
+  w.t.clock.t = W8 + HOUR;
+  plant(w, 'R-1', { raised_at: iso(W8 + 2 * HOUR) });
+  const r = await readApprove(w.t.ctx, 'R-1', { view: w.view });
+  assert.deepEqual([r.counted, r.lapsed], [false, true]);
+});
+
+test('L362 P9b: an Approve is read only for this round\'s raise', async () => {
+  const w = riskyWorld();
+  await w.at(W8);
+  w.g.review(7, { state: 'APPROVED', commit_id: w.H, submitted_at: W8 + HOUR });
+  w.t.clock.t = W8 + HOUR;
+  assert.ok(lapseAt(ask(w, 'R-1'), W8 + HOUR) > W8, 'control');
+  plant(w, 'R-1', { raised_reask: 5 });
+  const r = await readApprove(w.t.ctx, 'R-1', { view: w.view });
+  assert.deepEqual([r.counted, r.reason], [false, 'the ask has no readable raised time this round']);
+});
+
+test('L362 P6b: a raised_at 30 s ahead is kept, and runs 12 hours from that time', async () => {
+  const w = world();
+  yesNo(w);
+  await w.at(W8);
+  const ahead = W8 + HOUR + 30_000;
+  plant(w, 'Q-1', { raised_at: iso(ahead) });
+  assert.equal(lapseAt(ask(w, 'Q-1'), W8 + HOUR), ahead + 12 * HOUR);
+  await w.at(W8 + HOUR);
+  assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').reask_count], ['pushed', 0], 'a small drift is no lapse');
+});
+
+for (const raised_at of [12345, '']) {
+  test(`L362 P13: a raised_at of ${JSON.stringify(raised_at)} lapses the ask, not never`, async () => {
+    const w = world();
+    yesNo(w);
+    await w.at(W8);
+    plant(w, 'Q-1', { raised_at });
+    assert.equal(lapseAt(ask(w, 'Q-1'), W8 + HOUR), -Infinity);
+    await w.at(W8 + HOUR);
+    assert.deepEqual([ask(w, 'Q-1').state, ask(w, 'Q-1').reask_count], ['open', 1]);
+  });
+}
+
+// L326: the config mark names its problem, so a different problem is told at once, not held back by the day.
+test('L326: a different config problem is told at once', async () => {
+  const w = world({ 'approvals.push_windows': [] });
+  const reasons = () => w.t.alerts.filter((a) => a.type === 'approvals_config').map((a) => a.reason);
+  await w.at(W8);
+  assert.equal(reasons().length, 1);
+  w.t.ctx.rules = world({ 'accounts.joe.github_id': 'not a number' }).t.ctx.rules;
+  await w.at(W8 + HOUR);
+  assert.equal(reasons().length, 2);
+  assert.notEqual(reasons()[0], reasons()[1]);
+});

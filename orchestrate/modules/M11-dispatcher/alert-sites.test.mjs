@@ -126,7 +126,6 @@ export const LATE_MARK_OK = Object.freeze({
   RESTART_FACT: 'once per Lead session, and a session id is never reused',
   REVIEW_ALERT_FACT: 'one fact per review runner alert (its id and time), so a late mark is on an alert that has been told',
   // L127: told notes, written as the mark of the alert they record.
-  UNREAD_FACT: 'one per merge id, and a merge is one request, never reused: a late note is on a merge whose owner was told',
   RECONCILE_TELL_FACT: 'one per merge id, on a merge GitHub shows merged, which stays so: a late copy is still true',
   RECONCILED_FACT: 'a refused merge whose PR shows merged stays so (a merged PR does not unmerge): a late note still holds',
   ASK_REFUSED_FACT: 'one per card and refusal count; a later refusal is a new count, told again',
@@ -149,7 +148,7 @@ export function markFacts(files) {
 }
 export function undroppedCauses(files) {
   const all = files.map(([, t]) => t.replace(/\/\/.*$/gm, '')).join('\n');
-  return markFacts(files).filter((n) => !(n in LATE_MARK_OK) && !new RegExp(String.raw`dropCause\(\s*rec\s*,\s*${n}\b`).test(all));
+  return markFacts(files).filter((n) => !(n in LATE_MARK_OK) && !new RegExp(String.raw`(?:dropCause|clearCause)\(\s*rec\s*,\s*${n}\b|clearTold\(\s*rec\s*,\s*now\s*,\s*${n}\b`).test(all));
 }
 
 test('r7 M2 sweep: every told mark has a place its cause clears, or a reason a late mark is harmless', () => {

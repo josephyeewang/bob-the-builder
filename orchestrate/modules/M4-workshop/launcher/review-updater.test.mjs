@@ -666,6 +666,9 @@ test('L73 point 7(b): the stamp alert\'s "since" is when the updater first saw m
   assert.deepEqual(s12, { commit: main3, since: 5_000, installed: w.main1, checked_at: 12_000 }, 'a main that keeps moving does not restart it');
   assert.equal(behindSince(s12, main3), 5_000);
   assert.equal(behindSince(s12, 'f'.repeat(40)), 12_000, 'a head the updater has not seen: since its last fetch');
+  assert.equal(behindSince(s12, 'f'.repeat(40), w.main1), 5_000, 'L437: the same copy already behind keeps its time, whatever main does');
+  assert.equal(behindSince(s12, 'f'.repeat(40), 'e'.repeat(40)), 12_000, 'another copy starts again');
+  assert.equal(behindSince({ commit: main3, since: 5_000, installed: main3, checked_at: 12_000 }, 'f'.repeat(40), main3), 12_000, 'a copy that was level: since the last fetch');
   assert.equal(behindSince(null, main3), null);
 
   assert.equal((await updateOnce(w.c, { ...w.o, now: () => 15_000 })).ok, true);

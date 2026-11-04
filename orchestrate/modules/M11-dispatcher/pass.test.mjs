@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, UNKNOWN_FACT, rulesMissingAlert as rulesMissingAlert0 } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -9,6 +9,8 @@ import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { outbox, isQueued } from './alerts.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { REFUSED_FACT, tellRefused, watchWrites } from './refused-writes.mjs';
 import { change, parkOnLimit, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -42,7 +44,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
   let n = 0;
   let launchAnswer = () => ({ ok: true });
   const pass = (min = 0, extra = {}) => dispatcherPass({
-    rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
+    rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
     launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
@@ -52,6 +54,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     pauseLead: extra.pauseLead ?? (({ product }) => { calls.pauses.push([product, [...calls.stops]]); }),
     startsOff: extra.startsOff ?? null,
     filesOf: extra.filesOf ?? filesOfCommits,
+    failureLog: extra.failureLog,
     alert: (t) => calls.alerts.push(t),
   });
   const setCard = (id, patch) => change(rec, 'card', id, patch);
@@ -303,6 +306,37 @@ test('audit #125 r2 m-2, m-3: a card that has waited on a limit longer than the 
   assert.equal(told().length, 1);
   await w.pass(LIMIT_RESET_MAX_MS / MIN + 2);
   assert.equal(told().length, 1, 'told once');
+});
+
+// A hand-edited Record (L285): the M9 writer always stamps a readable since. The stand-in keeps a re-checked wait's
+// since as the writer does (L296), but stores a new wait's since as sent (its one departure, shared/record.mjs), so the
+// bad since goes in as a wait on another what, then back: an unreadable since is never kept, so it stays as sent.
+const garbleSince = (rec, id, since = 'not a time') => {
+  const wait = rec.read('card', id).doc.wait;
+  for (const what of ['hand-edited', wait.what]) {
+    const r = change(rec, 'card', id, { wait: { ...rec.read('card', id).doc.wait, what, since } });
+    assert.ok(r.ok, r.reason);
+  }
+  assert.deepEqual([rec.read('card', id).doc.wait.what, rec.read('card', id).doc.wait.since], [wait.what, since]);
+};
+
+test('L285: a limit wait whose since can\'t be read still ends: both caps count from the run\'s start, never from a hit that moves', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });   // no hit is ever recorded for acct-u
+  garbleSince(w.rec, 'S'); garbleSince(w.rec, 'U');
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage', 'exactly the no-hit cap from the run\'s start is not over it');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  // The hit (3 days in) and its reset (10 days in) are each in bounds; counted from the hit the card would wait past
+  // its reset with every new hit. Counted from the run's start, a minute past the bound waits on Joe.
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage', 'exactly the cap from the run\'s start is not over it');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer than any real limit window/.test(x)).length, 1);
 });
 
 test('L110 m-4: a limit_hit wait that names no account resumes nothing, never on the pass\'s account; it waits on Joe, one alert', async () => {
@@ -1173,6 +1207,67 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
   assert.equal(cardTells(), 1, 'told exactly once (P20)');
 });
 
+// Audit #153 MAT-1: a since or run_started more than 60 s ahead reads as none (pastTime's rule), so neither cap is held
+// at zero by a time that has not come.
+test('audit #153 MAT-1: a limit wait whose since is in the future still ends: both caps count from the run\'s start', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  const future = iso(T0 + 365 * DAY);
+  garbleSince(w.rec, 'S', future); garbleSince(w.rec, 'U', future);
+  await w.pass(24 * 60);
+  assert.equal(w.rec.read('card', 'U').doc.wait.who, 'usage');
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN);
+  assert.equal(w.rec.read('card', 'S').doc.wait.who, 'usage');
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  assert.equal(w.calls.alerts.filter((x) => /card S: it has waited on account acct-s's usage limit since 2\S+Z, longer/.test(x)).length, 1);
+});
+
+test('audit #153 MAT-1: a limit wait whose run_started is in the future is one with no run start: it waits on Joe', async () => {
+  const w = world();
+  // run_started is the Record's own, copied from the claim on the park: a run claimed by a clock a year ahead.
+  parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });
+  assert.equal(w.rec.read('card', 'R').doc.wait.run_started, iso(T0 + 365 * 24 * H));
+  await w.pass(1);
+  const r = w.rec.read('card', 'R').doc;
+  assert.deepEqual([r.wait.who, r.wait.what], ['joe', LIMIT_NO_RUN]);
+});
+
+test('audit #153 MAT-1: the stand-in does not keep a stored since in the future either; it keeps one up to 60 s ahead', () => {
+  const w = world();
+  parkOnLimit(w.rec, 'F', { ranAt: T0, account: 'acct-f' });
+  const recheck = (since) => { const r = change(w.rec, 'card', 'F', { wait: { ...w.rec.read('card', 'F').doc.wait, since, next_check: iso(T0 + 2 * MIN) } }); assert.ok(r.ok, r.reason); };
+  garbleSince(w.rec, 'F', iso(T0 + 365 * 24 * H));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0), 'the future since is not kept: the since sent is stored');
+  garbleSince(w.rec, 'F', iso(T0 + MIN));
+  recheck(iso(T0));
+  assert.equal(w.rec.read('card', 'F').doc.wait.since, iso(T0 + MIN), 'one 60 s ahead of the clock is kept');
+});
+
+// L329's two plants for these sites: a since an hour ahead of the pass that should fire the cap (the unreadable one is
+// the L285 test above), and a run_started an hour ahead (an unreadable one can't be stored: the Record drops it).
+test('audit #153 MAT-1, L329: a since an hour ahead of the pass still lets each cap fire, and a run_started an hour ahead waits on Joe', async () => {
+  const DAY = 24 * H;
+  const w = world([['fact', LIMIT_FACT('acct-s'), { resets_at: iso(T0 + 10 * DAY), observed_at: iso(T0 + 3 * DAY) }]]);
+  parkOnLimit(w.rec, 'S', { ranAt: T0, account: 'acct-s' });
+  parkOnLimit(w.rec, 'U', { ranAt: T0, account: 'acct-u' });
+  garbleSince(w.rec, 'U', iso(T0 + (24 * 60 + 1) * MIN + H));
+  garbleSince(w.rec, 'S', iso(T0 + LIMIT_RESET_MAX_MS + MIN + H));
+  await w.pass(24 * 60 + 1);
+  assert.deepEqual([w.rec.read('card', 'U').doc.wait.who, w.rec.read('card', 'U').doc.wait.what], ['joe', LIMIT_NO_HIT]);
+  await w.pass(LIMIT_RESET_MAX_MS / MIN + 1);
+  assert.deepEqual([w.rec.read('card', 'S').doc.wait.who, w.rec.read('card', 'S').doc.wait.what], ['joe', LIMIT_NO_RESET]);
+  const r = world();
+  parkOnLimit(r.rec, 'R', { ranAt: T0 + 2 * MIN + H, parkedAt: T0, account: 'acct-r' });
+  await r.pass(2);
+  assert.deepEqual([r.rec.read('card', 'R').doc.wait.who, r.rec.read('card', 'R').doc.wait.what], ['joe', LIMIT_NO_RUN]);
+});
+
 // ---- L324: a told time that lies ahead (a clock that went back, a bad write) or can't be read is due, never "told
 // recently". Before, each of these sites trusted it: a refused undo with a future told_at was told 0 times in 10 days.
 // L339 m3: also just past the 60 s margin, and a number (ISO text is the only readable form). Each is told; 59 s
@@ -1278,6 +1373,54 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   assert.equal(w.rec.read('fact', fact)?.doc?.told_at ?? null, null);
 });
 
+// L355 m2: a stop_wanted write is written in two places, the first wanting and the restart of a start time that can't be
+// read. Neither answer is read in stopPass: a refusal of either reaches the owner through the tick's watched Record, the
+// same way as the rest of stop_record, once a day while it lasts.
+test('L355 m2: stop_wanted refused at the first wanting and at a restart: the owner is told, then told again a day on', async () => {
+  const stopRefused = (w) => {
+    const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.kind === 'stop_wanted' ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+    return watchWrites(rec);
+  };
+  const told = fakeAlert();
+  const passAndTell = async (w, min) => {
+    const watched = stopRefused(w);
+    await w.pass(min, { rec: watched.rec });
+    await withAlerts(w.rec, T0 + min * MIN, told, (alert) => tellRefused({ rec: w.rec, alert, now: T0 + min * MIN, refused: watched.refused, taken: watched.taken, ran: () => true }));
+    return watched;
+  };
+  // The first wanting.
+  let w = world([card('C-1')]);
+  await w.pass(0);
+  let sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  w.probes.set(sid, busy);
+  let seen = await passAndTell(w, 1);
+  assert.deepEqual(seen.refused.get('stop_record').map((x) => [x.kind, x.id]), [['stop_wanted', STOP_FACT(sid)]]);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)), null, 'nothing stored');
+  assert.equal(told.texts.length, 1);
+  assert.match(told.texts[0], new RegExp(`^the Dispatcher: a session stop could not be recorded: ${STOP_FACT(sid)} \\(busy\\)`));
+  // Quiet the same day, told again a day on.
+  await passAndTell(w, 2);
+  assert.equal(told.texts.length, 1, 'once for the day');
+  await passAndTell(w, 25 * 60);
+  assert.equal(told.texts.length, 2, 'again a day on');
+  // The restart of a start time that can't be read.
+  w = world([card('C-1')]);
+  await w.pass(0);
+  sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  w.probes.set(sid, busy);
+  await w.pass(1);
+  change(w.rec, 'fact', STOP_FACT(sid), { since: 'garbage' });
+  const was = w.rec.read('fact', STOP_FACT(sid)).doc;
+  told.texts.length = 0;
+  seen = await passAndTell(w, 2);
+  assert.deepEqual(seen.refused.get('stop_record').map((x) => [x.kind, x.id]), [['stop_wanted', STOP_FACT(sid)]]);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, was.since, 'the stored time is unchanged: the refusal is what the owner reads');
+  assert.equal(told.texts.length, 1);
+  assert.match(told.texts[0], /a session stop could not be recorded/);
+});
+
 test('L324: a wanted stop whose since is ahead or unreadable is restarted from now and forced one grace later, not waited out for ever', async () => {
   for (const [label, bad] of [['future', iso(T0 + 30 * 24 * H)], ['unreadable', 'garbage'], ['61 s ahead', iso(T0 + 2 * MIN + 61_000)], ['a number', T0]]) {
     const w = world([card('C-1')]);
@@ -1373,4 +1516,281 @@ test('L339 m2: an unknown-usage start stored as a number is told once, then dail
   assert.equal(told(), 1, 'once in 4 passes (was: every pass)');
   await w.pass(1 + 24 * 60);
   assert.equal(told(), 2, 'again a day on');
+});
+
+// L386 m1: all seven of dispatcherPass's asks go through askJoe, so none loses a refused copy from the pass's notes.
+const DAY_MIN = 24 * 60;
+const ASK_SITES = [
+  ['usage_unknown', () => world([['card', 'K', { state: 'waiting', product: 'p1', tier: 1, wait: { who: 'dispatcher', what: 'usage_band', since: iso(T0), next_check: iso(T0) } }]], { usage: null }), DAY_MIN + 1, (w) => w.pass(0)],
+  [LIMIT_NO_ACCOUNT, () => world(), 1, (w) => parkOnLimit(w.rec, 'K', {})],
+  [LIMIT_NO_RUN, () => world(), 1, (w) => parkOnLimit(w.rec, 'K', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-k' })],
+  [LIMIT_NO_HIT, () => world(), DAY_MIN + 1, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  [`${LIMIT_NO_RESET} (no reset time)`, () => world([['fact', LIMIT_FACT('acct-k'), { observed_at: iso(T0 + MIN) }]]), 2, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  [`${LIMIT_NO_RESET} (past the cap)`, () => world([['fact', LIMIT_FACT('acct-k'), { resets_at: iso(T0 + 10 * DAY_MIN * MIN), observed_at: iso(T0 + 3 * DAY_MIN * MIN) }]]), LIMIT_RESET_MAX_MS / MIN + 1, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k' })],
+  ['limit_reset', () => world([['fact', LIMIT_FACT('acct-k'), { resets_at: iso(T0 + 5 * MIN), observed_at: iso(T0 + MIN) }]]), 6, (w) => parkOnLimit(w.rec, 'K', { account: 'acct-k', card: { tier: 1 } })],
+];
+for (const [name, make, min, park] of ASK_SITES) {
+  test(`L343, L386 m1: ${name} puts a refused copy of its since in the pass's notes and the text the owner reads`, async () => {
+    const w = make();
+    await park(w);
+    const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+    const out = await w.pass(min, { rec });
+    assert.equal(w.rec.read('card', 'K').doc.wait?.who, 'joe', name);
+    assert.ok(out.notes.some((n) => /^card K: this card's tell could not be kept with its wait \(busy\)/.test(n)), JSON.stringify(out.notes));
+    assert.ok(w.calls.alerts.some((x) => /^card K: .*could not be kept with its wait \(busy\)/.test(x)), JSON.stringify(w.calls.alerts));
+  });
+}
+
+test('L343: a limit wait put on the owner whose tell could not keep its since says so in the notes and in the text they read', async () => {
+  const w = world();
+  parkOnLimit(w.rec, 'R', { ranAt: T0 + 365 * 24 * H, parkedAt: T0, account: 'acct-r' });
+  const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+  const out = await w.pass(1, { rec });
+  assert.deepEqual(w.rec.read('card', 'R').doc.wait.what, LIMIT_NO_RUN);
+  assert.ok(out.notes.some((n) => /^card R: this card's tell could not be kept with its wait \(busy\)/.test(n)), JSON.stringify(out.notes));
+  assert.ok(w.calls.alerts.some((x) => /card R: .*could not be kept with its wait \(busy\)/.test(x)), JSON.stringify(w.calls.alerts));
+});
+
+// L354: at each clear site the queued alert leaves before the clear is written, by the order the writes really ran in;
+// a drop that fails is told, and the clear waits for the next pass where there is one.
+test('L354 stop dropped: the queued copy leaves first; a refused drop is in the notes and the stop still drops', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.probes.set(sid, busy);
+    w.setUsage(RED, T0 + MIN);
+    await w.pass(1);
+    w.setUsage(GREEN, T0 + 2 * MIN);
+    queueFor(w.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(2, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `stop_dropped:${STOP_FACT(sid)}`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'dropped');
+    assert.equal(r.notes.some((n) => /could not be dropped.*cleared anyway/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 stop done: the queued copy leaves first; a refused drop is in the notes and the stop still stands', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.setCard('C-1', { state: 'cancelled' });
+    queueFor(w.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `stop_done:${STOP_FACT(sid)}`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 pause cleared: the queued copy leaves first; a refused drop holds the clear for the next pass, and says so', async () => {
+  const failed = async () => {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+    w.setProduct('p1', 'active');
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  const a = await failed();
+  const log = [];
+  await a.pass(1, { rec: writeLog(a.rec, log) });
+  assertDropFirst(log, `pause_cleared:${PAUSE_FACT('p1')}`);
+  assert.equal(a.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'cleared');
+  const b = await failed();
+  const r = await b.pass(1, { rec: writeLog(b.rec, [], { refuseDrop: true }) });
+  assert.equal(b.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'held');
+  assert.ok(r.notes.some((n) => /could not be dropped.*next pass/.test(n)), r.notes.join(' | '));
+  await b.pass(2);
+  assert.equal(b.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'cleared', 'the next pass clears it');
+});
+
+test('L354 pause asked: the queued copy leaves first; a refused drop is in the notes and the ask is still recorded', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `pause_lead:${PAUSE_FACT('p1')}`);
+    assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+    assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.reason, undefined, 'the failure\'s reason does not outlive it');
+    // A drop that worked: the old failure's told fields left with it. One refused: its alert can still go out and mark.
+    if (!refuseDrop) assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.told_at, undefined);
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L449: a refused drop at pause asked reaches the log and one alert, and is not told again within a day', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+  const rec = writeLog(w.rec, [], { refuseDrop: true });
+  const logged = [];
+  const dropTold = () => w.calls.alerts.filter((t) => /could not be dropped/.test(typeof t === 'string' ? t : t.text));
+  const run = async (min) => {
+    const pf = w.rec.read('fact', PAUSE_FACT('p1'));
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: PAUSE_FACT('p1'), expectRev: pf.rev, doc: { ...pf.doc, state: 'failed', at: iso(T0 + min * MIN) }, kind: 'pause_lead_failed' }).ok, true);
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    await w.pass(min, { rec, failureLog: (l) => logged.push(l) });
+  };
+  await run(1);
+  assert.equal(logged.filter((l) => /could not be dropped/.test(l)).length, 1, logged.join(' | '));
+  assert.equal(dropTold().length, 1);
+  await run(60);
+  await run(23 * 60);
+  assert.equal(logged.filter((l) => /could not be dropped/.test(l)).length, 3, 'the log hears every one');
+  assert.equal(dropTold().length, 1);
+  await run(25 * 60);
+  assert.equal(dropTold().length, 2);
+});
+
+test('L449 m3: a told mark landing on a fact whose read had no told fields does not outlive pause cleared', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+  change(w.rec, 'fact', PAUSE_FACT('p1'), { told_at: undefined, told_cause: undefined });
+  w.setProduct('p1', 'active');
+  await w.pass(1, { rec: lateMark(w.rec, 'pause_cleared', PAUSE_FACT('p1'), { told_at: iso(T0), told_cause: 'c' }) });
+  const doc = w.rec.read('fact', PAUSE_FACT('p1')).doc;
+  assert.deepEqual([doc.state, doc.told_at ?? null, doc.told_cause ?? null], ['cleared', null, null], JSON.stringify(doc));
+});
+
+test('L449 m1, m2: a fold clear with nothing to clear writes nothing; one with a copy queued writes, so a mark on its way conflicts', async () => {
+  const fact = 'hold-waits-p1-paused';
+  const w = world([]);
+  const log = [];
+  await w.pass(0, { rec: writeLog(w.rec, log) });
+  await w.pass(1, { rec: writeLog(w.rec, log) });
+  assert.deepEqual(log.filter((l) => l.startsWith('hold_cleared:')), []);
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  await w.pass(2, { rec: writeLog(w.rec, log) });
+  assertDropFirst(log, `hold_cleared:${fact}`);
+  assert.equal(w.rec.read('fact', fact).doc.told_at, null);
+});
+
+test('L449 m1, m2: a refused-write clear with nothing to clear writes nothing; one with a copy queued writes, even with no fact yet', () => {
+  const fact = REFUSED_FACT('park');
+  const w = world([]);
+  const log = [];
+  const run = (min) => tellRefused({ rec: writeLog(w.rec, log), alert: fakeAlert(), now: T0 + min * MIN, refused: new Map(), ran: () => true });
+  run(0);
+  run(1);
+  assert.deepEqual(log.filter((l) => l.endsWith(fact)), []);
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  run(2);
+  assertDropFirst(log, `write_refused_cleared:${fact}`);
+  assert.equal(w.rec.read('fact', fact).doc.told_at, null);
+});
+
+test('L354 undo started: the queued copy leaves first; a refused drop is in the notes and the hold still clears', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([...undoEntries('U-1')]);
+    await w.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }) });
+    queueFor(w.rec, UNDO_HELD_FACT('U-1'), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `undo_started:${UNDO_HELD_FACT('U-1')}`);
+    assert.equal(w.rec.read('fact', UNDO_HELD_FACT('U-1')).doc.reason, null);
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 fold over: the queued copy leaves first, and a late mark is cleared; a refused drop holds the clear and says so', async () => {
+  const over = async (refuseDrop) => {
+    const w = world([card('C-1', { changed_at: iso(T0 - 2 * 24 * H) })]);
+    setClock(w.rec, T0); w.setProduct('p1', 'paused');
+    const fact = 'hold-waits-p1-paused';
+    const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
+      ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
+    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
+    await at(w.rec, T0 + 25 * H);
+    assert.equal(isQueued(w.rec, fact), true);
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { told_at: iso(T0) } }).ok, true);
+    setClock(w.rec, T0 + 26 * H); w.setProduct('p1', 'active');
+    const log = [];
+    const r = await at(writeLog(w.rec, log, { refuseDrop }), T0 + 26 * H + MIN);
+    return { w, fact, log, r };
+  };
+  const a = await over(false);
+  assertDropFirst(a.log, `hold_cleared:${a.fact}`);
+  assert.equal(a.w.rec.read('fact', a.fact).doc.told_at, null);
+  const b = await over(true);
+  assert.equal(b.log.includes(`hold_cleared:${b.fact}`), false, 'held');
+  assert.ok(b.r.notes.some((n) => /could not be dropped.*next pass/.test(n)), b.r.notes.join(' | '));
+});
+
+test('L354 item 4: a late mark survives a write that only changes other fields; the same mark does not survive a clear', async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.probes.set(sid, busy);
+  w.setUsage(RED, T0 + MIN);
+  await w.pass(1);
+  const f = STOP_FACT(sid);
+  // A mark lands after the pass has read the stop, while its since is rewritten.
+  const before = w.rec.read('fact', f);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: before.rev, doc: { ...before.doc, since: 'unreadable' } });
+  let fired = false;
+  const late = { ...w.rec, read: (e, id) => {
+    const got = w.rec.read(e, id);
+    if (!fired && e === 'fact' && id === f && got?.doc?.since === 'unreadable') {
+      fired = true;
+      return got;
+    }
+    if (fired === true && e === 'fact' && id === f) { fired = 'done'; change(w.rec, 'fact', f, { told_at: iso(T0) }); return w.rec.read(e, id); }
+    return got;
+  } };
+  await w.pass(2, { rec: late });
+  assert.equal(fired, 'done');
+  assert.equal(w.rec.read('fact', f).doc.told_at, iso(T0), 'the rewrite of since kept the mark');
+  assert.notEqual(w.rec.read('fact', f).doc.since, 'unreadable');
+  w.setUsage(GREEN, T0 + 3 * MIN);
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', f).doc.state, 'dropped');
+});
+
+test('L354 item 3: a mark landing as a clear is written does not outlive the clear', async () => {
+  const told = { told_at: iso(T0), told_cause: 'c' };
+  const check = async (w, fact, kind, min) => {
+    await w.pass(min, { rec: lateMark(w.rec, kind, fact, told) });
+    const doc = w.rec.read('fact', fact).doc;
+    assert.equal(doc.told_at ?? null, null, `${kind}: ${JSON.stringify(doc)}`);
+  };
+  const parked = async () => {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.probes.set(sid, busy);
+    w.setUsage(RED, T0 + MIN);
+    await w.pass(1);
+    return { w, sid };
+  };
+  const a = await parked();
+  a.w.setUsage(GREEN, T0 + 2 * MIN);
+  await check(a.w, STOP_FACT(a.sid), 'stop_dropped', 2);
+  const b = world([card('C-1')]);
+  await b.pass(0);
+  const sid = b.sessions[0].id;
+  b.setCard('C-1', { state: 'cancelled' });
+  await check(b, STOP_FACT(sid), 'stop_done', 1);
+  const down = async () => {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); }, alert: () => false });
+    return w;
+  };
+  const c = await down();
+  c.setProduct('p1', 'active');
+  await check(c, PAUSE_FACT('p1'), 'pause_cleared', 1);
+  await check(await down(), PAUSE_FACT('p1'), 'pause_lead', 1);
+  const u = world([...undoEntries('U-1')]);
+  await u.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }), alert: () => false });
+  await check(u, UNDO_HELD_FACT('U-1'), 'undo_started', 1);
 });

@@ -73,7 +73,7 @@ export function policyProblems(rules, product) {
       createdBy: () => Object.keys(CARD_CREATORS).find((a) => CARD_CREATORS[a].includes('exact_reverse')) ?? null,
     };
     const r = readyCheck(card, view, { rules, product });
-    if (r.ok || / no work starts$/.test(r.reason) || /needs the owner's go$/.test(r.reason)) continue;
+    if (r.ok || / no work starts$/.test(r.reason) || /needs the owner's go(:|$)/.test(r.reason)) continue;
     const reason = r.reason.replace(` in a ${state} product`, '');
     byReason.set(reason, [...(byReason.get(reason) ?? []), state]);
   }

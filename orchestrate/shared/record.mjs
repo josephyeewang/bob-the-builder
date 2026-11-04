@@ -41,7 +41,7 @@ export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAM
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
 export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
-import { claimCheck, fixPlanCheck, guardWrite } from '../modules/M9-record/guard.mjs';
+import { claimCheck, fixPlanCheck, guardWrite, keptSince, same } from '../modules/M9-record/guard.mjs';
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
@@ -69,6 +69,13 @@ export const REQUIRED_FIELDS = Object.freeze({
   merge_request: ['card', 'pr', 'session_id', 'head', 'rev', 'requested_at'],
   verdict: ['session_id', 'head'],
 });
+/**
+ * The launches `pick` keeps, newest first, in the order the Record took them. list() gives that order: launches are
+ * create-only and its index is built from the diary. launched_at is a stored time, and one stamped ahead by a clock
+ * that went back must not outrank a later launch (L367, L362 m1). A failed read throws: never an empty list.
+ */
+export const launchesNewestFirst = (rec, pick) => rec.list('launch').filter((l) => l?.doc && pick(l)).reverse();
+
 // A launch names a card and head only for the roles that work on one card (0b-5: a Front Door or thinking session has
 // neither; with no role, all are needed). The one check both the fake and the real writer use.
 export const CARD_ROLES = Object.freeze(['worker', 'reviewer', 'auditor']);
@@ -264,6 +271,16 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
           const fp = fixPlanCheck(g.doc, (fid) => docs.get(key('card', fid))?.doc ?? null);
           if (!fp.ok) return refused(fp.reason);
         }
+      }
+      // A wait's since on a re-check, by the Store Writer's own rule (keptSince, L285, L296): a wait that stays on the
+      // same who and what keeps its stored since, whatever the caller sends, so a test sees a cap measured from when
+      // the waiting began. DEPARTURE: a new wait's since is stored as the caller sends it. The Store Writer refuses one
+      // more than 60 s from its own clock and stores now; here a test's pass runs at its own `now` while this clock
+      // stays where the test set it, and the two are the same clock only in the real system.
+      const waits = (entity === 'card' && g.to === 'waiting') || (entity === 'session' && (g.to === 'waiting_input' || g.to === 'waiting_limit'));
+      if (waits && g.doc?.wait && !g.moving && !same(cur?.doc?.wait, g.doc.wait)) {
+        const keep = keptSince({ wait: g.doc.wait, kept: cur?.doc?.wait ?? null, nowMs: now() });
+        if (keep !== null) g.doc.wait = { ...g.doc.wait, since: keep };
       }
       const rev = expectRev + 1;
       const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };
