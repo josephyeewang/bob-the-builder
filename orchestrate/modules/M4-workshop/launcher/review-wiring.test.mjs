@@ -50,7 +50,7 @@ function x(over = {}, li = undefined) {
       makeCopy: async () => { made.push('/rc/S-1'); return { ok: true }; },
       settingsFor: (dir) => { settings.push(dir); return { ok: true, file: '/r/settings/S-1.json', settings: DESIGN_PROFILES[role] ? settingsOf(role) : {} }; },
       packageDir: '/r/packages/S-1',
-      packageFor: async ({ copy, head, dir }) => { made.push(`package ${copy} -> ${dir}`); return { ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${dir}/change.diff`, diffBytes: 10, diffSha256: PKG_SHA }; },
+      packageFor: async ({ copy, head, dir, since }) => { made.push(`package ${copy} -> ${dir}${since ? ` since ${since}` : ''}`); return { ok: true, base: 'b'.repeat(40), head, files: [{ status: 'M', path: 'a.txt' }], diffFile: `${dir}/change.diff`, diffBytes: 10, diffSha256: PKG_SHA }; },
       ...(li ? { launchInputs: li } : {}),
       ...over,
     },
@@ -124,6 +124,12 @@ test('L83 minor 2 planted: the file the session is handed is byte for byte what 
   assert.equal(r.ok, false, 'no launch inputs: refused at check 0');
   assert.equal(readFileSync(made.file, 'utf8'), templateText(made.settings), 'the wiring left the file as sessionSettings wrote it');
   assert.equal(made.file, join(m.c.root, 'settings', 'S-1.json'));
+});
+
+test('R-0b-146: a re-audit\'s package is made since the head the earlier audit passed', async () => {
+  const w = x({ role: 'auditor', audited: 'c'.repeat(40) });
+  await wiring.start(w.x);
+  assert.deepEqual(w.made, ['/rc/S-1', `package /rc/S-1-not-there -> /r/packages/S-1 since ${'c'.repeat(40)}`]);
 });
 
 test('R-0b-163: no profile, no copy or no settings means no launch', async () => {
