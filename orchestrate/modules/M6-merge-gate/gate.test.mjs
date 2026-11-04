@@ -3076,10 +3076,10 @@ test('L357 M11 + gate.mjs: an open-too-long refusal by M11 is told by step 3b, a
   assert.equal(m.doc.state, 'merging');
   tick(w, LIMIT_MIN + 1);
   sensorsReads(w, { state: 'open', merged: false, merge_commit_sha: null, head_sha: m.doc.judged_head, observed_at: nowIso(w, 0) });
-  const said = [];
-  await timeLimits({ rec: recOf(w), rules: w.ctx.rules, now: w.env.clock.t, b: {}, gateAlive: () => false, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: (t) => { said.push(t); return true; } });
+  const said = fakeAlert();
+  await timeLimits({ rec: recOf(w), rules: w.ctx.rules, now: w.env.clock.t, b: {}, gateAlive: () => false, hasReviewer: () => true, requestReview: () => ({ ok: true }), alert: said });
   assert.equal(mergeOf(w).doc.state, 'refused');
-  assert.deepEqual(said.filter((t) => /still open/.test(t)), [], 'M11 tells nothing itself');
+  assert.deepEqual(said.texts.filter((t) => /still open/.test(t)), [], 'M11 tells nothing itself');
   const note = mergeOf(w).doc.interrupted_note;
   assert.match(note, /still open after \d+ min, with no merge/);
   const tries = flakyAlert(w, 'merge_interrupted', 'false', 1);
