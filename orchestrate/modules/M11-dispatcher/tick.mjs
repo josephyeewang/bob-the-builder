@@ -53,8 +53,9 @@ import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, liste
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
+import { planGoPass } from './plan-go.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -97,7 +98,7 @@ export function approvalsAlertText(product, a) {
  * (a bad approvals config) is not failed here: M2 has told Joe itself (approvals_config), again each day while it stands.
  *   approvals() → [{ product, gh, owner, repo, stateDir, push, copies }]   per product, everything M2 reaches outside
  */
-export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass }) {
+export async function approvalsStep({ rec, rules, now, alert, approvals, productMs = APPROVALS_PRODUCT_MS, pass = schedulePass, what = 'Approvals' }) {
   if (typeof approvals !== 'function') throw new Error('the approvals port is missing');
   const list = await approvals();
   if (!Array.isArray(list)) throw new Error('the approvals port did not answer a list');
@@ -119,7 +120,7 @@ export async function approvalsStep({ rec, rules, now, alert, approvals, product
   }
   if (failed.length) {
     const named = failed.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([pr, why]) => `${pr} (${why})`);
-    throw new Error(`the Approvals pass failed for ${named.join(', ')}`);
+    throw new Error(`the ${what} pass failed for ${named.join(', ')}`);
   }
   return results;
 }
@@ -277,14 +278,15 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   if (!outageOpen) outageOpen = outageInRecord();
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
-  const startReadonly = async (x) => {
+  const gatedReadonly = (start) => async (x) => {
     if (outageOpen) return { ok: false, reason: 'outage: nothing starts' };
     const acct = signedInAccount({ rec, rules, now });
     if (!acct.account) return { ok: false, reason: acct.reason };
     const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running: p.sessions(), lead: x.lead });
     if (!g.ok && g.missing) missing.push(g.missing);
-    return g.ok ? p.startReadonly(x) : { ok: false, reason: g.reason };
+    return g.ok ? start(x) : { ok: false, reason: g.reason };
   };
+  const startReadonly = gatedReadonly((x) => p.startReadonly(x));
   await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text) => note(rec, 'intake-note', text, { now }),
     startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, ...(p.intakeFs ?? {}) }));
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
@@ -304,6 +306,10 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // outage too: it starts no session, and asks still lapse and go out on time. Not in `complete` below: M2 tells its
   // own config problems (approvals_config) and reports no missing rules value to the tick.
   await run('approvals', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }) }));
+  // Answered gos become go records, and cards wanting a go are asked (plan-go.mjs). After Approvals, so a go is on record
+  // before the main pass reads it. Runs during an outage: only a plan reviewer starts here, and the read-only gate holds it.
+  await run('plan-go', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, what: 'plan-go', ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }),
+    pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x), passMs: p.approvalsProductMs ?? APPROVALS_PRODUCT_MS }) }));
   await run('pass', async () => {
     const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
       saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, failureLog: failed('pass'), startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });

@@ -92,20 +92,34 @@ function productCheck(card, view, rules, product) {
   return { ok: true };
 }
 
-function goCheck(card, view, rules, product) {
+// Does this card still want the owner's go? The one definition (L443): `needed` is exactly the case where the go check
+// below refuses, so nothing that raises a go can disagree with what ready enforces.
+//   → { needed: false, go? } | { needed: true, root, reason }   root is null when the fix chain can't be followed
+// A fix card's `root` is another card: it runs on that card's go, and only the root is ever asked for one.
+export function goNeeded(card, view, rules, product) {
   const kind = card.doc.kind;
+  // A go-free kind made by the wrong creator isn't refused outright (L450): it is an ordinary card, ok on the owner's go.
+  let wrong = null;
   if (goFreeKinds(rules, product).includes(kind)) {
     const creator = view.createdBy('card', card.id);
-    if (creator && mayCreateKind(creator, kind)) return { ok: true };
-    return { ok: false, reason: `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go` };
+    if (creator && mayCreateKind(creator, kind)) return { needed: false };
+    wrong = `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go`;
   }
   const r = rootOf(card, view);
-  if (!r.ok) return r;
+  const root = r.ok ? r.root : null;
+  const reasonOf = (why) => (wrong ? `${wrong}: ${why}` : why);
+  if (!r.ok) return { needed: true, root, reason: reasonOf(r.reason) };
   const d = card.doc;
-  const fp = planFingerprint({ product: d.product, card_id: r.root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
-  if (!fp.ok) return { ok: false, reason: `plan can't be fingerprinted: ${fp.reason}` };
-  const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === r.root.id);
-  return go ? { ok: true, go: go.id } : { ok: false, reason: `no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})` };
+  const fp = planFingerprint({ product: d.product, card_id: root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
+  if (!fp.ok) return { needed: true, root, reason: reasonOf(`plan can't be fingerprinted: ${fp.reason}`) };
+  const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === root.id);
+  return go ? { needed: false, go: go.id } : { needed: true, root, reason: reasonOf(`no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})`) };
+}
+
+function goCheck(card, view, rules, product) {
+  const n = goNeeded(card, view, rules, product);
+  if (n.needed) return { ok: false, reason: n.reason };
+  return n.go ? { ok: true, go: n.go } : { ok: true };
 }
 
 export function readyCheck(card, view, { rules, product }) {

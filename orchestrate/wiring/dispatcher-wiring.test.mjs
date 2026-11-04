@@ -33,8 +33,8 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
+  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
 const PORTS_WIRED = Object.freeze(['approvals']);
@@ -45,7 +45,7 @@ const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', '
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 const EXPECTED_STEPS = Object.freeze({
-  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok',
+  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
