@@ -24,7 +24,8 @@
 //     10 minutes (M4 review-updater.mjs), so a copy behind main is told only once it has stayed behind for
 //     STAMP_GRACE_MS (item 20(c)); no stamp, or no `since` (or one dated ahead), is told at once. A plain commit string
 //     counts as no `since`. Without the port there is no stamp check. A port that fails or names no commit keeps the
-//     stamp hold as it is (`keep`, L437): main can't be read, so nothing is told or cleared. `mainSeenHead` builds the port
+//     stamp hold as it is (`keep`, L437): main can't be read, so nothing is cleared, and that is told on first sight and
+//     each day (L465), with the port's error in the words only, so it makes no new trouble. `mainSeenHead` builds the port
 //     from that record (L75 m-2), and reviewPorts builds it when given `installRoot` and `main` (main's commit, a port).
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
@@ -88,9 +89,10 @@ export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) 
     out.push({ id: 'runner-failed', hold: true, since: failureClass(why), text: `Its last pass failed: ${why}.` });
   }
   let head = null;
-  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch { head = null; }
+  let readError = '';
+  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch (e) { head = null; readError = String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 100); }
   const main = typeof head === 'string' ? head : head?.commit;
-  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: MAIN_UNREAD }];
+  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: readError ? `${MAIN_UNREAD} The read said: ${readError}` : MAIN_UNREAD }];
   if (main && s?.installed_commit !== main) {
     const at = s?.installed_commit ?? null;
     const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;

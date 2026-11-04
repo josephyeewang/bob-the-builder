@@ -122,8 +122,13 @@ test('L66, L315: a failed runner pass and an installed copy behind main are hold
   assert.match(statusAlerts({ ...ok, installed_commit: null }, () => MAIN, T0, { runnerLog: '/logs/review-runner.err.log' })[0].text, /says what to do in its log, \/logs\/review-runner\.err\.log\.$/);
   assert.doesNotMatch(none, /<|\.v-|installed-commit|L\d+/, 'no placeholders, folder names or lead-call numbers');
   assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, undefined), [], 'no port: no stamp check');
-  // L437 m1: main can't be read, so the stamp hold is kept as it is: nothing told, nothing cleared.
-  for (const mainHead of [() => null, () => 'main', () => ({ commit: null }), () => { throw new Error('no'); }]) {
+  // L470 m2: the port's error is in the words, on one line and cut to 100 characters, and never in the cause.
+  const failed = (message) => statusAlerts({ ...ok, installed_commit: HEAD }, () => { throw new Error(message); })[0];
+  assert.equal(failed('no\n  remote').text, `${MAIN_UNREAD} The read said: no remote`);
+  assert.equal(failed('x'.repeat(300)).text, `${MAIN_UNREAD} The read said: ${'x'.repeat(100)}`);
+  assert.equal(failed('one').since, failed('another').since);
+  // L437 m1, L465: main can't be read, so the stamp hold is kept and says so, under one cause whatever went wrong.
+  for (const mainHead of [() => null, () => 'main', () => ({ commit: null })]) {
     assert.deepEqual(statusAlerts({ ...ok, installed_commit: HEAD }, mainHead), [{ id: 'stamp', hold: true, keep: true, since: 'main-unreadable', text: MAIN_UNREAD }]);
   }
   // Through the ports, read from the real status file.

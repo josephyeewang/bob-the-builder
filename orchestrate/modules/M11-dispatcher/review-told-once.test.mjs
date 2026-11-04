@@ -153,7 +153,7 @@ function statusMac() {
   let say = { ok: true, error: null, installed_commit: MAIN };
   let main = { commit: MAIN, since: T0 };
   let unreadable = false;
-  const ports = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => clock.t, mainHead: () => main });
+  const ports = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => clock.t, mainHead: () => (typeof main === 'function' ? main() : main) });
   const hour = async (h) => {
     clock.t = T0 + h * H;
     setClock(rec, clock.t);
@@ -384,6 +384,30 @@ test('L465: main unreadable from the first pass is told at once and each day, an
   s.setMain(null);
   assert.deepEqual(await s.run(0, 24, /review runner: /), [0, 24], 'told at h0 and h24, nothing between');
   assert.deepEqual(await s.run(25, 48, /Main can't be read/), [48]);
+});
+
+test('L470 m1: a kept hold told, cleared and back the same day stays quiet until the day is up', async () => {
+  const s = statusMac();
+  s.setMain(null);
+  assert.deepEqual(await s.run(0, 0, /Main can't be read/), [0]);
+  s.setMain({ commit: MAIN, since: T0 });
+  await s.run(1, 3, /x/); // level for two hours: the mark clears
+  s.setMain(null);
+  assert.deepEqual(await s.run(10, 39, /Main can't be read/), [24]);
+});
+
+test('L470 m1: one failed read every 2 hours is told once a day', async () => {
+  const s = statusMac();
+  const told = await tellsOver(s, range(48, 1 / 12), /Main can't be read/, (h) => s.setMain(Math.round(h * 12) % 24 === 0 ? null : { commit: MAIN, since: T0 }));
+  assert.deepEqual(told, [0, 24, 48]);
+});
+
+test('L470 m2: another error from the read of main is no new tell', async () => {
+  const s = statusMac();
+  let n = 0;
+  const ports = () => { n += 1; throw new Error(`refused ${'abcdefgh'[n % 8]}`); };
+  s.setMain(ports);
+  assert.deepEqual(await s.run(0, 24, /Main can't be read/), [0, 24]);
 });
 
 test('L465: when main reads again, a copy behind is told at once, as news; a copy level ends it', async () => {
