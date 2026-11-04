@@ -21,7 +21,7 @@ function world() {
   mkdirSync(outbox);
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';
-  const rec = recWith();
+  let rec = recWith();
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,
@@ -34,7 +34,7 @@ function world() {
   const intake = (min = 3) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
     alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet: handoffVet(R) });
   const handIn = (bytes) => writeFileSync(join(outbox, HANDOFF_NAME(SID)), 'x'.repeat(bytes));
-  return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; } };
+  return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; }, useRec: (r) => { rec = r; } };
 }
 const phase = (rec) => rec.read('fact', RESTART_FACT(SID))?.doc?.phase ?? 'none';
 
@@ -375,6 +375,33 @@ test('L490 m5: main unreadable at a start is tried again each pass for that sess
   assert.deepEqual(launches(w.rec).map((l) => [l.session_id, l.head]), [['L-2', 'c'.repeat(40)]]);
   await next(6, async () => 'd'.repeat(40));
   assert.equal(launches(w.rec).length, 1, 'written once');
+});
+
+test('L494 Minor 6: a retry mark that can\'t be cleared adds no second launch record, and is told once a day', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  await w.step(ended(261_000, 2), 2, { mainSha: async () => { throw new Error('down'); } });
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'lead_launch_pending' ? { ok: false, reason: 'turned down' } : w.rec.write(x)) } });
+  const owner = fakeAlert();
+  const next = (min) => withAlerts(rec, T0 + min * MIN, owner, (alert) => leadRestartStep({ rec, rules: R, now: T0 + min * MIN, lead: { sessionId: 'L-2', product: 'p' }, size: ended(1000, min), alert, inFlight: null, mainSha: async () => 'c'.repeat(40),
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-3' }) }));
+  for (let min = 3; min < 9; min++) await next(min);
+  assert.equal(launches(w.rec).length, 1);
+  const told = owner.texts.map((t) => t?.text ?? t);
+  assert.equal(told.filter((t) => /the Lead L-2 has a launch record, but its retry mark could not be cleared \(turned down\)/.test(t)).length, 1, told.join(' | '));
+});
+
+test('L494 Minor 6: a retry that can\'t be saved is told, as nothing will try again', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'lead_launch_pending' ? { ok: false, reason: 'turned down' } : w.rec.write(x)) } });
+  w.useRec(rec);
+  await w.step(ended(261_000, 2), 2, { mainSha: async () => { throw new Error('down'); } });
+  assert.equal(w.calls.alerts.filter((t) => /the Lead L-2 has no launch record, and its retry could not be saved, so nothing will try again \(turned down\)/.test(t?.text ?? t)).length, 1, JSON.stringify(w.calls.alerts));
 });
 
 test('L490 m5: a Lead that was never marked is not given a launch record by a pass', async () => {

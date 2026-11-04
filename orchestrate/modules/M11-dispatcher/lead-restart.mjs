@@ -17,7 +17,7 @@
 import { KEYS, need } from './keys.mjs';
 import { tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
-import { ENTITIES } from '../../shared/record.mjs';
+import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -88,6 +88,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   const cap = need(rules, KEYS.handoffCapRole);
   let cur = rec.read('fact', RESTART_FACT(sid));
   let st = cur?.doc ?? { phase: 'none', reasks: 0 };
+  const pendingRefused = (id, what) => holdAlert({ rec, cause: `lead-launch-pending-${id}`, text: `the Lead ${id} has ${what}`, alert, now });
   // Main is read before the start, so the record names the commit the new Lead started on, not one that landed after.
   const startNext = async () => {
     const product = lead.product ?? null;
@@ -96,7 +97,8 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     let r;
     try { r = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { r = { ok: false, reason: e.message }; }
     if (r?.ok && !recordLeadLaunch({ rec, now, alert, sessionId: r.sessionId, head, product }).ok && namesSession(r.sessionId)) {
-      writeFrom(rec, RESTART_FACT(r.sessionId), null, { phase: 'none', reasks: 0, launch_pending: true }, 'lead_launch_pending');
+      const w = writeFrom(rec, RESTART_FACT(r.sessionId), null, { phase: 'none', reasks: 0, launch_pending: true }, 'lead_launch_pending');
+      if (!w?.ok) pendingRefused(r.sessionId, `no launch record, and its retry could not be saved, so nothing will try again (${w?.reason ?? 'no answer'})`);
     }
     return r;
   };
@@ -109,10 +111,18 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   // A start that left no launch record is tried again each pass for that session (L490 m5). Main is read now, so a commit
   // that landed since the start can be named; a plan made on an older one is still checked by the reviewer against main.
   if (st.launch_pending) {
-    const product = lead.product ?? null;
-    let head = null;
-    try { head = await mainSha({ product }); } catch { head = null; }
-    if (recordLeadLaunch({ rec, now, alert, sessionId: sid, head, product }).ok) save({ launch_pending: false }, 'lead_launch_pending');
+    // A record that is already there means only the flag failed to clear: a second record would be one more each pass.
+    let recorded = Boolean(leadLaunchHead(rec, sid));
+    if (!recorded) {
+      const product = lead.product ?? null;
+      let head = null;
+      try { head = await mainSha({ product }); } catch { head = null; }
+      recorded = recordLeadLaunch({ rec, now, alert, sessionId: sid, head, product }).ok;
+    }
+    if (recorded) {
+      const w = save({ launch_pending: false }, 'lead_launch_pending');
+      if (!w.ok) pendingRefused(sid, `a launch record, but its retry mark could not be cleared (${w.reason})`);
+    }
   }
 
   const noSize = !size || size.tokens == null;

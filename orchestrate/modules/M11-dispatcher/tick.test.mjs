@@ -1421,3 +1421,17 @@ test('L424: the tick asks the reviewEnded port before a review session\'s verdic
   assert.deepEqual(asked, ['R-1']);
   assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
 });
+
+test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, on its own fact', async () => {
+  const dir = tempDir('m11-tick-notes-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'waits\n');
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  const lines = () => w.rec.diary().filter((d) => d.kind === 'note' && /outbox|intake/.test(d.id ?? '')).map((d) => d.id);
+  for (let min = 0; min < 50; min++) await w.pass(min);
+  assert.equal(lines().length, 1, JSON.stringify(w.rec.diary().slice(-6)));
+  await w.pass(25 * 60);
+  assert.equal(lines().length, 2, 'a day later');
+});

@@ -745,9 +745,25 @@ test('L490 M2 SAME-NAME: a plan rewritten under its own name stays refused, and 
   assert.equal(owner(), 2, 'daily');
   assert.equal(p.told.length, 2, 'daily');
   assert.equal(p.rec.read('card', 'C-1').rev, card.rev, 'the new content was not used');
-  p.hand('plan-a.json', [planCard('C-1', { tier: 3 })]);
+});
+
+test('L494 Minor 2: a plan rewritten with new bytes every pass is told once, then daily, naming the latest bytes', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
   await p.run();
-  assert.equal(owner(), 3, 'other new content is its own cause');
+  p.told.length = 0;
+  const rewrite = async (i) => { p.hand('plan-a.json', [planCard('C-1', { module: `m${i}` })]); await p.run(); p.E.clock.t += 60_000; };
+  for (let i = 0; i < 20; i++) await rewrite(i);
+  const owner = () => p.owner.filter((t) => /again with different content/.test(t));
+  assert.equal(owner().length, 1, p.owner.join(' | '));
+  assert.equal(p.told.length, 1);
+  assert.match(owner()[0], /\(latest [0-9a-f]{12}\)/);
+  p.E.clock.t += OVER_A_DAY;
+  for (let i = 20; i < 30; i++) await rewrite(i);
+  assert.equal(owner().length, 2, 'daily');
+  assert.equal(p.told.length, 2, 'daily');
+  assert.notEqual(owner()[1].match(/latest (\w+)/)[1], owner()[0].match(/latest (\w+)/)[1]);
 });
 
 test('L490 M2 SAME-NAME-HELD: a plan only held takes its new content, with no alert about it', async () => {
@@ -850,22 +866,26 @@ test('L490 M3: a file not used yet, and a verdict that waits, are noted once a d
   assert.equal(lines() - start, 1, sid);
 });
 
-test('L490 m4: a plan the check refuses is told again next pass if nobody had it, and then not again', async () => {
+test('L494 MAT-1: a plan the check refuses, heard by nobody, is kept and told a day later, then not again', async () => {
   const p = planWorld();
   p.hand('plan-a.json', '{"cards": []}');
   const nobody = fakeAlert({ answer: false });
   let asked = 0;
   const fails = async () => { asked += 1; return { ok: false, reason: 'tab closed' }; };
-  for (let i = 0; i < 2; i++) await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: nobody, now: p.E.clock.t, replyToLead: fails });
-  assert.equal(asked, 2, 'nobody has it, so the next pass tries again');
+  const logged = [];
+  for (let i = 0; i < 3; i++) await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: nobody, now: p.E.clock.t, replyToLead: fails, failureLog: (l) => logged.push(l) });
+  assert.equal(asked, 1, 'one try a day');
   assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.state, 'refused');
+  assert.match(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, /was not applied/, 'a failed tell keeps the note');
+  assert.equal(logged.filter((l) => /neither the Lead L-1 nor the owner could be told, so it is tried again in a day/.test(l)).length, 1, logged.join(' | '));
+  p.E.clock.t += OVER_A_DAY;
   await passes(p);
   assert.equal(p.told.length, 1, 'the Lead hears it once it can');
   assert.match(p.told[0].text, /plan-a\.json was not applied/);
   assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, undefined);
 });
 
-test('L490 m4: what became of a plan is told again next pass if nobody had it, and when its file is gone', async () => {
+test('L494 MAT-1: what became of a plan is told a day later if nobody had it, even when its file is gone', async () => {
   const p = planWorld();
   must(p.launch());
   p.hand('plan-a.json', [planCard('C-1')]);
@@ -875,8 +895,121 @@ test('L490 m4: what became of a plan is told again next pass if nobody had it, a
   assert.equal(asked, 1);
   rmSync(join(p.ob, 'plan-a.json'));
   await passes(p);
+  assert.equal(p.told.length, 0, 'not before the day is up');
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p);
   assert.equal(p.told.length, 1);
   assert.match(p.told[0].text, /plan-a\.json was applied\. Created: C-1\./);
+});
+
+// A pass cut off at the step limit, or killed, stops at the tell. The call never answers while later passes run.
+for (const [what, hand, said] of [['a plan the check refuses', '{"cards": []}', /plan-a\.json was not applied/], ['a plan that applies', [planCard('C-1')], /plan-a\.json was applied/]]) {
+  test(`L494 MAT-1 HUNG-REPLY: ${what}, with a tell cut off mid-call, keeps its note and is told at 24 hours`, async () => {
+    const p = planWorld();
+    must(p.launch());
+    p.hand('plan-a.json', hand);
+    let release;
+    let reached;
+    const atTell = new Promise((r) => { reached = r; });
+    const cutOff = p.run({ reply: () => { reached(); return new Promise((r) => { release = r; }); }, portMs: 60_000 });
+    await atTell;
+    const left = p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc;
+    assert.match(left.lead_note, said, 'the note stays through the tell');
+    assert.equal(typeof left.lead_note_tried_at, 'string');
+    for (let h = 0; h < 23; h++) { p.E.clock.t += 3600 * 1000; await p.run(); }
+    assert.equal(p.told.length, 0, 'tried once a day');
+    p.E.clock.t += 3600 * 1000 + 60_000;
+    await p.run();
+    assert.equal(p.told.length, 1);
+    assert.match(p.told[0].text, said);
+    assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, undefined, 'cleared by the confirmed tell');
+    for (let h = 0; h < 30; h++) { p.E.clock.t += 3600 * 1000; await p.run(); }
+    assert.equal(p.told.length, 1, 'and not told again');
+    release({ ok: false, reason: 'gone' });
+    await cutOff;
+  });
+}
+
+test('L494 MAT-1: a Lead that does not answer in time costs one time limit, and the owner has the text', async () => {
+  const p = planWorld();
+  p.hand('plan-a.json', '{"cards": []}');
+  const [r] = await p.run({ reply: () => new Promise(() => {}), portMs: 20 });
+  assert.match(r.refused, /cards/);
+  assert.equal(p.owner.filter((t) => /the Lead L-1 could not be told \(it did not answer within 20 ms\).*plan-a\.json was not applied/.test(t)).length, 1, p.owner.join(' | '));
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.lead_note, undefined);
+});
+
+test('L494 MAT-1: a told note the Record will not clear is reported, and told again a day later, not every pass', async () => {
+  const p = planWorld();
+  p.hand('plan-a.json', '{"cards": []}');
+  const clearing = (x) => x.kind === 'outbox_told' && x.doc?.lead_note === undefined;
+  const rec = Object.create(p.rec, { write: { value: (x) => (clearing(x) ? { ok: false, reason: 'turned down' } : p.rec.write(x)) } });
+  const logged = [];
+  await passes(p, 4, { rec, failureLog: (l) => logged.push(l) });
+  assert.equal(p.told.length, 1);
+  assert.equal(logged.filter((l) => /was told, but the note could not be cleared \(turned down\)/.test(l)).length, 1, logged.join(' | '));
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p, 2, { rec });
+  assert.equal(p.told.length, 2);
+});
+
+test('L494 Minor 3: both tells failing over 50 passes adds at most one line a day', async () => {
+  const p = planWorld();
+  p.hand('verdict-a.md', 'x');
+  const nobody = fakeAlert({ answer: false });
+  const fails = async () => ({ ok: false, reason: 'tab closed' });
+  const start = p.rec.diary().length;
+  for (let i = 0; i < 50; i++) { await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: nobody, now: p.E.clock.t, replyToLead: fails }); p.E.clock.t += 60_000; }
+  assert.equal(p.rec.diary().length - start, 1);
+  const day = p.rec.diary().length;
+  p.E.clock.t += OVER_A_DAY;
+  for (let i = 0; i < 50; i++) { await intakePass({ rec: p.rec, sessions: p.sessions, ...p.ports, alert: nobody, now: p.E.clock.t, replyToLead: fails }); p.E.clock.t += 60_000; }
+  assert.equal(p.rec.diary().length - day, 1);
+  await passes(p);
+  assert.equal(p.told.length, 0, 'the mark stands for the day');
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p);
+  assert.equal(p.told.length, 1, 'the Lead hears it once it can');
+});
+
+test('L494 Minor 5: a plan whose outcome the Record would not keep is still told to the Lead, once', async () => {
+  const p = planWorld();
+  must(p.launch());
+  p.hand('plan-a.json', [planCard('C-1')]);
+  const rec = Object.create(p.rec, { write: { value: (x) => (x.kind === 'outbox_applied' ? { ok: false, reason: 'turned down' } : p.rec.write(x)) } });
+  await p.run({ rec });
+  assert.equal(p.told.length, 1);
+  assert.match(p.told[0].text, /plan-a\.json was applied\. Created: C-1\./);
+});
+
+test('L494: a verdict\'s ended record that hangs is a wait, and the pass goes on', async () => {
+  const { E, pass } = endedWorld('m11-intake-hung-');
+  const [r] = await pass({ now: E.clock.t, portMs: 20, reviewEnded: () => new Promise(() => {}) });
+  assert.match(r.waiting, /has not ended/);
+});
+
+test('L494: a read-only start that hangs is left claimed, told as interrupted, and never started twice', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  let starts = 0;
+  const startReadonly = () => { starts += 1; return new Promise(() => {}); };
+  const [r] = await p.run({ startReadonly, startMs: 20 });
+  assert.match(r.refused, /did not answer within 20 ms/);
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-think-q1.md').doc.state, 'starting');
+  await passes(p, 3, { startReadonly, startMs: 20 });
+  assert.equal(starts, 1);
+  assert.equal(p.owner.filter((t) => /think-q1\.md .*was interrupted; its read-only session may or may not have started/.test(t)).length, 1, p.owner.join(' | '));
+});
+
+test('L494: a queued request\'s note to the Lead has the time limit too, and a thrown one is no loose rejection', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  const startReadonly = () => ({ ok: false, reason: 'the red band' });
+  const [r] = await p.run({ startReadonly, portMs: 20, reply: () => new Promise(() => {}) });
+  assert.match(r.waiting, /red band/);
+  p.hand('think-q2.md', 'a second');
+  const [, r2] = await p.run({ startReadonly, reply: async () => { throw new Error('tab closed'); } });
+  assert.match(r2.waiting, /red band/);
 });
 
 test('L490 m4: when the Lead can\'t be told but the owner can, that is told, once', async () => {
@@ -966,7 +1099,7 @@ test('L475: a Lead file of a kind it can\'t hand in is told to the Lead once, th
   assert.equal(p.told.length, 3, 'gone, then back, is told at once');
 });
 
-test('L475: a Lead that can\'t be told means the owner reads it, once; if neither has it, the next pass asks again', async () => {
+test('L475, L494: a Lead that can\'t be told means the owner reads it, once; if neither has it, it is tried again in a day', async () => {
   const p = planWorld();
   p.hand('verdict-a.md', 'x');
   await passes(p, 3, { reply: async () => ({ ok: false, reason: 'tab closed' }) });
@@ -977,8 +1110,13 @@ test('L475: a Lead that can\'t be told means the owner reads it, once; if neithe
   q.hand('verdict-a.md', 'x');
   const alert = fakeAlert({ answer: false });
   let asked = 0;
-  for (let i = 0; i < 2; i++) await intakePass({ rec: q.rec, sessions: q.sessions, ...q.ports, alert, now: q.E.clock.t, replyToLead: async () => { asked += 1; return { ok: false, reason: 'tab closed' }; } });
-  assert.equal(asked, 2, 'nobody has it, so it is not marked told');
+  const pass = () => intakePass({ rec: q.rec, sessions: q.sessions, ...q.ports, alert, now: q.E.clock.t, replyToLead: async () => { asked += 1; return { ok: false, reason: 'tab closed' }; } });
+  await pass();
+  await pass();
+  assert.equal(asked, 1, 'one try a day');
+  q.E.clock.t += OVER_A_DAY;
+  await pass();
+  assert.equal(asked, 2);
 });
 
 test('L475: each file has its own cause, in each session, and a new reason is a new tell', async () => {
