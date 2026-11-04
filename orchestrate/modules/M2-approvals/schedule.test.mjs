@@ -684,6 +684,24 @@ test('L317: an ask-alerts told time 30 days ahead is not "told": the ask that ca
   assert.equal(noPush(), 2);
 });
 
+// L321's rule on the ask marks: no mark to read is "not told". It tells, and never counts as told a moment ago.
+test('L326: an ask-alerts mark that is null is due', async () => {
+  const w = world();
+  delete w.t.ctx.push;
+  must(createAsk(w.t.ctx, { id: 'U-1', kind: 'undo', card: 'C-1', title: 'Undo' }));
+  const noPush = () => w.t.alerts.filter((a) => a.type === 'approvals_no_push' && a.ask === 'U-1').length;
+  await w.at(W8);
+  assert.equal(noPush(), 1);
+  const f = join(w.t.ctx.stateDir, 'ask-alerts.json');
+  const m = JSON.parse(readFileSync(f, 'utf8'));
+  for (const k of Object.keys(m['U-1'])) m['U-1'][k] = null;
+  writeFileSync(f, JSON.stringify(m));
+  await w.at(W8 + MIN);
+  assert.equal(noPush(), 2, 'a null mark is not told');
+  await w.at(W8 + 2 * MIN);
+  assert.equal(noPush(), 2, 'and it is marked again');
+});
+
 // L329 (L321 sweep): every stored time M2 reads for "has it lapsed / is a push due" goes through shared pastTime. A time
 // that can't be read, or lies an hour ahead (a clock that went back, a bad write), counts as long past: an expiry lapses
 // now and a push goes out now, never waits on a time it can't trust. Two plants per site.

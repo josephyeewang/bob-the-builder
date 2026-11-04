@@ -492,6 +492,34 @@ for (const [name, say] of [['refuses', () => false], ['throws', () => { throw ne
   });
 }
 
+// A told mark that can't be kept is loud: the pass stops, so a write that failed is never taken for a told one.
+// The state folder turns into a file as the alert goes out, so the told mark is the write that fails.
+const markWillFail = (t) => {
+  const sink = t.ctx.alert;
+  t.ctx.alert = fakeAlert({
+    answer: (a) => {
+      rmSync(t.ctx.stateDir, { recursive: true, force: true });
+      writeFileSync(t.ctx.stateDir, '');
+      return sink(a);
+    },
+  });
+};
+
+test('L326: a near miss whose told mark cannot be written is loud', () => {
+  const t = world({ [ONBOARD_KEY]: 'Activ' });
+  markWillFail(t);
+  assert.throws(() => onboardNotices(t.ctx, onboard(t.ctx)), /EEXIST/);
+  assert.equal(told(t, 'onboard_near_miss').length, 1, 'told first, then the mark failed');
+});
+
+test('L326: a refused create whose told mark cannot be written is loud', () => {
+  const t = world();
+  markWillFail(t);
+  const { pass, count } = refusing(t, 'changed since read');
+  assert.throws(pass, /EEXIST/);
+  assert.equal(count(), 1, 'told first, then the mark failed');
+});
+
 test('L326: a near miss and a refusal are one wait, so moving from one to the other is told at once', () => {
   const t = world();
   const { pass, ctx, count } = refusing(t, 'rev moved');
