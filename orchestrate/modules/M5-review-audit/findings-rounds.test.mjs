@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
@@ -21,7 +21,8 @@ import { verdictProblem } from '../M6-merge-gate/refusals.mjs';
 import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { changeReaders, checkFindings, finalize, settle } from './findings.mjs';
-import { verdictFileText } from './verdict-file.mjs';
+import { finalizeMark } from '../M4-workshop/launcher/review-runner.mjs';
+import { verdictFileText, verdictFormat } from './verdict-file.mjs';
 import { VERDICT_CHECKLIST } from '../../shared/record.mjs';
 
 const ME = process.getuid();
@@ -96,7 +97,7 @@ async function world(d, { card: id = 'C-1', act }) {
     stop: async () => {},
     accountInUse: () => 'a',
     // The real finalize and the real head reader, as realPorts joins them.
-    finalize: async ({ role, sessionId, card: c, head }) => finalize({ outboxRoot, uids: UIDS, role, sessionId, card: c, head, owner: ME, ...await changeReaders({ gitDir: r.gd, head }) }),
+    finalize: async ({ role, sessionId, card: c, head, mark }) => finalize({ outboxRoot, uids: UIDS, role, sessionId, card: c, head, owner: ME, mark, ...await changeReaders({ gitDir: r.gd, head }) }),
     handedIn: (x) => sessionVerdict({ outboxRoot, uids: UIDS, ...x }),
     verdictTaken: () => ({ ok: true }),
     // The wiring's own steps with the stand-in, after showing the real wiring refuses (stand-in-start.test-helper.mjs).
@@ -145,9 +146,9 @@ test('R-0b-145: the finding-checker drops 2/2 planted noise findings and keeps e
   assert.deepEqual(kept, [real1, real2, real3], 'every real one kept, the repeat combined');
   assert.deepEqual(dropped.map((f) => f.says), [noise1.says, noise2.says]);
   assert.match(dropped[0].dropped, /chain\/round\.mjs is not in the head reviewed or where the change began/);
-  assert.match(dropped[1].dropped, /the quote is not in chain\/total\.mjs near line 2/);
-  // A line past the file's end is noise too; a quote spread over lines, or with other spacing, is still found.
-  assert.match((await check([{ ...real2, line: 40 }])).dropped[0].dropped, /has 9 lines, not 40/);
+  assert.equal(dropped[1].dropped, 'the quote is not in chain/total.mjs');
+  // A line number is never a reason to drop (L424); a quote spread over lines, or with other spacing, is still found.
+  assert.equal((await check([{ ...real2, line: 40 }])).kept.length, 1);
   assert.equal((await check([{ ...real2, line: 3, quote: 'let  sum = 0;\n  for (const r of rows)' }])).kept.length, 1);
 });
 
@@ -389,21 +390,186 @@ test('L92 M-2 planted: a finding about a removed line, a deleted file, a diff qu
   const kept = async (what, f) => assert.equal((await check(f)).kept.length, 1, what);
   await kept('a removed line', { file: 'chain/total.mjs', line: 8, quote: 'return part / whole;' });
   await kept('a removed line cited far from where it was', { file: 'chain/total.mjs', line: 1, quote: 'return part / whole;' });
-  await kept('a line only the base is long enough to hold', { file: 'chain/share.mjs', line: 1 });
-  await kept('a deleted file', { file: 'chain/share.mjs', line: 90, quote: 'nothing like this' });
+  await kept('a deleted file', { file: 'chain/share.mjs', line: 90 });
+  await kept('a quote from a deleted file', { file: 'chain/share.mjs', line: 90, quote: 'export const pct' });
   await kept('a quote as the diff shows it, added', { file: 'chain/total.mjs', line: 8, quote: '+  return Math.round(part);' });
   await kept('a quote as the diff shows it, removed', { file: 'chain/total.mjs', line: 8, quote: '-  return part / whole;' });
   await kept('a quote across both sides of the diff', { file: 'chain/total.mjs', line: 8, quote: '-  return part / whole;\n+  return Math.round(part);' });
   await kept('a path that is a link at the head', { file: 'chain/link.mjs', line: 5, quote: 'not what the link points at' });
   const dropped = async (what, f, why) => assert.match((await check(f)).dropped[0]?.dropped ?? '', why, what);
   await dropped('a file on neither side', { file: 'chain/none.mjs' }, /not in the head reviewed or where the change began/);
-  await dropped('a line past the end on both', { file: 'chain/total.mjs', line: 90 }, /has \d+ lines, not 90/);
   await dropped('a quote on neither side', { file: 'chain/total.mjs', line: 8, quote: 'sum += tax' }, /the quote is not in/);
-  await dropped('a quote the head still has, on the wrong line', { file: 'chain/total.mjs', line: 9, quote: 'return sum;' }, /the quote is not in/);
+  await dropped('a quote not in a deleted file', { file: 'chain/share.mjs', quote: 'sum += tax' }, /the quote is not in/);
+  // L424: a line number is never a reason to drop, past the end of both sides or not.
+  await kept('a line past the end on both', { file: 'chain/total.mjs', line: 90 });
+  await kept('a quote the head still has, on the wrong line', { file: 'chain/total.mjs', line: 9, quote: 'return sum;' });
   // The mirror failing to answer is no evidence: finalize stops, and the file stays as written.
   await assert.rejects(changeReaders({ gitDir: r.gd, head: '0'.repeat(40) }));
+  const blob = (await gitOk(['rev-parse', `${head}:chain/total.mjs`], { gitDir: r.gd })).trim();
+  rmSync(join(r.gd, 'objects', blob.slice(0, 2), blob.slice(2)));
+  await assert.rejects(readFile('chain/total.mjs'), /could not be read at/);
   renameSync(r.gd, `${r.gd}-gone`);
   await assert.rejects(readFile('chain/total.mjs'));
+});
+
+// L424: what is noise is worked out from the whole of both files, never from a line number.
+test('L424 F1 planted: a removed line whose text stands elsewhere too is kept, whichever side its line is counted on', async () => {
+  const r = await repo(tempDir('m5-f1-'));
+  const guard = '  if (w === 0) return 0;';
+  const lines = Array.from({ length: 60 }, (_, i) => (i === 4 || i === 49 ? guard : `  step(${i});`));
+  await r.commit('main', { 'chain/f.mjs': `${lines.join('\n')}\n` });
+  const after = [...Array.from({ length: 20 }, (_, i) => `  added(${i});`), ...lines.slice(0, 49), ...lines.slice(50)];
+  const head = await r.commit('card/f1', { 'chain/f.mjs': `${after.join('\n')}\n` });
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head });
+  for (const quote of [guard.trim(), `-${guard}`]) {
+    const { kept, dropped } = await checkFindings([{ level: 'material', says: 'the guard went', file: 'chain/f.mjs', line: 70, quote }], readFile, readBase);
+    assert.deepEqual([kept.length, dropped.length], [1, 0], quote);
+  }
+});
+
+test('L424 F3 planted: a quote longer than a few lines is kept, cited at its first line or its last, and with Windows line ends', async () => {
+  const r = await repo(tempDir('m5-f3-'));
+  const head = await r.commit('card/f3', { 'chain/share.mjs': '// a change\n' });
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head });
+  const quote = NUM.slice(0, 8).join('\n');
+  for (const f of [{ line: 1, quote }, { line: 8, quote }, { line: 1, quote: quote.replaceAll('\n', '\r\n') }]) {
+    assert.equal((await checkFindings([{ level: 'material', says: 'x', file: 'chain/total.mjs', ...f }], readFile, readBase)).kept.length, 1, f.line);
+  }
+});
+
+test('L424 m4 planted: a file the change shortens keeps a finding on a line only the base reaches', async () => {
+  const r = await repo(tempDir('m5-short-'));
+  const head = await r.commit('card/short', { 'chain/total.mjs': `${NUM.slice(0, 3).join('\n')}\n` });
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head });
+  for (const f of [{ line: 8 }, { line: 8, quote: 'return part / whole;' }]) {
+    assert.equal((await checkFindings([{ level: 'material', says: 'x', file: 'chain/total.mjs', ...f }], readFile, readBase)).kept.length, 1);
+  }
+});
+
+// L424 F2: `dropped` is the runner's own mark. Copied from an earlier round's notes, it never hides a finding.
+const rawVerdict = (l, fields) => writeFileSync(l.path, `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: l.head, ...fields } })}\n`, { mode: 0o644 });
+
+test('L424 F2 planted: a finding carrying a dropped key in a file finalize never marked refuses the verdict, so it never counts as a pass', async () => {
+  const cases = [
+    { pass: false, material: 1, notes: [noise2, { ...real1, dropped: 'copied' }] },
+    { pass: false, material: 1, notes: [noise2, { ...real1, dropped: '' }] },
+    { pass: true, material: 0, notes: [{ ...real1, dropped: 'copied' }] },
+  ];
+  for (const verdict of cases) {
+    const w = await world(tempDir('m5-f2-'), { act: (l) => (l.role === 'auditor' ? rawVerdict(l, verdict) : writeVerdict(l, { pass: true, checklist: CLEAN })) });
+    w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+    const { alerts } = await w.round(['reviewer', 'auditor']);
+    assert.ok(JSON.stringify(alerts).includes('could not be check'), 'Joe is told');
+    const h = JSON.parse(readFileSync(w.file('auditor', 'S-2'), 'utf8').split('\n')[0]);
+    assert.deepEqual(h.fields.notes, verdict.notes, 'left as written');
+    assert.match(verdictFields(h).reason, /only the runner marks a finding dropped/);
+    assert.notEqual(w.gate(), null);
+  }
+  assert.match(verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), pass: true, material: 0, finalized: 'yes' } }).reason, /finalized is only ever true/);
+  // The session is told, so a finding it raises again from an earlier round is not refused for the copied mark.
+  assert.match(verdictFormat({ role: 'auditor', card: 'C-1', head: 'a'.repeat(40) }), /"dropped" is the runner's own mark: leave it off every finding/);
+});
+
+test('L424 m3 planted: any kept Material finding makes the verdict a fail, whatever it says, with nothing dropped', async () => {
+  const none = { level: 'material', says: 'the chain double counts' };
+  assert.deepEqual(settle({ role: 'auditor', pass: true, material: 0, kept: [real1], dropped: [] }), { pass: false, material: 1 });
+  assert.deepEqual(settle({ role: 'reviewer', pass: true, checklist: CLEAN, kept: [none], dropped: [] }), { pass: false, checklist: CLEAN });
+  // A verdict that gave no count gains none, so a dropped finding can't give it the 0 M9 asks for.
+  assert.deepEqual(settle({ role: 'auditor', pass: true, material: null, kept: [], dropped: [{ ...noise1, dropped: 'x' }] }), { pass: true, material: null });
+  // Through the real runner, finalize and M9.
+  const w = await world(tempDir('m5-m3-'), { act: (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN, findings: [none] } : { pass: true, material: 0, findings: [real1] }) });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  await w.round(['reviewer', 'auditor']);
+  for (const [role, sid] of [['reviewer', 'S-1'], ['auditor', 'S-2']]) {
+    const v = verdictFields(JSON.parse(readFileSync(w.file(role, sid), 'utf8').split('\n')[0]));
+    assert.equal(v.ok, true, v.reason);
+    assert.equal(PASSES[role](v), false, `${role} is a fail at M9`);
+  }
+  assert.equal(w.fields('auditor', 'S-2').material, 1);
+  assert.match(w.gate(), /did not pass/);
+});
+
+test('L424: finalize run again on a file it marked changes nothing, so what it dropped stays dropped', async () => {
+  const w = await world(tempDir('m5-again-'), { act: (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: false, material: 1, findings: [noise2] }) });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  await w.round(['reviewer', 'auditor']);
+  assert.deepEqual([w.fields('auditor', 'S-2').pass, w.fields('auditor', 'S-2').material, w.fields('auditor', 'S-2').finalized], [true, 0, true]);
+  const was = sha256(w.file('auditor', 'S-2'));
+  const mark = finalizeMark({ dir: join(w.root, 'finalized'), uid: ME, role: 'auditor', card: 'C-1', head: w.card.head, sessionId: 'S-2' });
+  assert.equal(mark.read(), was, 'the runner\'s record names the file it wrote');
+  const again = await w.ctx.finalize({ role: 'auditor', sessionId: 'S-2', card: 'C-1', head: w.card.head, mark });
+  assert.deepEqual([again.ok, again.changed], [true, false]);
+  assert.equal(sha256(w.file('auditor', 'S-2')), was);
+  assert.equal(w.fields('reviewer', 'S-1').finalized, undefined, 'a file with nothing to change stays as written');
+  // A stop after the record and before the rename: the next run works out the same file, and the record still names it.
+  writeVerdict({ path: w.file('auditor', 'S-2'), head: w.card.head, role: 'auditor' }, { pass: false, material: 1, findings: [noise2] });
+  const retry = await w.ctx.finalize({ role: 'auditor', sessionId: 'S-2', card: 'C-1', head: w.card.head, mark });
+  assert.deepEqual([retry.ok, retry.changed], [true, true], retry.reason);
+  assert.equal(sha256(w.file('auditor', 'S-2')), was);
+  assert.equal(w.gate(), null);
+});
+
+test('L432 planted: a file listing a kept Material finding that says pass: true or material: 0 is refused, so one finalize could not settle never passes', async () => {
+  const reads = (fields) => verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), ...fields } });
+  for (const f of [{ pass: true, material: 0, notes: [real1] }, { pass: true, material: 1, notes: [real1] }, { pass: false, material: 0, notes: [real1] }, { pass: true, checklist: CLEAN, notes: [real1] }]) {
+    assert.match(reads(f).reason ?? '', /lists a Material finding/, JSON.stringify(f));
+  }
+  // A fail that says so stands; so does a pass with nothing Material kept, or a finding dropped in a marked file.
+  assert.equal(reads({ pass: false, material: 1, notes: [real1] }).ok, true);
+  assert.equal(reads({ pass: false, notes: [real1] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0, notes: [real2] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0, notes: [{ ...noise1, dropped: 'x' }], finalized: true }).ok, true);
+  // settle and M9 agree: what settle says of a kept Material finding, M9 takes.
+  const a = settle({ role: 'auditor', pass: true, material: 0, kept: [real1], dropped: [] });
+  assert.equal(reads({ ...a, notes: [real1] }).ok, true);
+  const r = settle({ role: 'reviewer', pass: true, checklist: CLEAN, kept: [real1], dropped: [] });
+  assert.equal(reads({ ...r, notes: [real1] }).ok, true);
+  // Finalize can't run, here the mirror is down: the file stays as written, the end refuses it, and the gate with it.
+  const w = await world(tempDir('m5-l432-'), { act: (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: true, material: 0, findings: [real1] }) });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  w.ctx.finalize = async () => { throw new Error('the mirror is down'); };
+  const { alerts } = await w.round(['reviewer', 'auditor']);
+  assert.deepEqual([w.fields('auditor', 'S-2').pass, w.fields('auditor', 'S-2').material], [true, 0], 'left as written');
+  assert.ok(JSON.stringify(alerts).includes('could not be check'), 'Joe is told');
+  assert.notEqual(w.gate(), null, 'it never counts as a pass');
+});
+
+test('L432 planted: a hunk header in a quote is left out, so a finding pasted from a diff is never dropped for it', async () => {
+  const r = await repo(tempDir('m5-hunk-'));
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head: await r.rev('main') });
+  const check = (quote) => checkFindings([{ ...real1, quote }], readFile, readBase);
+  for (const quote of ['@@ -5,3 +5,4 @@\n-  return part / whole;', '@@ -5,3 +5,4 @@ export function share(part, whole) {\n  return part / whole;\n@@ -1 +1 @@\n+  let sum = 0;', '@@ -5,3 +5,4 @@']) {
+    assert.equal((await check(quote)).kept.length, 1, quote);
+  }
+  // The rest of the quote still has to stand somewhere.
+  assert.equal((await check('@@ -5,3 +5,4 @@\n+  sum += tax')).dropped.length, 1);
+  assert.equal((await check('  @@ not a header @@')).dropped.length, 1);
+});
+
+test('L432 planted: a session\'s own finalized mark proves nothing; M9 trusts a dropped finding only in the file the runner\'s record names', async () => {
+  const forged = { pass: true, material: 0, finalized: true, notes: [{ ...real1, dropped: 'copied' }] };
+  const w = await world(tempDir('m5-forge-'), { act: (l) => (l.role === 'auditor' ? rawVerdict(l, forged) : writeVerdict(l, { pass: true, checklist: CLEAN })) });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  const { alerts } = await w.round(['reviewer', 'auditor']);
+  assert.match(JSON.stringify(alerts), /the runner holds no record of that file/);
+  assert.match(w.gate(), /only the runner marks a finding dropped, and the runner has no record of finalizing session S-2/);
+  // A real one passes on the runner's record, and the record must name this very file.
+  const ok = await world(tempDir('m5-forge2-'), { act: (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: false, material: 1, findings: [noise2] }) });
+  ok.card.head = await ok.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  await ok.round(['reviewer', 'auditor']);
+  assert.equal(ok.gate(), null);
+  const rec = join(ok.root, 'finalized', 'S-2.json');
+  const doc = JSON.parse(readFileSync(rec, 'utf8'));
+  rmSync(rec);
+  writeFileSync(rec, JSON.stringify({ ...doc, verdict_sha256: 'f'.repeat(64) }), { mode: 0o644 });
+  assert.match(ok.gate(), /its record names another file/);
+  rmSync(rec);
+  writeFileSync(rec, JSON.stringify({ ...doc, head: 'a'.repeat(40) }), { mode: 0o644 });
+  assert.match(ok.gate(), /is for another role, card or head/);
+  rmSync(rec);
+  assert.match(ok.gate(), /no record of finalizing/);
+  // And a runner that gives no record finalizes nothing.
+  assert.match((await finalize({ outboxRoot: ok.outboxRoot, uids: UIDS, role: 'auditor', sessionId: 'S-2', card: 'C-1', head: ok.card.head })).reason, /gave no record/);
 });
 
 test('L92 minor 2: a fail by either role sends the card back for both', async () => {

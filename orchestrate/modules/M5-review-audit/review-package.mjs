@@ -22,10 +22,10 @@ export const DIFF_NAME = 'change.diff';
 // The diff git hands over is plain text, never shaped by the tree under review (M-1 (a)).
 export const DIFF_FLAGS = Object.freeze(['--no-color', '--text', '--no-textconv', '--no-ext-diff', '--no-renames', '--ignore-submodules=none']);
 
-/** Throws on the first name holding a control character; → the list. */
 /** How many names main brought in the prompt lists. */
 export const MAX_BROUGHT = 200;
 
+/** Throws on the first name holding a control character; → the list. */
 export function plainNames(list, what = 'the file name') {
   const bad = list.find((p) => CONTROL.test(p));
   if (bad !== undefined) throw new Error(`${what} ${JSON.stringify(bad)} holds a control character, so no package is made`);

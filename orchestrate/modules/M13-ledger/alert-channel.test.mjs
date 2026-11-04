@@ -10,30 +10,34 @@ import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
 import { readUnsent } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
+import { lastLine, lineIs } from './alerts.mjs';
 import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
 
 const T0 = Date.parse('2026-11-03T08:00:00Z');
 const MIN = 60_000;
 
-// The GitHub stand-in, answering as the channel's client does (open → a number, edit/comment/close → true, findOpen →
-// a number or null). It is not M13's fakeIssues, whose calls only succeed (L130): a test that needs a call lost swaps
+// The GitHub stand-in, answering as the channel's client does (open → a number, edit/close → true, comment → { at },
+// read → the issue, findOpen → a number or null). It is not M13's fakeIssues, whose calls only succeed (L130): a test that needs a call lost swaps
 // that method for one that answers false or throws (the L235 c test).
 function fakeGitHub() {
   const issues = new Map();
   const calls = [];
+  const spoken = [];
   let n = 0;
   const gh = {
-    calls, issues,
+    calls, issues, clock: null,
     async open({ title, body, assignee }) { n += 1; issues.set(n, { title, body, assignee, closed: false, comments: [] }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); return true; },
-    async comment(i, text) { issues.get(i).comments.push(text); calls.push(['comment', i]); return true; },
-    async close(i, text) { const x = issues.get(i); x.closed = true; x.comments.push(text); calls.push(['close', i]); return true; },
-    async isClosed(i) {
-      if (!Number.isSafeInteger(i) || i <= 0 || !issues.has(i)) throw new Error(`fakeGitHub.isClosed: no issue ${JSON.stringify(i)}`);
-      return issues.get(i).closed;
+    async comment(i, text) { issues.get(i).comments.push(text); const at = gh.clock ? new Date(gh.clock()).toISOString() : undefined; if (at) spoken.push({ i, at, body: text }); calls.push(['comment', i]); return { at }; },
+    async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; x.comments.push(text); calls.push(['close', i]); return true; },
+    async read(i) {
+      if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeGitHub.read: not an issue number: ${JSON.stringify(i)}`);
+      const x = issues.get(i);
+      return x ? { open: !x.closed, body: x.body, ours: true, closedByOwner: x.closed && x.byOwner === true } : null;
     },
-    async findOpen(marker) { calls.push(['findOpen']); for (const [k, x] of issues) if (!x.closed && x.body.includes(marker)) return k; return null; },
-    ownerCloses(i) { issues.get(i).closed = true; },
+    async findOpen(test) { calls.push(['findOpen']); for (const [k, x] of issues) if (!x.closed && test(lastLine(x.body))) return k; return null; },
+    async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
+    ownerCloses(i) { const x = issues.get(i); x.closed = true; x.byOwner = true; },
     openIssues: () => [...issues.values()].filter((x) => !x.closed),
   };
   return gh;
@@ -43,6 +47,7 @@ function world({ products = ['p1'], product = 'p1', gh = fakeGitHub() } = {}) {
   const root = tempDir('m13-chan-');
   writeFileSync(join(root, 'unsent-alerts.jsonl'), '', { mode: 0o644 });
   let t = T0;
+  gh.clock = () => t;
   const rec = memoryRecord({ now: () => t });
   const repos = Object.fromEntries(products.map((p, i) => [p, `acme/product-${i + 1}`]));
   const bound = { recordRoot: root, product, products, repos, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 };
@@ -178,7 +183,7 @@ test('L245: refused and lost writes leave at most one open record_locked issue',
 
 test('a GitHub client that throws on every call never makes the round throw', async () => {
   const boom = async () => { throw new Error('boom'); };
-  const gh = { open: boom, edit: boom, comment: boom, close: boom, isClosed: boom, findOpen: boom };
+  const gh = { open: boom, edit: boom, comment: boom, close: boom, read: boom, findOpen: boom };
   const w = world({ gh });
   outbox(w.rec, T0)('x');
   const r = await w.run({ probe: ALIVE });
@@ -219,7 +224,10 @@ test('Bob\'s own repository, a bad repo name, no owner or no repo for the produc
 test('L237, L288 MAT-3: with no token (the App not set up) the round says so and calls nothing; the store\'s own alert goes to this Record\'s product\'s repo, naming it', async () => {
   const w = world({ products: ['p1', 'p2'], product: 'p2' });
   const fetched = [];
-  const fetchFn = async (url) => { fetched.push(url); return { status: 201, json: async () => ({ number: 1 }) }; };
+  const fetchFn = async (url, o) => {
+    fetched.push(url);
+    return o.method === 'GET' ? { status: 200, json: async () => [] } : { status: 201, json: async () => ({ number: 1 }) };
+  };
   const nb = { ...w.bound, issuesFor: undefined, fetchFn };
   let r = await deliverAlertsPass({ ...nb, rec: w.rec, token: async () => ({ ok: false, reason: 'no key file' }) });
   assert.equal(r.refused, 'alert channel not set up: no key file');
@@ -243,10 +251,14 @@ test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skip
   const seen = [];
   const answers = [];
   const fetchFn = async (url, init) => { seen.push([init.method, url, init.headers.authorization, init.body && JSON.parse(init.body)]); const [status, json] = answers.shift(); return { status, json: async () => json }; };
-  const gh = githubIssues({ repo: 'acme/r', owner: 'o', token: async () => ({ ok: true, token: 'tok' }), fetchFn });
+  const robot = 'robot[bot]';
+  const gh = githubIssues({ repo: 'acme/r', owner: 'o', token: async () => ({ ok: true, token: 'tok', login: robot }), fetchFn });
   answers.push([201, { number: 7 }]);
   assert.equal(await gh.open({ title: 't', body: 'b', assignee: 'o' }), 7);
   assert.deepEqual(seen[0], ['POST', 'https://api.github.com/repos/acme/r/issues', 'Bearer tok', { title: 't', body: 'b', assignees: ['o'] }]);
+  answers.push([201, { number: 8 }]);
+  assert.equal(await gh.open({ title: 't', body: 'b', labels: ['orch-alert'] }), 8);
+  assert.deepEqual(seen.at(-1)[3], { title: 't', body: 'b', labels: ['orch-alert'] }, 'labels reach GitHub');
   answers.push([422, null]);
   assert.equal(await gh.open({ title: 't', body: 'b' }), false);
   answers.push([201, { nope: 1 }]);
@@ -255,17 +267,20 @@ test('githubIssues: fixed host, the contract alerts.mjs reads, and findOpen skip
   answers.push([403, null]); assert.equal(await gh.edit(7, 'x'), false);
   answers.push([201, {}], [200, {}]); assert.equal(await gh.close(7, 'bye'), true);
   answers.push([500, null]); assert.equal(await gh.close(7, 'bye'), false, 'no close after a refused comment');
-  answers.push([200, { state: 'closed' }]); assert.equal(await gh.isClosed(7), true);
-  // L288 MAT-2 a: deleted (410) or not found (404) reads as closed, so the next alert opens a new issue; others throw.
-  answers.push([404, null]); assert.equal(await gh.isClosed(7), true);
-  answers.push([410, null]); assert.equal(await gh.isClosed(7), true);
-  answers.push([500, null]); await assert.rejects(gh.isClosed(7), /500/);
+  answers.push([200, {}]); assert.equal(await gh.close(7, null), true, 'r4 m1: no text, no comment: one PATCH is all it asks for');
+  // A comment answers GitHub's time for it, or false.
+  answers.push([201, { created_at: '2026-11-03T01:00:00Z' }]); assert.deepEqual(await gh.comment(7, 'x'), { at: '2026-11-03T01:00:00Z' });
+  answers.push([201, {}]); assert.deepEqual(await gh.comment(7, 'x'), { at: undefined });
+  answers.push([403, null]); assert.equal(await gh.comment(7, 'x'), false);
   await assert.rejects(gh.edit(0, 'x'), /not an issue number/);
-  answers.push([200, [{ number: 3, body: `x ${lockedMarker('p1')}`, pull_request: {} }, { number: 4, body: 'other' }, { number: 5, body: `y ${lockedMarker('p1')}` }]]);
-  assert.equal(await gh.findOpen(lockedMarker('p1')), 5);
-  assert.match(seen.at(-1)[1], /\/issues\?state=open&per_page=100&assignee=o$/);
-  answers.push([200, []]); assert.equal(await gh.findOpen(lockedMarker('p1')), null);
-  answers.push([401, null]); assert.equal(await gh.findOpen(lockedMarker('p1')), false);
+  const bot = { user: { login: robot, type: 'Bot' } };
+  const mark = lockedMarker('p1');
+  const isMark = lineIs(mark);
+  answers.push([200, [{ number: 3, body: `x\n${mark}`, pull_request: {}, ...bot }, { number: 4, body: 'other', ...bot }, { number: 5, body: `y\n${mark}`, ...bot }]]);
+  assert.equal(await gh.findOpen(isMark), 5);
+  assert.match(seen.at(-1)[1], /\/issues\?state=open&creator=robot%5Bbot%5D&per_page=100&page=1$/);
+  answers.push([200, []]); assert.equal(await gh.findOpen(isMark), null);
+  answers.push([401, null]); assert.equal(await gh.findOpen(isMark), false);
   const none = githubIssues({ repo: 'acme/r', token: async () => ({ ok: false, reason: 'no key' }), fetchFn });
   await assert.rejects(none.open({ title: 't', body: 'b' }), /alert channel not set up: no key/);
 });
@@ -371,16 +386,16 @@ test('L288 MAT-2 a: an issue Joe deleted reads as closed through the real client
     const id = m[1] && Number(m[1]);
     const body = init.body ? JSON.parse(init.body) : null;
     let status = 404; let json = null;
-    if (init.method === 'POST' && !id) { n += 1; live.set(n, { state: 'open' }); posted.push(['open', n]); status = 201; json = { number: n }; }
+    if (init.method === 'POST' && !id) { n += 1; live.set(n, { state: 'open', body: body.body, user: { login: 'robot[bot]', type: 'Bot' } }); posted.push(['open', n]); status = 201; json = { number: n }; }
     else if (init.method === 'GET' && !id) { status = 200; json = []; }
     else if (live.has(id)) {
       if (init.method === 'GET') { status = 200; json = live.get(id); }
-      else if (init.method === 'PATCH') { if (body.state) live.get(id).state = body.state; status = 200; json = {}; }
+      else if (init.method === 'PATCH') { Object.assign(live.get(id), body); status = 200; json = {}; }
       else if (m[2]) { posted.push(['comment', id]); status = 201; json = {}; }
     }
     return { status, json: async () => json };
   };
-  const run = () => deliverAlertsPass({ ...w.bound, issuesFor: undefined, fetchFn, token: async () => ({ ok: true, token: 'fake' }), rec: w.rec, now: w.now, probe: ALIVE });
+  const run = () => deliverAlertsPass({ ...w.bound, issuesFor: undefined, fetchFn, token: async () => ({ ok: true, token: 'fake', login: 'robot[bot]' }), rec: w.rec, now: w.now, probe: ALIVE });
   outbox(w.rec, T0)('cause', { mark: { fact: 'stop-x', fields: { n: 1 } } });
   assert.equal((await run()).sent, 1);
   live.delete(1); // Joe deletes issue 1: GitHub now answers 404 for it
@@ -455,7 +470,7 @@ test('L288 plants: a store backlog bigger than one round goes out over later rou
   const w = world();
   appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
   // Each issue write takes a second of the round's clock; a round's budget fits two.
-  const clock = () => w.gh.calls.length * 1000;
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
   const rounds = [];
   for (let i = 0; i < 4 && readUnsent(w.root).length; i += 1) {
     const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
@@ -527,7 +542,7 @@ test('L298 Minor 2 (N1): different entries for the same cause, back to back with
   assert.deepEqual(per, ['open:1', 'comment:1', 'comment:1', 'comment:1']);
 });
 
-test('L298 Minor 2 (N2): a crash after GitHub took the comment but before the alert state was saved re-comments once, then stops; never skipped', async () => {
+test('L298 Minor 2 (N2), L389: a crash after GitHub took the comment but before the alert state was saved repeats nothing: GitHub already holds that comment', async () => {
   const w = world();
   outbox(w.rec, w.now())('cause', { mark: markOf(1) });
   await w.run({ probe: ALIVE });
@@ -536,7 +551,7 @@ test('L298 Minor 2 (N2): a crash after GitHub took the comment but before the al
   let crashed = false;
   w.gh.comment = async (i, t) => { await comment(i, t); if (!crashed) { crashed = true; throw new Error('the process died after GitHub took the comment'); } return true; };
   for (let i = 0; i < 4; i++) await w.run({ probe: ALIVE });
-  assert.equal(w.gh.issues.get(1).comments.length, 2, 'the lost save costs one repeat comment, no more and no fewer');
+  assert.equal(w.gh.issues.get(1).comments.length, 1, 'the entry\'s one comment, and no repeat');
   assert.deepEqual(queued(w.rec), []);
 });
 
@@ -594,7 +609,7 @@ test('L298 Minor 5: a round that leaves alerts queued names the first one and Gi
   const w = world();
   outbox(w.rec, T0)('merge gate: card C-9 is held');
   const fetchFn = async (url, o) => ({ status: o.method === 'GET' ? 200 : 422, json: async () => [] });
-  const r = await w.run({ probe: ALIVE, issuesFor: undefined, token: async () => ({ ok: true, token: 'dummy-token' }), fetchFn });
+  const r = await w.run({ probe: ALIVE, issuesFor: undefined, token: async () => ({ ok: true, token: 'dummy-token', login: 'robot[bot]' }), fetchFn });
   assert.equal(r.failed, 1);
   assert.match(r.refused, /^1 alert\(s\) could not be delivered this round and stay queued for the next; the first, "merge gate: card C-9 is held": GitHub answered 422 to POST \/issues$/);
   // A store alert that throws: its title and the error.
@@ -622,4 +637,226 @@ test('L298 cosmetic: whose Record it is is checked before the lock, and a produc
   assert.equal(w.gh.calls.length, 0, 'a locked Record of another product tells no repository anything');
   const rec = { list: () => [{ id: null, doc: {} }] };
   assert.equal(recordProductProblem(rec, 'p2'), 'this Record\'s product can\'t be read, so it can\'t be told apart from p2\'s');
+});
+
+// The Record refusing to keep where an issue is, in delivery rounds: nothing is lost and nothing waits (L401). What it costs
+// is reads, so two rounds running get one alert of their own (L402).
+const refusingAlerts = (w, refuse = (o) => o.doc?.kind === 'fact.alert') => {
+  const write = w.rec.write.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.write = (o) => (refuse(o) ? { ok: false, reason: 'the store is full' } : write(o));
+  return rec;
+};
+const troubleOf = (gh) => [...gh.issues.values()].filter((x) => /refusing alert writes/.test(x.title));
+
+test('L401: with the Record refusing, every round delivers and drains; the second raises one alert, and it clears once the Record takes a write', async () => {
+  const w = world();
+  const rec = refusingAlerts(w);
+  for (let i = 1; i <= 6; i++) {
+    outbox(w.rec, w.now())('cause', { mark: markOf(i) });
+    const r = await w.run({ rec, probe: ALIVE });
+    assert.deepEqual([r.sent, r.failed, r.refused], [1, 0, undefined], `round ${i}`);
+    assert.deepEqual(queued(w.rec), []);
+    assert.equal(troubleOf(w.gh).length, i === 1 ? 0 : 1, `round ${i}`);
+    w.tick(10);
+  }
+  assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 2, 'the alert, and one about the Record');
+  assert.match(troubleOf(w.gh)[0].body, /the store is full/);
+  assert.match(troubleOf(w.gh)[0].title, /\(alert-channel\)$/, 'r5 m2: the round reports under its own name');
+  outbox(w.rec, w.now())('cause', { mark: markOf(7) });
+  await w.run({ probe: ALIVE });
+  assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 2);
+  assert.equal(troubleOf(w.gh)[0].closed, true);
+});
+
+test('L402: when the alert about the Record itself can\'t go out, the round says so and counts as failed', async () => {
+  const w = world();
+  const rec = refusingAlerts(w);
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ rec, probe: ALIVE });
+  const { open } = w.gh;
+  w.gh.lastAnswer = 'GitHub answered 503 to POST /issues';
+  w.gh.open = async (o) => (/refusing alert writes/.test(o.title) ? false : open(o));
+  outbox(w.rec, w.now())('cause', { mark: markOf(2) });
+  let r = await w.run({ rec, probe: ALIVE });
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, /the alert about the Record refusing writes did not go out: GitHub answered 503 to POST \/issues/);
+  w.gh.open = async (o) => { if (/refusing alert writes/.test(o.title)) throw new Error('socket hang up'); return open(o); };
+  outbox(w.rec, w.now())('cause', { mark: markOf(3) });
+  r = await w.run({ rec, probe: ALIVE });
+  assert.match(r.refused, /did not go out: socket hang up/);
+});
+
+test('L402: a clear the Record won\'t note, inside a retry, loses nothing: the footer holds it, and the entry goes out', async () => {
+  const w = world();
+  const line = `${JSON.stringify({ id: 'u9', outcome: 'unsent', event: { type: 'tamper' } })}\n`;
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), line);
+  assert.equal((await w.run({ probe: ALIVE })).sent, 1);
+  w.gh.ownerCloses(1);
+  writeFileSync(join(w.root, 'unsent-alerts.jsonl'), line);
+  const rec = refusingAlerts(w, (o) => o.doc?.status === 'cleared');
+  const r = await w.run({ rec, probe: ALIVE });
+  assert.deepEqual([r.sent, r.failed], [1, 0]);
+  assert.equal(w.gh.issues.size, 2);
+  assert.deepEqual(readUnsent(w.root), []);
+});
+
+// L402 condition: `owed` that can't be settled answers false, and the channel keeps the entry and stays red.
+test('L402 owed: a notice stuck on a failed read is red every round, with GitHub\'s answer, and one comment over them all', async () => {
+  const w = world();
+  outbox(w.rec, w.now())('cause', { mark: markOf(1) });
+  await w.run({ probe: ALIVE });
+  outbox(w.rec, w.now())('cause', { mark: markOf(2) });
+  const { edit, latestOwnComment } = w.gh;
+  let n = 0;
+  w.gh.edit = async (...a) => { n += 1; return n === 2 ? false : edit(...a); };
+  await w.run({ probe: ALIVE }); // the comment went out; the edit after it was lost
+  w.gh.edit = edit;
+  w.gh.lastAnswer = 'GitHub answered 403 to GET /issues/1/comments';
+  w.gh.latestOwnComment = async () => false;
+  for (let i = 0; i < 3; i++) {
+    w.tick(10);
+    const r = await w.run({ probe: ALIVE });
+    assert.equal(r.failed, 1);
+    assert.match(r.refused, /GitHub answered 403 to GET \/issues\/1\/comments/);
+    assert.equal(queued(w.rec).length, 1);
+  }
+  assert.equal(w.gh.issues.get(1).comments.length, 1);
+  w.gh.latestOwnComment = latestOwnComment;
+  const r = await w.run({ probe: ALIVE });
+  assert.deepEqual([r.sent, r.failed, r.refused], [1, 0, undefined]);
+  assert.equal(w.gh.issues.get(1).comments.length, 1, 'found on GitHub, so not sent twice');
+  assert.deepEqual(queued(w.rec), []);
+});
+
+// L399: the login comes with the token, and without it the round says what it fell back to.
+test('L399: a token with no login: the alert still goes out, any bot counts, and the round is red, naming why', async () => {
+  const w = world();
+  outbox(w.rec, T0)('x');
+  const fetchFn = async (url, o) => (o.method === 'GET' ? { status: 200, json: async () => [] } : { status: 201, json: async () => ({ number: 1 }) });
+  const r = await w.run({ probe: ALIVE, issuesFor: undefined, fetchFn, token: async () => ({ ok: true, token: 'not-a-real-token', login: null, login_reason: 'GitHub answered 401 to GET /app' }) });
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, /the robot's own login could not be read \(GitHub answered 401 to GET \/app\), so any bot's issue counted as the robot's this round/);
+  const ok = world();
+  outbox(ok.rec, T0)('x');
+  const y = await ok.run({ probe: ALIVE, issuesFor: undefined, fetchFn, token: async () => ({ ok: true, token: 'not-a-real-token', login: 'robot[bot]' }) });
+  assert.deepEqual([y.sent, y.refused], [1, undefined]);
+});
+
+// Through the real client.
+function realClient(token = { ok: true, token: 'not-a-real-token', login: 'robot[bot]' }) {
+  const answers = [];
+  const asked = [];
+  const fetchFn = async (url) => { asked.push(url); const [status, json] = answers.shift(); return { status, json: async () => json }; };
+  return { answers, asked, gh: githubIssues({ repo: 'acme/product-1', token: async () => token, fetchFn }) };
+}
+const ROBOT = { login: 'robot[bot]', type: 'Bot' };
+const closedBy = (closed_by) => [200, { state: 'closed', body: 'b', user: ROBOT, closed_by }];
+
+test('L399, L402 githubIssues.read: the state, whose issue it is, and only a person\'s close counts as the owner\'s', async () => {
+  const { answers, gh } = realClient();
+  const closedByOwner = async (a) => { answers.push(a); return (await gh.read(7)).closedByOwner; };
+  answers.push([200, { state: 'open', body: 'b', user: ROBOT, closed_by: null }]);
+  assert.deepEqual(await gh.read(7), { open: true, body: 'b', ours: true, closedByOwner: false });
+  answers.push([200, { state: 'open', body: null, user: ROBOT }]);
+  assert.equal((await gh.read(7)).body, '');
+  assert.equal(await closedByOwner(closedBy({ login: 'owner-login', type: 'User' })), true, 'the owner');
+  assert.equal(await closedByOwner(closedBy(ROBOT)), false, 'the robot');
+  assert.equal(await closedByOwner(closedBy({ login: 'robot[bot]', type: 'User' })), false, 'the robot, however it is typed');
+  assert.equal(await closedByOwner(closedBy({ login: 'other-app[bot]', type: 'Bot' })), false, 'another app');
+  assert.equal(await closedByOwner(closedBy({ login: 'owner-login' })), false, 'no type');
+  assert.equal(await closedByOwner(closedBy({ type: 'User' })), false, 'no login');
+  assert.equal(await closedByOwner(closedBy(null)), false, 'nobody named');
+  answers.push([200, { state: 'open', body: 'b', user: { login: 'other-app[bot]', type: 'Bot' } }]);
+  assert.equal((await gh.read(7)).ours, false, 'another app\'s');
+  answers.push([200, { state: 'open', body: 'b', user: { login: 'someone', type: 'User' } }]);
+  assert.equal((await gh.read(7)).ours, false, 'a stranger\'s');
+  answers.push([200, { state: 'open', body: 'b' }]);
+  assert.equal((await gh.read(7)).ours, false, 'no author');
+  for (const [status, json, want] of [[404, null, null], [410, null, null], [502, null, false], [500, { state: 'open' }, false], [200, null, false]]) {
+    answers.push([status, json]);
+    assert.equal(await gh.read(7), want, String(status));
+  }
+});
+
+test('r5 m1: a round with nothing to send still says the login is unknown, and a token it can\'t get stops nothing', async () => {
+  const w = world();
+  const gh = { ...w.gh, loginTrouble: null, ready: async () => { gh.loginTrouble = 'the robot\'s own login could not be read'; } };
+  assert.match((await w.run({ probe: ALIVE, issuesFor: () => gh })).refused, /could not be read/);
+  const { gh: noToken } = realClient({ ok: false, reason: 'no key' });
+  await noToken.ready();
+  assert.equal(noToken.loginTrouble, null);
+});
+
+test('L399 githubIssues: without the login any bot counts as the robot, a person never does, and it says why', async () => {
+  const { answers, gh, asked } = realClient({ ok: true, token: 'not-a-real-token', login: null, login_reason: 'GitHub answered 401 to GET /app' });
+  assert.equal(gh.loginTrouble, null, 'nothing asked yet');
+  await gh.ready();
+  assert.match(gh.loginTrouble, /GitHub answered 401 to GET \/app/, 'r5 m1: ready learns it with no GitHub call');
+  assert.equal(asked.length, 0);
+  answers.push([200, { state: 'open', body: 'b', user: { login: 'other-app[bot]', type: 'Bot' } }]);
+  assert.equal((await gh.read(7)).ours, true);
+  assert.match(gh.loginTrouble, /GitHub answered 401 to GET \/app/);
+  answers.push([200, { state: 'open', body: 'b', user: { login: 'someone', type: 'User' } }]);
+  assert.equal((await gh.read(7)).ours, false);
+  answers.push(closedBy({ login: 'owner-login', type: 'User' }));
+  assert.equal((await gh.read(7)).closedByOwner, true);
+  const MARK = '<!-- alert-key alert-1 -->';
+  answers.push([200, [{ number: 4, body: MARK, user: { type: 'Bot', login: 'other-app[bot]' } }]]);
+  assert.equal(await gh.findOpen(lineIs(MARK)), 4);
+  assert.ok(!asked.at(-1).includes('creator='), 'no filter without a login');
+  const known = realClient();
+  known.answers.push([200, { state: 'open', body: 'b', user: ROBOT }]);
+  await known.gh.read(7);
+  assert.equal(known.gh.loginTrouble, null);
+});
+
+test('L393, L399 githubIssues.findOpen: the robot\'s issue on any page, never another\'s or a marker that isn\'t the last line, and a reason when there are too many', async () => {
+  const { answers, asked, gh } = realClient();
+  const MARK = '<!-- alert-key alert-1 -->';
+  const test = lineIs(MARK);
+  const other = (number) => ({ number, body: 'something else', user: { type: 'User', login: 'someone' } });
+  const full = Array.from({ length: 100 }, (_, i) => other(i + 100));
+  answers.push([200, [{ number: 9, body: MARK, user: { type: 'User', login: 'someone' } }]]);
+  assert.equal(await gh.findOpen(test), null, 'a stranger quoted it');
+  answers.push([200, [{ number: 9, body: MARK, user: { type: 'Bot', login: 'other-app[bot]' } }]]);
+  assert.equal(await gh.findOpen(test), null, 'another app carries it');
+  answers.push([200, [{ number: 9, body: `${MARK}\nand some text after it`, user: ROBOT }]]);
+  assert.equal(await gh.findOpen(test), null, 'not the last line');
+  answers.push([200, full], [200, [{ number: 8, body: MARK, user: ROBOT }]]);
+  assert.equal(await gh.findOpen(test), 8, 'on the second page, whoever it is assigned to');
+  assert.match(asked.at(-1), /&page=2$/);
+  for (let i = 0; i < 10; i++) answers.push([200, full]);
+  assert.equal(await gh.findOpen(test), false);
+  assert.match(gh.lastAnswer, /more than 1000 open issues/);
+});
+
+test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page, and false when it can\'t read them all', async () => {
+  const answers = [];
+  const asked = [];
+  const fetchFn = async (url) => {
+    asked.push(url);
+    const [status, json] = answers.shift();
+    return { status, json: async () => json };
+  };
+  const gh = githubIssues({ repo: 'acme/product-1', owner: 'owner-login', token: async () => ({ ok: true, token: 'not-a-real-token', login: 'robot[bot]' }), fetchFn });
+  const said = (login, at, body) => ({ user: { login }, created_at: at, body });
+  const SINCE = '2026-11-02T08:00:00.000Z';
+  answers.push([200, [said('robot[bot]', '2026-11-03T01:00:00Z', 'old'), said('someone', '2026-11-03T02:00:00Z', 'not me'), said('robot[bot]', '2026-11-03T01:30:00Z', 'new')]]);
+  assert.deepEqual(await gh.latestOwnComment(7, SINCE), { at: '2026-11-03T01:30:00Z', body: 'new' });
+  assert.ok(asked[0].includes(`/issues/7/comments?since=${encodeURIComponent(SINCE)}&per_page=100&page=1`));
+  answers.push([200, [said('someone', '2026-11-03T02:00:00Z', 'not me')]]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), null);
+  const flood = Array.from({ length: 100 }, () => said('someone', '2026-11-03T02:00:00Z', 'flood'));
+  answers.push([200, flood], [200, [said('robot[bot]', '2026-11-03T03:00:00Z', 'on page two')]]);
+  assert.deepEqual(await gh.latestOwnComment(7, SINCE), { at: '2026-11-03T03:00:00Z', body: 'on page two' });
+  answers.push(...Array.from({ length: 10 }, () => [200, flood]));
+  assert.equal(await gh.latestOwnComment(7, SINCE), false, 'more than it will read');
+  assert.match(gh.lastAnswer, /more than 1000 comments on issue 7/, 'not "answered 200" (L393 m1)');
+  answers.push([500, null]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
+  answers.push([403, null]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
+  answers.push([200, [said('robot[bot]', 'no time', 'x')]]);
+  assert.equal(await gh.latestOwnComment(7, SINCE), false);
 });

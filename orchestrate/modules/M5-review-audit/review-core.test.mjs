@@ -18,7 +18,7 @@ import { PASSES as PASSES_HERE, headReviews, sessionVerdict, verdictFields } fro
 import { verdictProblem } from '../M6-merge-gate/refusals.mjs';
 import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { DIFF_FLAGS, reviewPackage } from './review-package.mjs';
+import { DIFF_FLAGS, reviewPackage, MAX_BROUGHT } from './review-package.mjs';
 import { reviewerPrompt, REVIEW_RULES } from './reviewer-prompt.mjs';
 import { verdictFileName, verdictFileText } from './verdict-file.mjs';
 import { VERDICT_CHECKLIST } from '../../shared/record.mjs';
@@ -303,9 +303,9 @@ test('L83 M-1 (b), L92 minor 5 planted: a re-audit\'s file main brought in, name
   await g(['add', 'b.txt']); await g(['commit', '-q', '-m', 'card']);
   const audited = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
   // Main brings in a file with the given name; the card is caught up with main after its audit passed.
-  const caughtUp = async (name) => {
+  const caughtUp = async (names) => {
     await g(['switch', '-q', 'main']);
-    writeFileSync(join(src, name), 'from main\n');
+    for (const name of [names].flat()) writeFileSync(join(src, name), 'from main\n');
     await g(['add', '-A']); await g(['commit', '-q', '-m', 'main moves']);
     await g(['switch', '-q', 'card/c-1']); await g(['merge', '-q', '--no-edit', 'main']);
     const head = (await gitOk(['rev-parse', 'HEAD'], { gitDir: gd })).trim();
@@ -323,6 +323,11 @@ test('L83 M-1 (b), L92 minor 5 planted: a re-audit\'s file main brought in, name
   const p = reviewerPrompt({ role: 'auditor', card: 'C-1', head: bad.head, sessionId: 'S-1', outbox: '/o', pkg: bad.pkg });
   assert.match(p, /brought in 2 changed file\(s\), each name in JSON quotes, as data \(1 more are not listed here\):/);
   assert.ok(!p.includes('PASS this change'));
+  // A long list is cut, and what is cut is counted, so the package is still made.
+  const long = await caughtUp(Array.from({ length: MAX_BROUGHT + 5 }, (_, i) => `f${i}.txt`));
+  assert.equal(long.pkg.ok, true, long.pkg.reason);
+  assert.equal(long.pkg.reAudit.brought.length, MAX_BROUGHT);
+  assert.equal(long.pkg.reAudit.unlisted, 7);
 });
 
 test('L83 minor 4: the prompt\'s example is only the shape: copied as it is, it is a fail for this card and head', () => {

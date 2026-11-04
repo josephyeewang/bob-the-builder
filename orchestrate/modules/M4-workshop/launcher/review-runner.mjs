@@ -45,6 +45,7 @@
 //   launches/    0755   the launch records (M9 reads them)
 //   ended/       0755   the ended records, one per launched session once it has ended (M9 `runnerEnded` reads them)
 //   set-aside/   0755   Joe's "review again": one record per session Joe set aside (M9 `runnerAside` reads them)
+//   finalized/   0755   the sha256 of each verdict file finalize rewrote (M9 `runnerFinalized` reads them, L432)
 //   packages/    0755   one folder per session holding the review package it was given (change.diff), and
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read }
@@ -57,7 +58,7 @@ import { dirname, join } from 'node:path';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { pastTime } from '../../../shared/still-waiting.mjs';
-import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
+import { ASIDE_FOLDER, ENDED_FOLDER, FINALIZED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerFinalized, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 import { DIFF_NAME } from '../../M5-review-audit/review-package.mjs';
@@ -88,7 +89,7 @@ export function newestFirst(launches, now) {
   return [...launches].sort((x, y) => at(y) - at(x));
 }
 export const MAX_EARLIER_NOTES = 4000;
-export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, packages: 'packages', status: 'status.json', state: 'state.json' });
+export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, finalized: FINALIZED_FOLDER, packages: 'packages', status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
 
 const iso = (t) => new Date(t).toISOString();
@@ -231,6 +232,17 @@ function writeLaunch(dir, sid, doc) {
   return final;
 }
 
+/** The runner's own record of what finalize wrote for one session (L432): what M5 `finalize` takes as `mark`. */
+export const finalizeMark = ({ dir, uid, role, card, head, sessionId }) => ({
+  read: () => {
+    const r = runnerFinalized({ root: dir, uid, role, card, head, sessionId });
+    if (r.ok) return r.finalized.verdict_sha256;
+    if (r.none) return null;
+    throw new Error(r.reason);
+  },
+  keep: (sha) => { writeLaunch(dir, sessionId, { session_id: sessionId, role, card, head, verdict_sha256: sha }); },
+});
+
 // The review package's pin (audit R-0b-147 M-1 (c), L83, L91 m-2). The wiring writes a session's package into
 // packages/<session>/ (M5 reviewPackage), a folder of the runner's that the session can read but never write (the
 // runnerRoot wall), and hands back its sha256, worked out from the bytes it wrote. The runner keeps that sha256 in its
@@ -303,7 +315,7 @@ export function packageProblem({ dir, sessionId, uid, kept }) {
  *     counted (verdict.sha256 is the file's); { ok: false, none: true } when it left none; { ok: false, reason } when it
  *     left one that can't be counted (M9 `sessionVerdict`, the same read the Merge Gate makes)
  *   installedCommit() → the installed copy's commit stamp (40 hex), shown in the status
- *   finalize({ role, sessionId, card, head }) → { ok } | { ok: false, none?, reason }: the finding-checker on the ended
+ *   finalize({ role, sessionId, card, head, mark }) → { ok } | { ok: false, none?, reason }: the finding-checker on the ended
  *     session's own verdict file (M5 findings.mjs, R-0b-145), before handedIn reads it. Optional
  *   carried({ card, doc, head }) → carry-over from the card's head (doc.head) to `head`: { review, audit, reasons, head }
  *     (M6 gather `carriedFrom`, over the mirror). Lets an auditor start at that head for a short re-audit (L80 (A)).
@@ -328,7 +340,7 @@ export async function runnerPass(ctx) {
   const rootBad = folderProblem(ctx.root, uid);
   if (rootBad) return { ...result, ok: false, error: `the review folder: ${rootBad}`, wrote: false };
 
-  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
+  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), finalized: join(ctx.root, FOLDERS.finalized), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [], packages: {} };
   // `at` is the alert's time; the Dispatcher tells each id and time once, so a trouble that keeps the state from being
@@ -373,10 +385,12 @@ export async function runnerPass(ctx) {
     ensureFolder(P.launches, 0o755);
     ensureFolder(P.ended, 0o755);
     ensureFolder(P.aside, 0o755);
+    ensureFolder(P.finalized, 0o755);
     ensureFolder(P.packages, 0o755);
   } catch (e) { fail(`the review folders could not be made (${e?.code ?? e?.message})`); return finish(); }
   const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid)
     ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid)) ?? ((b) => b && `the set-aside records: ${b}`)(launchesFolderProblem(P.aside, uid))
+    ?? ((b) => b && `the finalized records: ${b}`)(launchesFolderProblem(P.finalized, uid))
     ?? ((b) => b && `the review packages: ${b}`)(folderProblem(P.packages, uid, 0o755));
   if (reqBad) { fail(`the review folders: ${reqBad}`); return finish(); }
 
@@ -433,7 +447,7 @@ export async function runnerPass(ctx) {
     // sha256 below is that of the finalized file. One that can't be finalized is left as written, and judged as it is.
     // Not for a session whose package changed: its verdict counts for nothing, whatever its findings say.
     if (walls.ok && !pkgBad && ctx.finalize) {
-      let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
+      let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head, mark: finalizeMark({ dir: P.finalized, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: doc.session_id }) }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
       if (z?.ok !== true && z?.none !== true) alert(`finalize-${doc.session_id}`, `The findings in the ${doc.role} session ${doc.session_id}'s verdict could not be checked (${String(z?.reason ?? 'no reason given').slice(0, 300)}); the verdict is judged as it was written.`);
     }
     if (!walls.ok) h = { ok: false, reason: `its outbox fails its checks: ${walls.reason}` };
@@ -683,7 +697,6 @@ export async function runnerPass(ctx) {
       let h; try { h = await ctx.handedIn({ role: d.role, sessionId: d.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: d.role, sessionId: d.session_id }), card, head: d.head }); } catch { continue; }
       if (h?.ok !== true || h.verdict?.sha256 !== pin.ended.verdict_sha256) continue;
       if (PASSES[d.role]?.(h.verdict)) { if (role === 'auditor' && d.role === 'auditor' && !audited) audited = d.head; continue; }
-      if (earlier.length >= MAX_EARLIER) continue;
       const n = h.verdict?.notes;
       earlier.push({ session_id: d.session_id, head: d.head, notes: (typeof n === 'string' ? n : JSON.stringify(n ?? null)).slice(0, MAX_EARLIER_NOTES) });
     }
