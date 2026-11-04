@@ -17,7 +17,8 @@ import { PR_FACT } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { goFingerprint } from '../M2-approvals/go.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -108,6 +109,22 @@ test('L221 MAT-1: one real runTick turns on a product its rules file names, writ
   await runTick({ lockFile: join(tempDir('m11-lock-'), 'pass.lock'), rec: w.rec, rules, now: T0 + MIN, ports });
   assert.equal(w.rec.diary({}).filter((l) => l.entity === 'product' && l.id === 'p2').length, 1);
   assert.equal(w.calls.alerts.length, 1);
+});
+
+test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan reaches its Lead', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const replies = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const fp = goFingerprint({ record: w.rec, product: 'p2' }, 'C-3');
+  assert.equal(fp.ok, true, fp.reason);
+  seed(w.rec, 'ask', 'go-C-3', { kind: 'go_t2', product: 'p2', card: 'C-3', title: 'C-3', state: 'answered', fingerprint: fp.fingerprint, created_at: iso(T0 - MIN), answer: { approves: false, choice: 'Not now' } });
+  // recWith seeds a card as a script; a Lead's session wrote this plan.
+  const rec = Object.create(w.rec, { diary: { value: (...x) => [...w.rec.diary(...x), { actor: 'lead:L-1', writes: [{ entity: 'card', id: 'C-3', doc: { files: ['changed'] } }] }] } });
+  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); } } });
+  assert.equal(replies.length, 1, w.calls.alerts.join(' | '));
+  assert.match(replies[0].text, /declined the plan for card C-3/);
 });
 
 test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {

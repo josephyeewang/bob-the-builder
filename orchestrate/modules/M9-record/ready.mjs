@@ -98,19 +98,22 @@ function productCheck(card, view, rules, product) {
 // A fix card's `root` is another card: it runs on that card's go, and only the root is ever asked for one.
 export function goNeeded(card, view, rules, product) {
   const kind = card.doc.kind;
-  const r = rootOf(card, view);
-  const root = r.ok ? r.root : null;
+  // A go-free kind made by the wrong creator isn't refused outright (L450): it is an ordinary card, ok on the owner's go.
+  let wrong = null;
   if (goFreeKinds(rules, product).includes(kind)) {
     const creator = view.createdBy('card', card.id);
     if (creator && mayCreateKind(creator, kind)) return { needed: false };
-    return { needed: true, root, reason: `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go` };
+    wrong = `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go`;
   }
-  if (!r.ok) return { needed: true, root, reason: r.reason };
+  const r = rootOf(card, view);
+  const root = r.ok ? r.root : null;
+  const reasonOf = (why) => (wrong ? `${wrong}: ${why}` : why);
+  if (!r.ok) return { needed: true, root, reason: reasonOf(r.reason) };
   const d = card.doc;
   const fp = planFingerprint({ product: d.product, card_id: root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
-  if (!fp.ok) return { needed: true, root, reason: `plan can't be fingerprinted: ${fp.reason}` };
+  if (!fp.ok) return { needed: true, root, reason: reasonOf(`plan can't be fingerprinted: ${fp.reason}`) };
   const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === root.id);
-  return go ? { needed: false, go: go.id } : { needed: true, root, reason: `no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})` };
+  return go ? { needed: false, go: go.id } : { needed: true, root, reason: reasonOf(`no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})`) };
 }
 
 function goCheck(card, view, rules, product) {

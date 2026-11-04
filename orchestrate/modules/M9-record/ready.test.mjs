@@ -219,6 +219,21 @@ test('the ready list: a dependency closing makes a card appear; reverting makes 
   assert.deepEqual(ids(), []);
 });
 
+test('L450: a go-free kind by the wrong creator is an ordinary card, ok only on the owner\'s go for this plan', () => {
+  const d = card({ kind: 'exact_reverse' });
+  const creators = { 'C-1': 'lead:L-1' };
+  const at = (gos, who = creators) => check('C-1', d, view({ cards: { 'C-1': d }, gos, creators: who }));
+  assert.deepEqual(at([], { 'C-1': 'dispatcher' }), { ok: true }, 'the right creator needs no go');
+  const none = at([]);
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /made by lead:L-1 needs the owner's go/);
+  assert.match(none.reason, /fingerprint [0-9a-f]{12}/);
+  assert.deepEqual(at([goFor('C-1', d)]).ok, true, 'the owner\'s go on this plan lets it run');
+  const other = at([goFor('C-1', { ...d, what: 'x', done_when: 'another plan' })]);
+  assert.equal(other.ok, false, 'a go for another plan does not');
+  assert.match(other.reason, /made by lead:L-1 needs the owner's go/);
+});
+
 test('L443: goNeeded is exactly the case the go check refuses', () => {
   const rules = { flag: () => true, get: () => undefined };
   const d = card({ kind: 'exact_reverse' });
