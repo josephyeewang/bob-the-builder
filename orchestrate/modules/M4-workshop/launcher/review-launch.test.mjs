@@ -16,7 +16,7 @@ import { makeSnapshot, writeSnapshot } from '../hooks/snapshot.mjs';
 import { templateText } from './review-settings.mjs';
 import { startGate } from '../../M11-dispatcher/gate.mjs';
 import { rulesWith, recWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
-import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, SEND_BACK_EFFORT } from './review-launch.mjs';
+import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from './review-launch.mjs';
 
 const PIN = '2.1.300';
 const ME = process.getuid();
@@ -271,9 +271,10 @@ test('R-0b-163 planted: the session starts with --settings naming the runner\'s 
   assert.equal(args.includes(F.restricted), true);
   assert.equal(args[args.indexOf(F.mcpConfig) + 1], '{"mcpServers":{}}');
   assert.equal(args.at(-1), 'the prompt');
-  // R-0b-145: a send-back (an earlier failing verdict) runs at the highest effort; a first round sets none.
-  assert.equal(args.includes(F.effort), false);
-  for (const earlier of ['', '  ', undefined]) assert.equal(sessionArgs({ profile: DESIGN_PROFILES.reviewer, settingsFile: '/f', sessionId: 'S-1', prompt: 'p', earlier }).includes(F.effort), false);
+  // R-0b-145: a send-back (an earlier failing verdict) runs at xhigh; L92 minor 2: a first round at M10's floor.
+  assert.equal(args[args.indexOf(F.effort) + 1], FIRST_ROUND_EFFORT);
+  assert.equal(FIRST_ROUND_EFFORT, JSON.parse(readFileSync(new URL('../../M10-rules/roles/reviewer.json', import.meta.url), 'utf8')).effort_floor);
+  for (const earlier of ['', '  ', undefined]) { const a = sessionArgs({ profile: DESIGN_PROFILES.reviewer, settingsFile: '/f', sessionId: 'S-1', prompt: 'p', earlier }); assert.equal(a[a.indexOf(F.effort) + 1], FIRST_ROUND_EFFORT); }
   const back = sessionArgs({ profile: DESIGN_PROFILES.reviewer, settingsFile: '/f', sessionId: 'S-1', prompt: 'p', earlier: 'An earlier round failed.' });
   assert.equal(back[back.indexOf(F.effort) + 1], SEND_BACK_EFFORT);
   assert.equal(SEND_BACK_EFFORT, 'xhigh');

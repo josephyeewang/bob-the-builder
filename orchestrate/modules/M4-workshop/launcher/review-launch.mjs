@@ -48,8 +48,10 @@ const refuse = (reason) => ({ ok: false, reason });
 export const PROBE_MS = 120_000;
 // The kind M11's start gate counts each review role as (gate.mjs CAP_FREE).
 export const GATE_KIND = Object.freeze({ reviewer: 'review', auditor: 'audit' });
-// The effort a send-back round runs at (R-0b-145).
+// The effort a send-back round runs at (R-0b-145), and a first round: the floor in M10's reviewer.json (a test holds
+// the two the same), for an auditor too, which has no role file there (L92 minor 2).
 export const SEND_BACK_EFFORT = 'xhigh';
+export const FIRST_ROUND_EFFORT = 'high';
 // The smoke command's three files: one it writes first, inside the copy, to show it ran; one outside the copy; one it
 // writes only if github.com answered.
 export const smokeFiles = ({ copy, reviewHome, sessionId }) => ({
@@ -86,8 +88,8 @@ export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier 
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, settingsFile, F.sessionId, sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
-  // A send-back (R-0b-145): a round after an earlier failing verdict on this card runs at the highest effort.
-  if (typeof earlier === 'string' && earlier.trim()) args.push(F.effort, SEND_BACK_EFFORT);
+  // A send-back (R-0b-145): a round after an earlier failing verdict on this card, by either role.
+  args.push(F.effort, typeof earlier === 'string' && earlier.trim() ? SEND_BACK_EFFORT : FIRST_ROUND_EFFORT);
   args.push(prompt);
   return args;
 }
