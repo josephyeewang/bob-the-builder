@@ -4,7 +4,7 @@
 // no upstream source was available to port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GO_FREE, goFreeKinds, goFreeOn, readyCheck, rootOf } from './ready.mjs';
+import { GO_FREE, goFreeKinds, goFreeOn, goNeeded, readyCheck, rootOf } from './ready.mjs';
 import { PRODUCT, fingerprintFor, must, plan, product, put, readyCard, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 
 // An in-memory view: cards by id, gos, the product state, and who created each card.
@@ -217,4 +217,23 @@ test('the ready list: a dependency closing makes a card appear; reverting makes 
   seed(env, 'product', PRODUCT, { state: 'active' });
   must(put(env.record, 'dispatcher', 'card', 'E', { state: 'claimed', claim: { kind: 'tab', claim_id: 'T-1', host: 'mac-a' } }));
   assert.deepEqual(ids(), []);
+});
+
+test('L443: goNeeded is exactly the case the go check refuses', () => {
+  const rules = { flag: () => true, get: () => undefined };
+  const d = card({ kind: 'exact_reverse' });
+  const allowed = view({ cards: { 'C-1': d }, creators: { 'C-1': 'dispatcher' } });
+  assert.deepEqual(goNeeded({ id: 'C-1', doc: d }, allowed, rules, d.product), { needed: false });
+  const wrong = view({ cards: { 'C-1': d }, creators: { 'C-1': 'lead:L-1' } });
+  const asked = goNeeded({ id: 'C-1', doc: d }, wrong, rules, d.product);
+  assert.equal(asked.needed, true);
+  assert.equal(asked.root.id, 'C-1');
+  assert.match(asked.reason, /made by lead:L-1 needs the owner's go/);
+  const plain = card({});
+  const none = goNeeded({ id: 'C-1', doc: plain }, view({ cards: { 'C-1': plain } }), rules, plain.product);
+  assert.equal(none.needed, true);
+  assert.match(none.reason, /no go from the owner/);
+  const fix = card({ fix_of: 'C-gone' });
+  const lost = goNeeded({ id: 'C-2', doc: fix }, view({ cards: { 'C-2': fix } }), rules, fix.product);
+  assert.deepEqual([lost.needed, lost.root], [true, null]);
 });
