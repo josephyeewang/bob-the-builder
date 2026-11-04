@@ -481,8 +481,8 @@ export async function runnerPass(ctx) {
     const runningIds = new Set(state.running.map((x) => x.session_id));
     for (const { doc } of rl.launches) {
       if (runningIds.has(doc.session_id)) continue;
-      const at = Date.parse(doc.launched_at ?? '');
-      if (Number.isFinite(at) && now - at < SWEEP_AFTER_MS) continue;
+      const at = pastTime(doc.launched_at, now);   // unreadable or ahead counts as long past, so it can't be held off for ever (L403)
+      if (at !== null && now - at < SWEEP_AFTER_MS) continue;
       try { lstatSync(join(P.ended, `${doc.session_id}.json`)); continue; } catch { /* not marked */ }
       if (await endSession(doc, 'swept')) alert(`swept-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for card ${doc.card} at ${doc.head.slice(0, 7)} was not being tracked by the review runner; it is now marked ended.`);
     }

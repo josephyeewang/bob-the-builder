@@ -1237,3 +1237,19 @@ test('L367: a launched_at that lies ahead or cannot be read sorts oldest', () =>
   assert.deepEqual(order.slice(0, 2).map((x) => x.doc.session_id), ['new', 'old']);
   assert.deepEqual(order.slice(2).map((x) => x.doc.session_id).sort(), ['ahead', 'bad', 'none']);
 });
+
+// L403: a launch stamped ahead would otherwise look young for ever, and its lost session would never be ended.
+test('L403: a lost session whose launched_at lies ahead is still swept', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  editState(w, (s) => { s.running = []; });   // the memory lost it
+  w.end('S-1');
+  const f = join(w.root, 'launches', 'S-1.json');
+  const doc = JSON.parse(readFileSync(f, 'utf8'));
+  chmodSync(f, 0o644);
+  writeFileSync(f, JSON.stringify({ ...doc, launched_at: new Date(w.clock.t + 365 * 24 * 60 * MIN).toISOString() }));
+  w.clock.t += SWEEP_AFTER_MS + MIN;
+  await runnerPass(w.ctx);
+  assert.equal(w.ended('S-1').ended.how, 'swept');
+});
