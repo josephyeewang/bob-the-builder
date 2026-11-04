@@ -239,6 +239,7 @@ test('the Sensors job file is the Dispatcher\'s layout: only the label and the l
   const o = { label: 'org.sample.sensors', node: '/opt/node/bin/node', script: '/srv/orchestrate/modules/M12-sensors/loop.mjs', config: '/srv/sensors.json',
     path: '/usr/bin:/bin', logDir: '/srv/logs', workDir: '/srv' };
   const s = sensorsJobPlist(o).split('\n'); const d = loginJobPlist(o).split('\n');
+  assert.equal(sensorsJobPlist({ ...o, logName: 'dispatcher' }), sensorsJobPlist(o), 'a caller can\'t put the Sensors in the Dispatcher\'s log');
   assert.equal(s.length, d.length);
   const diff = s.map((l, i) => [l, d[i]]).filter(([a, b]) => a !== b);
   assert.deepEqual(diff.map(([a]) => a.trim()), ['<key>StandardOutPath</key><string>/srv/logs/sensors.out.log</string>', '<key>StandardErrorPath</key><string>/srv/logs/sensors.err.log</string>']);
