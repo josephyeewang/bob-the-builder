@@ -436,17 +436,24 @@ export async function runnerPass(ctx) {
     // And the package it was given must be the one the runner pinned (M-1 (c)): one changed while it ran shaped what it
     // read, so nothing it holds counts.
     const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: doc.session_id, uid, kept: state.packages?.[doc.session_id] }) : null;
-    let h;
+    const handed = async () => {
+      try { return await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { return { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
+    };
+    let h; let pre = null;
     // Finalize first (R-0b-145): the finding-checker works on this session's own verdict file only, in place, so the
     // sha256 below is that of the labelled file. One that can't be labelled is left as written, and judged as it is.
     // Not for a session whose package changed: its verdict counts for nothing, whatever its findings say.
+    // What the session wrote is read here, before finalize, and what it says must not move (L482). A record finalize
+    // wrote can't show that, so this is the one check that doesn't rest on finalize.
     if (walls.ok && !pkgBad && ctx.finalize) {
+      pre = await handed();
       let z; try { z = await ctx.finalize({ role: doc.role, sessionId: doc.session_id, card: doc.card, head: doc.head, mark: finalizeMark({ dir: P.finalized, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: doc.session_id }) }); } catch (e) { z = { ok: false, reason: e?.message ?? String(e) }; }
       if (z?.ok !== true && z?.none !== true) alert(`finalize-${doc.session_id}`, `The findings in the ${doc.role} session ${doc.session_id}'s verdict could not be checked (${String(z?.reason ?? 'no reason given').slice(0, 300)}); the verdict is judged as it was written.`);
     }
     if (!walls.ok) h = { ok: false, reason: `its outbox fails its checks: ${walls.reason}` };
     else if (pkgBad) h = { ok: false, reason: pkgBad };
-    else try { h = await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
+    else h = await handed();
+    if (pre?.ok === true && (h?.ok !== true || h.verdict?.content_sha256 !== pre.verdict?.content_sha256)) h = { ok: false, reason: 'finalize changed the review beyond its labels, so it is refused' };
     const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
     const said = sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
     if (!markEnded(doc, said, how)) return false;

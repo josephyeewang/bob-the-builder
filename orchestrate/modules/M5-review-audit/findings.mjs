@@ -3,10 +3,12 @@
 // Finalize never drops a finding, and it changes no count and no pass: no matcher can prove a quote is absent, so what it
 // finds is a label for the reader, nothing more. A finding whose file or quote it can't find, at the head reviewed or where
 // the change began, gets `quote_found: false` and QUOTE_NOTE. Everything else in the file stays as the session wrote it.
-// A file with nothing to label is not touched. For a file it labels, finalize first writes the sha256 of the file with
-// its labels left out (M9 verdictContent) into the runner's own record (`mark`, finalized/ in the runner's folder, which
-// no session can write). M9 headReviews refuses a labelled file that record does not match, so finalize can change
-// nothing but the labels (L469).
+// A file with nothing to label is not touched, and neither is one the labels would take over the outbox size limit.
+// For a file it labels, finalize writes the sha256 of the file with its labels left out (M9 verdictContent) into the
+// runner's own record (`mark`, finalized/ in the runner's folder, which no session can write), once the labelled file is
+// ready and just before it goes in. M9 headReviews refuses a labelled file that record does not match. The record comes
+// from finalize, so it can't vouch for finalize: the runner reads the file before and after, and refuses a verdict
+// whose content moved (review-runner.mjs `endSession`, L482).
 // finalize reads and writes only the one verdict file in that session's own folder, in place (a temporary dot-named
 // file, renamed over it, which the gate never lists). It never writes a second verdict, and it never reads or changes
 // another session's. A finding with nothing to check (no file named) gets no label.
@@ -14,7 +16,7 @@
 import { closeSync, fchmodSync, fchownSync, fsyncSync, openSync, readdirSync, renameSync, unlinkSync, writeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
-import { FINDING_LABELS, holdsLabel, kindOf, readOutboxFile, verdictContent, verdictFields } from '../M9-record/outbox.mjs';
+import { FINDING_LABELS, MAX_OUTBOX_BYTES, holdsLabel, kindOf, readOutboxFile, verdictContent, verdictFields } from '../M9-record/outbox.mjs';
 import { findingProblem } from './verdict-file.mjs';
 
 /** What a reader gives for a path that is at the commit but is not a plain file (a link, say): no text to check. */
@@ -40,8 +42,11 @@ const readings = (l) => {
  * digit are set aside, and a quote with nothing else holds. Of the rest, one line of at least SURE_LINE non-space
  * characters found in base or head is enough, or every shorter line found.
  */
-function quoteHolds(quote, texts) {
-  const hays = texts.map(squash);
+function quoteHolds(quote, texts, squashed) {
+  const hays = texts.map((t) => {
+    if (!squashed.has(t)) squashed.set(t, squash(t));
+    return squashed.get(t);
+  });
   const on = (t) => hays.some((h) => h.includes(t));
   if (on(squash(quote))) return true;
   const left = quote.split(/\r\n|\r|\n/).filter((l) => !HEADER.test(l) && !FENCE.test(l) && WORD.test(l));
@@ -57,15 +62,25 @@ function quoteHolds(quote, texts) {
  * `readBase(path)` where the change began: null when that commit has no such file, NOT_TEXT when the path is there but
  * is not a plain file. A review is of a diff, so a finding may be about what the change removes (L92 M-2): either side
  * will do, anywhere in the file. A line number is never looked at (L424). A path with no text to check counts as found.
+ * `squashed` keeps each text's squashed form, for a caller checking many findings.
  */
-export async function quoteFound(f, readFile, readBase) {
+export async function quoteFound(f, readFile, readBase, squashed = new Map()) {
   if (f.file === undefined) return true;
   const sides = [await readFile(f.file), await readBase(f.file)];
   if (sides.includes(NOT_TEXT)) return true;
   const texts = sides.filter((t) => typeof t === 'string');
   if (!texts.length) return false;
-  return f.quote === undefined || quoteHolds(f.quote, texts);
+  return f.quote === undefined || quoteHolds(f.quote, texts, squashed);
 }
+
+/** A reader that goes to the mirror once for each path, however many findings name it. */
+const oncePerPath = (read) => {
+  const seen = new Map();
+  return (path) => {
+    if (!seen.has(path)) seen.set(path, read(path));
+    return seen.get(path);
+  };
+};
 
 /** The header with each finding's label set by `found`, one yes or no per finding, and nothing else different. Pure. */
 export function labelled(header, found) {
@@ -105,19 +120,29 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
     if (p) return no(`a finding can't be checked: ${p}`);
   }
   const found = [];
-  for (const n of notes) found.push(await quoteFound(n, readFile, readBase));
+  const [head1, base1, squashed] = [oncePerPath(readFile), oncePerPath(readBase), new Map()];
+  for (const n of notes) found.push(await quoteFound(n, head1, base1, squashed));
   const next = labelled(f.header, found);
   const count = found.filter((x) => !x).length;
   // Nothing to label: the file stays exactly as the session wrote it.
   if (!count && !holdsLabel(notes)) return { ok: true, changed: false, labelled: 0 };
-  // The record comes first: a stop before the rename leaves a record of a file not there yet, and a run after it works
-  // out the same record. The other way round, a stop would leave a labelled file the runner has no record of.
-  const sha = verdictContent(f.header);
-  try { if (mark.read() !== sha) mark.keep(sha); } catch (e) { return no(`the runner's record of it could not be written (${e?.code ?? e?.message})`); }
   const text = JSON.stringify(next);
-  if (text === JSON.stringify(f.header)) return { ok: true, changed: false, labelled: count };
+  // A label must not turn a file that fits into one that is refused for its size.
+  if (Buffer.byteLength(`${text}\n`) > MAX_OUTBOX_BYTES) return no('labels skipped: the file would be too large');
+  const sha = verdictContent(f.header);
+  const keepRecord = () => {
+    try { if (mark.read() !== sha) mark.keep(sha); return null; } catch (e) { return `the runner's record of it could not be written (${e?.code ?? e?.message})`; }
+  };
+  if (text === JSON.stringify(f.header)) {
+    const bad = keepRecord();
+    return bad ? no(bad) : { ok: true, changed: false, labelled: count };
+  }
+  // The temporary file comes first, the record next, the rename last. A session's own file in the temporary file's place
+  // stops finalize before there is a record, so a label it wrote can't get one. A stop before the rename leaves a record
+  // of a file not there yet, and a run after it works out the same record. A rename first could leave a labelled file
+  // the runner has no record of.
   const tmp = join(dir, `.finalize-${sessionId}`);
-  let fd;
+  let fd; let bad = null;
   try {
     fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
     writeSync(fd, `${text}\n`);
@@ -125,13 +150,15 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
     if (Number.isInteger(owner)) fchownSync(fd, owner, -1);
     fsyncSync(fd);
     closeSync(fd); fd = undefined;
-    renameSync(tmp, file);
+    bad = keepRecord();
+    if (!bad) renameSync(tmp, file);
   } catch (e) {
-    if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ }
-    try { unlinkSync(tmp); } catch { /* not made */ }
-    return no(`the labelled verdict could not be written (${e?.code ?? e?.message})`);
+    bad = `the labelled verdict could not be written (${e?.code ?? e?.message})`;
   }
-  return { ok: true, changed: true, labelled: count };
+  if (!bad) return { ok: true, changed: true, labelled: count };
+  if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ }
+  try { unlinkSync(tmp); } catch { /* not made */ }
+  return no(bad);
 }
 
 /**
