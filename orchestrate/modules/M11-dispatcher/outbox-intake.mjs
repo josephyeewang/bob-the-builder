@@ -54,8 +54,9 @@ export function kindsFor(entry) {
  * `replyToLead({ lead, text })` leaves a report- note for the Lead. `note(text)` writes a diary line.
  * `vet({ session, kind, text })` may refuse a file before it is used (null = fine); a vetted-out file
  * is not marked as used, so the session can write it again under the same name (an oversize handoff).
- * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`): { ok, ended } |
- * { ok: false, none?, reason }. A session's `head` comes from the runner's launch record.
+ * `reviewEnded(session)` answers from the runner's own ended record (M9 `runnerEnded`), now or as a promise: { ok, ended }
+ * | { ok: false, none?, reason }. Left out, its stand-in answers "not ended" with a reason, noted every pass. A session's
+ * `head` comes from the runner's launch record.
  * Returns what happened to each file.
  */
 export async function intakePass({ rec, sessions, wait, alert, note, startReadonly, replyToLead, now = Date.now(),
@@ -120,13 +121,21 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     }
     // L424: a verdict is taken only once its session's ended record exists, never because the file sat still for
     // SETTLE_MS. The runner finalizes the file (it may rewrite it) and only then writes that record. Anything short of
-    // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner.
+    // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner,
+    // once until #181 lands its daily re-tell.
+    // The file was read above, before this question: the runner may have finalized it in between, so a record naming
+    // other bytes also waits (L445 m2). A claim on the old bytes would make every later pass say "new content".
     if (file.kind === 'verdict-') {
       let e;
-      try { e = reviewEnded(s); } catch (err) { e = { ok: false, reason: err.message }; }
-      if (e?.ok !== true) {
-        r.waiting = 'its session has not ended';
-        if (!e?.none) note(`verdict ${name} from ${s.role} ${s.sessionId} waits: ${e?.reason ?? 'no answer from the ended record'}`);
+      try { e = await reviewEnded(s); } catch (err) { e = { ok: false, reason: err.message }; }
+      const want = e?.ended?.verdict_sha256;
+      const held = e?.ok !== true ? (e?.reason ?? 'no answer from the ended record')
+        : typeof want !== 'string' ? 'its ended record does not say what verdict file it ended with'
+          : want === 'none' ? 'its ended record says it ended with no verdict file'
+            : /^[0-9a-f]{64}$/.test(want) && want !== hash ? 'this is not the file its ended record names' : null;
+      if (held) {
+        r.waiting = e?.ok === true ? held : 'its session has not ended';
+        if (!e?.none) note(`verdict ${name} from ${s.role} ${s.sessionId} waits: ${held}`);
         continue;
       }
     }
