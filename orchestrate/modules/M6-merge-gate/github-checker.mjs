@@ -954,7 +954,15 @@ function check(raw) {
   if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
-  for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+  for (const s of PRODUCT_STATES) {
+    const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+    // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
+    // doors that read it, so a typo could hold one door and pass another. A missing line stays M9's required-keys check.
+    for (const [key, known] of [['start', START_RULES], ['tier1_merge', TIER1_MERGE_RULES]]) {
+      const v = rules[key];
+      if (v !== undefined && v !== null && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
+    }
+  }
 
   for (const [cls, action] of Object.entries(mapOf(raw.failure_classes, 'failure_classes'))) {
     if (!FAILURE_ACTIONS.includes(action)) bad(`failure_classes.${cls} must be one of ${FAILURE_ACTIONS.join(', ')}`);

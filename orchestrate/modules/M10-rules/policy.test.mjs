@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { parsePolicy, KEYS, REQUIRED_KEYS, compareVersions } from './policy.mjs';
+import { parsePolicy, KEYS, REQUIRED_KEYS, compareVersions, PRODUCT_STATES, START_RULES, TIER1_MERGE_RULES } from './policy.mjs';
 
 const fixture = readFileSync(new URL('./fixtures/policy.yaml', import.meta.url), 'utf8');
 const swap = (from, to) => { assert.ok(fixture.includes(from), `fixture lacks ${JSON.stringify(from)}`); return fixture.replace(from, to); };
@@ -159,4 +159,36 @@ test('the database folders can\'t be left out or empty, and the hours end at 24:
   // Leaving the field out entirely can't be written: the rules format has no empty map, and a missing key is refused.
   refused(swap('  tier1_hours: 07:00-22:00', '  tier1_hours: 07:00-24:30'), 'past midnight');
   assert.ok(parsePolicy(swap('  tier1_hours: 07:00-22:00', '  tier1_hours: 07:00-24:00')).ok);
+});
+
+// S4 (L220, L226): every state's two rules are read against the one list of each. The lists are policy.mjs's own, so a
+// value added to one is in this test at once.
+const RULE_KEYS = [['start', START_RULES], ['tier1_merge', TIER1_MERGE_RULES]];
+const withRule = (state, key, value) => {
+  const line = new RegExp(`(\\n  ${state}:\\n(?:    .*\\n)*?    ${key}:) .*`);
+  assert.match(fixture, line, `${state}.${key} is in the fixture`);
+  return fixture.replace(line, `$1 ${value}`);
+};
+
+test('S4: every known start and tier1_merge value reads, in every state', () => {
+  for (const state of PRODUCT_STATES) for (const [key, known] of RULE_KEYS) for (const value of known) {
+    const r = parsePolicy(withRule(state, key, value));
+    assert.equal(r.ok, true, `${state}.${key}: ${value}: ${r.reason}`);
+    assert.equal(r.policy.product_state_rules[state][key], value);
+  }
+});
+
+test('S4: an unknown start or tier1_merge value fails the whole read and names the key', () => {
+  for (const state of PRODUCT_STATES) for (const [key, known] of RULE_KEYS) {
+    for (const value of ['sometimes', known[0].toUpperCase(), `${known[0]}x`, `[${known[0]}]`, '"undo-only"']) {
+      const r = parsePolicy(withRule(state, key, value));
+      assert.equal(r.ok, false, `${state}.${key}: ${value}`);
+      assert.match(r.reason, new RegExp(`product_state_rules\\.${state}\\.${key} must be one of ${known.join(', ')}`), value);
+    }
+  }
+});
+
+test('S4: a value of the other key is not taken: the two lists are read apart', () => {
+  assert.match(parsePolicy(withRule('active', 'start', 'undo_only')).reason, /product_state_rules\.active\.start must be one of/);
+  assert.match(parsePolicy(withRule('active', 'tier1_merge', 'none')).reason, /product_state_rules\.active\.tier1_merge must be one of/);
 });
