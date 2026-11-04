@@ -845,7 +845,7 @@ for (const [name, bad] of [['null', null], ['garbage', 'not a time'], ['1 h ahea
     const e = await w.at(NOW + MIN);
     assert.ok(e.events.some((x) => x.type === 'reasked_time_unreadable' && x.line === TIME_REASKED_LINE), JSON.stringify(e.events));
     assert.equal(reasked(w).length, 1);
-    assert.equal(approvalsAlertText('sample-app', reasked(w)[0]), 'The question about C-1 is being asked again because its time could not be read. An earlier copy of it no longer counts.', 'what Joe actually receives');
+    assert.equal(approvalsAlertText('sample-app', reasked(w)[0]), 'The question about C-1 [ask Q-1] is being asked again because its time could not be read. An earlier copy of it no longer counts.', 'what Joe actually receives');
     const d = ask(w, 'Q-1');
     assert.deepEqual([d.state, d.created_at, d.time_reasked_at, d.reask_count, d.raised_at], ['open', iso(NOW + MIN), iso(NOW + MIN), 0, undefined], 'raised afresh; the one re-ask is not spent');
 

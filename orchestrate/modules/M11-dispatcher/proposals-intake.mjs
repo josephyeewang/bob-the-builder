@@ -461,7 +461,7 @@ function tellCause(rec, causeFact, doc, why, said, alert, now) {
   }
   const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: causeFact, expectRev: prev?.rev ?? 0, doc: { ...doc, why: why ?? null, at: new Date(now).toISOString() }, kind: 'proposal_cause' });
   // The cause cleared: a tell still queued for it leaves unsent (the r7 M2 rule).
-  if (!why) { dropCause(rec, causeFact); return undefined; }
+  if (!why) return dropCause(rec, causeFact) ? undefined : alert(`the queued alert for ${causeFact} could not be dropped`);
   // The alert's answer goes back as it is (false when it was lost); nothing to tell answers undefined.
   if (!w.ok) return alert(said);
   return tellThen(alert, said, { fact: causeFact, fields: { told_why: why }, kind: 'proposal_told' });

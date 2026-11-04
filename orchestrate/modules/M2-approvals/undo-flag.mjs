@@ -146,7 +146,7 @@ export async function openUndoFlags(ctx, { entriesOf, addedBy } = {}) {
   for (const a of handAsks.filter((x) => !x.doc.main_alert_sent_at)) {
     const files = Array.isArray(a.doc.added_files) ? a.doc.added_files : [];
     try {
-      if (alert({ type: 'undo_by_hand', ask: a.id, card: a.doc.card, pr: a.doc.pr, commit: a.doc.merge_commit_sha, files })) {
+      if (alert({ type: 'undo_by_hand', ask: a.id, card: a.doc.card, pr: a.doc.pr, commit: a.doc.merge_commit_sha, files, files_known: a.doc.files_known === true })) {
         const m = markSent(ctx, a.id, [BY_HAND_KIND], 'main_alert_sent_at');
         if (!m.ok) alert({ type: 'undo_by_hand_mark_failed', ask: a.id, reason: m.reason });
       }

@@ -167,18 +167,19 @@ test('collect: step lines → ran / failed lists', () => {
 
 function fakeRepoIssues() {
   const issues = []; const calls = [];
+  const clock = { at: '2000-01-01T00:00:00.000Z' };
   const api = async (method, path, body) => {
     calls.push([method, path]);
     if (method === 'GET' && path.startsWith('/issues?')) return issues.map((i) => ({ ...i }));
     const cm = /^\/issues\/(\d+)\/comments/.exec(path);
     if (cm && method === 'GET') return issues[cm[1] - 1].comments;
-    if (cm && method === 'POST') { issues[cm[1] - 1].comments.push({ user: { login: BOT }, body: body.body }); return {}; }
+    if (cm && method === 'POST') { issues[cm[1] - 1].comments.push({ user: { login: BOT }, body: body.body, created_at: clock.at }); return {}; }
     if (method === 'POST' && path === '/issues') { issues.push({ number: issues.length + 1, title: body.title, body: body.body, state: 'open', comments: [] }); return {}; }
     const pm = /^\/issues\/(\d+)$/.exec(path);
     if (pm && method === 'PATCH') { Object.assign(issues[pm[1] - 1], body); return {}; }
     throw new Error(`unexpected ${method} ${path}`);
   };
-  return { issues, calls, api };
+  return { issues, calls, api, clock };
 }
 
 test('notify: Wi-Fi off for 3 hours → one "heartbeat stale" issue, updated hourly, not re-opened; cleared on return', async () => {
@@ -202,6 +203,118 @@ test('notify: an issue the owner closed mid-failure stays closed until the check
   assert.deepEqual(await notify({ ran: [t], failed: [t], api: gh.api }), [[t, 'suppressed']]);
   assert.deepEqual(await notify({ ran: [t], failed: [], api: gh.api }), [[t, 're-armed']]);
   assert.deepEqual(await notify({ ran: [t], failed: [t], api: gh.api }), [[t, 'opened']]);
+});
+
+// L315: a failing check's issue is commented on again every 24 h. This repo's issue is the one that still tells the
+// owner when the host itself is down, so it can't lean on the host's copy of the alert.
+test('L315 notify: a check still failing is commented on again every 24 h, not more often, and the told time is kept in the body', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const at = (h) => ({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW + h * 3600e3) });
+  assert.deepEqual(await notify(at(0)), [[t, 'opened']]);
+  assert.deepEqual(await notify(at(23)), [[t, 'updated']]);
+  assert.equal(gh.issues[0].comments.length, 0);
+  assert.deepEqual(await notify(at(24)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 1);
+  assert.equal(gh.issues[0].comments[0].body, 'Still failing since 2026-11-03T12:00:00.000Z.');
+  assert.match(gh.issues[0].body, /failing since 2026-11-03T12:00:00.000Z\nlast seen 2026-11-04T12:00:00.000Z\nlast told 2026-11-04T12:00:00.000Z/);
+  assert.deepEqual(await notify(at(25)), [[t, 'updated']]);
+  assert.deepEqual(await notify(at(47)), [[t, 'updated']]);
+  assert.deepEqual(await notify(at(48)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 2);
+  assert.deepEqual(await notify({ ran: [t], failed: [], api: gh.api, now: () => new Date(NOW + 49 * 3600e3) }), [[t, 'cleared']]);
+});
+
+test('L315 notify: a comment that fails is an error, the told time stays, and the next run tells again', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const at = (h, api = gh.api) => ({ ran: [t], failed: [t], api, now: () => new Date(NOW + h * 3600e3) });
+  await notify(at(0));
+  const lost = async (m, p, b) => { if (/comments$/.test(p)) throw new Error('GitHub is down'); return gh.api(m, p, b); };
+  assert.deepEqual(await notify(at(25, lost)), [[t, 'error']]);
+  assert.match(gh.issues[0].body, /last told 2026-11-03T12:00:00.000Z/, 'the told time stays');
+  assert.deepEqual(await notify(at(26)), [[t, 'reminded']]);
+  assert.equal(gh.issues[0].comments.length, 1);
+});
+
+test('L389 notify: a body update that keeps failing after its comment still sends one comment a day; only the bot\'s comments count', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  await notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(0) });
+  const noBody = async (m, p, b) => { if (m === 'PATCH') throw new Error('GitHub refused the update'); return gh.api(m, p, b); };
+  const answers = [];
+  for (let h = 25; h <= 75; h += 1) {
+    gh.clock.at = hours(h).toISOString();
+    answers.push(...await notify({ ran: [t], failed: [t], api: noBody, now: () => hours(h) }));
+  }
+  assert.equal(gh.issues[0].comments.length, 3, 'at +25 h, +49 h and +73 h');
+  assert.ok(answers.every(([, what]) => what === 'error'), 'and every run ends red');
+  // An outsider's comment is not the bot telling the owner.
+  const fresh = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: fresh.api, now: () => hours(0) });
+  fresh.issues[0].comments.push({ user: { login: 'someone' }, body: 'hello', created_at: hours(24.5).toISOString() });
+  fresh.clock.at = hours(25).toISOString();
+  assert.deepEqual(await notify({ ran: [t], failed: [t], api: fresh.api, now: () => hours(25) }), [[t, 'reminded']]);
+  assert.equal(fresh.issues[0].comments.length, 2);
+});
+
+// L393 m3: GitHub stamps the comment a little after the run's own time, so the next due run can find it just under 24 h old.
+// c3: the told line is GitHub's time for the comment, because the next run compares it with GitHub's. A time ahead of the
+// run's own, or none, can't be stored (L362).
+test('L402 c3 notify: the told line takes GitHub\'s time for a past comment, and the run\'s own for anything else', async () => {
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  const stamp = hours(24).toISOString();
+  const told = async (created_at) => {
+    const gh = fakeRepoIssues();
+    await notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(0) });
+    const api = async (method, path, body) => { const r = await gh.api(method, path, body); return method === 'POST' && /comments$/.test(path) ? { created_at } : r; };
+    assert.deepEqual(await notify({ ran: [t], failed: [t], api, now: () => hours(24) }), [[t, 'reminded']]);
+    return /last told (\S+)$/m.exec(gh.issues[0].body)[1];
+  };
+  const before = new Date(hours(24).getTime() - 3000).toISOString();
+  assert.equal(await told(before), before);
+  const slightly = new Date(hours(24).getTime() + 5000).toISOString();
+  assert.equal(await told(slightly), slightly, 'r4 c1: GitHub a little ahead is still GitHub\'s time');
+  assert.equal(await told(new Date(hours(24).getTime() + 61e3).toISOString()), stamp, 'ahead of the run');
+  assert.equal(await told('not a time'), stamp);
+  assert.equal(await told(undefined), stamp);
+});
+
+test('L393 notify: a due run the bot already spoke in writes that comment\'s time, answers updated, and the next run reminds', async () => {
+  const gh = fakeRepoIssues();
+  const t = 'product 1 / heartbeat';
+  const hours = (h) => new Date(NOW + h * 3600e3);
+  const run = (h) => { gh.clock.at = new Date(hours(h).getTime() + 5000).toISOString(); return notify({ ran: [t], failed: [t], api: gh.api, now: () => hours(h) }); };
+  await run(0);
+  assert.deepEqual(await run(24), [[t, 'reminded']]);
+  assert.deepEqual(await run(48), [[t, 'updated']], 'the 24 h comment is 5 s short of a day old');
+  assert.match(gh.issues[0].body, new RegExp(`last told ${new Date(hours(24).getTime() + 5000).toISOString()}`));
+  assert.deepEqual(await run(49), [[t, 'reminded']], 'and the reminder is one run late, not a day');
+  assert.equal(gh.issues[0].comments.length, 2);
+  // Of two bot comments inside the 24 h, the later one is the told time.
+  const two = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: two.api, now: () => hours(0) });
+  two.issues[0].comments.push({ user: { login: BOT }, body: 'x', created_at: hours(2).toISOString() }, { user: { login: BOT }, body: 'x', created_at: hours(20).toISOString() });
+  await notify({ ran: [t], failed: [t], api: two.api, now: () => hours(24) });
+  assert.match(two.issues[0].body, new RegExp(`last told ${hours(20).toISOString()}`));
+  // A bot comment stamped ahead of the run never moves the told line ahead.
+  const ahead = fakeRepoIssues();
+  await notify({ ran: [t], failed: [t], api: ahead.api, now: () => hours(0) });
+  ahead.issues[0].comments.push({ user: { login: BOT }, body: 'x', created_at: hours(26).toISOString() });
+  await notify({ ran: [t], failed: [t], api: ahead.api, now: () => hours(25) });
+  assert.match(ahead.issues[0].body, new RegExp(`last told ${hours(25).toISOString()}`));
+});
+
+test('L315 notify: a told time that cannot be read or is in the future tells now; an issue from before the told line is dated from failing since', async () => {
+  const t = 'product 1 / heartbeat';
+  for (const [line, h, want] of [['', 2, 'updated'], ['', 25, 'reminded'], ['\nlast told garbage', 2, 'reminded'], ['\nlast told 2099-01-01T00:00:00.000Z', 2, 'reminded']]) {
+    const gh = fakeRepoIssues();
+    await notify({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW) });
+    gh.issues[0].body = gh.issues[0].body.replace(/\nlast told \S+/, '') + line;
+    assert.deepEqual(await notify({ ran: [t], failed: [t], api: gh.api, now: () => new Date(NOW + h * 3600e3) }), [[t, want]], line);
+  }
 });
 
 test('keep-alive commits only after 50 quiet days', async () => {

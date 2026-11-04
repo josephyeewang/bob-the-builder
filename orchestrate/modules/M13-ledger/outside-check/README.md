@@ -12,7 +12,7 @@ public too, so the check prints only "product N / <check>: ok|FAIL <reason code>
 | `pinned-docs-lane.json` | Per product slot: the paths the robot may merge alone (its first-cutover docs lane). Empty in the template. |
 | `acknowledged-merges.json` | Per product slot: SHA-256 of each robot merge the owner has looked at and accepted. Empty in the template. |
 | `robot-merges-owner.json` | `tags`: a short public tag per slot (8–32 lowercase letters or digits) that the PRODUCTS entry and the Mini's config must repeat; `cleared`: per slot, the time the owner last cleared a latched robot-merges red. Empty in the template. |
-| `collect.mjs`, `notify.mjs` | One updated issue in this repo per failing check, closed when it passes. |
+| `collect.mjs`, `notify.mjs` | One updated issue in this repo per failing check, commented on again every 24 h while it fails, closed when it passes. |
 | `keep-alive.mjs` | A small commit to the `keep-alive` branch (never the default branch) after 50 quiet days, so GitHub doesn't switch the schedule off. |
 | `supported.mjs` | A copy of Bob's M12 rule for "a supported main commit"; a Bob test keeps the two identical. |
 | `pinned-audit-files.json` | Per product slot: each audit file's path and SHA-256, as approved. Empty in the template. |

@@ -21,7 +21,7 @@ const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9 ._:/#|@+-]{0,127}$/;
 
 const alert = { key: 'id', title: 'text', body: 'text', status_text: 'text', status: 'id', since: 'time', last: 'time',
-  cleared: 'time', count: 'count', issue: 'count' };
+  cleared: 'time', told_at: 'time', count: 'count', issue: 'count', retry_key: 'id', retry_issue: 'count', retry_status: 'id' };
 const check = { name: 'text', status: 'id', conclusion: 'id', summary: 'text' };
 // The Dispatcher's readings (R-0b-168): each carries observed_at, taken just before the read it reports began (L97 M-2).
 const reading = { value: 'bool', observed_at: 'time' };
