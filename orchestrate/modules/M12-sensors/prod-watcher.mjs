@@ -21,7 +21,7 @@
 // Deliberately absent: the N14 ref watch (D15's approved-jobs ref) is second cutover (0b-11); don't add it here.
 
 import { createHash } from 'node:crypto';
-import { wasSaved } from './facts.mjs';
+import { TROUBLE_SOURCES, wasSaved } from './facts.mjs';
 import { resolveStage, isSupported } from './supported.mjs';
 
 export const stateFactId = (product) => `prod-watch-${String(product).replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -60,9 +60,9 @@ export function shapeProblems({ deps, live, settings }) {
 export async function watchOnce(pass) {
   const out = await watch(pass);
   // The Record refusing alert writes gets its own alert (L402), and either answer shows like any other.
-  const result = await pass.alerts.reportTrouble(pass.product, 'prod-watcher');
+  const result = await pass.alerts.reportTrouble(pass.product, TROUBLE_SOURCES.WATCHER);
   if (result !== 'none') out.push({ kind: 'alerts', subject: 'record-refusing', result });
-  const login = pass.alerts.loginTrouble?.();
+  const login = await pass.alerts.loginTrouble?.();
   if (login) out.push({ kind: 'alerts', subject: 'robot-login', result: login });
   return out;
 }

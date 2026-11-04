@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
-import { makeFactWriter } from './facts.mjs';
+import { makeFactWriter, TROUBLE_SOURCES } from './facts.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
 import { makeVercelReader } from './vercel-reader.mjs';
 import { watchOnce, stateFactId } from './prod-watcher.mjs';
@@ -246,9 +246,10 @@ function lossSetup(raise, rulesEntry = { stage: 'first' }) {
   const v = fakeVercel();
   const writer = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
-  const alerts = { raise, clear: async () => false, reportTrouble: async () => 'none' };
+  const reported = [];
+  const alerts = { raise, clear: async () => false, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
   const pass = () => watchOnce({ vercel: v.reader, rulesEntry, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
-  return { v, pass, writer };
+  return { v, pass, writer, reported };
 }
 const subjects = (raise, kind) => raise.texts.filter((a) => a.key.includes(`|${kind}|`)).map((a) => a.key.split('|')[2]);
 
@@ -585,10 +586,16 @@ test('L402 owed: a daily reminder stuck on a failed read is in the pass\'s answe
   assert.equal(gh.issues.get(1).comments.length, 1, 'found on GitHub, so not sent twice');
 });
 
+test('r5 m2: the watcher reports the Record\'s trouble under its own name', async () => {
+  const t = lossSetup(async () => 'opened');
+  await t.pass();
+  assert.deepEqual(t.reported, [['product 1', TROUBLE_SOURCES.WATCHER]]);
+});
+
 test('r4 m2: a robot login that could not be read is in the pass\'s answer, and a known one is not', async () => {
   for (const [why, want] of [['the robot\'s own login could not be read', ['the robot\'s own login could not be read']], [null, []]]) {
     const t = setup();
-    const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => 'none', loginTrouble: () => why };
+    const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => 'none', loginTrouble: async () => why };
     const out = await watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
     assert.deepEqual(ofKind(out, 'alerts'), want);
   }

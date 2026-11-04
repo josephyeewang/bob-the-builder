@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
-import { makeFactWriter } from '../M12-sensors/facts.mjs';
+import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
 import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 
@@ -184,12 +184,13 @@ function lossSetup(raise, refuse = () => false) {
   };
   let planned = null;
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
-  const alerts = { raise, clear: async () => false, cacheTrouble: () => null, reportTrouble: async () => 'none' };
+  const reported = [];
+  const alerts = { raise, clear: async () => false, cacheTrouble: () => null, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
   // One GitHub for the whole test: a fresh one per pass forgot the pinned issue the last pass opened (the strict
   // read found it, #98 r1 m2).
   const gh = fakeIssues();
   const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
-  return { base, writer, world, pass, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
+  return { base, writer, world, pass, reported, tick: () => { t += 10 * 60e3; }, plan: (p) => { planned = p; } };
 }
 const changed = (raise) => raise.texts.filter((a) => /\|heartbeat\|account-changed-/.test(a.key)).map((a) => a.key.split('-').pop());
 const savedLogin = (h) => h.writer.get('heartbeat-account-product-1')?.login;
@@ -642,6 +643,21 @@ test('r4 m2: a robot login that could not be read is red on the pinned issue, wi
   h.gh.loginTrouble = null;
   h.tick(10);
   assert.ok(!(await h.pass()).red.includes('robot-login-unknown'));
+});
+
+test('r5 m1: a client that only learns the login on its first call: the first check of the pass still shows it red', async () => {
+  const h = setup();
+  h.gh.loginTrouble = null;
+  h.gh.ready = async () => { h.gh.loginTrouble = 'the robot\'s own login could not be read (GitHub answered 401)'; };
+  const { red, body } = await h.pass();
+  assert.ok(red.includes('robot-login-unknown'));
+  assert.match(body, /RED +alerts: the robot's own login could not be read/);
+});
+
+test('r5 m2: the heartbeat reports the Record\'s trouble under its own name', async () => {
+  const h = lossSetup(sink(() => 'opened'));
+  await h.pass();
+  assert.deepEqual(h.reported, [['product 1', TROUBLE_SOURCES.HEARTBEAT]]);
 });
 
 test('L402: any alert lost shows red once a pass, with no reason given or several lost', async () => {

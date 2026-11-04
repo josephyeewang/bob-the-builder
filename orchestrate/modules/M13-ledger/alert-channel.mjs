@@ -43,6 +43,7 @@
 
 import { createHash } from 'node:crypto';
 import { alertKey, lastLine, lineIs, makeAlerts, wasTold } from './alerts.mjs';
+import { TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
@@ -121,7 +122,8 @@ const once = (token) => {
  * latestOwnComment(n, since) → the robot's latest comment since that ISO time, as { at, body }; null when there is none;
  * false when GitHub refused a read or there are too many comments to read them all.
  * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell the owner what GitHub said.
- * `loginTrouble` says why the robot's login is unknown, in which case any bot counts as the robot; null when it is known.
+ * `loginTrouble` says why the robot's login is unknown, in which case any bot counts as the robot; null when it is known,
+ * and null until the first call: `ready` makes sure of one.
  * A missing token throws "alert channel not set up: …". Host fixed; the repository is checked once, here.
  */
 export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutMs = 15_000 } = {}) {
@@ -160,6 +162,8 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
     /** What GitHub answered to this client's latest call ("GitHub answered 422 to POST /issues"), or null. */
     get lastAnswer() { return last; },
     get loginTrouble() { return loginTrouble; },
+    /** Learns the login, for a pass that has made no call yet. A token that can't be had is the next call's to report. */
+    async ready() { await bearer().catch(() => {}); },
     async open({ title, body, assignee, labels }) {
       const r = await call('POST', '/issues', { title: String(title), body: String(body), ...(assignee ? { assignees: [assignee] } : {}), ...(labels?.length ? { labels } : {}) });
       return r.status === 201 && ISSUE(r.json?.number) ? r.json.number : false;
@@ -382,8 +386,9 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
     const plus = [];
     try {
-      if (await within(sendMs, () => alerts.reportTrouble(target, 'alert-channel')) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
+      if (await within(sendMs, () => alerts.reportTrouble(target, TROUBLE_SOURCES.CHANNEL)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
     } catch (e) { plus.push(`the alert about the Record refusing writes did not go out: ${msg(e)}`); }
+    await within(sendMs, () => gh?.ready?.()); // a round with nothing to send may have made no call yet
     if (gh?.loginTrouble) plus.push(gh.loginTrouble);
     if (plus.length) out.refused = [out.refused, ...plus].filter(Boolean).join('; ');
   } catch (e) {

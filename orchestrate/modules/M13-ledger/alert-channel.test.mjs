@@ -662,6 +662,7 @@ test('L401: with the Record refusing, every round delivers and drains; the secon
   }
   assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 2, 'the alert, and one about the Record');
   assert.match(troubleOf(w.gh)[0].body, /the store is full/);
+  assert.match(troubleOf(w.gh)[0].title, /\(alert-channel\)$/, 'r5 m2: the round reports under its own name');
   outbox(w.rec, w.now())('cause', { mark: markOf(7) });
   await w.run({ probe: ALIVE });
   assert.equal(w.gh.calls.filter(([c]) => c === 'open').length, 2);
@@ -778,9 +779,21 @@ test('L399, L402 githubIssues.read: the state, whose issue it is, and only a per
   }
 });
 
+test('r5 m1: a round with nothing to send still says the login is unknown, and a token it can\'t get stops nothing', async () => {
+  const w = world();
+  const gh = { ...w.gh, loginTrouble: null, ready: async () => { gh.loginTrouble = 'the robot\'s own login could not be read'; } };
+  assert.match((await w.run({ probe: ALIVE, issuesFor: () => gh })).refused, /could not be read/);
+  const { gh: noToken } = realClient({ ok: false, reason: 'no key' });
+  await noToken.ready();
+  assert.equal(noToken.loginTrouble, null);
+});
+
 test('L399 githubIssues: without the login any bot counts as the robot, a person never does, and it says why', async () => {
   const { answers, gh, asked } = realClient({ ok: true, token: 'not-a-real-token', login: null, login_reason: 'GitHub answered 401 to GET /app' });
   assert.equal(gh.loginTrouble, null, 'nothing asked yet');
+  await gh.ready();
+  assert.match(gh.loginTrouble, /GitHub answered 401 to GET \/app/, 'r5 m1: ready learns it with no GitHub call');
+  assert.equal(asked.length, 0);
   answers.push([200, { state: 'open', body: 'b', user: { login: 'other-app[bot]', type: 'Bot' } }]);
   assert.equal((await gh.read(7)).ours, true);
   assert.match(gh.loginTrouble, /GitHub answered 401 to GET \/app/);

@@ -101,6 +101,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   let trouble = null; // why the Record refused a cache write since the last report
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
+  let refused = null; // the latest cache write refused: which alert, and its issue
 
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
@@ -111,6 +112,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     if (s?.issue === issue && s?.status === status) return;
     const r = writer.put(id, { kind: 'fact.alert', key, issue, status });
     if (wasSaved(r)) { wrote = true; return; }
+    refused = { key, issue };
     trouble = masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200);
     again ||= behind;
   };
@@ -243,23 +245,38 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   /** Why the Record refused to keep where an alert is, since the last report, or null. */
   const cacheTrouble = () => trouble;
   /** Why the robot's login is unknown, so any bot counts as the robot (L399), or null. */
-  const loginTrouble = () => gh.loginTrouble ?? null;
+  const loginTrouble = async () => { await gh.ready?.(); return gh.loginTrouble ?? null; };
 
   // Called once at the end of a pass. A Record that refuses twice in a row gets one alert of its own, which needs nothing
   // from the Record, and it clears once a write lands (L402). The second refusal is read from GitHub showing the Record
   // behind, not counted: a count would have to be saved in the Record that is refusing. `source` names the caller, and
   // each has its own alert, because the Record can refuse one caller's alert and take another's: one key let a clean pass
   // of the heartbeat close what the watcher had just opened, every 10 minutes (#184 r4 MAT-1). A pass where no write
-  // landed says nothing about the Record, so it leaves the alert as it is.
+  // landed says nothing about the Record, and a quiet product can have those for weeks. So the alert's own entry keeps the
+  // write that was refused, and such a pass tries that write again, once (#184 r5 m3). Only that write shows the Record
+  // takes what it refused: trying any other closed the alert while the Record still refused, and reopened it every pass.
+  // An entry already holding that number needs no write, and writing one could undo a later change to it.
+  const retryRefused = ({ retry_key: key, retry_issue: issue }) => {
+    const id = idOf(key);
+    return writer.get(id)?.issue === issue || wasSaved(writer.put(id, { kind: 'fact.alert', key, issue, status: 'open' }));
+  };
+
   async function reportTrouble(product, source) {
     if (!source) throw new Error('reportTrouble needs the caller\'s name');
     const key = alertKey(product, 'alerts', `record-refusing:${source}`);
+    const own = idOf(key);
     const why = again ? trouble : null;
+    const entry = writer.get(own);
+    if (trouble === null && !wrote && entry?.retry_key) wrote = retryRefused(entry);
     const recovered = () => (wrote ? clear({ key, note: 'The Record is taking alert writes again.', look: true }) : 'none');
     const answer = why === null
       ? await recovered()
-      : await raise({ key, title: `${product}: the Record is refusing alert writes`, status: 'refusing',
+      : await raise({ key, title: `${product}: the Record is refusing alert writes (${source})`, status: 'refusing',
         body: `The Record refused to save where this product's alerts are (${why}). Alerts still go out, but each pass has to look them up on GitHub until it takes them.` });
+    if (why !== null && answer !== false && refused) {
+      const cur = writer.get(own);
+      if (cur?.status === 'open') writer.put(own, { ...cur, retry_key: refused.key, retry_issue: refused.issue });
+    }
     // After the alert, so a refusal of its own number isn't carried into the next pass as that pass's trouble.
     trouble = null; again = false; wrote = false;
     return answer;

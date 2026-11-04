@@ -4,7 +4,7 @@ import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
 import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold } from './alerts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
-import { makeFactWriter } from '../M12-sensors/facts.mjs';
+import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
 import { dueToTell as notifyDue, RETELL_MS, FUTURE_SKEW_MS as NOTIFY_SKEW } from './outside-check/notify.mjs';
 
@@ -956,21 +956,69 @@ test('L402 cacheTrouble: a clean pass makes no GitHub call for it', async () => 
   assert.equal(gh.calls.length, seen + 1);
 });
 
-test('r4 MAT-1: a pass where no write landed leaves the alert as it is, so no false "taking writes again"', async () => {
-  const w = refusing();
+const oneRefused = async (w) => {
   w.world.refuse = () => true;
   await w.make().raise(standing);
   const a = w.make();
   await a.raise(standing);
-  w.world.refuse = () => false; // it heals in time to keep the alert's own number
+  w.world.refuse = (doc) => doc.key === standing.key; // its own alert is taken; the refused one still isn't
   await a.reportTrouble('p', 'test');
-  assert.equal(troubleIssues(w.gh).length, 1);
+};
+
+test('r5 m3: a quiet pass retries the exact write refused: the alert closes once the Record takes it, not before', async () => {
+  const w = refusing();
+  await oneRefused(w);
+  const issue = troubleIssues(w.gh)[0];
+  assert.equal(issue.closed, false);
+  const own = cached(w.rec, alertKey('p', 'alerts', 'record-refusing:test'));
+  assert.deepEqual([own.retry_key, own.retry_issue], [standing.key, 1], 'kept by the fact shape, which drops what it doesn\'t know');
+  let tries = 0;
+  w.world.refuse = (doc) => { if (doc.key === standing.key) tries += 1; return doc.key === standing.key; };
   assert.equal(await w.make().reportTrouble('p', 'test'), 'none');
-  assert.equal(troubleIssues(w.gh)[0].closed, false, 'nothing here shows the Record took anything');
+  assert.equal(issue.closed, false, 'still refused, so still open');
+  assert.equal(tries, 1, 'once a pass');
+  w.world.refuse = () => false;
+  assert.equal(await w.make().reportTrouble('p', 'test'), 'cleared');
+  assert.equal(issue.closed, true);
+  assert.equal(cached(w.rec, standing.key).issue, 1, 'the refused alert has its number at last');
+});
+
+test('r5 m3: no retry on a pass that landed a write, or that has trouble of its own, or for an entry that has the number by now', async () => {
+  const w = refusing();
+  await oneRefused(w);
+  let tries = 0;
+  w.world.refuse = (doc) => { if (doc.key === standing.key) tries += 1; return doc.key === standing.key; };
   const b = w.make();
-  await b.raise({ ...standing, key: alertKey('p', 'kind', 'y') });
-  assert.equal(await b.reportTrouble('p', 'test'), 'cleared');
-  assert.equal(troubleIssues(w.gh)[0].closed, true);
+  await b.raise({ ...standing, key: alertKey('p', 'kind', 'other') });
+  await b.reportTrouble('p', 'test');
+  assert.equal(tries, 0, 'a write landed');
+
+  const t = refusing();
+  await oneRefused(t);
+  let tried = 0;
+  t.world.refuse = (doc) => { if (doc.key === standing.key) tried += 1; return true; };
+  const d = t.make();
+  await d.raise({ ...standing, key: alertKey('p', 'kind', 'third') });
+  const before = tried;
+  await d.reportTrouble('p', 'test');
+  assert.equal(tried, before, 'this pass has trouble of its own');
+
+  const c = refusing();
+  await oneRefused(c);
+  c.world.refuse = () => false;
+  assert.ok(c.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 1, status: 'settled' }).ok);
+  let writes = 0;
+  c.world.refuse = (doc) => { if (doc.key === standing.key) writes += 1; return false; };
+  assert.equal(await c.make().reportTrouble('p', 'test'), 'cleared', 'the number landed some other way');
+  assert.equal(writes, 0, 'and a later status isn\'t written over');
+  assert.equal(cached(c.rec, standing.key).status, 'settled');
+
+  const n = refusing();
+  await oneRefused(n);
+  n.world.refuse = () => false;
+  assert.ok(n.writer.put(idFor(standing.key), { kind: 'fact.alert', key: standing.key, issue: 9, status: 'open' }).ok);
+  await n.make().reportTrouble('p', 'test');
+  assert.equal(cached(n.rec, standing.key).issue, 1, 'a different number is not the refused write landing');
 });
 
 test('r4 MAT-1: two callers, the Record refusing one alert of one of them: one issue, not hundreds, and no false notes', async () => {
@@ -1013,8 +1061,19 @@ test('r4 MAT-1: each caller has its own alert, and one that doesn\'t say who it 
   assert.equal(troubleIssues(w.gh).length, 2);
 });
 
-test('r4 m2: the alerts object says why the robot\'s login is unknown', () => {
-  const gh = { ...fakeIssues(), loginTrouble: 'the robot\'s own login could not be read' };
-  assert.match(makeAlerts({ rec: memoryRecord(), gh, owner: 'o' }).loginTrouble(), /could not be read/);
-  assert.equal(makeAlerts({ rec: memoryRecord(), gh: fakeIssues(), owner: 'o' }).loginTrouble(), null);
+test('r5 m1: the alerts object asks the client first, so a pass that made no GitHub call still says the login is unknown', async () => {
+  const gh = { ...fakeIssues(), loginTrouble: null, ready: async () => { gh.loginTrouble = 'the robot\'s own login could not be read'; } };
+  assert.match(await makeAlerts({ rec: memoryRecord(), gh, owner: 'o' }).loginTrouble(), /could not be read/);
+  assert.equal(await makeAlerts({ rec: memoryRecord(), gh: fakeIssues(), owner: 'o' }).loginTrouble(), null);
+});
+
+test('r5 m2: the three callers\' names are distinct; c1: the alert\'s title says whose it is', async () => {
+  assert.equal(new Set(Object.values(TROUBLE_SOURCES)).size, 3);
+  const w = refusing();
+  w.world.refuse = () => true;
+  await w.make().raise(standing);
+  const a = w.make();
+  await a.raise(standing);
+  await a.reportTrouble('p', TROUBLE_SOURCES.WATCHER);
+  assert.equal(troubleIssues(w.gh)[0].title, `p: the Record is refusing alert writes (${TROUBLE_SOURCES.WATCHER})`);
 });

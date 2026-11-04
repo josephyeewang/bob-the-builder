@@ -24,7 +24,7 @@
 
 import { createHash } from 'node:crypto';
 import { lineIs, wasTold } from './alerts.mjs';
-import { wasSaved } from '../M12-sensors/facts.mjs';
+import { TROUBLE_SOURCES, wasSaved } from '../M12-sensors/facts.mjs';
 
 export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
@@ -141,7 +141,9 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
 
   const trouble = alerts.cacheTrouble();
   if (trouble) notSaved(`the Record refused to save where an alert is: ${trouble}`);
-  shown(await alerts.reportTrouble(product, 'heartbeat'));
+  shown(await alerts.reportTrouble(product, TROUBLE_SOURCES.HEARTBEAT));
+  // Asked for first: a client learns the login on its first call, and an all-green pass may not have made one yet.
+  await gh.ready?.();
   if (gh.loginTrouble) { red.push(LOGIN_UNKNOWN); lines.push(`RED   alerts: ${gh.loginTrouble}`); }
 
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
