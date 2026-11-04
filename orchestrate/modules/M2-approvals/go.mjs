@@ -16,7 +16,7 @@
 //       as plan_check; card and fingerprint must be this card's and its whole plan fingerprint now (audit r1 M-2).
 //   goFingerprint(ctx, cardId) → { ok, card, fingerprint, plan_sha256, inputs } | { ok: false, reason }
 //       what a plan reviewer names in its pass: the plan it read, as the go would bind it
-//   recordGo(ctx, askId) → { ok, go } | { ok: false, reason }           an answered "go" → the go record; the ask consumed
+//   recordGo(ctx, askId) → { ok, go } | { ok: false, reason }           an answered "go" → the go record; the ask consumed; the card's other live go asks withdrawn
 //   await goCheck({ go, card, changed, headRows, tier, view, mainSha }) → { ok, reasons, newGo }   at merge (refusal 10)
 //       + unreadable: true, cause: <the error> when a GitHub read threw and nothing else is wrong (L205); the
 //         caller classes `cause` (M6 gather failedRead: a 4xx other than 401/403/429 is GitHub's answer)
@@ -28,7 +28,7 @@ import { canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mj
 import { activeKind } from '../../shared/asks.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { createAsk, releaseBoxes } from './binding.mjs';
-import { closeDecisionPr } from './decision.mjs';
+import { CLOSE_DUE, closePr, hasDecisionPr } from './decision.mjs';
 import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
@@ -102,17 +102,22 @@ const closedGoAsk = (st, cardId, a) => ['withdrawn', 'expired'].includes(a.doc.s
 
 // A new plan's ask replaces the card's older live ones (L462 m2): their boxes are released and a Tier-1 go's pull request
 // closed, so the owner isn't left answering a plan that has gone. `withdrawn_for` tells this from any other withdrawal:
-// if the plan comes back, it is asked again. → null, or the reason one could not be withdrawn (raiseGo then raises nothing
-// and the next raise tries again). `ctx.checkTime`, if given, throws when the caller has no time left for a close.
+// if the plan comes back, it is asked again. A close that failed leaves CLOSE_DUE, so schedulePass retries it and tells the
+// owner the pull request no longer counts (L477). → null, or the reason one could not be withdrawn (raiseGo then raises
+// nothing and the next raise tries again). `ctx.checkTime`, if given, throws when the caller has no time left for a close.
+const liveGoAsk = (a, cardId) => a.doc.card === cardId && activeKind(a.doc.kind)?.go === true && ['open', 'pushed'].includes(a.doc.state);
+function withdraw(ctx, a, fingerprint, closeDue) {
+  const next = structuredClone(a.doc);
+  releaseBoxes(next, 'withdrawn', ctx.now(), { moveBack: false });
+  const w = writeDoc(ctx.record, 'ask', a, { ...next, state: 'withdrawn', withdrawn_for: fingerprint, ...(closeDue ? { [CLOSE_DUE]: true } : {}) });
+  return w.ok ? null : `ask ${a.id} could not be withdrawn: ${w.reason}`;
+}
 async function withdrawOlder(ctx, st, cardId, fingerprint) {
   for (const a of st.asks()) {
-    if (a.doc.card !== cardId || !activeKind(a.doc.kind)?.go || a.doc.fingerprint === fingerprint || !['open', 'pushed'].includes(a.doc.state)) continue;
+    if (!liveGoAsk(a, cardId) || a.doc.fingerprint === fingerprint) continue;
     ctx.checkTime?.();
-    if (!(await closeDecisionPr(ctx, a.id, a.doc))) return `the pull request of ask ${a.id} could not be closed`;
-    const next = structuredClone(a.doc);
-    releaseBoxes(next, 'withdrawn', ctx.now(), { moveBack: false });
-    const w = writeDoc(ctx.record, 'ask', a, { ...next, state: 'withdrawn', withdrawn_for: fingerprint });
-    if (!w.ok) return `ask ${a.id} could not be withdrawn: ${w.reason}`;
+    const no = withdraw(ctx, a, fingerprint, (await closePr(ctx, a.doc)) !== null);
+    if (no) return no;
   }
   return null;
 }
@@ -188,6 +193,14 @@ export function recordGo(ctx, askId) {
       rechecked: [], at: iso(ctx.now()) };
     const w = writeDoc(ctx.record, 'go', existing ?? { id, rev: 0 }, goDoc);
     if (!w.ok) return fail(`the record refused the go: ${w.reason}`);
+  }
+  // The card's other live asks are dead now (A -> B -> A with the go on A), so the owner can't press Go on one (L477). This
+  // comes before the ask is consumed, so a refused write or a crash here is picked up on the next try. No call out from
+  // here: the pull requests are left for schedulePass to close.
+  for (const other of st.asks()) {
+    if (other.id === askId || !liveGoAsk(other, doc.card)) continue;
+    const no = withdraw(ctx, other, fp.sha256, hasDecisionPr(other.doc));
+    if (no) return fail(`the go is recorded, but ${no}`);
   }
   const w = writeDoc(ctx.record, 'ask', a, { ...doc, state: 'consumed' });
   if (!w.ok) return fail(`the go is recorded, but the ask could not be closed: ${w.reason}`);

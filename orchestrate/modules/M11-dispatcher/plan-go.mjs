@@ -34,7 +34,7 @@
 //   Live for less, or a go it gave: nothing.
 //   Declined: never asked again for this plan. Its Lead is told once, so it can change the plan; a changed plan is a new ask.
 //   Expired, no answer: asked again at most once in GO_REASK_MS.
-//   Withdrawn by a newer plan (M2 raiseGo, withdrawn_for): the plan has come back, so it is asked. Any other withdrawal:
+//   Withdrawn for another plan (M2 raiseGo or recordGo, withdrawn_for): the plan has come back, so it is asked. Any other withdrawal:
 //   only a changed plan is asked.
 //   Used by a go since replaced (plan A, then B, then A again): asked, as M2 allows.
 // A declined, expired, withdrawn or unanswered card is in the owner's daily hold tell while it waits.
@@ -141,7 +141,7 @@ async function reviewed(ctx, ports, tell, c, fp) {
       if (e instanceof OutOfTime || NOT_WIRED.test(String(e?.message))) unmark();
       throw e;
     }
-    if (s?.ok !== true || typeof s.session !== 'string' || !s.session) { unmark(); tell(c.id, 'start', `no plan reviewer could start for card ${c.id}, so it can't be asked for a go: ${short(s?.reason)}`); return null; }
+    if (s?.ok !== true || typeof s.session !== 'string' || !s.session) { if (s?.ok === false) unmark(); tell(c.id, 'start', `no plan reviewer could start for card ${c.id}, so it can't be asked for a go: ${short(s?.reason)}`); return null; }
     const w = noteFact(rec, id, rec.read('fact', id)?.rev ?? 0, { fingerprint: fp.fingerprint, session: s.session, started_at: at });
     if (!w.ok) tell(c.id, 'start-noted', `the plan reviewer for card ${c.id} started but could not be noted, so another may start: ${short(w.reason)}`);
     return null;
@@ -252,24 +252,27 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
 const limitedCtx = (ctx, ports) => ({ ...ctx, checkTime: ports.checkTime, gh: { patch: (...a) => ports.limit('closing a pull request', () => ctx.gh.patch(...a)) } });
 
 // A call that hangs or throws becomes a throw naming it, which the card's own try tells; with the pass's time nearly gone,
-// no call is made at all. `timeouts` counts the calls that hung, which is how the pass sees which card they cost.
+// no call is made at all. `counted` is how the pass sees what each card cost it: its calls, how long they took, how many hung.
 function limited(ports) {
   const portMs = ports.portMs ?? PLAN_PORT_MS;
   const ends = Date.now() + (ports.passMs ?? portMs * 6);
-  const counted = { timeouts: 0 };
+  const counted = { calls: 0, ms: 0, timeouts: 0 };
   const checkTime = () => { if (ends - Date.now() < portMs * PLAN_LAST_CALL) throw new OutOfTime('the pass ran out of time'); };
   const limit = async (name, f) => {
+    counted.calls += 1;
+    const from = Date.now();
     const r = await guarded(async () => ({ value: await f() }), portMs);
+    counted.ms += Date.now() - from;
     if ('value' in r) return r.value;
     if (!/^it did not answer within /.test(r.reason)) throw new Error(`${name}: ${r.reason}`);
     counted.timeouts += 1;
     throw new TimedOut(`${name}: ${r.reason}`);
   };
   const timed = async (name, f) => { checkTime(); return limit(name, f); };
-  return { ...ports, counted, checkTime, limit, timed, ...Object.fromEntries(PLAN_PORTS.map((n) => [n, (x) => timed(n, () => ports[n](x))])) };
+  return { ...ports, portMs, counted, checkTime, limit, timed, ...Object.fromEntries(PLAN_PORTS.map((n) => [n, (x) => timed(n, () => ports[n](x))])) };
 }
 
-// The cards of this product waiting in draft: those whose last call timed out behind the rest, oldest timeout first.
+// The cards of this product waiting in draft: those that were slow last time behind the rest, the longest ago first.
 function inTurn(ctx, cards) {
   const slowAt = (c) => pastTime(ctx.record.read('fact', PLAN_SLOW_FACT(c.id))?.doc?.slow_at, ctx.now()) ?? -1;
   return cards.filter((c) => !c.corrupt && c.doc && c.doc.product === ctx.product && c.doc.state === 'draft')
@@ -294,15 +297,24 @@ export async function planGoPass(ctx, unlimited) {
   try { recordGos(ctx, tell, events); } catch (e) { tell(whole(ctx.product), 'record', `product ${ctx.product}'s answered gos could not be read: ${short(e?.message ?? e)}`); }
   const view = { get: (e, id) => rec.read(e, id), list: (e) => rec.list(e), createdBy: (e, id) => rec.meta(e, id)?.createdBy ?? null };
   const st = askStore(rec);
+  // The cards whose own calls cost this pass its time. A card that used the pass up goes behind the rest, or it would go
+  // first every tick and the cards after it would never be reached.
+  const slow = [];
   for (const c of inTurn(ctx, rec.list('card'))) {
-    const hungBefore = ports.counted.timeouts;
+    const was = { ...ports.counted };
+    let ranOut = false;
     try { await raiseFor(ctx, ports, tell, view, st, c, events); } catch (e) {
       const why = short(e?.message ?? e);
-      if (e instanceof OutOfTime) { tell(c.id, 'reached', `card ${c.id} was not reached: slow calls on other cards used up this pass's time. It is tried again next pass`); continue; }
-      if (NOT_WIRED.test(why)) tell(whole(ctx.product), 'wiring', `no go can be asked on product ${ctx.product}: ${why}`);
+      if (e instanceof OutOfTime) {
+        if (ports.counted.calls === was.calls) { tell(c.id, 'reached', `card ${c.id} was not reached: slow calls on ${slow.length ? slow.join(', ') : 'other cards'} used up this pass's time. It is tried again next pass`); continue; }
+        ranOut = true;
+        tell(c.id, 'own-time', `card ${c.id} was not finished: this card's own calls were slow and used up this pass's time. It goes behind the other cards next pass`);
+      } else if (NOT_WIRED.test(why)) tell(whole(ctx.product), 'wiring', `no go can be asked on product ${ctx.product}: ${why}`);
       else tell(c.id, 'failed', `asking for a go on card ${c.id} failed: ${why}`);
     }
-    noteSlow(ctx, tell, c, ports.counted.timeouts > hungBefore);
+    const isSlow = ranOut || ports.counted.timeouts > was.timeouts || ports.counted.ms - was.ms >= ports.portMs;
+    if (isSlow) slow.push(c.id);
+    noteSlow(ctx, tell, c, isSlow);
   }
   return { ok: true, events };
 }

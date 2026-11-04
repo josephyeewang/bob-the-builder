@@ -768,8 +768,9 @@ async function tickAsProcess(w, over) {
   const base = w.t.record;
   const rec = Object.create(base, { write: { value: (x) => (alive ? base.write(x) : { ok: false, reason: 'process gone' }) } });
   const before = w.sent.length;
+  w.stepError = null;
   await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: SCALED.productMs,
-    pass: (ctx) => planGoPass(ctx, { ...w.ports, alert: outbox(rec, now), portMs: SCALED.portMs, passMs: SCALED.productMs, ...over }) });
+    pass: (ctx) => planGoPass(ctx, { ...w.ports, alert: outbox(rec, now), portMs: SCALED.portMs, passMs: SCALED.productMs, ...over }) }).catch((e) => { w.stepError = e.message; });
   alive = false;
   await sendAlerts(base, async (text) => { w.sent.push(text); return true; }, now);
   const told = w.sent.slice(before);
@@ -778,15 +779,13 @@ async function tickAsProcess(w, over) {
 
 const hangsFor = (w, who) => (x) => (who(x.card) ? new Promise(() => {}) : w.ports.planRows(x));
 
-test('L467: with every card hanging, a tick names all of them or the rest the next, and the step never fails', async () => {
+test('L467: with every card hanging, the first tick names all of them and the step never fails', async () => {
   const w = world();
   ids10.forEach((id) => card(w, id));
   const planRows = hangsFor(w, () => true);
-  const named = new Set(await tickAsProcess(w, { planRows }));
-  assert.ok(named.size >= 5, `first tick named ${[...named]}`);
-  later(w, HOUR);
-  (await tickAsProcess(w, { planRows })).forEach((id) => named.add(id));
-  assert.deepEqual([...named].sort(), ids10, 'every card is named within a day');
+  const named = await tickAsProcess(w, { planRows });
+  assert.equal(w.stepError, null);
+  assert.deepEqual(named, ids10, 'every card is named in the first tick');
   assert.ok(w.sent.some((s) => /card C10 was not reached/.test(s)), w.sent.join(' | '));
 });
 
@@ -856,14 +855,14 @@ test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
 });
 
-test('L467 m-a: time up before isDir counts as not reached, not as a failed read', async () => {
+test('L467 m-a: time up before isDir counts as out of time, not as a failed read', async () => {
   const w = world();
   card(w, 'A');
   const asked = [];
   const planView = async () => ({ isDir: (sha, f) => { asked.push(f); return false; } });
   await timeJumps((jump) => pass(w, { portMs: 100, passMs: 1000, planView, mainSha: async () => { jump(); return w.M0; } }));
   assert.deepEqual(asked, []);
-  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
   assert.ok(!w.sent.some((s) => /could not be asked/.test(s)), w.sent.join(' | '));
 });
 
@@ -872,7 +871,7 @@ async function timeJumps(f) {
   const real = Date.now;
   let extra = 0;
   Date.now = () => real() + extra;
-  try { return await f(() => { extra = 60_000; }); } finally { Date.now = real; }
+  try { return await f((by = 60_000) => { extra = by; }); } finally { Date.now = real; }
 }
 
 // A Tier-1 ask with a pull request, asked for plan A, and the plan moved on.
@@ -896,7 +895,7 @@ test('L467 m-a: a close of an old pull request that hangs is limited, and the ca
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
 });
 
-test('L467 m-a: with no time left for the close, the old ask stays and the card is told as not reached', async () => {
+test('L467 m-a: with no time left for the close, the old ask stays and the card is told it ran out', async () => {
   const w = world();
   const id = await askWithPr(w);
   const calls = [];
@@ -907,7 +906,7 @@ test('L467 m-a: with no time left for the close, the old ask stays and the card 
   assert.equal(read, dirs, 'every file was read, so it is the close that was stopped');
   assert.deepEqual(calls, []);
   assert.equal(askStore(w.t.record).ask(id).doc.state, 'pushed');
-  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
 });
 
 test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', async () => {
@@ -976,16 +975,74 @@ test('L467 m-b: a new plan is not held by the old plan\'s mark', async () => {
   assert.equal(w.started.length, 1);
 });
 
-test('L467 m-c: a close that fails and can\'t be told stops the raise, naming the ask, and leaves it live', async () => {
+const OPEN_PR = (id) => new RegExp(`Ask ${id} was withdrawn; approving pull request 7 won't count`);
+function closingFails(w) {
+  const c = { status: 500, calls: 0 };
+  c.gh = { ...w.t.ctx.gh, patch: async () => { c.calls += 1; return { status: c.status }; } };
+  return c;
+}
+function closes(w, alert, c) {
+  const stateDir = join(w.t.base, 'm2-state');
+  mkdirSync(stateDir, { recursive: true });
+  return schedulePass({ ...w.t.ctx, stateDir, gh: c.gh, alert });
+}
+const told = (alert, id) => alert.texts.filter((x) => OPEN_PR(id).test(x?.text)).length;
+
+test('L477 m3: a failed close still replaces the ask; the close is retried, the owner told daily while it stays open, and it ends when it closes', async () => {
   const w = world();
   const id = await askWithPr(w);
-  const gh = { ...w.t.ctx.gh, patch: async () => ({ status: 500 }) };
-  const alert = fakeAlert({ answer: false });
-  await pass(w, {}, { gh, alert });
+  const c = closingFails(w);
+  await pass(w, {}, { gh: c.gh });
+  assert.equal(c.calls, 1);
+  const old = askStore(w.t.record).ask(id).doc;
+  assert.equal(old.state, 'withdrawn');
+  assert.equal(old.pr_close_due, true);
+  assert.equal(asks(w).length, 2, 'the new plan is asked');
+  const alert = fakeAlert();
+  await closes(w, alert, c);
+  await closes(w, alert, c);
+  assert.equal(told(alert, id), 1, 'once a day');
+  assert.equal(c.calls, 3, 'the close is tried every pass');
+  later(w, 25 * HOUR);
+  await closes(w, alert, c);
+  assert.equal(told(alert, id), 2, 'again the next day');
+  assert.equal(askStore(w.t.record).ask(id).doc.pr_close_due, true, 'telling is not closing');
+  c.status = 200;
+  await closes(w, alert, c);
+  const done = askStore(w.t.record).ask(id).doc;
+  assert.equal(done.pr_close_due, undefined);
+  assert.equal(done.pr_open_told_at, undefined);
+  assert.equal(done.state, 'withdrawn');
+  later(w, 25 * HOUR);
+  const calls = c.calls;
+  await closes(w, alert, c);
+  assert.equal(c.calls, calls);
+  assert.equal(told(alert, id), 2);
+});
+
+test('L477 m3: a tell nobody took is not marked, so the next pass tells again', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const c = closingFails(w);
+  await pass(w, {}, { gh: c.gh });
+  await closes(w, fakeAlert({ answer: false }), c);
+  assert.equal(askStore(w.t.record).ask(id).doc.pr_open_told_at, undefined);
+  const alert = fakeAlert();
+  await closes(w, alert, c);
+  assert.equal(told(alert, id), 1);
+});
+
+test('L477 m3: an answered decision is still let go once the owner is told', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const a = askStore(w.t.record).ask(id);
+  must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: a.rev, doc: { ...a.doc, state: 'answered', answer: { channel: 'github_review', choice: 'Not now', approves: false, declined: true, at: new Date(w.t.clock.t).toISOString() }, pr_close_due: true } }));
+  const c = closingFails(w);
+  const alert = fakeAlert();
+  await closes(w, alert, c);
+  assert.equal(askStore(w.t.record).ask(id).doc.pr_close_due, undefined);
   assert.ok(alert.texts.some((x) => x?.type === 'decision_pr_not_closed'));
-  assert.ok(w.sent.some((s) => new RegExp(`card A could not be asked for a go: the pull request of ask ${id} could not be closed`).test(s)), w.sent.join(' | '));
-  assert.equal(askStore(w.t.record).ask(id).doc.state, 'pushed');
-  assert.equal(asks(w).length, 1);
+  assert.equal(told(alert, id), 0);
 });
 
 test('L467 m-c: six calls at the port limit fit inside the product\'s deadline', () => {
@@ -1026,4 +1083,204 @@ test('L467: a product\'s causes can\'t be a card\'s: they carry a dot, which no 
   card(w, 'A');
   await pass(w, { planRows: async () => { throw new Error('not wired yet: planRows (R-0b-162)'); } });
   assert.match(JSON.stringify(w.t.record.list('fact').map((f) => f.id)), /hold-plan-go-product\./);
+});
+
+test('L477 m1: a card whose own calls use up the pass goes behind the rest, each told why, and the others are asked', async () => {
+  const w = world();
+  const ids = ['C01', 'C02', 'C03', 'C04'];
+  card(w, 'C01', { files: Array.from({ length: 12 }, (_, i) => `src/f${i}.mjs`) });
+  ids.slice(1).forEach((id) => card(w, id));
+  let cur = null;
+  const planRows = (x) => { cur = x.card; return w.ports.planRows(x); };
+  const planView = async (x) => {
+    const v = await w.ports.planView(x);
+    return { isDir: (sha, f) => (cur === 'C01' ? new Promise((r) => { setTimeout(() => r(false), SCALED.portMs * 0.9); }) : v.isDir(sha, f)) };
+  };
+  await tickAsProcess(w, { planRows, planView });
+  assert.equal(w.stepError, null);
+  assert.deepEqual(asks(w), []);
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at, 'it never hung, and it is still marked');
+  assert.ok(w.sent.some((s) => /card C01 was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card C02 was not reached: slow calls on C01 used up/.test(s)), w.sent.join(' | '));
+  later(w, 25 * HOUR);
+  await tickAsProcess(w, { planRows, planView });
+  assert.equal(w.stepError, null);
+  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C02', 'C03', 'C04']);
+});
+
+test('L477 m1: calls that took more than a port limit between them mark a card that finished', async () => {
+  const w = world();
+  card(w, 'A', { files: ['src/a.mjs', 'src/b.mjs'] });
+  card(w, 'B');
+  const planView = async () => ({ isDir: () => new Promise((r) => { setTimeout(() => r(false), 60); }) });
+  await pass(w, { portMs: 100, passMs: 1000, planView: async (x) => (x.product ? planView() : null) });
+  assert.equal(asks(w).length, 2, 'both asked');
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
+});
+
+test('L477 m1: a pass with nothing slow to blame says other cards, and its card keeps its place', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w, { passMs: 0 });
+  assert.ok(w.sent.some((s) => /card A was not reached: slow calls on other cards used up/.test(s)), w.sent.join(' | '));
+  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('A')), null);
+});
+
+test('L477 m2: a start answered with no readable session keeps its mark: one start a day, not one a pass', async () => {
+  const w = world();
+  t1(w, 'A');
+  const startPlanReview = async (x) => { w.started.push(x); return { ok: true, session: 42 }; };
+  for (let i = 0; i < 47; i += 1) { await pass(w, { startPlanReview }); later(w, HOUR / 2); }
+  assert.equal(w.started.length, 1);
+  later(w, HOUR);
+  await pass(w, { startPlanReview });
+  assert.equal(w.started.length, 2, 'tried again after the hold');
+});
+
+test('L477 m2: a clear no clears the mark, so the next pass tries', async () => {
+  const w = world();
+  t1(w, 'A');
+  const startPlanReview = async (x) => { w.started.push(x); return { ok: false, reason: 'no room' }; };
+  await pass(w, { startPlanReview });
+  await pass(w, { startPlanReview });
+  assert.equal(w.started.length, 2);
+});
+
+test('L477 m5: a start that timed out is not started again two hours later', async () => {
+  const w = world();
+  t1(w, 'A');
+  const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
+  await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
+  later(w, 2 * HOUR);
+  await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
+  assert.equal(w.started.length, 1);
+  later(w, PLAN_START_HOLD_MS);
+  await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
+  assert.equal(w.started.length, 2);
+});
+
+test('L477 item (i): a go recorded on A withdraws B\'s live ask after A -> B -> A, and B coming back is asked', async () => {
+  const w = world();
+  const files = card(w, 'A').files;
+  await pass(w);
+  const a1 = asks(w)[0].id;
+  answer(w, a1, 'Go', true);
+  replan(w, 'A');
+  await pass(w);
+  const b1 = asks(w).find((a) => a.id !== a1);
+  assert.equal(b1.doc.state, 'open');
+  replan(w, 'A', files);
+  await pass(w);
+  assert.equal(w.t.record.read('go', 'go-A').doc.ask, a1);
+  const after = askStore(w.t.record).ask(b1.id).doc;
+  assert.equal(after.state, 'withdrawn');
+  assert.equal(after.withdrawn_for, askStore(w.t.record).ask(a1).doc.fingerprint);
+  assert.equal(after.pr_close_due, undefined, 'a tap ask has nothing to close');
+  replan(w, 'A');
+  await pass(w);
+  assert.equal(asks(w).length, 3, 'B is a live plan again, so it is asked');
+});
+
+test('L477 item (i): a Tier-1 ask withdrawn that way has its pull request closed by the next schedule pass', async () => {
+  const w = world();
+  const files = t1(w, 'A').files;
+  await pass(w);
+  w.answer = { ok: true, answer: 'PASS' };
+  await pass(w);
+  const a1 = asks(w)[0].id;
+  answer(w, a1, 'go', true);
+  replan(w, 'A');
+  await pass(w);
+  await pass(w);
+  const b = asks(w).find((a) => a.id !== a1);
+  must(w.t.record.write({ actor: 'approvals', entity: 'ask', id: b.id, expectRev: b.rev, doc: { ...b.doc, state: 'pushed', pr: 7, raised_at: new Date(w.t.clock.t).toISOString(), raised_reask: 0 } }));
+  replan(w, 'A', files);
+  await pass(w);
+  assert.equal(askStore(w.t.record).ask(b.id).doc.state, 'withdrawn');
+  assert.equal(askStore(w.t.record).ask(b.id).doc.pr_close_due, true);
+  const c = closingFails(w);
+  c.status = 200;
+  await closes(w, fakeAlert(), c);
+  assert.equal(c.calls, 1);
+  assert.equal(askStore(w.t.record).ask(b.id).doc.pr_close_due, undefined);
+});
+
+test('L477 item (i): a withdrawal the record refuses leaves the go\'s ask to be tried again, so none is left live', async () => {
+  const w = world();
+  const files = card(w, 'A').files;
+  await pass(w);
+  const a1 = asks(w)[0].id;
+  answer(w, a1, 'Go', true);
+  replan(w, 'A');
+  await pass(w);
+  const b1 = asks(w).find((a) => a.id !== a1).id;
+  replan(w, 'A', files);
+  const base = w.t.record;
+  const rec = Object.create(base, { write: { value: (x) => (x.entity === 'ask' && x.id === b1 ? { ok: false, reason: 'refused' } : base.write(x)) } });
+  await pass(w, {}, { record: rec });
+  assert.equal(askStore(base).ask(a1).doc.state, 'answered');
+  assert.ok(w.sent.some((s) => /go on card A could not be recorded: the go is recorded, but ask/.test(s)), w.sent.join(' | '));
+  await pass(w);
+  assert.equal(askStore(base).ask(a1).doc.state, 'consumed');
+  assert.equal(askStore(base).ask(b1).doc.state, 'withdrawn');
+});
+
+test('R3: not reached has its own cause, so a card told it failed today still hears it was not reached', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w, { planRows: async () => { throw new Error('broke'); } });
+  await pass(w, { passMs: 0 });
+  assert.ok(w.sent.some((s) => /card A failed: planRows: broke/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+});
+
+test('O2: of the slow cards, the one slow longest ago goes first', async () => {
+  const w = world();
+  ['A', 'B', 'C'].forEach((id) => card(w, id));
+  const mark = (id, ago) => must(w.t.record.write({ actor: 'dispatcher', entity: 'fact', id: PLAN_SLOW_FACT(id), expectRev: 0, doc: { slow_at: new Date(w.t.clock.t - ago).toISOString() } }));
+  mark('A', HOUR);
+  mark('B', 2 * HOUR);
+  const order = [];
+  await pass(w, { planRows: async (x) => { order.push(x.card); return ROWS; } });
+  assert.deepEqual(order, ['C', 'B', 'A']);
+});
+
+test('A5: time running out while telling the Lead is out of time, not a Lead that could not be told', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w);
+  answer(w, asks(w)[0].id, 'Not now', false);
+  await pass(w, { passMs: 0 });
+  assert.ok(!w.sent.some((s) => /the Lead could not be told/.test(s)), w.sent.join(' | '));
+  assert.ok(w.sent.some((s) => /card A was not reached/.test(s)), w.sent.join(' | '));
+});
+
+test('L477 m4: with a little over one port limit left no call goes out, so the notes after it still fit', async () => {
+  const w = world();
+  card(w, 'A');
+  const viewed = [];
+  await timeJumps((jump) => pass(w, { portMs: 1000, passMs: 6000, planRows: async () => { jump(4900); return ROWS; }, planView: async (x) => { viewed.push(x); return w.ports.planView(x); } }));
+  assert.deepEqual(viewed, []);
+  assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
+});
+
+test('L477 m1: a card that ran out of time after its own quick calls goes behind the rest too', async () => {
+  const w = world();
+  card(w, 'A');
+  // The clock jumps while M2 reads the rows: after the card's calls were timed, before its next one.
+  await timeJumps((jump) => pass(w, { portMs: 100, passMs: 1000, planRows: async () => ({ get 'R-1'() { jump(); return ROWS['R-1']; } }) }));
+  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
+  assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
+});
+
+test('L477 m3: a close that worked leaves no mark and tells nobody', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const c = closingFails(w);
+  c.status = 200;
+  await pass(w, {}, { gh: c.gh });
+  assert.equal(c.calls, 1);
+  const old = askStore(w.t.record).ask(id).doc;
+  assert.equal(old.state, 'withdrawn');
+  assert.equal(old.pr_close_due, undefined);
 });
