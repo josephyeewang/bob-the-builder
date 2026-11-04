@@ -5,10 +5,10 @@
 // checked with M9's own reading, so the format the reviewer is told is the format the gate counts (M9 verdictAsWritten: finalize settles a file that says two things at once).
 
 import { verdictAsWritten } from '../M9-record/outbox.mjs';
-import { SESSION_ID, VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
+import { SESSION_ID, VERDICT_CHECKLIST, CHECKLIST_LEVELS, FINDING_LEVELS } from '../../shared/record.mjs';
 
 export const REVIEW_ROLES_HERE = Object.freeze(['reviewer', 'auditor']);
-export const FINDING_LEVELS = Object.freeze(['material', 'minor', 'cosmetic']);
+export { FINDING_LEVELS };
 
 /** The file's one name in the session's folder; a second verdict file there means none counts. */
 export function verdictFileName(sessionId) {

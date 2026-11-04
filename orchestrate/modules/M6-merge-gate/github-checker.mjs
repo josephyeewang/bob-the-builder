@@ -2703,6 +2703,7 @@ Object.defineProperties(__bob_e, {
   ENTITIES: { get: () => ENTITIES, enumerable: true },
   VERDICT_CHECKLIST: { get: () => VERDICT_CHECKLIST, enumerable: true },
   CHECKLIST_LEVELS: { get: () => CHECKLIST_LEVELS, enumerable: true },
+  FINDING_LEVELS: { get: () => FINDING_LEVELS, enumerable: true },
   REQUIRED_FIELDS: { get: () => REQUIRED_FIELDS, enumerable: true },
   launchesNewestFirst: { get: () => launchesNewestFirst, enumerable: true },
   CARD_ROLES: { get: () => CARD_ROLES, enumerable: true },
@@ -2778,6 +2779,8 @@ const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session', 'merg
 // verdict missing a line is no verdict (Merge Gate refusal 5). An auditor's verdict says its Material count instead.
 const VERDICT_CHECKLIST = Object.freeze(['correct', 'well_built', 'works_for_user', 'holds_up']);
 const CHECKLIST_LEVELS = Object.freeze(['clean', 'cosmetic', 'minor', 'material']);
+// What a verdict's finding may be, worst first.
+const FINDING_LEVELS = Object.freeze(['material', 'minor', 'cosmetic']);
 
 // Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
 // launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is

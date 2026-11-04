@@ -33,12 +33,16 @@ export const NOT_TEXT = Symbol('not a plain file');
 const RANK = Object.freeze({ clean: 0, cosmetic: 1, minor: 2, material: 3 });
 const worst = (levels) => levels.reduce((w, l) => (RANK[l] > RANK[w] ? l : w), 'clean');
 const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
-// A diff's hunk header stands in neither file, so a quote pasted from a diff is read without it (L432).
+// A diff's hunk header stands in neither file; nor do its other headers, or whatever else came with the paste.
 const HUNK = /^@@ .* @@/;
+// A line this long is one a real quote would hold, so one of them found is enough to keep the finding (L452).
+const SURE_LINE = 8;
 
 /**
- * Does the quote stand in one of these texts? Line by line, a line may carry its diff marker or be a hunk header, and
- * each may stand in a different one. A quote that is only hunk headers has nothing to check, so it holds.
+ * Does the quote stand in one of these texts? Whole, or line by line, a line carrying its diff marker or not. One line
+ * of at least SURE_LINE non-space characters found in base or head is enough, because a paste brings lines that stand in
+ * neither (L452): the cost is a false fail, never a real finding dropped. A quote with no such line needs every line. A
+ * quote that is only hunk headers has nothing to check, so it holds.
  */
 function quoteHolds(quote, texts) {
   const hays = texts.map(squash);
@@ -46,7 +50,9 @@ function quoteHolds(quote, texts) {
   if (on(squash(quote))) return true;
   const lines = quote.split('\n');
   const parts = lines.filter((l) => !HUNK.test(l)).map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
-  return parts.length ? parts.every(on) : lines.some((l) => HUNK.test(l));
+  if (!parts.length) return lines.some((l) => HUNK.test(l));
+  const sure = parts.filter((p) => p.replaceAll(' ', '').length >= SURE_LINE);
+  return sure.length ? sure.some(on) : parts.every(on);
 }
 
 /**

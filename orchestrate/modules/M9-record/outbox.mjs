@@ -42,9 +42,9 @@
 // can't pick the file the intake refused. The Merge Gate (M6 gather.mjs) and the record's verdict rule call it.
 //
 //   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }; a finding
-//     marked `dropped` stands only in a file marked `finalized` (M5 findings.mjs, L424), and a file listing a kept
-//     Material finding may not say `pass: true` or `material: 0` (L432). headReviews trusts that mark only in the file
-//     the runner's own record names.
+//     marked `dropped` stands only in a file marked `finalized` (M5 findings.mjs, L424), and a file saying `pass: true`
+//     or `material: 0` must hold only findings it can read, none of them a kept Material (L432, L452). headReviews
+//     trusts that mark only in the file the runner's own record names.
 //   verdictAsWritten(header): the same without the second check, for finalize, which settles such a file
 //   keptMaterial(notes) → how many Material findings are kept, the one count (M5 settle and verdictFields)
 //   verdictFromFile({ outboxRoot, uids, row }) →
@@ -81,7 +81,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, FINDING_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
 import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -484,6 +484,7 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real, owner_uid: owner };
 }
 
+const readableFinding = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && FINDING_LEVELS.includes(n.level);
 const holdsDropped = (notes) => Array.isArray(notes) && notes.some((n) => n && typeof n === 'object' && Object.hasOwn(n, 'dropped'));
 
 /** How many of these findings are Material and kept. The one count: M5 settle, and verdictFields below (L432). */
@@ -492,11 +493,14 @@ export const keptMaterial = (notes) => (Array.isArray(notes) ? notes.filter((n) 
 /**
  * A verdict file's header, checked: the one reading of what a verdict says, for the intake and for every later read. A
  * kept Material finding is a fail whatever the file says (M5 settle), so a file that says otherwise was never settled
- * (finalize could not run on it), and it is refused, not read as a pass (L432).
+ * (finalize could not run on it), and it is refused, not read as a pass (L432). A file that says it passed is taken only
+ * when every finding in it is one this can read: a shape not fully known never counts as a pass (L452).
  */
 export function verdictFields(h) {
   const v = verdictAsWritten(h);
-  if (v.ok && (v.pass === true || v.material === 0) && keptMaterial(v.notes)) return { ok: false, reason: 'it lists a Material finding, yet says pass: true or material: 0' };
+  if (!v.ok || (v.pass !== true && v.material !== 0)) return v;
+  if (v.notes !== null && !(Array.isArray(v.notes) && v.notes.every(readableFinding))) return { ok: false, reason: 'it lists a finding this can\'t read, yet says pass: true or material: 0' };
+  if (keptMaterial(v.notes)) return { ok: false, reason: 'it lists a Material finding, yet says pass: true or material: 0' };
   return v;
 }
 

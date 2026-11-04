@@ -503,3 +503,64 @@ test('L92 minor 2: a fail by either role sends the card back for both', async ()
   assert.equal(next.args[next.args.indexOf('--effort') + 1], 'xhigh');
   assert.ok(next.prompt.includes(real1.says), 'the reviewer sees the audit\'s findings');
 });
+
+test('L452 planted: a file saying it passed, with a finding this can\'t read, is refused; finalize refused it too, so it never passes', async () => {
+  const reads = (fields) => verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), ...fields } });
+  const odd = [{ ...real1, level: 'Material' }, { ...real1, level: 'MATERIAL' }, { ...real1, level: 'material ' }, { says: 'x', quote: 'y' }, { severity: 'material' }, 'a string', 7, null, [real1]];
+  for (const note of odd) {
+    for (const says of [{ pass: true }, { pass: true, material: 0 }, { pass: false, material: 0 }]) {
+      assert.match(reads({ ...says, notes: [note] }).reason ?? '', /a finding this can't read/, JSON.stringify([note, says]));
+    }
+    assert.equal(reads({ pass: false, material: 1, notes: [note] }).ok, true, 'a fail stays readable as a fail');
+  }
+  for (const notes of ['all fine', { level: 'material' }, 3]) assert.match(reads({ pass: true, notes }).reason ?? '', /can't read/);
+  assert.equal(reads({ pass: true, material: 0, notes: [real2] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0, notes: [] }).ok, true);
+  assert.equal(reads({ pass: true, material: 0 }).ok, true);
+  // On the real runner, finalize and gate.
+  for (const level of ['Material', 'material ', undefined]) {
+    const w = await world(tempDir('m5-odd-'), { act: (l) => (l.role === 'auditor' ? rawVerdict(l, { pass: true, material: 0, notes: [{ ...real1, level }] }) : writeVerdict(l, { pass: true, checklist: CLEAN })) });
+    w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+    const { alerts } = await w.round(['reviewer', 'auditor']);
+    assert.ok(alerts.length > 0, 'Joe is told');
+    assert.notEqual(w.gate(), null, String(level));
+  }
+});
+
+test('L452 planted: a line of a real quote found is enough, so nothing else in a paste can make it noise', async () => {
+  const r = await repo(tempDir('m5-paste-'));
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head: await r.rev('main') });
+  const check = (quote) => checkFindings([{ ...real1, quote }], readFile, readBase);
+  for (const quote of [
+    '--- a/chain/total.mjs\n+++ b/chain/total.mjs\n@@ -5,3 +5,4 @@\n   return part / whole;',
+    'diff --git a/chain/total.mjs b/chain/total.mjs\nindex 1234567..89abcde 100644\n-  return part / whole;',
+    '  @@ -5,3 +5,4 @@\n+  let sum = 0;',
+    '+  let sum = 0;\n\\ No newline at end of file',
+    'a line nobody wrote at all\n  return part / whole;',
+  ]) assert.equal((await check(quote)).kept.length, 1, quote);
+  // A wholly invented quote is still noise, and so is one of short lines not all there.
+  for (const quote of ['const nothing = like.this();\n+ and nothing like this either', '--- a/chain/total.mjs\n+++ b/chain/total.mjs', 'x = 1;\nlet\nyy']) {
+    assert.equal((await check(quote)).dropped.length, 1, quote);
+  }
+  // Short lines all there hold.
+  assert.equal((await check('+ let\n- sum')).kept.length, 1);
+});
+
+test('L452 c1 planted: the runner\'s record is written before the file is renamed, and with no record the file stays as written', async () => {
+  const fails = (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: false, material: 1, findings: [noise2] });
+  const w = await world(tempDir('m5-order-'), { act: fails });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  const real = w.ctx.finalize; const kept = [];
+  w.ctx.finalize = (a) => real({ ...a, mark: { read: a.mark.read, keep: (sha) => { kept.push([sha, w.fields(a.role, a.sessionId).finalized]); a.mark.keep(sha); } } });
+  await w.round(['reviewer', 'auditor']);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0][1], undefined, 'the file was not yet rewritten');
+  assert.equal(kept[0][0], sha256(w.file('auditor', 'S-2')), 'the record names what the rename then put there');
+  const no = await world(tempDir('m5-order2-'), { act: fails });
+  no.card.head = await no.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}// a change\n` });
+  const realNo = no.ctx.finalize;
+  no.ctx.finalize = (a) => realNo({ ...a, mark: { read: a.mark.read, keep: () => { throw new Error('no record'); } } });
+  await no.round(['reviewer', 'auditor']);
+  assert.equal(no.fields('auditor', 'S-2').finalized, undefined, 'never a marked file the runner has no record of');
+  assert.equal(no.fields('auditor', 'S-2').notes[0].dropped, undefined);
+});
