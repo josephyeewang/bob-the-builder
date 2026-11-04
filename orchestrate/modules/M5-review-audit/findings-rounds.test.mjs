@@ -458,7 +458,8 @@ test('L432 planted: a hunk header in a quote is left out, so a finding pasted fr
   }
   // The rest of the quote still has to stand somewhere.
   assert.equal((await check('@@ -5,3 +5,4 @@\n+  sum += tax')).dropped.length, 1);
-  assert.equal((await check('  @@ not a header @@')).dropped.length, 1);
+  // An indented one is set aside too, so nothing checkable is left (L464).
+  assert.equal((await check('  @@ -5,3 +5,4 @@')).kept.length, 1);
 });
 
 test('L432 planted: a session\'s own finalized mark proves nothing; M9 trusts a dropped finding only in the file the runner\'s record names', async () => {
@@ -506,7 +507,7 @@ test('L92 minor 2: a fail by either role sends the card back for both', async ()
 
 test('L452 planted: a file saying it passed, with a finding this can\'t read, is refused; finalize refused it too, so it never passes', async () => {
   const reads = (fields) => verdictFields({ entity: 'verdict', card: 'C-1', expectRev: 0, fields: { head: 'a'.repeat(40), ...fields } });
-  const odd = [{ ...real1, level: 'Material' }, { ...real1, level: 'MATERIAL' }, { ...real1, level: 'material ' }, { says: 'x', quote: 'y' }, { severity: 'material' }, 'a string', 7, null, [real1]];
+  const odd = [{ ...real1, level: 'clean' }, { ...real1, level: 'Material' }, { ...real1, level: 'MATERIAL' }, { ...real1, level: 'material ' }, { says: 'x', quote: 'y' }, { severity: 'material' }, 'a string', 7, null, [real1]];
   for (const note of odd) {
     for (const says of [{ pass: true }, { pass: true, material: 0 }, { pass: false, material: 0 }]) {
       assert.match(reads({ ...says, notes: [note] }).reason ?? '', /a finding this can't read/, JSON.stringify([note, says]));
@@ -539,7 +540,7 @@ test('L452 planted: a line of a real quote found is enough, so nothing else in a
     'a line nobody wrote at all\n  return part / whole;',
   ]) assert.equal((await check(quote)).kept.length, 1, quote);
   // A wholly invented quote is still noise, and so is one of short lines not all there.
-  for (const quote of ['const nothing = like.this();\n+ and nothing like this either', '--- a/chain/total.mjs\n+++ b/chain/total.mjs', 'x = 1;\nlet\nyy']) {
+  for (const quote of ['const nothing = like.this();\n+ and nothing like this either', 'x = 1;\nlet\nyy']) {
     assert.equal((await check(quote)).dropped.length, 1, quote);
   }
   // Short lines all there hold.
@@ -563,4 +564,57 @@ test('L452 c1 planted: the runner\'s record is written before the file is rename
   await no.round(['reviewer', 'auditor']);
   assert.equal(no.fields('auditor', 'S-2').finalized, undefined, 'never a marked file the runner has no record of');
   assert.equal(no.fields('auditor', 'S-2').notes[0].dropped, undefined);
+});
+
+const PASTED = '--- a/chain/total.mjs\n+++ b/chain/total.mjs\n@@ -7,2 +7,3 @@\n+  return;';
+
+test('L464 planted: a header line is no evidence, so a short real line under one keeps the finding through finalize and gate', async () => {
+  const fails = (l) => writeVerdict(l, l.role === 'reviewer' ? { pass: true, checklist: CLEAN } : { pass: false, material: 1, findings: [{ ...real1, quote: PASTED }] });
+  const w = await world(tempDir('m5-short-'), { act: fails });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': `${NUM.join('\n')}  return;\n` });
+  await w.round(['reviewer', 'auditor']);
+  const v = w.fields('auditor', 'S-2');
+  assert.equal(v.pass, false);
+  assert.equal(v.material, 1);
+  assert.equal(v.notes[0].dropped, undefined);
+  assert.notEqual(w.gate(), null, 'a real Material finding is never a pass');
+});
+
+test('L464 planted: the noise drop drops only a quote shown to be absent; a shape it can\'t tell keeps the finding', async () => {
+  const r = await repo(tempDir('m5-absent-'));
+  const { readFile, readBase } = await changeReaders({ gitDir: r.gd, head: await r.rev('main') });
+  const check = (quote) => checkFindings([{ ...real1, quote }], readFile, readBase);
+  const kept = [
+    // Nothing checkable left: a new file, a deleted one, mode lines, a bare header.
+    '--- /dev/null\n+++ b/new.mjs',
+    'diff --git a/new.mjs b/new.mjs\nnew file mode 100644\nindex 0000000..1234567\n--- /dev/null\n+++ b/new.mjs',
+    'diff --git a/gone.mjs b/gone.mjs\ndeleted file mode 100644\n--- a/gone.mjs\n+++ /dev/null',
+    'diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755',
+    'rename from chain/a.mjs\nrename to chain/b.mjs\nsimilarity index 90%',
+    'Binary files a/logo.png and b/logo.png differ',
+    '\\ No newline at end of file',
+    '--- a/chain/total.mjs\n+++ b/chain/total.mjs\n@@ -1,2 +1,3 @@',
+    // A short real line under long junk, however the junk is pasted.
+    'diff --git a/chain/total.mjs b/chain/total.mjs\nindex 1234567..89abcde 100644\n+  let',
+    '+  let\n\\ No newline at end of file',
+    'a line nobody wrote at all\n+  let',
+    '\x60\x60\x60js\n+  let\n\x60\x60\x60',
+    '...\nlet\n…',
+    '~~~\n}\n~~~',
+    '+  let\r-  sum',
+    // Line numbers, from grep -n and cat -n, on long lines and short.
+    '3:   return part / whole;',
+    '2   let sum = 0;\n3   return part / whole;',
+    '     2\t  let\n     3\t  sum',
+    'chain/total.mjs:8:  return part / whole;',
+    '8:+  return part / whole;',
+    // The boundary: eight non-space characters are enough alone.
+    'let sum = 0\nzz',
+  ];
+  for (const quote of kept) assert.equal((await check(quote)).kept.length, 1, quote);
+  // Seven are not, however many spaces pad them.
+  assert.equal((await check('a b c d e f g\nlet')).dropped.length, 1);
+  assert.equal((await check('nothing at all\nzz')).dropped.length, 1);
+  assert.equal((await check('8:  nothing at all here')).dropped.length, 1);
+  assert.equal((await check('diff --git a/x b/x\n+  nothing at all here')).dropped.length, 1);
 });

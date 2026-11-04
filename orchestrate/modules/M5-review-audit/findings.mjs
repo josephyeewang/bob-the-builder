@@ -33,26 +33,36 @@ export const NOT_TEXT = Symbol('not a plain file');
 const RANK = Object.freeze({ clean: 0, cosmetic: 1, minor: 2, material: 3 });
 const worst = (levels) => levels.reduce((w, l) => (RANK[l] > RANK[w] ? l : w), 'clean');
 const squash = (s) => String(s).replace(/\s+/g, ' ').trim();
-// A diff's hunk header stands in neither file; nor do its other headers, or whatever else came with the paste.
-const HUNK = /^@@ .* @@/;
+// Lines that say nothing either way: a diff's headers, and what a paste wraps a quote in. They stand in neither file.
+const HEADER = /^\s*(@@ .* @@|diff --git |index [0-9a-f]+\.\.|--- (a\/|\/dev\/null)|\+\+\+ (b\/|\/dev\/null)|\\ No newline at end of file|(new|deleted) file mode |old mode |new mode |similarity index |rename (from|to) |Binary files )/;
+const FENCE = /^\s*(\x60{3}|~~~)/;
+const WORD = /[\p{L}\p{N}]/u;
 // A line this long is one a real quote would hold, so one of them found is enough to keep the finding (L452).
 const SURE_LINE = 8;
+// What grep -n or cat -n puts before a line.
+const LINE_NUMBER = /^\s*(?:[^\s:]+:)?\d+[:\t ]/;
+const noMarker = (l) => squash(l.replace(/^[+\- ]/, ''));
+const readings = (l) => {
+  const bare = l.replace(LINE_NUMBER, '');
+  return [noMarker(l), squash(bare), noMarker(bare)].filter(Boolean);
+};
 
 /**
- * Does the quote stand in one of these texts? Whole, or line by line, a line carrying its diff marker or not. One line
- * of at least SURE_LINE non-space characters found in base or head is enough, because a paste brings lines that stand in
- * neither (L452): the cost is a false fail, never a real finding dropped. A quote with no such line needs every line. A
- * quote that is only hunk headers has nothing to check, so it holds.
+ * Could the quote be in one of these texts? Noise needs the quote shown to be absent, so whatever can't be told keeps the
+ * finding (L464). Headers, fences and lines with no letter or digit are set aside, and a quote with nothing else holds.
+ * Of the rest, one line of at least SURE_LINE non-space characters found in base or head is enough, or every shorter line
+ * found: a long line that is missing proves nothing about a short one beside it. The cost is only ever a false fail.
  */
 function quoteHolds(quote, texts) {
   const hays = texts.map(squash);
   const on = (t) => hays.some((h) => h.includes(t));
   if (on(squash(quote))) return true;
-  const lines = quote.split('\n');
-  const parts = lines.filter((l) => !HUNK.test(l)).map((l) => squash(l.replace(/^[+\- ]/, ''))).filter(Boolean);
-  if (!parts.length) return lines.some((l) => HUNK.test(l));
-  const sure = parts.filter((p) => p.replaceAll(' ', '').length >= SURE_LINE);
-  return sure.length ? sure.some(on) : parts.every(on);
+  const left = quote.split(/\r\n|\r|\n/).filter((l) => !HEADER.test(l) && !FENCE.test(l) && WORD.test(l));
+  if (!left.length) return true;
+  const found = (l) => readings(l).some(on);
+  const isSure = (l) => noMarker(l).replaceAll(' ', '').length >= SURE_LINE;
+  const short = left.filter((l) => !isSure(l));
+  return left.filter(isSure).some(found) || (short.length > 0 && short.every(found));
 }
 
 /**
