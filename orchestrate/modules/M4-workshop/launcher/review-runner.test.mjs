@@ -1293,7 +1293,7 @@ test('L412 m2 planted: a verdict the Record has not taken is told though its end
   writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 4, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
   w.end('S-1');
   await runnerPass(w.ctx);
-  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).alerts.filter((a) => /has not taken/.test(a.text)).length; };
+  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).status.holds.filter((a) => /has not taken/.test(a.text)).length; };
   assert.equal(await told(), 0, 'inside the wait');
   editState(w, (s) => { for (const a of Object.values(s.attempts)) delete a.ended_at; });
   assert.equal(await told(), 0, 'no ended time: nothing has ended');

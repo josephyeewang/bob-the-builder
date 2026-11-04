@@ -593,7 +593,7 @@ function tellWaits({ rec, groups, alert, now }) {
 // Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
 // fixed class, not their text (#157 audit m5); any other is keyed by its text with the numbers out.
 const FIXED_CAUSES = [['launcher', /^launcher: /], ['claim', /^not claimed: /], ['rules-error', /^rules: (could not be asked|rules error: )/]];
-const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason))?.[0]
+export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason))?.[0]
   ?? createHash('sha256').update(reason.replace(/\d+/g, 'N')).digest('hex').slice(0, 12);
 
 /** Card kinds the start loop never hands to a session. */

@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto';
 
 const iso = (ms) => new Date(ms).toISOString();
-const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
+export const putFact = (rec, id, doc, kind) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc, kind });
 
 export const ALERT_QUEUE_FACT = 'unsent-alerts';
 export const ALERT_QUEUE_MAX = 50;
@@ -123,11 +123,6 @@ export function clearTold(rec, fact, kind = 'hold_cleared') {
   dropCause(rec, fact);
   const cur = rec.read('fact', fact)?.doc;
   if (cur != null && !(typeof cur === 'object' && cur.told_at == null)) putFact(rec, fact, { ...(typeof cur === 'object' ? cur : {}), told_at: null }, kind);
-}
-
-/** The facts the queued alerts' marks name. */
-export function queuedFacts(rec) {
-  try { return entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).map((e) => e.mark?.fact).filter(Boolean); } catch { return []; }
 }
 
 /** Whether an alert whose mark names `fact` waits in the queue (a re-ask that would only replace it can be skipped). */

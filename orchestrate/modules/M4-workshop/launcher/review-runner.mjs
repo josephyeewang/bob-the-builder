@@ -482,6 +482,30 @@ export async function runnerPass(ctx) {
   let asideIds = new Set();
   try { asideIds = new Set(readdirSync(P.aside).filter((n) => !n.startsWith('.')).map((n) => n.replace(/\.json$/, ''))); } catch (e) { fail(`the set-aside records could not be listed (${e?.code ?? e})`); }
 
+  // The not-taken list is rebuilt from the launch and ended records on every pass, not only kept in state.json (L437):
+  // a memory file moved aside must not lose a verdict that is still not taken. A session counts once it has ended on a
+  // real verdict, its card still wants that role at that head, and the Record has not taken it after the wait. `none`,
+  // `refused` and `never_ran` were told when the session ended. A card that can't be read adds nothing here (one read
+  // failing must not turn every past session into a hold); a hold already listed stays, as above.
+  const cardsRead = new Map();
+  const cardOf = async (id) => {
+    if (!cardsRead.has(id)) { let c; try { c = await ctx.readCard(id); } catch { c = null; } cardsRead.set(id, c); }
+    return cardsRead.get(id);
+  };
+  for (const { doc: d } of rl.ok ? rl.launches : []) {
+    const sid = d.session_id;
+    if (asideIds.has(sid) || state.not_taken?.[sid]) continue;
+    const e = runnerEnded({ root: P.ended, uid, role: d.role, card: d.card, head: d.head, sessionId: sid });
+    if (!e.ok || !HEX64.test(e.ended.verdict_sha256)) continue;
+    if (now - (pastTime(e.ended.ended_at, now) ?? -Infinity) < INTAKE_WAIT_MS) continue;
+    const c = await cardOf(d.card);
+    if (!c?.ok || c.doc?.head !== d.head || !needsRole(c.doc, d.role)) continue;
+    let t;
+    try { t = await ctx.verdictTaken({ role: d.role, sessionId: sid, card: d.card, head: d.head }); } catch (e2) { t = { ok: false, reason: `the Record could not be read (${e2?.message ?? e2})` }; }
+    if (t?.ok === true) continue;
+    state.not_taken = { ...state.not_taken, [sid]: { id: `not-taken-${sid}`, session: sid, card: d.card, head: d.head, role: d.role, text: notTakenText({ role: d.role, card: d.card, head: d.head, why: notTakenWhy(t) }) } };
+  }
+
   // The sweep (L68): a launched session the runner is not running, with no ended record, is one it lost track of (it
   // stopped between the launch record and saving its memory, or the start gave a pid that wasn't claude's). It is marked
   // ended only on a pass where every live claude session of review's is the runner's own, so none can still hand in a

@@ -1,7 +1,7 @@
 // review-told-once.test.mjs — L315 (class audit "told once ever while still waiting"): the review holds that
 // were told to the owner once and never again while they lasted. Each now goes through the shared stillWaiting check:
-// quiet 2 hours on, told again 25 hours on while the trouble holds, and the mark cleared once it ends, so the same
-// trouble coming back is told again.
+// quiet 2 hours on, told again 25 hours on while the trouble holds, and the mark cleared an hour after it ends, so the
+// same trouble coming back a day after its last tell is told again. A trouble that comes and goes is one trouble (L437).
 //
 // The runner cases run end to end: the real review runner pass (M4) writes its real status file, the Dispatcher's real
 // reviewPorts read it, and the real timeLimits asks for reviews and relays the alerts through the real outbox, which
@@ -14,7 +14,8 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT } from './review-requests.mjs';
+import { reviewPorts, relayReviewAlerts, REVIEW_HOLD_FACT, HOLD_ABSENT_MS } from './review-requests.mjs';
+import { behindSince, nextMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { outbox, isQueued } from './alerts.mjs';
 import { timeLimits } from './merges.mjs';
 import { intakePass } from './outbox-intake.mjs';
@@ -100,12 +101,12 @@ test('L315: a review user that is an admin is told again a day later while it la
     assert.equal(m.card().state, 'in_review');
     assert.equal(m.card().attempts?.reviewer_starts ?? 0, 0, 'every ask "succeeded", so no failure is counted');
     assert.deepEqual(await m.run(4, 26, ADMIN), [25], 'told again a day after it was first told, while it still holds');
-    // Fixed: a reviewer starts, and the mark is cleared, so the trouble coming back is told again.
+    // Fixed: a reviewer starts, and the mark is cleared after an hour off the list. Back again: told a day after the last tell.
     m.ctx.isAdmin = async () => false;
-    await m.hour(27);
+    await m.run(27, 29, ADMIN);
     assert.equal(m.starts.length, 1);
     m.ctx.isAdmin = async () => true;
-    assert.deepEqual(await m.run(28, 29, ADMIN), [28]);
+    assert.deepEqual(await m.run(30, 49, ADMIN), [49]);
   });
 
 test('L315: a review runner memory file that can\'t be read is told again a day later while it lasts, and again after a fix', async () => {
@@ -118,9 +119,9 @@ test('L315: a review runner memory file that can\'t be read is told again a day 
     assert.deepEqual(await m.run(4, 26, CORRUPT), [25], 'told again a day later, while the file still can\'t be read');
     // Joe moves the file aside; the runner starts afresh. Spoiled again later: told again.
     rmSync(join(m.root, 'state.json'));
-    await m.hour(27);
+    await m.run(27, 29, CORRUPT);
     writeFileSync(join(m.root, 'state.json'), '{', { mode: 0o600 });
-    assert.deepEqual(await m.run(28, 29, CORRUPT), [28]);
+    assert.deepEqual(await m.run(30, 49, CORRUPT), [49]);
   });
 
 test('L315: a verdict the Record has not taken is told again a day later while it is still not taken, and never once it is', async () => {
@@ -163,7 +164,7 @@ function statusMac() {
     return got;
   };
   const run = async (from, to, re) => { const out = []; for (let h = from; h <= to; h += 1) for (const t of await hour(h)) if (re.test(t)) out.push(h); return out; };
-  return { set: (s) => { say = { ...say, ...s }; }, setMain: (x) => { main = x; }, unreadable: (u) => { unreadable = u; }, hour, run };
+  return { rec, set: (s) => { say = { ...say, ...s }; }, setMain: (x) => { main = x; }, unreadable: (u) => { unreadable = u; }, hour, run };
 }
 
 const FAILED = /review runner: Its last pass failed: the requests could not be listed \(EACCES\)/;
@@ -176,15 +177,19 @@ test('L315: a runner pass that keeps failing is told again a day later', async (
     assert.deepEqual(await s.run(3, 25, FAILED), [24], 'told again a day later, while every pass still fails');
   });
 
-test('L315: a runner error that stopped and later comes back is told again at once', async () => {
+test('L315, L437: a runner error that stopped and comes back is told again once a day has passed since its last tell', async () => {
     const s = statusMac();
     s.set(EACCES);
     assert.deepEqual(await s.run(0, 1, FAILED), [0]);
-    // Fixed: passes succeed for 3 hours. Then the same error comes back: told again, at once.
+    // Fixed: passes succeed for 3 hours, so the mark clears. The same error back within the day is not told again.
     s.set({ ok: true, error: null });
     assert.deepEqual(await s.run(2, 4, FAILED), []);
     s.set(EACCES);
-    assert.deepEqual(await s.run(5, 6, FAILED), [5], 'the same error back after it stopped');
+    assert.deepEqual(await s.run(5, 6, FAILED), [], 'told 5 hours ago');
+    s.set({ ok: true, error: null });
+    await s.run(7, 29, FAILED);
+    s.set(EACCES);
+    assert.deepEqual(await s.run(30, 31, FAILED), [30], 'the same error back a day on: told at once');
   });
 
 test('L315 (minor): an installed review copy that stays behind main is told again a day later', async () => {
@@ -277,6 +282,9 @@ test('L315: a hold that ends while its alert is queued leaves the queue unsent',
   assert.equal(relayReviewAlerts({ rec, alerts: [hold], alert: outbox(rec, T0), now: T0 }), 1);
   assert.equal(isQueued(rec, fact), true);
   assert.equal(relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, T0 + H), now: T0 + H }), 0);
+  assert.equal(isQueued(rec, fact), true, 'off the list for less than the hour');
+  const later = T0 + H + HOLD_ABSENT_MS;
+  assert.equal(relayReviewAlerts({ rec, alerts: [], alert: outbox(rec, later), now: later }), 0);
   assert.equal(isQueued(rec, fact), false);
 });
 
@@ -298,3 +306,157 @@ test('L315: a Lead\'s request that starts leaves its queued tell unsent', async 
   await pass(26, () => ({ ok: true }));
   assert.equal(isQueued(rec, applied), false);
 });
+
+// L437: a hold that comes and goes is one trouble. Each repro from the #181 audit, told at most once a day.
+const FAILED_ANY = /review runner: Its last pass failed/;
+const tellsOver = async (s, hours, re, each) => {
+  const out = [];
+  for (const h of hours) { each(h); for (const t of await s.hour(h)) if (re.test(t)) out.push(h); }
+  return out;
+};
+const range = (to, step = 1) => Array.from({ length: Math.round(to / step) + 1 }, (_, i) => i * step);
+
+test('L437 flood: a runner failure on every other pass is told once a day', async () => {
+  const s = statusMac();
+  const told = await tellsOver(s, range(48), FAILED_ANY, (h) => s.set(h % 2 === 0 ? EACCES : { ok: true, error: null }));
+  assert.deepEqual(told, [0, 24, 48]);
+});
+
+test('L437 flood: a runner failure on 1 pass in 3, at 5 minutes a pass, is told once in 6 hours', async () => {
+  const s = statusMac();
+  let i = 0;
+  const told = await tellsOver(s, range(6, 1 / 12), FAILED_ANY, () => { s.set(i % 3 === 0 ? EACCES : { ok: true, error: null }); i += 1; });
+  assert.equal(told.length, 1);
+});
+
+test('L437 flood: an error alternating between A and "A; B" is told once a day', async () => {
+  const s = statusMac();
+  const told = await tellsOver(s, range(48), FAILED_ANY, (h) => s.set({ ok: false, error: h % 2 === 0 ? EACCES.error : `${EACCES.error}; session ${h} could not be marked` }));
+  assert.deepEqual(told, [0, 24, 48]);
+});
+
+test('L437 flood: main moving every 3 hours past a stuck copy is told once a day', async () => {
+  const s = statusMac();
+  const head = (h) => String(Math.floor(h / 3)).padStart(40, 'b');
+  s.set({ installed_commit: HEAD });
+  let seen = nextMainSeen(null, { commit: head(0), installed: HEAD, now: T0 - 2 * H });
+  const out = [];
+  for (const h of range(72)) {
+    // The Dispatcher sees the new head before the updater does: the case the grace plans for.
+    s.setMain({ commit: head(h), since: behindSince(seen, head(h), HEAD) });
+    for (const t of await s.hour(h)) if (/Its installed copy is at aaaaaaa/.test(t)) out.push(h);
+    seen = nextMainSeen(seen, { commit: head(h), installed: HEAD, now: T0 + h * H });
+  }
+  assert.deepEqual(out, [0, 24, 48, 72]);
+});
+
+test('L437 flood: main unreadable on and off keeps the stamp hold, told once a day', async () => {
+  const s = statusMac();
+  s.set({ installed_commit: HEAD });
+  const told = await tellsOver(s, range(48), /Its installed copy is at aaaaaaa/, (h) => s.setMain(h % 2 === 0 ? { commit: MAIN, since: T0 - H } : null));
+  assert.deepEqual(told, [0, 24, 48]);
+});
+
+test('L437: time off the list counts readable passes only', async () => {
+  const s = statusMac();
+  const mark = () => s.rec.read('fact', REVIEW_HOLD_FACT('runner-failed'))?.doc;
+  s.set(EACCES);
+  await s.hour(0);
+  s.set({ ok: true, error: null });
+  await s.hour(1);
+  assert.ok(mark().told_at, 'off the list, not yet cleared');
+  s.unreadable(true);
+  await assert.rejects(s.hour(1.9), /status can't be read/);
+  s.unreadable(false);
+  await s.hour(2.1);
+  assert.ok(mark().told_at, 'an unreadable pass started the hour again');
+  await s.hour(3);
+  assert.ok(mark().told_at, 'still under the hour of readable passes');
+  await s.hour(3.2);
+  assert.equal(mark().told_at, null, 'an hour of readable passes: cleared');
+  await s.hour(4);
+  assert.equal(mark().told_at, null);
+});
+
+test('L437 m1: a hold kept because main can\'t be read tells nothing and clears nothing', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('stamp');
+  const hold = { id: 'stamp', hold: true, text: 'The copy is behind.', since: 'aaa' };
+  const keep = { id: 'stamp', hold: true, keep: true, text: '' };
+  assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, T0), now: T0 }), 0, 'never told: nothing was queued');
+  assert.equal(isQueued(rec, fact), false);
+  assert.equal(rec.read('fact', fact), null, 'and no mark written for it');
+  assert.equal(relayReviewAlerts({ rec, alerts: [hold], alert: outbox(rec, T0), now: T0 }), 1);
+  const later = T0 + 3 * H;
+  assert.equal(relayReviewAlerts({ rec, alerts: [keep], alert: outbox(rec, later), now: later }), 0);
+  assert.equal(isQueued(rec, fact), true, 'the queued copy stays');
+  assert.equal(rec.read('fact', fact)?.doc?.absent_since, undefined, 'kept is listed, not off the list');
+});
+
+test('L437: a told time that can\'t be read is not held back: the hold is told', () => {
+  const rec = recWith();
+  const fact = REVIEW_HOLD_FACT('review-admin');
+  const hold = { id: 'review-admin', hold: true, text: 'The review user is an admin Mac user.' };
+  for (const since_times of [{ none: 'garbage' }, { none: iso(T0 + 365 * 24 * H) }, { none: 7 }, 'text', null]) {
+    rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: rec.read('fact', fact)?.rev ?? 0, doc: { told_at: null, since_times }, kind: 'hold_alert' });
+    assert.equal(relayReviewAlerts({ rec, alerts: [hold], alert: outbox(rec, T0), now: T0 }), 1, JSON.stringify(since_times));
+  }
+});
+
+// The verdict flow to the first tell of a verdict the Record has not taken: hour 4.
+async function notTakenTold(over = {}) {
+  const m = mac({ verdictTaken: () => ({ ok: false, reason: 'the Record holds no verdict of session S-1' }), ...over });
+  for (let h = 0; h <= 2; h += 1) await m.hour(h);
+  m.live.splice(0);
+  assert.deepEqual(await m.run(3, 4, NOT_TAKEN), [4]);
+  return m;
+}
+const NOT_TAKEN = /review runner: The reviewer for card C-1 at aaaaaaa handed in a verdict the Record has not taken/;
+const held = (m) => JSON.parse(readFileSync(join(m.root, 'status.json'), 'utf8')).holds.filter((x) => x.id.startsWith('not-taken-'));
+
+test('L437 MAT-1: a verdict still not taken is told daily after the runner\'s memory is removed', async () => {
+  const m = await notTakenTold();
+  rmSync(join(m.root, 'state.json'));
+  assert.deepEqual(await m.run(5, 53, NOT_TAKEN), [28, 52]);
+  assert.equal(m.starts.length, 1, 'nothing started again');
+  assert.equal(held(m).length, 1);
+});
+
+test('L437 MAT-1: the rebuild tells only a real verdict the card still wants, and a card it can\'t read adds nothing', async () => {
+  const m = await notTakenTold();
+  rmSync(join(m.root, 'state.json'));
+  const read = m.ctx.readCard;
+  m.ctx.readCard = () => { throw new Error('the Record is away'); };
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 0, 'unreadable: one read failing must not turn past sessions into holds');
+  m.ctx.readCard = read;
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+  rmSync(join(m.root, 'state.json'));
+  m.ctx.verdictTaken = () => ({ ok: true });
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 0, 'taken');
+  // A session that ended with no verdict was told when it ended, with its tap: not a verdict not taken.
+  const silent = mac({ handedIn: () => ({ ok: false, none: true }), verdictTaken: () => ({ ok: false, reason: 'no' }) });
+  for (let h = 0; h <= 2; h += 1) await silent.hour(h);
+  silent.live.splice(0);
+  await silent.run(3, 4, NOT_TAKEN);
+  assert.equal(held(silent).length, 0);
+});
+
+test('L437 m2: a verdictTaken that throws counts as not taken, and an unreadable card keeps the hold', async () => {
+  const m = await notTakenTold();
+  m.ctx.verdictTaken = () => { throw new Error('the Record is away'); };
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 1);
+  assert.match(held(m)[0].text, /could not be read/);
+  m.ctx.verdictTaken = () => ({ ok: true });
+  m.ctx.readCard = () => { throw new Error('the Record is away'); };
+  await runnerPass(m.ctx);
+  assert.equal(held(m).length, 0, 'an answer that says taken ends it even with the card away');
+  const n = await notTakenTold();
+  n.ctx.readCard = () => ({ ok: false });
+  await runnerPass(n.ctx);
+  assert.equal(held(n).length, 1, 'an unreadable card leaves it held');
+});
+
