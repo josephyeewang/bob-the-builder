@@ -56,5 +56,5 @@ export const ASK_FIELDS = Object.freeze([
   'choices', 'recommended', 'payload', 'payload_sha256', 'payload_still_open', 'payload_still_open_sha256',
   'origin_session', 'boxes', 'released_typed', 'answer', 'pr', 'fingerprint', 'fingerprint_inputs', 'rows', 'files',
   'modules', 'window_pushes', 'last_push_at', 'lapsed_at', 'push_sent_at', 'main_alert_sent_at', 'pr_close_due',
-  'time_reasked_at',
+  'time_reasked_at', 'withdrawn_for', 'pr_open_told_at',
 ]);

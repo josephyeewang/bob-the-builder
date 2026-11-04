@@ -32,7 +32,7 @@ import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
-import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
+import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
@@ -130,6 +130,8 @@ export function heldBy(record, doc) {
   return null;
 }
 
+// While a withdrawn ask's pull request stays open, the owner hears no more often than this.
+const PR_OPEN_REPEAT_MS = 24 * 60 * 60 * 1000;
 const liveBox = (doc) => (doc.boxes ?? []).some((b) => b.status === 'bound');
 const raisedThisRound = (doc) => ms(doc.raised_at) !== null && doc.raised_reask === doc.reask_count;
 
@@ -142,10 +144,26 @@ function write(ctx, cur, doc, events, event) {
 
 // A decision answered while its close did not go through carries CLOSE_DUE (decision.mjs, L135); the pass tries the
 // close again, and takes the mark off once it closed or Joe was told it did not.
-async function retryClose(ctx, a, events) {
+// A withdrawn ask's mark stays until the close works: telling the owner doesn't close it (L477).
+async function retryClose(ctx, a, nowMs, events) {
+  if (a.doc.state === 'withdrawn') return retryWithdrawnClose(ctx, a, nowMs, events);
   if (!(await closeDecisionPr(ctx, a.id, a.doc))) return;
   const { [CLOSE_DUE]: _due, ...rest } = a.doc;
   write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: a.doc.card });
+}
+
+async function retryWithdrawnClose(ctx, a, nowMs, events) {
+  const doc = a.doc;
+  if ((await closePr(ctx, doc)) === null) {
+    const { [CLOSE_DUE]: _due, pr_open_told_at: _told, ...rest } = doc;
+    write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: doc.card });
+    return;
+  }
+  const told = pastTime(doc.pr_open_told_at, nowMs);
+  if (told !== null && nowMs - told < PR_OPEN_REPEAT_MS) return;
+  let sent = false;
+  try { sent = ctx.alert({ type: 'withdrawn_pr_open', ask: a.id, text: `Ask ${a.id} was withdrawn; approving pull request ${doc.pr} won't count. It could not be closed, and closing it is tried again each pass.` }) !== false; } catch { sent = false; }
+  if (sent) write(ctx, a, { ...doc, pr_open_told_at: iso(nowMs) }, events);
 }
 
 // A tap ask whose created_at can't be read or lies in the future: no box can bind on it (binding.mjs), so left alone it
@@ -260,7 +278,7 @@ export async function schedulePass(ctx) {
   for (const a of st.asks()) {
     if (!activeKind(a.doc.kind)) continue;
     // A close still due is retried first; the ask's run-out waits for the next pass (one write per ask per pass).
-    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, events); continue; }
+    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, nowMs, events); continue; }
     if (reaskUnreadable(ctx, a, nowMs, events)) continue;
     await runOut(ctx, a, nowMs, events);
   }

@@ -19,9 +19,10 @@ import { PR_FACT } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
 import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
+import { goFingerprint } from '../M2-approvals/go.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -79,7 +80,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -114,16 +115,67 @@ test('L221 MAT-1: one real runTick turns on a product its rules file names, writ
   assert.equal(w.calls.alerts.length, 1);
 });
 
+test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan reaches its Lead', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const replies = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const fp = goFingerprint({ record: w.rec, product: 'p2' }, 'C-3');
+  assert.equal(fp.ok, true, fp.reason);
+  seed(w.rec, 'ask', 'go-C-3', { kind: 'go_t2', product: 'p2', card: 'C-3', title: 'C-3', state: 'answered', fingerprint: fp.fingerprint, created_at: iso(T0 - MIN), answer: { approves: false, choice: 'Not now' } });
+  // recWith seeds a card as a script; a Lead's session wrote this plan.
+  const rec = Object.create(w.rec, { diary: { value: (...x) => [...w.rec.diary(...x), { actor: 'lead:L-1', writes: [{ entity: 'card', id: 'C-3', doc: { files: ['changed'] } }] }] } });
+  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); return { ok: true }; } } });
+  assert.equal(replies.length, 1, w.calls.alerts.join(' | '));
+  assert.match(replies[0].text, /declined the plan for card C-3/);
+});
+
+test('L467: the plan-go step gets the same deadline as its product, so a short one stops the calls and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const calls = [];
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const planRows = async (x) => { calls.push(x); return {}; };
+  await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows, approvalsProductMs: 1_000 } });
+  assert.deepEqual(calls, []);
+  assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
+});
+
+test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const started = [];
+  const seen = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
+    planReviewAnswer: async (x) => { seen.push(x); return { ok: true }; } };
+  const open = world([account(), usage(), card('C-3', plan), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
+  const held = await open.pass(0, { rules, ports: planPorts });
+  assert.equal(held.steps['plan-go'].ok, true, held.steps['plan-go'].error);
+  assert.equal(started.length, 0, 'an outage holds it');
+  assert.ok(open.calls.alerts.some((t) => /no plan reviewer could start for card C-3.*outage: nothing starts/.test(t)), open.calls.alerts.join(' | '));
+  const w = world([account(), usage(), card('C-3', plan)]);
+  await w.pass(0, { rules, ports: planPorts });
+  assert.equal(started.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(started[0].lead, 'plan-review');
+  await w.pass(1, { rules, ports: planPorts });
+  assert.equal(started.length, 1);
+  assert.equal(seen[0].session, 'S-review');
+});
+
 test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {
   const order = [];
   const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
   const ports = { ...w.ports, approvals: () => { order.push('approvals'); return []; }, launch: async (x) => { order.push('launch'); return w.ports.launch(x); } };
   const r = await w.pass(0, { ports });
   assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
-  assert.deepEqual(order, ['approvals'], 'it ran with the outage open');
-  // Before `pass`: its index is just before it in STEPS, and Object.keys(steps) is the run order.
+  assert.deepEqual(order, ['approvals', 'approvals'], 'it ran with the outage open, and plan-go after it');
+  // Before `pass`: Object.keys(steps) is the run order.
   const keys = Object.keys(r.steps);
-  assert.equal(keys.indexOf('approvals') + 1, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('approvals') + 2, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('plan-go') + 1, keys.indexOf('pass'));
   // A failing approvals step does not stop the dropping of rules values already told (not in `complete`).
   const src = readFileSync(fileURLToPath(new URL('./tick.mjs', import.meta.url)), 'utf8');
   assert.match(src, /const complete = \['stops', 'undo-starts', 'pass', 'limits', 'merges'\]/);
@@ -135,7 +187,7 @@ test('L221: a missing approvals port fails the step (loud); one product failing 
   assert.equal(r.steps.approvals.ok, false);
   assert.match(r.steps.approvals.error, /the approvals port is missing/);
   assert.ok(w.calls.alerts.some((a) => /Dispatcher's approvals step failed: the approvals port is missing/.test(a)));
-  for (const s of STEPS.filter((x) => x !== 'approvals')) assert.equal(r.steps[s].ok, true, s);
+  for (const s of STEPS.filter((x) => !['approvals', 'plan-go'].includes(x))) assert.equal(r.steps[s].ok, true, s);
 
   // Per product: one throws, one hangs past its deadline, one runs. Each gets its own try and deadline.
   const ran = [];
