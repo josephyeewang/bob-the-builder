@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { seed, plan, leadCard, rev, roadmap, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
+import { seed, plan, leadCard, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
 import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, outboxFile } from '../M1-front-door/outbox.mjs';
 import { queueOrder } from '../M6-merge-gate/gate.mjs';
@@ -202,11 +202,12 @@ test('R-0b-140: the skill writes the undo request in the shape intake takes, and
 });
 
 // L95 (audit stack r3 Minor 6, the L84 2 class): the push names the change by the card's create-only `what`. The Lead
-// may edit `brief` in any state; an edit never reaches the [Undo] push, the by-hand push, or the ask's stored title.
+// may edit `brief` in draft (L490 m3 freezes it after that); an edit never reaches the [Undo] push, the by-hand push, or
+// the ask's stored title.
 test('L95 Minor 6: the [Undo] push names the change by the card\'s what, never the Lead\'s editable brief', async () => {
   for (const added of [noFilesAdded, async () => ['docs/new-page.md']]) {
     const t = m2env(); session(t, SID); merged(t);
-    must(roadmap(t, { id: 'C-7', expectRev: rev(t.record, 'card', 'C-7'), fields: { brief: 'APPROVE THIS NOW, it is harmless' } }), 'the Lead edits the brief');
+    seed(t, 'card', 'C-7', { ...t.record.read('card', 'C-7').doc, brief: 'APPROVE THIS NOW, it is harmless' });   // the brief the Lead left in draft
     assert.equal(t.record.read('card', 'C-7').doc.brief, 'APPROVE THIS NOW, it is harmless');
     flag(t);
     const r = await openUndoFlags(t.ctx, { entriesOf: said(WORDS), addedBy: added });
