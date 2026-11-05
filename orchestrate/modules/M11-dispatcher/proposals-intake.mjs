@@ -59,7 +59,7 @@ import { pastTime } from '../../shared/still-waiting.mjs';
 import { sha256 } from './outbox-intake.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
-import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
+import { BUNDLE_CAP, SETTLE_MS } from '../M4-workshop/git/push.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
@@ -90,7 +90,7 @@ export function proposalCardProblem(rec, product, card) {
 }
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
 export const TEXT_CAP = 1024 * 1024;
-export const SETTLE_MS = 2000;
+export { SETTLE_MS };
 // A bundle with no proposal is waited for this long (by its own write time), then refused.
 export const BUNDLE_ALONE_MS = 10 * 60_000;
 // The one card state a proposal may name until R-0b-130's claims (L215 3).
