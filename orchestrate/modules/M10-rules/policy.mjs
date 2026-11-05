@@ -33,6 +33,7 @@ export const KEYS = Object.freeze({
   models: { required: true, type: 'map' },
   merge: { required: true, type: 'map' }, 'merge.queue.tier1_hours': { required: true, type: 'text' },
   product: { required: false, type: 'map' }, 'product.cutover_stage': { required: false, type: 'text' },
+  outside_check: { required: false, type: 'map' }, 'outside_check.workflow': { required: false, type: 'text' },
   docs_paths: { required: false, type: 'list' },
   approvals: { required: false, type: 'map' }, 'approvals.decisions_dir': { required: false, type: 'text' },
   product_profile: { required: false, type: 'map' }, 'product_profile.required_checks': { required: false, type: 'list' },

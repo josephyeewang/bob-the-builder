@@ -27,6 +27,7 @@ import { isMacKey, keyMatches, makeRules, MAC_LIST_ALL } from '../../shared/rule
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
 import * as M9 from '../M9-record/required-keys.mjs';
+import * as M4 from '../M4-workshop/required-keys.mjs';
 import { KEYS as M11_KEYS, need } from '../M11-dispatcher/keys.mjs';
 import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
@@ -79,7 +80,7 @@ const M11 = Object.freeze({
     return out;
   },
 });
-export const READERS = Object.freeze({ M6, M2, M9, M11 });
+export const READERS = Object.freeze({ M6, M2, M9, M11, M4 });
 export const MODULE_KEYS = Object.freeze([...new Set(Object.values(READERS).flatMap((m) => m.REQUIRED_KEYS))]);
 
 export const FIRST_LANES = Object.freeze(['docs', 'research']);
