@@ -521,9 +521,16 @@ test('L566 N1: a Record send that hangs every round still lets a store line go i
     if (writable) outbox(w.rec, T0)('stuck alert 0');
     appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['h1', 'h2', 'h3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
     const open = w.gh.open;
-    w.gh.open = (o) => (/stuck alert/.test(`${o.title}${o.body}`) ? new Promise(() => {}) : open(o));
+    // The time a round sees is this count, not the wall clock: at a budget of exactly two sends a real 30 ms hang can read
+    // as 30 or 29, within budget, and every store line goes in one round (seen on #249's CI).
+    let elapsed = 0;
+    w.gh.open = (o) => {
+      if (!/stuck alert/.test(`${o.title}${o.body}`)) return open(o);
+      elapsed += 30;
+      return new Promise(() => {});
+    };
     for (let round = 3; round > 0; round -= 1) {
-      await w.run({ rec, probe: ALIVE, sendMs: 30, budgetMs: 60 });
+      await w.run({ rec, probe: ALIVE, sendMs: 30, budgetMs: 50, clock: () => elapsed });
       assert.equal(readUnsent(w.root).length, round - 1, `writable ${writable}: one store line a round`);
     }
   }
