@@ -399,7 +399,9 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     const plus = [];
     // The queue is sent from its head, so while it can't shrink the entries past a round's reach are not sent at all. A
     // queue that didn't shrink is named, so that can't wait unheard; a backlog that is clearing fails no pass (L566 N2,
-    // L579). New arrivals can only over-tell. The one that failed is named above.
+    // L579). Arrivals during a round can over-tell. Arrivals between rounds can under-tell, as they count in the start
+    // size: a queue held steady by them looks as if it shrank (L582). That delays this line; no alert is lost. The one
+    // that failed is named above.
     if (r.left >= queuedAtStart && r.left > r.failed) plus.push(`${r.left - r.failed} alert(s) are still in the Record's queue after this round, which did not shrink it`);
     if (storeTried < waiting.length) plus.push(`${waiting.length - storeTried} of the store's unsent alerts had no time this round and wait for the next`);
     try {
