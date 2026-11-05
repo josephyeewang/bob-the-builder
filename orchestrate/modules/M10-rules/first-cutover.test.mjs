@@ -552,3 +552,10 @@ test('L120 m-1: a value that is wrong gets no known label', () => {
   noLabel(swap(FIRST, 'heartbeat_stale_min: 30', 'heartbeat_stale_min: abc'), 'proposals.heartbeat_stale_min');
   noLabel(swap(FIRST, '    light: 1\n', '    light: abc\n'), 'caps.per_state');
 });
+
+test('L580: the fit check refuses a proposals folder no launch could wall, naming the key', () => {
+  const from = /proposals:[\s\S]*?outbox: (\S+)/.exec(FIRST)[1];
+  for (const bad of ['srv/rel/proposals', '/srv/../x', '/srv/./x', '~/p', '/srv/a[1]']) {
+    assert.deepEqual(fit(swap(FIRST, `outbox: ${from}`, `outbox: "${bad}"`), ENTRY), [`M11: proposals.outbox must be an absolute plain folder path, not ${bad}`], bad);
+  }
+});

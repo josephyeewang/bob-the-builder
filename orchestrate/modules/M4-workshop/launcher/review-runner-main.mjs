@@ -80,6 +80,7 @@ import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } fr
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
+import { cardBranch } from '../git/branch.mjs';
 import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
@@ -383,7 +384,7 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
   if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
   try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
   mkdirSync(dest, { mode: 0o700 });
-  const branch = `card/${card.toLowerCase()}`;
+  const branch = cardBranch(card);
   const opts = (purpose) => ({ gitDir: join(dest, '.git'), workTree: dest, cwd: dest, purpose, timeoutMs: 120_000 });
   try {
     // Born on a branch name nothing fetches into: git refuses to fetch into the branch a folder is on, and a plain
