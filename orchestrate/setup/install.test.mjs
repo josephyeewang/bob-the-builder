@@ -4,7 +4,7 @@
 // PLANT tests break one clause each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, fchmodSync, renameSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fchmodSync, lstatSync, readlinkSync, renameSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -12,12 +12,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { SCRIPTS, reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
-import { checkInstall, rootMadeEntries } from './install.mjs';
+import { checkInstall, planAddToInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -47,6 +48,9 @@ async function origin(root) {
   writeFileSync(join(seed, 'orchestrate', SCRIPTS.updater), '// the updater, as the copy holds it\n');
   mkdirSync(join(seed, 'orchestrate', 'modules/M4-workshop/launcher'), { recursive: true });
   writeFileSync(join(seed, 'orchestrate', 'modules/M4-workshop/launcher/review-wiring.mjs'), '// the review wiring, as main holds it\n');
+  mkdirSync(join(seed, 'orchestrate', 'modules/M4-workshop/hooks'), { recursive: true });
+  writeFileSync(join(seed, 'orchestrate', 'modules/M4-workshop/hooks/guard.mjs'), '// a hook, as the module holds it\n');
+  writeFileSync(join(seed, 'orchestrate', 'modules/M4-workshop/hooks/guard.test.mjs'), '// its test, which the hook folder does not carry\n');
   mkdirSync(join(seed, 'scripts/blueprint'), { recursive: true });
   writeFileSync(join(seed, 'scripts/blueprint/yaml-lite.mjs'), '// the file outside orchestrate/ the copy imports\n');
   await gitOk(['add', '-A'], sg); await gitOk(['commit', '-q', '-m', 'first'], sg);
@@ -969,4 +973,169 @@ test('L203 reload-account refuses on a missing install (the not-there branch of 
   rmSync(w.mac.at(`${BASE}/install/orchestrate`)); const n = w.mac.log.length;
   const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /install is not there yet/);
   assert.ok(!w.mac.log.slice(n).some((l) => /^launchctl (bootout|bootstrap)/.test(l)));
+});
+
+// add-to-install (L573, L574): the pinned Claude Code and the hooks go into the installed copy, in place.
+const PIN = '2.1.316';
+const PROGRAM = '#!/bin/sh\necho pinned\n';
+const SHA = createHash('sha256').update(PROGRAM).digest('hex');
+const ADD = ['add-to-install', '--pin', PIN, '--sha256', SHA];
+const real = (w) => realpathSync(w.root);
+/** An installed world, the pinned program at its place outside the copy, and the prepared runner config naming it inside. */
+async function readyToAdd(over = {}) {
+  const w = await installed();
+  const dir = w.mac.at(`${BASE}/claude-code/${PIN}`);
+  mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'claude'), PROGRAM); chmodSync(join(dir, 'claude'), 0o755);
+  const rc = JSON.parse(readFileSync(join(w.ext, 'review.json'), 'utf8'));
+  writeFileSync(join(w.ext, 'review.json'), JSON.stringify({ ...rc, pin: PIN, claudeBin: pinnedBinary(w.root, PIN), hooksDir: join(w.root, 'hooks'), ...over }));
+  // The stand-in's copy fetches from a local folder; the step reads the updater's config as the real run does, so it holds the real kind of address.
+  const uc = join(real(w), UPDATER_CONFIG); const c = JSON.parse(readFileSync(uc, 'utf8')); w.bare = c.address;
+  writeFileSync(uc, JSON.stringify({ ...c, address: w.raw.address, keep: c.keep.filter((n) => n !== 'hooks') }));   // and, like a copy installed without them, no hooks kept yet
+  return w;
+}
+/** Every entry of a folder: path → link target, or kind, mode and bytes' fingerprint. `skip`: top-level names left out. */
+function tree(dir, skip = []) {
+  const out = {};
+  const walk = (d, rel) => { for (const n of readdirSync(d)) {
+    if (rel === '' && skip.includes(n)) continue;
+    const p = join(d, n); const r = `${rel}${n}`; const st = lstatSync(p);
+    if (st.isSymbolicLink()) out[r] = `link ${readlinkSync(p)}`;
+    else if (st.isDirectory()) { out[r] = `dir ${st.mode}`; walk(p, `${r}/`); } else out[r] = `file ${st.mode} ${createHash('sha256').update(readFileSync(p)).digest('hex')}`;
+  } };
+  walk(dir, ''); return out;
+}
+const CHANGED = ['claude-code', 'hooks', UPDATER_CONFIG, RUNNER_CONFIG];
+
+test('add-to-install: the pinned program, the hooks and both configs are in the copy, and check-install passes', async () => {
+  const w = await readyToAdd();
+  const r = w.run(ADD);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /done: all \d+ items PASS/);
+  const bin = pinnedBinary(w.root, PIN);
+  assert.equal(readFileSync(bin, 'utf8'), PROGRAM); assert.equal(statSync(bin).mode & 0o777, 0o755);
+  assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs'], 'the scripts, not their tests');
+  assert.equal(readFileSync(join(w.root, 'hooks/guard.mjs'), 'utf8'), readFileSync(join(w.root, 'modules/M4-workshop/hooks/guard.mjs'), 'utf8'));
+  assert.equal(statSync(join(w.root, 'hooks/guard.mjs')).mode & 0o777, 0o755);
+  assert.equal(readFileSync(join(w.root, RUNNER_CONFIG), 'utf8'), readFileSync(join(w.ext, 'review.json'), 'utf8'), 'review.json is the prepared file, unchanged');
+  const uc = readUpdaterConfig(join(w.root, UPDATER_CONFIG), { localAddress: true });
+  for (const k of ['bin', UPDATER_CONFIG, RUNNER_CONFIG, 'claude-code', 'hooks', 'claude-bin']) assert.ok(uc.keep.includes(k), k);
+  assert.deepEqual(readdirSync(real(w)).filter((n) => n.endsWith('.adding')), [], 'no temporary name left');
+  assert.ok(checkInstall(w.mac, w.cfg).every((x) => x.ok));
+  for (const f of [`claude-code.adding/${PIN}/claude`, 'hooks.adding/guard.mjs']) assert.ok(w.mac.log.some((l) => l.startsWith('chown') && l.endsWith(f)), `${f} made root's`);
+});
+
+test('add-to-install: a program swapped after the plan is caught at the copy, and review.json stays as it was', async () => {
+  const w = await readyToAdd(); const old = readFileSync(join(real(w), RUNNER_CONFIG), 'utf8');
+  const { ops } = planAddToInstall(w.mac, w.cfg, { pin: PIN, sha256: SHA, readSource: (p) => readFileSync(p, 'utf8') });
+  writeFileSync(w.mac.at(`${BASE}/claude-code/${PIN}/claude`), 'swapped\n');
+  assert.throws(() => { for (const o of ops) o.run(); }, /does not have the fingerprint/);
+  assert.equal(readFileSync(join(real(w), RUNNER_CONFIG), 'utf8'), old);
+  assert.ok(!existsSync(pinnedBinary(w.root, PIN)));
+});
+
+test('add-to-install: as root, a runner config someone else owns is refused, as install refuses it', async () => {
+  const w = await readyToAdd(); w.mac.sourceOwner = w.mac.rootUid + 1;
+  const r = w.run(ADD); assert.equal(r.code, 1, r.text); assert.match(r.text, /nothing was changed/);
+  assert.ok(!existsSync(join(w.root, 'hooks/guard.mjs')));
+});
+
+test('add-to-install: no update, no flip, no launchctl, no job file; every other file of the copy is byte for byte the same', async () => {
+  const w = await readyToAdd();
+  const copy = real(w); const before = tree(copy, CHANGED); const link = readlinkSync(w.root);
+  const home = posix(dirname(copy)); const installWas = tree(join(w.mac.at(BASE), 'install'), [home]);
+  const jobs = tree(w.mac.at('/Library/LaunchDaemons'));
+  const runs = w.updaterRuns.length; const n = w.mac.log.length;
+  const programs = []; const realRun = w.mac.run; w.mac.run = (cmd, args) => { programs.push(cmd); return realRun(cmd, args); };
+  assert.equal(w.run(ADD).code, 0);
+  assert.deepEqual(programs.filter((c) => /launchctl/.test(c)), [], 'not even to read');
+  assert.deepEqual(tree(copy, CHANGED), before);
+  assert.equal(readlinkSync(w.root), link, 'the link still points at the same folder');
+  assert.deepEqual(tree(join(w.mac.at(BASE), 'install'), [home]), installWas);
+  assert.deepEqual(tree(w.mac.at('/Library/LaunchDaemons')), jobs);
+  assert.equal(w.updaterRuns.length, runs, 'the updater did not run');
+  assert.deepEqual(w.mac.log.slice(n).filter((l) => /launchctl|LaunchDaemons|loaded-jobs/.test(l)), []);
+  assert.ok(w.mac.log.slice(n).every((l) => !/^(rename|write|copy|rm|mkdir)\b/.test(l) || l.includes(`/${home}/orchestrate/`)), 'it writes only inside the real folder');
+});
+const posix = (p) => p.split('/').pop();
+
+test('add-to-install: every refusal comes before any change', async () => {
+  const cases = [
+    ['a wrong fingerprint', {}, (w) => writeFileSync(w.mac.at(`${BASE}/claude-code/${PIN}/claude`), 'another program\n'), /does not have the fingerprint/],
+    ['a link for the program', {}, (w) => { const f = w.mac.at(`${BASE}/claude-code/${PIN}/claude`); rmSync(f); symlinkSync('/bin/ls', f); }, /is a link/],
+    ['no program', {}, (w) => rmSync(w.mac.at(`${BASE}/claude-code/${PIN}/claude`)), /does not exist/],
+    ['no hooks in the copy', {}, (w) => rmSync(join(w.root, 'modules/M4-workshop/hooks'), { recursive: true }), /no hook scripts/],
+    ['a runner config for another pin', { pin: '2.1.300' }, null, /pin must be 2\.1\.316/],
+    ['a program outside the copy', { claudeBin: '/usr/local/bin/claude' }, null, /claudeBin .*not inside any of the extras/],
+    ['another version folder in the copy', { claudeBin: 'X' }, (w) => { const f = join(w.ext, 'review.json'); writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), claudeBin: pinnedBinary(w.root, '2.1.300') })); }, /claudeBin must be/],
+    ['a hooks folder elsewhere in the copy', { hooksDir: 'X' }, (w) => { const f = join(w.ext, 'review.json'); writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), hooksDir: join(w.root, 'claude-code', 'hooks') })); }, /hooksDir must be/],
+    ['a runner config for another copy', { installRoot: '/elsewhere' }, null, /installRoot must be/],
+    ['an updater config the updater refuses', {}, (w) => { const f = join(real(w), UPDATER_CONFIG); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, keep: ['bin'] })); }, /updater\.json was refused/],
+  ];
+  for (const [name, over, change, why] of cases) {
+    const w = await readyToAdd(over); if (change) change(w);
+    const before = tree(real(w)); const n = w.mac.log.length;
+    const r = w.run(ADD);
+    assert.equal(r.code, 1, name); assert.match(r.text, why, name); assert.match(r.text, /nothing was changed/, name);
+    assert.deepEqual(tree(real(w)), before, name); assert.equal(w.mac.log.length, n, name);
+  }
+});
+
+test('add-to-install: on a Mac with nothing installed it says so and changes nothing', async () => {
+  const w = await world();
+  const r = w.run(ADD); assert.equal(r.code, 1, r.text); assert.match(r.text, /not installed yet/);
+});
+
+test('add-to-install: cut off at any step, the copy keeps working and a second run finishes it', async () => {
+  const count = (await (async () => { const w = await readyToAdd(); return planAddToInstall(w.mac, w.cfg, { pin: PIN, sha256: SHA, readSource: (p) => readFileSync(p, 'utf8') }).ops.length; })());
+  assert.ok(count > 10);
+  for (let cut = 0; cut < count; cut++) {
+    const w = await readyToAdd();
+    const copy = real(w); const old = tree(copy, CHANGED); const oldReview = readFileSync(join(copy, RUNNER_CONFIG), 'utf8');
+    const { ops } = planAddToInstall(w.mac, w.cfg, { pin: PIN, sha256: SHA, readSource: (p) => readFileSync(p, 'utf8') });
+    for (const o of ops.slice(0, cut)) o.run();
+    assert.deepEqual(tree(copy, [...CHANGED, ...CHANGED.map((n) => `${n}.adding`)]), old, `cut at ${cut}`);
+    const review = readFileSync(join(copy, RUNNER_CONFIG), 'utf8');
+    if (review !== oldReview) { assert.ok(existsSync(pinnedBinary(w.root, PIN)), `cut at ${cut}`); assert.ok(existsSync(join(w.root, 'hooks/guard.mjs')), `cut at ${cut}`); }
+    const r = w.run(ADD); assert.equal(r.code, 0, `cut at ${cut}: ${r.text}`);
+    assert.equal(readFileSync(join(copy, RUNNER_CONFIG), 'utf8'), readFileSync(join(w.ext, 'review.json'), 'utf8'), `cut at ${cut}`);
+    assert.deepEqual(readdirSync(copy).filter((n) => n.endsWith('.adding')), [], `cut at ${cut}`);
+  }
+});
+
+test('add-to-install: a second run gives the same copy, and replaces a hook folder that no longer matches', async () => {
+  const w = await readyToAdd(); assert.equal(w.run(ADD).code, 0);
+  const once = tree(real(w));
+  assert.equal(w.run(ADD).code, 0);
+  assert.deepEqual(tree(real(w)), once);
+  writeFileSync(join(w.root, 'hooks/guard.mjs'), '// old\n'); writeFileSync(join(w.root, 'hooks/stray.mjs'), '// gone\n');
+  assert.equal(w.run(ADD).code, 0);
+  assert.deepEqual(tree(real(w)), once);
+});
+
+test('add-to-install: a dry run lists the steps and changes nothing; the flags belong to this command', async () => {
+  const w = await readyToAdd(); const before = tree(real(w));
+  const r = w.run([...ADD, '--dry-run']); assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /would run: copy .*claude/); assert.match(r.text, /dry run: \d+ step/);
+  assert.deepEqual(tree(real(w)), before);
+  assert.throws(() => parseArgs(['add-to-install']), /needs --pin/);
+  assert.throws(() => parseArgs(['add-to-install', '--pin', '2.1.316']), /needs --pin/);
+  assert.throws(() => parseArgs(['add-to-install', '--pin', 'latest', '--sha256', SHA]), /--pin must be a version/);
+  assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', 'ABC']), /--sha256 must be/);
+  assert.throws(() => parseArgs(['install', '--pin', PIN]), /only for add-to-install/);
+});
+
+test('add-to-install: the next real update carries claude-code and hooks across, and the runner config still passes', async () => {
+  const w = await readyToAdd(); assert.equal(w.run(ADD).code, 0);
+  const uc = JSON.parse(readFileSync(join(w.root, UPDATER_CONFIG), 'utf8')); uc.address = w.bare;
+  writeFileSync(join(w.root, UPDATER_CONFIG), JSON.stringify(uc));
+  const seed = join(w.ext, 'second'); const sg = { gitDir: join(seed, '.git'), workTree: seed, cwd: seed, extraConfig: ID };
+  assert.equal(spawnSync(GIT, ['clone', '-q', uc.address, seed]).status, 0);
+  writeFileSync(join(seed, 'orchestrate', 'a.txt'), 'two\n');
+  await gitOk(['add', '-A'], sg); await gitOk(['commit', '-q', '-m', 'second'], sg); await gitOk(['push', '-q', uc.address, 'HEAD:refs/heads/main'], sg);
+  const was = real(w);
+  const r = spawnSync(process.execPath, [join(w.ext, 'run-updater.mjs'), join(HERE, '..', SCRIPTS.updater), JSON.stringify({ uid: ME, owner: ME, top: w.mac.prefix, localAddress: true, pathDirs: [], self: join(real(w), SCRIPTS.updater) }), join(w.root, UPDATER_CONFIG)], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.notEqual(real(w), was, 'the link moved');
+  assert.equal(readFileSync(join(w.root, 'a.txt'), 'utf8'), 'two\n');
+  assert.equal(readFileSync(pinnedBinary(w.root, PIN), 'utf8'), PROGRAM);
+  assert.deepEqual(readdirSync(join(w.root, 'hooks')), ['guard.mjs']);
 });

@@ -8,6 +8,8 @@
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
+//   add-to-install --pin <x.y.z> --sha256 <hex> [--dry-run]   the pinned Claude Code and the hooks into the installed copy, in
+//                                       place: no update, no job touched; safe to run again                    (root)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
@@ -38,7 +40,7 @@ import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
-import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
+import { checkInstall, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { checkWatchRules, planWatchRules, watchConfigLine } from './watch-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
@@ -50,9 +52,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
 const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
 
@@ -61,14 +63,16 @@ export function parseArgs(argv) {
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, pin: null, sha256: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
     else if (a === '--print-config-line') o.printLine = true;
-    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only') {
+    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
+      if (a === '--pin') { if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error('--pin must be a version, x.y.z'); o.pin = v; continue; }
+      if (a === '--sha256') { if (!/^[0-9a-f]{64}$/.test(v)) throw new Error('--sha256 must be 64 lower-case hex characters'); o.sha256 = v; continue; }
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else if (a === '--rules-source') o.rulesSource = v; else if (a === '--only') o.only = v; else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
@@ -81,6 +85,8 @@ export function parseArgs(argv) {
   if (cmd === 'watch-rules' && !o.rulesSource) throw new Error('watch-rules needs --rules-source <the full path of the rules file>');
   if (o.only !== null && !(cmd === 'daemons' && ['place', 'load', 'unload', 'list', 'check'].includes(sub))) throw new Error('--only is only for daemons place, load, unload, list and check');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
+  if ((o.pin !== null || o.sha256 !== null) && cmd !== 'add-to-install') throw new Error('--pin and --sha256 are only for add-to-install');
+  if (cmd === 'add-to-install' && (o.pin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
   return o;
 }
 
@@ -103,6 +109,7 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
+    : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.pin, sha256: o.sha256, readSource })
     : o.cmd === 'token' ? planToken(io, cfg)
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
@@ -162,14 +169,14 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.dry) {
     for (const x of planned.ops) out(`would run: ${x.text}`);
     // A dry run is not root, but it can read the runner config with root's rules: warn only when root would refuse it, and say why (L169 m4).
-    if (o.cmd === 'install' && cfg.runnerConfig && planned.ops.length) {
+    if ((o.cmd === 'install' || o.cmd === 'add-to-install') && cfg.runnerConfig && planned.ops.length) {
       try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: keep your copy of review.json in a folder only you can open, then sudo install -o root -g wheel -m 0644 /dev/stdin <a path in a folder only root can write, e.g. under /Library> < <that copy>, and set runnerConfig in your settings to that path`); }
     }
     out(`dry run: ${planned.ops.length} step(s), nothing changed.`); return 0; }
   // A message that already says what to run next ("run: daemons load") is the one instruction; the generic "run it again" is only for the rest.
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
-  const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
+  const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkWatchRules(io, cfg)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
