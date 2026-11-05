@@ -308,8 +308,11 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
       const sid = l.lead?.sessionId;
       // Each Lead on its own: one that can't be read holds no other, and the owner hears which it was (L584 M2).
       try {
-        const inFlight = leadInFlight({ rec, sessionId: sid, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
-        const handoffRefused = intaken.find((r) => r.session === sid && r.name === HANDOFF_NAME(sid))?.refused;
+        const handoff = intaken.find((r) => r.session === sid && r.name === HANDOFF_NAME(sid));
+        const handoffRefused = handoff?.refused;
+        // A handoff the Lead can rewrite holds nothing: the WRAP that goes out tells the Lead the cap (L596 m-b).
+        const outboxNames = handoff?.rewrite ? l.outboxNames.filter((n) => n !== handoff.name) : l.outboxNames;
+        const inFlight = leadInFlight({ rec, sessionId: sid, outboxNames, questionOpen: l.questionOpen });
         out.push([sid, await leadRestartStep({ rec, rules, now, lead: l.lead, handoffRefused, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
       } catch (e) {
         out.push([sid, `skipped: ${e?.message ?? e}`]);

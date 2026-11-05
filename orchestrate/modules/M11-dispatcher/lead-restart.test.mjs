@@ -534,7 +534,7 @@ test('L355 m5: a give-up after no finished turn whose alert was not queued is to
   assert.equal(await w.step(null, 1 + 24 * 60, { answer: () => false }), 'gave up; the old Lead keeps running');
   assert.equal(w.calls.alerts.length, 0);
   assert.equal(await w.step(null, 2 + 24 * 60), 'gave_up');
-  assert.deepEqual(w.calls.alerts, [`the Lead ${SID} did not hand in a usable handoff within a day of the ask (its size could not be read for a day after the ask); it keeps running`]);
+  assert.deepEqual(w.calls.alerts, [`the Lead ${SID} did not hand in a usable handoff within a day of the ask (its size could not be read for a day after the ask); it keeps running, and a restart now needs a person`]);
 });
 
 test('L359: a re-ask the Lead keeps refusing is told from the first refusal, then daily, and cleared once sent', async () => {

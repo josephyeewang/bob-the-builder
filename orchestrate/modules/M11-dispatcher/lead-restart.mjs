@@ -84,11 +84,11 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
  * handoff })` -> { ok, reason, sessionId }; `mainSha({ product })` -> sha; `alert(text)`.
  * `handoffRefused`: why this pass's intake refused the Lead's handoff file, if it did. A refusal writes no fact, so the
  * tick hands it on, and the Lead and the owner hear the true cause (L584 M1). Returns the action taken. Throws when the
- * Lead's rules can't be read: the tick tells that Lead and goes on to the next (tellLeadSkipped).
+ * Lead's id or rules can't be read: the tick tells that Lead and goes on to the next (tellLeadSkipped).
  */
 export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, mainSha, alert, handoffRefused }) {
-  const sid = lead.sessionId;
-  if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
+  const sid = lead?.sessionId;
+  if (!namesSession(sid)) throw new Error('its session id is missing, or is one the outbox names cannot hold');
   if (!lead.product) throw new Error('it names no product, so its rules can\'t be read');
   const soft = need(rules, KEYS.leadSoft, { product: lead.product });
   const hard = need(rules, KEYS.leadHard, { product: lead.product });
@@ -249,11 +249,12 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
 export function tellLeadSkipped({ rec, lead, error, alert, now }) {
   const sid = lead?.sessionId;
   const where = lead?.product ? `product ${plain(lead.product)}` : 'no product named';
-  return holdAlert({ rec, cause: `lead-skipped-${namesSession(sid) ? sid : 'no-session'}`, alert, now,
-    text: `the Lead ${plain(sid)} (${where}) was skipped this pass: ${plain(error?.message ?? error)}; the other Leads still ran, and it is tried again next pass` });
+  // A bad id gets its own cause too, so two bad Leads are both told; the id goes into a fact name, so only its safe letters.
+  return holdAlert({ rec, cause: `lead-skipped-${String(sid ?? 'no-session').replace(/[^A-Za-z0-9-]/g, '_').slice(0, 80)}`, alert, now,
+    text: `the Lead ${sid == null ? 'with no session id' : plain(sid)} (${where}) was skipped this pass: ${plain(error?.message ?? error)}; the other Leads still ran, and it is tried again next pass` });
 }
 
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
 const reaskRefusedText = (sid, outcome, since) => `the Lead ${sid} did not hand in a usable handoff, and the second ask could not be sent since ${since} (${outcome ?? 'no answer'}); it is tried again at each finished turn`;
-const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running`;
+const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running, and a restart now needs a person`;
 const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

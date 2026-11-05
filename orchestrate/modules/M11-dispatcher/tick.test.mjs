@@ -1462,9 +1462,9 @@ const rulesWithout = (product) => {
 };
 
 for (const [name, product, why] of [
-  ['no product', null, /lead L-1 \(handoff-L-1\.md\) could not be checked: the session names no product/],
+  ['no product', null, /lead L-1 \(handoff-L-1\.md, no product named\) could not be checked: the session names no product/],
   ['an empty product', '', /could not be checked: the session names no product/],
-  ['a product the rules don\'t have', 'gone', /could not be checked: .*context\.handoff_cap\.role/],
+  ['a product the rules don\'t have', 'gone', /\(handoff-L-1\.md, product gone\) could not be checked: .*context\.handoff_cap\.role/],
 ]) {
   test(`L584 M1: a handoff from a session with ${name} is told to the owner with its true cause, daily, and clears once it can be checked`, async () => {
     const w = leadsWorld({ hand: 'the hand-off', product, rules: rulesWithout('gone') });
@@ -1549,4 +1549,102 @@ test('L584 M2: a skipped Lead that can\'t be told fails the step, so it is told 
   assert.equal(r.steps.leads.ok, false);
   assert.match(r.steps.leads.error, /a skipped Lead could not be told \(L-B: no read\)/);
   assert.equal(w.sent.length, 1, 'the healthy Lead got its WRAP');
+});
+
+test('L596 m-b: an oversize handoff before WRAP holds nothing: the Lead gets its WRAP, and a rewrite restarts it', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  const r = await w.pass(0);
+  assert.match(r.steps.intake.result[0].refused, /over the 8000 cap/);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 'WRAP sent']]);
+  assert.match(w.sent[0], /under 8000 tokens/);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  w.state.endedAt = T0 + 2 * MIN;
+  const again = await w.pass(3);
+  assert.deepEqual(again.steps.leads.result, [['L-1', 'restarted']]);
+});
+
+test('L596 m-b: a Lead that leaves the file oversize hears its size, and the owner hears the give-up', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  await w.pass(0);
+  w.state.endedAt = T0 + 2 * MIN;
+  await w.pass(3);
+  assert.match(w.sent[1], /Your handoff was not used \(the handoff is about 10000 tokens, over the 8000 cap\)/);
+  w.state.endedAt = T0 + 5 * MIN;
+  await w.pass(6);
+  assert.ok(w.calls.alerts.some((a) => /the Lead L-1 did not hand in a usable handoff .*10000 tokens/.test(a)), w.calls.alerts.join(' | '));
+});
+
+test('L596 m-b: another file still in flight holds the WRAP, though the handoff can be rewritten', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  writeFileSync(join(w.outbox, '.half-written'), 'x');
+  const r = await w.pass(0);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 'waiting: outbox file .half-written not used yet']]);
+});
+
+test('L596 m-a: once the Lead has given up, the daily line says so, and that a restart needs a person', async () => {
+  const w = leadsWorld({ product: null });
+  await w.pass(0);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  for (const [end, at] of [[2, 3], [5, 6]]) { w.state.endedAt = T0 + end * MIN; await w.pass(at); }
+  assert.match(w.calls.alerts.find((a) => a.includes('could not be checked: the session names')), /a Lead's restart waits on it/, 'before the give-up');
+  assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'gave_up');
+  const gave = w.calls.alerts.find((a) => a.includes('did not hand in a usable handoff'));
+  assert.match(gave, /it keeps running, and a restart now needs a person/);
+  await w.pass(24 * 60 + 10);
+  const last = w.calls.alerts.filter((a) => a.includes('could not be checked: the session names')).at(-1);
+  assert.match(last, /the Lead has given up on its restart and keeps running, so a restart now needs a person/);
+  assert.doesNotMatch(last, /restart waits on it/);
+});
+
+test('L596 m-f: a Lead with a bad id, or none, is told, and is never run as a session', async () => {
+  for (const [bad, name] of [[{ sessionId: 'bad id!', product: 'p1' }, /the Lead bad id! \(product p1\)/], [{ product: 'p1' }, /the Lead with no session id \(product p1\)/]]) {
+    const w = leadsWorld({ bad });
+    const r = await w.pass(0);
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    assert.match(r.steps.leads.result[0][1], /^skipped: its session id is missing/);
+    assert.ok(w.calls.alerts.some((a) => name.test(a) && /session id is missing/.test(a)), w.calls.alerts.join(' | '));
+    assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+    assert.equal(w.rec.read('fact', RESTART_FACT('undefined')), null, 'no session called undefined');
+  }
+});
+
+test('L596 m-f: two Leads with bad ids are each told', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'bad id!', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], lead: { sessionId: 'also bad!', product: 'p1' } }, ...leads()];
+  await w.pass(0);
+  for (const id of ['bad id!', 'also bad!']) assert.ok(w.calls.alerts.some((a) => a.includes(`the Lead ${id} `)), id);
+});
+
+test('L596 O1: a throw while reading what a Lead has in flight skips that Lead alone', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], outboxNames: null }, leads()[1]];
+  const r = await w.pass(0);
+  assert.match(r.steps.leads.result[0][1], /^skipped: /);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+});
+
+test('L596 O3: a file that can\'t be checked is told afresh if it comes back the same day, once it had gone', async () => {
+  const w = leadsWorld({ hand: 'the hand-off', product: null, tokens: 100 });
+  const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked')).length;
+  await w.pass(0);
+  assert.equal(told(), 1);
+  await w.pass(5);
+  assert.equal(told(), 1, 'once inside the day');
+  rmSync(join(w.outbox, HANDOFF_NAME('L-1')));
+  await w.pass(10);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off, again');
+  await w.pass(15);
+  assert.equal(told(), 2);
+});
+
+test('L596 O7: a Lead whose send throws, not a rules error, is skipped by name, and the Lead behind it runs', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], send: async () => { throw new Error('the pane is gone'); } }, leads()[1]];
+  const r = await w.pass(0);
+  assert.match(r.steps.leads.result[0][1], /^skipped: the pane is gone/);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+  assert.ok(w.calls.alerts.some((a) => /the Lead L-B \(product p1\) was skipped this pass: the pane is gone/.test(a)), w.calls.alerts.join(' | '));
 });

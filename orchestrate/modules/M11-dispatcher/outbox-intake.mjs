@@ -19,8 +19,9 @@ import { readOutboxFile, OUTBOX_NAME } from '../M4-workshop/launcher/outbox.mjs'
 import { outboxKindOf } from '../../shared/record-names.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { checkPlan } from '../M3-lead/lead-wording.mjs';
-import { tellThen, dropCause, isQueued, clearCause, queuedMarks, writeFrom } from './alerts.mjs';
+import { plain, tellThen, dropCause, isQueued, clearCause, queuedMarks, writeFrom } from './alerts.mjs';
 import { HOLD_FACT, HOLD_REPEAT_MS, causeOf, guarded, holdAlert, refusalReport } from './pass.mjs';
+import { RESTART_FACT } from './lead-restart.mjs';
 import { stillWaiting, STILL_WAITING_MS, pastTime } from '../../shared/still-waiting.mjs';
 import { OUTBOX_KINDS, leadLaunchHead } from '../../shared/record.mjs';
 import { NEVER_RAN } from '../M9-record/outbox.mjs';
@@ -364,11 +365,14 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       r.refused = why;
       noteDaily(s, name, why, `outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`);
       // Rewriting can't cure a file that can't be checked, and a Lead's restart waits on it, so the owner is told, once a
-      // day while it lasts. A file over the cap is the session's to rewrite (L584 M1).
+      // day while it lasts (L584 M1). A file the session can rewrite doesn't hold its WRAP, which is how it hears (L596 m-b).
+      r.rewrite = !unchecked;
       if (unchecked) {
         const cause = readHold(s.sessionId, name, 'unchecked');
         held.add(HOLD_FACT(cause));
-        holdAlert({ rec, cause, now, alert, text: `an outbox file from ${s.role} ${s.sessionId} (${name}) ${why}; it is kept and not used, and a Lead's restart waits on it` });
+        const gaveUp = rec.read('fact', RESTART_FACT(s.sessionId))?.doc?.phase === 'gave_up';
+        const then = gaveUp ? `the Lead has given up on its restart and keeps running, so a restart now needs a person` : `a Lead's restart waits on it`;
+        holdAlert({ rec, cause, now, alert, text: `an outbox file from ${s.role} ${s.sessionId} (${name}, ${s.product ? `product ${plain(s.product)}` : 'no product named'}) ${why}; it is kept and not used, and ${then}` });
       }
       continue;
     }
