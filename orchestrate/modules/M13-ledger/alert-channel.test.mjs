@@ -480,6 +480,40 @@ test('L288 plants: a store backlog bigger than one round goes out over later rou
   assert.deepEqual([...w.gh.issues.values()].map((x) => x.title), ['p1\'s Record store: kind-b1', 'p1\'s Record store: kind-b2', 'p1\'s Record store: kind-b3', 'p1\'s Record store: kind-b4', 'p1\'s Record store: kind-b5']);
 });
 
+// A queue that can't shrink: every entry went out, but the Record refuses to take it off.
+const stuckQueue = (w, n) => {
+  for (let i = 0; i < n; i += 1) outbox(w.rec, T0)(`stuck alert ${i}`);
+  return Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+};
+
+test('L558 M3: a stuck queue that fills the round leaves time for the store\'s lines', async () => {
+  for (const [stuck, ms] of [[20, 300], [50, 300], [50, 150], [10, 600]]) {
+    const w = world();
+    const rec = stuckQueue(w, stuck);
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('k1', 'alert_not_queued'));
+    const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * ms;
+    await w.run({ rec, probe: ALIVE, clock });
+    assert.deepEqual(readUnsent(w.root), [], `${stuck} stuck at ${ms} ms: the store's line went in the first round`);
+  }
+});
+
+test('L558 M3: with nothing from the store waiting, the queue has the whole round', async () => {
+  const w = world();
+  for (let i = 0; i < 12; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 6000 });
+  assert.equal(r.sent, 6);
+});
+
+test('L558 M3: store lines the round had no time for are named in `refused`', async () => {
+  const w = world();
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
+  assert.equal(r.sent, 2);
+  assert.match(r.refused, /3 of the store's unsent alerts had no time this round/);
+});
+
 test('L288 plants: an unsent file that can\'t be read is refused, never read as empty (the channel and M9)', async () => {
   for (const make of [(f) => { rmSync(f); mkdirSync(f); }, (f) => { rmSync(f); writeFileSync(`${f}.real`, storeLine('z1')); symlinkSync(`${f}.real`, f); }]) {
     const w = world();

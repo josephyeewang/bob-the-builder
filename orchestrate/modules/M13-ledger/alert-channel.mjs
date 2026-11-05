@@ -349,7 +349,13 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       if (why !== null) failedOn(text, why);
       return why === null;
     };
-    const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs, clock });
+    // A queue the Record won't let shrink is sent again every round, so with no share of the time it would use all of it
+    // and the store's lines, the way out of that very state, would never go (L558 M3). With any waiting, it gets half of
+    // what can be started in a round.
+    let storeWaiting = false;
+    try { storeWaiting = readUnsent(recordRoot).length > 0; } catch { /* the read below names it */ }
+    const reserveMs = storeWaiting ? Math.max(0, (budgetMs - sendMs) / 2) : 0;
+    const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs: budgetMs - reserveMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
     // A send that hung past sendMs never came back to the port: it is named by that.
     if (r.failed && !first) first = { title: 'a Record alert', why: `no answer within ${sendMs} ms` };
@@ -362,8 +368,10 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       else return { ...out, refused: `the store's unsent alerts could not be read: ${msg(e)}` };
     }
     let storeLeft = waiting.length;
+    let storeTried = 0;
     for (const x of waiting) {
       if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
+      storeTried += 1;
       const text = storeText(x.event, target);
       let why;
       try { why = await within(sendMs, () => raiseWhy(alerts, gh, alertKey(target, 'store', x.id), text, x.id)); } catch (e) { why = msg(e); }
@@ -385,6 +393,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     }
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
     const plus = [];
+    if (storeTried < waiting.length) plus.push(`${waiting.length - storeTried} of the store's unsent alerts had no time this round and wait for the next`);
     try {
       if (await within(sendMs, () => alerts.reportTrouble(target, TROUBLE_SOURCES.CHANNEL)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
     } catch (e) { plus.push(`the alert about the Record refusing writes did not go out: ${msg(e)}`); }

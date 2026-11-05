@@ -145,7 +145,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // the last day, with nothing in memory (a pass is one process). Past the total, a key is counted, not kept, and the
   // owner hears the count at each step. Only ever appends; it reads no document and hands nothing back.
   function keepAlert(text, key) {
-    const capKey = String(key).slice(0, 300);
+    // A long key keeps its hash, so two alerts that differ past the cut stay two (L558 Minor 1).
+    const whole = String(key);
+    const capKey = whole.length <= 300 ? whole : `${whole.slice(0, 200)}#${createHash('sha256').update(whole).digest('hex')}`;
     const at = now();
     const since = at - KEEP_WINDOW_MS;
     let lines = [];
@@ -157,7 +159,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const n = lines.filter((x) => x.outcome === 'kept_back').length + 1;
     if (n > KEPT_BACK_MAX) return;
     try { appendPlain(P.unsent, `${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { return; }
-    if (KEPT_BACK_STEPS.includes(n) && !lines.some((x) => x.cap_key === `kept-back-${n}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${n} more alerts could not be queued in the last day and were kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${n}`, at: mark.at });
+    // The highest step reached, not only a count exactly on one: a lasting fault's count settles between steps (L558 M1).
+    const step = KEPT_BACK_STEPS.findLast((x) => x <= n);
+    if (!lines.some((x) => x.cap_key === `kept-back-${step}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${step} more ${step === 1 ? 'alert' : 'alerts'} could not be queued in the last day and ${step === 1 ? 'was' : 'were'} kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${step}`, at: mark.at });
   }
   function resend() {
     let waiting = [];

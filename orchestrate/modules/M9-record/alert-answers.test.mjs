@@ -361,3 +361,54 @@ test('L545 (lane 1): a line dated ahead of the clock is no line to the cap: it s
   assert.ok(keptOf(env, 'alert_not_queued').some((x) => x.event.text === 'told now'));
 });
 
+// One simulated day: `calls` keepAlert calls spread across it, then the step lines that day added.
+const dayOf = (env, keys) => {
+  const before = readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8').split('\n').filter(Boolean).length;
+  const steps = keptOf(env, 'alerts_kept_back').length;
+  const gap = Math.floor(DAY / keys.length);
+  for (const k of keys) { env.record.keepAlert(`alert ${k}`, k); env.clock.t += gap; }
+  const added = readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8').split('\n').filter(Boolean).slice(before).filter((l) => !/"outcome":"kept_back"/.test(l));
+  return { steps: keptOf(env, 'alerts_kept_back').length - steps, lines: added.length };
+};
+
+test('L558 M1: while a fault lasts, every day with alerts held back tells the owner, at any count', () => {
+  for (const perDay of [25, 35, 50, 120]) {
+    for (const stuck of [false, true]) {
+      const env = quiet();
+      const heldDays = [];
+      for (let day = 0; day < 5; day += 1) {
+        // A stuck cause tells every pass; here a pass is two hours. New keys arrive once each.
+        const keys = stuck ? Array.from({ length: 12 }).flatMap(() => Array.from({ length: perDay }, (_, i) => `cause-${i}`)) : Array.from({ length: perDay }, (_, i) => `d${day}-${i}`);
+        heldDays.push(dayOf(env, keys).steps);
+      }
+      assert.ok(heldDays.every((n) => n >= 1), `${perDay} a day, stuck ${stuck}: told each day, got ${heldDays}`);
+    }
+  }
+});
+
+test('L558 M1 stays bounded (L555): a heavy fault is about 21 to 24 lines a day, for days', () => {
+  const env = quiet();
+  for (let day = 0; day < 3; day += 1) {
+    const { lines } = dayOf(env, Array.from({ length: 1100 }, (_, i) => `d${day}-${i}`));
+    assert.ok(lines >= 21 && lines <= 24, `day ${day}: ${lines} lines`);
+  }
+});
+
+test('L558 M1: a count that jumped past a step (two processes at once) still tells that step', () => {
+  const env = quiet();
+  const file = join(env.root, 'unsent-alerts.jsonl');
+  const at = iso(env.clock.t);
+  appendFileSync(file, Array.from({ length: KEEP_PER_WINDOW }, (_, i) => `${JSON.stringify({ id: `f${i}`, outcome: 'unsent', event: { type: 'alert_not_queued', text: 'x' }, cap_key: `f${i}`, at })}\n`).join(''));
+  appendFileSync(file, Array.from({ length: 11 }, (_, i) => `${JSON.stringify({ outcome: 'kept_back', cap_key: `b${i}`, at })}\n`).join(''));
+  env.clock.t += 1;
+  env.record.keepAlert('next', 'k-next');
+  assert.match(keptOf(env, 'alerts_kept_back')[0].event.text, /at least 10 more alerts/);
+});
+
+test('L558 Minor 1: two long alerts that differ only past the cut stay two', () => {
+  const env = quiet();
+  env.record.keepAlert(`${'y'.repeat(400)}a`, `${'y'.repeat(400)}a`);
+  env.record.keepAlert(`${'y'.repeat(400)}b`, `${'y'.repeat(400)}b`);
+  assert.equal(keptOf(env, 'alert_not_queued').length, 2);
+});
+

@@ -151,9 +151,9 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
     const capped = capQueue(rec, all);
     dropped = capped.dropped;
     return { ...withDrops(rec, d, capped.entries, dropped), next };
-  }, 'alert_queued'); } catch (e) { keepOutside(rec, `${text} (it could not be queued: ${String(e?.message ?? e).slice(0, 200)})`, mark?.fact ?? text); throw e; }
+  }, 'alert_queued'); } catch (e) { keepOutside(rec, `${text} (it could not be queued: ${String(e?.message ?? e).slice(0, 200)})`, key ?? text); throw e; }
   // updateFact's answer is final: a conflict was tried again in there, so this is never a first refused try (L545).
-  if (saved?.ok !== true) { keepOutside(rec, `${text} (it could not be queued: ${String(saved?.reason ?? 'no answer').slice(0, 200)})`, mark?.fact ?? text); return null; }
+  if (saved?.ok !== true) { keepOutside(rec, `${text} (it could not be queued: ${String(saved?.reason ?? 'no answer').slice(0, 200)})`, key ?? text); return null; }
   return !dropped.some((e) => e.id === entry.id) ? entry.id : null;
 }
 
@@ -350,7 +350,9 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
   if (markRefused && sent.retry) return { ok: true };
   const firstRefusal = markRefused && !e.delivered_at;
   if (firstRefusal) gave.push(`its mark on ${sent.mark.fact}: ${markRefused}`);
-  const q = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
+  const queueStuck = (why) => keepOutside(rec, `the alert queue can't be written, so a delivered alert may go out again each round: ${String(why).slice(0, 200)}`, ALERT_QUEUE_FACT);
+  let q;
+  try { q = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
     const cur = doc ?? {};
     const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
     const causes = causesOf(cur).filter((c) => !told.has(c.id));
@@ -359,10 +361,10 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
       ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now), delivered_text: sent.text } : x))
       : entriesOf(cur).flatMap((x) => (x.id !== e?.id ? [x] : sent.retry && x.text !== x.delivered_text ? [unsaid(x)] : []));
     return { ...cur, entries, dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
-  }, 'alert_sent');
+  }, 'alert_sent'); } catch (err) { queueStuck(err?.message ?? err); throw err; }
   if (q?.ok !== true) {
     gave.push(`the queue: ${q?.reason ?? 'no answer'}`);
-    keepOutside(rec, `the alert queue can't be written, so a delivered alert may go out again each round: ${String(q?.reason ?? 'no answer').slice(0, 200)}`, ALERT_QUEUE_FACT);
+    queueStuck(q?.reason ?? 'no answer');
   }
   else if (firstRefusal) queueAlert(rec, markRefusedText(sent.mark.fact, markRefused), { now });
   return gave.length ? { ok: false, reason: gave.join('; ') } : { ok: true };

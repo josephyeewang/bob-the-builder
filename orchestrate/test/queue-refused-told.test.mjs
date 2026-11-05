@@ -77,3 +77,31 @@ test('L545: a Record that throws on the queue write: the alert is kept and the t
   assert.throws(() => queueAlert(rec, 'the band is red', { now: T0 }), /the store broke/);
 });
 
+test('L558 M2: two causes on one fact are two lines: a cause is the fact with its fields', () => {
+  const env = setup({ prefix: 'orch-qrefused-', extra: { alert: () => false } });
+  const rec = queueRefused(env.record);
+  for (let i = 0; i < 5; i += 1) {
+    tellThen(outbox(rec, T0 + i), 'past its hard limit', { fact: 'restart-s1', fields: { hard_told: 'x' }, kind: 'k' });
+    tellThen(outbox(rec, T0 + i), 'could not be started again: it is DOWN', { fact: 'restart-s1', fields: { start_failed_told: 'x' }, kind: 'k' });
+  }
+  const texts = readUnsent(env.root).map((x) => x.event.text);
+  assert.equal(texts.length, 2);
+  assert.ok(texts.some((t) => /hard limit/.test(t)) && texts.some((t) => /it is DOWN/.test(t)));
+});
+
+test('L558 M2: the same on a queue write that throws', () => {
+  const env = setup({ prefix: 'orch-qrefused-', extra: { alert: () => false } });
+  const rec = Object.create(env.record, { write: { value: (w) => { if (w.id === ALERT_QUEUE_FACT) throw new Error('the store broke'); return env.record.write(w); } } });
+  for (const field of ['hard_told', 'start_failed_told']) assert.throws(() => queueAlert(rec, `cause ${field}`, { now: T0, mark: { fact: 'restart-s1', fields: { [field]: 'x' }, kind: 'k' } }), /the store broke/);
+  assert.equal(readUnsent(env.root).length, 2);
+});
+
+test('L558 Minor 2: a settle whose queue write throws keeps its one line, and the throw still reaches the caller', () => {
+  const env = setup({ prefix: 'orch-qrefused-', extra: { alert: () => false } });
+  queueAlert(env.record, 'delivered', { now: T0 });
+  const e = env.record.read('fact', ALERT_QUEUE_FACT).doc.entries[0];
+  const rec = Object.create(env.record, { write: { value: (w) => { if (w.id === ALERT_QUEUE_FACT) throw new Error('the store broke'); return env.record.write(w); } } });
+  assert.throws(() => settleAlert(rec, e, true, T0 + 1), /the store broke/);
+  assert.match(readUnsent(env.root)[0]?.event.text ?? '', /alert queue can't be written.*the store broke/);
+});
+
