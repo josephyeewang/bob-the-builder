@@ -1435,3 +1435,118 @@ test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, o
   await w.pass(25 * 60);
   assert.equal(lines().length, 2, 'a day later');
 });
+
+// A Lead for the tick's `leads` port, with a real outbox folder for the file checks.
+function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000, rules } = {}) {
+  const outbox = tempDir('m11-tick-lead-');
+  if (hand) writeFileSync(join(outbox, HANDOFF_NAME('L-1')), hand);
+  const sent = [];
+  const state = { product, tokens, endedAt: T0 };
+  const entry = (lead, to, size) => ({ lead, outboxNames: readdirSync(outbox), questionOpen: false, size,
+    send: async (t) => { to.push(t); return { outcome: 'sent' }; }, stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-9' }) });
+  const w = world([account(), usage()], { over: {
+    mainSha: async () => 'a'.repeat(40),
+    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
+    leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
+      entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
+  }, ...(rules ? { rules } : {}) });
+  return { ...w, sent, outbox, state };
+}
+const untouched = /missing or over the cap/;
+
+// A rules stand-in with no values for one product, as a product missing from the rules reads on the real engine.
+const rulesWithout = (product) => {
+  const base = rulesWith({}, allow);
+  const hide = (f) => (k, o) => (o?.product === product ? undefined : f(k, o));
+  return Object.create(base, { get: { value: hide(base.get) }, num: { value: hide(base.num) } });
+};
+
+for (const [name, product, why] of [
+  ['no product', null, /lead L-1 \(handoff-L-1\.md\) could not be checked: the session names no product/],
+  ['an empty product', '', /could not be checked: the session names no product/],
+  ['a product the rules don\'t have', 'gone', /could not be checked: .*context\.handoff_cap\.role/],
+]) {
+  test(`L584 M1: a handoff from a session with ${name} is told to the owner with its true cause, daily, and clears once it can be checked`, async () => {
+    const w = leadsWorld({ hand: 'the hand-off', product, rules: rulesWithout('gone') });
+    const r = await w.pass(0);
+    assert.deepEqual(r.steps.leads.result, [['L-1', `waiting: outbox file ${HANDOFF_NAME('L-1')} not used yet`]]);
+    const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked'));
+    assert.equal(told().length, 1);
+    assert.match(told()[0], why);
+    assert.equal(readdirSync(w.outbox).length, 1, 'the file is kept');
+    await w.pass(5);
+    assert.equal(told().length, 1, 'once inside the day');
+    await w.pass(24 * 60 + 5);
+    assert.equal(told().length, 2, 'told again a day on');
+    w.state.product = 'p1';
+    const fixed = await w.pass(24 * 60 + 10);
+    assert.equal(fixed.steps.intake.result[0].refused, undefined, 'the file is checked again');
+    await w.pass(2 * 24 * 60 + 20);
+    assert.equal(told().length, 2, 'not told once it can be checked');
+  });
+}
+
+test('L584 M1: after WRAP the Lead and the owner hear the true cause, not "missing or over the cap"', async () => {
+  const w = leadsWorld({ product: null });
+  await w.pass(0);
+  assert.match(w.sent[0], /^WRAP/);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  w.state.endedAt = T0 + 2 * MIN;
+  const r = await w.pass(3);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 're-asked']]);
+  assert.match(w.sent[1], /Your handoff was not used \(could not be checked: the session names no product/);
+  assert.doesNotMatch(w.sent[1], untouched);
+  w.state.endedAt = T0 + 5 * MIN;
+  await w.pass(6);
+  const gave = w.calls.alerts.find((a) => a.includes('did not hand in a usable handoff'));
+  assert.match(gave, /could not be checked: the session names no product/);
+  assert.doesNotMatch(gave, untouched);
+});
+
+test('L584: the tick passes the vet, so an oversize handoff is refused and the Lead hears its size', async () => {
+  const w = leadsWorld();
+  await w.pass(0);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'x'.repeat(33_000));
+  w.state.endedAt = T0 + 2 * MIN;
+  const r = await w.pass(3);
+  assert.match(r.steps.intake.result[0].refused, /8250 tokens, over the 8000 cap/);
+  assert.match(w.sent[1], /Your handoff was not used \(the handoff is about 8250 tokens/);
+  assert.equal(w.calls.alerts.filter((a) => a.includes('outbox file')).length, 0, 'a file the Lead can rewrite is not the owner\'s yet');
+});
+
+for (const [name, bad, why] of [
+  ['no product', { sessionId: 'L-B' }, /the Lead L-B \(no product named\) was skipped this pass: it names no product/],
+  ['an empty product', { sessionId: 'L-B', product: '' }, /the Lead L-B \(no product named\) was skipped/],
+  ['a product missing the key', { sessionId: 'L-B', product: 'gone' }, new RegExp(`the Lead L-B \\(product gone\\) was skipped this pass: .*${K.leadSoft}`)],
+]) {
+  test(`L584 M2: a Lead with ${name} is told by name, and the healthy Lead behind it still runs`, async () => {
+    const w = leadsWorld({ bad, rules: rulesWithout('gone'), tokens: 999_999 });
+    const r = await w.pass(0);
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    assert.equal(r.steps.leads.result[0][0], 'L-B');
+    assert.match(r.steps.leads.result[0][1], /^skipped: /);
+    assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+    assert.ok(w.calls.alerts.some((a) => why.test(a)), w.calls.alerts.join(' | '));
+    assert.ok(w.calls.alerts.some((a) => a.includes('the Lead L-1 is at 999999 tokens')), 'the healthy Lead\'s own hard-line alert');
+    assert.ok(!w.calls.alerts.some((a) => a.includes('leads step failed')));
+    await w.pass(5);
+    assert.equal(w.calls.alerts.filter((a) => a.includes('the Lead L-B')).length, 1, 'once a day');
+  });
+}
+
+test('L584 M2: a healthy Lead whose new session did not start is still retried behind a bad Lead', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B' } });
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT('L-1'), expectRev: 0, doc: { phase: 'start_failed', reasks: 0 }, kind: 'lead_start_failed' });
+  const r = await w.pass(0);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'restarted']);
+});
+
+test('L584 M2: a skipped Lead that can\'t be told fails the step, so it is told that way, and the Lead behind it still ran', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B' } });
+  const good = w.rec;
+  const rec = Object.create(good, { read: { value: (e, id) => { if (e === 'fact' && id === 'hold-lead-skipped-L-B') throw new Error('no read'); return good.read(e, id); } } });
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(r.steps.leads.ok, false);
+  assert.match(r.steps.leads.error, /a skipped Lead could not be told \(L-B: no read\)/);
+  assert.equal(w.sent.length, 1, 'the healthy Lead got its WRAP');
+});

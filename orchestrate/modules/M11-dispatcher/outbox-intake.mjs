@@ -358,8 +358,20 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       }
     }
     let why;
-    try { why = vet({ session: s, kind: file.kind, text: file.text }); } catch (e) { why = `could not be checked: ${e.message}`; } // audit MIN-12
-    if (why) { r.refused = why; noteDaily(s, name, why, `outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`); continue; }
+    let unchecked = false;
+    try { why = vet({ session: s, kind: file.kind, text: file.text }); } catch (e) { why = `could not be checked: ${e.message}`; unchecked = true; } // audit MIN-12
+    if (why) {
+      r.refused = why;
+      noteDaily(s, name, why, `outbox file ${name} from ${s.role} ${s.sessionId} not used yet: ${why}`);
+      // Rewriting can't cure a file that can't be checked, and a Lead's restart waits on it, so the owner is told, once a
+      // day while it lasts. A file over the cap is the session's to rewrite (L584 M1).
+      if (unchecked) {
+        const cause = readHold(s.sessionId, name, 'unchecked');
+        held.add(HOLD_FACT(cause));
+        holdAlert({ rec, cause, now, alert, text: `an outbox file from ${s.role} ${s.sessionId} (${name}) ${why}; it is kept and not used, and a Lead's restart waits on it` });
+      }
+      continue;
+    }
     // A Lead's read-only request starts its session first. Refused (at the cap, in red) -> the file waits
     // and is tried again next pass (audit MAT-6); the Lead is told once that it is queued, and the owner once it has
     // waited a day, then each day it still waits (L315). The wait's start and mark go through each write of the fact.

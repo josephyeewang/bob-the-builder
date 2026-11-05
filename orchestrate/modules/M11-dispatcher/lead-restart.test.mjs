@@ -74,13 +74,22 @@ test('L564: the handoff check reads the cap for the session\'s product, and a se
   const session = { product: 'p' };
   assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_000) }), null);
   assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_004) }), /4001 tokens, over the 4000 cap/);
-  assert.throws(() => vet({ session: {}, kind: 'handoff-', text: 'x' }), /handoff_cap/);
+  assert.throws(() => vet({ session: {}, kind: 'handoff-', text: 'x' }), /names no product, so context\.handoff_cap\.role/);
+  assert.throws(() => vet({ session: { product: 'nobody' }, kind: 'handoff-', text: 'x' }), /context\.handoff_cap\.role/);
   // Through intake, as production calls it: a session with no product gets "could not be checked", and the file waits.
   const w = world();
   w.handIn(100);
   const [r] = await w.intake(3, { product: null, vet });
   assert.match(r.refused, /^could not be checked/);
   assert.equal(readdirSync(w.outbox).length, 1);
+});
+
+test('L584 m1: a Lead told about the hard line mid-turn still gets its WRAP at the finished turn', async () => {
+  const w = world();
+  assert.equal(await w.step(midTurn(451_000), 0), 'mid-turn');
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(await w.step(ended(452_000, 1), 1), 'WRAP sent');
+  assert.match(w.calls.sent[0], /^WRAP: /);
 });
 
 test('M18: 260k at a finished turn with nothing in flight -> WRAP; the handoff applied -> restarted on it', async () => {

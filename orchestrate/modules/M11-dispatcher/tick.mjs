@@ -39,7 +39,7 @@ import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
-import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
+import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
 import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
@@ -296,16 +296,27 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     return g.ok ? start(x) : { ok: false, reason: g.reason };
   };
   const startReadonly = gatedReadonly((x) => p.startReadonly(x));
-  await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
-    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) }));
+  let intaken = [];
+  await run('intake', async () => (intaken = await intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
+    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) })));
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
     if (outageOpen) return 'outage: the Lead step waits';
     const out = [];
+    const untold = [];
     for (const l of p.leads()) {
-      const inFlight = leadInFlight({ rec, sessionId: l.lead.sessionId, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
-      out.push([l.lead.sessionId, await leadRestartStep({ rec, rules, now, lead: l.lead, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
+      const sid = l.lead?.sessionId;
+      // Each Lead on its own: one that can't be read holds no other, and the owner hears which it was (L584 M2).
+      try {
+        const inFlight = leadInFlight({ rec, sessionId: sid, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
+        const handoffRefused = intaken.find((r) => r.session === sid && r.name === HANDOFF_NAME(sid))?.refused;
+        out.push([sid, await leadRestartStep({ rec, rules, now, lead: l.lead, handoffRefused, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
+      } catch (e) {
+        out.push([sid, `skipped: ${e?.message ?? e}`]);
+        try { tellLeadSkipped({ rec, lead: l.lead, error: e, alert, now }); } catch (t) { untold.push(`${sid}: ${t?.message ?? t}`); }
+      }
     }
+    if (untold.length) throw new Error(`a skipped Lead could not be told (${untold.join('; ')})`);
     return out;
   });
   // Approvals (M2's schedule pass), per product (L221 MAT-1). Before the main pass, so a product its rules file just

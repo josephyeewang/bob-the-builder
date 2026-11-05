@@ -343,6 +343,7 @@ test('L565: a handoff cap under the floor is refused, naming the key; the floor 
   const cap = (n) => firstCutoverProblems(swap(FIRST, '    role: 8000\n', `    role: ${n}\n`), ENTRY);
   assert.deepEqual(cap(3), [`M11: context.handoff_cap.role must be at least ${HANDOFF_CAP_FLOOR} tokens, not 3: no handoff fits under it, so no Lead can restart`]);
   assert.equal(cap(HANDOFF_CAP_FLOOR - 1).length, 1);
+  assert.deepEqual(cap(0), [`M11: context.handoff_cap.role must be at least ${HANDOFF_CAP_FLOOR} tokens, not 0: no handoff fits under it, so no Lead can restart`]);
   assert.deepEqual(cap(HANDOFF_CAP_FLOOR), []);
 });
 
