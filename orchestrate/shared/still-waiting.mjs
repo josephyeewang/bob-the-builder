@@ -40,6 +40,12 @@
 //              of now. It takes ISO time text only: a number (ms) or a Date reads as unreadable. Any clock a site reads
 //              for "how long has this waited" goes through it, so a future time is told, never waited out.
 //
+// THE ONE NAMED EXCEPTION (L339 m1). Null from pastTime means "old enough: tell or act now", with one exception. A STOP
+// whose wanted-since can't be read, or lies ahead, has its clock restarted from now (M11 pass.mjs, the stop step). A
+// stop is an action, not a tell. Forcing it at once over one bad field would skip its safe point. Restarted, it is
+// forced one limit later at most: bounded, and never silent. Nothing else restamps: a tell never restarts its own
+// clock (L330); it is told now.
+//
 // It imports nothing: each module plugs in its own alert path and its own Record writes.
 
 export const STILL_WAITING_MS = 24 * 60 * 60_000;

@@ -143,6 +143,11 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
     // The engine reads the product's state from the Record's product document; none reads as paused (no starts).
     productState: (p) => rec?.read('product', p)?.doc ?? null,
     // How many editing sessions run: the session list, not wired yet. A throw is "count unknown", which the engine refuses.
+    // TO-DO (L322, in the change that wires this): in M11 pass.mjs a Tier-1 card M10 refuses with its cap words
+    // ("editing cap reached for <p> (<n>)", "... on this Mac (<n>)") is refused at the rules.may step and never reaches
+    // capRefusal / tier1Waiting, so Tier-2 cards are not held behind it in amber. Make that step count it (capRefusal
+    // reading M10's words), with a test. Until this is wired every start is refused here as "count unknown", so no card
+    // gets the cap words.
     running: refusing('running'),
     rolesDir: ROLES_DIR,
     clock: now,

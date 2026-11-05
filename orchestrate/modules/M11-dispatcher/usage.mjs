@@ -124,11 +124,20 @@ export function mayStart({ b, kind, tier, risky = [], repair = false, redRuns })
   return kind === 'script' || kind === 'overnight' ? { ok: true } : { ok: false, reason: `unknown kind ${kind}` };
 }
 
+// The start of a stretch of unread usage recorded with no time at all (see recordBands).
+export const UNRECORDED_START = 'not recorded';
+
 /** Writes the `band-usage` fact when the band or own-building value changed; keeps unknown_since. */
 export function recordBands({ rec, b, now, account }) {
   const cur = rec.read('fact', BAND_FACT);
   const prev = cur?.doc;
-  const unknownSince = b.band === 'unknown' ? (prev?.band === 'unknown' && prev.unknown_since ? prev.unknown_since : new Date(now).toISOString()) : null;
+  // A stretch already under way keeps its start. One recorded with no start (a hand edit, a corrupt fact) is not "just
+  // started", which would be a fresh time every pass, never written, so never told (L355 m6): it counts from when its band
+  // was decided, and with neither, from UNRECORDED_START, which the shared pastTime cannot read, so it counts as old
+  // enough and is told (L321, L329). Each is the same every pass, so the stretch is told once, then daily.
+  const unknownSince = b.band !== 'unknown' ? null
+    : prev?.band === 'unknown' ? (prev.unknown_since || prev.decided_at || UNRECORDED_START)
+    : new Date(now).toISOString();
   if (prev && prev.band === b.band && prev.own_building === b.own_building) return { ok: true, unchanged: true, unknownSince };
   const doc = { band: b.band, own_building: b.own_building, reason: b.reason, account: account ?? null, decided_at: new Date(now).toISOString(), unknown_since: unknownSince };
   const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: BAND_FACT, expectRev: cur?.rev ?? 0, doc, kind: 'usage_band' });

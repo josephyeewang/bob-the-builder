@@ -55,10 +55,11 @@ import { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, const
 import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 import { sha256 } from './outbox-intake.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
-import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
+import { BUNDLE_CAP, SETTLE_MS } from '../M4-workshop/git/push.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
@@ -89,7 +90,7 @@ export function proposalCardProblem(rec, product, card) {
 }
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
 export const TEXT_CAP = 1024 * 1024;
-export const SETTLE_MS = 2000;
+export { SETTLE_MS };
 // A bundle with no proposal is waited for this long (by its own write time), then refused.
 export const BUNDLE_ALONE_MS = 10 * 60_000;
 // The one card state a proposal may name until R-0b-130's claims (L215 3).
@@ -409,8 +410,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const pair = `proposal-${parsed.id}.md`;
       if (!names.includes(pair)) {
         // Its proposal may still be on the way (lane 2's #124 review, m3): wait, unrecorded, while the bundle is young.
+        // Its file time through the shared pastTime (L329): one that can't be read, or lies ahead (a clock that went back,
+        // a re-dated file), counts as old enough, so the bundle is refused and told, never "waiting" for ever.
         const mtime = Number(String(first).split(':')[1]);
-        if (now - mtime < BUNDLE_ALONE_MS) { r.waiting = `waiting for ${pair}`; continue; }
+        const at = Number.isFinite(mtime) && Math.abs(mtime) <= 8.64e15 ? pastTime(new Date(mtime).toISOString(), now) : null;
+        if (at !== null && now - at < BUNDLE_ALONE_MS) { r.waiting = `waiting for ${pair}`; continue; }
         refuse(`no ${pair} names this bundle's card`, hash); continue;
       }
       // Recorded, so new bytes under its name are refused and told like any other kind's (L233 M-5).

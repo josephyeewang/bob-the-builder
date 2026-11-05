@@ -3,19 +3,24 @@
 // logic, and the real one, where installed, for the bypass cases.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync, utimesSync } from 'node:fs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { gzipSync, deflateSync } from 'node:zlib';
 import { gitOk, git, initMirror, callLog } from './safe-git.mjs';
-import { createPushScript, readBundleHeader, githubUrl } from './push.mjs';
+import { createPushScript, readBundleHeader, githubUrl, SETTLE_MS } from './push.mjs';
+import { researchCardDoc, RESEARCH_CARD } from '../../M11-dispatcher/research-intake.mjs';
+import { SETTLE_MS as INTAKE_SETTLE_MS } from '../../M11-dispatcher/proposals-intake.mjs';
+import { researchCopyProblem } from '../../M6-merge-gate/refusals.mjs';
 import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
+import { timeLimits } from '../../M11-dispatcher/merges.mjs';
+import { rulesWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
@@ -599,6 +604,7 @@ test('the mirror is checked before every push: a planted alternates file refuses
 import { createSaveWork, CLONE_CONFIG_TEMPLATE } from './save-work.mjs';
 import { prepareWorkerCopy } from '../launcher/worker-copy.mjs';
 import { readdirSync, statSync } from 'node:fs';
+import { fakeAlert } from '../../../test/fake-alert.test-helper.mjs';
 
 const HOOK_NAMES = ['applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit',
   'pre-rebase', 'post-checkout', 'post-merge', 'pre-push', 'pre-receive', 'update', 'proc-receive', 'post-receive', 'post-update', 'reference-transaction',
@@ -1244,4 +1250,377 @@ test('R-0b-127: a push script is never made without the worker\'s and the owner\
   assert.equal(typeof p, 'function');
   assert.equal(p.pushCard, p);
   assert.equal(typeof p.pushProposal, 'function');
+});
+
+// ---- the research copy (L286, L290, L313): the third door. The script makes the one commit itself, from the bytes ----
+// A BOM, Windows line ends, a character past ASCII and no last line end: any text handling on the way changes one.
+const REPORT_BYTES = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# Rivals\r\n\r\nPlans run 20% under the caf\u00e9.\r\nNo last line end')]);
+const RC = RESEARCH_CARD('R-1');
+const RBRANCH = 'card/research-r-1';
+const RPATH = 'docs/research/research-R-1.md';
+const blobOf = (b) => createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${b.length}\0`), b])).digest('hex');
+const sha256Of = (b) => createHash('sha256').update(b).digest('hex');
+const SETTLED = new Date(Date.now() - 3_600_000);
+
+// A world with a ready research_copy card, made by the one card shape, and its report in the proposals folder.
+async function researchWorld(bytes = REPORT_BYTES, { over = {} } = {}) {
+  const w = await world();
+  const file = join(w.proposals, 'research-R-1.md');
+  const put = (b = bytes) => { rmSync(file, { force: true }); writeFileSync(file, b); utimesSync(file, SETTLED, SETTLED); };
+  put();
+  const doc = { ...researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha256Of(bytes), blob: blobOf(bytes), size: bytes.length }), ...over };
+  // A card is created in draft and moved, as the Record takes it.
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'card', id: RC, expectRev: 0, doc: { ...doc, state: 'draft' } }).ok, true);
+  if (over.state !== 'draft') { const m = w.record.write({ actor: 'dispatcher', entity: 'card', id: RC, expectRev: 1, doc: { ...doc, state: over.state ?? 'ready' } }); assert.equal(m.ok, true, m.reason); }
+  const factOf = () => `push.${RC}.r-${sha256Of(bytes).slice(0, 12)}`;
+  const pushR = (input = { product: PRODUCT, card: RC }, ports = {}) => createPushScript({ ...w.ports, uids: { worker: ME + 1 }, ownerUid: ME, ...ports }).pushResearch(input);
+  const mainTip = async () => (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: w.gh })).trim();
+  // A branch or a main commit put on "GitHub" by something other than this script.
+  const onGitHub = async (ref, fn) => {
+    const cg = w.cg;
+    await gitOk(['checkout', '-q', '-B', 'side', 'main'], cg);
+    fn(w.clone);
+    await gitOk(['add', '-A'], cg);
+    await gitOk(['commit', '-q', '-m', 'side'], cg);
+    await gitOk(['push', '-q', '-f', w.gh, `HEAD:${ref}`], cg);
+  };
+  return { ...w, file, put, pushR, factOf, mainTip, onGitHub };
+}
+
+async function researchRefused(w, re, input, ports) {
+  const before = await w.ghRefs();
+  const r = await w.pushR(input, ports);
+  assert.equal(r.ok, false, 'should be refused');
+  assert.match(r.reason, re);
+  assert.equal(await w.ghRefs(), before, 'GitHub changed on a refusal');
+  assert.deepEqual(readdirSync(w.ports.privateDir), [], 'a work folder was left behind');
+  return r;
+}
+
+test('L286: one commit on main, made by the script: the report byte for byte at its one path, and the merge gate\'s refusal 10 passes', async () => {
+  const w = await researchWorld();
+  const main = await w.mainTip();
+  pushAsked.length = 0;
+  const r = await w.pushR();
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.branch, RBRANCH);
+  const g = { gitDir: w.gh };
+  assert.equal((await gitOk(['rev-parse', `refs/heads/${RBRANCH}`], g)).trim(), r.tip);
+  assert.equal((await gitOk(['rev-parse', `${r.tip}^`], g)).trim(), main, 'its one parent is main as fetched');
+  assert.equal((await gitOk(['rev-list', '--count', `${main}..${r.tip}`], g)).trim(), '1');
+  assert.equal((await gitOk(['log', '-1', '--format=%an', r.tip], g)).trim(), 'orchestrate');
+  // Every byte, as git holds them: the BOM, the \r\n and the missing last line end.
+  const held = await git(['cat-file', 'blob', `${r.tip}:${RPATH}`], g);
+  assert.deepEqual(held.stdout, REPORT_BYTES);
+  const change = (await gitOk(['diff-tree', '-r', '--no-renames', '--no-commit-id', '--raw', main, r.tip], g)).trim();
+  assert.equal(change, `:000000 100644 ${'0'.repeat(40)} ${blobOf(REPORT_BYTES)} A\t${RPATH}`);
+  // What the merge gate will judge: refusal 10, on the change as made.
+  const card = w.record.read('card', RC);
+  assert.equal(researchCopyProblem({ card, files: [{ path: RPATH, status: 'added', mode: '100644', blob: blobOf(REPORT_BYTES) }] }), null);
+  // M10's real push_branch was asked, and took the card by its docs lane (L384 5).
+  assert.equal(pushAsked.length, 1);
+  assert.deepEqual(pushAsked[0].card, { id: RC, kind: 'research_copy', rows: [], doc: { lane: 'docs' } });
+  assert.deepEqual(pushAsked[0].files, [{ path: RPATH, status: 'added' }]);
+  // The same core: the scan ran, a PR opened with the card's words, the fact says what door it came by.
+  assert.match(w.fake.calls(), /git\ndir\nstdin/, 'the secret scan ran');
+  assert.equal(w.prs.length, 1);
+  assert.equal(w.prs[0].branch, RBRANCH);
+  assert.match(w.prs[0].title, /copy research ask R-1's report/);
+  const f = w.record.read('fact', w.factOf()).doc;
+  assert.deepEqual([f.result, f.from, f.product, f.tip], ['pushed', 'research', PRODUCT, r.tip]);
+  assert.equal((await gitOk(['rev-parse', `refs/heads/${RBRANCH}`], { gitDir: w.mirror })).trim(), r.tip, 'the mirror\'s branch moved');
+  assert.equal((await git(['rev-parse', '--verify', '-q', `refs/orchestrate/incoming/${RC}/${w.factOf().split('.')[2]}`], { gitDir: w.mirror })).code === 0, false, 'the holding ref is gone');
+});
+
+test('L286: main\'s other files stay as they are, and a report already at the path is updated, not replaced with a new tree', async () => {
+  const w = await researchWorld();
+  await w.onGitHub('refs/heads/main', (c) => {
+    mkdirSync(join(c, 'docs/research'), { recursive: true });
+    writeFileSync(join(c, 'docs/research/research-R-1.md'), 'an older copy\n');
+    writeFileSync(join(c, 'docs/research/other.md'), 'keep me\n');
+    writeFileSync(join(c, 'docs/top.md'), 'keep me too\n');
+    chmodSync(join(c, 'app.txt'), 0o755);
+  });
+  const main = await w.mainTip();
+  const r = await w.pushR();
+  assert.equal(r.ok, true, r.reason);
+  const g = { gitDir: w.gh };
+  const diff = (await gitOk(['diff-tree', '-r', '--no-renames', '--no-commit-id', '--name-status', main, r.tip], g)).trim();
+  assert.equal(diff, `M\t${RPATH}`);
+  assert.equal((await gitOk(['ls-tree', r.tip, 'app.txt'], g)).split(' ')[0], '100755', 'a file\'s mode is left as it was');
+});
+
+test('L286: the same bytes answer the recorded push again: nothing goes to GitHub twice', async () => {
+  const w = await researchWorld();
+  const first = await w.pushR();
+  const refs = await w.ghRefs();
+  const rev = w.record.read('fact', w.factOf()).rev;
+  const again = await w.pushR();
+  assert.deepEqual([again.ok, again.already, again.tip], [true, true, first.tip]);
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.record.read('fact', w.factOf()).rev, rev, 'the fact is left as it is');
+  assert.equal(w.prs.length, 1);
+});
+
+test('L286: a push whose fact was lost: the one commit on GitHub counts as it, through the same checks, and nothing moves', async () => {
+  const w = await researchWorld();
+  const first = await w.pushR();
+  const f = w.record.read('fact', w.factOf());
+  assert.equal(w.record.write({ actor: 'workshop', entity: 'fact', id: w.factOf(), expectRev: f.rev, doc: { result: 'refused', reason: 'stand-in for a lost fact', at: new Date().toISOString() } }).ok, true);
+  const refs = await w.ghRefs();
+  w.fake.setMode('leak');
+  const scanned = await w.pushR();
+  assert.equal(scanned.ok, false, 'a branch already on GitHub is scanned like any other');
+  w.fake.setMode('clean');
+  const r = await w.pushR();
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.tip, first.tip);
+  assert.equal(await w.ghRefs(), refs);
+  assert.equal(w.record.read('fact', w.factOf()).doc.tip, first.tip);
+});
+
+test('L286: a card branch on GitHub holding anything else is refused and left there, never forced', async () => {
+  const cases = [
+    ['other bytes at the path', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), 'not the report\n'); }, /not exactly the report/],
+    ['the report plus another file', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); writeFileSync(join(c, 'app.txt'), 'and this\n'); }, /not exactly the report/],
+    ['another file only', (c) => { writeFileSync(join(c, 'app.txt'), 'only this\n'); }, /not exactly the report/],
+    // L441 m1, m2: the report is first by name here, so only the count and the mode refuse these.
+    ['the report plus a later file', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); writeFileSync(join(c, 'z-later.txt'), 'and this\n'); }, /not exactly the report/],
+    ['the report, executable', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); chmodSync(join(c, RPATH), 0o755); }, /not exactly the report/],
+  ];
+  for (const [name, fn, re] of cases) {
+    const w = await researchWorld();
+    await w.onGitHub(`refs/heads/${RBRANCH}`, fn);
+    await researchRefused(w, re, undefined, undefined);
+    assert.equal(w.prs.length, 0, name);
+  }
+  // L441 m1: a file renamed onto the path, the report's bytes and all, takes the old name off main with it.
+  const moved = await researchWorld();
+  await moved.onGitHub('refs/heads/main', (c) => writeFileSync(join(c, 'z-plan.md'), REPORT_BYTES));
+  mkdirSync(join(moved.clone, 'docs/research'), { recursive: true });
+  renameSync(join(moved.clone, 'z-plan.md'), join(moved.clone, RPATH));
+  await gitOk(['add', '-A'], moved.cg);
+  await gitOk(['commit', '-q', '-m', 'renamed'], moved.cg);
+  await gitOk(['push', '-q', '-f', moved.gh, `HEAD:refs/heads/${RBRANCH}`], moved.cg);
+  await researchRefused(moved, /not exactly the report/, undefined, undefined);
+  // The right net change, in two commits, is still not the one copy commit.
+  const w = await researchWorld();
+  await w.onGitHub(`refs/heads/${RBRANCH}`, (c) => writeFileSync(join(c, 'app.txt'), 'first\n'));
+  await gitOk(['checkout', '-q', 'side'], w.cg);
+  await gitOk(['revert', '--no-edit', 'HEAD'], w.cg);
+  mkdirSync(join(w.clone, 'docs/research'), { recursive: true });
+  writeFileSync(join(w.clone, RPATH), REPORT_BYTES);
+  await gitOk(['add', '-A'], w.cg);
+  await gitOk(['commit', '-q', '--amend', '-m', 'two'], w.cg);
+  await gitOk(['push', '-q', '-f', w.gh, `HEAD:refs/heads/${RBRANCH}`], w.cg);
+  await researchRefused(w, /more than the one copy commit/, undefined, undefined);
+});
+
+test('L290: a report that is not the bytes the intake recorded is refused before anything is staged, with the one reason M11 tells', async () => {
+  const REASON = /the report's bytes are not the ones the intake recorded/;
+  const same = Buffer.from(REPORT_BYTES); same[10] ^= 1;
+  for (const b of [same, Buffer.concat([REPORT_BYTES, Buffer.from('x')]), REPORT_BYTES.subarray(1)]) {
+    const w = await researchWorld();
+    w.put(b);
+    await researchRefused(w, REASON);
+    assert.equal(w.fake.calls(), '', 'no scan ran: it stopped at the read');
+    assert.equal(w.record.read('fact', w.factOf()).doc.result, 'refused');
+  }
+  // Written over after the file was opened: the read is of that one handle, so the new bytes are what is judged.
+  const w = await researchWorld();
+  await researchRefused(w, REASON, undefined, { fstat: (fd) => { writeFileSync(w.file, same); utimesSync(w.file, SETTLED, SETTLED); return fstatSync(fd); } });
+});
+
+test('L286: a report the secret scan can\'t read is refused like any file, and nothing is staged', async () => {
+  const bad = Buffer.concat([Buffer.from('# Report\n'), Buffer.from([0xff, 0xfe, 0x41])]);
+  await researchRefused(await researchWorld(bad), /cannot be scanned for secrets/);
+});
+
+test('L290: the one safe open: a link, a second name, the wrong owner, a folder that is a link or anyone else\'s, or a file still settling', async () => {
+  const w = await researchWorld();
+  await researchRefused(w, /owned by user/, undefined, { fstat: ownedBy(ME + 7) });
+  await researchRefused(w, /owned by user/, undefined, { ownerUid: ME + 7, uids: { worker: ME } });
+  writeFileSync(w.file, REPORT_BYTES); // written just now
+  await researchRefused(w, /changed a moment ago/);
+  const ahead = new Date(Date.now() + 3_600_000);
+  utimesSync(w.file, ahead, ahead);
+  await researchRefused(w, /changed a moment ago/);
+  utimesSync(w.file, SETTLED, SETTLED);
+  const elsewhere = join(w.root, 'elsewhere.md');
+  writeFileSync(elsewhere, REPORT_BYTES);
+  rmSync(w.file);
+  symlinkSync(elsewhere, w.file);
+  await researchRefused(w, /missing, a link, or has more than one name/);
+  rmSync(w.file);
+  await researchRefused(w, /missing, a link, or has more than one name/);
+  writeFileSync(w.file, REPORT_BYTES); utimesSync(w.file, SETTLED, SETTLED);
+  linkSync(w.file, join(w.root, 'second-name.md'));
+  const r = await researchRefused(w, /missing, a link, or has more than one name/);
+  assert.doesNotMatch(r.reason, new RegExp(w.root), 'no machine path in the reason');
+  const w2 = await researchWorld();
+  renameSync(w2.proposals, `${w2.proposals}-real`);
+  symlinkSync(`${w2.proposals}-real`, w2.proposals);
+  await researchRefused(w2, /not a plain folder/);
+});
+
+test('L286: the card alone says what is copied: only a ready research_copy card of this product, naming its ask\'s one file, with proof', async () => {
+  const none = await researchWorld();
+  await researchRefused(none, /not in the Record/, { product: PRODUCT, card: 'research-R-9' });
+  await researchRefused(none, /names no product/, { card: RC });
+  await researchRefused(none, /bad card id/, { product: PRODUCT, card: '../x' });
+  await researchRefused(none, /another product's/, { product: 'p2', card: RC });
+  await researchRefused(none, /not a research_copy card/, { product: PRODUCT, card: 'C-1' });
+  for (const [over, re] of [
+    [{ state: 'draft' }, /is draft, not ready/],
+    [{ files: [RPATH, 'app.txt'] }, /does not name its ask's one file/],
+    [{ files: ['docs/research/research-R-2.md'] }, /does not name its ask's one file/],
+    [{ research_ask: 'R-2' }, /does not name its ask's one file/],
+    // L441 m8: names that agree with each other, for an ask id that is no id.
+    [{ research_ask: '../../x', files: ['docs/research/research-../../x.md'], source: { file: 'research-../../x.md', sha256: sha256Of(REPORT_BYTES), blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /does not name its ask's one file/],
+    [{ source: { file: 'other.md', sha256: sha256Of(REPORT_BYTES), blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /does not name its ask's one file/],
+    [{ source: { file: 'research-R-1.md', sha256: 'x', blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } }, /no proof of the report's bytes/],
+    [{ source: { file: 'research-R-1.md', sha256: sha256Of(REPORT_BYTES), blob: 'x', size: REPORT_BYTES.length } }, /no proof of the report's bytes/],
+    [{ source: { file: 'research-R-1.md', sha256: sha256Of(REPORT_BYTES), blob: blobOf(REPORT_BYTES), size: 0 } }, /no proof of the report's bytes/],
+  ]) await researchRefused(await researchWorld(REPORT_BYTES, { over }), re);
+  // A blob id that isn't these bytes': the sha256 matches, the blob doesn't, and no commit is made.
+  await researchRefused(await researchWorld(REPORT_BYTES, { over: { source: { file: 'research-R-1.md', sha256: sha256Of(REPORT_BYTES), blob: 'a'.repeat(40), size: REPORT_BYTES.length } } }), /not the ones the intake recorded/);
+  // The other way round: the blob matches and the sha256 doesn't. Both proofs are checked; neither stands in for the other.
+  await researchRefused(await researchWorld(REPORT_BYTES, { over: { source: { file: 'research-R-1.md', sha256: sha256Of(Buffer.from('other bytes')), blob: blobOf(REPORT_BYTES), size: REPORT_BYTES.length } } }), /not the ones the intake recorded/);
+  const w = await researchWorld();
+  await researchRefused(w, /no proposals folder/, undefined, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) });
+});
+
+test('L286: it meets the same core as any commit: the scan, a gitleaks:allow line, the rules, the start gate', async () => {
+  const leak = await researchWorld();
+  leak.fake.setMode('leak');
+  await researchRefused(leak, /secret/i);
+  const allow = Buffer.from('# Report\n\nkey = x # gitleaks:allow\n');
+  await researchRefused(await researchWorld(allow), /gitleaks:allow/);
+  const w = await researchWorld();
+  await researchRefused(w, /not allow/, undefined, { rules: fakeRules({ answers: { push_branch: deny('frozen') }, values: w.values }) });
+  const noLane = await researchWorld(REPORT_BYTES, { over: { lane: undefined } });
+  await researchRefused(noLane, /card has no lane/);
+  const shut = await researchWorld();
+  await researchRefused(shut, /start gate/, undefined, { workflowRule: async () => ({ ok: false, reason: 'shut' }) });
+  // A report that can't sit where its folder should be: main has `docs` as a file.
+  const file = await researchWorld();
+  await file.onGitHub('refs/heads/main', (c) => writeFileSync(join(c, 'docs'), 'a file\n'));
+  await researchRefused(file, /main has docs as a file/);
+  // Main already holds these bytes: nothing to copy.
+  const held = await researchWorld();
+  await held.onGitHub('refs/heads/main', (c) => { mkdirSync(join(c, 'docs/research'), { recursive: true }); writeFileSync(join(c, RPATH), REPORT_BYTES); });
+  await researchRefused(held, /main already holds these bytes/);
+});
+
+test('SETTLE_MS is one value: the intake\'s is the push script\'s', () => {
+  assert.equal(INTAKE_SETTLE_MS, SETTLE_MS);
+});
+
+// ---- The card's head (L387): the merge path reads it for a review ask and a merge request, and only the push may write it ----
+const moveCard = (rec, id, fields) => {
+  const c = rec.read('card', id);
+  const m = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, doc: { ...c.doc, ...fields } });
+  assert.equal(m.ok, true, m.reason);
+};
+const toReview = (rec, id) => {
+  if (rec.read('card', id).doc.state === 'draft') moveCard(rec, id, { state: 'ready' });
+  moveCard(rec, id, { state: 'claimed', claim: { kind: 'tab', claim_id: 'c-1', host: 'the-host' } });
+  moveCard(rec, id, { state: 'running' });
+  moveCard(rec, id, { state: 'in_review' });
+};
+async function askedAfter(rec) {
+  const asked = [];
+  await timeLimits({ rec, rules: rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) }), now: Date.now() + 86_400_000,
+    b: { band: 'green', own_building: 'open', pace: 0.5, prodBlocked: false }, gateAlive: () => true, hasReviewer: async () => false,
+    requestReview: async (x) => { asked.push(x); return { ok: true }; }, alert: fakeAlert() });
+  return asked;
+}
+
+test('L387: a worker\'s push reaches the review request with the pushed head, and nothing here writes it by hand', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const r = await w.push();
+  assert.equal(r.ok, true, r.reason);
+  toReview(w.record, 'C-1');
+  const asked = await askedAfter(w.record);
+  assert.ok(asked.length > 0, 'a reviewer was asked for');
+  for (const a of asked) assert.equal(a.head, r.tip);
+});
+
+test('L387: all three doors write the head they pushed, and a repeat of it writes nothing', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const sha256 = await w.propose();
+  const p = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  assert.equal(p.ok, true, p.reason);
+  assert.equal(w.record.read('card', 'C-1').doc.head, p.tip);
+  const rev = w.record.read('card', 'C-1').rev;
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1', sha256 })).already, true);
+  assert.equal(w.record.read('card', 'C-1').rev, rev);
+  const rw = await researchWorld();
+  const r = await rw.pushR();
+  assert.equal(r.ok, true, r.reason);
+  const card = rw.record.read('card', RC).doc;
+  assert.deepEqual([card.head, card.state], [r.tip, 'ready'], 'the head is written and the card makes no move');
+  // A refused push writes no head.
+  const leak = await researchWorld();
+  leak.fake.setMode('leak');
+  await researchRefused(leak, /secret/i);
+  assert.equal(leak.record.read('card', RC).doc.head, undefined);
+});
+
+test('L387: a new head on a verified card sends it back to in_review, as M9 asks', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const one = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: await w.propose() });
+  assert.equal(one.ok, true, one.reason);
+  toReview(w.record, 'C-1');
+  moveCard(w.record, 'C-1', { state: 'verified' });
+  await w.commit('more', (c) => writeFileSync(join(c, 'app.txt'), 'changed again\n'));
+  const two = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: await w.propose() });
+  assert.equal(two.ok, true, two.reason);
+  assert.notEqual(two.tip, one.tip);
+  const c = w.record.read('card', 'C-1').doc;
+  assert.deepEqual([c.head, c.state], [two.tip, 'in_review']);
+});
+
+test('L387: a refused head write is finished by the next try of the same bytes, at each door that remembers a push', async () => {
+  const refusing = (t) => ({ ...Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]])),
+    write: (x) => (x.entity === 'card' ? { ok: false, reason: 'no push while the card is merging' } : t.write(x)) });
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  const sha256 = await w.propose();
+  const input = { product: PRODUCT, card: 'C-1', sha256 };
+  assert.equal((await w.pushP(input, { record: refusing(w.record) })).ok, true);
+  assert.equal(w.record.read('card', 'C-1').doc.head, undefined);
+  const p = await w.pushP(input);
+  assert.deepEqual([p.ok, p.already, w.record.read('card', 'C-1').doc.head], [true, undefined, p.tip], p.reason);
+  assert.equal((await w.pushP(input)).already, true, 'with the head written, the bytes answer the recorded push again');
+  const rw = await researchWorld();
+  assert.equal((await rw.pushR(undefined, { record: refusing(rw.record) })).ok, true);
+  assert.equal(rw.record.read('card', RC).doc.head, undefined);
+  const r = await rw.pushR();
+  assert.deepEqual([r.ok, r.already, rw.record.read('card', RC).doc.head], [true, undefined, r.tip], r.reason);
+});
+
+test('L387: a refused head write leaves the push pushed and says so in its fact; a lost race is tried again', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const t = w.record;
+  const wrap = (write) => ({ ...Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]])), write });
+  let tries = 0;
+  const refused = wrap((x) => { if (x.entity === 'card') { tries += 1; return { ok: false, reason: 'no push while the card is merging' }; } return t.write(x); });
+  const r = await w.push({ record: refused });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(tries, 2);
+  assert.equal(t.read('card', 'C-1').doc.head, undefined);
+  assert.deepEqual([t.read('fact', 'push.C-1.a1').doc.result, t.read('fact', 'push.C-1.a1').doc.head_refused], ['pushed', 'no push while the card is merging']);
+  let first = true;
+  const raced = wrap((x) => { if (x.entity === 'card' && first) { first = false; return { ok: false, reason: 'the card changed' }; } return t.write(x); });
+  const again = await w.push({ record: raced });
+  assert.equal(again.ok, true, again.reason);
+  assert.equal(t.read('card', 'C-1').doc.head, again.tip);
+  assert.equal(t.read('fact', 'push.C-1.a1').doc.head_refused, undefined, 'a later good write clears the note');
 });
