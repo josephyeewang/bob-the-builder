@@ -214,6 +214,8 @@ function readersAccept(text) {
 const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list', proposalsOutbox: 'text' };
 const START_KINDS = ['editing', 'undo', 'overnight', 'script', 'readonly', 'review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door'];
 
+const RESEARCH_OFF_FIT = 'M11: approvals.plan_go.go_free.research_copy must be true at the first cutover';
+const RESEARCH_ON = 'research copies are on at the first cutover (L549)';
 const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      research_copy: true\n      lead_daily_card: []\n';
 // The fixture's daily-card list, [] (L96), made into a list of the patterns given.
 const DAILY = (...pats) => (t) => swap(t, '      lead_daily_card: []\n', `      lead_daily_card:\n${pats.map((p) => `        - ${p}\n`).join('')}`);
@@ -228,6 +230,8 @@ const VARIANTS = [
   ['no go_free', (t) => swap(t, GO_FREE_BLOCK, '')],
   ['go_free in the list form', (t) => swap(t, GO_FREE_BLOCK, '    go_free: [exact_reverse]\n')],
   ['go_free without exact_reverse', (t) => swap(t, '      exact_reverse: true\n', '')],
+  ['go_free without research_copy', (t) => swap(t, '      research_copy: true\n', ''), RESEARCH_ON],
+  ['research_copy: false', (t) => swap(t, 'research_copy: true', 'research_copy: false'), RESEARCH_ON],
   ['no lead_daily_card', (t) => swap(t, '      lead_daily_card: []\n', '')],
   ['one daily-card pattern', DAILY('docs/blueprint/daily/**'), L120],
   ['a null bot id', (t) => swap(t, 'bot_user_id: 1000099', 'bot_user_id: null')],
@@ -435,7 +439,10 @@ test('go_free values are read: only the known kinds, a flag exactly true or fals
   const by = Object.fromEntries(VARIANTS.map(([n, m]) => [n, m(FIRST)]));
   assert.deepEqual(fit(by['exact_reverse: false'], ENTRY), ['M6: approvals.plan_go.go_free.exact_reverse must be true at the first cutover']);
   assert.deepEqual(fit(by['ordinary: true, so the Lead\'s cards skip the go'], ENTRY), ['M9: approvals.plan_go.go_free.ordinary is not a go-free kind (only exact_reverse, research_copy, lead_daily_card)']);
-  assert.deepEqual(fit(by['research_copy: yes'], ENTRY), ['M9: approvals.plan_go.go_free.research_copy must be true or false']);
+  assert.deepEqual(fit(by['research_copy: yes'], ENTRY), ['M9: approvals.plan_go.go_free.research_copy must be true or false', RESEARCH_OFF_FIT]);
+  // Left out or false is a fit problem naming the key: a quiet "off" would lose research copies unseen (L549).
+  assert.deepEqual(fit(by['go_free without research_copy'], ENTRY), [RESEARCH_OFF_FIT]);
+  assert.deepEqual(fit(by['research_copy: false'], ENTRY), [RESEARCH_OFF_FIT]);
   // The text a rules file gives ("true") is read as true; research_copy: true is a known kind, and FIRST sets it (L514).
   assert.deepEqual(fit(FIRST, ENTRY), []);
   const rules = rulesOf(FIRST);
@@ -544,4 +551,11 @@ test('L120 m-1: a value that is wrong gets no known label', () => {
   noLabel(swap(FIRST, 'heartbeat_stale_min: 30', 'heartbeat_stale_min: 0'), 'proposals.heartbeat_stale_min');
   noLabel(swap(FIRST, 'heartbeat_stale_min: 30', 'heartbeat_stale_min: abc'), 'proposals.heartbeat_stale_min');
   noLabel(swap(FIRST, '    light: 1\n', '    light: abc\n'), 'caps.per_state');
+});
+
+test('L580: the fit check refuses a proposals folder no launch could wall, naming the key', () => {
+  const from = /proposals:[\s\S]*?outbox: (\S+)/.exec(FIRST)[1];
+  for (const bad of ['srv/rel/proposals', '/srv/../x', '/srv/./x', '~/p', '/srv/a[1]']) {
+    assert.deepEqual(fit(swap(FIRST, `outbox: ${from}`, `outbox: "${bad}"`), ENTRY), [`M11: proposals.outbox must be an absolute plain folder path, not ${bad}`], bad);
+  }
 });

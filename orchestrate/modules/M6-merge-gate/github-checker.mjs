@@ -484,6 +484,7 @@ async function checkExactReverse({ view, reverses, merged }) {
 __bob_def('orchestrate/modules/M10-rules/git-view.mjs', [], function (__bob_e, __bob_i) {
 Object.defineProperties(__bob_e, {
   COMPARE_FILE_LIMIT: { get: () => COMPARE_FILE_LIMIT, enumerable: true },
+  notRead: { get: () => notRead, enumerable: true },
   makeGitView: { get: () => makeGitView, enumerable: true },
   touchedPaths: { get: () => touchedPaths, enumerable: true },
   sameEntry: { get: () => sameEntry, enumerable: true },
@@ -516,6 +517,12 @@ const MODES = new Set(['100644', '100755', '120000', '160000']);
 // GitHub's file statuses → ours. `changed` is GitHub's word for a mode-only change; `unchanged` is dropped.
 const STATUS = { added: 'added', removed: 'removed', modified: 'modified', renamed: 'renamed', copied: 'copied', changed: 'modified' };
 
+// A client that threw gave no answer at all (a dropped connection, a body cut mid-read, a token that can't be read), so
+// the throw is marked `unreadable` for M6's failedRead (S16, L543): held, never counted as GitHub's answer about the
+// change. Here rather than in a client, as every client's reads pass through this one line. The message and any status are
+// kept, as failedRead reads the status first.
+const notRead = (e) => Object.assign(new Error(String(e?.message ?? e), { cause: e }), { unreadable: true, ...(Number.isInteger(e?.status) && { status: e.status }) });
+
 function makeGitView({ gh, owner, repo }) {
   if (!gh || typeof gh.get !== 'function') throw new Error('git view needs a GitHub client with get()');
   if (!NAME.test(owner ?? '') || !NAME.test(repo ?? '')) throw new Error('git view needs an owner and repo');
@@ -525,7 +532,8 @@ function makeGitView({ gh, owner, repo }) {
   const folders = new Map();
   const sha = (s, what) => { if (typeof s !== 'string' || !SHA.test(s)) throw new Error(`${what} is not a full commit id`); return s; };
   const read = async (path) => {
-    const r = await gh.get(`${base}${path}`);
+    let r;
+    try { r = await gh.get(`${base}${path}`); } catch (e) { throw notRead(e); }
     if (r?.status !== 200 || !r.json || typeof r.json !== 'object') throw new Error(`GitHub answered ${r?.status} for ${path}`);
     return r.json;
   };
@@ -954,7 +962,17 @@ function check(raw) {
   if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
-  for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+  for (const s of PRODUCT_STATES) {
+    const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+    // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
+    // doors that read it, so a typo could hold one door and pass another. `tier1_merge` must be there: with it missing
+    // or blank every undo start is denied, and no other check names the key (L562). A missing or blank `start` passes
+    // here; the fit check names it through M9's keys, and on a later rules change a start is refused and told per card.
+    for (const [key, known, must] of [['start', START_RULES, false], ['tier1_merge', TIER1_MERGE_RULES, true]]) {
+      const v = rules[key];
+      if ((must || (v !== undefined && v !== null)) && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
+    }
+  }
 
   for (const [cls, action] of Object.entries(mapOf(raw.failure_classes, 'failure_classes'))) {
     if (!FAILURE_ACTIONS.includes(action)) bad(`failure_classes.${cls} must be one of ${FAILURE_ACTIONS.join(', ')}`);

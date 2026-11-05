@@ -4,6 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeGitView } from './git-view.mjs';
+import { failedRead } from '../M6-merge-gate/gather.mjs';
+import { readOnlyClient } from '../M6-merge-gate/watch-only.mjs';
 import { carryOver } from './carry-over.mjs';
 import { checkExactReverse } from './exact-reverse.mjs';
 
@@ -54,4 +56,43 @@ test('isDir: a folder listed as a tree entry, or only implied by a file under it
   assert.equal(await v.isDir(B, 'nope'), false);
   const cut = view({ tree: { truncated: true, tree: [] } });
   await assert.rejects(cut.isDir(B, 'src'), /cut off/);
+});
+
+// S16, L543: a client that throws gave no answer, so it is a failed read and the gate holds; git-view's own answers about
+// the change are not. Built through the real read-only client where the shape comes from it.
+const throwing = (e) => makeGitView({ gh: { get: async () => { throw e; } }, owner: 'o', repo: 'r' });
+const viaClient = (o) => makeGitView({ gh: readOnlyClient(o), owner: 'o', repo: 'r' });
+const thrown = (p) => p.then(() => { throw new Error('expected a throw'); }, (e) => e);
+test('S16: each raw throw from a client is a failed read, its message kept', async () => {
+  const cutBody = async () => ({ status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } });
+  const noToken = () => { throw new Error('the token file could not be read'); };
+  for (const [label, view, re] of [
+    ['socket hang up', throwing(new Error('socket hang up')), /socket hang up/],
+    ['ECONNRESET', throwing(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })), /ECONNRESET/],
+    ['a body cut mid-read', viaClient({ token: () => 't', fetchFn: cutBody }), /Unexpected end of JSON/],
+    ['a token that can not be read', viaClient({ token: noToken, fetchFn: async () => { throw new Error('never called'); } }), /token file/],
+  ]) {
+    const e = await thrown(view.commit(B));
+    assert.match(e.message, re, label);
+    assert.equal(failedRead(e), true, label);
+  }
+});
+test('S16 controls: fetch failed, timeouts and a thrown status class as before; a thrown 404 stays an answer', async () => {
+  for (const [label, err, want] of [
+    ['fetch failed', new TypeError('fetch failed'), true],
+    ['timeout', Object.assign(new Error('the operation timed out'), { name: 'TimeoutError' }), true],
+    ['abort', Object.assign(new Error('aborted'), { name: 'AbortError' }), true],
+    ['HTTP 502', new Error('HTTP 502 from GitHub'), true],
+    ['status 503', Object.assign(new Error('busy'), { status: 503 }), true],
+    ['HTTP 404', new Error('HTTP 404 from GitHub'), false],
+    ['status 404', Object.assign(new Error('gone'), { status: 404 }), false],
+    ['a thrown non-Error', 'nope', true],
+  ]) assert.equal(failedRead(await thrown(throwing(err).commit(B))), want, label);
+});
+test('S16 controls: git-view\'s own answers about the change stay answers', async () => {
+  const e = await thrown(view({ tree: { truncated: true, tree: [] } }).entry(B, 'x'));
+  assert.match(e.message, /cut off/);
+  assert.equal(failedRead(e), false);
+  const odd = await thrown(makeGitView({ gh: { get: async () => ({ status: 500, json: null }) }, owner: 'o', repo: 'r' }).commit(B));
+  assert.equal(failedRead(odd), true, 'a 500 answer is still failed, through its message');
 });

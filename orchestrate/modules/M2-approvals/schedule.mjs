@@ -3,7 +3,8 @@
 //
 // WHY. The owner is interrupted twice a day, not all day: an ask goes out only in a push window (08:00, 17:00 in the
 // owner's zone, or the trip zone while away). Urgent kinds (undo, incident repair) go out at once and every 2 hours
-// until answered. Nothing waits forever: a lapsing ask unanswered 12 hours after it was raised is re-asked once, in the
+// until answered. A go ask still waiting on a draft card reaches the phone again once a day, in a window (L523).
+// Nothing waits forever: a lapsing ask unanswered 12 hours after it was raised is re-asked once, in the
 // next window, then expires. A merge approval not used within 24 hours of being raised goes back the same way. All
 // clocks run from raised_at (GitHub's time for a review request; the first push or bound box for a tap), so a pass
 // that runs late — the Mini was down — lapses an ask exactly as an on-time pass would, and an answer given after the
@@ -36,7 +37,7 @@ import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mj
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
-import { MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
+import { GO_REPUSH_MS, MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const HELD_CLOSED_STATES = Object.freeze(['merged', 'closed', 'cancelled', 'closed_no_answer', 'reverted']);
@@ -72,12 +73,12 @@ function configAlert(ctx, reason) {
 // then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
 // pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
 // Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
-// the alert's type and reason with its numbers out; its mark is stillWaiting's, kept only once the sink took it
+// the alert's type and reason (or its text, when it has no reason) with its numbers out; its mark is stillWaiting's, kept only once the sink took it
 // (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
 // ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
 // stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
 const ASK_ALERTS = 'ask-alerts.json';
-const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
+const causeOf = (e) => `${e.type}:${String(e.reason ?? e.text ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
   const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
   let marks = {};
@@ -134,6 +135,17 @@ export function heldBy(record, doc) {
 const PR_OPEN_REPEAT_MS = 24 * 60 * 60 * 1000;
 const liveBox = (doc) => (doc.boxes ?? []).some((b) => b.status === 'bound');
 const raisedThisRound = (doc) => ms(doc.raised_at) !== null && doc.raised_reask === doc.reask_count;
+const onDraft = (record, doc) => { const c = record.read('card', doc.card); return !!c && !c.corrupt && c.doc?.state === 'draft'; };
+// Why a go's card can't be read, or null. Nothing else tells this: the plan pass skips such a card and a move only answers
+// with a reason, so without this the go would wait in silence (L556).
+const goCardLost = (record, doc) => {
+  if (!activeKind(doc.kind).go) return null;
+  const c = record.read('card', doc.card);
+  return !c ? 'the Record has no such card, so someone needs to find out what became of it' : c.corrupt ? 'the card cannot be read and needs repairing by hand' : null;
+};
+const stillAsking = (doc) => doc.state === 'open' || doc.state === 'pushed';
+// The cards the loop below tells about when lost, so the Dispatcher's check for every other card does not tell them twice.
+export const goToldCards = (record) => new Set(askStore(record).asks().filter((a) => activeKind(a.doc.kind)?.go && stillAsking(a.doc)).map((a) => a.doc.card));
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -218,7 +230,10 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
     d.last_push_at = iso(nowMs);
     if (win && !urgent) d.window_pushes = [...(d.window_pushes ?? []), win.key].slice(-MAX_WINDOW_MARKS);
   };
-  if (k.channel === 'tap') {
+  // The daily reminder of a go (L523). A Tier-1 go is answered on GitHub, so its reminder only points there: the ask, its
+  // pull request and its review request stay as they are.
+  const reminder = k.go && !first && !urgent && (k.channel === 'tap' || Number.isSafeInteger(doc.pr));
+  if (k.channel === 'tap' || reminder) {
     if (typeof ctx.push !== 'function') { once.alert(a.id, { type: 'approvals_no_push', ask: a.id }); return; }
     // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
     // shown is held, never sent bare.
@@ -226,7 +241,8 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
     if (k.go) { const v = goView(doc); if (!v.ok) { once.alert(a.id, { type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
     // An undo the owner flagged (R-0b-140) carries its pull request, so its push says which change and what Undo does.
     if (doc.kind === 'undo' && Number.isSafeInteger(doc.pr)) view = undoPushText({ card: doc.card, title: doc.title, pr: doc.pr });
-    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
+    const line = doc.kind === 'undo' && anyBound ? UNDO_OPEN_QUESTION_LINE : k.channel === 'tap' ? null : `Answer this on pull request #${doc.pr} on GitHub. Nothing tapped here counts.`;
+    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(line ? { line } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
     if (!sent) { once.alert(a.id, { type: 'push_not_sent', ask: a.id }); return; }
@@ -288,7 +304,10 @@ export async function schedulePass(ctx) {
   const once = askOnce(ctx);
   for (const a of asks) {
     const doc = a.doc;
-    if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    if (!stillAsking(doc)) continue;
+    const lost = goCardLost(ctx.record, doc);
+    // No push either: it could not be acted on, and a first push would wipe this tell's mark (#225 r2 Minor 1).
+    if (lost) { once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, text: `The go for card ${doc.card} [ask ${a.id}] can't go ahead: ${lost}.` }); continue; }
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }
@@ -299,6 +318,7 @@ export async function schedulePass(ctx) {
     const pushed = pastTime(doc.last_push_at, nowMs);
     const since = pastTime(doc.lapsed_at ?? doc.created_at, nowMs);
     if (urgent) due = !raisedThisRound(doc) || pushed === null || nowMs - pushed >= URGENT_REPUSH_MS;
+    else if (activeKind(doc.kind).go && raisedThisRound(doc)) due = win !== null && (pushed === null || nowMs - pushed >= GO_REPUSH_MS) && onDraft(ctx.record, doc);
     else due = win !== null && !raisedThisRound(doc) && (since === null || since <= win.start);
     if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }
