@@ -556,7 +556,22 @@ test('L566 N2: a queue the round can\'t get through is named in `refused`', asyn
   const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
   const r = await w.run({ rec, probe: ALIVE, clock });
   assert.ok(r.sent < 60);
-  assert.match(r.refused, /60 alerts are still in the Record's queue after this round/);
+  assert.match(r.refused, /60 alert\(s\) are still in the Record's queue after this round, which did not shrink it/);
+});
+
+test('L579: a backlog that is clearing fails no pass: a shrinking queue stays quiet', async () => {
+  const w = world();
+  for (let i = 0; i < 60; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
+  const r = await w.run({ probe: ALIVE, clock });
+  assert.ok(queued(w.rec).length > 0 && queued(w.rec).length < 60, `${queued(w.rec).length} left`);
+  assert.equal(r.refused ?? '', '');
+});
+
+test('L579: one stuck entry on its own is named', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 1);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /1 alert\(s\) are still in the Record's queue/);
 });
 
 test('L566 N2: a queue that empties says nothing, and the one failed send is not counted twice', async () => {

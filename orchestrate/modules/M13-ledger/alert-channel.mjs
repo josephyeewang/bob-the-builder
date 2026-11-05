@@ -45,7 +45,7 @@ import { createHash } from 'node:crypto';
 import { alertKey, lastLine, lineIs, makeAlerts, wasTold } from './alerts.mjs';
 import { TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
-import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
+import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
@@ -356,6 +356,8 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     let storeWaiting = false;
     try { storeWaiting = readUnsent(recordRoot).length > 0; } catch { /* the read below names it */ }
     const reserveMs = storeWaiting ? Math.max(0, (budgetMs - sendMs) / 2) : 0;
+    let queuedAtStart = 0;
+    try { queuedAtStart = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries?.length ?? 0; } catch { /* sendAlerts' own read answers for it */ }
     const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs: budgetMs - reserveMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
     // A send that hung past sendMs never came back to the port: it is named by that.
@@ -395,9 +397,10 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     }
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
     const plus = [];
-    // The queue is sent from its head, so while it can't shrink, the entries past a round's reach are not sent at all. Naming
-    // what is left keeps that from waiting unheard (L566 N2). The one that failed is named above.
-    if (r.left > r.failed) plus.push(`${r.left - r.failed} alerts are still in the Record's queue after this round`);
+    // The queue is sent from its head, so while it can't shrink the entries past a round's reach are not sent at all. A
+    // queue that didn't shrink is named, so that can't wait unheard; a backlog that is clearing fails no pass (L566 N2,
+    // L579). New arrivals can only over-tell. The one that failed is named above.
+    if (r.left >= queuedAtStart && r.left > r.failed) plus.push(`${r.left - r.failed} alert(s) are still in the Record's queue after this round, which did not shrink it`);
     if (storeTried < waiting.length) plus.push(`${waiting.length - storeTried} of the store's unsent alerts had no time this round and wait for the next`);
     try {
       if (await within(sendMs, () => alerts.reportTrouble(target, TROUBLE_SOURCES.CHANNEL)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
