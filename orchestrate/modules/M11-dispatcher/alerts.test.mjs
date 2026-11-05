@@ -673,3 +673,41 @@ test('L527: a round that settles later writes no mark until it settles', async (
   r.settle();
   assert.equal(writes.filter((id) => id === 'stop-m-5').length, 1, 'the mark, tried once');
 });
+
+test('L533: a new fact replacing a held entry is told once the mark saves, not lost; while refused it waits for the day', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-6', () => refusing);
+  const got = [];
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-6', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  const send = (now) => sendAlerts(rec, (t) => { got.push(t); return true; }, now, { sendMs: 50 });
+  tell('refused: first reason', T0);
+  await send(T0);
+  tell('refused: second reason', T0 + MIN);
+  await send(T0 + MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason'], 'the day cap holds through a new text');
+  refusing = false;
+  await send(T0 + 2 * MIN);
+  await send(T0 + 3 * MIN);
+  await send(T0 + 4 * MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason', 'refused: second reason'], 'told once, then gone');
+  assert.equal(queue(real).length, 0);
+});
+
+test('L533: still refused, the new text is what goes out at the day, and the same text again leaves when the mark saves', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-7', () => refusing);
+  const got = [];
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-7', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  const send = (now) => sendAlerts(rec, (t) => { got.push(t); return true; }, now, { sendMs: 50 });
+  tell('refused: first reason', T0);
+  await send(T0);
+  tell('refused: second reason', T0 + MIN);
+  await send(T0 + DAY + MIN);
+  refusing = false;
+  await send(T0 + DAY + 2 * MIN);
+  await send(T0 + DAY + 3 * MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason', 'refused: second reason']);
+  assert.equal(queue(real).length, 0);
+});

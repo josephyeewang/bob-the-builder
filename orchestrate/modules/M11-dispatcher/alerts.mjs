@@ -141,7 +141,7 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
     const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
     // A copy already delivered whose mark could not be saved stays held (see holdsDelivered): a site that sees no mark
     // tells again each pass, and that must not start the day over.
-    if (i >= 0) { const was = all[i].delivered_at; all[i] = was ? { ...entry, delivered_at: was } : entry; } else all.push(entry);
+    if (i >= 0) { const { delivered_at: at, delivered_text: said } = all[i]; all[i] = at ? { ...entry, delivered_at: at, delivered_text: said } : entry; } else all.push(entry);
     const capped = capQueue(rec, all);
     dropped = capped.dropped;
     return { ...withDrops(rec, d, capped.entries, dropped), next };
@@ -284,7 +284,10 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
 // reads a missing mark as "not told". Without this it was told every pass, for every alert on the queue. A held entry
 // is not sent for a day from that delivery; each pass its mark is tried again, and once it is saved the entry leaves.
 // A day on it goes out again, so the cause is told daily at most and never lost. The cap lives on the queue, not on the
-// mark that can't be saved. A time that can't be read is no hold: it is sent.
+// mark that can't be saved. A time that can't be read is no hold: it is sent. `delivered_text` is what went out: a site
+// may replace a held entry with a new fact (a different refusal), so when the mark saves, an entry whose text changed
+// loses its hold and goes out once instead of leaving unsent (L533). A pass is one process, so nothing in memory can cap
+// a queue write refused as well: see the PR for #217.
 const holdsDelivered = (e, now) => {
   if (!e.delivered_at) return false;
   const at = pastTime(e.delivered_at, now);
@@ -343,7 +346,10 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
     const cur = doc ?? {};
     const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
     const causes = causesOf(cur).filter((c) => !told.has(c.id));
-    const entries = markRefused ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now) } : x)) : entriesOf(cur).filter((x) => x.id !== e?.id);
+    const unsaid = ({ delivered_at: _at, delivered_text: _said, ...x }) => x;
+    const entries = markRefused
+      ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now), delivered_text: sent.text } : x))
+      : entriesOf(cur).flatMap((x) => (x.id !== e?.id ? [x] : sent.retry && x.text !== x.delivered_text ? [unsaid(x)] : []));
     return { ...cur, entries, dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
   }, 'alert_sent');
   if (q?.ok !== true) gave.push(`the queue: ${q?.reason ?? 'no answer'}`);
