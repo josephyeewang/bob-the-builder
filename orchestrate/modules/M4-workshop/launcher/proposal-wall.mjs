@@ -3,17 +3,27 @@
 // WHY. Every AI session runs as the same Mac user, which can read the owner's proposals folders, so the settings are the
 // wall: renderRoleSettings refuses a launch unless every folder is on the read-deny list, the session's own product's and
 // the others' (L78 n5). This is where that list comes from, so the launch port has one thing to pass as both
-// `proposalOutboxes` and `paths.deny.proposals`. A folder left off can't be read past: a product the rules can't name a
-// usable folder for refuses here rather than being left out of the wall.
+// `proposalOutboxes` and `paths.deny.proposals`. A product the rules can't name a usable folder for refuses here rather
+// than being left out of the wall.
 //
-//   proposalFolder(rules, product)     → the folder, or null when the rules give none that is an absolute plain path
+// A usable folder is one definition (L580), here, for the wall, the push script, the intake and the fit check. A real
+// session proved why it is narrow: a Read rule written with a `.` segment or a `[` matches nothing, so the file reads.
+//
+//   plainFolder(path)                  → whether it is an absolute path of plain characters, with no `.` or `..` segment
+//   proposalFolder(rules, product)     → the folder, or null when the rules give none that is plain
 //   proposalWall(rules, products)      → { ok: true, folders } | { ok: false, reason }
 
-import { isAbsolute } from 'node:path';
+const PLAIN = /^\/[A-Za-z0-9._/-]+$/;
+
+export function plainFolder(path) {
+  if (typeof path !== 'string' || !PLAIN.test(path)) return false;
+  const parts = path.split('/').filter(Boolean);
+  return parts.length > 0 && !parts.some((p) => p === '.' || p === '..');
+}
 
 export function proposalFolder(rules, product) {
   const f = rules.get('proposals.outbox', { product });
-  return typeof f === 'string' && isAbsolute(f) && !f.split('/').includes('..') ? f : null;
+  return plainFolder(f) ? f : null;
 }
 
 export function proposalWall(rules, products) {

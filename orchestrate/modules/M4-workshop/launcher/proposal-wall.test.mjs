@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { proposalFolder, proposalWall } from './proposal-wall.mjs';
+import { plainFolder, proposalFolder, proposalWall } from './proposal-wall.mjs';
 import { renderRoleSettings } from './render-settings.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { SETTINGS as S } from './settings-names.mjs';
@@ -14,8 +14,8 @@ const PATHS = (proposals) => ({
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals },
   bobFolder: '/w/bob', mirror: '/w/mirror.git', reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 });
-const render = (role, deny, proposalOutboxes) => renderRoleSettings({ productionFiles: [], proposalOutboxes, role, profile: DESIGN_PROFILES[role], paths: PATHS(deny),
-  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [] });
+const render = (role, deny, proposalOutboxes, phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes, role, profile: DESIGN_PROFILES[role], paths: PATHS(deny),
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], phase });
 // The review roles run as a Mac user that can't read these folders at all (L65), so the Mac is their wall.
 const SESSION_ROLES = Object.keys(DESIGN_PROFILES).filter((r) => !['reviewer', 'auditor'].includes(r));
 
@@ -25,7 +25,7 @@ test('L549: every product\'s folder is in the wall, the same folder once', () =>
 });
 
 test('L549: a product with no usable folder refuses, naming it: it is never left out of the wall', () => {
-  for (const [label, value] of [['none', undefined], ['relative', 'p/a'], ['climbing', '/p/../a'], ['not text', 7]]) {
+  for (const [label, value] of [['none', undefined], ['relative', 'p/a'], ['climbing', '/p/../a'], ['not text', 7], ['a list', ['/p/a']], ['a home path', '~/p'], ['a dot segment', '/p/./a'], ['ends in a dot', '/p/a/.'], ['a bracket', '/p/a[1]'], ['a space', '/p/a b'], ['the root', '/'], ['only slashes', '//']]) {
     assert.equal(proposalFolder(rulesWith({ a: value }), 'a'), null, label);
     assert.deepEqual(proposalWall(rulesWith({ a: FOLDERS.a, b: value }), ['a', 'b']), { ok: false, reason: 'the rules give no usable proposals folder for b' }, label);
   }
@@ -54,4 +54,14 @@ test('L549: a session role with the rules\' folders not given, or one left off t
     assert.match(render(role, [FOLDERS.a, FOLDERS.b], undefined).reason, /proposals folders were not given/, role);
     assert.match(render(role, [FOLDERS.a], [FOLDERS.a, FOLDERS.b]).reason, /not all on the read-deny list/, role);
   }
+});
+
+test('L580: a worker\'s install step, which runs package scripts, is held to the same two refusals', () => {
+  assert.match(render('worker', [FOLDERS.a, FOLDERS.b], undefined, 'install').reason, /proposals folders were not given/);
+  assert.match(render('worker', [FOLDERS.a], [FOLDERS.a, FOLDERS.b], 'install').reason, /not all on the read-deny list/);
+  assert.equal(render('worker', [FOLDERS.a, FOLDERS.b], [FOLDERS.a, FOLDERS.b], 'install').ok, true);
+});
+
+test('L580: the forms a real session shows the deny rule works on stay usable', () => {
+  for (const f of ['/p/a', '/p/a/', '/p//a', '/p/my.folder/a-b_c']) assert.equal(plainFolder(f), true, f);
 });
