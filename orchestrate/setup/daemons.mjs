@@ -3,6 +3,7 @@
 //
 //   place    write the three plists (four with the hourly watch-only job, when the config's `watch` entry has `rulesSha256`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //            and make each log file launchd opens for a job with a UserName, owned by that user (jobLogs)
+//            in the log folder, which it repairs, or refuses if the job's user could change it
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
 //            bootstrap); refuses unless the install check passes. It records the fingerprint of each file it loaded
 //            (<base>/install/loaded-jobs.json, root's) so `check` can tell a loaded job from a file that has since changed
@@ -10,12 +11,12 @@
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
 //   check    read only: the files are exactly what review-daemons.mjs builds, root's 0644, no access list; no job file left under
 //            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes;
-//            a job with a UserName has its log files, that user's, 0644
+//            a job with a UserName has its log files, that user's, 0644, in a folder that is root's 0755
 //
 // Paths inside the plists are the real ones (no test prefix); the plist files themselves sit under io.at().
 
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { reviewDaemonPlists, updaterPlist } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { RUNNER_CONFIG, aclProblem, chainProblem, currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { homeOf } from './layout.mjs';
@@ -73,10 +74,28 @@ export function plistTexts(io, cfg) {
  * neither. (The paths come from the base, which layout.mjs limits to plain characters, so nothing in them is escaped.)
  */
 export function jobLogs(text) {
-  const value = (key) => new RegExp(`<key>${key}</key><string>([^<]*)</string>`).exec(text)?.[1] ?? null;
+  // `\s*`: the file on disk, which load reads, may be laid out on several lines, as `plutil -convert xml1` writes it.
+  const value = (key) => new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(text)?.[1] ?? null;
   return { user: value('UserName'), files: ['StandardOutPath', 'StandardErrorPath'].map(value).filter(Boolean) };
 }
 const LOG_MODE = 0o644;
+const LOG_FOLDER_MODE = 0o755;
+
+/**
+ * The folder holding a job's log files, as it stands: { missing }, { refuse: why }, { fix: why, ino, dev } or {}. launchd must pass
+ * through it as the job's user, so it has to be 0755. It must also be root's alone: root gives files in it away by name, so one the
+ * job's user could change can't be trusted, and is refused, never repaired. Root's folder with the wrong mode or group is what a
+ * cut-off run leaves, and is repaired.
+ */
+function logFolderState(io, dir) {
+  let st; try { st = io.lstat(dir); } catch (e) { return e?.code === 'ENOENT' ? { missing: true } : { refuse: `${dir} could not be read (${e?.code ?? e})` }; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return { refuse: `${dir} exists but is not a plain folder` };
+  const unsafe = chainProblem(dir, { owner: io.rootUid, top: dir, lstat: io.lstat, acl: (seen) => aclProblem(seen.map(io.at)) });
+  if (unsafe) return { refuse: `${dir} is not safe for root to give files out in (${unsafe})` };
+  const mode = st.mode & 0o7777;
+  if (mode !== LOG_FOLDER_MODE) return { fix: `${dir} has mode ${mode.toString(8)}, want ${LOG_FOLDER_MODE.toString(8)}`, ino: st.ino, dev: st.dev };
+  return st.gid === 0 ? {} : { fix: `${dir} has group ${st.gid}, want 0`, ino: st.ino, dev: st.dev };
+}
 
 /** Why a job's log files would stop it, or null, from the job file's text. The check and `daemons load` both ask here. */
 function logProblem(io, text) {
@@ -85,6 +104,7 @@ function logProblem(io, text) {
   const who = readUser(io, user);
   if (!who.exists) return `the user ${user} does not exist`;
   const why = [];
+  for (const dir of new Set(files.map(dirname))) { const s = logFolderState(io, dir); if (s.refuse || s.fix) why.push(s.refuse ?? s.fix); }
   for (const f of files) {
     let st = null; try { st = io.lstat(f); } catch { why.push(`${f} is missing`); continue; }
     if (st.isSymbolicLink() || !st.isFile()) why.push(`${f} is not a plain file`);
@@ -106,9 +126,12 @@ function planLogs(io, text) {
   const want = { uid: who.uid, gid: who.gid, mode: LOG_MODE };
   for (const f of files) {
     let st = null; try { st = io.lstat(f); } catch (e) { if (e?.code !== 'ENOENT') { problems.push(`${f} could not be read (${e?.code ?? e})`); continue; } }
-    if (st === null) { ops.push(op(`make ${f}   (${user}'s, 0644)`, () => { io.write(f, '', 0o600); io.secureFile(f, want); })); continue; }
+    if (st === null) { ops.push(op(`make ${f}   (${user}'s, 0644)`, () => io.writeOwned(f, '', want))); continue; }
     if (st.isSymbolicLink() || !st.isFile()) { problems.push(`${f} exists but is not a plain file; nothing was changed`); continue; }
-    if (st.uid !== who.uid || (st.mode & 0o7777) !== LOG_MODE) ops.push(op(`set owner and mode of ${f}: ${user}'s, 0644`, () => io.secureFile(f, { ...want, ino: st.ino, dev: st.dev })));
+    if (st.uid === who.uid && (st.mode & 0o7777) === LOG_MODE) continue;
+    // Giving away a file with a second name gives away whatever that name is.
+    if (st.nlink !== 1) { problems.push(`${f} has ${st.nlink} names (a hard link), so its owner can't be set safely; nothing was changed`); continue; }
+    ops.push(op(`set owner and mode of ${f}: ${user}'s, 0644`, () => io.secureFile(f, { ...want, ino: st.ino, dev: st.dev })));
   }
   return { ops, problems };
 }
@@ -129,9 +152,12 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
   const above = chainProblem(io.at(DAEMON_DIR), { owner: io.rootUid, top: io.prefix || '/' });
   if (above) return { ops, problems: [`${DAEMON_DIR} is not safe for root to write in (${above}); nothing was changed`] };
-  let st = null; try { st = io.lstat(P.logDir); } catch (e) { if (e?.code !== 'ENOENT') return { ops, problems: [`${P.logDir} could not be read (${e?.code ?? e})`] }; }
-  if (st === null) ops.push(op(`mkdir ${P.logDir}`, () => io.mkdir(P.logDir, 0o700)), op(`set owner and mode of ${P.logDir}: chown 0:0, chmod 755`, () => io.secure(P.logDir, { uid: io.rootUid, gid: 0, mode: 0o755 })));
-  else if (st.isSymbolicLink() || !st.isDirectory()) return { ops, problems: [`${P.logDir} exists but is not a plain folder; nothing was changed`] };
+  const folder = logFolderState(io, P.logDir);
+  if (folder.refuse) return { ops, problems: [`${folder.refuse}; nothing was changed`] };
+  const setFolder = (want) => op(`set owner and mode of ${P.logDir}: chown 0:0, chmod 755`, () => io.secure(P.logDir, { uid: io.rootUid, gid: 0, mode: LOG_FOLDER_MODE, ...want }));
+  // Made with its final mode, so a run cut off here leaves a folder launchd can pass through.
+  if (folder.missing) ops.push(op(`mkdir ${P.logDir}`, () => io.mkdir(P.logDir, LOG_FOLDER_MODE)), setFolder({}));
+  else if (folder.fix) ops.push(setFolder({ ino: folder.ino, dev: folder.dev }));
   for (const job of jobs) {
     const f = plistPath(cfg, job);
     let same = false;
