@@ -50,7 +50,7 @@ const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', '
 const NW = (port) => notWiredText(port);
 const EXPECTED_STEPS = Object.freeze({
   stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
-  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
+  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
