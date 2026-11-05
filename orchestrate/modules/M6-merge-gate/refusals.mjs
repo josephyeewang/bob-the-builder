@@ -103,8 +103,7 @@ function checksProblem(f) {
   // gate's verdict at the cap, which is final (L190 minor a).
   if (typeof f.checksCutOff === 'string') return (f.judgedOnMain === true ? final : notYet)(`${f.checksCutOff}; GitHub's count doesn't match its list`);
   if (!Array.isArray(f.checks) || !Array.isArray(f.statuses)) return notYet('the checks could not be read');
-  // An empty list is the same answer: with no check named, nothing below would stop a change that ran none (L96 m-1).
-  if (!Array.isArray(f.requiredChecks) || !f.requiredChecks.length) return notYet('the rules name no required checks');
+  if (!Array.isArray(f.requiredChecks)) return notYet('the rules name no required checks');
   const runs = f.checks.filter((c) => !ignored(c, f.checksIgnored));
   const runRed = (c) => c?.status === 'completed' && !GOOD.has(c.conclusion);
   const stPending = (x) => x?.state === 'pending';

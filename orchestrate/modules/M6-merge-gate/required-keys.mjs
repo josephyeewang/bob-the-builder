@@ -37,8 +37,9 @@ export function policyProblems(rules, product) {
   const get = (key) => { try { return rules.get(key, { product }); } catch { return undefined; } };
   const out = [];
   const checks = get('product_profile.required_checks');
-  // gather.mjs:142 reads a list of check names. An empty list is a policy line in the fit check, and the gate's checks step refuses it too (L96 m-1).
-  if (!Array.isArray(checks) || !checks.every((c) => typeof c === 'string' && c)) out.push('M6: product_profile.required_checks must be a list of check names');
+  // gather.mjs reads a list of check names. An empty list is a policy line in the fit check, and gather.mjs treats it as no list (L96 m-1).
+  if (!Array.isArray(checks) || !checks.every((c) => typeof c === 'string' && c.trim())) out.push('M6: product_profile.required_checks must be a list of check names');
+  else if (new Set(checks.map((c) => c.trim())).size !== checks.length) out.push('M6: product_profile.required_checks names a check twice');
   if (botId(get('product_profile.robot')) === null) out.push('M6: product_profile.robot.bot_user_id must be the robot\'s numeric id');
   if (!goFreeOn(rules, product, 'exact_reverse')) out.push(`M6: ${GO_FREE_KEY}.exact_reverse must be true at the first cutover`);
   // Read as gate.mjs reads it (M11's need): 0 would call every open merge interrupted at once.

@@ -363,7 +363,8 @@ test('M6\'s checks step reads the required checks from the real rules: green pas
 
 test('M6\'s checks step refuses a change when the rules name no required checks', async () => {
   const empty = await checksStep(swap(FIRST, 'required_checks: [build, test]', 'required_checks: []'), (h) => [run(h, 'build'), run(h, 'test')]);
-  assert.deepEqual(empty.f.requiredChecks, []);
+  assert.equal(empty.f.requiredChecks, null, 'an empty list is no list');
+  assert.equal(empty.f.main.green, null, 'main is not green on a list that names no check');
   assert.notDeepEqual(refusal1(empty), []);
 });
 
