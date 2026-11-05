@@ -141,8 +141,11 @@ const onDraft = (record, doc) => { const c = record.read('card', doc.card); retu
 const goCardLost = (record, doc) => {
   if (!activeKind(doc.kind).go) return null;
   const c = record.read('card', doc.card);
-  return !c ? 'its card is missing from the record, so this go cannot go ahead' : c.corrupt ? 'its card cannot be read, so this go cannot go ahead' : null;
+  return !c ? 'the Record has no such card, so someone needs to find out what became of it' : c.corrupt ? 'the card cannot be read and needs repairing by hand' : null;
 };
+const stillAsking = (doc) => doc.state === 'open' || doc.state === 'pushed';
+// The cards the loop below tells about when lost, so the Dispatcher's check for every other card does not tell them twice.
+export const goToldCards = (record) => new Set(askStore(record).asks().filter((a) => activeKind(a.doc.kind)?.go && stillAsking(a.doc)).map((a) => a.doc.card));
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -301,9 +304,10 @@ export async function schedulePass(ctx) {
   const once = askOnce(ctx);
   for (const a of asks) {
     const doc = a.doc;
-    if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    if (!stillAsking(doc)) continue;
     const lost = goCardLost(ctx.record, doc);
-    if (lost) once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, reason: lost });
+    // No push either: it could not be acted on, and a first push would wipe this tell's mark (#225 r2 Minor 1).
+    if (lost) { once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, text: `The go for card ${doc.card} [ask ${a.id}] can't go ahead: ${lost}.` }); continue; }
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }

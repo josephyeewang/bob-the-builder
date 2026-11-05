@@ -597,6 +597,12 @@ function foldText(g) {
  * product and cause has waited a day, so a return is told afresh (#157 audit m3). Run on a full pass only: a pass that
  * starts undo cards alone sees no groups and must not clear them.
  */
+export const clearHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
+  const cur = rec.read('fact', fact)?.doc;
+  const was = typeof cur === 'object' ? cur : undefined;
+  if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
+}, report);
+
 function tellWaits({ rec, groups, alert, now, report }) {
   let products;
   try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
@@ -616,11 +622,7 @@ function tellWaits({ rec, groups, alert, now, report }) {
       tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
       // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and written when a mark shows or
       // something was queued, cleared_at moving the version so a mark on its way conflicts (L449 m1, m2).
-      clear: () => clearCause(rec, fact, (moved) => {
-        const cur = rec.read('fact', fact)?.doc;
-        const was = typeof cur === 'object' ? cur : undefined;
-        if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
-      }, report),
+      clear: () => clearHold(rec, fact, now, report),
     });
   }
 }
