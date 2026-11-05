@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { deliverAlertsPass } from '../modules/M13-ledger/alert-channel.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
@@ -16,11 +17,11 @@ import { PRODUCT, UID, seed, setup } from '../modules/M9-record/fixtures.test-he
 const DAY = 24 * 60 * 60 * 1000;
 const PRODUCT_REPO = { [PRODUCT]: 'acme/product-1' };
 const card = (n) => ({ state: 'draft', product: PRODUCT, module: 'M1', kind: 'ordinary', round: n });
-const opened = (env, extra = {}) => openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: () => false, now: () => env.clock.t, ...extra });
+const opened = (env, extra = {}) => openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: fakeAlert({ answer: false }), now: () => env.clock.t, ...extra });
 // Damage also makes recover() move later documents aside, each with its own tamper alert: only this alert is followed here.
 const kept = (env) => readUnsent(env.root).filter((x) => x.event.type === 'diary_damaged');
 const told = (gh) => [...gh.issues.values()].filter((x) => /diary_damaged/.test(x.body));
-const logOnly = (extra = {}) => setup({ prefix: 'orch-damaged-', extra: { alert: () => false, ...extra } });
+const logOnly = (extra = {}) => setup({ prefix: 'orch-damaged-', extra: { alert: fakeAlert({ answer: false }), ...extra } });
 // A write the rules allow, so what stops it can only be the store. The answer, whether the write returned it or threw it.
 const tryWrite = (o) => {
   try { const r = o.record.write({ actor: 'dispatcher', entity: 'fact', id: 'stop-hb-T-3-1', expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-3' } }); return r.ok ? 'written' : r.reason; } catch (e) { return e.message; }
