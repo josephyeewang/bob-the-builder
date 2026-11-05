@@ -53,7 +53,7 @@ const no = (reason) => { throw new Refusal(reason); };
 
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
 export const bundleName = (card) => `bundle-${card}.bundle`;
-const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]];
+export const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]];
 
 /**
  * Copies the bundle, never following a link, into `dir`; returns the copy's path. The bundle must be owned by `uid`

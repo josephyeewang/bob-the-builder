@@ -301,14 +301,20 @@ export function readMergeFiles({ recordRoot, recordUid }) {
 
 /**
  * Carry-over from the card's head to `head` over the mirror (L80 (A)), with M6's one reading (`carriedFrom`). The card's
- * one open merge request gives the recorded catch-ups; none, or more than one, throws (no carry-over).
+ * one open merge request gives the recorded catch-ups. None, more than one, or one not waiting for a re-audit at `head`
+ * is a plain no, and comes back with the merge files it could not read, so the runner can tell them (L513 m4). The request
+ * is untrusted, so that is settled before any git read (m3).
  */
 export async function mirrorCarried({ mirror, recordRoot, recordUid, card, doc, head }) {
   const { merges, bad } = readMergeFiles({ recordRoot, recordUid });
   const mine = merges.filter((m) => m.doc?.card === card && isOpen('merge', m.doc?.state));
-  if (mine.length !== 1) throw new Error(`card ${card} has ${mine.length} open merge requests, not one`);
-  const mainSha = (await gitOk(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'review-runner-main', timeoutMs: CHILD_MS })).trim();
-  return { ...await carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups }), badMerges: bad };
+  const no = (why) => ({ review: false, audit: false, head, reasons: [why], badMerges: bad });
+  if (mine.length !== 1) return no(`card ${card} has ${mine.length} open merge requests, not one`);
+  if (mine[0].doc.re_audit_at !== head) return no(`its merge request is not waiting for a re-audit at ${String(head).slice(0, 7)}`);
+  try {
+    const mainSha = (await gitOk(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'review-runner-main', timeoutMs: CHILD_MS })).trim();
+    return { ...await carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups }), badMerges: bad };
+  } catch (e) { return no(e?.message ?? String(e)); }
 }
 
 /**

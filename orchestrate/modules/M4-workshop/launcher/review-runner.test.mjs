@@ -1357,3 +1357,24 @@ test('L329: a lost session whose launch time is unreadable or an hour ahead is s
     assert.equal(v.ended('S-1').ended?.how, 'swept', what);
   }
 });
+
+// L513 r3: what a refusal counts as (R-0b-171). One that can't clear by itself is kept, and told after a day; a card that isn't there is not.
+const refusedStreaks = (w) => JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).refused_streaks ?? {};
+
+test('L513 r3: a card that can\'t be read and a branch not at the request\'s head wait as refusals; a card not in the Record does not', async () => {
+  for (const [over, re, kept] of [
+    [{ readCard: () => ({ ok: false, reason: 'its file is torn' }) }, /card C-1 is not in the Record/, true],
+    [{ readCard: () => ({ ok: false, missing: true }) }, /card C-1 is not in the Record/, false],
+    [{ currentHead: () => HEAD2 }, /but the card's branch is at/, true],
+  ]) {
+    const w = await ready(over);
+    w.ask();
+    refusedFor(await runnerPass(w.ctx), re);
+    assert.deepEqual(Object.keys(refusedStreaks(w)), kept ? ['C-1 reviewer'] : []);
+  }
+});
+
+test('L513 r3: findings that could not be checked are told under one id, the session\'s, so a later pass is the same alert', async () => {
+  const { r } = await packageRun(() => {}, null, { finalize: async () => ({ ok: false, reason: 'no such thing' }) });
+  assert.match(r.alerts.find((a) => a.id === 'finalize-S-1').text, /could not be checked \(no such thing/);
+});

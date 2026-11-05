@@ -51,11 +51,11 @@ async function world() {
   await gitOk(['init', '-q', src], { gitDir });
   const put = (p, t) => { mkdirSync(dirname(join(src, p)), { recursive: true }); writeFileSync(join(src, p), t); };
   const commit = async (msg) => { await g(['add', '.']); await g(['commit', '-q', '-m', msg]); return (await gitOk(['rev-parse', 'HEAD'], { gitDir })).trim(); };
-  put('app/a.mjs', 'one\n'); put('app/moved.mjs', Array.from({ length: 30 }, (_, i) => `line ${i}\n`).join('')); put('run.sh', 'echo\n'); put('docs/x.md', 'x\n'); put('gone.md', 'bye\n');
+  put('app/a.mjs', 'one\n'); put('app/moved.mjs', Array.from({ length: 30 }, (_, i) => `line ${i}\n`).join('')); put('run.sh', 'echo\n'); put('docs/x.md', 'x\n'); put('gone.md', 'bye\n'); put('kind', 'a file that becomes a link\n');
   await g(['branch', '-M', 'main']).catch(() => {});
   const root = await commit('root');
   await g(['branch', '-M', 'main']);
-  put('app/a.mjs', 'two\n'); put('app/new.mjs', 'new\n'); rmSync(join(src, 'gone.md')); chmodSync(join(src, 'run.sh'), 0o755); symlinkSync('docs/x.md', join(src, 'link'));
+  put('app/a.mjs', 'two\n'); put('app/new.mjs', 'new\n'); rmSync(join(src, 'gone.md')); chmodSync(join(src, 'run.sh'), 0o755); symlinkSync('docs/x.md', join(src, 'link')); rmSync(join(src, 'kind')); symlinkSync('docs/x.md', join(src, 'kind'));
   await g(['mv', 'app/moved.mjs', 'app/renamed.mjs']);
   const ahead = await commit('change');
   await g(['switch', '-q', '-c', 'side', root]);
@@ -89,7 +89,8 @@ test('L92 Minor 4: both views agree on a compare in every direction, and on the 
   const named = (list, p) => list.find((f) => f.path === p)?.status;
   assert.equal(named(l.files, 'app/moved.mjs'), 'removed');
   assert.equal(named(l.files, 'app/renamed.mjs'), 'added');
-  for (const p of ['app/a.mjs', 'app/new.mjs', 'gone.md', 'run.sh', 'link']) assert.equal(named(l.files, p), named(r.files, p), p);
+  for (const p of ['app/a.mjs', 'app/new.mjs', 'gone.md', 'run.sh', 'link', 'kind']) assert.equal(named(l.files, p), named(r.files, p), p);
+  assert.equal(named(l.files, 'kind'), 'modified', 'a file that became a link is a change of that file');
 });
 
 test('L92 Minor 4: both views read a file\'s version alike: file, mode, link, nothing there, a folder', async () => {

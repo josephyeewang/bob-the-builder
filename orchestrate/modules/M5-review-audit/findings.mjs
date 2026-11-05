@@ -94,7 +94,9 @@ export function labelled(header, found) {
 
 // How many files one runner pass reads for finalize, across every session it ends (L487). Each file costs up to four git
 // calls. Measured on this repo's fixtures on 4 Nov 2026, 85 to 98 ms a file on a busy Mac: 5478 files took 466 s, past
-// the 3 minutes after which the runner reads as stopped (review-runner.mjs STATUS_STALE_MS). A thousand is under 100 s.
+// the 3 minutes after which the runner reads as stopped (review-runner.mjs STATUS_STALE_MS). Measured through the real
+// readers with every quote unfound and both sides read (audit of #67 r2): 1000 files of 2 KB took 136 s, 1000 of 39 KB 94 s,
+// 200 of 977 KB 22 s.
 export const MAX_CHECKED_PATHS = 1000;
 
 /**

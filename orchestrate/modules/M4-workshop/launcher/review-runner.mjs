@@ -766,12 +766,13 @@ export async function runnerPass(ctx) {
       const not = `the request names head ${head.slice(0, 7)}, but the card's head is ${String(c.doc.head ?? 'none').slice(0, 7)}`;
       if (!reAudit || typeof ctx.carried !== 'function') { refuse(not); continue; }
       let k; try { k = await ctx.carried({ card, doc: c.doc, head }); } catch (e) { k = { reasons: [e?.message ?? String(e)] }; }
+      // Told before the checks (L513 m4): an unreadable file can be the very reason this start is refused. It is left out of
+      // the count here, and the gate reads the Record for itself.
+      if (k.badMerges?.length) alert(`bad-merges-${card}`, `${k.badMerges.length} merge file(s) in the Record could not be read: ${k.badMerges.join('; ').slice(0, 300)}. The carry-over below went without them; the Merge Gate decides on its own reading.`);
       if (k?.review !== true || k.audit === true || k.head !== head) {
         refuse(`${not}; an auditor starts there only for a short re-audit, when the review carried over to it and the audit did not (${k?.review !== true ? `the review does not: ${(k?.reasons ?? []).join('; ') || 'no reason given'}` : k.audit === true ? 'the audit carries over, so none is needed' : 'worked out for another head'})`);
         continue;
       }
-      // A merge file that could not be read is left out of the count above, and the gate reads the Record for itself.
-      if (k.badMerges?.length) alert(`bad-merges-${card}`, `${k.badMerges.length} merge file(s) in the Record could not be read: ${k.badMerges.join('; ').slice(0, 300)}. A short re-audit started anyway; the Merge Gate decides on its own reading.`);
     }
     let gitHead; try { gitHead = await ctx.currentHead(card, c.doc); } catch (e) { gitHead = null; stuck(`the card's head in git could not be read (${e?.message ?? e})`); continue; }
     if (gitHead !== head) { stuck(`the request names head ${head.slice(0, 7)}, but the card's branch is at ${String(gitHead ?? 'nothing').slice(0, 7)}`); continue; }

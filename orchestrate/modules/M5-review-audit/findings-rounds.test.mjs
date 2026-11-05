@@ -253,7 +253,9 @@ test('R-0b-145: a Tier-1 change repeats audit rounds until 0 Material, and each 
 // Scenario (h)'s setting. B (card C-1) changes chain/share.mjs and passes review and audit at H0. A (card C-2), the
 // other Tier-1 change, on another file of the chain, merges first. The robot catches B up with main: the branch is at
 // H1 now, and the Record's card head stays H0. The Record holds both merge requests, A's merged, B's with its
-// recorded catch-up. The runner's carry-over port is the real one, over the mirror (L80 (A)).
+// recorded catch-up. The runner's carry-over port is the real one, over the mirror (L80 (A)). The merges and the catch-up
+// here are written by hand, in one repository, to pin the runner's own refusals. The real flow, with GitHub and the mirror
+// apart, is in M6's gate.test.mjs (L513 MAT-1).
 async function caughtUp(d) {
   const w = await world(d, { act: (l) => writeVerdict(l, l.role === 'auditor' ? { pass: true, material: 0 } : { pass: true, checklist: CLEAN }) });
   const H0 = await w.commit('card/c-1', { 'chain/share.mjs': 'export const pct = (x) => Math.round(x * 1000) / 10;\n' });
@@ -361,11 +363,22 @@ test('L80 (A): the runner starts no auditor off the card\'s head when the audit 
   const read = readMergeFiles({ recordRoot: rec, recordUid: ME });
   assert.deepEqual([read.merges.length, read.bad.length], [3, 1]);
   assert.match(read.bad[0], /^merge M-9: /);
-  put('M-2', { card: 'C-1', tier: 1, state: 'held', catch_ups: [{ pr: 2, before_sha: w.card.head, after_sha: H1 }] });
+  // L513 m4: a merge file that can't be read is told even when the start is then refused, here with no open merge seen.
   w.ctx.carried = ({ card, doc, head }) => mirrorCarried({ mirror: w.gd, recordRoot: rec, recordUid: ME, card, doc, head });
   a = await w.ask(['auditor'], H1);
-  assert.equal(a.started.length, 1, JSON.stringify(a.refused));
+  assert.equal(a.started.length, 0);
   assert.ok(a.alerts.some((x) => /merge file\(s\) in the Record could not be read: merge M-9: /.test(JSON.stringify(x))), JSON.stringify(a.alerts));
+  put('M-2', { card: 'C-1', tier: 1, state: 'held', re_audit_at: H1, catch_ups: [{ pr: 2, before_sha: w.card.head, after_sha: H1 }] });
+  // L513 m3: a head the open merge is not waiting on is refused before any git read: the mirror here isn't one.
+  const wrong = 'f'.repeat(40);
+  const k3 = await mirrorCarried({ mirror: join(rec, 'no-such-mirror'), recordRoot: rec, recordUid: ME, card: 'C-1', doc: w.card, head: wrong });
+  assert.deepEqual([k3.review, k3.reasons], [false, [`its merge request is not waiting for a re-audit at ${wrong.slice(0, 7)}`]]);
+  // The right head with git failing is a no too, and the unreadable file is still handed back to be told.
+  const k4 = await mirrorCarried({ mirror: join(rec, 'no-such-mirror'), recordRoot: rec, recordUid: ME, card: 'C-1', doc: w.card, head: H1 });
+  assert.equal(k4.review, false);
+  assert.match(k4.badMerges[0], /^merge M-9: /);
+  a = await w.ask(['auditor'], H1);
+  assert.equal(a.started.length, 1, JSON.stringify(a.refused));
   assert.throws(() => readMergeFiles({ recordRoot: rec, recordUid: ME + 1 }), /is not the Record owner's alone/);
 });
 
@@ -913,6 +926,11 @@ for (const [left, labels] of [[4, true], [3, false]]) {
     assert.equal(w.gate(), null, 'a pass stays a pass');
   });
 }
+
+test('L513 r3: a finding that names no file costs no file check', async () => {
+  const { said } = await twoSessions('m5-cap0-', [], [{ level: 'minor', says: 'x' }], 0);
+  assert.doesNotMatch(said, SKIPPED);
+});
 
 test('L487 planted: findings on one file count as one file', async () => {
   const { w, said } = await twoSessions('m5-cap1-', [], [...gone(1, 'a'), ...gone(1, 'a'), ...gone(1, 'a')], 1);

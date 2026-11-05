@@ -20,7 +20,9 @@
 //      the robot's mark on the merge commit, and a check that the merge commit's first parent is the judged main.
 //
 //   await gatePass(ctx) → { ran, reason?, problems?, did: [{ merge, step, ... }] }
-// ctx = gather.mjs's ctx, plus readFact? (id → doc; default the record's fact) and maxCatchUps? (default 3).
+// ctx = gather.mjs's ctx, plus readFact? (id → doc; default the record's fact), maxCatchUps? (default 3) and refreshMirror
+// (M4 git/mirror-refresh.mjs: { product, card, head } → { ok, reason? }). With refreshMirror unwired no short re-audit can
+// start, and each wait says so: whatever wires the gate's pass must wire it (L521).
 // The gate writes only as merge_gate. It never moves a card it didn't put in merging, except merged.
 //
 // TOLD UNTIL DELIVERED (L168, L170; the site G pattern of L135). A refusal the owner must hear of is written with
@@ -59,6 +61,9 @@ export const FINAL_NOTE = 'refused for a reason about the change itself; it won\
 // timer in recover has no default: with no key it still waits for GitHub's final answer).
 export const WAIT_CAP_TIMES = 3;
 export const DEFAULT_WAIT_LIMIT_MIN = 30;
+// A short re-audit is a whole Claude session plus the runner's turns, so 3 × the wait limit (30 min on the first cutover)
+// would refuse a slow but healthy one for good (L513 m1). It gets its own cap, never shorter than the usual one.
+export const RE_AUDIT_CAP_MIN = 360;
 export const waitCapNote = (limitMs) => `waited ${Math.round((WAIT_CAP_TIMES * limitMs) / 60_000)} min or more to be judged and was never judged, with GitHub readable; refused for good so the owner can act on what it waited on. It won't be retried until the card changes`;
 // A catch-up GitHub accepted (202) whose head never moves (L190 B1): capped as a wait is, timed from the request.
 export const CATCH_UP_STUCK = 'GitHub accepted the branch update but the head never moved';
@@ -260,8 +265,22 @@ export async function gatePass(ctx) {
     }
     const v = judge(facts);
     if (v.decision === 'refuse') { refuse(m, facts, v); return outage ? undefined : STEPPED_ASIDE; }
-    if (v.decision === 'hold') { hold(m, v, unreadable); return outage ? undefined : STEPPED_ASIDE; }
+    if (v.decision === 'hold') { hold(m, await withMirror(m, v), unreadable); return outage ? undefined : STEPPED_ASIDE; }
     return take(m, facts);
+  }
+
+  // A short re-audit needs the caught-up head and main in the mirror, and only GitHub has them (L513 MAT-1, L521: the
+  // gate does this, as the runner's user may not write the mirror or hold a robot key). Every pass of the wait, so main
+  // stays current and a failed fetch is tried again. A failure, or no port wired, is a line in waiting_on: the owner's
+  // wait notice says why, and the wait cap still applies.
+  async function withMirror(m, v) {
+    const head = v.refusals.find((x) => x.reAudit)?.reAudit;
+    if (v.hold !== WAITING_HOLD || !head) return v;
+    let r;
+    try { r = await ctx.refreshMirror?.({ product, card: m.doc.card, head }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    if (r?.ok === true) return v;
+    const why = typeof ctx.refreshMirror === 'function' ? r?.reason ?? 'no answer' : 'nothing is wired to do it';
+    return { ...v, refusals: [...v.refusals, { n: 'mirror', reason: `the mirror could not be brought up to ${short(head)} (${why}), so no short re-audit can start` }] };
   }
 
   async function catchUp(m, head) {
@@ -363,9 +382,10 @@ export async function gatePass(ctx) {
       // where the cap can't be judged (no limit) is a bad clock restamped, so it can be judged once the rules answer.
       const stuck = pastTime(fields.stuck_since, now());
       if (limit === undefined && stuck === null) fields.stuck_since = iso();
-      if (limit !== undefined && (stuck === null || now() - stuck >= WAIT_CAP_TIMES * limit)) {
+      const cap = limit === undefined ? undefined : fields.re_audit_at ? Math.max(RE_AUDIT_CAP_MIN * 60_000, WAIT_CAP_TIMES * limit) : WAIT_CAP_TIMES * limit;
+      if (cap !== undefined && (stuck === null || now() - stuck >= cap)) {
         const reasons = waitingOn;
-        if (!move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(limit) })) return false;
+        if (!move(cur, 'refused', { ...fields, hold: null, reasons, tell_owner: true, tell_note: waitCapNote(cap / WAIT_CAP_TIMES) })) return false;
         tellRefused(fresh('merge', m.id));
         return true;
       }
