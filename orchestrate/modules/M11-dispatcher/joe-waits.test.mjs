@@ -343,6 +343,26 @@ test('L405 m1, L315: a card on the owner, never told, whose copy is refused on e
   assert.equal(w.tell().wait_since, undefined);
 });
 
+// Joe-waits audit m4: the daily repeat of a refused copy ends with its wait, the mark goes, and nothing more is sent.
+test('L405 m1, L315: a refused-copy card stops being told once its wait ends: nothing over the next 3 days, its mark cleared', async () => {
+  const w = world();
+  const real = w.E.record;
+  const rec = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === WAIT_TELL_FACT('C-1') && x.doc?.wait_since ? { ok: false, reason: 'busy' } : real.write(x)) } });
+  assert.equal(waitOnJoe(rec, 'C-1', { text: 'needs you', alert: fakeAlert({ answer: false }), now: w.E.clock.t, ...ask }).ok, true);
+  w.E.clock.t += 10 * MIN;
+  await withAlerts(rec, w.E.clock.t, w.port, (alert) => retellWaits({ rec, alert, now: w.E.clock.t }));
+  assert.equal(w.got.length, 1, 'told while it waits');
+  assert.ok(w.tell().told_at, 'marked');
+  w.E.clock.t += MIN;
+  assert.equal(waitOn(real, 'C-1', { who: 'dependency', what: 'card C-9', now: w.E.clock.t }).ok, true);
+  for (let i = 0; i < 3 * 24; i++) {
+    w.E.clock.t += 60 * MIN;
+    await withAlerts(rec, w.E.clock.t, w.port, (alert) => retellWaits({ rec, alert, now: w.E.clock.t }));
+  }
+  assert.equal(w.got.length, 1, JSON.stringify(w.got));
+  assert.equal(w.tell().told_at, null, 'the mark is cleared');
+});
+
 // Audit #153 m1: the Record keeps a re-checked wait's since (L296), so a tell asked at now would match no wait.
 test('audit #153 m1: a card put on Joe again for the same what is told the new text, on the real writer and the stand-in', async () => {
   const { recWith, seed, setClock, T0 } = await import('./fixtures.test-helper.mjs');
