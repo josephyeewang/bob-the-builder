@@ -96,10 +96,11 @@ const readHoldsOf = (sessionId) => HOLD_FACT(`outbox-read-${shortHash(sessionId)
 const readHoldsOfFile = (sessionId, name) => `${readHoldsOf(sessionId)}${shortHash(name)}-`;
 const readHold = (sessionId, name, why) => `${readHoldsOfFile(sessionId, name)}${why}`.slice(HOLD_FACT('').length);
 
-// A note that has no fact to be kept on, so it is tried once, and the owner reads what the Lead could not.
+// A note that has no fact to be kept on, so it is tried once, and the owner reads what the Lead could not. Answers whether
+// either heard it, so the caller can say when neither did (L539).
 async function tellLead({ replyToLead, alert, lead, product, text }) {
   const r = await leaveNote(replyToLead, lead, text);
-  if (r?.ok !== true) alert(ownerText({ lead, product, text, reason: r?.reason ?? 'no answer' }));
+  return r?.ok === true || alert(ownerText({ lead, product, text, reason: r?.reason ?? 'no answer' })) !== false;
 }
 
 // A tell with a dated try (L490 m4, m10, L494, L497). The date goes on the Record before the tell and is never taken back.
@@ -439,7 +440,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       else alert(said);
     }
     if (outcome && done.ok) await deliverNote(notes, key);
-    else if (outcome) await tellLead({ ...notes, lead: s.sessionId, product: s.product, text: outcome });
+    else if (outcome && !await tellLead({ ...notes, lead: s.sessionId, product: s.product, text: outcome })) report(`neither the Lead ${s.sessionId} nor the owner could be told, and the outcome could not be saved to try again: ${outcome}`, `lead-note-${shortHash(`${key} ${outcome}`)}`);
   }
   noteLeftOut(notes, leftOut);
   clearGoneSlow(notes, listed, seen);

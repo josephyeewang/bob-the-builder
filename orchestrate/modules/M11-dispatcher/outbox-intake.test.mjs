@@ -1354,6 +1354,22 @@ test('L520 n1: a second note on the same file reaches the owner at once, not a d
   assert.match(lines[1], /was applied/);
 });
 
+test('L539: the outcome unsaved, the Lead refused and the owner refused: the failure is logged, and not when the owner took it', async () => {
+  const run = async (alert) => {
+    const p = planWorld();
+    must(p.launch());
+    p.hand('plan-a.json', [planCard('C-1')]);
+    const rec = Object.create(p.rec, { write: { value: (x) => (x.kind === 'outbox_applied' ? { ok: false, reason: 'turned down' } : p.rec.write(x)) } });
+    const logged = [];
+    await p.run({ rec, reply: async () => ({ ok: false, reason: 'busy' }), failureLog: (l) => logged.push(l), ...(alert ? { alert } : {}) });
+    return logged.filter((l) => /neither the Lead L-1 nor the owner could be told/.test(l));
+  };
+  const lost = await run(() => false);
+  assert.equal(lost.length, 1);
+  assert.match(lost[0], /plan-a\.json/);
+  assert.deepEqual(await run(), []);
+});
+
 test('L534 m1: a later note in the same words reaches the owner at once, once the Lead heard the first', async () => {
   const p = planWorld();
   must(p.launch());
