@@ -47,9 +47,9 @@ export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = n
 export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text), 'utf8') / 4);
 
 /** The intake's vet for handoff files: refuses one over the cap, so the session can write it again. */
-export const handoffVet = (rules) => ({ kind, text }) => {
+export const handoffVet = (rules) => ({ session, kind, text }) => {
   if (kind !== 'handoff-') return null;
-  const cap = need(rules, KEYS.handoffCapRole);
+  const cap = need(rules, KEYS.handoffCapRole, { product: session?.product });
   const est = estimateTokens(text);
   return est > cap ? `the handoff is about ${est} tokens, over the ${cap} cap` : null;
 };
@@ -84,9 +84,9 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
 export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, mainSha, alert }) {
   const sid = lead.sessionId;
   if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
-  const soft = need(rules, KEYS.leadSoft);
-  const hard = need(rules, KEYS.leadHard);
-  const cap = need(rules, KEYS.handoffCapRole);
+  const soft = need(rules, KEYS.leadSoft, { product: lead.product });
+  const hard = need(rules, KEYS.leadHard, { product: lead.product });
+  const cap = need(rules, KEYS.handoffCapRole, { product: lead.product });
   let cur = rec.read('fact', RESTART_FACT(sid));
   let st = cur?.doc ?? { phase: 'none', reasks: 0 };
   const pendingRefused = (id, what) => holdAlert({ rec, cause: `lead-launch-pending-${id}`, text: `the Lead ${id} has ${what}`, alert, now });

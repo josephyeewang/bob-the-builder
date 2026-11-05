@@ -146,7 +146,6 @@ test('L104, L123: the files still handed old values are named, exist, name an ow
   assert.deepEqual([...names].sort(), [
     'modules/M11-dispatcher/account-ports.test.mjs',
     'modules/M11-dispatcher/fixtures.test-helper.mjs',
-    'modules/M11-dispatcher/lead-restart.test.mjs',
     'modules/M11-dispatcher/merges.test.mjs',
     'modules/M11-dispatcher/pass.test.mjs',
     'modules/M11-dispatcher/tick.test.mjs',

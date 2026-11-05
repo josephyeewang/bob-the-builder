@@ -46,9 +46,12 @@ const M11_TYPES = Object.freeze({ perState: 'object', shakedown: 'boolean', lead
 export const DAILY_CARD_RULE = `${M11_KEYS.leadDailyCard}: daily-card file lists are not allowed until the Dispatcher reads them with the rules' own path language (L120)`;
 // A key's scope is the rules' own (L131): Mac-wide when shared/rules.mjs isMacKey(key) says so, per product otherwise.
 // No list of M11's here: a test reads M11's sources and fails when a caller reads a key at another scope, except a key
-// in known-gaps.mjs SCOPE_OWNERS, which M11 still reads Mac-wide (lane 2's L104 sweep) and the check below names.
+// in known-gaps.mjs SCOPE_OWNERS, none today, which M11 reads Mac-wide and the check below names.
 export const m11Scope = (key) => (isMacKey(key) ? 'mac' : 'product');
 const M11_READ = Object.freeze(Object.entries(M11_KEYS));
+// The handoff cap is in tokens, and a Lead that can't fit its handoff under it can't restart. Any number reads, so without
+// this line a cap of 3 passes here and refuses every handoff (L565).
+export const HANDOFF_CAP_FLOOR = 1000;
 const M11 = Object.freeze({
   REQUIRED_KEYS: Object.freeze(M11_READ.map(([, k]) => k)),
   policyProblems(rules, product) {
@@ -64,6 +67,10 @@ const M11 = Object.freeze({
       }
       if (reads(rules, key, m11Scope(key) === 'product' ? withProduct : { type })) continue;
       out.push(`M11: ${key} must be ${a} ${type}`);
+    }
+    if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.handoffCapRole} `))) {
+      const cap = need(rules, M11_KEYS.handoffCapRole, { product });
+      if (cap < HANDOFF_CAP_FLOOR) out.push(`M11: ${M11_KEYS.handoffCapRole} must be at least ${HANDOFF_CAP_FLOOR} tokens, not ${cap}: no handoff fits under it, so no Lead can restart`);
     }
     // Off, research copies stop at the Dispatcher with no card: a file that left the line out would lose them unseen (L549).
     if (!goFreeOn(rules, product, 'research_copy')) out.push(`M11: ${GO_FREE_KEY}.research_copy must be true at the first cutover`);
