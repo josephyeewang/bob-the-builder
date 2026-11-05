@@ -264,7 +264,7 @@ export function judge(f) {
     // A PR head that could not be read is refusal 3's to say (not yet); 6 compares only against a head that was read.
     if (!Array.isArray(f.checks)) { if (reverse) (typeof f.checksTooLong === 'string' ? no : wait)(6, typeof f.checksTooLong === 'string' ? `the commit has ${f.checksTooLong}` : 'the checks could not be read'); } else if (SHA.test(prHead ?? '') && f.checks.some((c) => c?.head_sha !== prHead)) no(6, 'a check result is for another commit');
     // 2. main. Red or unread, it is main's state, not the change's: not yet.
-    if (f.main?.green !== true) wait(2, f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
+    if (f.main?.green !== true) wait(2, !Array.isArray(f.requiredChecks) ? 'the rules name no required checks' : f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
     // 3, 4. The pull request. GitHub works out mergeable in the background, so null or 'unknown' is not yet.
     const pr = f.pr;
     if (!pr) wait(3, 'the pull request could not be read');

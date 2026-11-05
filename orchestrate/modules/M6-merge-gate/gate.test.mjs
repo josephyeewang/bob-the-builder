@@ -174,6 +174,27 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   assert.equal(w.g.repo.files(w.g.main).get('src/a.mjs').text, 'one');
 });
 
+// An undo skips refusal 1, so refusal 2 is what stops it: main is never green on a list that names no check.
+test('L96 m-1: an undo card does not merge when the rules name an empty list of required checks, or none, and its hold says so (L531)', async () => {
+  for (const list of [[], null, ['  '], ['test', ''], [' test']]) {
+    const w = world();
+    verifiedCard(w);
+    await gatePass(w.ctx);
+    const flagged = mergeOf(w).doc.merge_commit;
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+    await gatePass(w.ctx);
+    must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+    w.env.clock.t += 60_000;
+    verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+    w.values['product_profile.required_checks'] = list;
+    w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+    await gatePass(w.ctx);
+    const u = mergeOf(w, 'U-1');
+    assert.notEqual(u.doc.state, 'merged', JSON.stringify(list));
+    assert.match(JSON.stringify(u.doc), /2: the rules name no required checks/, JSON.stringify(u.doc));
+  }
+});
+
 // L135 site G: the undo card merged, but marking the undone card reverted failed, and the alert saying so was lost
 // (false, or a throw). The gate tries again each pass until the mark holds or the alert is delivered, then stops.
 async function undoWithBlockedMark(lost) {
@@ -1790,6 +1811,7 @@ const HOLDS = [
   ['main is red', (w) => w.g.checks.set(w.g.main, redRun(w.g.main)), /^2: main is red/],
   ['main has 100 check runs', (w) => w.g.checks.set(w.g.main, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: w.g.main, status: 'completed', conclusion: 'success' }))), /^2: main's checks could not be read/],
   ['the rules name no required checks', (w) => { w.values['product_profile.required_checks'] = null; }, /^1: the rules name no required checks/],
+  ['the rules name an empty list of required checks', (w) => { w.values['product_profile.required_checks'] = []; }, /^1: the rules name no required checks/],
   ['the rules give no merge answer', (w) => { w.ctx.rules = Object.create(w.ctx.rules, { may: { value: () => { throw new Error('the engine stopped'); } } }); }, /^9: the rules gave no merge answer/],
   ['the go check fails', (w) => { const base = w.ctx.record; w.ctx.record = Object.create(base, { read: { value: (e, id) => { if (e === 'go') throw new Error('go store gone'); return base.read(e, id); } } }); }, /^10: the go could not be checked/],
   ['GitHub never works out mergeable', (w) => { w.g.pulls.get(7).mergeable_state = 'unknown'; }, /^3: GitHub has not worked out/],

@@ -57,6 +57,8 @@ jobs:
   bob-self-check:
     name: Bob's own docs pass Bob's checks
     runs-on: ubuntu-latest
+    # A hung test ends the job instead of holding the run for GitHub's 6 h default (L520; a normal run is about 9 min).
+    timeout-minutes: 30
     # Rule 33 — the coherence sweep on Bob itself. Until 2026-10-28 it could not read Bob's
     # heading-style decision log and reported "no drift" over three duplicate decision IDs.
     steps:

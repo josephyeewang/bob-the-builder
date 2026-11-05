@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL, FD_RESTART_FACT, FD_STRAY_FACT } from './phone-link.mjs';
+import { phoneLinkStep, FACTS, LINK_FACT, REMOTE_CONTROL, FALSE_READINGS, FD_RESTART_FACT, FD_STRAY_FACT } from './phone-link.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { KEYS as K } from './keys.mjs';
 import { change, rulesWith, recWith, T0, MIN, iso, withAlerts, writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
@@ -226,6 +226,71 @@ test('r7 M2: an outage alert queued while the port was down is dropped when the 
   assert.equal(got.length, 0, 'the passed outage is not told');
   for (m = 18; m <= 60; m += 1) { read(m, false); await step(m); }
   assert.equal(got.filter((t) => /cannot reach the Front Door/.test(t)).length, 1, got.join(' | '));
+});
+
+// L329: a stored time that can't be read, or lies an hour ahead (a clock that went back, a bad write), is never
+// "done recently": the step acts. Before, a future one held each of these for ever.
+const BAD_AT = (min) => [['unreadable', 'garbage'], ['an hour ahead', iso(T0 + (min + 60) * MIN)]];
+function linkState(w, doc) {
+  const cur = w.rec.read('fact', LINK_FACT);
+  const r = w.rec.write({ actor: 'dispatcher', entity: 'fact', id: LINK_FACT, expectRev: cur?.rev ?? 0, doc: { false_streak: 0, attempts: 0, failures: 0, ...doc } });
+  if (!r.ok) throw new Error(r.reason);
+}
+const stepWith = (w, min, extra) => withAlerts(w.rec, T0 + min * MIN, (t) => w.calls.alerts.push(t), (a) => phoneLinkStep({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN,
+  send: async (t) => { w.calls.sent.push(t); return { outcome: 'suppressed_busy' }; },
+  restartFrontDoor: async () => { w.calls.restarts += 1; return { ok: true }; },
+  startMinibase: async () => { w.calls.minibase += 1; return { ok: true }; }, ...extra, alert: a }));
+
+test('L329: the Front Door gone, its last restart time unreadable or ahead: restarted, not "restarted recently"', async () => {
+  for (const [label, bad] of BAD_AT(1)) {
+    const w = world();
+    w.read(1);
+    linkState(w, { fd_restarted_at: bad });
+    assert.deepEqual(await stepWith(w, 1, { frontDoorAlive: () => false }), ['Front Door was missing; restarted'], label);
+    assert.equal(w.calls.restarts, 1, label);
+  }
+});
+
+test('L329: a stray check time unreadable or ahead: checked now', async () => {
+  for (const [label, bad] of BAD_AT(1)) {
+    const w = world();
+    w.read(1);
+    linkState(w, { stray_checked_at: bad });
+    let checked = 0;
+    await stepWith(w, 1, { frontDoorAlive: () => true, strayFrontDoor: async () => { checked += 1; return { ok: true, stopped: [] }; } });
+    assert.equal(checked, 1, label);
+  }
+});
+
+test('L329: the remote link on the host down, its last start time unreadable or ahead: started now', async () => {
+  for (const [label, bad] of BAD_AT(1)) {
+    const w = world();
+    w.read(1, { mb: false });
+    linkState(w, { minibase_started_at: bad });
+    assert.ok((await stepWith(w, 1)).includes('Mini Base started'), label);
+    assert.equal(w.calls.minibase, 1, label);
+  }
+});
+
+test('L329: the link down, its last try time unreadable or ahead: tried now, not "waiting to try again"', async () => {
+  for (const [label, bad] of BAD_AT(1)) {
+    const w = world();
+    w.read(1, { fd: false });
+    linkState(w, { false_streak: FALSE_READINGS, attempts: 1, last_try_at: bad });
+    const out = await stepWith(w, 1);
+    assert.deepEqual(w.calls.sent, [REMOTE_CONTROL], `${label}: ${out.join(' | ')}`);
+  }
+});
+
+test('L329: refused since a time unreadable or ahead counts as long enough: the Front Door is restarted', async () => {
+  for (const [label, bad] of BAD_AT(1)) {
+    const w = world();
+    w.read(1, { fd: false });
+    linkState(w, { false_streak: FALSE_READINGS, refused_since: bad });
+    const out = await stepWith(w, 1);
+    assert.ok(out.includes('Front Door restarted'), `${label}: ${out.join(' | ')}`);
+    assert.equal(w.calls.restarts, 1, label);
+  }
 });
 
 test('L335 m-1: the link coming back clears told even when a told mark landed after the step read the link (the clear is forced)', async () => {
