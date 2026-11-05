@@ -32,6 +32,12 @@
 // tell was lost is carried by every later write of the file's fact, so a claim or refusal never hides it (L268 MAT-A).
 // A file name goes into an alert or the diary only fenced (`shownName`: one line, stripped, masked; R-0b-126, probe P7).
 //
+// A proposal must name a ready card of its own product (R-0b-129): `proposal-<card>.md` for a card in the record that is
+// this product's and `ready`. Anything else (no such card, another product's, a card in any other state, or a research
+// copy, which only the copier lands) is refused at intake, before the docs check or review; a card that can't be read
+// keeps the proposal unused this pass and is told. "Claimed by the lane handing in" waits on R-0b-130's tab claims:
+// until then only a ready card is taken, so a card claimed by anyone is refused (L215 3).
+//
 // Day 1 (`product.cutover_stage` first; L76 (5)):
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
 //   - idea- files are refused: idea filing stays off until #95-b lands (L212, L215 2);
@@ -49,6 +55,7 @@ import { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, const
 import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 import { sha256 } from './outbox-intake.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
@@ -56,11 +63,38 @@ import { BUNDLE_CAP } from '../M4-workshop/git/push.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
+
+/** The card as a refusal is keyed on: its id and revision (0 when there is none), or null when it can't be read. */
+export function proposalCardKey(rec, card) {
+  try { const o = rec.read('card', card); return o?.corrupt ? null : `${card}@${Number.isSafeInteger(o?.rev) ? o.rev : 0}`; } catch { return null; }
+}
+
+/**
+ * Why a proposal from `product`'s folder can't name `card` (R-0b-129): { refuse, key } when it can't, keyed on the card's
+ * revision so the refusal is looked at again once the card changes (#159 audit Minor 2); { broke } when the card can't
+ * be read (looked at again next pass); or { rev } when it is a ready card of this product, the revision it was seen at.
+ */
+export function proposalCardProblem(rec, product, card) {
+  let o;
+  try { o = rec.read('card', card); } catch (e) { return { broke: `card ${card} could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
+  if (!o) return { refuse: `no card ${card} in the record: a proposal must name a ready card`, key: `${card}@0` };
+  // A card with no product is one the record's writer can't make (it sets `product` at create): read as can't be read.
+  if (o.corrupt || !o.doc || typeof o.doc !== 'object' || typeof o.doc.product !== 'string' || !o.doc.product || !Number.isSafeInteger(o.rev)) {
+    return { broke: `card ${card} could not be read (${String(o.reason ?? (o.doc && typeof o.doc === 'object' && Number.isSafeInteger(o.rev) ? 'no product named' : 'no document')).slice(0, 200)})` };
+  }
+  const key = `${card}@${o.rev}`;
+  if (o.doc.product !== product) return { refuse: `card ${card} is ${o.doc.product.slice(0, 100)}'s, not ${product}'s`, key };
+  if (o.doc.kind === 'research_copy') return { refuse: `card ${card} is a research copy, which only the copier lands (L286)`, key };
+  if (!PROPOSAL_CARD_STATES.includes(o.doc.state)) return { refuse: `card ${card} is ${String(o.doc.state).slice(0, 40)}, not ready: a proposal must name a ready card`, key };
+  return { rev: o.rev };
+}
 export const IDEAS_OFF = 'idea filing is off until #95-b lands (L212, L215)';
 export const TEXT_CAP = 1024 * 1024;
 export const SETTLE_MS = 2000;
 // A bundle with no proposal is waited for this long (by its own write time), then refused.
 export const BUNDLE_ALONE_MS = 10 * 60_000;
+// The one card state a proposal may name until R-0b-130's claims (L215 3).
+export const PROPOSAL_CARD_STATES = Object.freeze(['ready']);
 
 // The six names (L76 (3)). An id is a card, ask, slug or tab id, in the push script's own card id shape.
 const ID = '([A-Za-z0-9][A-Za-z0-9-]{0,63})';
@@ -183,7 +217,11 @@ export function stageOf(rules, product) {
  *   needs the file itself (the research copy) records them on its card, and M6 refusal 10 compares the blob at merge.
  *   Open (lane 2, L286 follow-up): the copier, push.mjs, is not built; it will read the file again through M9's safe
  *   side-file open and copy it only when its sha256 still matches the card's.
- * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
+ * A proposal must name a ready card of its own product (R-0b-129, proposalCardProblem), checked before the docs check
+ *   and again just before the claim; a card refusal is keyed on the card's revision, so it is looked at again once the
+ *   card changes. A card that can't be read keeps the file unused, told once.
+ * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
+ *   `cardRev` is the card's revision at the last check: part 2's card move must expect it, so a card changed since is refused.
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.
  * Returns what happened to each file.
@@ -285,16 +323,20 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // it is added beside it, so a used file's "already used" still holds when its bytes come back.
     // Told once per reason and file: the bytes' hash, or for a file never read, its size, change time and file number
     // (L259). A new file refused for the same reason is a new request, and told again; one sitting there is not.
-    const refuse = (reason, hash = null) => {
+    const refuse = (reason, hash = null, extra = null) => {
       r.refused = reason;
       const told = `${reason}\n${hash ?? first}`;
       const keep = hash === null && prev?.doc?.sha256 != null && prev.doc.state !== 'refused';
-      if ((keep || prev?.doc?.state === 'refused') && prev.doc.refused_key === told) return;
+      if ((keep || prev?.doc?.state === 'refused') && prev.doc.refused_key === told) {
+        // Told already; a card refusal keeps the card's newest key, so it is not looked at again until the card changes.
+        if (extra && Object.entries(extra).some(([k, v]) => prev.doc[k] !== v)) put({ ...prev.doc, ...extra }, 'proposal_refused');
+        return;
+      }
       const said = `${shown} in ${product}'s proposals folder was refused: ${reason}`;
       note(`proposals ${product}: ${shown} refused: ${reason}`);
       const at = new Date(now).toISOString();
       // Its own text and key, apart from an interruption's, so each is told again until delivered (L260 MAT-1).
-      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, refused_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, refused_text: said }, 'proposal_refused');
+      const w = put(keep ? { ...prev.doc, refused_why: reason, refused_at: at, refused_key: told, refused_text: said } : { sha256: hash, state: 'refused', why: reason, at, refused_key: told, refused_text: said, ...(extra ?? {}) }, 'proposal_refused');
       if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_key: told }, kind: 'proposal_told' });
       else tellUnrecorded(said, `refused ${told}`);
     };
@@ -322,7 +364,9 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (prev && prev.doc?.sha256 != null) {
       const was = prev.doc.state;
       if (prev.doc.sha256 === hash && ['applied', 'interrupted'].includes(was)) { r.already = true; continue; }
-      if (prev.doc.sha256 === hash && was === 'refused') { r.refused = prev.doc.why; continue; }
+      // Refused for good, except a card refusal, looked at again once its card has changed (#159 audit Minor 2).
+      const cardKey = typeof prev.doc.card_key === 'string' && parsed.kind === 'proposal' ? proposalCardKey(rec, parsed.id) : null;
+      if (prev.doc.sha256 === hash && was === 'refused' && !(cardKey !== null && cardKey !== prev.doc.card_key)) { r.refused = prev.doc.why; continue; }
       // L78 n2: a heartbeat's new bytes are a new poll. Every other kind: new bytes on a used name are refused.
       if (prev.doc.sha256 !== hash && parsed.kind !== 'heartbeat' && !['refused', 'interrupted'].includes(was)) {
         r.refused = 'the same name with new content';
@@ -336,6 +380,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     }
     let use;
     let useBundle = null;
+    let cardRev = null;
     // Which product handed these bytes in (L279). `record` writes this product's mark for bytes nobody has; without it the
     // check only reads, so a proposal's duplicate is refused as one before the first-cutover docs check (r6 m-1).
     const bytesSeen = (hashes, record) => {
@@ -365,8 +410,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const pair = `proposal-${parsed.id}.md`;
       if (!names.includes(pair)) {
         // Its proposal may still be on the way (lane 2's #124 review, m3): wait, unrecorded, while the bundle is young.
+        // Its file time through the shared pastTime (L329): one that can't be read, or lies ahead (a clock that went back,
+        // a re-dated file), counts as old enough, so the bundle is refused and told, never "waiting" for ever.
         const mtime = Number(String(first).split(':')[1]);
-        if (now - mtime < BUNDLE_ALONE_MS) { r.waiting = `waiting for ${pair}`; continue; }
+        const at = Number.isFinite(mtime) && Math.abs(mtime) <= 8.64e15 ? pastTime(new Date(mtime).toISOString(), now) : null;
+        if (at !== null && now - at < BUNDLE_ALONE_MS) { r.waiting = `waiting for ${pair}`; continue; }
         refuse(`no ${pair} names this bundle's card`, hash); continue;
       }
       // Recorded, so new bytes under its name are refused and told like any other kind's (L233 M-5).
@@ -391,6 +439,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         bundle = { path: join(dir, pair), sha256: b.sha256 };
       }
       if (bytesStop(bytesSeen([hash, ...(bundle ? [bundle.sha256] : [])], false))) continue;
+      // It names a ready card of this product, or it goes no further (R-0b-129), after the duplicate-bytes check so
+      // bytes another product handed in are told as that first.
+      const named = proposalCardProblem(rec, product, card);
+      if (named?.refuse) { refuse(named.refuse, hash, { card_key: named.key }); continue; }
+      if (named?.broke) { r.refused = named.broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${named.broke}`, `card ${hash}`); continue; }
       if (stageOf(rules, product) !== 'second') {
         if (typeof docsCheck !== 'function') { refuse(`${FIRST_CUTOVER} (A docs proposal is taken in once the docs check on the push script's changed files is wired: R-0b-128 part 2.)`, hash); continue; }
         if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
@@ -400,7 +453,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       }
       if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
       useBundle = bundle?.sha256 ?? null;
-      use = () => toReview({ rec, product, card, proposal: fenceFor('proposal', file.text).fenced, bundle });
+      use = () => toReview({ rec, product, card, cardRev, proposal: fenceFor('proposal', file.text).fenced, bundle });
     } else {
       const h = handlers[parsed.kind];
       if (typeof h !== 'function') { r.waiting = `no ${parsed.kind} handler yet`; waiting.get(product)?.add(parsed.kind); continue; }
@@ -410,6 +463,13 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     // (L279: three misses telling folders apart, MAT-B, C, D). Checked across all products by sha256, the bundle's too
     // when one goes with a proposal, and recorded before the claim. A check that can't be read or written keeps the file
     // unused this pass and is told once (fail closed). A heartbeat is a poll: the same bytes come again by design.
+    if (parsed.kind === 'proposal') {
+      // The card again, after the docs check's wait (#159 audit Minor 1): it may have changed meanwhile.
+      const again = proposalCardProblem(rec, product, parsed.id);
+      if (again.refuse) { refuse(again.refuse, hash, { card_key: again.key }); continue; }
+      if (again.broke) { r.refused = again.broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${again.broke}`, `card ${hash}`); continue; }
+      cardRev = again.rev;
+    }
     if (parsed.kind !== 'heartbeat' && bytesStop(bytesSeen([hash, ...(useBundle ? [useBundle] : [])], true))) continue;
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
