@@ -48,7 +48,7 @@ const TOKEN_PAGE_NOTE = [
   'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
   "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
   '  - Repository access: only the one repository named in the config;',
-  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
+  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Checks = Read-only, Commit statuses = Read-only (the watch job reads these two to judge a merge), and nothing else.',
 ];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];

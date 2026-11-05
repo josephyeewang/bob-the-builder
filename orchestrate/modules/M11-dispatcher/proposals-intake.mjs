@@ -60,6 +60,7 @@ import { sha256 } from './outbox-intake.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
 import { BUNDLE_CAP, SETTLE_MS } from '../M4-workshop/git/push.mjs';
+import { plainFolder } from '../M4-workshop/launcher/proposal-wall.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
@@ -124,7 +125,6 @@ export function fenceFor(kind, text) {
   if (!source || source === BYTES || !SOURCES.includes(source)) throw new Error(`no outside-text source for a ${kind} file`);
   return { source, fenced: cleanOutside(text, source) };
 }
-const PLAIN_DIR = /^\/[A-Za-z0-9._/-]+$/;
 
 /** The kind and id a name stands for, or null. */
 export function proposalName(name) {
@@ -156,7 +156,7 @@ const ORDER = (name) => (name.startsWith('bundle-') ? 0 : 1);
 
 /** The folder's own problem, or null. `look` is lstat. */
 export function folderProblem(dir, ownerUid, look = lstatSync) {
-  if (typeof dir !== 'string' || !PLAIN_DIR.test(dir) || dir.split('/').includes('..')) return 'proposals.outbox is not a plain absolute folder path';
+  if (!plainFolder(dir)) return 'proposals.outbox is not a plain absolute folder path';
   let st; try { st = look(dir); } catch { return 'the proposals folder is missing'; }
   if (st.isSymbolicLink() || !st.isDirectory()) return 'the proposals folder is not a plain folder';
   if (st.uid !== ownerUid) return `the proposals folder is owned by user ${st.uid}, not the owner's user`;
