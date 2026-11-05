@@ -212,7 +212,7 @@ function check(raw) {
   for (const s of PRODUCT_STATES) {
     const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
     // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
-    // doors that read it, so a typo could hold one door and pass another. A missing line stays M9's required-keys check.
+    // doors that read it, so a typo could hold one door and pass another. A missing `start` stays M9's required-keys check; a missing `tier1_merge` the engine denies as not a known rule.
     for (const [key, known] of [['start', START_RULES], ['tier1_merge', TIER1_MERGE_RULES]]) {
       const v = rules[key];
       if (v !== undefined && v !== null && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
