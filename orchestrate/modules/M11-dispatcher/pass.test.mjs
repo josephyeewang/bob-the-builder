@@ -49,7 +49,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}` }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -566,6 +566,13 @@ for (const [name, outbox, why] of WRONG_OUTBOXES) {
     assert.match(said, new RegExp(`card C-2: session ${sid} was refused: the outbox its launcher named .*it was stopped and the card went back to ready`));
   });
 }
+
+test('#219 r2 m-4: the stop of a refused session names the account it started in, the same two fields as a running session', async () => {
+  const w = world([card('C-2')]); let asked = null;
+  w.refuseLaunch(() => ({ ok: true, outbox: '/', signin: 'acct-2', configDir: '/cfg/acct-2' }));
+  await w.pass(0, { stopGroup: async (s) => { asked = s; return { ok: true }; } });
+  assert.deepEqual([asked?.signin, asked?.config_dir], ['acct-2', '/cfg/acct-2']);
+});
 
 test('#219 M-1: a wrong outbox whose session can\'t be stopped keeps the card claimed, so no second session starts, and says so', async () => {
   const w = world([card('C-2')]);

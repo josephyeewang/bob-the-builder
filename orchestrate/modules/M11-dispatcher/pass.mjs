@@ -749,7 +749,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // must keep its card claimed or a second one would start.
     const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
     if (outboxWrong) {
-      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid }), portDeadlineMs);
+      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }), portDeadlineMs);
       const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
       const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
         : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`
