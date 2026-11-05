@@ -30,7 +30,7 @@ const STATUS = { added: 'added', removed: 'removed', modified: 'modified', renam
 // the throw is marked `unreadable` for M6's failedRead (S16, L543): held, never counted as GitHub's answer about the
 // change. Here rather than in a client, as every client's reads pass through this one line. The message and any status are
 // kept, as failedRead reads the status first.
-const notRead = (e) => Object.assign(new Error(String(e?.message ?? e), { cause: e }), { unreadable: true, ...(Number.isInteger(e?.status) && { status: e.status }) });
+export const notRead = (e) => Object.assign(new Error(String(e?.message ?? e), { cause: e }), { unreadable: true, ...(Number.isInteger(e?.status) && { status: e.status }) });
 
 export function makeGitView({ gh, owner, repo }) {
   if (!gh || typeof gh.get !== 'function') throw new Error('git view needs a GitHub client with get()');

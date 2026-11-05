@@ -484,6 +484,7 @@ async function checkExactReverse({ view, reverses, merged }) {
 __bob_def('orchestrate/modules/M10-rules/git-view.mjs', [], function (__bob_e, __bob_i) {
 Object.defineProperties(__bob_e, {
   COMPARE_FILE_LIMIT: { get: () => COMPARE_FILE_LIMIT, enumerable: true },
+  notRead: { get: () => notRead, enumerable: true },
   makeGitView: { get: () => makeGitView, enumerable: true },
   touchedPaths: { get: () => touchedPaths, enumerable: true },
   sameEntry: { get: () => sameEntry, enumerable: true },

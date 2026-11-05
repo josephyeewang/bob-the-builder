@@ -2590,6 +2590,47 @@ test('L205: at the first cutover, a failed read of the reversed commit\'s mark h
   assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
 });
 
+// S16, L548: the mark read goes straight to the client, not through git-view, so a throw there is marked in watchReads.
+const undoAwaitingMark = async (w) => {
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(recOf(w), 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  tick(w, 1);
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  return flagged;
+};
+test('S16, L548: a raw throw on the mark read is not read, never an answer: the wait does not count, and the next pass merges', async () => {
+  for (const msg of ['socket hang up', 'read ECONNRESET', 'Unexpected end of JSON input', 'the token file could not be read']) {
+    const w = world({ values: { 'product.cutover_stage': 'first' } });
+    const flagged = await undoAwaitingMark(w);
+    let left = 1;
+    wrapGet(w, (p, r) => { if (left > 0 && p.includes(`/commits/${flagged}/statuses`)) { left -= 1; throw new Error(msg); } return r; });
+    await gatePass(w.ctx);
+    assert.equal(left, 0, `${msg}: the mark read was the one that threw`);
+    const u = mergeOf(w, 'U-1');
+    assert.equal(u.doc.state, 'held', `${msg}: ${JSON.stringify(u.doc)}`);
+    assert.ok((u.doc.waiting_on ?? []).some((x) => /^9: /.test(x)), (u.doc.waiting_on ?? []).join(' | '));
+    assert.equal(u.doc.stuck_since, null, `${msg}: a failed read does not start the cap`);
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+  }
+});
+test('S16, L548: the same throw sustained past the cap never refuses the undo, and the owner is told it waits', async () => {
+  const lim = limited();
+  const w = world({ ...lim, values: { ...lim.values, 'product.cutover_stage': 'first' } });
+  const flagged = await undoAwaitingMark(w);
+  wrapGet(w, (p, r) => { if (p.includes(`/commits/${flagged}/statuses`)) throw new Error('socket hang up'); return r; });
+  for (const step of [0, 5, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'held', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(told(w, 'merge_refused').length, 0);
+  assert.ok(told(w, 'merge_waiting_long').length >= 1, 'a long wait on a failed read is told');
+});
+
 // The review threads (plant Q25): a GraphQL answer of 404 is GitHub's answer, so the wait on 7 counts toward the cap.
 test('L205 Minor 1: a review-thread read GitHub answers with a 404 waits on 7, and the wait counts toward the cap', async () => {
   const w = world(limited());

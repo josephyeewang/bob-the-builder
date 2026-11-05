@@ -96,4 +96,3 @@ test('S16 controls: git-view\'s own answers about the change stay answers', asyn
   const odd = await thrown(makeGitView({ gh: { get: async () => ({ status: 500, json: null }) }, owner: 'o', repo: 'r' }).commit(B));
   assert.equal(failedRead(odd), true, 'a 500 answer is still failed, through its message');
 });
-
