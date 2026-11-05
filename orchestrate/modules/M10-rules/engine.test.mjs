@@ -15,6 +15,8 @@ const FIXTURE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
 const C = 'c'.repeat(40); const B = 'b'.repeat(40); const R = 'a'.repeat(40);
 const pol = (edit = (t) => t) => { const r = parsePolicy(edit(FIXTURE)); assert.ok(r.ok, r.reason); return r.policy; };
 const set = (key, from, to) => (t) => { assert.ok(t.includes(from), `fixture has ${from}`); return t.replace(from, to); };
+// A state's start rule set on the parsed policy: parsePolicy refuses an unknown one (S4), and these prove the engine does too.
+const withStart = (state, start) => { const p = pol(); return { ...p, product_state_rules: { ...p.product_state_rules, [state]: { ...p.product_state_rules[state], start } } }; };
 
 // 10:00 and 03:00 New York time on an ordinary day (EDT, UTC-4).
 const AT_10 = Date.parse('2026-10-14T14:00:00Z');
@@ -101,7 +103,7 @@ test('the file\'s state rules can only tighten (MAT-8)', () => {
   const tight = world({ policies: { app: pol(set('', 'away:\n    start: within_caps', 'away:\n    start: none')) } });
   tight.states.app = { state: 'away' };
   assert.equal(start(tight).decision, 'deny');
-  const odd = world({ policies: { app: pol(set('', 'start: editing_cap_1', 'start: whenever')) } });
+  const odd = world({ policies: { app: withStart('light', 'whenever') } });
   odd.states.app = { state: 'light' };
   assert.match(start(odd).reason, /not a known rule/);
 });
@@ -200,7 +202,7 @@ test('start_session while paused: an exact-reverse undo starts, nothing else doe
   const noStarts = world({ policies: { app: pol(set('', 'start: within_caps', 'start: none')) } });
   assert.equal(start(noStarts, undo).decision, 'allow');
   assert.match(start(noStarts).reason, /no starts/);
-  const unknown = world({ states: { app: { state: 'paused' } }, policies: { app: pol(set('', 'start: none', 'start: sometimes')) } });
+  const unknown = world({ states: { app: { state: 'paused' } }, policies: { app: withStart('paused', 'sometimes') } });
   assert.match(start(unknown, undo).reason, /not a known rule/);
   // Every other state keeps its answer: the undo in active, away and light starts as before.
   for (const state of ['active', 'away', 'light']) assert.equal(start(world({ states: { app: { state } } }), undo).decision, 'allow', state);
@@ -245,8 +247,8 @@ test('start_session takes its state answer from push_branch and merge, in every 
       const undoMay = pushUndo && docsMerge(reverseOf);
       assert.equal(undoOk, knownStart && undoMay, `undo, ${where}`);
       // A normal edit's start reads only the start rule. Where the two rules disagree (an unknown tier1_merge, or
-      // `undo_only` beside a start rule other than `none`), it still starts though its merge would be refused: a
-      // file that pairs them so is refused by parsePolicy once both keys are checked there (the lead's to-do, L220).
+      // `undo_only` beside a start rule other than `none`), it still starts though its merge would be refused. An unknown
+      // value is refused by parsePolicy; that pairing is not checked by parsePolicy yet (SAFETY-ROADMAP).
       const paired = TIER1_MERGE_RULES.includes(mergeRule) && (startRule === 'none') === (mergeRule === 'undo_only');
       assert.equal(ok(start(w)), knownStart && startRule !== 'none' && pushNormal && (!paired || docsMerge()), `normal edit, ${where}`);
       if (knownStart && !undoMay) undoDeniedByMerge++;
