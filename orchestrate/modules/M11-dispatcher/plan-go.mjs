@@ -31,7 +31,7 @@
 //   A start is marked before the call. If the call timed out it may still have started, so for PLAN_START_HOLD_MS the
 //   mark counts as started: no second start, and the owner told daily that it is unconfirmed (L467).
 // One ask per card and plan (L450), the time of it kept in a fact. The plan's latest ask says what happens next:
-//   Live for over GO_REASK_MS: the owner is told daily, naming the ask. M2 pushes a go ask once and never lapses it (L462).
+//   Live for over GO_REASK_MS: the owner is told daily, naming the ask. M2 re-pushes a go ask once a day and never lapses it (L523).
 //   Live for less, or a go it gave: nothing.
 //   Declined: never asked again for this plan. Its Lead is told once, so it can change the plan; a changed plan is a new ask.
 //   Expired, no answer: asked again at most once in GO_REASK_MS.
