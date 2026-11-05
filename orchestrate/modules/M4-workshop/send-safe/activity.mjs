@@ -198,9 +198,25 @@ export class ActivityTracker {
     const next = { ...now, activity: { state: s.state, at, ...(s.reason ? { reason: s.reason } : {}) } };
     if (!next.firstSignalAt) next.firstSignalAt = at;
     if (s.state === State.EXITED) this.flights.delete(id); // no correlation survives an exit
+    // Leaving the needs-input family ends a ping still owed for it.
+    if (!needsInput(next.activity.state)) delete next.pingPending;
     this.store.set(id, next);
     // Entering the needs-input family pings the person once; escalation inside it doesn't.
-    if (!needsInput(prev) && needsInput(next.activity.state)) this.notify({ type: 'needs_input', id });
+    if (!needsInput(prev) && needsInput(next.activity.state)) this.ping(id);
+    // A ping lost earlier in this wait is sent again on the session's next written signal (L135 F).
+    else if (next.pingPending) this.ping(id);
+  }
+
+  // The needs-input ping, whose answer counts (L135 F): false or a throw is a ping that was lost. The session is
+  // marked as owed one, so its next written signal or the reaper's next look sends it again, and no wait on the person goes untold. A sent one clears
+  // the mark.
+  ping(id) {
+    let told;
+    try { told = this.notify({ type: 'needs_input', id }); } catch { told = false; }
+    const rec = this.store.get(id);
+    if (!rec) return;
+    const { pingPending: _, ...rest } = rec;
+    this.store.set(id, told === false ? { ...rec, pingPending: true } : rest);
   }
 
   // A crash or kill fires no session-end hook, so the reaper is the last chance to
@@ -211,7 +227,10 @@ export class ActivityTracker {
     if (!alive) {
       this.store.set(id, { ...rec, terminated: true });
       this.flights.delete(id);
+      return;
     }
+    // A session waiting on the person sends no more hooks, so the reaper's look is when a lost ping is sent again.
+    if (rec.pingPending && needsInput(rec.activity?.state)) this.ping(id);
   }
 }
 
