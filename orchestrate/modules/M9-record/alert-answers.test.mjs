@@ -13,6 +13,9 @@ import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { openRecordWithStore } from './writer.mjs';
+import { KEEP_PER_WINDOW, KEPT_BACK_STEPS } from './store.mjs';
+import { readUnsent } from './unsent.mjs';
+import { makeRecord } from '../../shared/record.mjs';
 import { PRODUCT, UID, claimCard, iso, must, outboxFile, product, readyCard, runCard, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
 
 const LOST = ['false', 'throws'];
@@ -238,3 +241,78 @@ test('L168 Minor: when even the append to unsent-alerts.jsonl fails, the alert i
     } finally { chmodSync(file, 0o644); }
   }
 });
+
+// L545: keepAlert, for an alert the queue would not take. It answers nothing and needs no Record write.
+const DAY = 24 * 60 * MIN;
+const quiet = () => open(sink('false'), { prefix: 'm9-keep-' });
+const keptOf = (env, type) => readUnsent(env.root).filter((x) => x.event.type === type);
+const bumped = (env) => { env.clock.t += 1; };
+
+test('L545: one line per key a day, judged from the file: a repeat is nothing, and a day on it is kept again', () => {
+  const env = quiet();
+  const seq = env.store.lines().length;
+  for (let i = 0; i < 5; i += 1) { assert.equal(env.record.keepAlert('the band is red', 'stop-1'), undefined); bumped(env); }
+  assert.equal(keptOf(env, 'alert_not_queued').length, 1);
+  assert.equal(keptOf(env, 'alert_not_queued')[0].event.text, 'the band is red');
+  assert.equal(env.store.lines().length, seq, 'no Record write');
+  env.clock.t += DAY;
+  env.record.keepAlert('the band is red', 'stop-1');
+  assert.equal(keptOf(env, 'alert_not_queued').length, 2);
+});
+
+test('L545: a delivered line still counts toward the day, so a resend is not a new issue', () => {
+  const env = quiet();
+  env.record.keepAlert('one', 'k');
+  markSentFor(env);
+  bumped(env);
+  env.record.keepAlert('one', 'k');
+  assert.equal(readUnsent(env.root).length, 0);
+});
+const markSentFor = (env) => { for (const x of readUnsent(env.root)) appendFileSync(join(env.root, 'unsent-alerts.jsonl'), `${JSON.stringify({ id: x.id, outcome: 'sent', at: iso(env.clock.t) })}\n`); };
+
+test('L545: past the total, keys are held back and the owner hears "at least N" at each step', () => {
+  const env = quiet();
+  const each = KEEP_PER_WINDOW + 150;
+  for (let i = 0; i < each; i += 1) { env.record.keepAlert(`alert ${i}`, `key-${i}`); bumped(env); }
+  assert.equal(keptOf(env, 'alert_not_queued').length, KEEP_PER_WINDOW);
+  assert.deepEqual(keptOf(env, 'alerts_kept_back').map((x) => Number(/at least (\d+) more/.exec(x.event.text)?.[1])), KEPT_BACK_STEPS.slice(0, 3));
+  // The same held-back key again is the same alert: not counted twice.
+  for (let i = 0; i < 9; i += 1) { env.record.keepAlert('alert 21', 'key-21'); bumped(env); }
+  assert.equal(readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8').split('\n').filter((l) => /kept_back/.test(l) && /"cap_key":"key-21"/.test(l)).length, 1);
+});
+
+test('L545: counting stops at the last step, so a text that changes every pass cannot grow the file for ever', () => {
+  const env = quiet();
+  const file = join(env.root, 'unsent-alerts.jsonl');
+  const mark = iso(env.clock.t);
+  appendFileSync(file, Array.from({ length: KEEP_PER_WINDOW }, (_, i) => `${JSON.stringify({ id: `f${i}`, outcome: 'unsent', event: { type: 'alert_not_queued', text: 'x' }, cap_key: `f${i}`, at: mark })}\n`).join(''));
+  const last = KEPT_BACK_STEPS.at(-1);
+  appendFileSync(file, Array.from({ length: last }, (_, i) => `${JSON.stringify({ outcome: 'kept_back', cap_key: `b${i}`, at: mark })}\n`).join(''));
+  const size = readFileSync(file, 'utf8').length;
+  bumped(env);
+  env.record.keepAlert('one more', 'another');
+  assert.equal(readFileSync(file, 'utf8').length, size);
+});
+
+test('L545: a line in the file that is not whole JSON is no line to the cap, and the alert is kept', () => {
+  const env = quiet();
+  appendFileSync(join(env.root, 'unsent-alerts.jsonl'), '{"cap_key":"k","at\n');
+  env.record.keepAlert('kept', 'k');
+  assert.equal(keptOf(env, 'alert_not_queued').length, 1);
+});
+
+test('L545: the shape: a text and a key in, nothing back, and no way to the store (writer.mjs: never the raw store)', () => {
+  const env = quiet();
+  assert.equal(env.record.keepAlert('a', 'k'), undefined);
+  assert.equal(env.impl.keepAlert('b', 'k2'), undefined, 'the Writer hands nothing from the store');
+  assert.equal(env.impl.keepAlert.length, 2);
+  let got;
+  const rec = makeRecord({ keepAlert: (...a) => { got = a; return { paths: 'the raw store' }; } });
+  assert.equal(rec.keepAlert({ a: 1 }, 7, 'a third'), undefined, 'the Record hands nothing back');
+  assert.deepEqual(got, ['[object Object]', '7'], 'only a text and a key reach it, as strings');
+  assert.equal(makeRecord({}).keepAlert('a', 'k'), undefined, 'a Record with no store: nothing');
+  assert.equal(makeRecord({ keepAlert: () => { throw new Error('no'); } }).keepAlert('a', 'k'), undefined, 'never throws');
+  const doc = env.record.read('fact', 'k');
+  assert.equal(doc ?? null, null, 'no document made');
+});
+

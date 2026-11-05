@@ -706,6 +706,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     // The Record's own times (L72): the Dispatcher's limits read these, never a field a script stamps.
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
+    keepAlert: (text, key) => { store.keepAlert(text, key); },
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }
