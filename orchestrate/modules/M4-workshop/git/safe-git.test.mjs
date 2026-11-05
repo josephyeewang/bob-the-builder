@@ -83,7 +83,10 @@ test('mirror check: the template passes, every planted extra is refused', async 
 // Static check (review 0b-4 M5): no other file under orchestrate/ starts git itself.
 // Known exceptions, each with the lead's call and date. The test fails if a listed file stops starting git, so the
 // line is deleted in the change that routes it through safe-git.mjs.
-const KNOWN_EXCEPTIONS = {};
+const KNOWN_EXCEPTIONS = {
+  // Tests only: it builds a throwaway bare repository with commits GitHub would hold, for the gate tests (L513).
+  'modules/M6-merge-gate/fixtures/real-commits.test-helper.mjs': 'test fixture',
+};
 test('no other orchestrate file spawns git directly', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = join(here, '..', '..', '..');
