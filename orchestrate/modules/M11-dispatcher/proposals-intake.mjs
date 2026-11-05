@@ -217,7 +217,7 @@ export function stageOf(rules, product) {
  * A proposal must name a ready card of its own product (R-0b-129, proposalCardProblem), checked before the docs check
  *   and again just before the claim; a card refusal is keyed on the card's revision, so it is looked at again once the
  *   card changes. A card that can't be read keeps the file unused, told once.
- * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
+ * `docsCheck({ product, card, bundle })` → null | reason | { retry: reason }, and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
  *   `cardRev` is the card's revision at the last check: part 2's card move must expect it, so a card changed since is refused.
  *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
  *   part 2's; not passed in, every proposal is refused.
