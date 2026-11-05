@@ -17,15 +17,16 @@
 // Every refusal leaves GitHub untouched and writes one record line with a plain reason.
 // All git goes through safe-git.mjs.
 //
-// Three doors, one core (R-0b-127; the third below): `pushCard(sessionId)` for a worker's outbox, and `pushProposal({ product, card,
-// sha256 })` for a bundle Joe's own tab dropped in the product's proposals folder (rules `proposals.outbox`). A proposal
+// Three doors, one core (R-0b-127; the third below): `pushCard(sessionId)` for a worker's outbox, and `pushProposal({ product,
+// card })` for a bundle Joe's own tab dropped in the product's proposals folder (rules `proposals.outbox`). A proposal
 // goes through every step above exactly like a worker's bundle. What differs is only where it comes from: the folder,
 // the owner the bundle must have (Joe's `ownerUid`, where a worker's must be `uids.worker`; L76 (3), L77 m2), and its
-// bytes, which must be the ones the intake recorded (`sha256`). Its branch is `card/<card>` and its attempt
+// bytes, which must be the ones the intake holds for `bundle-<card>.bundle`: the script reads that fact itself, and no
+// caller names a hash (L325 m1). Its branch is `card/<card>` and its attempt
 // `p-<first 12 of sha256>`, so new bytes are a new attempt and bytes already pushed answer that push
 // again ({ already: true }); its card must be in the Record. `{ look: true }` stops after step 4 and answers the net
-// change's files without asking the rules or pushing: the intake's day-1 docs check reads the push script's own list
-// (L77 m1), never one a proposal declares.
+// change's files, with their modes, and the sha256 it read, without asking the rules or pushing: the intake's day-1 docs check reads the push script's own list
+// (L77 m1), never one a proposal declares. A refusal that may pass by itself says `retry: true`; the others are final.
 //
 // The third door, `pushResearch({ product, card })` (L286, L290): a research_copy card has no bundle, because no AI writes
 // its copy. This script makes the one commit itself, on main as just fetched from GitHub, from the owner's report in the
@@ -48,12 +49,15 @@ import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
+import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
 
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
 // A research copy refused with this reason is told to the owner at once (M11 researchCopyPass).
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
+// The bits a proposals folder may not have: anything looser than 750. One value: the intake's folder check too.
+export const FOLDER_LOOSE = 0o027;
 export const BRANCH = /^card\/[a-z0-9][a-z0-9-]{0,63}$/;
 // git's change letters (diff-tree --raw --no-renames) as M10 names them; a type change (T) is a modified file.
 const CHANGE_STATUS = Object.freeze({ A: 'added', M: 'modified', D: 'removed', T: 'modified' });
@@ -62,11 +66,16 @@ const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 const REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const isUid = (u) => Number.isSafeInteger(u) && u >= 0;
+const isUid = (u) => Number.isSafeInteger(u) && u > 0;
+// An attempt id starting p- or r- is a proposal's or a research copy's (their facts live under it); a worker's never does.
+const DOOR_ATTEMPT = /^[pr]-/;
 const NEVER = ['main', 'master', 'jobs-approved'];
 
 class Refusal extends Error {}
 const no = (reason) => { throw new Refusal(reason); };
+// A refusal that may pass by itself (GitHub, the mirror, the robot key, the start gate): the caller keeps the work and
+// tries again (`retry: true` on the answer), where every other refusal is the end of it (L325 m2).
+const later = (reason) => { const e = new Refusal(reason); e.retry = true; throw e; };
 
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
 export const bundleName = (card) => `bundle-${card}.bundle`;
@@ -77,12 +86,13 @@ function checkFolder(folder, folderUid) {
   let ost; try { ost = lstatSync(folder); } catch { no('the outbox is missing'); }
   if (ost.isSymbolicLink() || !ost.isDirectory()) no('the outbox is not a plain folder');
   if (folderUid !== undefined && ost.uid !== folderUid) no(`the folder is owned by user ${ost.uid}, not user ${folderUid}`);
+  if (folderUid !== undefined && (ost.mode & FOLDER_LOOSE) !== 0) no('the folder is looser than 750');
 }
 
 /**
  * Copies the bundle, never following a link, into `dir`; returns the copy's path. The bundle must be owned by `uid`
  * (the caller's: the worker's for an outbox, Joe's for a proposals folder; L77 m2), checked on the handle it is read
- * through. With `folderUid`, the folder must be owned by that user too. With `sha256`, the copy's bytes must hash to it.
+ * through. With `folderUid`, the folder must be owned by that user too, and be no looser than 750. With `sha256`, the copy's bytes must hash to it.
  */
 function stageBundle(outbox, card, dir, cap, { uid, folderUid, sha256, fstat = fstatSync }) {
   if (!isUid(uid)) no('no owner to check the bundle against');
@@ -238,6 +248,7 @@ async function messages(mirror, shas, names) {
  *   pullRequests.upsert({ repo, branch, base, title, body, token })   opens or updates the PR
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
  *                           never passes it, so every address is https://github.com/<repo>.git.
+ *   testFstat(fd)           tests only, refused outside them: stands in for fstat on the bundle's handle.
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
@@ -246,7 +257,8 @@ async function messages(mirror, shas, names) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, fstat } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, testFstat: fstat } = deps;
+  if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
@@ -258,17 +270,23 @@ export function createPushScript(deps) {
     if (!s || typeof s !== 'object') no('no launch record for this session');
     const { product, card, branch, outbox, attempt: att } = s;
     if (typeof product !== 'string' || !product) no('the launch record names no product');
-    if (!CARD.test(String(card))) no('the launch record has a bad card id');
-    if (!ATTEMPT.test(String(att))) no('the launch record has a bad attempt id');
+    if (typeof card !== 'string' || !CARD.test(card)) no('the launch record has a bad card id');
+    if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
     if (typeof outbox !== 'string' || !isAbsolute(outbox)) no('the launch record has no outbox');
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }
 
-  /** A proposal's inputs: the caller names product, card and the sha256 the intake recorded; the rest is the rules'. */
-  function proposalInputs({ product, card, sha256 } = {}) {
+  /** The sha256 the intake holds for this card's bundle: the one source of which bytes a proposal is (L325 m1). */
+  function heldSha({ product, card } = {}) {
     if (typeof product !== 'string' || !product) no('the proposal names no product');
-    if (!CARD.test(String(card))) no('the proposal has a bad card id');
-    if (!SHA256.test(String(sha256))) no('the proposal has no sha256 of the bundle the intake recorded');
+    if (typeof card !== 'string' || !CARD.test(card)) no('the proposal has a bad card id');
+    const f = record.read('fact', intakeFactId(product, bundleName(card)));
+    if (f?.corrupt || f?.doc?.state !== 'held' || !SHA256.test(String(f.doc.sha256))) no('the intake holds no bundle for this card');
+    return f.doc.sha256;
+  }
+
+  /** A proposal's inputs: the caller names product and card, the intake's fact the bytes, and the rest is the rules'. */
+  function proposalInputs({ product, card }, sha256) {
     // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
     if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
     const folder = rules.get('proposals.outbox', { product });
@@ -285,7 +303,7 @@ export function createPushScript(deps) {
   /** A research copy's inputs: the card alone says what is copied, and only a ready research_copy card is. */
   function researchInputs({ product, card } = {}) {
     if (typeof product !== 'string' || !product) no('the research copy names no product');
-    if (!CARD.test(String(card))) no('the research copy has a bad card id');
+    if (typeof card !== 'string' || !CARD.test(card)) no('the research copy has a bad card id');
     const c = record.read('card', card);
     if (c?.corrupt || !c?.doc) no(`card ${card} is not in the Record`);
     const d = c.doc;
@@ -313,7 +331,7 @@ export function createPushScript(deps) {
     if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
     const fmt = await git(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
-    if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) no(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
+    if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) later(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
     if (fmt.code !== 0) no(`the branch "${branch}" is not a valid name`);
 
     const url = testRemote ? testRemote(repo) : githubUrl(repo);
@@ -323,11 +341,11 @@ export function createPushScript(deps) {
     const v = await checkGitVersion();
     if (!v.ok) no(v.reason);
     const m = checkMirror(mirror);
-    if (!m.ok) no(`mirror: ${m.reason}`);
+    if (!m.ok) later(`mirror: ${m.reason}`);
 
     let token;
     try { token = await getRobotToken(product); } catch { token = null; }
-    if (typeof token !== 'string' || !token) no('no robot key for this product');
+    if (typeof token !== 'string' || !token) later('no robot key for this product');
     // The one address the network calls may name besides local paths (safe-git, L51).
     const auth = { extraConfig: tokenConfig(token), address: url };
 
@@ -344,12 +362,12 @@ export function createPushScript(deps) {
 
       // 3. Main (and the card branch) fresh from GitHub, then the bundle into the holding ref.
       const lr = await git(['ls-remote', '--heads', url, `refs/heads/${branch}`], { gitDir: mirror, purpose: 'push-ls-remote', ...auth });
-      if (lr.code !== 0) no('could not read GitHub');
+      if (lr.code !== 0) later('could not read GitHub');
       const remoteTip = /^([0-9a-f]{40})\t/.exec(lr.stdout.toString())?.[1] ?? null;
       const specs = ['+refs/heads/main:refs/heads/main'];
       if (remoteTip) specs.push(`+refs/heads/${branch}:${remoteRef}`);
       const fm = await git(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', url, ...specs], { gitDir: mirror, purpose: 'push-fetch-main', ...auth });
-      if (fm.code !== 0) no('could not fetch main from GitHub');
+      if (fm.code !== 0) later('could not fetch main from GitHub');
       if (!remoteTip) await git(['update-ref', '-d', remoteRef], { gitDir: mirror, purpose: 'push-fetch-main' });
 
       if (research) {
@@ -372,6 +390,8 @@ export function createPushScript(deps) {
       // Counted from the branch on GitHub, unless this is that same commit (a retry, after a stop or a refused head write)
       // or a research copy: those are checked whole, from main, and pushing the same commit changes nothing.
       const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip && remoteTip !== tip && !research ? [remoteRef] : [])]);
+      // A proposal's branch that is already this commit, with main past it too: nothing is left to push (L274 (6)).
+      if (!commits.length && sha256 !== undefined && !look && remoteTip === tip) return { ok: true, product, card, branch, tip, commits: 0, pr: null, binaries: [] };
       if (!commits.length) no('the bundle holds no new commits');
       if (research && commits.length !== 1) no('the card\'s branch on GitHub holds more than the one copy commit');
       const why = [];
@@ -392,7 +412,7 @@ export function createPushScript(deps) {
       if (research && (net.length !== 1 || net[0].path !== research.path || net[0].newId !== research.blob || net[0].newMode !== '100644')) no('the branch is not exactly the report at its one path');
       const files = net.map((e) => ({ path: e.path, status: CHANGE_STATUS[e.status] ?? `unknown (${e.status})` }));
       // A look stops here: the net change, checked against the refusal list, and nothing asked or pushed.
-      if (look) return { ok: true, product, card, branch, tip, files };
+      if (look) return { ok: true, product, card, branch, tip, sha256, files: net.map((e, i) => ({ ...files[i], mode: e.newMode })) };
 
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
@@ -411,11 +431,11 @@ export function createPushScript(deps) {
       const d = rules.may('push_branch', subject);
       if (d.decision !== 'allow') no(`the rules do not allow this push: ${d.reason}`);
       const gate = await startGate({ product, mirror, record, readRun, workflowPath: rules.get('outside_check.workflow', { product }), workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
-      if (!gate.ok) no(`the start gate is shut: ${gate.reason}`);
+      if (!gate.ok) later(`the start gate is shut: ${gate.reason}`);
 
       // 7. The push: exactly this commit, exactly this branch, never forced.
       const p = await git(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth });
-      if (p.code !== 0) no('GitHub refused the push');
+      if (p.code !== 0) later('GitHub refused the push');
       const card_doc = cardDoc;
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
@@ -448,18 +468,20 @@ export function createPushScript(deps) {
 
   async function settle(inputs, factParts, { look = false, from } = {}) {
     let res;
-    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200)}` }; }
+    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200)}`, ...(e.retry ? { retry: true } : {}) }; }
     // Every reason is masked once, here, before the record: a secret used as a file name is cut to
     // its first four characters, and git's own error text loses its folder paths (round 3 MIN-3, COS-4).
     if (!res.ok) res = { ...res, reason: maskPath(res.reason) };
     if (look) return res;
     const [card, att] = factParts();
-    // Only real text names a fact: String(undefined) or String(null) would pass the id patterns as "undefined" / "null".
-    const id = `push.${typeof card === 'string' && CARD.test(card) ? card : 'unknown'}.${typeof att === 'string' && ATTEMPT.test(att) ? att : 'unknown'}`;
+    // Only a real card and attempt name a fact, so two refusals can't share one (L325 m3). String(undefined) or
+    // String(null) would pass the id patterns as "undefined" / "null". With neither there is only the answer.
+    if (typeof card !== 'string' || !CARD.test(card) || typeof att !== 'string' || !ATTEMPT.test(att)) return res;
+    const id = `push.${card}.${att}`;
     // Before the fact: a stop between the two leaves no fact, so the retry finds the branch and comes back here.
     const headRefused = res.ok ? writeHead(card, res.tip) : null;
     const cur = record.read('fact', id);
-    let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, at: new Date(now()).toISOString() };
+    let doc = res.ok ? { result: 'pushed', branch: res.branch, tip: res.tip, binaries: res.binaries ?? [], at: new Date(now()).toISOString() } : { result: 'refused', reason: res.reason, ...(res.retry ? { retry: true } : {}), at: new Date(now()).toISOString() };
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
     if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
     if (headRefused) doc.head_refused = headRefused;
@@ -476,27 +498,29 @@ export function createPushScript(deps) {
   }
 
   /**
-   * Pushes one proposal's bundle from the product's proposals folder ({ product, card, sha256 }), or with
-   * `{ look: true }` answers { ok, files } for its net change without asking the rules or pushing.
+   * Pushes one proposal's bundle from the product's proposals folder ({ product, card }): the bytes the intake holds
+   * for that card, or with `{ look: true }` answers { ok, sha256, files } for its net change without asking the rules or pushing.
    */
   async function pushProposal(p = {}, { look = false } = {}) {
-    const sha = SHA256.test(String(p?.sha256)) ? p.sha256 : null;
+    // Read once: the fact's name and the bytes checked are the same hash, whatever the intake does meanwhile.
+    let sha = null;
+    const inputs = () => { sha ??= heldSha(p ?? {}); return proposalInputs(p, sha); };
     // The same bytes are the same attempt (L274 (6), L334): once pushed, they answer the recorded push, with no
     // second push and the fact left as it is. Only after the proposal's own checks pass (the card still in the Record,
     // the product's folder), and only for the product the fact recorded; a corrupt fact is not a push (#170 r1 m1, m2).
-    if (!look && sha) {
-      let inputs = null;
+    if (!look) {
+      let got = null;
       // Any throw here (a refusal, or a rules or Record read that fails, the push fact's too) falls through to settle, which meets the same
       // error and records it the usual way, masked (#170 r2).
       let done = null;
       try {
-        inputs = proposalInputs(p);
-        const f = record.read('fact', `push.${inputs.card}.${inputs.att}`);
+        got = inputs();
+        const f = record.read('fact', `push.${got.card}.${got.att}`);
         done = f?.doc && !f.corrupt ? f.doc : null;
       } catch { done = null; }
-      if (done?.result === 'pushed' && done.product === inputs.product && !done.head_refused) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
+      if (done?.result === 'pushed' && done.product === got.product && !done.head_refused) return { ok: true, already: true, product: got.product, card: got.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
     }
-    return settle(() => proposalInputs(p), () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
+    return settle(inputs, () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
   }
 
   /** Makes and pushes a ready research_copy card's one commit ({ product, card }). Bytes already pushed answer that push. */

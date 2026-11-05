@@ -42,9 +42,10 @@
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
 //   - idea- files are refused: idea filing stays off until #95-b lands (L212, L215 2);
 //   - a proposal goes to the docs-lane check, run on the push script's real changed files for its bundle's net change
-//     (L77 m1). That check is part 2, after R-0b-127; until it is passed in as `docsCheck`, every proposal is refused
+//     (L77 m1): `docsCheck`, built by proposal-route.mjs. Until it is passed in, every proposal is refused
 //     with FIRST_CUTOVER before any review starts, which fails closed. A bundle is taken in only with its proposal.
 // At the second cutover a proposal goes to review (`toReview`, M5), also part 2; until it is passed in, refused.
+// A docs check that could not finish answers { retry }: the file waits for the next pass, unrecorded.
 // A kind whose handler is not passed in is left untouched and unrecorded, so it is taken in once the handler lands.
 //
 //   proposalsPass({ rec, rules, products, ownerUid, wait, alert, note, handlers, docsCheck, toReview, now }) → [result]
@@ -59,7 +60,8 @@ import { pastTime } from '../../shared/still-waiting.mjs';
 import { sha256 } from './outbox-intake.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
-import { BUNDLE_CAP, SETTLE_MS } from '../M4-workshop/git/push.mjs';
+import { BUNDLE_CAP, SETTLE_MS, FOLDER_LOOSE } from '../M4-workshop/git/push.mjs';
+import { idHash, intakeFactId } from './intake-facts.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
@@ -133,12 +135,7 @@ export function proposalName(name) {
 }
 
 export const sourceOf = (product) => `proposals-${product}`;
-// Fact ids (L233 M-4): a product name may hold a hyphen, so `a` + `b-x.md` and `a-b` + `x.md` must not share one. Each
-// id is its role plus a hash of its parts, each part length-prefixed, so no two different pairs, and no file and
-// folder, can meet.
-const idHash = (...parts) => sha256(parts.map((p) => `${String(p).length}:${p}`).join('|')).slice(0, 32);
-/** The fact a file's intake is kept in. */
-export const intakeFactId = (product, name) => `intake-applied-proposals-file-${idHash(product, name)}`;
+export { intakeFactId };
 /** The fact a product's folder problem is kept in. */
 export const folderFactId = (product) => `intake-applied-proposals-folder-${idHash(product)}`;
 /** The fact that says files of `kind` sit in a product's folder with nothing to take them in yet. */
@@ -160,7 +157,7 @@ export function folderProblem(dir, ownerUid, look = lstatSync) {
   let st; try { st = look(dir); } catch { return 'the proposals folder is missing'; }
   if (st.isSymbolicLink() || !st.isDirectory()) return 'the proposals folder is not a plain folder';
   if (st.uid !== ownerUid) return `the proposals folder is owned by user ${st.uid}, not the owner's user`;
-  if ((st.mode & 0o027) !== 0) return `the proposals folder's mode ${(st.mode & 0o777).toString(8)} is looser than 750`;
+  if ((st.mode & FOLDER_LOOSE) !== 0) return `the proposals folder's mode ${(st.mode & 0o777).toString(8)} is looser than 750`;
   return null;
 }
 
@@ -449,6 +446,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
         let docs;
         try { docs = await docsCheck({ product, card, bundle }); } catch (e) { docs = `the docs check failed: ${e.message}`; }
+        // A look that couldn't finish (GitHub, the mirror, the robot key) is no answer: the file waits for the next pass.
+        if (docs?.retry) { r.waiting = docs.retry; continue; }
         if (docs) { refuse(`${FIRST_CUTOVER} (${docs})`, hash); continue; }
       }
       if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }

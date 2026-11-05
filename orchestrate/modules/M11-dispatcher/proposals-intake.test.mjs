@@ -16,6 +16,7 @@ import { FAKE } from '../M12-sensors/fakes.mjs';
 import { recWith, seed, writeLog, queueFor } from './fixtures.test-helper.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { createDocsCheck } from './proposal-route.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { renderRoleSettings } from '../M4-workshop/launcher/render-settings.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
@@ -205,6 +206,44 @@ test('plant: a docs proposal needs its own bundle; a bundle for another card is 
   put(w2, 'bundle-C-1.bundle', 'bytes');
   const out2 = await w2.pass({ docsCheck: async () => 'app/x.ts is not a docs file', toReview: () => ({ ok: true }) });
   assert.equal(one(out2, 'proposal-C-1.md').refused, `${FIRST_CUTOVER} (app/x.ts is not a docs file)`);
+});
+
+test('R-0b-128: a docs check that could not finish leaves the file waiting, unrecorded, and the next pass takes it', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  let reviews = 0;
+  const toReview = () => { reviews += 1; return { ok: true }; };
+  const out = await w.pass({ docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview });
+  const row = one(out, 'proposal-C-1.md');
+  assert.equal(row.waiting, 'could not read GitHub');
+  assert.equal(row.refused, undefined);
+  assert.equal(reviews, 0);
+  assert.equal(one(await w.pass({ docsCheck: async () => null, toReview }), 'proposal-C-1.md').applied, true);
+  assert.equal(reviews, 1);
+});
+
+test('R-0b-128: the real docs check at the intake: a code bundle stays with MAIN and no review starts; a docs one goes on', async () => {
+  const world2 = world();
+  put(world2, 'proposal-C-1.md', 'a change');
+  put(world2, 'bundle-C-1.bundle', 'bytes');
+  let reviews = 0;
+  const toReview = () => { reviews += 1; return { ok: true }; };
+  let held = null;
+  const pushProposal = async () => ({ ok: true, sha256: held, files: [{ path: 'app/x.ts', status: 'modified', mode: '100644' }] });
+  const route = (decision) => {
+    const check = createDocsCheck({ record: world2.rec, rules: { may: () => ({ decision, reason: 'not this lane\'s change; MAIN merges it as today: app/x.ts is outside the docs and research lane' }) }, pushProposal });
+    return (x) => { held = x.bundle.sha256; return check(x); };
+  };
+  const out = await world2.pass({ docsCheck: route('deny'), toReview });
+  assert.equal(one(out, 'proposal-C-1.md').refused, `${FIRST_CUTOVER} (not this lane's change; MAIN merges it as today: app/x.ts is outside the docs and research lane)`);
+  assert.equal(reviews, 0);
+  const w3 = world();
+  put(w3, 'proposal-C-1.md', 'a change');
+  put(w3, 'bundle-C-1.bundle', 'bytes');
+  const yes = createDocsCheck({ record: w3.rec, rules: { may: () => ({ decision: 'allow', reason: 'docs lane' }) }, pushProposal });
+  assert.equal(one(await w3.pass({ docsCheck: (x) => { held = x.bundle.sha256; return yes(x); }, toReview }), 'proposal-C-1.md').applied, true);
+  assert.equal(reviews, 1);
 });
 
 test('at the second cutover a proposal goes to review once; with no route to review it is refused', async () => {
