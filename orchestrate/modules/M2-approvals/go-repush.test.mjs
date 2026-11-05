@@ -46,12 +46,12 @@ async function tier2(w, id = 'A') {
 }
 
 async function tier1(w, id = 'T') {
-  const plan = { tier: 1, plan_sha256: 'e'.repeat(64), main_commit: w.M0, files: ['src/a.mjs'] };
+  const plan = { tier: 1, plan_sha256: 'from the plan file', main_commit: w.M0, files: ['src/a.mjs'] };
   const rows = { 'R-1': row('R-1', { tier: 1 }) };
   leadCard(w.t, id, { done_when: doneBar(rows), ...plan });
   const fp = goFingerprint(w.t.ctx, id);
   assert.equal(fp.ok, true, fp.reason);
-  const planCheck = { pass: true, material: 0, card: id, fingerprint: fp.fingerprint, plan_sha256: 'e'.repeat(64), reviewer_session: 'S-review', author_session: 'S-lead' };
+  const planCheck = { pass: true, material: 0, card: id, fingerprint: fp.fingerprint, plan_sha256: w.t.record.read('card', id).doc.plan_sha256, reviewer_session: 'S-review', author_session: 'S-lead' };
   const r = await raiseGo(w.t.ctx, { cardId: id, rows, view: w.view, mainSha: w.M0, planCheck });
   assert.equal(r.ok, true, r.reason);
   assert.equal(askStore(w.t.record).ask(r.id).doc.kind, 'go_t1');
