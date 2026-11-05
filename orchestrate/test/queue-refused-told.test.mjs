@@ -96,6 +96,13 @@ test('L558 M2: the same on a queue write that throws', () => {
   assert.equal(readUnsent(env.root).length, 2);
 });
 
+test('L566 A4: the same cause in new words on a throw is still one line', () => {
+  const env = setup({ prefix: 'orch-qrefused-', extra: { alert: () => false } });
+  const rec = Object.create(env.record, { write: { value: (w) => { if (w.id === ALERT_QUEUE_FACT) throw new Error('the store broke'); return env.record.write(w); } } });
+  for (const words of ['first words', 'second words']) assert.throws(() => queueAlert(rec, words, { now: T0, mark: { fact: 'restart-s1', fields: { hard_told: 'x' }, kind: 'k' } }), /the store broke/);
+  assert.equal(readUnsent(env.root).length, 1);
+});
+
 test('L558 Minor 2: a settle whose queue write throws keeps its one line, and the throw still reaches the caller', () => {
   const env = setup({ prefix: 'orch-qrefused-', extra: { alert: () => false } });
   queueAlert(env.record, 'delivered', { now: T0 });

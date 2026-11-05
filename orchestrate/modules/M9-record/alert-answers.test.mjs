@@ -412,3 +412,11 @@ test('L558 Minor 1: two long alerts that differ only past the cut stay two', () 
   assert.equal(keptOf(env, 'alert_not_queued').length, 2);
 });
 
+test('L566 A12: a step is told on its own count, not one before', () => {
+  const env = quiet();
+  for (let i = 0; i < KEEP_PER_WINDOW + 9; i += 1) { env.record.keepAlert(`a${i}`, `k${i}`); env.clock.t += 1; }
+  assert.doesNotMatch(keptOf(env, 'alerts_kept_back').map((x) => x.event.text).join(), /at least 10 /);
+  env.record.keepAlert('a10', 'k-tenth');
+  assert.match(keptOf(env, 'alerts_kept_back').map((x) => x.event.text).join(), /at least 10 more alerts/);
+});
+
