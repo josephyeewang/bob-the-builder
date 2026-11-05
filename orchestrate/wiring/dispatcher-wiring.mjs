@@ -54,7 +54,7 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -69,6 +69,13 @@ export const PORT_GROUPS = Object.freeze([
   Object.freeze({ notWired: NOT_WIRED_PHONE, build: phonePorts }),
 ]);
 export { notWiredText, refusing };
+// Every port the tick needs from the wiring. A port's wiring moves between the port files; this list changes only when the
+// tick starts reading a new port. Options with defaults are not ports. `alert` and `approvals` are answered here.
+const WIRED_HERE = Object.freeze(['alert', 'approvals']);
+export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview',
+  'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
+  'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 
 // `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
 export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
@@ -166,8 +173,10 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
 }
 
 /**
- * The tick's ports: refusing ones for every name on a group's list, then whatever each group's port file answers. A port
- * both answered and still on a list stops the start, so a port can't look wired while the list says it isn't.
+ * The tick's ports: refusing ones for every name on a group's list, then whatever each group's port file answers. Each port
+ * has one home, or the start stops: a port both answered and listed, on two lists, answered by two files, a port the tick
+ * doesn't read, one neither answered nor listed, or a file answering `alert` or `approvals`. The cleanup group follows
+ * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
  * A port file gets `ctx`: { config, rec, rules, entry, stateDir, log, limitedSync, fetchFn, now }.
  */
 export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS } = {}) {
@@ -179,12 +188,24 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
   const ctx = Object.freeze({ config: c, rec, rules, entry, stateDir, log, limitedSync, fetchFn, now });
-  const listed = new Set(groups.flatMap((g) => g.notWired));
+  const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
+  const lists = groups.flatMap((g) => g.notWired);
+  const listed = new Set(lists);
+  stopOn('these ports are on two lists', lists.filter((k, i) => lists.indexOf(k) !== i));
+  stopOn('no tick step reads these ports', lists.filter((k) => !TICK_PORTS.includes(k)));
+  const answers = new Set();
   for (const { build } of groups) {
     const answered = build(ctx);
-    const both = Object.keys(answered).filter((k) => listed.has(k));
-    if (both.length) throw new Error(`these ports are wired but still listed as not wired: ${both.join(', ')}`);
+    const names = Object.keys(answered);
+    stopOn('these ports are wired but still listed as not wired', names.filter((k) => listed.has(k)));
+    stopOn('only the wiring answers these ports', names.filter((k) => WIRED_HERE.includes(k)));
+    stopOn('two port files answer these ports', names.filter((k) => answers.has(k)));
+    stopOn('no tick step reads these ports', names.filter((k) => !TICK_PORTS.includes(k)));
+    for (const k of names) answers.add(k);
     Object.assign(ports, answered);
   }
+  stopOn('nothing answers or lists these ports, which the tick needs', TICK_PORTS.filter((k) => !WIRED_HERE.includes(k) && !listed.has(k) && !answers.has(k)));
+  const cleanup = cleanupProblem(ports.cleanup);
+  if (cleanup) throw new Error(cleanup);
   return { rec, rules, ports };
 }
