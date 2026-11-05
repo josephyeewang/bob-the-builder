@@ -1,10 +1,10 @@
 // build-skip.test.mjs — only production on main builds; full mode needs the mark or the owner's label; every failure skips.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, chmodSync, mkdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { decideBuild, decideBuildFull, skipCommand, main, BUILD_TOKEN } from './build-skip.mjs';
 import { routeGh, markRoutes } from './fixtures/checker-fake.mjs';
@@ -98,6 +98,7 @@ test('skipCommand refuses a branch, tag, short id, non-https URL or a bad hash',
   }
   assert.throws(() => skipCommand({ mode: 'full', checkerUrl: PIN, sha256: 'f'.repeat(63) }), /sha256/);
   assert.throws(() => skipCommand({ mode: 'later', checkerUrl: PIN, sha256: h }), /mode/);
+  assert.throws(() => skipCommand({}), /mode/);
   const cmd = skipCommand({ mode: 'full', checkerUrl: PIN, sha256: h });
   assert.match(cmd, /; exit 0$/);
   assert.match(cmd, /&& exit 1; exit 0$/);
@@ -131,10 +132,55 @@ test('the command, run by sh: a failed download, a wrong hash and a crash each s
   assert.equal(runCmd(skipCommand({ mode: 'full', checkerUrl: PIN, sha256: hash() })), 0, 'a crash exits 1 but prints no token');
   write('console.log("no"); process.exit(1);');
   assert.equal(runCmd(skipCommand({ mode: 'full', checkerUrl: PIN, sha256: hash() })), 0, 'exit 1 with no token');
-  // The real bundle (an ES module with imports) through the exact command: a production main commit builds at the
-  // first cutover, a preview skips. (A bare mktemp name made node refuse the file, so every deploy was skipped.)
+  // The real bundle (an ES module with imports) through the exact download command: only its first mode can say BUILD
+  // with no GitHub, so the mode is swapped here. (A bare mktemp name made node refuse the file, so every deploy was skipped.)
   writeFileSync(checker, readFileSync(new URL('./github-checker.mjs', import.meta.url)));
   const runEnv = (cmd, extra) => { try { execFileSync('/bin/sh', ['-c', cmd], { env: { PATH, ...extra }, stdio: 'pipe' }); return 0; } catch (e) { return e.status; } };
-  assert.equal(runEnv(skipCommand({ mode: 'first', checkerUrl: PIN, sha256: hash() }), env()), 1, 'the real checker builds production main');
-  assert.equal(runEnv(skipCommand({ mode: 'first', checkerUrl: PIN, sha256: hash() }), env({ VERCEL_ENV: 'preview' })), 0, 'the real checker skips a preview');
+  const downloadFirst = skipCommand({ mode: 'full', checkerUrl: PIN, sha256: hash() }).replace('node "$f" full', 'node "$f" first');
+  assert.equal(runEnv(downloadFirst, env()), 1, 'the real checker builds production main');
+  assert.equal(runEnv(downloadFirst, env({ VERCEL_ENV: 'preview' })), 0, 'the real checker skips a preview');
+});
+
+test('L571: full mode is the download command, byte for byte', () => {
+  const h = 'f'.repeat(64);
+  assert.equal(skipCommand({ mode: 'full', checkerUrl: PIN, sha256: h }),
+    `d=$(mktemp -d) && f="$d/checker.mjs" && curl -fsSL --max-time 60 -o "$f" '${PIN}' && [ "$(sha256sum "$f" | cut -c1-64)" = ${h} ] && [ "$(node "$f" full)" = ${BUILD_TOKEN} ] && exit 1; exit 0`);
+  assert.throws(() => skipCommand({ mode: 'full' }), /pinned/, 'full mode still needs its pin');
+});
+
+test('L571: the first-cutover command is one self-contained line that needs no URL or hash', () => {
+  const cmd = skipCommand({ mode: 'first' });
+  assert.equal(skipCommand({ mode: 'first', checkerUrl: PIN, sha256: 'f'.repeat(64) }), cmd, 'a pin changes nothing');
+  assert.ok(!/[\n\r]/.test(cmd), 'one line');
+  for (const word of ['curl', 'wget', 'http', 'node', 'mktemp', 'sha256', 'checker', '$(', '`']) assert.ok(!cmd.includes(word), word);
+});
+
+test('L571: through real shells, the first-cutover command agrees with decideBuild on every case', () => {
+  const dir = tempDir('m6-first-skip-');
+  const FULL = 'a'.repeat(40);
+  const values = {
+    VERCEL_ENV: [undefined, '', 'production', 'preview', 'development', 'Production', 'production ', 'production\n', '*', 'production|main', 'production|main|'],
+    VERCEL_GIT_COMMIT_REF: [undefined, '', 'main', 'mainx', 'Main', 'x|main', '$(touch PLANTED)', '`touch PLANTED`', 'main\n', 'ma*', 'main;exit 1', '"; exit 1; "', `main|${FULL}`, FULL],
+    VERCEL_GIT_COMMIT_SHA: [undefined, '', FULL, '0123456789abcdef0123456789abcdef01234567', FULL.slice(1), `${FULL}a`, FULL.toUpperCase(), `${FULL}\n`, `\n${FULL}`,
+      `${'a'.repeat(20)}|${'b'.repeat(19)}`, `g${'a'.repeat(39)}`, '?'.repeat(40), '*', 'é'.repeat(40), `${'a'.repeat(39)}B`, `|${FULL}`, '$(touch PLANTED)'],
+  };
+  const cmd = skipCommand({ mode: 'first' });
+  const shells = ['/bin/sh', '/bin/bash', '/bin/dash', '/bin/zsh'].filter((s) => existsSync(s));
+  assert.ok(shells.includes('/bin/sh'));
+  let builds = 0;
+  for (const [i, shell] of shells.entries()) {
+    const lang = i % 2 ? 'en_US.UTF-8' : 'C'; // both locales cross the shells below without doubling the run
+    for (const a of values.VERCEL_ENV) for (const b of values.VERCEL_GIT_COMMIT_REF) for (const c of values.VERCEL_GIT_COMMIT_SHA) {
+      const vars = {};
+      if (a !== undefined) vars.VERCEL_ENV = a;
+      if (b !== undefined) vars.VERCEL_GIT_COMMIT_REF = b;
+      if (c !== undefined) vars.VERCEL_GIT_COMMIT_SHA = c;
+      const want = decideBuild({ mode: 'first', env: vars }).build ? 1 : 0;
+      const got = spawnSync(shell, ['-c', cmd], { cwd: dir, env: { PATH: '/usr/bin:/bin', LC_ALL: lang, ...vars } }).status;
+      assert.equal(got, want, `${shell} ${lang} ${JSON.stringify(vars)}`);
+      builds += want;
+    }
+  }
+  assert.ok(builds > 0, 'some case builds');
+  assert.deepEqual(readdirSync(dir), [], 'a shell-looking value ran nothing');
 });
