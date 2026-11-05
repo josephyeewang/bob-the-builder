@@ -35,16 +35,16 @@ const SHOWN = {
 // On an alert, not on the line, on purpose: which field, on which kinds, and why. By kind, so a new kind carrying one of
 // these fields is looked at, not let through by another kind's reason (L408 m2).
 const NOT_SHOWN = {
-  ask: { why: 'its text names it', kinds: ['ask_time_unreadable', 'withdrawn_pr_open'] },
-  card: { why: 'its text names it', kinds: ['ask_time_unreadable'] },
+  ask: { why: 'its text names it', kinds: ['ask_time_unreadable', 'go_card_unreadable', 'withdrawn_pr_open'] },
+  card: { why: 'its text names it', kinds: ['ask_time_unreadable', 'go_card_unreadable'] },
   error: { why: "an exception's own text can hold anything, and the fixed reason beside it says what failed", kinds: ['ask_request_refused', 'undo_request_refused'] },
   files_known: { why: 'said by the line when false; see the unreadable-list test', kinds: ['undo_by_hand'] },
   product: { why: "the line starts with it, or the alert's own text names it", kinds: ['onboard_near_miss', 'onboard_refused', 'product_on'] },
-  text: { why: "the alert's own words are the whole line; see the text test", kinds: ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'] },
+  text: { why: "the alert's own words are the whole line; see the text test", kinds: ['ask_time_unreadable', 'go_card_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'] },
 };
 // The kinds whose own text is the whole line, so everything else on them goes unseen. Pinned against the walk: a kind
 // that becomes a text alert fails until someone looks at what it stops showing (L438 m-1).
-const TEXT_KINDS = ['ask_time_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'];
+const TEXT_KINDS = ['ask_time_unreadable', 'go_card_unreadable', 'onboard_near_miss', 'onboard_refused', 'product_on', 'withdrawn_pr_open'];
 // A text alert may leave these off the line only if its text says them: the template names the field's own value.
 const NAMED_IN_TEXT = ['ask', 'card', 'pr', 'commit', 'files'];
 const leftOff = (table, kind, field) => table[field]?.kinds.includes(kind) === true;
