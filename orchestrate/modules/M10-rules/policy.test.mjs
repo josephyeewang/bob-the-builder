@@ -180,7 +180,7 @@ test('S4: every known start and tier1_merge value reads, in every state', () => 
 
 test('S4: an unknown start or tier1_merge value fails the whole read and names the key', () => {
   for (const state of PRODUCT_STATES) for (const [key, known] of RULE_KEYS) {
-    for (const value of ['sometimes', known[0].toUpperCase(), `${known[0]}x`, `[${known[0]}]`, '"undo-only"']) {
+    for (const value of ['sometimes', known[0].toUpperCase(), `${known[0]}x`, `[${known[0]}]`, '"undo-only"', `"${known[0]} "`, `" ${known[0]}"`]) {
       const r = parsePolicy(withRule(state, key, value));
       assert.equal(r.ok, false, `${state}.${key}: ${value}`);
       assert.match(r.reason, new RegExp(`product_state_rules\\.${state}\\.${key} must be one of ${known.join(', ')}`), value);
