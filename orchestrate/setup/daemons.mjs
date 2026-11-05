@@ -2,13 +2,15 @@
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
 //   place    write the three plists (four with the hourly watch-only job, when the config's `watch` entry has `rulesSha256`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//            and make each log file launchd opens for a job with a UserName, owned by that user (jobLogs)
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
 //            bootstrap); refuses unless the install check passes. It records the fingerprint of each file it loaded
 //            (<base>/install/loaded-jobs.json, root's) so `check` can tell a loaded job from a file that has since changed
 //   unload   launchctl bootout system/<label>, for each job that is loaded
 //   list     launchctl print system/<label>: loaded or not, state, last exit code (read only)
 //   check    read only: the files are exactly what review-daemons.mjs builds, root's 0644, no access list; no job file left under
-//            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes
+//            another label; each job is loaded, from the file as it is now, its last run ended with exit 0, and no run has been going over 30 minutes;
+//            a job with a UserName has its log files, that user's, 0644
 //
 // Paths inside the plists are the real ones (no test prefix); the plist files themselves sit under io.at().
 
@@ -64,6 +66,53 @@ export function plistTexts(io, cfg) {
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
 
+/**
+ * The Mac user a job file runs as and the log files launchd opens for it: { user, files }, read from the job file itself, so every
+ * job that has a UserName is covered without a list. launchd opens these files AS that user, in a folder that is root's, so a file
+ * missing or not that user's stops the job before its program starts (exit 78). A job with no UserName runs as root, which needs
+ * neither. (The paths come from the base, which layout.mjs limits to plain characters, so nothing in them is escaped.)
+ */
+export function jobLogs(text) {
+  const value = (key) => new RegExp(`<key>${key}</key><string>([^<]*)</string>`).exec(text)?.[1] ?? null;
+  return { user: value('UserName'), files: ['StandardOutPath', 'StandardErrorPath'].map(value).filter(Boolean) };
+}
+const LOG_MODE = 0o644;
+
+/** Why a job's log files would stop it, or null, from the job file's text. The check and `daemons load` both ask here. */
+function logProblem(io, text) {
+  const { user, files } = jobLogs(text);
+  if (user === null || files.length === 0) return null;
+  const who = readUser(io, user);
+  if (!who.exists) return `the user ${user} does not exist`;
+  const why = [];
+  for (const f of files) {
+    let st = null; try { st = io.lstat(f); } catch { why.push(`${f} is missing`); continue; }
+    if (st.isSymbolicLink() || !st.isFile()) why.push(`${f} is not a plain file`);
+    else {
+      if (st.uid !== who.uid) why.push(`${f} belongs to uid ${st.uid}, not ${user} (${who.uid})`);
+      if ((st.mode & 0o7777) !== LOG_MODE) why.push(`${f} has mode ${(st.mode & 0o7777).toString(8)}, want ${LOG_MODE.toString(8)}`);
+    }
+  }
+  return why.length ? why.join('; ') : null;
+}
+
+/** Steps that give a job's log files to its user. An existing file keeps what it holds; a link or anything else in its place stops the run. */
+function planLogs(io, text) {
+  const ops = []; const problems = [];
+  const { user, files } = jobLogs(text);
+  if (user === null || files.length === 0) return { ops, problems };
+  const who = readUser(io, user);
+  if (!who.exists) return { ops, problems: [`the user ${user} does not exist, so its job's log files can't be made (run users-folders first); nothing was changed`] };
+  const want = { uid: who.uid, gid: who.gid, mode: LOG_MODE };
+  for (const f of files) {
+    let st = null; try { st = io.lstat(f); } catch (e) { if (e?.code !== 'ENOENT') { problems.push(`${f} could not be read (${e?.code ?? e})`); continue; } }
+    if (st === null) { ops.push(op(`make ${f}   (${user}'s, 0644)`, () => { io.write(f, '', 0o600); io.secureFile(f, want); })); continue; }
+    if (st.isSymbolicLink() || !st.isFile()) { problems.push(`${f} exists but is not a plain file; nothing was changed`); continue; }
+    if (st.uid !== who.uid || (st.mode & 0o7777) !== LOG_MODE) ops.push(op(`set owner and mode of ${f}: ${user}'s, 0644`, () => io.secureFile(f, { ...want, ino: st.ino, dev: st.dev })));
+  }
+  return { ops, problems };
+}
+
 const launchctl = (io, args) => io.run(LAUNCHCTL, args);
 const failText = (r) => (r.stderr.trim() || r.stdout.trim()).slice(0, 200);
 
@@ -92,6 +141,7 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
     // through the open handle; launchd refuses a file with any other owner or mode, so a cut-off run leaves a file it will not load.
     ops.push(op(`write ${f}   (root:wheel 0644)`, () => { io.rm(f); io.write(f, plists[job], 0o600); io.secureFile(f, { uid: io.rootUid, gid: 0, mode: 0o644 }); }));
   }
+  for (const job of jobs) { const logs = planLogs(io, plists[job]); ops.push(...logs.ops); problems.push(...logs.problems); }
   return { ops, problems };
 }
 
@@ -115,6 +165,8 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
   for (const job of jobs) {
     const text = fileText(io, cfg, job);
     if (text === null) { problems.push(`${plistPath(cfg, job)} is not there (run daemons place first)`); continue; }
+    const logs = logProblem(io, text);
+    if (logs) { problems.push(`${labelOf(cfg, job)} could not start: ${logs} (run daemons place first)`); continue; }
     const s = jobState(io, cfg, job); const label = labelOf(cfg, job); const h = sha(text);
     if (s.error) { problems.push(`could not ask launchd about ${label}: ${s.error}`); continue; }
     if (s.loaded && rec[label] === h) continue;
@@ -219,6 +271,8 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     }
     item(why.length === 0, `${f} is root's 0644 and exactly the built job file`, why.join('; '));
     const s = jobState(io, cfg, job); const label = labelOf(cfg, job);
+    const { user, files } = jobLogs(plists[job]);
+    if (user !== null && files.length) { const logs = logProblem(io, plists[job]); item(logs === null, `${label}'s log files are ${user}'s, 0644, so launchd can open them`, logs ? `${logs}; run daemons place` : undefined); }
     item(s.loaded, `${label} is loaded`, s.error ?? 'not loaded');
     if (!s.loaded) continue;
     const text = fileText(io, cfg, job);
