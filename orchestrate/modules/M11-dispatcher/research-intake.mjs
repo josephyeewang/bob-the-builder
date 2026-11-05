@@ -223,14 +223,15 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now, h
     const mark = READY_FACT(c.id);
     // The card's own clock restarts at every move, and a failing route moves it every tick, so the wait's start is kept
     // on the fact, from the first held pass (L441 M2). A card has one set of bytes (researchHandler), so this start is
-    // theirs. A refused write leaves the card's clock for this pass, and the next pass tries again.
+    // theirs. While that write is refused the push's own time stands in, never the card's clock on a pushed card: that
+    // clock restarts at every move, and the next pass tries the write again (L528). A card not pushed yet doesn't move.
     const stateSince = rec.meta?.('card', c.id)?.stateSince;
     const seen = rec.read('fact', mark)?.doc;
     if (waiting && seen?.waiting_since === undefined) putFact(rec, mark, { ...seen, waiting_since: stateSince ?? new Date(now).toISOString() }, 'hold_waiting', seen);
     stillWaiting({
       now,
       waiting,
-      after: { since: rec.read('fact', mark)?.doc?.waiting_since ?? stateSince, limit: STILL_WAITING_MS },
+      after: { since: rec.read('fact', mark)?.doc?.waiting_since ?? (doc?.result === 'pushed' ? doc.at : stateSince), limit: STILL_WAITING_MS },
       read: () => rec.read('fact', mark)?.doc,
       tell: (fields) => {
         const pushed = doc?.result === 'pushed' && (stopped ? `it is on branch ${doc.branch} but could not go to review (${stopped})` : headed ? `it is on branch ${doc.branch} but has not merged` : `it is on branch ${doc.branch} but its card could not take the new head (${doc.head_refused ?? 'the card names another head'})`);

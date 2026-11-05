@@ -475,11 +475,12 @@ for (const [stop, at] of [['claim', 'ready'], ['started', 'claimed'], ['launch',
 // L441: the real lapse step between passes, as the tick runs it. A stop at `stop` that never clears. Six-hourly, so four
 // days stay quick: a claim goes stale in 10 minutes, so each tick still lapses what the last one moved.
 const TICK = 6 * 3_600_000;
-const stuck = async (stop, days) => {
+const stuck = async (stop, days, { clockOff = false } = {}) => {
   const v = routed();
   v.t.clock.t = v.T;
   const push = async () => { const k = v.rec.read('card', v.card); must(v.rec.write({ actor: 'workshop', entity: 'card', id: v.card, expectRev: k.rev, kind: 'push_head', doc: { ...k.doc, head: TIP } })); must(v.rec.write({ actor: 'workshop', entity: 'fact', id: v.fact, expectRev: 0, kind: 'push', doc: { result: 'pushed', branch: 'b', tip: TIP, at: new Date(v.T).toISOString(), from: 'research', product: PRODUCT } })); return { ok: true }; };
-  await researchCopyPass({ rec: refusing(v.rec, stop, Infinity), rules: v.t.rules, pushResearch: push, alert: outbox(v.rec, v.T), now: v.T, host: 'the-host' });
+  const stopped = () => { const r = refusing(v.rec, stop, Infinity); return clockOff ? refusing(r, 'hold_waiting', Infinity) : r; };
+  await researchCopyPass({ rec: stopped(), rules: v.t.rules, pushResearch: push, alert: outbox(v.rec, v.T), now: v.T, host: 'the-host' });
   const seen = new Set();
   let lapses = 0;
   const end = v.T + days * DAY;
@@ -487,10 +488,10 @@ const stuck = async (stop, days) => {
     v.t.clock.t = at;
     lapses += must(v.rec.lapseClaims(at)).lapsed.length;
     seen.add(v.state());
-    await v.passOn(refusing(v.rec, stop, Infinity), at);
+    await v.passOn(stopped(), at);
     await sendAlerts(v.rec, v.port, at);
   }
-  return { v, seen, lapses, end };
+  return { v, seen, lapses, end, stopped };
 };
 const lifted = async ({ v, end }) => {
   must(v.rec.lapseClaims(end));
@@ -545,6 +546,32 @@ test('L441 M2: a step refused for four days bounces ready and claimed, and is to
   assert.equal(r.v.state(), 'in_review');
   assert.equal(r.v.rec.read('fact', READY_FACT(r.v.card)).doc.waiting_since, undefined, 'over, so a later wait starts afresh');
 });
+
+test('L528 1: the wait\'s start can\'t be written on any pass, the card bounces, and the owner is still told, from the push', async () => {
+  const r = await stuck('started', 4, { clockOff: true });
+  assert.ok(r.lapses > 10);
+  assert.equal(r.v.rec.read('fact', READY_FACT(r.v.card))?.doc?.waiting_since, undefined, 'never written');
+  assert.equal(r.v.alerts.length, 3, 'at one, two and three days');
+});
+
+// L528 2: no lapse in the last stretch, so the pass that tells starts with the card in claimed or running, and the
+// card's own clock is too young to tell: only the kept start can.
+for (const [stop, at] of [['started', 'claimed'], ['launch', 'running']]) {
+  test(`L528 2: a card that starts the pass ${at} keeps the wait\'s start and is told on it`, async () => {
+    const r = await stuck(stop, 0.5);
+    const { v, end, stopped } = r;
+    assert.ok(r.lapses > 0, 'it moved, so its own clock restarted');
+    must(v.rec.lapseClaims(end));
+    await v.passOn(stopped(), end);
+    assert.equal(v.state(), at);
+    const late = v.T + DAY + 1;
+    v.t.clock.t = late;
+    await v.passOn(stopped(), late);
+    await sendAlerts(v.rec, v.port, late);
+    assert.equal(v.state(), at);
+    assert.equal(v.alerts.length, 1);
+  });
+}
 
 test('L441 M2: not told before the day, however many moves it made', async () => {
   const r = await stuck('started', 1);
