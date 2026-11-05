@@ -214,7 +214,9 @@ function readersAccept(text) {
 const M11_TYPE = { perState: 'object', shakedown: 'boolean', leadDailyCard: 'list', redRuns: 'list', proposalsOutbox: 'text' };
 const START_KINDS = ['editing', 'undo', 'overnight', 'script', 'readonly', 'review', 'audit', 'merge', 'undo_merge', 'lead', 'front_door'];
 
-const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      lead_daily_card: []\n';
+const RESEARCH_OFF_FIT = 'M11: approvals.plan_go.go_free.research_copy must be true at the first cutover';
+const RESEARCH_ON = 'research copies are on at the first cutover (L549)';
+const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      research_copy: true\n      lead_daily_card: []\n';
 // The fixture's daily-card list, [] (L96), made into a list of the patterns given.
 const DAILY = (...pats) => (t) => swap(t, '      lead_daily_card: []\n', `      lead_daily_card:\n${pats.map((p) => `        - ${p}\n`).join('')}`);
 const L120 = 'no daily-card list until the Dispatcher reads it with compile (L120)';
@@ -228,6 +230,8 @@ const VARIANTS = [
   ['no go_free', (t) => swap(t, GO_FREE_BLOCK, '')],
   ['go_free in the list form', (t) => swap(t, GO_FREE_BLOCK, '    go_free: [exact_reverse]\n')],
   ['go_free without exact_reverse', (t) => swap(t, '      exact_reverse: true\n', '')],
+  ['go_free without research_copy', (t) => swap(t, '      research_copy: true\n', ''), RESEARCH_ON],
+  ['research_copy: false', (t) => swap(t, 'research_copy: true', 'research_copy: false'), RESEARCH_ON],
   ['no lead_daily_card', (t) => swap(t, '      lead_daily_card: []\n', '')],
   ['one daily-card pattern', DAILY('docs/blueprint/daily/**'), L120],
   ['a null bot id', (t) => swap(t, 'bot_user_id: 1000099', 'bot_user_id: null')],
@@ -250,7 +254,7 @@ const VARIANTS = [
   // #79 put goFreeOn in goFreeKinds, so the readers refuse it too: the L115 M-C tripwire fired, and it is no longer a policy line.
   ['exact_reverse: false', (t) => swap(t, 'exact_reverse: true', 'exact_reverse: false')],
   ['ordinary: true, so the Lead\'s cards skip the go', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      ordinary: true\n'), 'go_free values: only the known kinds'],
-  ['research_copy: yes', (t) => swap(t, '      exact_reverse: true\n', '      exact_reverse: true\n      research_copy: yes\n'), 'go_free values: a flag is true or false'],
+  ['research_copy: yes', (t) => swap(t, '      research_copy: true\n', '      research_copy: yes\n'), 'go_free values: a flag is true or false'],
   ['an empty daily-card pattern', DAILY("''"), 'M10\'s pattern rule (L96 m-3)'],
   ['an unclosed { in a daily-card pattern', DAILY("'docs/{a'"), 'M10\'s pattern rule (L96 m-3)'],
   ['a non-ASCII daily-card pattern', DAILY('docs/dé/**'), 'M10\'s pattern rule (L96 m-3)'],
@@ -435,13 +439,18 @@ test('go_free values are read: only the known kinds, a flag exactly true or fals
   const by = Object.fromEntries(VARIANTS.map(([n, m]) => [n, m(FIRST)]));
   assert.deepEqual(fit(by['exact_reverse: false'], ENTRY), ['M6: approvals.plan_go.go_free.exact_reverse must be true at the first cutover']);
   assert.deepEqual(fit(by['ordinary: true, so the Lead\'s cards skip the go'], ENTRY), ['M9: approvals.plan_go.go_free.ordinary is not a go-free kind (only exact_reverse, research_copy, lead_daily_card)']);
-  assert.deepEqual(fit(by['research_copy: yes'], ENTRY), ['M9: approvals.plan_go.go_free.research_copy must be true or false']);
-  // The text a rules file gives ("true") is read as true; research_copy: true is a known kind.
-  assert.deepEqual(fit(swap(FIRST, '      exact_reverse: true\n', '      exact_reverse: true\n      research_copy: true\n'), ENTRY), []);
+  assert.deepEqual(fit(by['research_copy: yes'], ENTRY), ['M9: approvals.plan_go.go_free.research_copy must be true or false', RESEARCH_OFF_FIT]);
+  // Left out or false is a fit problem naming the key: a quiet "off" would lose research copies unseen (L549).
+  assert.deepEqual(fit(by['go_free without research_copy'], ENTRY), [RESEARCH_OFF_FIT]);
+  assert.deepEqual(fit(by['research_copy: false'], ENTRY), [RESEARCH_OFF_FIT]);
+  // The text a rules file gives ("true") is read as true; research_copy: true is a known kind, and FIRST sets it (L514).
+  assert.deepEqual(fit(FIRST, ENTRY), []);
   const rules = rulesOf(FIRST);
   assert.equal(goFreeOn(rules, 'sample-app', 'exact_reverse'), true);
   assert.equal(goFreeOn(rulesOf(by['one daily-card pattern']), 'sample-app', 'lead_daily_card'), true, 'a pattern kind is go-free when its value is a list');
-  assert.equal(goFreeOn(rules, 'sample-app', 'research_copy'), false, 'a kind the map does not name');
+  assert.equal(goFreeOn(rules, 'sample-app', 'research_copy'), true);
+  assert.equal(goFreeOn(rulesOf(swap(FIRST, '      research_copy: true\n', '')), 'sample-app', 'research_copy'), false, 'a kind the map does not name');
+  assert.equal(goFreeOn(rulesOf(swap(FIRST, 'research_copy: true', 'research_copy: false')), 'sample-app', 'research_copy'), false, 'a kind turned off');
   assert.equal(goFreeOn(rulesOf(swap(FIRST, '      lead_daily_card: []\n', '      lead_daily_card: docs/x\n')), 'sample-app', 'lead_daily_card'), false, 'a pattern kind whose value is not a list');
   assert.equal(goFreeOn(rulesOf(by['exact_reverse: false']), 'sample-app', 'exact_reverse'), false);
   assert.equal(goFreeOn(rules, 'sample-app', 'lead_daily_card'), false, '[] means no daily card, so not go-free (L115 m-F)');
@@ -497,7 +506,7 @@ test('go_free in the list form is refused: one map serves goFreeKinds and M11\'s
   // The map form: both readers get what they need from the same file.
   const rules = rulesOf(FIRST);
   // lead_daily_card: [] names no daily card, so it is not go-free (goFreeOn, L115 m-F; #79).
-  assert.deepEqual(goFreeKinds(rules, 'sample-app'), ['exact_reverse']);
+  assert.deepEqual(goFreeKinds(rules, 'sample-app'), ['exact_reverse', 'research_copy']);
   assert.deepEqual(need(rules, M11_KEYS.leadDailyCard, { product: 'sample-app', type: 'list' }), []);
 });
 

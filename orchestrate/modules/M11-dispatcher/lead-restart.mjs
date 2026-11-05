@@ -8,22 +8,40 @@
 //   3. the outbox intake checks the handoff is under context.handoff_cap.role, estimated as
 //      ceil(utf-8 bytes / 4) (`handoffVet`), and applies it; an oversize one is not used;
 //   4. once applied: a `handoff` entry, the old session stopped (its transcript kept), the new Lead
-//      started on the same profile with the handoff first.
+//      started on the same profile with the handoff first, and its launch record written (below).
 // A missing or oversize handoff gets one re-ask; after that the old Lead keeps running and Joe is
 // told. A Lead is never stopped without an applied handoff. A Lead read above
 // context.lead.hard + 50k means Claude Code's own compaction did not fire: alert once (m9).
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
-import { tellThen } from './alerts.mjs';
-import { ENTITIES } from '../../shared/record.mjs';
+import { tellThen, writeFrom } from './alerts.mjs';
+import { holdAlert } from './pass.mjs';
+import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
 import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
 export const HARD_MARGIN = 50_000;
 const SID = /^[A-Za-z0-9-]+$/;
+const namesSession = (sid) => typeof sid === 'string' && SID.test(sid);
 const iso = (ms) => new Date(ms).toISOString();
+
+/**
+ * The Lead's launch record (R-0b-170, L460), written at every Lead start: the main commit it started on, read before the
+ * start. A plan takes its main_commit from here, so a Lead with no record can't plan, and the owner is told why.
+ * `head` is a sha, or null when it could not be read. Only a restart calls this today: nothing starts a Lead for the
+ * first time yet, and until that is wired (on the cutover list) a first-started Lead has no record and its plans are held.
+ */
+export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = null }) {
+  const named = namesSession(sessionId);
+  const w = !named ? { ok: false, reason: 'the start named no session' }
+    : !/^[0-9a-f]{40}$/.test(String(head)) ? { ok: false, reason: 'the main commit could not be read' }
+      : rec.write({ actor: 'dispatcher', entity: 'launch', id: `lead-${sessionId}-${now}`, expectRev: 0, kind: 'launch',
+        doc: { session_id: sessionId, role: 'lead', card: null, head, rev: null, product, launched_at: iso(now) } });
+  if (!w.ok) holdAlert({ rec, cause: named ? `lead-launch-${sessionId}` : 'lead-launch-no-session', text: `${named ? `the Lead ${sessionId}` : 'a Lead'} started with no launch record, so its plans will be refused: ${w.reason}`, alert, now });
+  return w;
+}
 
 /** The handoff estimate (m8): ceil(utf-8 bytes / 4). */
 export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text), 'utf8') / 4);
@@ -61,9 +79,9 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
 /**
  * One pass for one Lead. `size` = readSize() of its transcript; `inFlight` = leadInFlight()'s
  * answer; `send(text)` = sendSafe to this Lead -> { outcome }; `stopSession()`, `startLead({
- * handoff })` -> { ok, reason }; `alert(text)`. Returns the action taken.
+ * handoff })` -> { ok, reason, sessionId }; `mainSha({ product })` -> sha; `alert(text)`. Returns the action taken.
  */
-export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, alert }) {
+export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, mainSha, alert }) {
   const sid = lead.sessionId;
   if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
   const soft = need(rules, KEYS.leadSoft);
@@ -71,6 +89,20 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   const cap = need(rules, KEYS.handoffCapRole);
   let cur = rec.read('fact', RESTART_FACT(sid));
   let st = cur?.doc ?? { phase: 'none', reasks: 0 };
+  const pendingRefused = (id, what) => holdAlert({ rec, cause: `lead-launch-pending-${id}`, text: `the Lead ${id} has ${what}`, alert, now });
+  // Main is read before the start, so the record names the commit the new Lead started on, not one that landed after.
+  const startNext = async () => {
+    const product = lead.product ?? null;
+    let head = null;
+    try { head = await mainSha({ product }); } catch { head = null; }
+    let r;
+    try { r = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { r = { ok: false, reason: e.message }; }
+    if (r?.ok && !recordLeadLaunch({ rec, now, alert, sessionId: r.sessionId, head, product }).ok && namesSession(r.sessionId)) {
+      const w = writeFrom(rec, RESTART_FACT(r.sessionId), null, { phase: 'none', reasks: 0, launch_pending: true }, 'lead_launch_pending');
+      if (!w?.ok) pendingRefused(r.sessionId, `no launch record, and its retry could not be saved, so nothing will try again (${w?.reason ?? 'no answer'})`);
+    }
+    return r;
+  };
   const save = (doc, kind) => {
     const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT(sid), expectRev: cur?.rev ?? 0, doc: { ...st, ...doc, changed_at: iso(now) }, kind });
     if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
@@ -83,6 +115,23 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     return 'gave up; the old Lead keeps running';
   };
 
+  // A start that left no launch record is tried again each pass for that session (L490 m5). Main is read now, so a commit
+  // that landed since the start can be named; a plan made on an older one is still checked by the reviewer against main.
+  if (st.launch_pending) {
+    // A record that is already there means only the flag failed to clear: a second record would be one more each pass.
+    let recorded = Boolean(leadLaunchHead(rec, sid));
+    if (!recorded) {
+      const product = lead.product ?? null;
+      let head = null;
+      try { head = await mainSha({ product }); } catch { head = null; }
+      recorded = recordLeadLaunch({ rec, now, alert, sessionId: sid, head, product }).ok;
+    }
+    if (recorded) {
+      const w = save({ launch_pending: false }, 'lead_launch_pending');
+      if (!w.ok) pendingRefused(sid, `a launch record, but its retry mark could not be cleared (${w.reason})`);
+    }
+  }
+
   const noSize = !size || size.tokens == null;
   // Told only once sent (audit 0b-6 r5 MAT-2).
   if (!noSize && size.tokens > hard + HARD_MARGIN && !st.hard_told) {
@@ -94,8 +143,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
   // whatever the old transcript says; Joe was told once.
   if (st.phase === 'start_failed') {
-    let again;
-    try { again = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { again = { ok: false, reason: e.message }; }
+    const again = await startNext();
     if (!again?.ok) {
       // Told once delivered (L130): a first alert the queue refused is asked again here, each pass.
       if (!st.start_failed_told) tellThen(alert, startFailedText(sid, again?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });
@@ -153,8 +201,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
       if (!st.stop_told) tellThen(alert, `the Lead ${sid} handed off but could not be stopped (${stopped?.reason ?? 'no answer'}); no new Lead starts until it is`, { fact: RESTART_FACT(sid), fields: { stop_told: true }, kind: 'lead_stop_failed' });
       return 'old Lead not stopped; tried again next pass';
     }
-    let started;
-    try { started = await startLead({ handoff: `handoff-${sid}` }); } catch (e) { started = { ok: false, reason: e.message }; }
+    const started = await startNext();
     if (!started?.ok) {
       save({ phase: 'start_failed', stopped_at: iso(now) }, 'lead_start_failed');
       tellThen(alert, startFailedText(sid, started?.reason), { fact: RESTART_FACT(sid), fields: { start_failed_told: true }, kind: 'lead_start_failed_alert' });
