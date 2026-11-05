@@ -523,7 +523,7 @@ test('L462 M1: the age is from the first push, then the raise, then the ask itse
   assert.equal(w.sent.length, 1, 'only the ask\'s own time is left');
 });
 
-test('L462 M1: on real M2 scheduling, one push, then the owner hears daily with no answer', async () => {
+test('L462 M1, L523: on real M2 scheduling, one push a day, and the owner hears daily with no answer', async () => {
   const w = world();
   card(w, 'A');
   await pass(w);
@@ -532,7 +532,7 @@ test('L462 M1: on real M2 scheduling, one push, then the owner hears daily with 
   mkdirSync(w.t.ctx.stateDir, { recursive: true });
   w.t.ctx.push = async (e) => { pushes.push(e); return true; };
   for (let i = 0; i < 4 * 48; i += 1) { later(w, HOUR / 2); await schedulePass(w.t.ctx); await pass(w); }
-  assert.equal(pushes.length, 1, 'M2 pushes a go ask once');
+  assert.equal(pushes.length, 4, 'one push a day over four days, never one a pass');
   assert.equal(asks(w).length, 1);
   assert.ok(w.sent.filter((s) => s.includes('card A')).length >= 3, w.sent.join(' | '));
 });
