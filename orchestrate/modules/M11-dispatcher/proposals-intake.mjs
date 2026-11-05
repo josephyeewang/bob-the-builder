@@ -44,18 +44,21 @@
 //   - a proposal goes to the docs-lane check, run on the push script's real changed files for its bundle's net change
 //     (L77 m1): `docsCheck`, built by proposal-route.mjs. Until it is passed in, every proposal is refused
 //     with FIRST_CUTOVER before any review starts, which fails closed. A bundle is taken in only with its proposal.
-// At the second cutover a proposal goes to review (`toReview`, M5), also part 2; until it is passed in, refused.
+// A proposal that passes goes to review (`toReview`, built by proposal-route.mjs, at either cutover); until it is
+// passed in, refused. Its way to review after that is proposalRoutePass's, not this file's.
 // A docs check that could not finish, or met a cause that may pass by itself (a pause, one read or rules error, the
 // bundle moving during the check), answers { retry }: the file waits for the next pass, its cause on a wait fact, and
 // Joe is told at once, then daily while it waits (L325 m2, L597). Only a real answer about the change is final; the
 // refusal names it (MAIN merges code by hand, or the push script refused the bundle). A proposal refused over its
 // bundle is looked at again once the bundle held is other bytes, and a held bundle never handed on may be replaced.
+// A proposal the push refused for good (routeRefused) gives its card back, so its two names take new bytes (L549).
 // A kind whose handler is not passed in is left untouched and unrecorded, so it is taken in once the handler lands.
 //
 //   proposalsPass({ rec, rules, products, ownerUid, wait, alert, note, handlers, docsCheck, toReview, now }) → [result]
 //   proposalsReadBack({ dir, ownerUid, canRead, canWrite, settings }) → [] | every problem (Joe's setup batch)
 
 import { createHash } from 'node:crypto';
+import { routeRefused } from './proposal-route.mjs';
 import { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants as C } from 'node:fs';
 import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
@@ -226,9 +229,9 @@ export function stageOf(rules, product) {
  *   and again just before the claim; a card refusal is keyed on the card's revision, so it is looked at again once the
  *   card changes. A card that can't be read keeps the file unused, told once.
  * `docsCheck({ product, card, bundle })` → null | reason | { refuse: reason } | { retry: reason } (proposal-route.mjs), and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
- *   `cardRev` is the card's revision at the last check: part 2's card move must expect it, so a card changed since is refused.
- *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
- *   part 2's; not passed in, every proposal is refused.
+ *   `cardRev` is the card's revision at the last check: the card move expects it, so a card changed since is refused.
+ *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so the push takes the bytes that were checked.
+ *   Not passed in, every proposal is refused. Its refusal is keyed on the card, so it is looked at again once the card changes.
  * Returns what happened to each file.
  */
 export async function proposalsPass({ rec, rules, products, ownerUid, wait, alert, note = () => {}, handlers = {}, docsCheck, toReview,
@@ -430,8 +433,10 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (prev.doc.sha256 === hash && was === 'refused' && !(cardKey !== null && cardKey !== prev.doc.card_key) && !bundleMoved) { r.refused = prev.doc.why; continue; }
       // L78 n2: a heartbeat's new bytes are a new poll. Every other kind: new bytes on a used name are refused, and so
       // is a held bundle's, once its bytes may have gone on with a proposal. A bundle held but never handed on is not
-      // used, so a corrected one replaces it (the header's rule; L597 (2)).
-      const replaceable = ['refused', 'interrupted'].includes(was) || (parsed.kind === 'bundle' && was === 'held' && !mayHaveGone(prev.doc.sha256));
+      // used, so a corrected one replaces it (the header's rule; L597 (2)). A proposal the push refused for good: the
+      // card is ready again, so its two names take new bytes (L549).
+      const refiled = ['proposal', 'bundle'].includes(parsed.kind) && routeRefused(rec, parsed.id);
+      const replaceable = ['refused', 'interrupted'].includes(was) || (parsed.kind === 'bundle' && was === 'held' && !mayHaveGone(prev.doc.sha256)) || refiled;
       if (prev.doc.sha256 !== hash && parsed.kind !== 'heartbeat' && !replaceable) {
         r.refused = 'the same name with new content';
         // Told once for these bytes: the mark lands when the alert is sent, and one still waiting is not queued again.
@@ -531,7 +536,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
           refuse(`${FIRST_CUTOVER} (${shownName(docs)})`, hash, { ...extra, card_key: proposalCardKey(rec, card) }); continue;
         }
       }
-      if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
+      if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not wired in yet (R-0b-162)', hash); continue; }
       useBundle = bundle?.sha256 ?? null;
       use = () => toReview({ rec, product, card, cardRev, proposal: fenceFor('proposal', file.text).fenced, bundle });
     } else {
@@ -559,7 +564,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (done?.ok) {
       put({ sha256: hash, state: 'applied', applied_at: new Date(now).toISOString() }, 'proposal_applied');
       r.applied = true;
-    } else refuse(done?.reason ?? 'no answer', hash);
+    } else refuse(done?.reason ?? 'no answer', hash, parsed.kind === 'proposal' ? { card_key: proposalCardKey(rec, parsed.id) } : null);
   }
   // Files of a kind nothing takes in yet sit in the folder: told once per product and kind, and cleared when none wait.
   for (const [product, kinds] of waiting) {
