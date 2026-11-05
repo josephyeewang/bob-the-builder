@@ -1350,6 +1350,7 @@ test('L325 m2: a refusal that may pass by itself says retry: true and files that
     ['GitHub unreadable', async (w) => ({ testRemote: () => join(w.root, 'nowhere.git') }), /^could not read GitHub$/],
     ['fetch failed', async (w) => { await gitOk(['update-ref', '-d', 'refs/heads/main'], { gitDir: w.gh }); return {}; }, /^could not fetch main from GitHub$/],
     ['the mirror', async (w) => { w.values['product.mirror'] = join(w.root, 'no-mirror'); return {}; }, /^mirror: /],
+    ['a mirror that fails its own check', async (w) => { mkdirSync(join(w.mirror, 'hooks'), { recursive: true }); writeFileSync(join(w.mirror, 'hooks', 'post-update'), '#!/bin/sh\n'); return {}; }, /^mirror: mirror has hooks: post-update$/],
     ['the start gate', async () => ({ workflowRule: async () => ({ ok: false, reason: 'no rule' }) }), /^the start gate is shut: /],
     ['GitHub refused', async (w) => { const h = join(w.gh, 'hooks', 'pre-receive'); writeFileSync(h, '#!/bin/sh\nexit 1\n'); chmodSync(h, 0o755); return {}; }, /^GitHub refused the push$/],
   ];
