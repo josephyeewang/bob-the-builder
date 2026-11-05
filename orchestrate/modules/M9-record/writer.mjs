@@ -717,7 +717,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         const since = store.meta(entity, d.id)?.stateSince;
         if (lim === undefined) { out.push({ entity, id: d.id, state: d.doc.state, since, limit: null, corrupt: true, reason: `the rules have no time limit for ${entity} ${d.doc.state}` }); continue; }
         if (lim.minutes) {
-          if (nowMs > Date.parse(since) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
+          if (nowMs > (pastTime(since, nowMs) ?? -Infinity) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
         } else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {
           out.push({ entity, id: d.id, state: d.doc.state, since, limit: 'next_check', next_check: d.doc.wait.next_check });
         }
