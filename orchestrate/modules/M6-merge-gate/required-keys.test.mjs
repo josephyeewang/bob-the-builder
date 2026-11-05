@@ -107,7 +107,8 @@ test('L96 m-1: required_checks with a blank name or a name given twice is a rule
   const P = 'sample-app';
   const problems = (list) => policyProblems(fakeRules({ values: { 'product_profile.required_checks': list } }), P).filter((l) => /required_checks/.test(l));
   for (const bad of [[''], ['  '], ['build', ' ']]) assert.deepEqual(problems(bad), ['M6: product_profile.required_checks must be a list of check names'], JSON.stringify(bad));
-  for (const bad of [['build', 'build'], ['build', ' build ']]) assert.deepEqual(problems(bad), ['M6: product_profile.required_checks names a check twice'], JSON.stringify(bad));
+  for (const bad of [[' build'], ['build '], ['test', ' build ']]) assert.deepEqual(problems(bad), ['M6: product_profile.required_checks has spaces around a check name, and the gate matches names exactly'], JSON.stringify(bad));
+  for (const bad of [['build', 'build']]) assert.deepEqual(problems(bad), ['M6: product_profile.required_checks names a check twice'], JSON.stringify(bad));
   assert.deepEqual(problems(['build', 'test']), []);
 });
 

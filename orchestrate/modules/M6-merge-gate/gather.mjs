@@ -149,7 +149,9 @@ export async function statusesAt(gh, base, sha) {
 
 // The rules' required checks, or null. An empty list is no list: with no check named, every check of the list passes
 // with none run, so main would read as green and an undo card, which skips refusal 1, would merge (L96 m-1).
-export const namedChecks = (list) => (Array.isArray(list) && list.length ? list : null);
+// The gate compares a check's name exactly, so a name with spaces around it would never match anything.
+export const checkName = (c) => typeof c === 'string' && c !== '' && c === c.trim();
+export const namedChecks = (list) => (Array.isArray(list) && list.length && list.every(checkName) ? list : null);
 
 // main is green when every required check ran there and passed, and no other check or status is red.
 async function mainGreen(gh, base, sha, required, ignoredList) {

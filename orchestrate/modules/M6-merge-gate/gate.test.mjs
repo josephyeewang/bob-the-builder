@@ -157,8 +157,8 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
 });
 
 // An undo skips refusal 1, so refusal 2 is what stops it: main is never green on a list that names no check.
-test('L96 m-1: an undo card does not merge when the rules name an empty list of required checks, or none', async () => {
-  for (const list of [[], null]) {
+test('L96 m-1: an undo card does not merge when the rules name an empty list of required checks, or none, and its hold says so (L531)', async () => {
+  for (const list of [[], null, ['  '], ['test', ''], [' test']]) {
     const w = world();
     verifiedCard(w);
     await gatePass(w.ctx);
@@ -173,7 +173,7 @@ test('L96 m-1: an undo card does not merge when the rules name an empty list of 
     await gatePass(w.ctx);
     const u = mergeOf(w, 'U-1');
     assert.notEqual(u.doc.state, 'merged', JSON.stringify(list));
-    assert.match(JSON.stringify(u.doc), /2: main's checks could not be read/, JSON.stringify(u.doc));
+    assert.match(JSON.stringify(u.doc), /2: the rules name no required checks/, JSON.stringify(u.doc));
   }
 });
 
