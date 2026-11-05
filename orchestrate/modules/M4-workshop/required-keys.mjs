@@ -9,19 +9,21 @@
 //   policyProblems(rules, product) → [] when a push can use these rules, else every reason it can't
 
 export const REQUIRED_KEYS = Object.freeze([
-  'product.repo',             // with none, every push is refused
-  'product.mirror',           // the mirror the scan and the push read from
-  'product.onboarded',        // must be true, or every push is refused
-  'product.allowed_binaries', // says which images may go; [] allows none, and a missing list must not mean that unseen
-  'outside_check.workflow',   // the pinned workflow the start gate compares the outside check's run with
   'product.vercel_project',   // the project the start gate's Vercel facts must name
 ]);
 
+// L568: repo, mirror, onboarded and the outside check's workflow come from code, not the rules file, and #237 moves
+// push.mjs there. When it lands, they leave this list with their reads.
 export const OPTIONAL_KEYS = Object.freeze([
+  'product.repo',
+  'product.mirror',
+  'product.onboarded',
+  'outside_check.workflow',
+  'product.allowed_binaries', // missing allows no images
   'product.default_branch',   // missing reads as main
   'proposals.outbox',         // read only for a card that hands in a proposal; a missing one is refused there
 ]);
 
-export function policyProblems(rules, product) {
-  return rules.flag('product.onboarded', { product }) === true ? [] : ['product.onboarded must be true: anything else and every push is refused'];
+export function policyProblems() {
+  return [];
 }

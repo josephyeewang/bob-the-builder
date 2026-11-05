@@ -66,20 +66,14 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     'context.handoff_cap.role is missing (M11 reads it)',
     'context.worker.split_after_compactions is missing (M11 reads it)',
     'proposals.outbox is missing (M11 reads it)',
-    ...['product.repo', 'product.mirror', 'product.onboarded', 'product.allowed_binaries', 'outside_check.workflow', 'product.vercel_project'].map((k) => `${k} is missing (M4 reads it)`),
+    'product.vercel_project is missing (M4 reads it)',
   ]);
 });
 
 test('each missing or wrong piece is named', () => {
   const cases = [
-    // The Workshop's push keys (L601, the audit of #244 M-2): with any one gone, every push would be refused.
-    [swap(FIRST, '  repo: sample-org/sample-app\n', ''), 'product.repo is missing (M4 reads it)'],
-    [swap(FIRST, '  mirror: /srv/sample-app/mirror.git\n', ''), 'product.mirror is missing (M4 reads it)'],
-    [swap(FIRST, '  onboarded: true\n', ''), 'product.onboarded is missing (M4 reads it)'],
-    [swap(FIRST, '  onboarded: true\n', '  onboarded: false\n'), 'product.onboarded must be true: anything else and every push is refused'],
-    [swap(FIRST, '  allowed_binaries: []\n', ''), 'product.allowed_binaries is missing (M4 reads it)'],
+    // The Workshop's one key from the rules file (L601, L612): with it gone, the start gate shuts every push.
     [swap(FIRST, '  vercel_project: sample-app\n', ''), 'product.vercel_project is missing (M4 reads it)'],
-    [swap(FIRST, 'outside_check:\n  workflow: .github/workflows/outside-check.yml\n', ''), 'outside_check.workflow is missing (M4 reads it)'],
     [swap(FIRST, 'product:\n  cutover_stage: first\n', ''), 'product.cutover_stage must say first'],
     [swap(FIRST, 'cutover_stage: first', 'cutover_stage: second'), 'product.cutover_stage must say first'],
     // The one "on" switch (L204-b, L209): missing, another word, another case, a trailing space or another type is off.

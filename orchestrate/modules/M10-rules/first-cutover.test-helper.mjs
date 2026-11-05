@@ -59,8 +59,6 @@ approvals:
 proposals:
   heartbeat_stale_min: 30
   outbox: /srv/sample-app/proposals
-outside_check:
-  workflow: .github/workflows/outside-check.yml
 outage:
   min_dead: 2
   share: 0.5
@@ -81,9 +79,8 @@ export const TIMEOUT_MINUTES = ['cancel_grace_min: 10', 'park_wait_min: 60', 'de
   'checking_max_min: 60', 'reporting_max_min: 30', 'in_review_no_reviewer_min: 60', 'front_door_stuck_min: 30',
   'usage_unknown_max_min: 30'].map((l) => `  ${l}\n`).join('');
 
-// The product keys the Workshop's push reads (M4 required-keys.mjs, L601).
-export const PUSH_KEYS = ['repo: sample-org/sample-app', 'mirror: /srv/sample-app/mirror.git', 'onboarded: true', 'allowed_binaries: []',
-  'vercel_project: sample-app'].map((l) => `  ${l}\n`).join('');
+// The one product key the Workshop's push needs from the rules file (M4 required-keys.mjs, L612).
+export const PUSH_KEYS = '  vercel_project: sample-app\n';
 
 // The sample made into a first-cutover entry: no lead lane, no editing, no import list, the modules' keys given.
 export const FIRST = [
