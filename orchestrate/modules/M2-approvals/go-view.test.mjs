@@ -41,9 +41,8 @@ const rowsFor = (id, tier, n = 1) => Object.fromEntries(Array.from({ length: n }
   { id: `${id}-R${i + 1}`, what: `row ${i + 1}`, module: 'M1', tier, done_when: `the ${id} check ${i + 1} passes\nwith its second line`, status: 'planned' }]));
 
 async function raise(w, id, { tier, files, rows = 1, planCheck, noPass = false } = {}) {
-  const sha = String(id).charCodeAt(1).toString(16).padStart(2, '0').repeat(32).slice(0, 64);
   const rs = rowsFor(id, tier, rows);
-  leadCard(w.t, id, { what: `Card ${id}`, done_when: doneBar(rs), files, tier, ...(tier === 1 ? { plan_sha256: sha, main_commit: w.M0 } : {}) });
+  const { plan_sha256: sha } = leadCard(w.t, id, { what: `Card ${id}`, done_when: doneBar(rs), files, tier, ...(tier === 1 ? { plan_sha256: 'from the plan file', main_commit: w.M0 } : {}) });
   return raiseGo(w.t.ctx, { cardId: id, rows: rs, view: w.view, mainSha: w.M0, title: 'a title nobody reviewed', ...(tier === 1 && !noPass ? { planCheck: planCheck ?? PASS(w.t.ctx, id, sha) } : {}) });
 }
 
