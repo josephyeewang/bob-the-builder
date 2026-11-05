@@ -111,9 +111,11 @@ test('L557: an alert that is refused keeps no mark, and the next pass tries agai
   const w = world('A');
   writeFileSync(w.path('A'), 'x');
   const lostAlert = fakeAlert({ answer: false });
-  tellLostCards({ rec: w.t.record, alert: lostAlert, now: w.T0, report: (l) => assert.fail(l) });
-  tellLostCards({ rec: w.t.record, alert: lostAlert, now: w.T0 + 60_000, report: (l) => assert.fail(l) });
+  const lines = [];
+  tellLostCards({ rec: w.t.record, alert: lostAlert, now: w.T0, report: (l) => lines.push(l) });
+  tellLostCards({ rec: w.t.record, alert: lostAlert, now: w.T0 + 60_000, report: (l) => lines.push(l) });
   assert.equal(lostAlert.calls.length, 2);
+  assert.equal(lines.length, 2, 'each refused send is reported');
 });
 
 test('L557: it only tells: no card is written, and the corrupt file is left as it was', () => {
@@ -155,4 +157,13 @@ test('L575: a lost card reaches the owner through a real tick', async () => {
   writeFileSync(w.path('A'), 'x');
   await tick({ rec: w.t.record, rules: rulesWith({}), now: w.T0, ports: { alert: w.alert } });
   assert.deepEqual(w.alert.texts.filter((t) => /can't be read/.test(t)).map((t) => t.slice(0, 19)), ["card A can't be rea"]);
+});
+
+test('L594: a tell the queue refuses is reported, and nothing is marked told', () => {
+  const w = world('A');
+  writeFileSync(w.path('A'), 'x');
+  const lines = [];
+  tellLostCards({ rec: w.t.record, alert: () => false, now: w.T0, report: (l) => lines.push(l) });
+  assert.deepEqual(lines, ['the lost-cards alert could not be queued; it is tried again next pass']);
+  assert.equal(w.t.record.read('fact', LOST_CARDS_FACT), null);
 });

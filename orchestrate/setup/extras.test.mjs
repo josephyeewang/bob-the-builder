@@ -617,7 +617,7 @@ test('L173 n1 prove-token says what it proved (pull requests only) and tells Joe
   const w = withToken(); github(w);
   const r = await prove(w); assert.equal(r.code, 0, r.text);
   assert.match(r.text, /What this proved: the token cannot write pull requests\. It did not prove the token cannot change code/);
-  assert.match(r.text, /Fine-grained tokens/); assert.match(r.text, /Metadata = Read-only \(GitHub adds it by itself; fine if absent\), Contents = Read-only.*Pull requests = Read-only, and nothing else/); assert.match(r.text, /only the one repository/);
+  assert.match(r.text, /Fine-grained tokens/); assert.match(r.text, /Metadata = Read-only \(GitHub adds it by itself; fine if absent\), Contents = Read-only.*Pull requests = Read-only, Checks = Read-only, Commit statuses = Read-only .*and nothing else/); assert.match(r.text, /only the one repository/);
   const bad = withToken(); github(bad, { write: 200 }); const f = await prove(bad);
   assert.equal(f.code, 1); assert.doesNotMatch(f.text, /What this proved/);
   const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');

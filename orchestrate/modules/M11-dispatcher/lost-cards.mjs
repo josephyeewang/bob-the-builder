@@ -32,7 +32,7 @@ export function tellLostCards({ rec, alert, now, report }) {
   const ids = new Set(rec.diary({ since: 0 }).flatMap((l) => l.writes ?? []).filter((w) => w.entity === 'card').map((w) => w.id));
   const lost = [...ids].filter((id) => { if (told.has(id)) return false; const c = rec.read('card', id); return !c || c.corrupt; }).sort();
   const since = lost.join(' ');
-  stillWaiting({
+  const w = stillWaiting({
     now,
     ...(lost.length ? { since } : {}),
     waiting: lost.length > 0,
@@ -40,5 +40,6 @@ export function tellLostCards({ rec, alert, now, report }) {
     tell: (fields) => { const text = lostText(lost); return tellThen(alert, text, { fact: LOST_CARDS_FACT, fields: { text, ...fields }, kind: 'hold_alert' }); },
     clear: () => clearHold(rec, LOST_CARDS_FACT, now, report),
   });
+  if (w.did === 'unsent') report('the lost-cards alert could not be queued; it is tried again next pass');
   return { lost };
 }
