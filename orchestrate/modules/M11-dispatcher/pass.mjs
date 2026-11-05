@@ -165,9 +165,12 @@ const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? '
 const factDoc = (rec, id) => rec.read('fact', id);
 // `base` is the doc the caller read: only what the caller changed is written, at the version read and again on a
 // conflict, so a mark written meanwhile is kept (writeFrom, L335 m-1). `force` names keys written anyway: a clear's told fields.
-const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, id, base, doc, kind, { force });
+export const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, id, base, doc, kind, { force });
 // The fields a told mark writes on the facts cleared here (L354 item 3).
 const TOLD = ['told_cause', 'told_at'];
+/** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
+export const writeLaunch = (rec, { sessionId, role, kind, card, head, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+  doc: { session_id: sessionId, role, kind, card, head: head ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
@@ -636,7 +639,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
   // The Lead's own daily card is never started as a worker (audit MAT-4; M9 lets only the Lead make one). A fix
   // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
-  // either: its commit is the owner's file, copied mechanically (research-intake.mjs; lane 2's copier, L286).
+  // either: its commit is the owner's file, copied mechanically (M4 push.mjs pushResearch, L286).
   const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
   const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
@@ -738,8 +741,7 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
-    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
-      doc: { session_id: sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, copy: l.copy ?? null, launched_at: iso(now) } });
+    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
