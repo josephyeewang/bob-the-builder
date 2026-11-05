@@ -192,3 +192,29 @@ test('S4: a value of the other key is not taken: the two lists are read apart', 
   assert.match(parsePolicy(withRule('active', 'start', 'undo_only')).reason, /product_state_rules\.active\.start must be one of/);
   assert.match(parsePolicy(withRule('active', 'tier1_merge', 'none')).reason, /product_state_rules\.active\.tier1_merge must be one of/);
 });
+
+test('S4: the two lists hold exactly these values: a widened list fails here (L562 m1)', () => {
+  assert.deepEqual([...START_RULES], ['within_caps', 'editing_cap_1', 'none']);
+  assert.deepEqual([...TIER1_MERGE_RULES], ['rules', 'tier1_hours_only', 'undo_only']);
+});
+
+// Each way of leaving a state's rule without a value. A misspelt key is the rule being absent.
+const withoutRule = (state, key) => {
+  const line = new RegExp(`(\\n  ${state}:\\n(?:    .*\\n)*?)    ${key}: .*\\n`);
+  const named = new RegExp(`(\\n  ${state}:\\n(?:    .*\\n)*?    )${key}:`);
+  return [fixture.replace(line, '$1'), withRule(state, key, '~'), withRule(state, key, 'null'), withRule(state, key, ''), fixture.replace(named, `$1${key.replace('_', '')}:`)];
+};
+
+test('L562 M1: a tier1_merge with no value fails the whole read and names the key, in every state', () => {
+  for (const state of PRODUCT_STATES) for (const text of withoutRule(state, 'tier1_merge')) {
+    assert.notEqual(text, fixture);
+    const r = parsePolicy(text);
+    assert.equal(r.ok, false, state);
+    assert.match(r.reason, new RegExp(`product_state_rules\\.${state}\\.tier1_merge must be one of ${TIER1_MERGE_RULES.join(', ')}`));
+  }
+});
+
+test('L562: a start with no value still passes this read: the fit check names it (M9\'s keys)', () => {
+  for (const state of PRODUCT_STATES) for (const text of withoutRule(state, 'start')) assert.equal(parsePolicy(text).ok, true, state);
+});
+

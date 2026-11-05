@@ -965,10 +965,12 @@ function check(raw) {
   for (const s of PRODUCT_STATES) {
     const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
     // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
-    // doors that read it, so a typo could hold one door and pass another. A missing `start` stays M9's required-keys check; a missing `tier1_merge` the engine denies as not a known rule.
-    for (const [key, known] of [['start', START_RULES], ['tier1_merge', TIER1_MERGE_RULES]]) {
+    // doors that read it, so a typo could hold one door and pass another. `tier1_merge` must be there: with it missing
+    // or blank every undo start is denied, and no other check names the key (L562). A missing or blank `start` passes
+    // here; the fit check names it through M9's keys, and on a later rules change a start is refused and told per card.
+    for (const [key, known, must] of [['start', START_RULES, false], ['tier1_merge', TIER1_MERGE_RULES, true]]) {
       const v = rules[key];
-      if (v !== undefined && v !== null && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
+      if ((must || (v !== undefined && v !== null)) && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
     }
   }
 
