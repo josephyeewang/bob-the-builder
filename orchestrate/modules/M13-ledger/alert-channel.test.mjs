@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
-import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
+import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs';
 import { readUnsent } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
@@ -572,6 +572,37 @@ test('L579: one stuck entry on its own is named', async () => {
   const w = world();
   const rec = stuckQueue(w, 1);
   assert.match((await w.run({ rec, probe: ALIVE })).refused, /1 alert\(s\) are still in the Record's queue/);
+});
+
+// L593: a delivered alert whose told mark the Record refuses stays on the queue (L527). It went out, so it isn't waiting.
+const heldDelivered = async (w) => {
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === 'stop-m-1' ? { ok: false, reason: 'busy' } : w.rec.write(x)) } });
+  tellThen(outbox(rec, w.now()), 'cause still stands', { fact: 'stop-m-1', fields: { told_at: new Date(w.now()).toISOString() }, kind: 'k' });
+  await w.run({ rec, probe: ALIVE });     // delivered and held; the line about the mark arrives during this round
+  w.tick(5);
+  assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', 'the line about the mark goes out');
+  return rec;
+};
+
+test('L593: a delivered alert held on the queue fails no pass', async () => {
+  const w = world();
+  const rec = await heldDelivered(w);
+  for (let i = 0; i < 4; i += 1) {
+    w.tick(5);
+    const left = queued(rec).length;
+    assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', `round ${i}`);
+    assert.equal(left, 1, 'still held on the queue');
+  }
+});
+
+test('L593: a stuck alert behind a held one is named, and only it is counted', async () => {
+  const w = world();
+  await heldDelivered(w);
+  outbox(w.rec, w.now())('a stuck alert');
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT || x.id === 'stop-m-1' ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+  w.tick(5);
+  assert.equal(queued(rec).length, 2);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /^1 alert\(s\) are still in the Record's queue/);
 });
 
 test('L566 N2: a queue that empties says nothing, and the one failed send is not counted twice', async () => {

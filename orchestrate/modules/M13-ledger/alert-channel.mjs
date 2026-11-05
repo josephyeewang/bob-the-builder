@@ -45,7 +45,7 @@ import { createHash } from 'node:crypto';
 import { alertKey, lastLine, lineIs, makeAlerts, wasTold } from './alerts.mjs';
 import { TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
-import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
+import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, holdsDelivered, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
@@ -356,8 +356,14 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     let storeWaiting = false;
     try { storeWaiting = readUnsent(recordRoot).length > 0; } catch { /* the read below names it */ }
     const reserveMs = storeWaiting ? Math.max(0, (budgetMs - sendMs) / 2) : 0;
-    let queuedAtStart = 0;
-    try { queuedAtStart = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries?.length ?? 0; } catch { /* sendAlerts' own read answers for it */ }
+    // A delivered alert held for its mark (L527) stays on the queue by design, and was sent: it isn't waiting (L593).
+    const unsentQueued = () => {
+      try {
+        const q = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries;
+        return Array.isArray(q) ? q.filter((e) => !holdsDelivered(e, nowMs())).length : 0;
+      } catch { return 0; }   // as sendAlerts' own read: an unreadable queue counts as empty here
+    };
+    const queuedAtStart = unsentQueued();
     const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs: budgetMs - reserveMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
     // A send that hung past sendMs never came back to the port: it is named by that.
@@ -399,10 +405,12 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     const plus = [];
     // The queue is sent from its head, so while it can't shrink the entries past a round's reach are not sent at all. A
     // queue that didn't shrink is named, so that can't wait unheard; a backlog that is clearing fails no pass (L566 N2,
-    // L579). Arrivals during a round can over-tell. Arrivals between rounds can under-tell, as they count in the start
-    // size: a queue held steady by them looks as if it shrank (L582). That delays this line; no alert is lost. The one
-    // that failed is named above.
-    if (r.left >= queuedAtStart && r.left > r.failed) plus.push(`${r.left - r.failed} alert(s) are still in the Record's queue after this round, which did not shrink it`);
+    // L579). The one that failed is named above, so it is taken off the count. Arrivals during a round can over-tell.
+    // Arrivals between rounds can under-tell, as they count in the start size: a queue held steady by them looks as if
+    // it shrank (L582). That delays this line and no alert is lost; past the queue's cap the oldest go, and the count
+    // is told (L593).
+    const unsentLeft = unsentQueued();
+    if (unsentLeft >= queuedAtStart && unsentLeft > r.failed) plus.push(`${unsentLeft - r.failed} alert(s) are still in the Record's queue after this round, which did not shrink it`);
     if (storeTried < waiting.length) plus.push(`${waiting.length - storeTried} of the store's unsent alerts had no time this round and wait for the next`);
     try {
       if (await within(sendMs, () => alerts.reportTrouble(target, TROUBLE_SOURCES.CHANNEL)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
