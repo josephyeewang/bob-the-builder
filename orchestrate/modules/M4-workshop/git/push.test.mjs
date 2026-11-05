@@ -61,6 +61,40 @@ async function realScanner(dir) {
 const world = ({ scanner, gate } = {}) => pushWorld({ root: tmp(), scanner, gate, onPushAsked: (x) => pushAsked.push(x) });
 
 // L81 sweep: the push asks M10's push_branch what it reads, and the real engine answers it.
+// #219 audit M-1: the session record's outbox is checked as the Dispatcher checked the launcher's answer, so an older
+// attempt's bundle can never go out under this one.
+test('#219 M-1: a worker push reads only the session\'s own outbox', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const outboxes = join(w.root, 'outboxes');
+  const older = join(outboxes, 'worker', 'S-old');
+  mkdirSync(older, { mode: 0o700 });
+  await w.bundle(undefined, older);
+  const setOutbox = (outbox) => { const cur = w.record.read('session', 'S-1'); assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, outbox } }).ok, true); };
+  const before = await w.ghRefs();
+  for (const [outbox, re] of [[older, /own folder/], [`${w.outbox}/../S-1`, /plain path/], ['/', /plain path/], [join(outboxes, 'reviewer', 'S-1'), /worker outbox/], ['outbox/worker/S-1', /full path/], [undefined, /not named/]]) {
+    setOutbox(outbox);
+    const r = await w.push();
+    assert.equal(r.ok, false, String(outbox));
+    assert.match(r.reason, re);
+    assert.equal(await w.ghRefs(), before, 'nothing reached GitHub');
+  }
+  // With the root known, a link in the session's own place is refused too; the real folder is pushed.
+  const link = `${w.outbox}-moved`;
+  renameSync(w.outbox, link);
+  symlinkSync(older, w.outbox);
+  setOutbox(w.outbox);
+  const linked = await w.push({ outboxRoot: outboxes });
+  assert.equal(linked.ok, false);
+  assert.match(linked.reason, /not inside the outbox root/);
+  assert.equal(await w.ghRefs(), before);
+  rmSync(w.outbox);
+  renameSync(link, w.outbox);
+  const good = await w.push({ outboxRoot: outboxes });
+  assert.equal(good.ok, true, good.reason);
+});
+
 test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each file as { path, status }; the old subject is refused', async () => {
   const w = await world();
   await w.commit('work', (c) => { writeFileSync(join(c, 'app.txt'), 'changed\n'); writeFileSync(join(c, 'new.txt'), 'new\n'); });

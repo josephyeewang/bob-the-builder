@@ -252,7 +252,7 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
   // The Mac's launcher (a port): it answers yes, in the shape M11's own tests use.
   const launched = [];
   const r = await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
   assert.deepEqual(r.refused, [], 'the undo card is refused a start');
   assert.deepEqual(r.started, [id]);
   assert.deepEqual(launched, [id]);

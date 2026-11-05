@@ -36,6 +36,7 @@ import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { BRANCH, cardBranch } from './branch.mjs';
+import { workerOutboxProblem } from './session-outbox.mjs';
 
 export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
@@ -162,12 +163,13 @@ async function messages(mirror, shas, names) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
+ *   outboxRoot              the outboxes' root folder: a worker's outbox must really be <root>/worker/<session id>
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, fstat } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, fstat } = deps;
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
@@ -181,7 +183,8 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the launch record names no product');
     if (!CARD.test(String(card))) no('the launch record has a bad card id');
     if (!ATTEMPT.test(String(att))) no('the launch record has a bad attempt id');
-    if (typeof outbox !== 'string' || !isAbsolute(outbox)) no('the launch record has no outbox');
+    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot });
+    if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }
 

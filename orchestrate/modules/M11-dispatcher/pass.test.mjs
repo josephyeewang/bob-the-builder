@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
@@ -48,7 +50,8 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
     launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}` }; },
-    stopGroup: async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
+    outboxRoot: extra.outboxRoot,
+    stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
     hostLock: extra.hostLock ?? (() => extra.host ?? null),
     pauseLead: extra.pauseLead ?? (({ product }) => { calls.pauses.push([product, [...calls.stops]]); }),
@@ -507,7 +510,7 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   assert.match(v.calls.alerts.join('\n'), /launch was not recorded .*head.*merge will be refused/);
 });
 
-test('L204-a: every start writes its session record; one with no outbox, or one the record refuses, is told', async () => {
+test('L204-a: every start writes its session record, with its own attempt number', async () => {
   // An earlier session of C-1: this start is the card's second, so its push gets its own record line. Another card's
   // session does not count.
   const w = world([card('C-1'), ['session', 'S-old', { state: 'preparing', role: 'worker', product: 'p1', card: 'C-1' }],
@@ -518,20 +521,146 @@ test('L204-a: every start writes its session record; one with no outbox, or one 
   assert.deepEqual([s.state, s.role, s.product, s.card, s.branch, s.outbox, s.attempt, s.pid, s.pid_start, s.launched_at],
     ['preparing', 'worker', 'p1', 'C-1', 'card/c-1', `/outbox-root/worker/${sid}`, 'a2', 1001, 'start-1', iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
-  // A launcher that names no outbox (or not a full path): the session runs, its work can never be pushed, the owner is told.
-  for (const outbox of [undefined, 'outbox/worker/x']) {
-    const v = world([card('C-2')]);
-    v.refuseLaunch(() => ({ ok: true, outbox }));
-    assert.deepEqual((await v.pass()).started, ['C-2']);
-    assert.equal(v.rec.read('session', v.sessions[0].id).doc.outbox, null);
-    assert.match(v.calls.alerts.join('\n'), /card C-2: session .* started, but the launcher did not say where its outbox is, so its work cannot be pushed/);
-  }
-  // The record refuses the session (one by that id is already there, made while the launch ran): the owner is told why.
+});
+
+test('L72: a launcher that answers with a session the claim does not name starts nothing and is told', async () => {
+  const w = world([card('C-2')]);
+  let sid;
+  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, sessionId: 'S-SOMEONE-ELSE', outbox: '/outbox-root/worker/S-SOMEONE-ELSE' }; });
+  const r = await w.pass();
+  assert.deepEqual(r.started, []);
+  assert.deepEqual(r.refused, [['C-2', 'launcher: it started a session the claim does not name']]);
+  const c = w.rec.read('card', 'C-2').doc;
+  assert.deepEqual([c.state, c.claim?.session_id], ['claimed', sid], 'the card stays claimed');
+  for (const id of [sid, 'S-SOMEONE-ELSE']) for (const entity of ['session', 'launch']) assert.equal(w.rec.read(entity, id), null, `${entity} ${id}`);
+  assert.match(w.calls.alerts.join('\n'), new RegExp(`card C-2: the launcher answered with session S-SOMEONE-ELSE, not the claimed ${sid}; the card stays claimed`));
+});
+
+// The outboxes a launcher must not be believed about: each is refused, however it is wrong (#219 audit M-1, m-1).
+const WRONG_OUTBOXES = [
+  ['missing', () => undefined, /was not named/],
+  ['not a full path', (sid) => `outbox/worker/${sid}`, /is not a full path/],
+  ['another session\'s, such as an older attempt\'s', () => '/outbox-root/worker/SOME-OTHER-SESSION', /is not this session's own folder/],
+  ['climbing out', (sid) => `/outbox-root/worker/${sid}/../../../etc`, /is not a plain path/],
+  ['climbing back to the same name', (sid) => `/outbox-root/worker/x/../${sid}`, /is not a plain path/],
+  ['the reviewer\'s', (sid) => `/outbox-root/reviewer/${sid}`, /is not a worker outbox/],
+  ['the top of the disk', () => '/', /is not a plain path/],
+];
+
+for (const [name, outbox, why] of WRONG_OUTBOXES) {
+  test(`#219 M-1: an outbox that is ${name} is refused: the session is stopped, the claim given back, the owner told`, async () => {
+    const w = world([card('C-2')]);
+    let sid;
+    w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, outbox: outbox(x.sessionId) }; });
+    const r = await w.pass();
+    assert.deepEqual(r.started, []);
+    assert.deepEqual(w.calls.stops, [sid], 'the session is stopped');
+    assert.deepEqual(w.sessions, []);
+    const c = w.rec.read('card', 'C-2').doc;
+    assert.deepEqual([c.state, c.claim ?? null], ['ready', null], 'the claim is given back');
+    assert.equal(w.rec.read('session', sid), null, 'no session record, so nothing can push from it');
+    assert.equal(w.rec.read('launch', sid), null, 'no launch record, so nothing can merge from it');
+    assert.match(r.refused.map(([, x]) => x).join('\n'), why);
+    const said = w.calls.alerts.join('\n');
+    assert.match(said, why);
+    assert.match(said, new RegExp(`card C-2: session ${sid} was refused: the outbox its launcher named .*it was stopped and the card went back to ready`));
+  });
+}
+
+test('#219 M-1: a wrong outbox whose session can\'t be stopped keeps the card claimed, so no second session starts, and says so', async () => {
+  const w = world([card('C-2')]);
+  let sid;
+  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, outbox: '/' }; });
+  const r = await w.pass(0, { stopGroup: async () => ({ ok: false, reason: 'permission' }) });
+  assert.deepEqual(r.started, []);
+  const c = w.rec.read('card', 'C-2').doc;
+  assert.deepEqual([c.state, c.claim?.session_id], ['claimed', sid]);
+  assert.match(w.calls.alerts.join('\n'), /it could not be stopped \(permission\), so the card stays claimed and cannot start twice/);
+  assert.equal(w.rec.read('session', sid), null);
+  // A stop that throws, or never answers, is no stop either: the claim stays.
+  const v = world([card('C-3')]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(0, { stopGroup: async () => { throw new Error('gone wrong'); } });
+  assert.equal(v.rec.read('card', 'C-3').doc.state, 'claimed');
+  assert.match(v.calls.alerts.join('\n'), /could not be stopped \(gone wrong\)/);
+});
+
+test('#219 M-1: a stopped session whose claim can\'t be given back says so', async () => {
+  const w = world([card('C-2')]);
+  w.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  const rec = { ...w.rec, ready: w.rec.ready, list: w.rec.list, read: w.rec.read, write: w.rec.write, meta: w.rec.meta, claim: w.rec.claim, release: () => ({ ok: false, reason: 'the store refused' }) };
+  await w.pass(0, { rec });
+  assert.match(w.calls.alerts.join('\n'), /it was stopped, but its claim could not be given back \(the store refused\); it lapses at claims.unlaunched_min/);
+});
+
+test('#219 M-1: with the outbox root known, the real folder must be the session\'s own, through any link', async () => {
+  const root = realpathSync(tempDir('orch-pass-outbox-'));
+  mkdirSync(join(root, 'worker'), { recursive: true });
+  // Good: the folder is really there.
+  const w = world([card('C-1')]);
+  w.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
+  assert.deepEqual((await w.pass(0, { outboxRoot: root })).started, ['C-1']);
+  assert.deepEqual(w.calls.alerts, []);
+  // The right name, but outside the root.
+  const v = world([card('C-2')]);
+  v.refuseLaunch((x) => { const d = join(root, 'elsewhere', 'worker', x.sessionId); mkdirSync(d, { recursive: true }); return { ok: true, outbox: d }; });
+  assert.deepEqual((await v.pass(0, { outboxRoot: root })).started, []);
+  assert.match(v.calls.alerts.join('\n'), /is not inside the outbox root/);
+  // The right name in the right place, but a link to another session's folder.
   const u = world([card('C-3')]);
-  u.refuseLaunch((x) => { assert.equal(u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }).ok, true); return { ok: true }; });
-  assert.deepEqual((await u.pass()).started, ['C-3']);
-  assert.equal(u.rec.read('session', u.sessions[0].id).doc.card, 'C-9');
-  assert.match(u.calls.alerts.join('\n'), /card C-3: session .* started, but its session record was not written \(.+\), so its work cannot be pushed/);
+  const older = join(root, 'worker', 'older-attempt');
+  mkdirSync(older);
+  u.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
+  assert.deepEqual((await u.pass(0, { outboxRoot: root })).started, []);
+  assert.match(u.calls.alerts.join('\n'), /is not inside the outbox root/);
+  // Named, but not there.
+  const t = world([card('C-4')]);
+  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'worker', x.sessionId) }));
+  assert.deepEqual((await t.pass(0, { outboxRoot: root })).started, []);
+  assert.match(t.calls.alerts.join('\n'), /could not be read \(ENOENT\)/);
+});
+
+test('#219 m-2: a record not written and a wrong outbox are two causes: one told today does not hide the other', async () => {
+  const wrong = /was refused: the outbox its launcher named/;
+  const noRecord = /its session record was not written/;
+  const says = (w, re) => w.calls.alerts.filter((a) => re.test(a)).length;
+  const refuseRecord = (w) => w.refuseLaunch((x) => {
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }).ok, true);
+    return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` };
+  });
+  // Told once a day however often it repeats.
+  const w = world([card('C-1')]);
+  w.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await w.pass();
+  await w.pass(1);
+  assert.equal(says(w, wrong), 1);
+  // A record refused the same day is a different failure, told though the outbox was told within the day. The session
+  // itself is good, so it runs on; only its push is lost.
+  refuseRecord(w);
+  assert.deepEqual((await w.pass(2)).started, ['C-1']);
+  assert.equal(says(w, noRecord), 1);
+  // And the other way round: a record told today does not hide a wrong outbox.
+  const v = world([card('C-2'), ['fact', 'hold-session-record-C-2', { text: 'earlier', told_at: iso(T0) }]]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(1);
+  assert.equal(says(v, wrong), 1);
+});
+
+test('#219 m-2: a later good start clears each cause, so a failure that comes back is told at once', async () => {
+  const told = { text: 'earlier', told_at: iso(T0) };
+  const w = world([card('C-1'), ['fact', 'hold-session-outbox-C-1', told], ['fact', 'hold-session-record-C-1', told]]);
+  assert.deepEqual((await w.pass(1)).started, ['C-1']);
+  for (const f of ['hold-session-outbox-C-1', 'hold-session-record-C-1']) assert.equal(w.rec.read('fact', f).doc.told_at, null, f);
+  // A start refused for its outbox leaves the record's mark alone: nothing about the record was shown to be good.
+  const v = world([card('C-2'), ['fact', 'hold-session-record-C-2', told]]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(1);
+  assert.equal(v.rec.read('fact', 'hold-session-record-C-2').doc.told_at, iso(T0));
+  // A record refused leaves the outbox cleared: that outbox was good.
+  const u = world([card('C-3'), ['fact', 'hold-session-outbox-C-3', told]]);
+  u.refuseLaunch((x) => { u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }); return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` }; });
+  await u.pass(1);
+  assert.equal(u.rec.read('fact', 'hold-session-outbox-C-3').doc.told_at, null);
 });
 
 test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
@@ -680,7 +809,7 @@ test('audit 0b-6 r2 MAT-7: a session whose probe, stop or save throws does not e
   const sessions = w.sessions.filter((s) => s.id === a || s.id === b);
   const stops = [];
   const alerts = [];
-  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
   // Pass 1: A's probe throws; B is cancelled and idle.
   let r = await dispatcherPass({ ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
@@ -959,7 +1088,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', OUTAGE_FACT, { state: 'open' }], ...undoEntries('U-1')]);
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(launched, []);
   assert.deepEqual(r.started, []);
   assert.ok(r.notes.includes('outage: nothing starts'));
@@ -968,7 +1097,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const cur = rec.read('fact', OUTAGE_FACT);
   rec.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: cur.rev, doc: { state: 'ended' } });
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
 });
 
@@ -979,7 +1108,7 @@ test('L199: at editing cap 0 the undo start starts one undo per product; the sec
   const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
   const launched = [];
   const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
-    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
     filesOf: filesOfCommits, alert: fakeAlert() });
   const r = await ask([]);
   assert.deepEqual(r.started, ['U-1']);
@@ -1032,7 +1161,7 @@ function usageInto(rec) {
 test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
   const run = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
+    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
   const r = await run(0);
   assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
@@ -1156,7 +1285,7 @@ test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale
   let down = true;
   const sent = [];
   const at = (min, rules) => dispatcherPass({ rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
     alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
   const told = () => sent.filter((t) => /your undo \(card U-1\) is waiting/.test(t)).length;
@@ -1386,7 +1515,7 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
     ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
   const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
   await at(T0 + 25 * H);
   assert.equal(isQueued(w.rec, fact), true, 'told: queued, not yet sent');
@@ -1618,7 +1747,7 @@ test('L354 fold over: the queued copy leaves first, and a late mark is cleared; 
     const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
       ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
     const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
-      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
     await at(w.rec, T0 + 25 * H);
     assert.equal(isQueued(w.rec, fact), true);

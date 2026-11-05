@@ -1001,6 +1001,24 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
 });
 
+// #219 audit M-1: a start whose outbox is wrong is stopped, on the undo path and on the normal one alike. Both are told
+// through the tick's own ports: a stop port left behind would keep every such card claimed for nothing.
+test('#219 M-1: the tick gives both start paths the stop port and the outbox root', async () => {
+  const run = async (entries) => {
+    const stopped = [];
+    const w = world([account(), usage(), ...entries], { over: {
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
+      outboxRoot: '/no-such-outbox-root' } });
+    await w.pass();
+    return stopped;
+  };
+  // A normal card reaches only the pass's own starts.
+  assert.deepEqual(await run([card('C-1')]), ['C-1']);
+  // An undo is tried by the undo start and, given back, by the pass: stopped once each.
+  assert.deepEqual(await run(undoEntries('U-1')), ['U-1', 'U-1']);
+});
+
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes
 // (an import that waits forever, a wire() that never answers, a wire() that blocks the thread) still ends.
 test('r5 MAT-1: `node main.mjs` with a wiring that never finishes is ended by the watchdog', () => {
