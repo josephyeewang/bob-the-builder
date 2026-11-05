@@ -46,6 +46,7 @@ import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
+import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 
@@ -271,8 +272,8 @@ export function createPushScript(deps) {
     if (!SHA256.test(String(sha256))) no('the proposal has no sha256 of the bundle the intake recorded');
     // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
     if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
     return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
   }
 
@@ -296,8 +297,8 @@ export function createPushScript(deps) {
     const { file, sha256, blob, size } = d.source ?? {};
     if (typeof ask !== 'string' || !RESEARCH_ID.test(ask) || file !== researchFileName(ask) || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== researchPath(ask)) no(`card ${card} does not name its ask's one file`);
     if (!SHA256.test(String(sha256)) || !SHA.test(String(blob)) || !Number.isSafeInteger(size) || size <= 0) no(`card ${card} has no proof of the report's bytes`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
     const research = { ask, file, sha256, blob, size, path: d.files[0] };
     return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
   }
