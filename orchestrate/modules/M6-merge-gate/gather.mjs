@@ -25,7 +25,7 @@
 import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { RULES_PATH } from '../M10-rules/reader.mjs';
-import { COMPARE_FILE_LIMIT } from '../M10-rules/git-view.mjs';
+import { COMPARE_FILE_LIMIT, notRead } from '../M10-rules/git-view.mjs';
 import { approveNeeded, goCheck, ROW_FILE } from '../M2-approvals/go.mjs';
 import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
@@ -109,7 +109,7 @@ function watchReads({ view, gh } = {}) {
     .map((k) => [k, async (...a) => { try { return await view[k](...a); } catch (e) { throw note(e); } }]))) : view;
   const g = gh ? { ...gh, get: async (path) => {
     let r;
-    try { r = await gh.get(path); } catch (e) { throw note(e); }
+    try { r = await gh.get(path); } catch (e) { throw note(notRead(e)); }
     if (r?.status !== 200) note(Object.assign(new Error(`GitHub answered ${r?.status} for ${path}`), { status: r?.status }));
     return r;
   } } : gh;
