@@ -1,10 +1,9 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, tellThen, isQueued, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
-import { tellThen, isQueued } from './alerts.mjs';
 
 const queue = (rec) => rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
 const mark = (fact) => ({ fact, fields: { told_at: 'now' }, kind: 'k' });
@@ -709,5 +708,27 @@ test('L533: still refused, the new text is what goes out at the day, and the sam
   await send(T0 + DAY + 2 * MIN);
   await send(T0 + DAY + 3 * MIN);
   assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason', 'refused: second reason']);
+  assert.equal(queue(real).length, 0);
+});
+
+test('#217 r1 M3: a new fact that replaces an entry while its send is out is still told: what went out is what is remembered', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-8', () => refusing);
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-8', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  tell('refused: fact A', T0);
+  const p = held();
+  const sending = sendAlerts(rec, p.port, T0, { sendMs: 5_000, budgetMs: 5_000, later: true });
+  await tickOver();
+  assert.deepEqual(p.got, ['refused: fact A']);
+  tell('refused: fact B', T0);
+  p.open();
+  (await sending).settle();
+  const entry = queue(real).find((x) => x.text === 'refused: fact B');
+  assert.equal(entry?.delivered_text, 'refused: fact A', 'B is on the queue, and only A went out');
+  refusing = false;
+  const got = [];
+  for (const m of [1, 2, 3]) await sendAlerts(rec, (t) => { got.push(t); return true; }, T0 + m * MIN, { sendMs: 50 });
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: fact B'], 'B is told once, not lost when the mark saves');
   assert.equal(queue(real).length, 0);
 });

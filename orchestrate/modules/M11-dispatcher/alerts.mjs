@@ -287,7 +287,7 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
 // mark that can't be saved. A time that can't be read is no hold: it is sent. `delivered_text` is what went out: a site
 // may replace a held entry with a new fact (a different refusal), so when the mark saves, an entry whose text changed
 // loses its hold and goes out once instead of leaving unsent (L533). A pass is one process, so nothing in memory can cap
-// a queue write refused as well: see the PR for #217.
+// a queue write refused as well: the entry is then sent each round, which the alert channel turns into an edit of one issue.
 const holdsDelivered = (e, now) => {
   if (!e.delivered_at) return false;
   const at = pastTime(e.delivered_at, now);
