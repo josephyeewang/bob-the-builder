@@ -14,7 +14,7 @@ import { createAsk, nextBox, processSession } from './binding.mjs';
 import { readDecision } from './decision.mjs';
 import { doneBar, goFingerprint, raiseGo } from './go.mjs';
 import { GO_REPUSH_MS } from './kinds.mjs';
-import { schedulePass } from './schedule.mjs';
+import { schedulePass, goToldCards } from './schedule.mjs';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -158,7 +158,7 @@ test('L523: a card no longer in draft gets no reminder, and neither does one tha
 });
 
 test('L556: a go whose card is missing or corrupt tells the owner once, then daily, and stops when the card reads again', async () => {
-  for (const [label, gone, words] of [['corrupt', { corrupt: true }, /cannot be read/], ['missing', null, /missing from the record/]]) {
+  for (const [label, gone, words] of [['corrupt', { corrupt: true }, /cannot be read and needs repairing by hand/], ['missing', null, /has no such card/]]) {
     const w = world();
     const id = await tier2(w);
     await w.at(W8);
@@ -171,7 +171,8 @@ test('L556: a go whose card is missing or corrupt tells the owner once, then dai
     assert.equal(told().length, 1, `${label}: once, however often the pass runs`);
     assert.equal(told()[0].ask, id);
     assert.equal(told()[0].card, 'A');
-    assert.match(told()[0].reason, words, label);
+    assert.match(told()[0].text, words, label);
+    assert.match(told()[0].text, new RegExp(`card A \\[ask ${id}\\]`), label);
     await w.at(W8 + 2 * DAY);
     await w.at(W8 + 3 * DAY);
     assert.equal(told().length, 3, `${label}: again each day it stands`);
@@ -200,6 +201,74 @@ test('L556: a lost card is told at night too, and with a box on the screen, sinc
   boxed.t.ctx.record = Object.create(fine, { read: { value: (e, x) => (e === 'card' ? { corrupt: true } : fine.read(e, x)) } });
   await boxed.at(W8 + DAY);
   assert.equal(boxed.t.alerts.filter((a) => a.type === 'go_card_unreadable').length, 1, 'with a live box');
+});
+
+test('L557: a go never pushed, with a lost card at a window: told once, and no push until the card reads', async () => {
+  const w = world();
+  const id = await tier2(w);
+  const told = () => w.t.alerts.filter((a) => a.type === 'go_card_unreadable').length;
+  const good = w.t.record;
+  w.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? { corrupt: true } : good.read(e, x)) } });
+  await w.at(W8);
+  await w.at(W8 + MIN);
+  await w.at(W8 + 5 * MIN);
+  assert.equal(told(), 1, 'the mark holds: nothing wipes it within the day');
+  assert.equal(w.pushes.length, 0, 'a push it could not act on stays back');
+  assert.equal(doc(w, id).state, 'open');
+  w.t.ctx.record = good;
+  await w.at(W8 + 10 * MIN);
+  assert.equal(w.pushes.length, 1, 'the card reads: the first push goes');
+});
+
+test('L557: the cards the go check tells are the ones of a go still asked', async () => {
+  const w = world();
+  const id = await tier2(w);
+  assert.deepEqual([...goToldCards(w.t.record)], ['A'], 'open');
+  await w.at(W8);
+  assert.deepEqual([...goToldCards(w.t.record)], ['A'], 'pushed');
+  change(w, id, { state: 'withdrawn' });
+  assert.deepEqual([...goToldCards(w.t.record)], [], 'no longer asked');
+  const o = world();
+  leadCard(o.t, 'C-1');
+  must(createAsk(o.t.ctx, { id: 'Q-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship the export' }));
+  assert.deepEqual([...goToldCards(o.t.record)], [], 'another kind of ask');
+});
+
+test('L575: an answered go is no longer told by the go check, so a lost card under it falls to the lost-cards tell', async () => {
+  const w = world();
+  const id = await tier2(w);
+  await w.at(W8);
+  assert.deepEqual([...goToldCards(w.t.record)], ['A'], 'pushed: still asked');
+  change(w, id, { state: 'answered' });
+  assert.deepEqual([...goToldCards(w.t.record)], []);
+});
+
+test('L575: a go ask the Approvals reader does not trust covers no card', async () => {
+  const w = world();
+  const id = await tier2(w);
+  const good = w.t.record;
+  const forged = Object.create(good, { diary: { value: (o) => good.diary(o).map((l) => ((l.writes ?? []).some((x) => x.entity === 'ask' && x.id === id) ? { ...l, actor: 'dispatcher' } : l)) } });
+  const st = askStore(forged);
+  assert.deepEqual(st.asks(), [], 'the reader really does refuse it');
+  assert.deepEqual(st.untrusted, [`ask/${id}`]);
+  assert.deepEqual([...goToldCards(forged)], []);
+});
+
+test('L575: a go card that goes from corrupt to missing has new words, told at once', async () => {
+  const w = world();
+  await tier2(w);
+  const told = () => w.t.alerts.filter((a) => a.type === 'go_card_unreadable').map((a) => a.text);
+  const good = w.t.record;
+  let card = { corrupt: true };
+  w.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? card : good.read(e, x)) } });
+  await w.at(W8);
+  assert.equal(told().length, 1);
+  card = null;
+  await w.at(W8 + MIN);
+  assert.equal(told().length, 2, 'not held for the daily repeat');
+  assert.notEqual(told()[0], told()[1]);
+  await w.at(W8 + 2 * MIN);
+  assert.equal(told().length, 2, 'and once a day after that');
 });
 
 test('L556: only a go is told: a card that reads, and an ask of another kind, say nothing', async () => {

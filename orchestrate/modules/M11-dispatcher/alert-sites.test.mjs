@@ -148,7 +148,7 @@ export function markFacts(files) {
 }
 export function undroppedCauses(files) {
   const all = files.map(([, t]) => t.replace(/\/\/.*$/gm, '')).join('\n');
-  return markFacts(files).filter((n) => !(n in LATE_MARK_OK) && !new RegExp(String.raw`(?:dropCause|clearCause)\(\s*rec\s*,\s*${n}\b|clearTold\(\s*rec\s*,\s*now\s*,\s*${n}\b`).test(all));
+  return markFacts(files).filter((n) => !(n in LATE_MARK_OK) && !new RegExp(String.raw`(?:dropCause|clearCause|clearHold)\(\s*rec\s*,\s*${n}\b|clearTold\(\s*rec\s*,\s*now\s*,\s*${n}\b`).test(all));
 }
 
 test('r7 M2 sweep: every told mark has a place its cause clears, or a reason a late mark is harmless', () => {
