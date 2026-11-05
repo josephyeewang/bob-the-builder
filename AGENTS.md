@@ -45,9 +45,8 @@ When two or more sessions work on Bob at once, each area has one writer. A chang
 
 | Area | Owner | Shared files both touch (pull first, keep edits small) |
 |---|---|---|
-| `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/` | ORCHESTRATE lead (lanes in `orchestrate/LANES.md`) | — |
-| The NEW mode and startup text: core "MODES" and "MODE: NEW", `build-protocol.md` Part II, the startup steps in `skill/SKILL.md`; `scripts/bob-init.sh`, `spec-audit.py`, `doc-pointers-check.mjs` | ORCHESTRATE lead | — |
-| Everything else | Bob upkeep | `VERSION` (one bump per change set; the ORCHESTRATE lanes bump once per milestone), `CHANGELOG.md`, `decision-log.md`, `.github/workflows/scripts-ci.yml` |
+| `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/`, and the text of an ORCHESTRATE mode wherever it is added | ORCHESTRATE lead (lanes in `orchestrate/LANES.md`) | — |
+| Everything else, including the NEW mode and startup text (core "MODES" and "MODE: NEW", `build-protocol.md` Part II, the startup steps in `skill/SKILL.md`, `scripts/bob-init.sh`, `spec-audit.py`, `doc-pointers-check.mjs`; moved from the ORCHESTRATE lead on 2026-11-03, D-037) | Bob upkeep | `VERSION` (one bump per change set; the ORCHESTRATE lanes bump once per milestone), `CHANGELOG.md`, `decision-log.md`, `.github/workflows/scripts-ci.yml` |
 
 ## Key Rules
 

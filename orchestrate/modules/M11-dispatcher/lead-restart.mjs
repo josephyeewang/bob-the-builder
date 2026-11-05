@@ -18,6 +18,7 @@ import { KEYS, need } from './keys.mjs';
 import { tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
+import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 export const RESTART_FACT = (sid) => `lead-restart-${sid}`;
 export const HANDOFF_NAME = (sid) => `handoff-${sid}.md`;
@@ -107,6 +108,12 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     if (w.ok) { cur = rec.read('fact', RESTART_FACT(sid)); st = cur.doc; }
     return w;
   };
+  // The old Lead keeps running, and the owner is told until a copy is delivered (L130). `asked`: a second ask was sent.
+  const giveUp = (why, asked = true) => {
+    save({ phase: 'gave_up', gave_up_why: why, gave_up_asked: asked }, 'lead_restart_gave_up');
+    tellThen(alert, gaveUpText(sid, why, asked), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+    return 'gave up; the old Lead keeps running';
+  };
 
   // A start that left no launch record is tried again each pass for that session (L490 m5). Main is read now, so a commit
   // that landed since the start can be named; a plan made on an older one is still checked by the reviewer against main.
@@ -131,7 +138,7 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     tellThen(alert, `the Lead ${sid} is at ${size.tokens} tokens, past ${hard} + ${HARD_MARGIN}: its compaction did not happen`, { fact: RESTART_FACT(sid), fields: { hard_told: true }, kind: 'lead_hard_alert' });
   }
   // A give-up whose alert the queue refused is told again each pass until it is delivered (L130).
-  if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
+  if (st.phase === 'gave_up' && !st.gave_up_told) tellThen(alert, gaveUpText(sid, st.gave_up_why, st.gave_up_asked !== false), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
   if (['done', 'gave_up'].includes(st.phase)) return st.phase;
   // The old Lead is stopped and the new one did not start (audit 0b-6 r2 MIN-1): try again every pass,
   // whatever the old transcript says; Joe was told once.
@@ -144,6 +151,15 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     }
     save({ phase: 'done', restarted_at: iso(now), new_lead: again.sessionId ?? null }, 'lead_restarted');
     return 'restarted';
+  }
+  // The wait on the Lead's answer has its day's cap whatever its transcript shows (L355 m5): a Lead with no size reading,
+  // or never at a finished turn, a day after the ask (or with an ask time that can't be read, L329) is given up on, and
+  // the owner told. Nothing is sent mid-turn and the Lead is never stopped. One at a finished turn goes the re-ask path.
+  if (['wrap_sent', 'reasked'].includes(st.phase) && (noSize || !size.turnEnded)) {
+    const askedAt = pastTime(st.sent_at, now);
+    if (askedAt === null || now - askedAt >= STILL_WAITING_MS) {
+      return giveUp(noSize ? 'its size could not be read for a day after the ask' : 'it did not finish a turn within a day of the ask', st.phase === 'reasked');
+    }
   }
   if (noSize) return 'no size';
   // Every move happens only at a finished turn: never WRAP mid-turn, never act on a turn in progress.
@@ -160,7 +176,12 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
 
   // wrap_sent or reasked: wait for the Lead's answer (a turn ended after the ask) or the handoff.
   const used = rec.read('fact', `intake-applied-${sid}-${HANDOFF_NAME(sid)}`)?.doc;
-  const answered = size.endedAt != null && size.endedAt > Date.parse(st.sent_at);
+  // The ask's time through the shared pastTime (L329): one that can't be read or lies ahead counts as long ago, so the
+  // wait ends. And the wait has a cap (STILL_WAITING_MS, the code default; no rules key while the rules file is frozen):
+  // a Lead that never answers counts as not answering, and goes down the same re-ask, then gave-up-and-told path.
+  const sentAt = pastTime(st.sent_at, now);
+  const timedOut = sentAt === null || now - sentAt >= STILL_WAITING_MS;
+  const answered = timedOut || (size.endedAt != null && size.endedAt > sentAt);
   // Only a hand-off applied after WRAP counts (audit 0b-6 r2 MAT-3): an older one under the same name
   // would start the new Lead from an out-of-date note. No time recorded counts as older.
   const since = Date.parse(st.wrap_at ?? st.sent_at);
@@ -190,19 +211,31 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     return 'restarted';
   }
   if (!answered) return 'waiting for the handoff';
-  const why = used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
+  const why = timedOut && !(size.endedAt != null && sentAt !== null && size.endedAt > sentAt) && !used ? 'no answer within a day of the ask'
+    : used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
     : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap';
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
-    if (r?.outcome !== 'sent') return `re-ask not sent (${r?.outcome ?? 'no answer'})`;
-    save({ phase: 'reasked', sent_at: iso(now), reasks: 1 }, 'lead_reask');
+    if (r?.outcome !== 'sent') {
+      // A re-ask the Lead keeps refusing would be tried each finished turn with no word (L359): the owner is told
+      // through stillWaiting, from the first refused re-ask, then daily; cleared once the re-ask is sent.
+      if (st.reask_refused_since == null) save({ reask_refused_since: iso(now) }, 'lead_reask_refused');
+      const since = String(st.reask_refused_since ?? iso(now));
+      stillWaiting({
+        now, waiting: true, since,
+        read: () => st.reask_refused_told ?? null,
+        tell: (mark) => tellThen(alert, reaskRefusedText(sid, r?.outcome, since), { fact: RESTART_FACT(sid), fields: { reask_refused_told: mark }, kind: 'lead_reask_refused_alert' }),
+        clear: () => {},
+      });
+      return `re-ask not sent (${r?.outcome ?? 'no answer'})`;
+    }
+    save({ phase: 'reasked', sent_at: iso(now), reasks: 1, reask_refused_since: null, reask_refused_told: null }, 'lead_reask');
     return 're-asked';
   }
-  save({ phase: 'gave_up', gave_up_why: why }, 'lead_restart_gave_up');
-  tellThen(alert, gaveUpText(sid, why), { fact: RESTART_FACT(sid), fields: { gave_up_told: true }, kind: 'lead_gave_up_alert' });
-  return 'gave up; the old Lead keeps running';
+  return giveUp(why);
 }
 
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
-const gaveUpText = (sid, why) => `the Lead ${sid} did not hand in a usable handoff after a second ask (${why ?? 'no reason recorded'}); it keeps running`;
+const reaskRefusedText = (sid, outcome, since) => `the Lead ${sid} did not hand in a usable handoff, and the second ask could not be sent since ${since} (${outcome ?? 'no answer'}); it is tried again at each finished turn`;
+const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running`;
 const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

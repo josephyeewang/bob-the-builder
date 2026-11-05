@@ -51,7 +51,12 @@ function world({ products = ['a'] } = {}) {
   const pass = async (over = {}) => { const out = await proposalsPass({ rec, ...base, ...over }); await sendAlerts(rec, port, NOW); return out; };
   return { root, dirs, calls, rec, pass, base };
 }
-const put = (w, name, text, p = 'a') => writeFileSync(join(w.dirs[p], name), text);
+// A proposal names a card (R-0b-129): put seeds that card ready for its product unless { card: false } or it exists.
+const put = (w, name, text, p = 'a', { card = true } = {}) => {
+  const m = /^proposal-(.+)\.md$/.exec(name);
+  if (card && m && !w.rec.read('card', m[1])) seed(w.rec, 'card', m[1], { product: p, state: 'ready' });
+  writeFileSync(join(w.dirs[p], name), text);
+};
 const one = (out, name) => out.find((r) => r.name === name);
 const fact = (w, name, p = 'a') => w.rec.read('fact', intakeFactId(p, name))?.doc;
 
@@ -971,7 +976,7 @@ test('L291 (1): the exact inputs: a handler and review get these keys and no oth
     handlers: { ...w.base.handlers, research: (x) => { got.handler = x; return { ok: true }; } },
     toReview: (x) => { got.review = x; return { ok: true }; } });
   assert.deepEqual(Object.keys(got.handler).sort(), ['blob', 'fenced', 'id', 'kind', 'name', 'now', 'product', 'rec', 'sha256', 'size', 'source']);
-  assert.deepEqual(Object.keys(got.review).sort(), ['bundle', 'card', 'product', 'proposal', 'rec']);
+  assert.deepEqual(Object.keys(got.review).sort(), ['bundle', 'card', 'cardRev', 'product', 'proposal', 'rec']);
   assert.deepEqual(Object.keys(got.review.bundle).sort(), ['path', 'sha256']);
   for (const v of [...Object.values(got.handler), ...Object.values(got.review)]) assert.ok(!(v instanceof Uint8Array), 'no bytes');
   assert.equal(got.handler.fenced, cleanOutside('look into x', 'research-file'));
@@ -1060,13 +1065,172 @@ test('L290 c2 (P04, P05): a bytes record with no product reads as broken; anothe
   for (const t of v.calls.alerts) assert.ok(!t.includes('\n'));
 });
 
+// L329: a lone bundle whose file time can't be read, or lies an hour ahead, is refused and told now, not "waiting for
+// its pair" for ever.
+test('L329: a lone bundle with an unreadable or future file time is refused, not left waiting', async () => {
+  for (const [label, mtime] of [['unreadable', 'NaN'], ['an hour ahead', String(Date.now() + 60 * 60_000)]]) {
+    const w = world();
+    put(w, 'bundle-C-2.bundle', 'bytes');
+    const out = await w.pass({ look: (p) => (/bundle-C-2/.test(p) ? `5:${mtime}:77` : null) });
+    assert.equal(one(out, 'bundle-C-2.bundle').refused, 'no proposal-C-2.md names this bundle\'s card', label);
+  }
+});
+
+// R-0b-129: a proposal must name a ready card of its own product, or it is refused at intake, before any check or review.
+const reviewAll = () => {
+  const seen = [];
+  return { seen, over: { docsCheck: async () => null, toReview: (x) => { seen.push(x.card); return { ok: true }; } } };
+};
+
+// The record with its card reads swapped where `cards` says: id → a read result, or a function of the real one.
+const swapCards = (w, cards) => {
+  const read = w.rec.read.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.read = (entity, id) => {
+    if (entity !== 'card' || !Object.hasOwn(cards, id)) return read(entity, id);
+    const c = cards[id];
+    return typeof c === 'function' ? c(read(entity, id)) : c;
+  };
+  return rec;
+};
+
+test('R-0b-129: a proposal naming no card in the record is refused at intake; nothing is checked or reviewed', async () => {
+  const w = world();
+  put(w, 'proposal-C-404.md', 'a change', 'a', { card: false });
+  put(w, 'bundle-C-404.bundle', 'bundle bytes');
+  put(w, 'proposal-C-405.md', 'another change');
+  put(w, 'bundle-C-405.bundle', 'other bundle bytes');
+  const r = reviewAll();
+  const checked = [];
+  // The first cutover, each with a bundle: the docs check would run, so its count shows the card check came first (#159 audit Minor 3).
+  const out = await w.pass({ ...r.over, docsCheck: async ({ card }) => { checked.push(card); return null; } });
+  assert.match(one(out, 'proposal-C-404.md').refused, /^no card C-404 in the record: a proposal must name a ready card$/);
+  assert.deepEqual(checked, ['C-405'], 'only the proposal with a ready card is docs-checked');
+  assert.deepEqual(r.seen, ['C-405']);
+  assert.equal(fact(w, 'proposal-C-404.md').state, 'refused');
+  assert.ok(w.calls.alerts.some((t) => /proposal-C-404\.md/.test(t) && /no card C-404/.test(t)), 'Joe is told');
+});
+
+test('R-0b-129: a card of another product, a card not ready, and a research copy card are refused; a ready card of this product goes on', async () => {
+  const w = world({ products: ['a', 'b'] });
+  seed(w.rec, 'card', 'C-20', { product: 'b', state: 'ready' });
+  for (const [id, state] of [['C-21', 'draft'], ['C-22', 'merged'], ['C-23', 'closed'], ['C-24', 'running'], ['C-25', 'in_review']]) seed(w.rec, 'card', id, { product: 'a', state });
+  seed(w.rec, 'card', 'C-26', { product: 'a', state: 'ready', kind: 'research_copy', source: { file: 'docs/research/R-1.md', sha256: 'a'.repeat(64), blob: 'b'.repeat(40), size: 1 } });
+  seed(w.rec, 'card', 'C-27', { product: 'a', state: 'ready' });
+  for (const id of ['C-20', 'C-21', 'C-22', 'C-23', 'C-24', 'C-25', 'C-26', 'C-27']) put(w, `proposal-${id}.md`, `change ${id}`, 'a', { card: false });
+  const r = reviewAll();
+  const out = await w.pass({ rules: rulesFor(w.dirs, { a: 'second', b: 'second' }), ...r.over });
+  assert.match(one(out, 'proposal-C-20.md').refused, /^card C-20 is b's, not a's$/);
+  for (const [id, state] of [['C-21', 'draft'], ['C-22', 'merged'], ['C-23', 'closed'], ['C-24', 'running'], ['C-25', 'in_review']]) {
+    assert.equal(one(out, `proposal-${id}.md`).refused, `card ${id} is ${state}, not ready: a proposal must name a ready card`);
+  }
+  assert.match(one(out, 'proposal-C-26.md').refused, /^card C-26 is a research copy, which only the copier lands \(L286\)$/);
+  assert.deepEqual(r.seen, ['C-27']);
+  assert.equal(one(out, 'proposal-C-27.md').applied, true);
+});
+
+test('R-0b-129: a card that can\'t be read keeps the proposal unused and unrefused this pass, and Joe is told once', async () => {
+  const w = world();
+  put(w, 'proposal-C-30.md', 'a change', 'a', { card: false });
+  const read = w.rec.read.bind(w.rec);
+  const rec = Object.fromEntries(Object.keys(w.rec).map((k) => [k, typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]]));
+  rec.read = (entity, id) => (entity === 'card' && id === 'C-30' ? { corrupt: true, reason: 'bad json' } : read(entity, id));
+  const r = reviewAll();
+  const out = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.match(one(out, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
+  assert.notEqual(fact(w, 'proposal-C-30.md')?.state, 'refused', 'not refused for good: the next pass looks again');
+  assert.deepEqual(r.seen, []);
+  // A second broken pass: still unused, and Joe is told exactly once, naming the file (#159 audit Minor 4).
+  const twice = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.match(one(twice, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
+  assert.equal(w.calls.alerts.filter((t) => t.includes('proposal-C-30.md')).length, 1, 'told once over two passes');
+  assert.ok(w.calls.alerts.some((t) => t.includes('proposal-C-30.md') && /card C-30 could not be read/.test(t)));
+  seed(w.rec, 'card', 'C-30', { product: 'a', state: 'ready' });
+  const again = await w.pass({ rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.equal(one(again, 'proposal-C-30.md').applied, true);
+});
+
+test('#159 audit Minor 5: a claimed card and a lowercase name are refused; a card with no product reads as can\'t be read', async () => {
+  const w = world();
+  seed(w.rec, 'card', 'C-31', { product: 'a', state: 'claimed' });
+  put(w, 'proposal-C-31.md', 'a change', 'a', { card: false });
+  seed(w.rec, 'card', 'C-5', { product: 'a', state: 'ready' });
+  put(w, 'proposal-c-5.md', 'a change to c-5', 'a', { card: false });
+  put(w, 'proposal-C-32.md', 'a third change');
+  const rec = swapCards(w, { 'C-32': (o) => ({ ...o, doc: { ...o.doc, product: undefined } }) });
+  const r = reviewAll();
+  const out = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
+  assert.equal(one(out, 'proposal-C-31.md').refused, 'card C-31 is claimed, not ready: a proposal must name a ready card');
+  assert.equal(one(out, 'proposal-c-5.md').refused, 'no card c-5 in the record: a proposal must name a ready card');
+  assert.equal(one(out, 'proposal-C-32.md').refused, 'card C-32 could not be read (no product named)');
+  assert.notEqual(fact(w, 'proposal-C-32.md')?.state, 'refused', 'held, not refused for good');
+  assert.deepEqual(r.seen, []);
+});
+
+test('#159 audit Minor 1: the card is checked again after the docs check, and its revision goes to review', async () => {
+  const w = world();
+  put(w, 'proposal-C-40.md', 'a change');
+  put(w, 'bundle-C-40.bundle', 'bundle bytes');
+  put(w, 'proposal-C-42.md', 'a fine change');
+  put(w, 'bundle-C-42.bundle', 'fine bundle bytes');
+  let cancelled = false;
+  const rec = swapCards(w, { 'C-40': (o) => (cancelled ? { ...o, rev: o.rev + 1, doc: { ...o.doc, state: 'cancelled' } } : o) });
+  const sent = [];
+  const out = await w.pass({ rec, docsCheck: async ({ card }) => { if (card === 'C-40') cancelled = true; return null; }, toReview: (x) => { sent.push(x); return { ok: true }; } });
+  assert.equal(one(out, 'proposal-C-40.md').refused, 'card C-40 is cancelled, not ready: a proposal must name a ready card');
+  assert.notEqual(one(out, 'proposal-C-40.md').applied, true);
+  assert.deepEqual(sent.map((x) => x.card), ['C-42'], 'the cancelled card never reaches review');
+  assert.equal(sent[0].cardRev, w.rec.read('card', 'C-42').rev, 'review gets the revision the card was checked at');
+  assert.equal(fact(w, 'proposal-C-40.md').state, 'refused');
+  assert.ok(w.calls.alerts.some((t) => t.includes('proposal-C-40.md') && /is cancelled/.test(t)), 'Joe is told');
+});
+
+test('#159 audit Minor 2: a card refusal is looked at again once the card changes; told again only for a new reason', async () => {
+  const w = world();
+  seed(w.rec, 'card', 'C-41', { product: 'a', state: 'draft' });
+  put(w, 'proposal-C-41.md', 'a change', 'a', { card: false });
+  put(w, 'notes.md', 'an odd name');
+  const stage = rulesFor(w.dirs, { a: 'second' });
+  const r = reviewAll();
+  const told = () => w.calls.alerts.filter((t) => t.includes('proposal-C-41.md')).length;
+  assert.match(one(await w.pass({ rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  // The same card, unchanged: still refused, not told again.
+  assert.match(one(await w.pass({ rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  // The card edited but still a draft: looked at again, the same reason, not told again.
+  let card = (o) => ({ ...o, rev: o.rev + 1 });
+  const rec = swapCards(w, { 'C-41': (o) => card(o) });
+  assert.match(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is draft, not ready/);
+  assert.equal(told(), 1);
+  assert.equal(fact(w, 'proposal-C-41.md').card_key, `C-41@${w.rec.read('card', 'C-41').rev + 1}`, 'the newest card key is kept');
+  // Merged: a new reason, told once.
+  card = (o) => ({ ...o, rev: o.rev + 2, doc: { ...o.doc, state: 'merged' } });
+  assert.match(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').refused, /is merged, not ready/);
+  assert.equal(told(), 2);
+  // Ready: the same bytes now go on to review.
+  card = (o) => ({ ...o, rev: o.rev + 3, doc: { ...o.doc, state: 'ready' } });
+  assert.equal(one(await w.pass({ rec, rules: stage, ...r.over }), 'proposal-C-41.md').applied, true);
+  assert.deepEqual(r.seen, ['C-41']);
+  // A refusal that is not the card's stays for good.
+  assert.equal(fact(w, 'notes.md').state, 'refused');
+});
+
+test('R-0b-129: a card claimed by a lane other than the one handing in is refused', { todo: 'R-0b-130 (tab claims) is not built; until then only a ready card is taken, so a card claimed by anyone is refused (L215 3)' }, () => {
+  assert.fail('needs R-0b-130 claims');
+});
+
+test('R-0b-129: an idea file lands as an idea row with its text quoted', { todo: 'idea filing is off until #95-b; the idea-row half of R-0b-129 comes later (L212, L215 2). Today an idea file is refused with IDEAS_OFF, tested above' }, () => {
+  assert.fail('idea filing is off');
+});
+
 test('L354 item 2: a cause cleared whose queued alert cannot be dropped is told, not lost', async () => {
   const w = world();
   chmodSync(w.dirs.a, 0o755);
   await w.pass();
   chmodSync(w.dirs.a, 0o750);
   queueFor(w.rec, folderFactId('a'), 'told_why', 'x', NOW);
-  const told = fakeAlert();
-  await proposalsPass({ ...w.base, rec: writeLog(w.rec, [], { refuseDrop: true }), alert: told });
-  assert.ok(told.texts.some((t) => t === `the queued alert for ${folderFactId('a')} could not be dropped`), told.texts.join(' | '));
+  const toldPort = fakeAlert();
+  await proposalsPass({ ...w.base, rec: writeLog(w.rec, [], { refuseDrop: true }), alert: toldPort });
+  assert.ok(toldPort.texts.some((t) => t === `the queued alert for ${folderFactId('a')} could not be dropped`), toldPort.texts.join(' | '));
 });

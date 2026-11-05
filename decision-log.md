@@ -647,6 +647,16 @@ The companion `audit-log.md` records *deferred* items (Defer verdicts that may s
   - The first project that uses the Works column and the wiring check through a full phase: check that the scoreboard moved and the check caught something real, or simplify them.
   - Or: the wiring check raises a false alarm on a healthy project. Fix the check; never mute it.
 
+### D-037: Bob's method files have one owner, Bob upkeep
+
+- **Date:** 2026-11-03
+- **Status:** Accepted (the owner decided it on 3 Nov)
+- **Context:** Since D-032 the ownership table in `AGENTS.md` gave the ORCHESTRATE lead Bob's NEW mode and startup text (core "MODES" and "MODE: NEW", `build-protocol.md` Part II, the startup steps in `skill/SKILL.md`) and three scripts (`bob-init.sh`, `spec-audit.py`, `doc-pointers-check.mjs`), while it rewrote them. On 3 Nov the lead said it does not edit Bob's protocol and handed Part II items back. The table no longer said who actually changes those files, and the table is what keeps two sessions out of the same file.
+- **Decision:** Those files move to Bob upkeep. The lead keeps `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/`, and the text of an ORCHESTRATE mode wherever it is added. The lead agreed on 3 Nov. The planned move of the NEW mode into `modes/new.md` moves with them. The two sections `one-home-check.mjs` skipped while another session owned them are fixed in the same change (the "Appendix K" wording, and two Bob commands that failed from a project), and its skip list is now empty.
+- **Alternatives considered:** keep the table and hand edits back case by case. Rejected: a table that says one thing while sessions do another is how two sessions end up editing the same file.
+- **Consequences:** Bob upkeep is the one writer for all of Bob's method text; the lead asks it for changes there. A future session that rewrites a large part of Bob's method gets its own row in the table for that time, as the lead had.
+- **Revisit trigger:** a second session takes on a large rewrite of Bob's method text.
+
 ---
 
 ## Anti-pattern reminder
