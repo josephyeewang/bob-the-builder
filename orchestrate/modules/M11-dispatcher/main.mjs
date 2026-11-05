@@ -105,6 +105,8 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     return 2;
   }
   if (!r.ran) log(`dispatcher: ${r.reason}`);
+  // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
+  for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
   return 0;
 }
 

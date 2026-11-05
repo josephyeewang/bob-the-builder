@@ -75,8 +75,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
-import { SESSION_ID } from '../../../shared/record.mjs';
+import { SESSION_ID, isOpen } from '../../../shared/record.mjs';
 import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } from '../../../shared/job-config.mjs';
+import { carriedFrom } from '../../M6-merge-gate/gather.mjs';
+import { localGitView } from '../../M5-review-audit/local-view.mjs';
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
@@ -84,7 +86,8 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
-import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
+import { MAX_CHECKED_PATHS, changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
+import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -224,12 +227,13 @@ function recordFolderProblem(d, recordUid) {
 // One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
 function readRecordFile(p, recordUid, entity, id, missing) {
   let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, ...(e?.code === 'ENOENT' ? { missing: true } : {}), reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
     const d = JSON.parse(readFileSync(fd, 'utf8'));
-    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
+    // An id that isn't the one asked for is no such document: on a disk that ignores case, `c-1` opens the file of `C-1`.
+    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, ...(d?.entity === entity && typeof d.id === 'string' && d.id !== id ? { missing: true } : {}), reason: `its file is not a ${entity} document` };
     return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
 }
@@ -259,12 +263,58 @@ export function holdersOf(dir, { runFn = run } = {}) {
 
 /** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
 export function readCardFile({ recordRoot, recordUid, card }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, missing: true, reason: 'not a card id' };
   for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
     const bad = recordFolderProblem(d, recordUid);
     if (bad) return { ok: false, reason: bad };
   }
-  return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
+  // The exact name, before anything opens it: on a disk that ignores case, `c-1` would open `C-1.json`, and a ruined
+  // file then counts as a read failure for every spelling of it.
+  const dir = join(recordRoot, 'docs', 'card');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the card folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${card}.json`)) return { ok: false, missing: true, reason: 'no such card' };
+  return readRecordFile(join(dir, `${card}.json`), recordUid, 'card', card, 'no such card');
+}
+
+/**
+ * Every merge document of the Record, read only (docs/merge/): { merges, bad: [reason] }. One bad file blocks nothing
+ * (L92 minor 5): it is listed, for the caller to report. A folder that can't be read throws.
+ */
+export function readMergeFiles({ recordRoot, recordUid }) {
+  for (const d of [recordRoot, join(recordRoot, 'docs')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) throw new Error(bad);
+  }
+  const dir = join(recordRoot, 'docs', 'merge');
+  try { lstatSync(dir); } catch (e) { if (e?.code === 'ENOENT') return { merges: [], bad: [] }; throw e; }
+  const bad = recordFolderProblem(dir, recordUid);
+  if (bad) throw new Error(bad);
+  const merges = []; const unread = [];
+  for (const n of readdirSync(dir).filter((x) => x.endsWith('.json') && !x.startsWith('.'))) {
+    const id = n.slice(0, -'.json'.length);
+    const r = readRecordFile(join(dir, n), recordUid, 'merge', id, 'it is gone');
+    if (r.ok) merges.push({ id, doc: r.doc }); else unread.push(`merge ${id}: ${r.reason}`);
+  }
+  return { merges, bad: unread };
+}
+
+/**
+ * Carry-over from the card's head to `head` over the mirror (L80 (A)), with M6's one reading (`carriedFrom`). The card's
+ * one open merge request gives the recorded catch-ups. None, more than one, or one not waiting for a re-audit at `head`
+ * is a plain no, and comes back with the merge files it could not read, so the runner can tell them (L513 m4). The request
+ * is untrusted, so that is settled before any git read (m3).
+ */
+export async function mirrorCarried({ mirror, recordRoot, recordUid, card, doc, head }) {
+  const { merges, bad } = readMergeFiles({ recordRoot, recordUid });
+  const mine = merges.filter((m) => m.doc?.card === card && isOpen('merge', m.doc?.state));
+  const no = (why) => ({ review: false, audit: false, head, reasons: [why], badMerges: bad });
+  if (mine.length !== 1) return no(`card ${card} has ${mine.length} open merge requests, not one`);
+  if (mine[0].doc.re_audit_at !== head) return no(`its merge request is not waiting for a re-audit at ${String(head).slice(0, 7)}`);
+  try {
+    const mainSha = (await gitOk(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'review-runner-main', timeoutMs: CHILD_MS })).trim();
+    return { ...await carriedFrom({ view: localGitView({ gitDir: mirror }), merges, mergeId: mine[0].id, H0: doc.head, head, mainSha, catchUps: mine[0].doc.catch_ups }), badMerges: bad };
+  } catch (e) { return no(e?.message ?? String(e)); }
 }
 
 /**
@@ -372,7 +422,7 @@ export function reviewCopyPath(c, sessionId) {
  * back, as for a worker's copy (worker-copy.mjs). A folder already there is refused, never reused. → { ok } | { ok: false, reason }
  */
 export async function prepareReviewCopy({ mirror, card, head, dest }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
   if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
   try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
   mkdirSync(dest, { mode: 0o700 });
@@ -395,8 +445,9 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
 }
 
 /** The real ports (the wiring gives `start`). */
-export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
+export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, checkedPaths = MAX_CHECKED_PATHS, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
+  const checks = { left: checkedPaths };   // these ports last one pass, so this is the pass's own (L487)
   // What the launch checks read for one session (review-launch.mjs reviewChecks, L83 M-3).
   const launchInputs = (x, hooksDir) => {
     const card = readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card: x.card });
@@ -414,12 +465,22 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    // The Dispatcher's own rules key, for how long a request may go unrenewed (R-0b-171). The key is per product; a request
+    // that names no card has none, so it takes the longest. With no budget module it throws, and the runner then ends
+    // nothing on silence; no review starts then either, and each refusal says so.
+    requestGapMs: (product) => {
+      const gap = (p) => minutes(budget.rules, KEYS.inReviewNoReviewerMin, { product: p });
+      if (product) return gap(product);
+      const listed = budget.rec.list('product');
+      return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
+    },
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });
       if (r.code !== 0) throw new Error(`the card's branch is not in the mirror (${r.code})`);
       return r.stdout.toString('utf8').trim();
     },
+    carried: ({ card, doc, head }) => mirrorCarried({ mirror: c.mirror, recordRoot: c.recordRoot, recordUid: c.recordUid, card, doc, head }),
     // The head's tree (L69): one start per card, tree and role. The head is the one currentHead just read.
     treeOf: async (card, head) => {
       if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) throw new Error('the head is not 40 hex');
@@ -463,7 +524,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
-    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, ...await changeReaders({ gitDir: c.mirror, head }) }),
+    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, checks, ...await changeReaders({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }

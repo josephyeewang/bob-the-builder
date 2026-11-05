@@ -25,7 +25,9 @@ export function fakeRepo({ owner = 'sample-org', repo = 'sample-app' } = {}) {
       const text = typeof v === 'string' ? v : v.text;
       tree.set(path, { text, mode: typeof v === 'string' ? '100644' : v.mode ?? '100644', blob: blobSha(Buffer.from(text)) });
     }
-    const sha = createHash('sha1').update(`commit ${++n}`).digest('hex');
+    n += 1;
+    // `shaFor` lets a test give each commit a real one (fixtures/real-commits.test-helper.mjs).
+    const sha = r.shaFor?.(parents, tree) ?? createHash('sha1').update(`commit ${n}`).digest('hex');
     commits.set(sha, { parents: [...parents], files: tree, n });
     return sha;
   };

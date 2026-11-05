@@ -3,7 +3,8 @@
 //
 // WHY. The owner is interrupted twice a day, not all day: an ask goes out only in a push window (08:00, 17:00 in the
 // owner's zone, or the trip zone while away). Urgent kinds (undo, incident repair) go out at once and every 2 hours
-// until answered. Nothing waits forever: a lapsing ask unanswered 12 hours after it was raised is re-asked once, in the
+// until answered. A go ask still waiting on a draft card reaches the phone again once a day, in a window (L523).
+// Nothing waits forever: a lapsing ask unanswered 12 hours after it was raised is re-asked once, in the
 // next window, then expires. A merge approval not used within 24 hours of being raised goes back the same way. All
 // clocks run from raised_at (GitHub's time for a review request; the first push or bound box for a tap), so a pass
 // that runs late — the Mini was down — lapses an ask exactly as an on-time pass would, and an answer given after the
@@ -32,11 +33,11 @@ import { activeKind } from '../../shared/asks.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { askStore, writeDoc } from './ask-store.mjs';
 import { releaseBoxes, releaseSessions } from './binding.mjs';
-import { CLOSE_DUE, closeDecisionPr, openDecision } from './decision.mjs';
+import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
-import { MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
+import { GO_REPUSH_MS, MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const HELD_CLOSED_STATES = Object.freeze(['merged', 'closed', 'cancelled', 'closed_no_answer', 'reverted']);
@@ -130,8 +131,18 @@ export function heldBy(record, doc) {
   return null;
 }
 
+// While a withdrawn ask's pull request stays open, the owner hears no more often than this.
+const PR_OPEN_REPEAT_MS = 24 * 60 * 60 * 1000;
 const liveBox = (doc) => (doc.boxes ?? []).some((b) => b.status === 'bound');
 const raisedThisRound = (doc) => ms(doc.raised_at) !== null && doc.raised_reask === doc.reask_count;
+const onDraft = (record, doc) => { const c = record.read('card', doc.card); return !!c && !c.corrupt && c.doc?.state === 'draft'; };
+// Why a go's card can't be read, or null. Nothing else tells this: the plan pass skips such a card and a move only answers
+// with a reason, so without this the go would wait in silence (L556).
+const goCardLost = (record, doc) => {
+  if (!activeKind(doc.kind).go) return null;
+  const c = record.read('card', doc.card);
+  return !c ? 'its card is missing from the record, so this go cannot go ahead' : c.corrupt ? 'its card cannot be read, so this go cannot go ahead' : null;
+};
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -142,10 +153,26 @@ function write(ctx, cur, doc, events, event) {
 
 // A decision answered while its close did not go through carries CLOSE_DUE (decision.mjs, L135); the pass tries the
 // close again, and takes the mark off once it closed or Joe was told it did not.
-async function retryClose(ctx, a, events) {
+// A withdrawn ask's mark stays until the close works: telling the owner doesn't close it (L477).
+async function retryClose(ctx, a, nowMs, events) {
+  if (a.doc.state === 'withdrawn') return retryWithdrawnClose(ctx, a, nowMs, events);
   if (!(await closeDecisionPr(ctx, a.id, a.doc))) return;
   const { [CLOSE_DUE]: _due, ...rest } = a.doc;
   write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: a.doc.card });
+}
+
+async function retryWithdrawnClose(ctx, a, nowMs, events) {
+  const doc = a.doc;
+  if ((await closePr(ctx, doc)) === null) {
+    const { [CLOSE_DUE]: _due, pr_open_told_at: _told, ...rest } = doc;
+    write(ctx, a, rest, events, { type: 'decision_pr_close_retried', ask: a.id, card: doc.card });
+    return;
+  }
+  const told = pastTime(doc.pr_open_told_at, nowMs);
+  if (told !== null && nowMs - told < PR_OPEN_REPEAT_MS) return;
+  let sent = false;
+  try { sent = ctx.alert({ type: 'withdrawn_pr_open', ask: a.id, text: `Ask ${a.id} was withdrawn; approving pull request ${doc.pr} won't count. It could not be closed, and closing it is tried again each pass.` }) !== false; } catch { sent = false; }
+  if (sent) write(ctx, a, { ...doc, pr_open_told_at: iso(nowMs) }, events);
 }
 
 // A tap ask whose created_at can't be read or lies in the future: no box can bind on it (binding.mjs), so left alone it
@@ -156,7 +183,7 @@ function reaskUnreadable(ctx, a, nowMs, events) {
   const doc = a.doc;
   if (activeKind(doc.kind).channel !== 'tap' || (doc.state !== 'open' && doc.state !== 'pushed') || pastTime(doc.created_at, nowMs) !== null) return false;
   let told = false;
-  try { told = ctx.alert({ type: 'ask_time_unreadable', ask: a.id, card: doc.card, text: `The question about ${doc.card} is being asked again because its time could not be read. An earlier copy of it no longer counts.` }) === true; } catch { told = false; }
+  try { told = ctx.alert({ type: 'ask_time_unreadable', ask: a.id, card: doc.card, text: `The question about ${doc.card} [ask ${a.id}] is being asked again because its time could not be read. An earlier copy of it no longer counts.` }) === true; } catch { told = false; }
   if (!told) return true;
   const next = structuredClone(doc);
   releaseBoxes(next, 'time_unreadable', nowMs, { moveBack: false });
@@ -200,7 +227,10 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
     d.last_push_at = iso(nowMs);
     if (win && !urgent) d.window_pushes = [...(d.window_pushes ?? []), win.key].slice(-MAX_WINDOW_MARKS);
   };
-  if (k.channel === 'tap') {
+  // The daily reminder of a go (L523). A Tier-1 go is answered on GitHub, so its reminder only points there: the ask, its
+  // pull request and its review request stay as they are.
+  const reminder = k.go && !first && !urgent && (k.channel === 'tap' || Number.isSafeInteger(doc.pr));
+  if (k.channel === 'tap' || reminder) {
     if (typeof ctx.push !== 'function') { once.alert(a.id, { type: 'approvals_no_push', ask: a.id }); return; }
     // A go push carries the go view (R-0b-138/139): the plan in three lines and the files it allows. One that can't be
     // shown is held, never sent bare.
@@ -208,7 +238,8 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
     if (k.go) { const v = goView(doc); if (!v.ok) { once.alert(a.id, { type: 'go_not_shown', ask: a.id, reason: v.reason }); return; } view = goText(v); }
     // An undo the owner flagged (R-0b-140) carries its pull request, so its push says which change and what Undo does.
     if (doc.kind === 'undo' && Number.isSafeInteger(doc.pr)) view = undoPushText({ card: doc.card, title: doc.title, pr: doc.pr });
-    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(doc.kind === 'undo' && anyBound ? { line: UNDO_OPEN_QUESTION_LINE } : {}), ...(view ? { view } : {}) };
+    const line = doc.kind === 'undo' && anyBound ? UNDO_OPEN_QUESTION_LINE : k.channel === 'tap' ? null : `Answer this on pull request #${doc.pr} on GitHub. Nothing tapped here counts.`;
+    const event = { ask: a.id, card: doc.card, kind: doc.kind, urgent, ...(line ? { line } : {}), ...(view ? { view } : {}) };
     let sent = false;
     try { sent = (await ctx.push(event)) === true; } catch { sent = false; }
     if (!sent) { once.alert(a.id, { type: 'push_not_sent', ask: a.id }); return; }
@@ -260,7 +291,7 @@ export async function schedulePass(ctx) {
   for (const a of st.asks()) {
     if (!activeKind(a.doc.kind)) continue;
     // A close still due is retried first; the ask's run-out waits for the next pass (one write per ask per pass).
-    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, events); continue; }
+    if (a.doc[CLOSE_DUE] === true) { await retryClose(ctx, a, nowMs, events); continue; }
     if (reaskUnreadable(ctx, a, nowMs, events)) continue;
     await runOut(ctx, a, nowMs, events);
   }
@@ -271,6 +302,8 @@ export async function schedulePass(ctx) {
   for (const a of asks) {
     const doc = a.doc;
     if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    const lost = goCardLost(ctx.record, doc);
+    if (lost) once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, reason: lost });
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }
@@ -281,6 +314,7 @@ export async function schedulePass(ctx) {
     const pushed = pastTime(doc.last_push_at, nowMs);
     const since = pastTime(doc.lapsed_at ?? doc.created_at, nowMs);
     if (urgent) due = !raisedThisRound(doc) || pushed === null || nowMs - pushed >= URGENT_REPUSH_MS;
+    else if (activeKind(doc.kind).go && raisedThisRound(doc)) due = win !== null && (pushed === null || nowMs - pushed >= GO_REPUSH_MS) && onDraft(ctx.record, doc);
     else due = win !== null && !raisedThisRound(doc) && (since === null || since <= win.start);
     if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }

@@ -3,13 +3,14 @@
 // a GitHub refusal and a stopped pass each end where they should; behind main catches up; the queue order.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { linkSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setup, product, leadCard, runCard, outboxFile, put, must, plan, PRODUCT, fingerprintFor, fullTimeouts, runnerLaunch, runnerEndedRecord, runnerAsideRecord, launch } from '../M9-record/fixtures.test-helper.mjs';
 import { chmodSync } from 'node:fs';
 import { fakeRules, allow, deny, makeRules } from '../../shared/rules.mjs';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { makeEngine } from '../M10-rules/engine.mjs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
 import { rulesFromText } from '../M10-rules/from-text.mjs';
@@ -17,7 +18,12 @@ import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { ROBOT_FACT, NO_PUSH_FACT } from '../M12-sensors/outside-watch.mjs';
-import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE, CHECK_CUT_NOTE, WAIT_CAP_TIMES, DEFAULT_WAIT_LIMIT_MIN, waitCapNote } from './gate.mjs';
+import { gatePass, queueOrder, NOT_GREEN_LINE, MERGE_LIMIT_TOLD_FACT, FINAL_NOTE, GITHUB_NO_NOTE, CHECK_CUT_NOTE, WAIT_CAP_TIMES, DEFAULT_WAIT_LIMIT_MIN, RE_AUDIT_CAP_MIN, waitCapNote } from './gate.mjs';
+import { realCommits } from './fixtures/real-commits.test-helper.mjs';
+import { createMirrorRefresh } from '../M4-workshop/git/mirror-refresh.mjs';
+import { git as safeGit, initMirror } from '../M4-workshop/git/safe-git.mjs';
+import { prepareReviewCopy, realPorts } from '../M4-workshop/launcher/review-runner-main.mjs';
+import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
 import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
@@ -28,10 +34,11 @@ import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
 
-function world({ values = {}, mergeAnswer } = {}) {
+function world({ values = {}, mergeAnswer, gitHub } = {}) {
   const env = setup({ prefix: 'm6-gate-' });
   product(env);
   const g = fakeGateGitHub();
+  gitHub?.(g);   // before the first commit
   const root = g.commit([], { 'orchestrate/policy.yaml': POLICY, 'src/a.mjs': 'one' });
   g.main = root;
   const vals = {
@@ -59,15 +66,15 @@ function world({ values = {}, mergeAnswer } = {}) {
 
 // A card built, reviewed by a reviewer the review runner launched (its own record, L65) through the review outbox,
 // verified, and asked to merge as pull #7.
-function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo, request = true } = {}) {
+function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, undo, request = true, audit = false, tier = 2, cardTier } = {}) {
   const { env, g } = w;
   if (undo) {
     // The Dispatcher's undo card, from an authenticated audit issue (lane 2 makes it; here it is made the same way).
     must(env.record.write({ actor: 'sensors', entity: 'fact', id: `undo-issue-${id}`, expectRev: 0, doc: { type: 'undo_issue', authenticated: true, commit: undo } }), 'issue');
     must(env.record.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'draft', product: PRODUCT, kind: 'exact_reverse', source: { fact: `undo-issue-${id}` }, ...plan({ files: Object.keys(files) }) } }), 'undo card');
   } else {
-    const doc = leadCard(env, id, { files: Object.keys(files) });
-    must(env.record.write({ actor: 'approvals', entity: 'go', id: `go-${id}`, expectRev: 0, doc: { product: PRODUCT, card_id: id, plan_fingerprint: fingerprintFor(id, doc), files: Object.keys(files), tier: 2, rows: {} } }), 'go');
+    const doc = leadCard(env, id, { files: Object.keys(files), ...(cardTier ? { tier: cardTier, plan_sha256: 'a'.repeat(64), main_commit: g.main } : {}) });
+    must(env.record.write({ actor: 'approvals', entity: 'go', id: `go-${id}`, expectRev: 0, doc: { product: PRODUCT, card_id: id, plan_fingerprint: fingerprintFor(id, doc), files: Object.keys(files), tier, rows: {} } }), 'go');
   }
   must(put(env.record, 'dispatcher', 'card', id, { state: 'ready' }), 'ready');
   runCard(env, id);
@@ -80,9 +87,20 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
   must(env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(env, 'reviewer', sid, `verdict-${id}.md`, hdr)), 'verdict');
   runnerEndedRecord(env, id, sid, 'reviewer', head);
+  if (audit) auditorAt(w, id, `A-${id}`, head);
   must(put(env.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
   if (request) requestMerge(w, id, pr, head);
   return head;
+}
+
+// An auditor the review runner launched at `head`, which handed in `material` findings and ended.
+function auditorAt(w, id, sid, head, { material = 0 } = {}) {
+  const { env } = w;
+  runnerLaunch(env, id, sid, 'auditor', head);
+  const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: material === 0, material } })}\n`;
+  const r = env.review.applyOutbox({ role: 'auditor', sessionId: sid, card: id }, outboxFile(env, 'auditor', sid, `verdict-${id}.md`, hdr));
+  runnerEndedRecord(env, id, sid, 'auditor', head);
+  return r;
 }
 
 function requestMerge(w, id, pr, head) {
@@ -154,6 +172,27 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'reverted');
   assert.ok(r.did.some((d) => d.step === 'reverted' && d.card === 'C-1'));
   assert.equal(w.g.repo.files(w.g.main).get('src/a.mjs').text, 'one');
+});
+
+// An undo skips refusal 1, so refusal 2 is what stops it: main is never green on a list that names no check.
+test('L96 m-1: an undo card does not merge when the rules name an empty list of required checks, or none, and its hold says so (L531)', async () => {
+  for (const list of [[], null, ['  '], ['test', ''], [' test']]) {
+    const w = world();
+    verifiedCard(w);
+    await gatePass(w.ctx);
+    const flagged = mergeOf(w).doc.merge_commit;
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+    await gatePass(w.ctx);
+    must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+    w.env.clock.t += 60_000;
+    verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+    w.values['product_profile.required_checks'] = list;
+    w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+    await gatePass(w.ctx);
+    const u = mergeOf(w, 'U-1');
+    assert.notEqual(u.doc.state, 'merged', JSON.stringify(list));
+    assert.match(JSON.stringify(u.doc), /2: the rules name no required checks/, JSON.stringify(u.doc));
+  }
 });
 
 // L135 site G: the undo card merged, but marking the undone card reverted failed, and the alert saying so was lost
@@ -1772,6 +1811,7 @@ const HOLDS = [
   ['main is red', (w) => w.g.checks.set(w.g.main, redRun(w.g.main)), /^2: main is red/],
   ['main has 100 check runs', (w) => w.g.checks.set(w.g.main, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: w.g.main, status: 'completed', conclusion: 'success' }))), /^2: main's checks could not be read/],
   ['the rules name no required checks', (w) => { w.values['product_profile.required_checks'] = null; }, /^1: the rules name no required checks/],
+  ['the rules name an empty list of required checks', (w) => { w.values['product_profile.required_checks'] = []; }, /^1: the rules name no required checks/],
   ['the rules give no merge answer', (w) => { w.ctx.rules = Object.create(w.ctx.rules, { may: { value: () => { throw new Error('the engine stopped'); } } }); }, /^9: the rules gave no merge answer/],
   ['the go check fails', (w) => { const base = w.ctx.record; w.ctx.record = Object.create(base, { read: { value: (e, id) => { if (e === 'go') throw new Error('go store gone'); return base.read(e, id); } } }); }, /^10: the go could not be checked/],
   ['GitHub never works out mergeable', (w) => { w.g.pulls.get(7).mergeable_state = 'unknown'; }, /^3: GitHub has not worked out/],
@@ -2568,6 +2608,47 @@ test('L205: at the first cutover, a failed read of the reversed commit\'s mark h
   assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
 });
 
+// S16, L548: the mark read goes straight to the client, not through git-view, so a throw there is marked in watchReads.
+const undoAwaitingMark = async (w) => {
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(recOf(w), 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  tick(w, 1);
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  return flagged;
+};
+test('S16, L548: a raw throw on the mark read is not read, never an answer: the wait does not count, and the next pass merges', async () => {
+  for (const msg of ['socket hang up', 'read ECONNRESET', 'Unexpected end of JSON input', 'the token file could not be read']) {
+    const w = world({ values: { 'product.cutover_stage': 'first' } });
+    const flagged = await undoAwaitingMark(w);
+    let left = 1;
+    wrapGet(w, (p, r) => { if (left > 0 && p.includes(`/commits/${flagged}/statuses`)) { left -= 1; throw new Error(msg); } return r; });
+    await gatePass(w.ctx);
+    assert.equal(left, 0, `${msg}: the mark read was the one that threw`);
+    const u = mergeOf(w, 'U-1');
+    assert.equal(u.doc.state, 'held', `${msg}: ${JSON.stringify(u.doc)}`);
+    assert.ok((u.doc.waiting_on ?? []).some((x) => /^9: /.test(x)), (u.doc.waiting_on ?? []).join(' | '));
+    assert.equal(u.doc.stuck_since, null, `${msg}: a failed read does not start the cap`);
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+  }
+});
+test('S16, L548: the same throw sustained past the cap never refuses the undo, and the owner is told it waits', async () => {
+  const lim = limited();
+  const w = world({ ...lim, values: { ...lim.values, 'product.cutover_stage': 'first' } });
+  const flagged = await undoAwaitingMark(w);
+  wrapGet(w, (p, r) => { if (p.includes(`/commits/${flagged}/statuses`)) throw new Error('socket hang up'); return r; });
+  for (const step of [0, 5, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'held', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(told(w, 'merge_refused').length, 0);
+  assert.ok(told(w, 'merge_waiting_long').length >= 1, 'a long wait on a failed read is told');
+});
+
 // The review threads (plant Q25): a GraphQL answer of 404 is GitHub's answer, so the wait on 7 counts toward the cap.
 test('L205 Minor 1: a review-thread read GitHub answers with a 404 waits on 7, and the wait counts toward the cap', async () => {
   const w = world(limited());
@@ -2602,6 +2683,24 @@ test('#108 r3 R3-b: a carry-over whose files read is cut off at 300 (main moved 
   for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
   assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
   assert.ok(mergeOf(w).doc.reasons.some((x) => /^5: /.test(x)), mergeOf(w).doc.reasons.join(' | '));
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+test('S1, L543: a carry-over whose files read says "not an ancestor", from the real git view: the wait counts toward the cap, then refused and told', async () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const diverged = makeGitView({ gh: { get: async () => ({ status: 200, json: { status: 'diverged', merge_base_commit: { sha: 'd'.repeat(40) }, files: [] } }) }, owner: 'o', repo: 'r' });
+  const notAncestor = await diverged.files(A, B).then(() => null, (e) => e);
+  assert.match(notAncestor?.message ?? '', /is not an ancestor of/);
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  const newMain = w.g.main;
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { files: { value: (b, h) => (h === newMain ? Promise.reject(notAncestor) : view.files(b, h)) } });
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w).doc.stuck_since ?? null, null, `the wait counts toward the cap: ${JSON.stringify(mergeOf(w).doc)}`);
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
   assert.equal(told(w, 'merge_refused').length, 1);
 });
 test('#108 r3 R3-c: an undo whose exact-reverse compare lists 300 files: the wait counts toward the cap and the undo is refused, told', async () => {
@@ -3263,4 +3362,204 @@ test('L356 gate.mjs: a refused clear of the landed reading steps aside with an a
   assert.equal(again().doc.wait_reading ?? null, null, 'cleared on the next pass');
   assert.equal(gatePuts(w), puts + 1, 'and it went on');
   assert.equal(refused().length, 1);
+});
+
+// L92 M-3: the short re-audit in the real flow, on the real gate and the real Record, with no hand-made merge document
+// or card state. Two Tier-1 changes: the first merges; the second is caught up behind it, so its audit doesn't carry over.
+// The start gate reads two facts Sensors keeps fresh, good for two hours: a test that moves the clock further says so.
+function sensorsStillGreen(w) {
+  const at = new Date(w.env.clock.t).toISOString();
+  w.facts.set(ROBOT_FACT(PRODUCT), { ...w.facts.get(ROBOT_FACT(PRODUCT)), last_green_at: at });
+  w.facts.set(NO_PUSH_FACT, { ...w.facts.get(NO_PUSH_FACT), at });
+}
+
+async function reAuditWorld() {
+  const w = world({ values: { 'live_check.M1.proven_at': '2026-01-01T00:00:00Z' } });
+  const r = w.ctx.rules;
+  w.ctx.rules = Object.create(r, { classify: { value: (x) => ({ ...r.classify(x), tier: 1 }) } });
+  w.ctx.refreshMirror = async () => ({ ok: true });
+  verifiedCard(w, 'C-1', { audit: true, tier: 1 });
+  const H0 = verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b' }, request: false, audit: true, tier: 1 });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc));
+  w.env.clock.t += 60_000;
+  requestMerge(w, 'C-2', 8, H0);
+  await gatePass(w.ctx);   // behind main: catch-up asked
+  await gatePass(w.ctx);   // caught up: judged
+  return { w, H0, H1: mergeOf(w, 'C-2').doc.catch_ups?.[0]?.after_sha };
+}
+
+test('L92 M-3 planted: a Tier-1 change caught up behind a Tier-1 merge waits with its catch-ups, is re-audited at the caught-up head, and merges', async () => {
+  const { w, H0, H1 } = await reAuditWorld();
+  let m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'held', JSON.stringify(m.doc));
+  assert.equal(m.doc.hold, 'waiting');
+  assert.equal(m.doc.re_audit_at, H1, 'where the Dispatcher asks for the auditor');
+  assert.equal(m.doc.catch_ups.length, 1);
+  assert.match(m.doc.waiting_on.join(), /^5: the Tier-1 audit does not carry over to [0-9a-f]{7}; waiting for a short re-audit there$/);
+  assert.equal(w.env.record.read('card', 'C-2').doc.state, 'verified');
+  assert.equal(w.env.record.read('card', 'C-2').doc.head, H0);
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'held', 'still waiting, nothing merged');
+  assert.ok(!w.g.writes.some(([verb, path]) => verb === 'put' && path.endsWith('/pulls/8/merge')));
+  auditorAt(w, 'C-2', 'A-re', H1);
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'merged', JSON.stringify(m.doc));
+  assert.equal(m.doc.re_audit_at, null, 'the wait is over');
+});
+
+// L513 MAT-1 and scenario (h): GitHub and the mirror are two repositories, as in production, and the runner reads only
+// the mirror. The gate catches up on GitHub alone, so it is the gate's refresh that lets the auditor start. Nothing here
+// is hand-written: the merges, the catch-up and the card are the real gate's and the real Record's.
+async function mirrorWorld() {
+  const d = tempDir('m6-mirror-');
+  const real = realCommits(d);
+  const w = world({ values: { 'live_check.M1.proven_at': '2026-01-01T00:00:00Z' }, gitHub: (g) => { g.repo.shaFor = real.shaFor; } });
+  const r = w.ctx.rules;
+  w.ctx.rules = Object.create(r, { classify: { value: (x) => ({ ...r.classify(x), tier: 1 }) } });
+  verifiedCard(w, 'C-1', { audit: true, tier: 1, files: { 'src/a.mjs': 'two\n' } });
+  const H0 = verifiedCard(w, 'C-2', { pr: 8, files: { 'src/b.mjs': 'b\n' }, request: false, audit: true, tier: 1, cardTier: 1 });
+  const mirror = join(d, 'mirror.git');
+  await initMirror(mirror);
+  const values = { 'product.repo': 'sample-org/sample-app', 'product.mirror': mirror };
+  const port = createMirrorRefresh({ rules: { get: (k) => values[k] }, getRobotToken: async () => 'test-value', testRemote: () => real.gd });
+  const refresh = (x) => { real.publish({ main: w.g.main, 'card/c-2': w.g.pulls.get(8).head }); return port(x); };
+  assert.deepEqual(await refresh({ product: PRODUCT, card: 'C-2', head: H0 }), { ok: true });
+  const inMirror = async (ref) => { const o = await safeGit(['rev-parse', '--verify', '-q', ref], { gitDir: mirror, purpose: 'test' }); return o.code === 0 ? o.stdout.toString('utf8').trim() : null; };
+  // The runner, on the real ports over the mirror and the Record; only the session itself is a stand-in.
+  const root = join(d, 'review'); const outboxRoot = join(d, 'outbox'); const copies = join(d, 'copies');
+  for (const p of [root, outboxRoot, copies]) { mkdirSync(p, { mode: 0o755 }); chmodSync(p, 0o755); }
+  const uids = w.env.reviewUids;
+  const ports = () => realPorts({ root, outboxRoot, uids, reviewHome: join(d, 'home'), claudeBin: '/pinned/claude', recordRoot: w.env.root, recordUid: process.getuid(), mirror }, {});
+  const live = [];
+  let n = 0; let q = 0;
+  const runner = () => {
+    const p = ports();
+    return { root, outboxRoot, uids, reviewHome: join(d, 'home'), claudeBin: '/pinned/claude', now: () => w.env.clock.t, ownUid: () => process.getuid(), newId: () => `S-${++n}`, isAdmin: async () => false,
+      readCard: p.readCard, currentHead: p.currentHead, carried: p.carried, treeOf: p.treeOf, setAsideByJoe: () => [], sessions: async () => live.slice(), stop: async () => {},
+      processName: (pid) => { const x = live.find((y) => y.pid === pid); return x ? `/pinned/claude --session-id ${x.sessionId}` : null; }, accountInUse: () => 'a',
+      handedIn: () => ({ ok: false }), verdictTaken: () => ({ ok: true }), finalize: async () => ({ ok: true }),
+      start: async (x) => { const made = await prepareReviewCopy({ mirror, card: x.card, head: x.head, dest: join(copies, x.sessionId) }); if (!made.ok) return made; live.push({ pid: 900000 + n, sessionId: x.sessionId }); return { ok: true, pid: 900000 + n }; } };
+  };
+  const askAuditor = async (head) => {
+    assert.equal((await runnerPass(runner())).ok, true);
+    q += 1;
+    writeFileSync(join(root, 'requests', `q-${q}.json`), JSON.stringify({ card: 'C-2', head, role: 'auditor', request_id: `q-${q}` }), { mode: 0o644 });
+    return runnerPass(runner());
+  };
+  const catchUpBehindC1 = async () => {
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w).doc.state, 'merged', JSON.stringify(mergeOf(w).doc));
+    w.env.clock.t += 60_000;
+    requestMerge(w, 'C-2', 8, H0);
+    await gatePass(w.ctx);   // behind main: catch-up asked
+    await gatePass(w.ctx);   // caught up: judged
+    return mergeOf(w, 'C-2').doc.catch_ups?.[0]?.after_sha;
+  };
+  return { w, H0, refresh, inMirror, askAuditor, catchUpBehindC1 };
+}
+
+test('L513 MAT-1, scenario (h): the gate brings the mirror up to the caught-up head, the runner starts the auditor from the mirror alone, and the change merges on that audit', async () => {
+  const { w, H0, refresh, inMirror, askAuditor, catchUpBehindC1 } = await mirrorWorld();
+  w.ctx.refreshMirror = refresh;
+  const H1 = await catchUpBehindC1();
+  const m = mergeOf(w, 'C-2');
+  assert.deepEqual([m.doc.state, m.doc.re_audit_at], ['held', H1], JSON.stringify(m.doc));
+  assert.notEqual(H1, H0);
+  assert.equal(await inMirror('refs/heads/card/c-2'), H1);
+  assert.equal(await inMirror('refs/heads/main'), w.g.main);
+  assert.equal(w.env.record.read('card', 'C-2').doc.head, H0, 'the card head never moved');
+  const a = await askAuditor(H1);
+  assert.equal(a.started.length, 1, JSON.stringify(a.refused));
+  auditorAt(w, 'C-2', 'A-re', H1);
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'merged', JSON.stringify(mergeOf(w, 'C-2').doc));
+});
+
+test('L513 MAT-1: without the refresh the mirror never has the head and no auditor starts; a wait that can\'t refresh says why, and the next good pass ends that', async () => {
+  const { w, refresh, askAuditor, catchUpBehindC1 } = await mirrorWorld();
+  const H1 = await catchUpBehindC1();   // no port wired
+  let m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.re_audit_at, H1);
+  assert.match(m.doc.waiting_on.join(' | '), /^5: .*short re-audit there \| mirror: the mirror could not be brought up to [0-9a-f]{7} \(nothing is wired to do it\), so no short re-audit can start$/);
+  assert.equal((await askAuditor(H1)).started.length, 0);
+  // A port that fails, or throws, keeps the wait, with its reason.
+  w.ctx.refreshMirror = async () => ({ ok: false, reason: 'could not fetch from GitHub' });
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  assert.match(mergeOf(w, 'C-2').doc.waiting_on.join(), /\(could not fetch from GitHub\)/);
+  w.ctx.refreshMirror = async () => { throw new Error('it broke'); };
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'held');
+  assert.match(m.doc.waiting_on.join(), /\(it broke\)/);
+  // The failed passes tried again, so one good pass is enough.
+  w.ctx.refreshMirror = refresh;
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  assert.ok(!/mirror/.test(mergeOf(w, 'C-2').doc.waiting_on.join()), JSON.stringify(mergeOf(w, 'C-2').doc));
+  const a = await askAuditor(H1);
+  assert.equal(a.started.length, 1, JSON.stringify(a.refused));
+});
+
+test('L513 m6: a second catch-up keeps the first, so the chain of recorded catch-ups is whole, and the re-audit moves to the newest head', async () => {
+  const { w } = await reAuditWorld();
+  const first = mergeOf(w, 'C-2').doc.catch_ups[0];
+  w.g.main = w.g.commit([w.g.main], { 'src/c.mjs': 'c' }, { from: w.g.main });
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  const m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.catch_ups.length, 2, JSON.stringify(m.doc));
+  assert.deepEqual(m.doc.catch_ups[0], first);
+  assert.equal(m.doc.catch_ups[1].before_sha, first.after_sha);
+  assert.equal(m.doc.re_audit_at, m.doc.catch_ups[1].after_sha);
+});
+
+test('L513 m1: a short re-audit has its own wait cap, past three times the wait limit', async () => {
+  const { w } = await reAuditWorld();
+  const start = w.env.clock.t;
+  const limit = fullTimeouts().merging_open_max_min;
+  assert.ok(limit === undefined || WAIT_CAP_TIMES * limit < RE_AUDIT_CAP_MIN);
+  w.env.clock.t = start + (WAIT_CAP_TIMES * (limit ?? DEFAULT_WAIT_LIMIT_MIN) + 5) * 60_000;
+  sensorsStillGreen(w);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'held', 'past the usual cap, still waiting for the auditor');
+  w.env.clock.t = start + (RE_AUDIT_CAP_MIN - 5) * 60_000;
+  sensorsStillGreen(w);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'C-2').doc.state, 'held', 'just short of its own cap');
+  w.env.clock.t = start + (RE_AUDIT_CAP_MIN + 5) * 60_000;
+  sensorsStillGreen(w);
+  await gatePass(w.ctx);
+  const m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.equal(m.doc.tell_note, waitCapNote(RE_AUDIT_CAP_MIN * 60_000 / WAIT_CAP_TIMES));
+});
+
+test('L92 M-3 planted: a failed short re-audit refuses for good', async () => {
+  const { w, H1 } = await reAuditWorld();
+  auditorAt(w, 'C-2', 'A-re', H1, { material: 1 });
+  w.env.clock.t += 60_000;
+  await gatePass(w.ctx);
+  const m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.match(m.doc.reasons.join(), /the auditor session A-re did not pass/);
+});
+
+test('L92 M-3 planted: a short re-audit that never comes reaches the wait cap and the owner hears', async () => {
+  const { w } = await reAuditWorld();
+  for (let i = 0; i < 40 && mergeOf(w, 'C-2').doc.state === 'held'; i += 1) {
+    w.env.clock.t += DEFAULT_WAIT_LIMIT_MIN * 60_000;
+    sensorsStillGreen(w);
+    await gatePass(w.ctx);
+  }
+  const m = mergeOf(w, 'C-2');
+  assert.equal(m.doc.state, 'refused', JSON.stringify(m.doc));
+  assert.equal(m.doc.tell_owner, true);
 });

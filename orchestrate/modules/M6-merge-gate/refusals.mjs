@@ -31,8 +31,9 @@
 //   statuses [{ context, state }] | null     commit statuses on the PR head (refusal 1)
 //   requiredChecks [name], checksIgnored [{ app_id, name }]
 //   compareStatus 'ahead' | 'behind' | 'diverged' | 'identical' | null   main...head (refusal 12)
-//   carried { review, audit, unread?, reasons } | null   carry-over from H0 to the PR head (read only when they differ;
-//                                            unread: true when it could not be read, which is not yet)
+//   carried { review, audit, unread?, reasons, head } | null   carry-over from H0 to the PR head (read only when they
+//                                            differ; gather `carriedFrom`); unread: true when it could not be read,
+//                                            which is not yet; `head` is the head it was worked out for (L80)
 //   reviews [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }] | null   every
 //                                            session the review runner launched for this card at H0 or H0's tree, with
 //                                            its own verdict file (M9 headReviews, L68, L69); null when they could not
@@ -171,7 +172,14 @@ function verdictCheck(f) {
     if (pp) return reworded(pp, (r) => `${r}${there}`);
     if (!f.carried || f.carried.unread === true) return notYet(`whether the review carries over to ${prHead.slice(0, 7)} could not be read`);
     if (f.carried.review !== true) return final(`the review was for ${head.slice(0, 7)}; it does not carry over to ${prHead.slice(0, 7)}`);
-    if (f.tier === 1 && f.carried.audit !== true) return final(`the Tier-1 audit does not carry over to ${prHead.slice(0, 7)}`);
+    // The short re-audit (L80 (A), R-0b-146): when the review carried over to exactly this head and only the audit did
+    // not, a passing auditor at the pull request's head counts in its place, and until one has it is a wait (L92 M-3),
+    // told and capped like any other. Every auditor there still had its say above, so a failed one is final.
+    if (f.tier === 1 && f.carried.audit !== true) {
+      const no = `the Tier-1 audit does not carry over to ${prHead.slice(0, 7)}`;
+      if (f.carried.head !== prHead) return final(no);
+      if (worstVerdict(f.prReviews, 'auditor', PASSES.auditor, { needPass: true })) return { ...notYet(`${no}; waiting for a short re-audit there`), reAudit: prHead };
+    }
   }
   return null;
 }
@@ -230,7 +238,7 @@ export function judge(f) {
   const notes = [];
   const no = (n, reason) => refusals.push({ n, reason });
   const wait = (n, reason) => refusals.push({ n, reason, temporary: true });
-  const add = (n, x) => { if (x) (x.temporary ? wait : no)(n, x.reason); };
+  const add = (n, x) => { if (!x) return; if (!x.temporary) no(n, x.reason); else refusals.push({ n, reason: x.reason, temporary: true, ...(x.reAudit ? { reAudit: x.reAudit } : {}) }); };
   // A refusal that waits only because there is no file list is final when the list can never be read (L182).
   const filesGone = filesFinal(f);
   const waitFiles = (n, reason) => (filesGone ? no(n, filesGone) : wait(n, reason));
@@ -256,7 +264,7 @@ export function judge(f) {
     // A PR head that could not be read is refusal 3's to say (not yet); 6 compares only against a head that was read.
     if (!Array.isArray(f.checks)) { if (reverse) (typeof f.checksTooLong === 'string' ? no : wait)(6, typeof f.checksTooLong === 'string' ? `the commit has ${f.checksTooLong}` : 'the checks could not be read'); } else if (SHA.test(prHead ?? '') && f.checks.some((c) => c?.head_sha !== prHead)) no(6, 'a check result is for another commit');
     // 2. main. Red or unread, it is main's state, not the change's: not yet.
-    if (f.main?.green !== true) wait(2, f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
+    if (f.main?.green !== true) wait(2, !Array.isArray(f.requiredChecks) ? 'the rules name no required checks' : f.main?.green === false ? 'main is red' : 'main\'s checks could not be read');
     // 3, 4. The pull request. GitHub works out mergeable in the background, so null or 'unknown' is not yet.
     const pr = f.pr;
     if (!pr) wait(3, 'the pull request could not be read');

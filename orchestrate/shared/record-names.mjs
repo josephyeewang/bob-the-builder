@@ -47,6 +47,8 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'scout-': NONE(['lead']),
   'write-': NONE(['lead']),
   'roadmap-': { roles: ['lead'], entity: 'card', mode: 'move' },
+  // The Lead's whole plan, read as one file (hence `create`), which makes or updates draft cards (R-0b-170, M9 plan-cards.mjs).
+  'plan-': { roles: ['lead'], entity: 'card', mode: 'create' },
   'history-': { roles: ['lead'], entity: 'report', mode: 'create', latent: 'no Lead prompt writes one yet, and M12 history.mjs answer() has no caller' },
   // Refused until their consumers land (L151 M-1). The skill says "Filed: resume X / wrap up / rotate K" and "Filed:
   // pause X / away X": stored, nothing would resume, rotate or pause anything, so the Record refuses them and Joe hears
@@ -67,6 +69,9 @@ export function notARecord(kind) {
 }
 export const isNotARecord = (r) => r?.ok === false && r?.notARecord === true && r?.reason === NOT_A_RECORD;
 export const OUTBOX_KIND_PATTERN = KIND_SHAPE;
+// What a plan says about each card (R-0b-170): the checks of M3's checkPlan and M9's plan rule read these.
+export const TIERS = Object.freeze([1, 2]);
+export const CARD_MODULE = /^[A-Za-z0-9._-]{1,64}$/;
 // A session id: capped so an id made from it stays a legal file name (0b-2 audit round 6). record.mjs re-exports it.
 export const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
 // The one outbox file name rule: `<kind>-<id>.(md|json|txt)`, ASCII letters, digits and dashes only. The write hook

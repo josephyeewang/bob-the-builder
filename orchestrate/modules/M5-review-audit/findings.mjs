@@ -3,7 +3,8 @@
 // Finalize never drops a finding, and it changes no count and no pass: no matcher can prove a quote is absent, so what it
 // finds is a label for the reader, nothing more. A finding whose file or quote it can't find, at the head reviewed or where
 // the change began, gets `quote_found: false` and QUOTE_NOTE. Everything else in the file stays as the session wrote it.
-// A file with nothing to label is not touched, and neither is one the labels would take over the outbox size limit.
+// A file with nothing to label is not touched, and neither is one the labels would take over the outbox size limit, or
+// one that names more files than the runner's pass has reads left for (MAX_CHECKED_PATHS).
 // For a file it labels, finalize writes the sha256 of the file with its labels left out (M9 verdictContent) into the
 // runner's own record (`mark`, finalized/ in the runner's folder, which no session can write), once the labelled file is
 // ready and just before it goes in. M9 headReviews refuses a labelled file that record does not match. The record comes
@@ -91,13 +92,21 @@ export function labelled(header, found) {
   return { ...header, fields: { ...header.fields, notes } };
 }
 
+// How many files one runner pass reads for finalize, across every session it ends (L487). Each file costs up to four git
+// calls. Measured on this repo's fixtures on 4 Nov 2026, 85 to 98 ms a file on a busy Mac: 5478 files took 466 s, past
+// the 3 minutes after which the runner reads as stopped (review-runner.mjs STATUS_STALE_MS). Measured through the real
+// readers with every quote unfound and both sides read (audit of #67 r2): 1000 files of 2 KB took 136 s, 1000 of 39 KB 94 s,
+// 200 of 977 KB 22 s.
+export const MAX_CHECKED_PATHS = 1000;
+
 /**
  * Label one session's verdict file. `owner` is the review user's uid, given back to the rewritten file. `mark` is the
  * runner's own record of what finalize labelled: read() → the sha256, or null when there is none; keep(sha256), once.
+ * `checks` is what is left of the pass's file reads: { left }, one object for the whole pass.
  * → { ok, changed, labelled? } | { ok: false, none?, reason } (a file that can't be labelled is left as it is, for the
  * runner's own read to judge)
  */
-export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark }) {
+export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark, checks = { left: MAX_CHECKED_PATHS } }) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
   if (typeof mark?.read !== 'function' || typeof mark?.keep !== 'function') return no('the runner gave no record to mark what it finalizes');
   const dir = join(outboxRoot, role, sessionId);
@@ -119,6 +128,9 @@ export async function finalize({ outboxRoot, uids, role, sessionId, card, head, 
     const p = findingProblem(n);
     if (p) return no(`a finding can't be checked: ${p}`);
   }
+  const paths = new Set(notes.map((n) => n.file).filter((p) => p !== undefined)).size;
+  if (paths > checks.left) return no('labels skipped: the review names more files than this pass can check');
+  checks.left -= paths;
   const found = [];
   const [head1, base1, squashed] = [oncePerPath(readFile), oncePerPath(readBase), new Map()];
   for (const n of notes) found.push(await quoteFound(n, head1, base1, squashed));

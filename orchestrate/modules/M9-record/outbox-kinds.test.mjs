@@ -346,7 +346,7 @@ test('L162: each kind\'s roles are pinned', () => {
     'report-': ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], 'report-compact-': ['worker'], 'state-compact-': ['front_door'],
     'handoff-': ['lead', 'learning'], 'handin-': ['worker'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
     'ask-request-': ['front_door', 'incident'], 'wish-': ['lead'], 'think-': ['lead'], 'scout-': ['lead'], 'write-': ['lead'],
-    'roadmap-': ['lead'], 'history-': ['lead'], 'request-': ['front_door'], 'state-': ['front_door'], 'idea-': ['front_door', 'thinking'],
+    'plan-': ['lead'], 'roadmap-': ['lead'], 'history-': ['lead'], 'request-': ['front_door'], 'state-': ['front_door'], 'idea-': ['front_door', 'thinking'],
     'check-': ['learning'], 'prune-': ['learning'],
   });
 });
