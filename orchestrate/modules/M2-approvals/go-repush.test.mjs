@@ -157,6 +157,68 @@ test('L523: a card no longer in draft gets no reminder, and neither does one tha
   assert.equal(v.pushes.length, 1, 'missing');
 });
 
+test('L556: a go whose card is missing or corrupt tells the owner once, then daily, and stops when the card reads again', async () => {
+  for (const [label, gone, words] of [['corrupt', { corrupt: true }, /cannot be read/], ['missing', null, /missing from the record/]]) {
+    const w = world();
+    const id = await tier2(w);
+    await w.at(W8);
+    const told = () => w.t.alerts.filter((a) => a.type === 'go_card_unreadable');
+    const good = w.t.record;
+    w.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? gone : good.read(e, x)) } });
+    await w.at(W8 + DAY);
+    await w.at(W8 + DAY + 5 * MIN);
+    await w.at(W8 + DAY + 3 * HOUR);
+    assert.equal(told().length, 1, `${label}: once, however often the pass runs`);
+    assert.equal(told()[0].ask, id);
+    assert.equal(told()[0].card, 'A');
+    assert.match(told()[0].reason, words, label);
+    await w.at(W8 + 2 * DAY);
+    await w.at(W8 + 3 * DAY);
+    assert.equal(told().length, 3, `${label}: again each day it stands`);
+    assert.equal(w.pushes.length, 1, `${label}: it stays out of the reminders`);
+    w.t.ctx.record = good;
+    await w.at(W8 + 4 * DAY);
+    assert.equal(told().length, 3, `${label}: nothing to tell once the card reads again`);
+    assert.equal(w.pushes.length, 2, `${label}: and the reminders come back`);
+  }
+});
+
+test('L556: a lost card is told at night too, and with a box on the screen, since the go cannot go ahead either way', async () => {
+  const night = world();
+  await tier2(night);
+  await night.at(W8);
+  const good = night.t.record;
+  night.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? null : good.read(e, x)) } });
+  await night.at(W8 + 16 * HOUR);
+  assert.equal(night.t.alerts.filter((a) => a.type === 'go_card_unreadable').length, 1, 'outside a window');
+  const boxed = world();
+  const id = await tier2(boxed);
+  await boxed.at(W8);
+  session(boxed.t, 'S-1');
+  change(boxed, id, { boxes: [{ session_id: 'S-1', tool_use_id: 'toolu_1', status: 'bound', version: 'payload', bound_at: new Date(W8).toISOString() }] });
+  const fine = boxed.t.record;
+  boxed.t.ctx.record = Object.create(fine, { read: { value: (e, x) => (e === 'card' ? { corrupt: true } : fine.read(e, x)) } });
+  await boxed.at(W8 + DAY);
+  assert.equal(boxed.t.alerts.filter((a) => a.type === 'go_card_unreadable').length, 1, 'with a live box');
+});
+
+test('L556: only a go is told: a card that reads, and an ask of another kind, say nothing', async () => {
+  const w = world();
+  const id = await tier2(w);
+  await w.at(W8);
+  must(put(w.t.record, 'approvals', 'card', 'A', { state: 'cancelled', cancel_reason: 'no longer wanted' }), 'cancel');
+  await w.at(W8 + DAY);
+  assert.equal(doc(w, id).state, 'pushed');
+  assert.equal(w.t.alerts.filter((a) => a.type === 'go_card_unreadable').length, 0, 'a card that reads is not lost');
+  const o = world();
+  leadCard(o.t, 'C-1');
+  must(createAsk(o.t.ctx, { id: 'Q-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship the export' }));
+  const good = o.t.record;
+  o.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? null : good.read(e, x)) } });
+  await o.at(W8);
+  assert.equal(o.t.alerts.filter((a) => a.type === 'go_card_unreadable').length, 0, 'another kind of ask');
+});
+
 test('L523: an ask with a live box gets no reminder: it is on the screen already', async () => {
   const w = world();
   const id = await tier2(w);

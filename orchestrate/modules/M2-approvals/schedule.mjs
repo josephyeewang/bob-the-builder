@@ -136,6 +136,13 @@ const PR_OPEN_REPEAT_MS = 24 * 60 * 60 * 1000;
 const liveBox = (doc) => (doc.boxes ?? []).some((b) => b.status === 'bound');
 const raisedThisRound = (doc) => ms(doc.raised_at) !== null && doc.raised_reask === doc.reask_count;
 const onDraft = (record, doc) => { const c = record.read('card', doc.card); return !!c && !c.corrupt && c.doc?.state === 'draft'; };
+// Why a go's card can't be read, or null. Nothing else tells this: the plan pass skips such a card and a move only answers
+// with a reason, so without this the go would wait in silence (L556).
+const goCardLost = (record, doc) => {
+  if (!activeKind(doc.kind).go) return null;
+  const c = record.read('card', doc.card);
+  return !c ? 'its card is missing from the record, so this go cannot go ahead' : c.corrupt ? 'its card cannot be read, so this go cannot go ahead' : null;
+};
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -295,6 +302,8 @@ export async function schedulePass(ctx) {
   for (const a of asks) {
     const doc = a.doc;
     if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    const lost = goCardLost(ctx.record, doc);
+    if (lost) once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, reason: lost });
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }
