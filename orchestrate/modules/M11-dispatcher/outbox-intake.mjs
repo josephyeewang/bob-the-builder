@@ -137,7 +137,18 @@ async function deliverNote({ rec, replyToLead, alert, report, now }, id) {
   }
   const { lead_note: heard, lead_note_tried_at: at, lead_note_tries: n, lead_note_product: p, ...done } = tried;
   const cleared = writeFrom(rec, id, tried, done, 'outbox_told');
-  if (!cleared?.ok) report(`the Lead ${lead} was told, but the note could not be cleared (${cleared?.reason ?? 'no answer'}), so it is told again: ${text}`, cause);
+  if (!cleared?.ok) { report(`the Lead ${lead} was told, but the note could not be cleared (${cleared?.reason ?? 'no answer'}), so it is told again: ${text}`, cause); return; }
+  // The wait is over, so a later note in the same words is a new one to the owner (L534 m1).
+  const hold = HOLD_FACT(cause);
+  if (rec.read('fact', hold)?.doc?.told_at != null || isQueued(rec, hold)) clearTold(rec, hold, now, report);
+}
+
+// A cause that has cleared: a queued copy goes, and the mark, so the next time it happens it is told at once.
+function clearTold(rec, id, now, report) {
+  clearCause(rec, id, () => {
+    const was = rec.read('fact', id)?.doc;
+    if (was) writeFrom(rec, id, was, { ...was, told_at: null, replied_at: null, cleared_at: new Date(now).toISOString() }, 'hold_cleared');
+  }, (line) => report(line, 'outbox-read-clear'));
 }
 
 // Files in the order a pass takes them. A verdict whose ended record was slow goes behind the rest, and the slow ones take
@@ -297,6 +308,7 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       const w = put({ ...prev.doc, sha256: prev.doc.sha256, state: 'interrupted', at: new Date(now).toISOString(), alert_text: said, ...(leadNote ? forLead(leadNote) : {}) }, 'outbox_interrupted');
       if (w.ok) tellThen(alert, said, { fact: appliedId(s.sessionId, name), fields: { told_state: 'interrupted' }, kind: 'outbox_told' });
       if (w.ok && leadNote) await deliverNote(notes, key);
+      prev = rec.read('fact', key);   // both may have written it, and the writes below go from this version
     }
     if (prev) {
       const was = prev.doc.state;
@@ -311,6 +323,9 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         continue;
       }
     }
+    // New bytes under this name would replace the fact, and with it what the Lead has yet to hear. So the file waits for that
+    // note, which is retried and told to the owner meanwhile (L534 m2).
+    if (typeof prev?.doc?.lead_note === 'string') { r.waiting = 'an earlier note about this file has yet to reach its Lead'; continue; }
     // L424: a verdict is taken only once its session's ended record exists, never because the file sat still for
     // SETTLE_MS. The runner finalizes the file (it may rewrite it) and only then writes that record. Anything short of
     // a readable record waits, and takes nothing; a verdict still untaken 15 minutes after its end is told by the runner,
@@ -457,10 +472,7 @@ function clearReadHolds({ rec, alert, now, listed, held, unsettled }) {
     const told = facts.filter((f) => f.id.startsWith(holds) && (f.doc?.told_at != null || f.doc?.replied_at != null)).map((f) => f.id);
     for (const id of new Set([...told, ...queuedMarks(rec, holds)])) {
       if (held.has(id) || unsettled.has(id.slice(0, holds.length + 13))) continue;
-      clearCause(rec, id, () => {
-        const was = rec.read('fact', id)?.doc;
-        if (was) writeFrom(rec, id, was, { ...was, told_at: null, replied_at: null, cleared_at: new Date(now).toISOString() }, 'hold_cleared');
-      }, (line) => report(line, 'outbox-read-clear'));
+      clearTold(rec, id, now, report);
     }
   }
 }

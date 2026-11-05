@@ -1084,7 +1084,12 @@ test('L497 m5: slow verdicts take turns, and one that recovers loses its mark a 
   assert.equal(asked.size, 8, [...asked].join(' '));
   await seen(() => ({ ok: false, none: true }));
   assert.equal(marks().length, 8, 'a quick answer inside the day leaves the mark (L520 C)');
-  w.skip(DAY);
+  w.skip(DAY - 3_600_000);
+  await seen(() => ({ ok: false, none: true }));
+  await seen(() => ({ ok: false, none: true }));
+  await seen(() => ({ ok: false, none: true }));
+  assert.equal(marks().length, 8, 'and so does one at 23 hours (L534 m3)');
+  w.skip(3_600_000);
   await seen(() => ({ ok: false, none: true }));
   await seen(() => ({ ok: false, none: true }));
   await seen(() => ({ ok: false, none: true }));
@@ -1348,6 +1353,63 @@ test('L520 n1: a second note on the same file reaches the owner at once, not a d
   assert.equal(lines.length, 2, p.owner.join(' | '));
   assert.match(lines[1], /was applied/);
 });
+
+test('L534 m1: a later note in the same words reaches the owner at once, once the Lead heard the first', async () => {
+  const p = planWorld();
+  must(p.launch());
+  const blip = async () => ({ ok: false, reason: 'busy' });
+  const said = () => p.owner.filter((t) => /plan-a\.json .*could not be told \(busy\)/.test(t));
+  p.hand('plan-a.json', '{"cards":');
+  await p.run({ reply: blip });
+  assert.equal(said().length, 1);
+  p.E.clock.t += 5 * 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 1);
+  p.hand('plan-a.json', '{"cards":[');
+  p.E.clock.t += 60_000;
+  await p.run({ reply: blip });
+  assert.equal(said().length, 2, p.owner.join(' | '));
+  assert.equal(said()[0], said()[1], 'the same words');
+});
+
+// A hand-in cut off in its claim, its file then rewritten.
+function cutOff(p, name, content, state = 'applying') {
+  p.hand(name, content);
+  must(p.rec.write({ actor: 'dispatcher', entity: 'fact', id: `intake-applied-L-1-${name}`, expectRev: 0, doc: { session: 'L-1', name, sha256: 'a'.repeat(64), state }, kind: 'outbox_claim' }));
+}
+
+test('L534 m2: a bad plan rewritten after an interrupt: the Lead hears both, and the owner is not told it was left out', async () => {
+  const p = planWorld();
+  must(p.launch());
+  cutOff(p, 'plan-a.json', '{"cards":');
+  const [r] = await p.run();
+  assert.match(r.refused, /it is not JSON/);
+  assert.deepEqual(p.told.map((x) => x.text.slice(0, 30)), ['Your plan plan-a.json may or m', 'Your plan plan-a.json was not ']);
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-plan-a.json').doc.state, 'refused');
+  assert.ok(!p.owner.some((t) => /was not told/.test(t)), p.owner.join(' | '));
+});
+
+for (const [name, content, over, state] of [['plan-a.json', '{"cards":', {}], ['plan-b.json', [planCard('C-1')], {}], ['think-q1.md', 'a question', { startReadonly: async () => ({ ok: true }) }, 'starting']]) {
+  test(`L534 m2: ${name} rewritten while the Lead misses the interrupted note: it waits for the note, ticks every minute`, async () => {
+    const p = planWorld();
+    must(p.launch());
+    cutOff(p, name, content, state);
+    const blip = async () => ({ ok: false, reason: 'busy' });
+    for (let i = 0; i < 3; i++) {
+      const [r] = await p.run({ reply: blip, ...over });
+      assert.equal(r.waiting, 'an earlier note about this file has yet to reach its Lead');
+      p.E.clock.t += 60_000;
+    }
+    assert.equal(p.rec.read('fact', `intake-applied-L-1-${name}`).doc.state, 'interrupted');
+    assert.equal(typeof p.rec.read('fact', `intake-applied-L-1-${name}`).doc.lead_note, 'string', 'the note stays');
+    assert.ok(p.owner.some((t) => /could not be told \(busy\)/.test(t) && t.includes(name)), p.owner.join(' | '));
+    p.E.clock.t += 5 * 60 * 1000;
+    await p.run(over);
+    assert.match(p.told[0].text, /may (not|or may not)/, 'the Lead hears the interrupted note first');
+    assert.notEqual(p.rec.read('fact', `intake-applied-L-1-${name}`).doc.state, 'interrupted', 'and the file goes on');
+    assert.ok(!p.owner.some((t) => /was not told/.test(t)), p.owner.join(' | '));
+  });
+}
 
 test('L494: a queued request\'s note to the Lead has the time limit too, and a thrown one is no loose rejection', async () => {
   const p = planWorld();
