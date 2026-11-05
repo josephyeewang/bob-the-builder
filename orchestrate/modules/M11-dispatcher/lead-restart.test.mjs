@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { leadRestartStep, leadInFlight, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
@@ -309,4 +309,89 @@ test('r5 MAT-2: a hard-line alert that fails is told on the next pass, once', as
     await w.step(midTurn(462_000), 3, { alert });
     assert.equal(sent.filter((t) => /compaction did not happen/.test(t)).length, 1, sent.join(' | '));
   }
+});
+
+// L329: the ask's time is read through the shared pastTime; one that can't be read, or lies an hour ahead, counts as
+// long ago (the wait ends), and the wait for the handoff has a 24 h cap.
+test('L329: an ask time unreadable or an hour ahead ends the wait: re-asked, not "waiting for the handoff" for ever', async () => {
+  for (const [label, bad] of [['unreadable', 'garbage'], ['an hour ahead', iso(T0 + 62 * MIN)]]) {
+    const w = world();
+    assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+    change(w.rec, 'fact', RESTART_FACT(SID), { sent_at: bad });
+    // No turn time either, so only the ask's own time can end the wait.
+    assert.equal(await w.step({ ...ended(260_000, 0), endedAt: null }, 2), 're-asked', label);
+  }
+});
+
+test('L329: a Lead that never answers the WRAP is re-asked after a day, then given up on and the owner told', async () => {
+  const w = world();
+  const DAY = 24 * 60;
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-asked');
+  assert.match(w.calls.sent.at(-1), /not used \(no answer within a day of the ask\)/);
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.filter((a) => /did not hand in a usable handoff after a second ask \(no answer within a day of the ask\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.calls.stops, 0, 'never stopped without a handoff');
+});
+
+test('L355 m5: a Lead with no size reading, or never at a finished turn, a day after the ask is given up on and the owner told', async () => {
+  const DAY = 24 * 60;
+  for (const [label, size, why] of [
+    ['no size', null, 'its size could not be read for a day after the ask'],
+    ['mid-turn', midTurn(260_000), 'it did not finish a turn within a day of the ask'],
+  ]) {
+    const w = world();
+    assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+    assert.equal(await w.step(size, 1 + DAY - 1), label, `${label}: still waiting within the day`);
+    assert.equal(await w.step(size, 1 + DAY), 'gave up; the old Lead keeps running', label);
+    assert.equal(w.calls.alerts.filter((a) => a.includes(`did not hand in a usable handoff within a day of the ask (${why})`)).length, 1, w.calls.alerts.join(' | '));
+    assert.equal(await w.step(size, 1 + DAY + 1), 'gave_up', `${label}: told once`);
+    assert.equal(w.calls.alerts.length, 1);
+    assert.equal(w.calls.stops, 0, 'never stopped');
+    assert.equal(w.calls.sent.length, 1, 'nothing sent but the WRAP');
+  }
+  // After the re-ask, the same cap; the alert says a second ask was sent.
+  const w = world();
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-asked');
+  assert.equal(await w.step(null, 1 + 2 * DAY), 'gave up; the old Lead keeps running');
+  assert.match(w.calls.alerts.at(-1), /after a second ask \(its size could not be read for a day after the ask\)/);
+  // An ask time that can't be read counts as long ago (L329).
+  const u = world();
+  assert.equal(await u.step(ended(260_000, 0), 1), 'WRAP sent');
+  change(u.rec, 'fact', RESTART_FACT(SID), { sent_at: 'garbage' });
+  assert.equal(await u.step(midTurn(260_000), 2), 'gave up; the old Lead keeps running');
+});
+
+test('L355 m5: a give-up after no finished turn whose alert was not queued is told on the next pass with the same words', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(null, 1 + 24 * 60, { answer: () => false }), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(await w.step(null, 2 + 24 * 60), 'gave_up');
+  assert.deepEqual(w.calls.alerts, [`the Lead ${SID} did not hand in a usable handoff within a day of the ask (its size could not be read for a day after the ask); it keeps running`]);
+});
+
+test('L359: a re-ask the Lead keeps refusing is told from the first refusal, then daily, and cleared once sent', async () => {
+  const DAY = 24 * 60;
+  const w = world();
+  const told = () => w.calls.alerts.filter((a) => /the second ask could not be sent since/.test(a)).length;
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  w.refuse('busy');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-ask not sent (busy)');
+  assert.equal(told(), 1, 'told at the first refusal');
+  assert.match(w.calls.alerts.at(-1), new RegExp(`since ${iso(T0 + (1 + DAY) * MIN)} \\(busy\\)`));
+  assert.equal(await w.step(ended(260_000, 0), 2 + DAY), 're-ask not sent (busy)');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY - 1), 're-ask not sent (busy)');
+  assert.equal(told(), 1, 'quiet within the day');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY), 're-ask not sent (busy)');
+  assert.equal(told(), 2, 'again a day on, counted from the first refusal');
+  w.refuse('sent');
+  assert.equal(await w.step(ended(260_000, 0), 2 + 2 * DAY), 're-asked');
+  const doc = w.rec.read('fact', RESTART_FACT(SID)).doc;
+  assert.equal(doc.reask_refused_since, null, 'cleared once sent');
+  assert.equal(doc.reask_refused_told, null);
+  assert.equal(w.calls.stops, 0);
 });
