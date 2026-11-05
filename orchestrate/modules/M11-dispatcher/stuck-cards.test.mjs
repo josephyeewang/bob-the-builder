@@ -92,7 +92,7 @@ test('L569: a corrupt entry is told whatever it names, each with its reason', ()
   seed(w.t, 'merge', 'R', { state: 'merging', product: PRODUCT });
   const r = w.pass(w.T0);
   assert.equal(r.broken, 1);
-  assert.match(w.alert.texts[0], /^the time limits could not be worked out: the rules have no time limit for merge merging$/);
+  assert.match(w.alert.texts[0], /^the time limits could not be worked out: the rules have no time limit for merge merging \(merge R\)$/);
   w.pass(w.T0 + MIN);
   assert.equal(w.alert.texts.length, 1, 'once a day, like the rest');
 });
@@ -183,4 +183,35 @@ test('L569: the same card and time in another state counts as a change, for a ti
   state = 'in_review';
   pass(w.T0 + MIN);
   assert.equal(w.alert.texts.length, 2);
+});
+
+test('L594: each corrupt reason is said once, with its count and the documents it names', () => {
+  const noRow = fullTimeouts();
+  delete noRow.merge.merging;
+  delete noRow.card.ready;
+  const w = world({ timeouts: noRow });
+  for (const id of ['A', 'B', 'C']) w.card(id, 'ready');
+  seed(w.t, 'merge', 'R', { state: 'merging', product: PRODUCT });
+  assert.equal(w.pass(w.T0).broken, 4);
+  const [text] = w.alert.texts;
+  assert.match(text, /the rules have no time limit for card ready \(3: card A, card B, card C\)/);
+  assert.match(text, /the rules have no time limit for merge merging \(merge R\)/);
+  assert.equal(text.split('no time limit for card ready').length, 2, text);
+});
+
+test('L594: a corrupt entry with no document says its reason, and a count only when there are several', () => {
+  const w = world();
+  const entry = { entity: null, id: null, corrupt: true, reason: 'record error: no disk' };
+  const rec = Object.create(w.t.record, { overdue: { value: () => [entry, entry] } });
+  tellStuckCards({ rec, alert: w.alert, now: w.T0, report: (l) => assert.fail(l) });
+  assert.match(w.alert.texts[0], /worked out: record error: no disk \(2\)$/);
+});
+
+test('L594: a tell the queue refuses is reported, and nothing is marked told', () => {
+  const w = world();
+  w.card('A', 'ready');
+  const lines = [];
+  tellStuckCards({ rec: w.t.record, alert: () => false, now: w.T0 + 61 * MIN, report: (l) => lines.push(l) });
+  assert.deepEqual(lines, ['the stuck-cards alert could not be queued; it is tried again next pass']);
+  assert.equal(w.t.record.read('fact', STUCK_CARDS_FACT), null);
 });
