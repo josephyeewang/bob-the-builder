@@ -4,7 +4,9 @@
 // on is merged, is work the owner never agreed to. Every move into `ready` and the ready list call this one function, so the
 // two can't drift. It fails closed: anything missing or unreadable is "not ready", with the reason.
 //
-//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason }
+//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason, waiting? }
+//     waiting: the ordinary wait for a dependency that can still merge, or a paused product to resume, which nobody has
+//     to act on. Set only when the wait can end by itself; anything else is said, so a card never sits quietly (L490).
 //     card = { id, doc }; view = { get(entity, id) → { id, doc } | corrupt | null, list(entity), createdBy(entity, id) }
 //
 // A card may start when all of these hold:
@@ -17,6 +19,7 @@
 
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { mayCreateKind } from './permissions.mjs';
+import { OPEN_CARD_STATES } from '../../shared/record.mjs';
 
 const MAX_CHAIN = 64;
 
@@ -76,19 +79,23 @@ function depsCheck(card, view) {
     const d = view.get('card', id);
     if (!d) return { ok: false, reason: `dependency ${id} does not exist` };
     if (d.corrupt) return { ok: false, reason: `dependency ${id} is unreadable` };
-    // A dependency that will never merge (cancelled, no answer, failed) can't be waited out: the card waits on the owner.
-    if (['cancelled', 'closed_no_answer', 'failed'].includes(d.doc.state)) return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
-    if (d.doc.state !== 'merged' && d.doc.state !== 'closed') return { ok: false, reason: `dependency ${id} is ${d.doc.state}, not merged` };
+    if (d.doc.state === 'merged' || d.doc.state === 'closed') continue;
+    if (OPEN_CARD_STATES.includes(d.doc.state)) return { ok: false, waiting: true, reason: `dependency ${id} is ${d.doc.state}, not merged` };
+    // Any other state will never merge (failed, cancelled, closed with no answer, reverted; L490): it can't be waited
+    // out, so the card waits on the owner.
+    return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
   }
   return { ok: true };
 }
 
 function productCheck(card, view, rules, product) {
   const p = view.get('product', card.doc.product);
-  const state = p && !p.corrupt && typeof p.doc?.state === 'string' ? p.doc.state : 'paused';
+  const readable = Boolean(p) && !p.corrupt && typeof p.doc?.state === 'string';
+  const state = readable ? p.doc.state : 'paused';
   const start = rules.get(`product_state_rules.${state}.start`, { product });
   if (typeof start !== 'string' || !start) return { ok: false, reason: `the rules say nothing about starting work in a ${state} product` };
-  if (start === 'none') return { ok: false, reason: `product ${card.doc.product} is ${state}${p ? '' : ' (no product record)'}; no work starts` };
+  // Only a state read off the record can be waited out: a missing or unreadable record is said (L490 m7).
+  if (start === 'none') return { ok: false, waiting: readable, reason: `product ${card.doc.product} is ${state}${readable ? '' : p ? ' (its record can\'t be read)' : ' (no product record)'}; no work starts` };
   return { ok: true };
 }
 

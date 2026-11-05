@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { timeLimits, requestMerges, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
+import { timeLimits, requestMerges, workerLaunches, MERGE_REQUEST, PR_FACT, RECONCILED_FACT, RECONCILE_TELL_FACT, UNREAD_FACT } from './merges.mjs';
 import { KEYS as K } from './keys.mjs';
 import { settleMerge, reconcileMerge, openTooLong, prReadingAfter } from '../M6-merge-gate/merge-outcome.mjs';
 import { rulesWith, recWith, change, seed, setClock, undoEntries, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
@@ -418,6 +418,20 @@ test('audit MAT-5: a merge request is held in red without merges, and for Tier-1
   assert.deepEqual([mr.card, mr.pr, mr.session_id, mr.head, mr.rev], ['C-1', 7, 'S-9', HA, rev]);
   assert.equal(c.meta('merge_request', MERGE_REQUEST('C-1', HA, 0)).createdBy, 'dispatcher');
   assert.deepEqual(requestMerges({ alert: noAlert, rec: c, rules: R, now: T0, b: GREEN }), []);
+});
+
+test('L387: a research copy\'s run counts as the card\'s session for its merge request', () => {
+  const run = ['launch', 'L-copy', { session_id: 'copy-C-1-r-abc', role: 'copy_run', card: 'C-1', head: HA, rev: 1, launched_at: at(-60) }];
+  const c = readyRec({}, [run, prSeen(7)]);
+  const alert = fakeAlert();
+  assert.deepEqual(requestMerges({ alert, rec: c, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(alert.texts, []);
+  assert.equal(c.read('merge_request', MERGE_REQUEST('C-1', HA, 0)).doc.session_id, 'copy-C-1-r-abc');
+});
+
+test('L441 m6: a research copy\'s run is not a worker launch: cleanup finds no work folder through it', () => {
+  const run = ['launch', 'L-copy', { session_id: 'copy-C-1-r-abc', role: 'copy_run', card: 'C-1', head: HA, rev: 1, launched_at: at(-60) }];
+  assert.deepEqual(workerLaunches(readyRec({}, [run]), 'C-1').map((l) => l.doc.role).filter((r) => r === 'copy_run'), []);
 });
 
 test('L129: an edit to the card at the same head makes no second request; a refusal the gate records does', () => {

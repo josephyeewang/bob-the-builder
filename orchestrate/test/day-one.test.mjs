@@ -35,9 +35,9 @@
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
-//     research_copy   designed for the first cutover, but nothing makes one yet and the fixture does not make it
-//                     go-free (todo below, R-0b-135, L204-c). Until it is built, nothing on day one makes a docs change
-//                     for the gate to merge or an Undo to reverse; the ordinary card here is seeded (day-one audit M-2).
+//     research_copy   go-free in the first-cutover rules (L514). M11 researchHandler makes the card and it goes ready
+//                     with no go (test below). Nothing calls that path yet (R-0b-162), so the docs change the gate
+//                     merges and the Undo reverses here is an ordinary seeded card (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
 //                     product.
 //   Product state: active (the fixture's product_state_rules.active.start is within_caps). paused is "no starts" by
@@ -55,6 +55,13 @@ import { rulesFromText } from '../modules/M10-rules/from-text.mjs';
 import { firstCutoverProblems } from '../modules/M10-rules/first-cutover.mjs';
 import { makeGitView } from '../modules/M10-rules/git-view.mjs';
 import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
+import { createHash } from 'node:crypto';
+import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
+import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
+import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
+import { blobSha } from '../modules/M10-rules/reader.mjs';
+import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
 import { CARD_CREATORS } from '../modules/M9-record/permissions.mjs';
 import { setup, seed, product as writeProduct, PRODUCT } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { moduleSources, scanSources, stripComments } from '../modules/M9-record/write-sites.test-helper.mjs';
@@ -139,8 +146,8 @@ test('the kinds list at the top is what the fixture and the modules say', () => 
   assert.equal(rules.num('caps.editing_per_product', { product: P }), 0);
   // script: off.
   assert.equal(rules.get('roles_enabled.script', { product: P }), 'none');
-  // Undo cards are go-free; nothing else is (research_copy is not, and the Lead's daily card has no files).
-  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse']);
+  // Undo cards and research copies are go-free; nothing else is (the Lead's daily card has no files).
+  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse', 'research_copy']);
   assert.deepEqual(rules.get('approvals.plan_go.go_free.lead_daily_card', { product: P }), []);
   assert.ok(CARD_CREATORS.dispatcher.includes('exact_reverse'));
   assert.ok(CARD_KINDS.includes('research_copy') && CARD_KINDS.includes('exact_reverse'));
@@ -329,10 +336,36 @@ test('a research report sent again after an interrupted intake is told, never st
   assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c, L286: M11 research-intake.mjs makes the card; the first-cutover rules do not set go_free.research_copy yet (it waits for step 15b)' }, () => {
-  const { rules } = dayOne();
-  assert.ok(goFreeKinds(rules, P).includes('research_copy'));
+// The real path to a research copy: an ask from the front door, then the report for it.
+const REPORT = '# One thing\n\nIt was found out.\n';
+function reportArrives(w) {
+  const now = w.env.clock.t;
+  const f = outboxFile('ask-request', '20261103-0915-rb', { ask: 'research', product: P, brief: 'find out one thing' });
+  assert.equal(checkOutboxFile(f.name, f.text, { products: [P], seenIds: [] }).ok, true);
+  const asked = w.rec.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(w.env, 'front_door', 'F-1', f.name, f.text));
+  assert.equal(asked.ok, true, asked.reason);
+  assert.equal(openResearchAsks({ record: w.rec, rules: w.rules, product: P, now: () => now, alert: fakeAlert() }).opened.length, 1);
+  return researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
+    sha256: createHash('sha256').update(REPORT).digest('hex'), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now });
+}
+
+test('a research_copy card is ready on day one with no go', () => {
+  const w = dayOne();
+  const made = reportArrives(w);
+  assert.equal(made.ok, true, made.reason);
+  const card = w.rec.read('card', RESEARCH_CARD('R-1'));
+  assert.equal(card.doc.state, 'ready');
+  assert.ok(w.rec.ready().some((c) => c.id === card.id), 'the Record lists it as ready, and no go was ever asked for');
 });
+
+for (const [name, off] of [['left out of', ''], ['false in', '      research_copy: false\n']]) {
+  test(`research copies ${name} the first-cutover rules fail closed: no card, and the kind is not go-free`, () => {
+    const w = dayOne({ text: swap(FIRST, '      research_copy: true\n', off) });
+    assert.deepEqual(goFreeKinds(w.rules, P), ['exact_reverse']);
+    assert.deepEqual(reportArrives(w), { ok: false, reason: RESEARCH_OFF });
+    assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')), null);
+  });
+}
 
 // ---- M6's checks step: the real gatherFacts over fake GitHub, then judge ----
 
@@ -363,9 +396,10 @@ test('M6\'s checks step reads the required checks from the real rules: green pas
   assert.deepEqual(refusal1(missing).map((x) => x.reason), ['required check build has not run']);
 });
 
-test('M6\'s checks step refuses a change when the rules name no required checks', { todo: 'L96 m-1: M6 refusals.mjs must refuse an empty required_checks too; today only the fit check does' }, async () => {
+test('M6\'s checks step refuses a change when the rules name no required checks', async () => {
   const empty = await checksStep(swap(FIRST, 'required_checks: [build, test]', 'required_checks: []'), (h) => [run(h, 'build'), run(h, 'test')]);
-  assert.deepEqual(empty.f.requiredChecks, []);
+  assert.equal(empty.f.requiredChecks, null, 'an empty list is no list');
+  assert.equal(empty.f.main.green, null, 'main is not green on a list that names no check');
   assert.notDeepEqual(refusal1(empty), []);
 });
 

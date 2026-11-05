@@ -16,19 +16,22 @@
 
 import { OUTSIDE_FORM } from '../M12-sensors/escape.mjs';
 import { WAIT_WHO } from '../../shared/record.mjs';
+import { CARD_MODULE, TIERS } from '../../shared/record-names.mjs';
 import { briefProblems, pathKey } from './task-brief.mjs';
 
 // The plan file, as an example the Lead copies the shape of. Every key checkPlan reads is in it.
 const PLAN_EXAMPLE = Object.freeze({ cards: [
-  { id: 'C-1', wave: 1, depends_on: [], brief: { goal: 'What the card is for.', done_when: 'What anyone can check to see it worked.', files: ['src/store.js'], not_in_scope: 'What a worker must leave alone.' } },
-  { id: 'C-2', wave: 2, depends_on: ['C-1'], brief: { goal: '…', done_when: '…', files: ['src/search.js'], not_in_scope: '…',
+  { id: 'C-1', wave: 1, tier: 2, module: 'store', depends_on: [], brief: { goal: 'What the card is for.', done_when: 'What anyone can check to see it worked.', files: ['src/store.js'], not_in_scope: 'What a worker must leave alone.' } },
+  { id: 'C-2', wave: 2, tier: 1, module: 'search', depends_on: ['C-1'], brief: { goal: '…', done_when: '…', files: ['src/search.js'], not_in_scope: '…',
     wait: { who: 'joe', what: 'what it waits for', since: '2026-11-01T09:00Z', next_check: '2026-11-02T09:00Z', reason: 'why' } } },
 ] });
 
-export const PLAN_FORMAT = 'Plan file. Hand in the plan as one JSON file, plan.json, in exactly this shape (the same keys; '
+export const PLAN_FORMAT = 'Plan file. Hand in the plan as one JSON file, plan-<name>.json, in exactly this shape (the same keys; '
   + '"wait" only on a card that waits; "reason" is needed only when who is date): '
   + `${JSON.stringify(PLAN_EXAMPLE)}. `
-  + 'An id is letters, digits and dashes (at most 64). A wave is a whole number from 1. depends_on lists the ids of cards '
+  + 'A changed plan is a new file under a new name; it may change only cards still in draft, and it can\'t change a card\'s module or depends_on. '
+  + 'An id is letters, digits and dashes (at most 64). A wave is a whole number from 1. tier is 1 or 2, and every card needs one: there is no default. '
+  + 'module is the part of the product the card belongs to: letters, digits, dots, dashes or underscores, at most 64. depends_on lists the ids of cards '
   + 'in earlier waves. since and next_check are ISO times. Each file is one plain path from the product\'s top folder, in plain ASCII '
   + '(letters a-z or A-Z, digits and plain punctuation; no accents, no ":", no leading "~"): no "..", no folder, no pattern.';
 
@@ -69,7 +72,7 @@ export const PLAN_REVIEW_WORDING = Object.freeze([
 const ID = /^[A-Za-z0-9-]{1,64}$/;
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** plan: { cards: [{ id, wave, depends_on?, brief }] } (PLAN_FORMAT) → [] when the plan's shape is right. */
+/** plan: { cards: [{ id, wave, tier, module, depends_on?, brief }] } (PLAN_FORMAT) → [] when the plan's shape is right. */
 export function checkPlan(plan) {
   const cards = plan?.cards;
   if (!Array.isArray(cards) || !cards.length) return ['the plan has no cards'];
@@ -81,6 +84,8 @@ export function checkPlan(plan) {
     if (!ID.test(String(c.id))) { out.push(`"${String(c.id).slice(0, 80)}" is not a card id`); continue; }
     if (wave.has(c.id)) out.push(`card ${c.id} appears twice`);
     if (!Number.isInteger(c.wave) || c.wave < 1) out.push(`card ${c.id}: the wave must be a whole number from 1`);
+    if (!TIERS.includes(c.tier)) out.push(`card ${c.id}: the tier must be 1 or 2`);
+    if (!CARD_MODULE.test(String(c.module ?? ''))) out.push(`card ${c.id}: it needs a module of letters, digits, dots, dashes or underscores`);
     if (c.depends_on !== undefined && !Array.isArray(c.depends_on)) out.push(`card ${c.id}: depends_on must be a list of card ids`);
     wave.set(c.id, c.wave);
     for (const p of briefProblems(c.brief)) out.push(`card ${c.id}: ${p}`);
