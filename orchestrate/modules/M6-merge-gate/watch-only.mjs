@@ -37,7 +37,7 @@ import { parsePolicy } from '../M10-rules/policy.mjs';
 import { MAX_BYTES, RULES_PATH, blobSha, findApprovingPull } from '../M10-rules/reader.mjs';
 import { approveNeeded } from '../M2-approvals/go.mjs';
 import { makeRules } from '../../shared/rules.mjs';
-import { botId, checksAt, failedRead, linesOf, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
+import { botId, checksAt, failedRead, linesOf, namedChecks, statusesAt, threads as threadsOf, threadsQuery } from './gather.mjs';
 import { judge } from './refusals.mjs';
 
 export const NOT_JUDGED = Object.freeze([2, 3, 5, 10, 11, 12, 13]);
@@ -182,7 +182,7 @@ export function judgeMerged(facts, rules) {
     // Placeholders for what NOT_JUDGED lists: the refusals they could cause are dropped below, never read.
     pr: { number: facts.pr, state: 'open', draft: false, mergeable: true, mergeable_state: 'clean', base: { ref: facts.prBase }, head: { sha: facts.headSha }, merge_commit_sha: facts.sha, labels },
     main: { green: true }, request: null, go: { ok: true, skipped: true }, compareStatus: 'ahead', rulesAdopted: true, exactReverse: false, reviews: [], movesSinceRequest: [],
-    checks: facts.checks, statuses: facts.statuses, requiredChecks: Array.isArray(required) ? required : null,
+    checks: facts.checks, statuses: facts.statuses, requiredChecks: namedChecks(required),
     checksIgnored: Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [],
     filesProblem: facts.filesProblem ?? (files ? null : 'unread'), filesMissing: facts.filesMissing, checksTooLong: facts.checksTooLong, checksCutOff: facts.checksCutOff, judgedOnMain: true,
     threads: facts.threads, files, firstCustomerNewFiles: Array.isArray(fcv) ? fcv : null, tier, lane,

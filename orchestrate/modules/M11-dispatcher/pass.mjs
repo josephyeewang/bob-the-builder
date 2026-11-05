@@ -261,7 +261,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
     // point over a bad field): the stop is forced one limit from now at most.
     if (pastTime(pending.since, now) === null) {
       const was = pending;
-      pending = { ...pending, since: iso(now) };
+      pending = { ...pending, since: iso(now), restarted: true };
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted', was);
     }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
@@ -286,7 +286,9 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
   const after = Math.max(now, clock());
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
-    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((after - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now: after });
+    // After a restart (its start time could not be read) the wait was longer than this count: the note says so (L339).
+    const counted = `${Math.round((after - Date.parse(pending.since)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;
+    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${counted} (${pending.reason})`, { now: after });
     // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
     // and told to the owner while it lasts (refused-writes.mjs), never dropped.
     const moved = moveAfterStop(rec, s.card, pending.reason, after);
@@ -467,7 +469,11 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
+  // Compared as text, exactly (L339 m2, L350): a start stored as a number is still this stretch's, so told daily, not
+  // every pass; and a short or corrupt start ('2') is no prefix match for an old stretch's mark, so a new stretch is
+  // told at once. The mark's since is written from this same value, so equal is the whole test; an empty one never matches.
+  const sameStretch = uf?.since != null && String(uf.since) !== '' && String(uf.since) === String(unknownSince);
+  if (unknownLong && (!sameStretch || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 

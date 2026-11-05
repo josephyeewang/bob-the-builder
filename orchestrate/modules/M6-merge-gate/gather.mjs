@@ -147,6 +147,12 @@ export async function statusesAt(gh, base, sha) {
   return j.statuses.map((s) => ({ context: s?.context, state: s?.state }));
 }
 
+// The rules' required checks, or null. An empty list is no list: with no check named, every check of the list passes
+// with none run, so main would read as green and an undo card, which skips refusal 1, would merge (L96 m-1).
+// The gate compares a check's name exactly, so a name with spaces around it would never match anything.
+export const checkName = (c) => typeof c === 'string' && c !== '' && c === c.trim();
+export const namedChecks = (list) => (Array.isArray(list) && list.length && list.every(checkName) ? list : null);
+
 // main is green when every required check ran there and passed, and no other check or status is red.
 async function mainGreen(gh, base, sha, required, ignoredList) {
   const ign = (c) => (ignoredList ?? []).some((x) => x?.app_id === c.app_id && x?.name === c.name);
@@ -224,7 +230,7 @@ export async function gatherFacts(ctx, merge) {
   });
   const head = SHA.test(f.pr?.head?.sha ?? '') ? f.pr.head.sha : null;
   const mainSha = await attempt(async () => { const s = (await json(gh, `${base}/git/ref/heads/main`)).object?.sha; if (!SHA.test(s ?? '')) throw new Error('no main'); return s; });
-  f.requiredChecks = Array.isArray(get('product_profile.required_checks')) ? get('product_profile.required_checks') : null;
+  f.requiredChecks = namedChecks(get('product_profile.required_checks'));
   // The rules file gives every value as text: an app id is turned into a number here, once, as botId does.
   const ignoredRaw = get('product_profile.checks_ignored');
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
