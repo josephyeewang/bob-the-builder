@@ -87,10 +87,28 @@ export function roadmap(env, header, sid = 'L-1') {
   return env.record.applyOutbox({ role: 'lead', sessionId: sid }, outboxFile(env, 'lead', sid, `roadmap-${++fileNo}.md`, `${JSON.stringify({ entity: 'card', ...header })}\nnotes\n`));
 }
 
-// A draft card from the Lead (ordinary).
+// A plan file from the Lead, through the Record's real rule: the one way plan_sha256 and main_commit reach a card (L460).
+// `cards` are the plan's cards, `head` the commit the Lead's launch record names. The plan check is M11's; here it is taken as run.
+export function planFile(env, cards, { sid = 'L-1', head = HEAD } = {}) {
+  must(env.record.write({ actor: 'dispatcher', entity: 'launch', id: `lead-${sid}-${++fileNo}`, expectRev: 0,
+    doc: { session_id: sid, role: 'lead', card: null, head, rev: null, product: PRODUCT, launched_at: iso(env.clock.t) } }), 'lead launch');
+  const text = JSON.stringify({ cards });
+  return env.record.applyOutbox({ role: 'lead', sessionId: sid, checked_sha256: createHash('sha256').update(text).digest('hex') }, outboxFile(env, 'lead', sid, `plan-${++fileNo}.json`, text));
+}
+
+// A draft card from the Lead (ordinary). With main_commit and plan_sha256 it comes from a plan file naming that commit, and
+// its plan_sha256 is the file's own, whatever `over` says: read it from the card. With only one of them it is set past the
+// writer: no plan can make such a card, and a test of what is missing needs one.
 export function leadCard(env, id, over = {}) {
-  const fields = { product: PRODUCT, kind: 'ordinary', ...plan(), ...over };
-  must(roadmap(env, { id, expectRev: 0, fields }), `create ${id}`);
+  const { plan_sha256, main_commit, ...rest } = { product: PRODUCT, kind: 'ordinary', ...plan(), ...over };
+  if (plan_sha256 && main_commit) {
+    const { module, tier, files, done_when, what, depends_on = [], product: _p, kind: _k, ...left } = rest;
+    must(planFile(env, [{ id, tier, module, depends_on, brief: { goal: what, done_when, files } }], { head: main_commit }), `plan ${id}`);
+    if (Object.keys(left).length) must(roadmap(env, { id, expectRev: env.record.read('card', id).rev, fields: left }), `fields of ${id}`);
+    return env.record.read('card', id).doc;
+  }
+  must(roadmap(env, { id, expectRev: 0, fields: rest }), `create ${id}`);
+  if (plan_sha256 || main_commit) seed(env, 'card', id, { ...env.record.read('card', id).doc, ...(plan_sha256 ? { plan_sha256 } : { main_commit }) });
   return env.record.read('card', id).doc;
 }
 

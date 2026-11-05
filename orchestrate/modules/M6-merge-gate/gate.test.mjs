@@ -156,6 +156,27 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   assert.equal(w.g.repo.files(w.g.main).get('src/a.mjs').text, 'one');
 });
 
+// An undo skips refusal 1, so refusal 2 is what stops it: main is never green on a list that names no check.
+test('L96 m-1: an undo card does not merge when the rules name an empty list of required checks, or none, and its hold says so (L531)', async () => {
+  for (const list of [[], null, ['  '], ['test', ''], [' test']]) {
+    const w = world();
+    verifiedCard(w);
+    await gatePass(w.ctx);
+    const flagged = mergeOf(w).doc.merge_commit;
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+    await gatePass(w.ctx);
+    must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+    w.env.clock.t += 60_000;
+    verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+    w.values['product_profile.required_checks'] = list;
+    w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+    await gatePass(w.ctx);
+    const u = mergeOf(w, 'U-1');
+    assert.notEqual(u.doc.state, 'merged', JSON.stringify(list));
+    assert.match(JSON.stringify(u.doc), /2: the rules name no required checks/, JSON.stringify(u.doc));
+  }
+});
+
 // L135 site G: the undo card merged, but marking the undone card reverted failed, and the alert saying so was lost
 // (false, or a throw). The gate tries again each pass until the mark holds or the alert is delivered, then stops.
 async function undoWithBlockedMark(lost) {
@@ -1772,6 +1793,7 @@ const HOLDS = [
   ['main is red', (w) => w.g.checks.set(w.g.main, redRun(w.g.main)), /^2: main is red/],
   ['main has 100 check runs', (w) => w.g.checks.set(w.g.main, Array.from({ length: 100 }, (_, i) => ({ name: i ? `c${i}` : 'test', app: { id: 1 }, head_sha: w.g.main, status: 'completed', conclusion: 'success' }))), /^2: main's checks could not be read/],
   ['the rules name no required checks', (w) => { w.values['product_profile.required_checks'] = null; }, /^1: the rules name no required checks/],
+  ['the rules name an empty list of required checks', (w) => { w.values['product_profile.required_checks'] = []; }, /^1: the rules name no required checks/],
   ['the rules give no merge answer', (w) => { w.ctx.rules = Object.create(w.ctx.rules, { may: { value: () => { throw new Error('the engine stopped'); } } }); }, /^9: the rules gave no merge answer/],
   ['the go check fails', (w) => { const base = w.ctx.record; w.ctx.record = Object.create(base, { read: { value: (e, id) => { if (e === 'go') throw new Error('go store gone'); return base.read(e, id); } } }); }, /^10: the go could not be checked/],
   ['GitHub never works out mergeable', (w) => { w.g.pulls.get(7).mergeable_state = 'unknown'; }, /^3: GitHub has not worked out/],
@@ -2568,6 +2590,47 @@ test('L205: at the first cutover, a failed read of the reversed commit\'s mark h
   assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
 });
 
+// S16, L548: the mark read goes straight to the client, not through git-view, so a throw there is marked in watchReads.
+const undoAwaitingMark = async (w) => {
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(recOf(w).write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  must(put(recOf(w), 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  tick(w, 1);
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  w.ctx.rules = fakeRules({ values: w.values, answers: { merge: allow('in lane') } });
+  return flagged;
+};
+test('S16, L548: a raw throw on the mark read is not read, never an answer: the wait does not count, and the next pass merges', async () => {
+  for (const msg of ['socket hang up', 'read ECONNRESET', 'Unexpected end of JSON input', 'the token file could not be read']) {
+    const w = world({ values: { 'product.cutover_stage': 'first' } });
+    const flagged = await undoAwaitingMark(w);
+    let left = 1;
+    wrapGet(w, (p, r) => { if (left > 0 && p.includes(`/commits/${flagged}/statuses`)) { left -= 1; throw new Error(msg); } return r; });
+    await gatePass(w.ctx);
+    assert.equal(left, 0, `${msg}: the mark read was the one that threw`);
+    const u = mergeOf(w, 'U-1');
+    assert.equal(u.doc.state, 'held', `${msg}: ${JSON.stringify(u.doc)}`);
+    assert.ok((u.doc.waiting_on ?? []).some((x) => /^9: /.test(x)), (u.doc.waiting_on ?? []).join(' | '));
+    assert.equal(u.doc.stuck_since, null, `${msg}: a failed read does not start the cap`);
+    tick(w, 1);
+    await gatePass(w.ctx);
+    assert.equal(mergeOf(w, 'U-1').doc.state, 'merged', JSON.stringify(mergeOf(w, 'U-1').doc));
+  }
+});
+test('S16, L548: the same throw sustained past the cap never refuses the undo, and the owner is told it waits', async () => {
+  const lim = limited();
+  const w = world({ ...lim, values: { ...lim.values, 'product.cutover_stage': 'first' } });
+  const flagged = await undoAwaitingMark(w);
+  wrapGet(w, (p, r) => { if (p.includes(`/commits/${flagged}/statuses`)) throw new Error('socket hang up'); return r; });
+  for (const step of [0, 5, WAIT_CAP_TIMES * LIMIT_MIN, 5]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'held', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(told(w, 'merge_refused').length, 0);
+  assert.ok(told(w, 'merge_waiting_long').length >= 1, 'a long wait on a failed read is told');
+});
+
 // The review threads (plant Q25): a GraphQL answer of 404 is GitHub's answer, so the wait on 7 counts toward the cap.
 test('L205 Minor 1: a review-thread read GitHub answers with a 404 waits on 7, and the wait counts toward the cap', async () => {
   const w = world(limited());
@@ -2602,6 +2665,24 @@ test('#108 r3 R3-b: a carry-over whose files read is cut off at 300 (main moved 
   for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
   assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
   assert.ok(mergeOf(w).doc.reasons.some((x) => /^5: /.test(x)), mergeOf(w).doc.reasons.join(' | '));
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
+test('S1, L543: a carry-over whose files read says "not an ancestor", from the real git view: the wait counts toward the cap, then refused and told', async () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const diverged = makeGitView({ gh: { get: async () => ({ status: 200, json: { status: 'diverged', merge_base_commit: { sha: 'd'.repeat(40) }, files: [] } }) }, owner: 'o', repo: 'r' });
+  const notAncestor = await diverged.files(A, B).then(() => null, (e) => e);
+  assert.match(notAncestor?.message ?? '', /is not an ancestor of/);
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  const newMain = w.g.main;
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { files: { value: (b, h) => (h === newMain ? Promise.reject(notAncestor) : view.files(b, h)) } });
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w).doc.stuck_since ?? null, null, `the wait counts toward the cap: ${JSON.stringify(mergeOf(w).doc)}`);
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
   assert.equal(told(w, 'merge_refused').length, 1);
 });
 test('#108 r3 R3-c: an undo whose exact-reverse compare lists 300 files: the wait counts toward the cap and the undo is refused, told', async () => {

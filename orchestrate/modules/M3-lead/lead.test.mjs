@@ -157,11 +157,11 @@ test('L87 M-5: a brief field can\'t fake a section or a fence, and the owner\'s 
 
 // Five sample items (generic, not any product's): a note app's wishes, planned into cards and waves.
 const PLAN = { cards: [
-  { id: 'C-1', wave: 1, brief: brief(['src/store.js', 'test/store.test.js']) },
-  { id: 'C-2', wave: 1, brief: brief(['src/theme.css']) },
-  { id: 'C-3', wave: 2, depends_on: ['C-1'], brief: brief(['src/search.js', 'src/store.js']) },
-  { id: 'C-4', wave: 2, depends_on: ['C-1'], brief: brief(['src/export.js']) },
-  { id: 'C-5', wave: 3, depends_on: ['C-3', 'C-4'], brief: brief(['src/menu.js']) },
+  { id: 'C-1', wave: 1, tier: 2, module: 'store', brief: brief(['src/store.js', 'test/store.test.js']) },
+  { id: 'C-2', wave: 1, tier: 2, module: 'theme', brief: brief(['src/theme.css']) },
+  { id: 'C-3', wave: 2, tier: 1, module: 'search', depends_on: ['C-1'], brief: brief(['src/search.js', 'src/store.js']) },
+  { id: 'C-4', wave: 2, tier: 2, module: 'export', depends_on: ['C-1'], brief: brief(['src/export.js']) },
+  { id: 'C-5', wave: 3, tier: 2, module: 'menu', depends_on: ['C-3', 'C-4'], brief: brief(['src/menu.js']) },
 ] };
 const edit = (f) => { const p = structuredClone(PLAN); f(p.cards); return checkPlan(p); };
 
@@ -175,6 +175,9 @@ test('the plan: briefs, predicted files and waves', () => {
   assert.ok(edit((c) => { c[0].brief.files = []; }).some((p) => p.includes('empty')));
   assert.ok(edit((c) => { c[1].id = 'C-1'; }).some((p) => p.includes('twice')));
   assert.deepEqual(checkPlan({ cards: [] }), ['the plan has no cards']);
+  // R-0b-170: tier and module have no default.
+  for (const f of [(c) => { delete c[0].tier; }, (c) => { c[0].tier = 3; }]) assert.ok(edit(f).some((p) => p.includes('tier must be 1 or 2')));
+  for (const f of [(c) => { delete c[0].module; }, (c) => { c[0].module = 'a b'; }]) assert.ok(edit(f).some((p) => p.includes('needs a module')));
 });
 
 test('L87 M-1: one file spelled six ways, or a folder beside a file in it, is shared inside a wave', () => {
