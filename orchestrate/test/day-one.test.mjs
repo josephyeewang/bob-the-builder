@@ -210,14 +210,16 @@ for (const kind of USED) {
   });
 }
 
-test('M10\'s start question: a worker for an undo card may start on day one', { todo: 'L199-B (lane 1, M10): an exact-reverse undo start is never refused by the editing caps' }, async () => {
+test('M10\'s start question: a worker for an undo card may start on day one', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
   // pass.mjs asks start_session with editing: true for an undo card too (its worker edits files), and the tier
-  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier).
-  const tier = riskOf(w.rules, cardOf(w.rec, id)).tier;
-  const r = w.rules.may('start_session', { product: P, role: 'worker', tier, editing: true });
+  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier). The card goes
+  // with it, as pass.mjs sends it: the engine knows an undo by the card's kind.
+  const card = cardOf(w.rec, id);
+  const tier = riskOf(w.rules, card).tier;
+  const r = w.rules.may('start_session', { product: P, card, role: 'worker', tier, editing: true });
   assert.equal(r.decision, 'allow', `the engine refuses the undo worker: ${r.reason}`);
 });
 
@@ -234,7 +236,7 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
