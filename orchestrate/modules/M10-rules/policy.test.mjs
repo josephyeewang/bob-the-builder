@@ -67,9 +67,9 @@ test('risky_acts must be exactly the fixed list', () => {
 });
 
 test('the Claude Code pin must be at least 2.1.295', () => {
-  refused(swap('  pin: 2.1.300', '  pin: 2.1.294'), 'old pin');
-  refused(swap('  pin: 2.1.300', '  pin: latest'), 'not a version');
-  assert.ok(parsePolicy(swap('  pin: 2.1.300', '  pin: 2.1.295')).ok);
+  refused(swap('  pin: 2.1.316', '  pin: 2.1.294'), 'old pin');
+  refused(swap('  pin: 2.1.316', '  pin: latest'), 'not a version');
+  assert.ok(parsePolicy(swap('  pin: 2.1.316', '  pin: 2.1.295')).ok);
   assert.equal(compareVersions('2.10.0', '2.9.9'), 1);
 });
 
