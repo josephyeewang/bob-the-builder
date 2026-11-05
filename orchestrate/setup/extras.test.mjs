@@ -340,7 +340,7 @@ function jobRead(u, init, reads, jobPulls) {
     ['compare', /^\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/, () => ({ files: [] })],
     ['rules', /^\/contents\//, () => ({ sha: TREE })],
     ['commitPulls', /^\/commits\/([0-9a-f]{40})\/pulls$/, (m) => (m[1] === MERGED ? jobPulls : [])],
-    ['pull', /^\/pulls\/7$/, () => ({ number: 7, merged: true, head: { sha: PRHEAD } })],
+    ['pull', /^\/pulls\/7$/, () => ({ number: 7, merged: reads.notMerged !== true, head: { sha: PRHEAD } })],
     ['checks', /^\/commits\/[0-9a-f]{40}\/check-runs$/, () => ({ total_count: 0, check_runs: [] })],
     ['statuses', /^\/commits\/[0-9a-f]{40}\/status$/, () => ({ total_count: 0, statuses: [] })],
   ];
@@ -412,11 +412,31 @@ test('L591 no rules file at the commit is an answer: the key could ask, and a re
   assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*the rules file at a commit works \(there is none there\)/);
 });
 
-test('L591 no answer at all from GitHub on a read fails, and is not taken for a pass', async () => {
-  const w = withToken(); github(w); const real = w.mac.github;
-  w.mac.github = (url, init) => { if (/check-runs/.test(url)) throw new Error('down'); return real(url, init); };
-  const r = await prove(w);
-  assert.equal(r.code, 1, r.text); assert.match(r.text, /FAIL .*read of the check runs works/);
+const JOB_ONLY = WATCH_READS.filter((x) => !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key));
+for (const k of JOB_ONLY) {
+  test(`L591 no answer at all from GitHub on the read of ${k.what} fails, and is not taken for a pass`, async () => {
+    const w = withToken(); github(w); const real = w.mac.github;
+    // /git/commits/ is the walk's own read, which the commit's shape also fits.
+    w.mac.github = (url, init) => { const u = new URL(url); if (k.shape.test(u.pathname + u.search) && !u.pathname.includes('/git/commits/')) throw new Error('down'); return real(url, init); };
+    const r = await prove(w);
+    assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works`));
+  });
+}
+
+// A key with no permission on a private repository is often told 404, not 403: only the rules file may read a 404 as an answer.
+for (const k of JOB_ONLY.filter((x) => x.key !== 'rules')) {
+  test(`PLANT L591 a 404 on the read of ${k.what} fails prove-token: only the rules file can be absent`, async () => {
+    const w = withToken(); github(w, { reads: { [k.key]: 404 } }); const r = await prove(w);
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works`));
+  });
+}
+
+test('PLANT L591 a pull request that was closed unmerged is not the commit\'s pull request: the walk goes on, and says so when there is no other', async () => {
+  const w = withToken(); github(w, { reads: { notMerged: true } }); const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /FAIL .*a commit on main with a pull request.*there is none/);
+  assert.doesNotMatch(r.text, /PASS .*the job's read/);
 });
 
 test('L150 m4 the token is read AS orchestrate (sudo -n -H -u orchestrate /bin/cat <file>), never by root through the name; the token is in no argument', async () => {
