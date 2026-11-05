@@ -19,7 +19,11 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText } from './dispatcher-wiring.mjs';
+import { wire, notWiredText, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
+import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
+import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,7 +80,8 @@ function world({ extra = {}, omit = [], products = [ENTRY] } = {}) {
 function boot(w) {
   const r = spawnSync(process.execPath, ['--import', FAKE, w.main, w.configFile], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: w.f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
-  return { code: r.status, err: r.stderr };
+  // A boot that hangs or is killed says so, so a failing test names that and not only a code of null.
+  return { code: r.status, err: r.error || r.signal ? `${r.stderr}\nthe boot did not finish: ${r.error?.code ?? r.error ?? ''} ${r.signal ?? ''}` : r.stderr };
 }
 
 // The record as main.mjs left it, opened again for reading.
@@ -145,10 +150,76 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
   }
 });
 
+// The seam: a port file fills its ports without this wiring changing.
+// Groups for `wire`: the ones a test is about, and one more holding every other port, so that a test changes only what it means to.
+const rest = (taken, ...groups) => [...groups, {
+  notWired: TICK_PORTS.filter((k) => !['alert', 'approvals', 'cleanup', ...taken].includes(k)),
+  build: () => (taken.includes('cleanup') ? {} : { cleanup: workerPorts({}).cleanup }),
+}];
+test('the seam: each port has one home; a port file gets ctx and fills its ports, and the rest keep refusing', async () => {
+  const lists = [NOT_WIRED_WORKER, NOT_WIRED_REVIEW, NOT_WIRED_PHONE];
+  assert.deepEqual(lists.flat().sort(), [...PORTS_NOT_WIRED].sort(), 'every refusing port is on exactly one port file\'s list');
+  assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
+  assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
+  for (const build of [reviewPorts, phonePorts]) assert.deepEqual(build({}), {}, 'nothing answered yet');
+  assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
+
+  const w = world();
+  const seen = [];
+  const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
+  const filled = await wire(w.config, { ...opts, limitedSync: 'the sync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
+    { notWired: ['launch', 'probe'], build: (ctx) => { seen.push(ctx); return { sessions: 'a real port' }; } },
+    { notWired: ['board'], build: () => ({ hostLock: 'another' }) }) });
+  assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
+  for (const k of ['launch', 'probe', 'board']) assert.throws(() => filled.ports[k](), { message: notWiredText(k) });
+  assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'limitedSync', 'log', 'now', 'rec', 'rules', 'stateDir']);
+  assert.ok(Object.isFrozen(seen[0]));
+  assert.equal(seen[0].limitedSync, 'the sync');
+  assert.equal(seen[0].rec, filled.rec);
+  assert.equal(seen[0].rules, filled.rules);
+});
+
+// Every way a port can lose its one home stops a start: the groups the wiring is given, what stops it, the port it names.
+const answer = (o) => ({ notWired: [], build: () => o });
+const BAD_GROUPS = [
+  ['answered by one file, listed by a later one', () => rest(['launch'], answer({ launch: 'real' }), { notWired: ['launch'], build: () => ({}) }), /these ports are wired but still listed as not wired: launch$/],
+  ['listed by one file, answered by a later one', () => rest(['launch'], { notWired: ['launch'], build: () => ({}) }, answer({ launch: 'real' })), /these ports are wired but still listed as not wired: launch$/],
+  ['answered by two files, either order', () => rest(['leads'], answer({ leads: 'one' }), answer({ leads: 'two' })), /two port files answer these ports: leads$/],
+  ['on two lists', () => rest(['probe'], { notWired: ['probe'], build: () => ({}) }, { notWired: ['probe'], build: () => ({}) }), /these ports are on two lists: probe$/],
+  ['the approvals port replaced', () => rest([], answer({ approvals: () => [] })), /only the wiring answers these ports: approvals$/],
+  ['the alert port replaced', () => rest([], answer({ alert: fakeAlert() })), /only the wiring answers these ports: alert$/],
+  ['an answer the tick never reads', () => rest([], answer({ lanuch: 'real' })), /no tick step reads these ports: lanuch$/],
+  ['a listing the tick never reads', () => rest([], { notWired: ['lanuch'], build: () => ({}) }), /no tick step reads these ports: lanuch$/],
+  ['neither answered nor listed', () => rest(['resume']), /nothing answers or lists these ports, which the tick needs: resume$/],
+  ['no cleanup at all', () => rest(['cleanup']), /nothing answers or lists these ports, which the tick needs: cleanup$/],
+  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.mirrorFor, cleanup\.git, cleanup\.saveWork, cleanup\.copiesRoot$/],
+  ['a port file that is async, so answers nothing yet', () => rest(['cleanup'], { notWired: [], build: async () => ({ cleanup: {} }) }), /nothing answers or lists these ports, which the tick needs: cleanup$/],
+];
+for (const [name, groups, why] of BAD_GROUPS) {
+  test(`the seam: a port ${name} stops the start`, async () => {
+    const w = world();
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {}, groups: groups() }), why);
+  });
+}
+
+test('the seam: the cleanup group follows the same rules, by its own list', () => {
+  assert.deepEqual([...NOT_WIRED_CLEANUP].sort(), [...CLEANUP_NOT_WIRED].sort());
+  assert.equal(cleanupProblem(workerPorts({}).cleanup), null, 'as it stands');
+  const cleanup = (changes) => {
+    const c = Object.getOwnPropertyDescriptors(workerPorts({}).cleanup);
+    return Object.defineProperties({}, { ...c, ...changes });
+  };
+  assert.match(cleanupProblem(cleanup({ mirrorFor: { enumerable: true, value: () => 'real' } })), /still listed as not wired: cleanup\.mirrorFor$/);
+  assert.match(cleanupProblem(cleanup({ copiesRoot: { enumerable: true, value: '/real/folder' } })), /still listed as not wired: cleanup\.copiesRoot$/);
+  assert.match(cleanupProblem({}), new RegExp(`still listed as not wired: ${CLEANUP_PORTS.map((k) => `cleanup\\.${k}`).join(', ')}$`), 'gone is not wired');
+  assert.match(cleanupProblem(cleanup({ extra: { enumerable: true, value: 1 } })), /no tick step reads these ports: cleanup\.extra$/);
+});
+
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
   const src = readFileSync(TICK, 'utf8');
   const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
   assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...PORTS_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
+  assert.deepEqual([...TICK_PORTS].sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'what the start insists on is what the tick reads');
   const w = world();
   const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
   assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal or a pinned wiring');
