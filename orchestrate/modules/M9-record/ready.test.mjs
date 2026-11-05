@@ -133,6 +133,23 @@ test('L490: every card state is one of the three things to a card that depends o
   assert.deepEqual(table, { draft: 'waits', ready: 'waits', claimed: 'waits', running: 'waits', in_review: 'waits', verified: 'waits', approved: 'waits', merging: 'waits', merged: 'done', closed: 'done', waiting: 'waits', failed: 'told', cancelled: 'told', closed_no_answer: 'told', reverted: 'told' });
 });
 
+test('L595: an undo card is ready on a paused product; nothing else is, and an unreadable product still refuses', () => {
+  const er = card({ kind: 'exact_reverse' });
+  const creators = { 'C-1': 'dispatcher' };
+  const at = (productState, who = creators) => check('C-1', er, view({ cards: { 'C-1': er }, creators: who, productState }));
+  assert.deepEqual(at('paused'), { ok: true });
+  const none = at(null);
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /no product record/);
+  assert.match(at('paused', { 'C-1': 'lead:L-1' }).reason, /made by lead:L-1 needs the owner's go/, 'the wrong creator still needs a go');
+  const ordinary = card();
+  assert.match(check('C-1', ordinary, withGo(ordinary, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
+  const script = card({ kind: 'script' });
+  assert.match(check('C-1', script, withGo(script, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
+  const norule = check('C-1', er, view({ cards: { 'C-1': er }, creators, productState: 'paused' }), rulesFor({ 'product_state_rules.paused.start': undefined }));
+  assert.match(norule.reason, /the rules say nothing about starting work in a paused product/);
+});
+
 test('L490 m7: a product that can only be read as paused is not an ordinary wait; a paused one is', () => {
   const d = card();
   const withProduct = (doc) => { const v = withGo(d); return { ...v, get: (e, id) => (e === 'product' ? doc : v.get(e, id)) }; };

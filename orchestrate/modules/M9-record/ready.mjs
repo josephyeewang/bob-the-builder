@@ -94,6 +94,9 @@ function productCheck(card, view, rules, product) {
   const state = readable ? p.doc.state : 'paused';
   const start = rules.get(`product_state_rules.${state}.start`, { product });
   if (typeof start !== 'string' || !start) return { ok: false, reason: `the rules say nothing about starting work in a ${state} product` };
+  // An undo is never held by the product's state: pausing is often the moment the owner wants one, and M10 and M11's
+  // start gate already let it through, so this check alone was stopping it (L595). A record that can't be read still refuses.
+  if (start === 'none' && readable && card.doc.kind === 'exact_reverse') return { ok: true };
   // Only a state read off the record can be waited out: a missing or unreadable record is said (L490 m7).
   if (start === 'none') return { ok: false, waiting: readable, reason: `product ${card.doc.product} is ${state}${readable ? '' : p ? ' (its record can\'t be read)' : ' (no product record)'}; no work starts` };
   return { ok: true };
