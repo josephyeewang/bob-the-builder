@@ -35,7 +35,7 @@ import { tellThen, clearCause, isQueued, writeFrom } from './alerts.mjs';
 import { stillWaiting, dueToTell, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { exactReverse } from './undo.mjs';
 import { cardBranch } from '../M4-workshop/git/branch.mjs';
-import { isAbsolute } from 'node:path';
+import { workerOutboxProblem } from '../M4-workshop/git/session-outbox.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
@@ -80,7 +80,7 @@ export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
   let timer;
-  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, reason: `it did not answer within ${ms} ms` }), ms); });
+  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }), ms); });
   try { return await Promise.race([Promise.resolve().then(f), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
 }
 
@@ -118,6 +118,8 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
 export const HOLD_FACT = (cause) => `hold-${cause}`;
 // The shared still-waiting repeat, one definition (#164 audit c1).
 export const HOLD_REPEAT_MS = STILL_WAITING_MS;
+const SESSION_OUTBOX_CAUSE = (card) => `session-outbox-${card}`;
+const SESSION_RECORD_CAUSE = (card) => `session-record-${card}`;
 
 /**
  * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
@@ -167,9 +169,12 @@ const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? '
 const factDoc = (rec, id) => rec.read('fact', id);
 // `base` is the doc the caller read: only what the caller changed is written, at the version read and again on a
 // conflict, so a mark written meanwhile is kept (writeFrom, L335 m-1). `force` names keys written anyway: a clear's told fields.
-const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, id, base, doc, kind, { force });
+export const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, id, base, doc, kind, { force });
 // The fields a told mark writes on the facts cleared here (L354 item 3).
 const TOLD = ['told_cause', 'told_at'];
+/** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
+export const writeLaunch = (rec, { sessionId, role, kind, card, head, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+  doc: { session_id: sessionId, role, kind, card, head: head ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
@@ -263,7 +268,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
     // point over a bad field): the stop is forced one limit from now at most.
     if (pastTime(pending.since, now) === null) {
       const was = pending;
-      pending = { ...pending, since: iso(now) };
+      pending = { ...pending, since: iso(now), restarted: true };
       putFact(rec, STOP_FACT(s.id), pending, 'stop_wanted', was);
     }
     const limit = pending.reason === 'cancel' ? cancelMs : parkMs;
@@ -288,7 +293,9 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
   const after = Math.max(now, clock());
   for (const [i, { s, pending, late, stopped }] of done.entries()) {
     const saved = saves[i];
-    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${Math.round((after - Date.parse(pending.since)) / 60_000)} min (${pending.reason})`, { now: after });
+    // After a restart (its start time could not be read) the wait was longer than this count: the note says so (L339).
+    const counted = `${Math.round((after - Date.parse(pending.since)) / 60_000)} min${pending.restarted ? ' counted from a restart (its start time could not be read, so it waited longer)' : ''}`;
+    if (late) note(rec, `stop-note-${s.id}`, `session ${s.id} stopped without a safe point after ${counted} (${pending.reason})`, { now: after });
     // The move's answer is kept on the stop (L323): a park the Record refuses is tried again each pass (reparkStopped)
     // and told to the owner while it lasts (refused-writes.mjs), never dropped.
     const moved = moveAfterStop(rec, s.card, pending.reason, after);
@@ -357,7 +364,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
@@ -470,7 +477,11 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   }
   // Once per stretch of unread usage, and again each day it lasts (L38).
   const uf = factDoc(rec, UNKNOWN_FACT)?.doc;
-  if (unknownLong && (!uf?.since?.startsWith?.(unknownSince) || dueToTell(uf, now, HOLD_REPEAT_MS))) {
+  // Compared as text, exactly (L339 m2, L350): a start stored as a number is still this stretch's, so told daily, not
+  // every pass; and a short or corrupt start ('2') is no prefix match for an old stretch's mark, so a new stretch is
+  // told at once. The mark's since is written from this same value, so equal is the whole test; an empty one never matches.
+  const sameStretch = uf?.since != null && String(uf.since) !== '' && String(uf.since) === String(unknownSince);
+  if (unknownLong && (!sameStretch || dueToTell(uf, now, HOLD_REPEAT_MS))) {
     tellThen(alert, 'usage has been unreadable for over a day; parked work waits on you', { fact: UNKNOWN_FACT, fields: { since: unknownSince, told_at: iso(now) }, kind: 'usage_unknown_alert' });
   }
 
@@ -479,7 +490,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
     if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, out, alert, report, failureLog, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
+    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -511,12 +522,12 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 
 // Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
-  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
+  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
   return { ...out, missing, running: live };
 }
 
@@ -610,14 +621,19 @@ function tellWaits({ rec, groups, alert, now, report }) {
       tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
       // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and written when a mark shows or
       // something was queued, cleared_at moving the version so a mark on its way conflicts (L449 m1, m2).
-      clear: () => clearCause(rec, fact, (moved) => {
-        const cur = rec.read('fact', fact)?.doc;
-        const was = typeof cur === 'object' ? cur : undefined;
-        if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
-      }, report),
+      clear: () => clearHold({ rec, fact, now, report }),
     });
   }
 }
+// A hold that has ended: a queued copy is dropped, and a mark written so the same cause is told again if it comes back.
+function clearHold({ rec, fact, now, report }) {
+  return clearCause(rec, fact, (moved) => {
+    const cur = rec.read('fact', fact)?.doc;
+    const was = typeof cur === 'object' ? cur : undefined;
+    if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
+  }, report);
+}
+
 // Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
 // fixed class, not their text (#157 audit m5); any other is keyed by its text with the numbers out.
 const FIXED_CAUSES = [['launcher', /^launcher: /], ['claim', /^not claimed: /], ['rules-error', /^rules: (could not be asked|rules error: )/]];
@@ -627,13 +643,13 @@ export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason)
 /** Card kinds the start loop never hands to a session. */
 export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
-async function starts({ rec, rules, now, b, running, launch, out, alert, report, failureLog, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
   // The Lead's own daily card is never started as a worker (audit MAT-4; M9 lets only the Lead make one). A fix
   // card stays a draft until the Lead plans it, so rec.ready never holds it. A research_copy card is never a worker's
-  // either: its commit is the owner's file, copied mechanically (research-intake.mjs; lane 2's copier, L286).
+  // either: its commit is the owner's file, copied mechanically (M4 push.mjs pushResearch, L286).
   const ready = rec.ready().filter((c) => !NEVER_STARTED.includes(c.doc.kind));
   const since = (c) => String(rec.meta?.('card', c.id)?.stateSince ?? '');
   ready.sort((x, y) => isUndo(y.doc) - isUndo(x.doc)
@@ -728,6 +744,21 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
       holdAlert({ rec, cause: `launch-other-${id}`, text: `card ${id}: the launcher answered with session ${l.sessionId}, not the claimed ${sessionId}; the card stays claimed`, alert, now });
       continue;
     }
+    // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
+    // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
+    // must keep its card claimed or a second one would start.
+    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
+    if (outboxWrong) {
+      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid }), portDeadlineMs);
+      const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
+      const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
+        : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`
+          : 'it was stopped and the card went back to ready';
+      out.refused.push([id, `launcher: its outbox ${outboxWrong}`]);
+      holdAlert({ rec, cause: SESSION_OUTBOX_CAUSE(id), text: `card ${id}: session ${sessionId} was refused: the outbox its launcher named ${outboxWrong}; ${then}`, alert, now });
+      continue;
+    }
+    clearHold({ rec, fact: HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report });
     // claimed -> running adds the process (pid and its start time) to the claim, and nothing else.
     const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
     if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
@@ -735,19 +766,18 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
-    const lr = rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
-      doc: { session_id: sessionId, role: 'worker', kind, card: id, head: l.head ?? null, rev: started.rev ?? null, product: product ?? null, signin: l.signin ?? null, config_dir: l.configDir ?? null, copy: l.copy ?? null, launched_at: iso(now) } });
+    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
     // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
     // attempt), M9's claim break reads its process, and M2 its state. The Dispatcher makes it in preparing (M9: only
     // the Dispatcher makes one, and the workshop moves it on). `attempt` counts this card's sessions, so each start's
-    // push has its own record line. With no record, or no outbox, the work can never be pushed: the owner is told.
-    const outboxOk = typeof l.outbox === 'string' && isAbsolute(l.outbox);
+    // push has its own record line. With no record the work can never be pushed: the owner is told.
     const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
     const sr = rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
-      doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: outboxOk ? l.outbox : null, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
-    if (!sr.ok || !outboxOk) holdAlert({ rec, cause: `session-${id}`, text: `card ${id}: session ${sessionId} started, but ${sr.ok ? 'the launcher did not say where its outbox is' : `its session record was not written (${sr.reason})`}, so its work cannot be pushed`, alert, now });
+      doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: l.outbox, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
+    if (sr.ok) clearHold({ rec, fact: HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report });
+    else holdAlert({ rec, cause: SESSION_RECORD_CAUSE(id), text: `card ${id}: session ${sessionId} started, but its session record was not written (${sr.reason}), so its work cannot be pushed`, alert, now });
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
     clearCause(rec, UNDO_HELD_FACT(id), () => {

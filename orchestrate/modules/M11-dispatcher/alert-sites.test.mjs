@@ -132,7 +132,7 @@ export const LATE_MARK_OK = Object.freeze({
   UNDO_NOTE_FACT: 'one per undo card, whose fix card is never written twice: a late note is on a fix card the Lead was told of',
   // L130: marks that carry what they told, so a later one of the same kind is told again.
   OUTAGE_FACT: 'the mark carries the outage it told (told_id); a new outage has a new id and is told again',
-  WAIT_TELL_FACT: 'the mark carries the wait it told (told_since); a new wait has a new since and is told again',
+  WAIT_TELL_FACT: 'the mark carries the wait it told (told_since) and when (told_at, repeated daily by stillWaiting); a new wait has a new since and is told again, and retellWaits drops the cause when the wait ends',
   appliedId: 'the mark carries the state it told (told_state); a new hand-in under the name rewrites the fact without it',
   UNSAVED_FACT: 'one per stopped session, and a session id is never reused',
   // R-0b-128: the proposals folder's file facts.

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
+import { leadLaunchHead } from '../../shared/record.mjs';
 import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -718,6 +719,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     { over: {
       sessions: () => running,
       stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
+      mainSha: async () => 'a'.repeat(40),
       outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
       leads: () => [{ lead, outboxNames: readdirSync(outbox), questionOpen: false,
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
@@ -737,6 +739,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     assert.deepEqual(r2.steps.leads.result, [['L-1', 'restarted']], `${band}: ${JSON.stringify(r2.steps.leads.result)}`);
     assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'done');
     assert.equal(starts.length, 1);
+    assert.ok(leadLaunchHead(w.rec, 'L-2'), `${band}: the restarted Lead has no launch record, so its plans would be refused`);
   }
 });
 
@@ -999,6 +1002,24 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
   assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
   assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
+});
+
+// #219 audit M-1: a start whose outbox is wrong is stopped, on the undo path and on the normal one alike. Both are told
+// through the tick's own ports: a stop port left behind would keep every such card claimed for nothing.
+test('#219 M-1: the tick gives both start paths the stop port and the outbox root', async () => {
+  const run = async (entries) => {
+    const stopped = [];
+    const w = world([account(), usage(), ...entries], { over: {
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
+      outboxRoot: '/no-such-outbox-root' } });
+    await w.pass();
+    return stopped;
+  };
+  // A normal card reaches only the pass's own starts.
+  assert.deepEqual(await run([card('C-1')]), ['C-1']);
+  // An undo is tried by the undo start and, given back, by the pass: stopped once each.
+  assert.deepEqual(await run(undoEntries('U-1')), ['U-1', 'U-1']);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes
@@ -1417,4 +1438,18 @@ test('L424: the tick asks the reviewEnded port before a review session\'s verdic
   await w.pass();
   assert.deepEqual(asked, ['R-1']);
   assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
+});
+
+test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, on its own fact', async () => {
+  const dir = tempDir('m11-tick-notes-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'waits\n');
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  const lines = () => w.rec.diary().filter((d) => d.kind === 'note' && /outbox|intake/.test(d.id ?? '')).map((d) => d.id);
+  for (let min = 0; min < 50; min++) await w.pass(min);
+  assert.equal(lines().length, 1, JSON.stringify(w.rec.diary().slice(-6)));
+  await w.pass(25 * 60);
+  assert.equal(lines().length, 2, 'a day later');
 });

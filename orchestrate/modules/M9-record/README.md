@@ -31,6 +31,12 @@ A session's claim ends three ways:
 
 Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
 
+## Plan files
+
+A plan file makes draft cards (R-0b-170, L460). `plan-<name>.json` from a Lead goes through `plan-cards.mjs`: every card is checked first, then all are written in one diary line, or none. `plan_sha256` is the hash of the file and `main_commit` the head on the Lead's newest launch record, so neither can be typed: anything under those names in the plan is ignored, and a `roadmap-` file may not set them. The Record takes only the bytes M11's plan check read (`checked_sha256`). A later plan may change only draft cards, never a card's module or depends_on, and a card it leaves out stays as it was and is named in the answer.
+
+Once a card has a `plan_sha256`, only a plan file can change its plan; a roadmap file trying to is refused (L490). A card's `brief` is frozen once it leaves draft. A plan changes only `ordinary` cards.
+
 ## Facts: families and who may change them
 
 Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.

@@ -76,12 +76,23 @@ export const REQUIRED_FIELDS = Object.freeze({
  */
 export const launchesNewestFirst = (rec, pick) => rec.list('launch').filter((l) => l?.doc && pick(l)).reverse();
 
+/**
+ * The Lead session's newest launch and the main commit it started on, or null (R-0b-170, L460): the one source of a
+ * plan's main_commit. A newest launch with no readable head is null, never the launch before it.
+ */
+export function leadLaunchHead(rec, sessionId) {
+  const l = launchesNewestFirst(rec, (x) => x.doc.role === 'lead' && x.doc.session_id === sessionId)[0];
+  return !l?.corrupt && typeof l?.doc.head === 'string' && /^[0-9a-f]{40}$/.test(l.doc.head) ? { id: l.id, head: l.doc.head } : null;
+}
+
 // A launch names a card and head only for the roles that work on one card (0b-5: a Front Door or thinking session has
-// neither; with no role, all are needed). The one check both the fake and the real writer use.
+// neither; with no role, all are needed). A Lead names the main commit it started on as its head, and has no card or
+// card rev (L460). The one check both the fake and the real writer use.
 export const CARD_ROLES = Object.freeze(['worker', 'reviewer', 'auditor']);
 export function missingFields(entity, doc) {
   const blank = (f) => doc?.[f] === undefined || doc?.[f] === null || doc?.[f] === '';
-  const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !['card', 'head'].includes(f) || !doc?.role || CARD_ROLES.includes(doc.role));
+  const free = doc?.role === 'lead' ? ['card', 'rev'] : doc?.role && !CARD_ROLES.includes(doc.role) ? ['card', 'head'] : [];
+  const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !free.includes(f));
   return need.filter(blank);
 }
 
@@ -226,7 +237,8 @@ export function makeRecord(impl) {
 // real Record let writes pass every test that the real one refuses. What it still does not check is the rest of the
 // Store Writer: the ready rule, a claim's and a wait's shape, verdicts and merges. applyOutbox makes the document a
 // create kind makes (a handoff, a report, a lesson: as M9's applyParsed does, once per file content, written as
-// `<role>:<session>`), without M9's file checks (owner, links, size); any other kind it records in the diary only.
+// `<role>:<session>`), without M9's file checks (owner, links, size); any other kind, a plan- file too, it records in the
+// diary only.
 // The claim fakes are simple: ready() is every `ready` card with no claim, release() hands a claimed card back when the
 // session holds it, overdue() and lapseClaims() find none. breakIfDead() breaks only what M9's would and only when the
 // test's `dead(claim)` says the owner is dead (the fake can't tell a dead owner itself, so with no `dead` it never
@@ -306,7 +318,7 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       if (spec.record === 'none') return notARecord(kind);
       if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
-      if (spec.mode === 'create') {
+      if (spec.mode === 'create' && spec.entity !== 'card') {
         let buf;
         try { buf = readFileSync(file); } catch (e) { return refused(`can't read ${name} (${e?.code ?? 'error'})`); }
         const sha256 = createHash('sha256').update(buf).digest('hex');
