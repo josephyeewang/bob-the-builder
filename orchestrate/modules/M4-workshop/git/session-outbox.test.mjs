@@ -27,7 +27,7 @@ test('with the root: the real folder must be <root>/worker/<session>, through an
   mkdirSync(join(root, 'worker', 'S-old'));
   assert.equal(workerOutboxProblem(join(root, 'worker', SID), SID, { root }), null);
   // A root reached through a link is the same root.
-  const viaLink = `${root}-link`;
+  const viaLink = join(tempDir('orch-outbox-'), 'link');
   symlinkSync(root, viaLink);
   assert.equal(workerOutboxProblem(join(viaLink, 'worker', SID), SID, { root }), null);
   assert.equal(workerOutboxProblem(join(root, 'worker', SID), SID, { root: viaLink }), null);
