@@ -2626,6 +2626,24 @@ test('#108 r3 R3-b: a carry-over whose files read is cut off at 300 (main moved 
   assert.ok(mergeOf(w).doc.reasons.some((x) => /^5: /.test(x)), mergeOf(w).doc.reasons.join(' | '));
   assert.equal(told(w, 'merge_refused').length, 1);
 });
+test('S1, L543: a carry-over whose files read says "not an ancestor", from the real git view: the wait counts toward the cap, then refused and told', async () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const diverged = makeGitView({ gh: { get: async () => ({ status: 200, json: { status: 'diverged', merge_base_commit: { sha: 'd'.repeat(40) }, files: [] } }) }, owner: 'o', repo: 'r' });
+  const notAncestor = await diverged.files(A, B).then(() => null, (e) => e);
+  assert.match(notAncestor?.message ?? '', /is not an ancestor of/);
+  const w = world(limited());
+  verifiedCard(w);
+  w.g.main = w.g.commit([w.g.main], { 'docs/other.md': 'x' }, { from: w.g.main });
+  const newMain = w.g.main;
+  const view = w.ctx.view;
+  w.ctx.view = Object.create(view, { files: { value: (b, h) => (h === newMain ? Promise.reject(notAncestor) : view.files(b, h)) } });
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w).doc.stuck_since ?? null, null, `the wait counts toward the cap: ${JSON.stringify(mergeOf(w).doc)}`);
+  for (const step of [LIMIT_MIN, WAIT_CAP_TIMES * LIMIT_MIN]) { tick(w, step); await gatePass(w.ctx); }
+  assert.equal(mergeOf(w).doc.state, 'refused', JSON.stringify(mergeOf(w).doc));
+  assert.equal(told(w, 'merge_refused').length, 1);
+});
 test('#108 r3 R3-c: an undo whose exact-reverse compare lists 300 files: the wait counts toward the cap and the undo is refused, told', async () => {
   const w = world();
   verifiedCard(w);

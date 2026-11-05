@@ -26,6 +26,12 @@ const MODES = new Set(['100644', '100755', '120000', '160000']);
 // GitHub's file statuses → ours. `changed` is GitHub's word for a mode-only change; `unchanged` is dropped.
 const STATUS = { added: 'added', removed: 'removed', modified: 'modified', renamed: 'renamed', copied: 'copied', changed: 'modified' };
 
+// A client that threw gave no answer at all (a dropped connection, a body cut mid-read, a token that can't be read), so
+// the throw is marked `unreadable` for M6's failedRead (S16, L543): held, never counted as GitHub's answer about the
+// change. Here rather than in a client, as every client's reads pass through this one line. The message and any status are
+// kept, as failedRead reads the status first.
+const notRead = (e) => Object.assign(new Error(String(e?.message ?? e), { cause: e }), { unreadable: true, ...(Number.isInteger(e?.status) && { status: e.status }) });
+
 export function makeGitView({ gh, owner, repo }) {
   if (!gh || typeof gh.get !== 'function') throw new Error('git view needs a GitHub client with get()');
   if (!NAME.test(owner ?? '') || !NAME.test(repo ?? '')) throw new Error('git view needs an owner and repo');
@@ -35,7 +41,8 @@ export function makeGitView({ gh, owner, repo }) {
   const folders = new Map();
   const sha = (s, what) => { if (typeof s !== 'string' || !SHA.test(s)) throw new Error(`${what} is not a full commit id`); return s; };
   const read = async (path) => {
-    const r = await gh.get(`${base}${path}`);
+    let r;
+    try { r = await gh.get(`${base}${path}`); } catch (e) { throw notRead(e); }
     if (r?.status !== 200 || !r.json || typeof r.json !== 'object') throw new Error(`GitHub answered ${r?.status} for ${path}`);
     return r.json;
   };
