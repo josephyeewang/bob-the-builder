@@ -19,7 +19,10 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText } from './dispatcher-wiring.mjs';
+import { wire, notWiredText, PORT_GROUPS } from './dispatcher-wiring.mjs';
+import { NOT_WIRED_WORKER, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
+import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -143,6 +146,36 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
     assert.equal(r.code, 1, JSON.stringify(extra));
     assert.match(r.err, new RegExp(`dispatcher: not started: ${why.source}`));
   }
+});
+
+// The seam: a port file fills its ports without this wiring changing.
+test('the seam: each port is on one list; a port file\'s answer replaces the refusal; a port both wired and listed stops the start', async () => {
+  const lists = [NOT_WIRED_WORKER, NOT_WIRED_REVIEW, NOT_WIRED_PHONE];
+  assert.deepEqual(lists.flat().sort(), [...PORTS_NOT_WIRED].sort(), 'every refusing port is on exactly one port file\'s list');
+  assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
+  assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
+  for (const build of [reviewPorts, phonePorts]) assert.deepEqual(build({}), {}, 'nothing answered yet');
+  assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
+
+  const w = world();
+  const config = w.config;
+  const seen = [];
+  const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
+  const filled = await wire(config, { ...opts, limitedSync: 'the sync', groups: [
+    { notWired: ['launch', 'probe'], build: (ctx) => { seen.push(ctx); return { sessions: 'a real port' }; } },
+    { notWired: ['board'], build: () => ({ hostLock: 'another' }) },
+  ] });
+  assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
+  for (const k of ['launch', 'probe', 'board']) assert.throws(() => filled.ports[k](), { message: notWiredText(k) });
+  assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'limitedSync', 'log', 'now', 'rec', 'rules', 'stateDir']);
+  assert.equal(seen[0].limitedSync, 'the sync');
+  assert.equal(seen[0].rec, filled.rec);
+  assert.equal(seen[0].rules, filled.rules);
+  // A port wired by one file and still listed, even by another, can't start.
+  for (const groups of [
+    [{ notWired: ['launch'], build: () => ({}) }, { notWired: [], build: () => ({ launch: 'real' }) }],
+    [{ notWired: [], build: () => ({ launch: 'real' }) }, { notWired: ['launch'], build: () => ({}) }],
+  ]) await assert.rejects(wire(config, { ...opts, groups }), /these ports are wired but still listed as not wired: launch/);
 });
 
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
