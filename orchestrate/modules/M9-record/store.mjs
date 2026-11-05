@@ -27,6 +27,7 @@ import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
 import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
 // Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
@@ -34,12 +35,15 @@ export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn
 // L545, the cap on alerts kept with no queue (keepAlert). Each line is its own GitHub issue, so 20 a day: more distinct
 // causes than one bad day should have, and still a list the owner can read. ALERT_QUEUE_MAX is the queue's size, not that.
 // A line can't be changed once delivered, and one written at the day's end would never come if the fault stopped first,
-// so the count past 20 is told as it grows, at these steps: "at least N". Counting stops at the last step, which bounds
-// the file when a text changes every pass.
+// so the count past 20 is told as it grows, at these steps: "at least N", each step once a day at most, as the count can
+// sit at a step while old lines leave the day. Counting stops at the last step, which bounds each day's growth when a
+// text changes every pass; nothing trims the file.
 const KEEP_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const KEEP_PER_WINDOW = 20;
 export const KEPT_BACK_STEPS = Object.freeze([1, 10, 100, 1000]);
 const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
+// A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
+const KEPT_BACK_TEXT_MAX = 300;
 
 const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong', 'rename_fails']);
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
@@ -145,15 +149,15 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const at = now();
     const since = at - KEEP_WINDOW_MS;
     let lines = [];
-    try { lines = readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return typeof x?.cap_key === 'string' && Date.parse(x.at) > since ? [x] : []; } catch { return []; } }); } catch { /* the keep below is still tried */ }
+    try { lines = readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since ? [x] : []; } catch { return []; } }); } catch { /* the keep below is still tried */ }
     if (lines.some((x) => x.cap_key === capKey)) return;
     const mark = { cap_key: capKey, at: new Date(at).toISOString() };
     const kept = lines.filter((x) => x.outcome === 'unsent' && x.event?.type === 'alert_not_queued');
     if (kept.length < KEEP_PER_WINDOW) { keep(stamp({ type: 'alert_not_queued', text: String(text) }), mark); return; }
     const n = lines.filter((x) => x.outcome === 'kept_back').length + 1;
     if (n > KEPT_BACK_MAX) return;
-    try { appendPlain(P.unsent, `${JSON.stringify({ outcome: 'kept_back', ...mark })}\n`); } catch { return; }
-    if (KEPT_BACK_STEPS.includes(n)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${n} more alerts could not be queued in the last day and were kept back: the Record is refusing the alert queue` }), { cap_key: `kept-back-${n}`, at: mark.at });
+    try { appendPlain(P.unsent, `${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { return; }
+    if (KEPT_BACK_STEPS.includes(n) && !lines.some((x) => x.cap_key === `kept-back-${n}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${n} more alerts could not be queued in the last day and were kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${n}`, at: mark.at });
   }
   function resend() {
     let waiting = [];
