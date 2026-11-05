@@ -2,7 +2,7 @@ import { test as nodeTest } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, symlinkSync, mkdirSync, rmSync, existsSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { intakePass, kindsFor, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS } from './outbox-intake.mjs';
+import { intakePass, kindsFor, sha256, INTAKE_PORT_MS, INTAKE_START_MS, INTAKE_PASS_MS, LEFT_OUT_TELL_MS } from './outbox-intake.mjs';
 import { STEP_DEADLINE_MS } from './tick.mjs';
 import { note } from './moves.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
@@ -1034,7 +1034,7 @@ test('L497: an unheard note writes at most 6 lines on its first day and 4 a day 
 test('L497 m4: the time limits fit the step', () => {
   assert.ok(INTAKE_PORT_MS < STEP_DEADLINE_MS);
   assert.ok(INTAKE_START_MS < STEP_DEADLINE_MS);
-  assert.ok(INTAKE_PASS_MS + INTAKE_START_MS + INTAKE_PORT_MS < STEP_DEADLINE_MS, 'the budget leaves room for one last start and note');
+  assert.ok(INTAKE_PASS_MS + INTAKE_START_MS + 2 * INTAKE_PORT_MS < STEP_DEADLINE_MS, 'the budget leaves room for one last note, start and note (L520 s3)');
 });
 
 // 24 verdicts whose ended records hang, a healthy session's verdict, and a file that needs no ended record.
@@ -1055,7 +1055,7 @@ function hungVerdicts(n = 24) {
       vet: ({ kind }) => { if (kind === 'wish-') reached.push(at); return 'a stand-in'; },
       reviewEnded: (s) => { asked.push(s.sessionId); if (s.sessionId === 'R-2') return { ok: false, none: true }; hungPerPass[hungPerPass.length - 1] += 1; return new Promise(() => {}); }, ...over });
   };
-  return { pass, rec, asked, reached, hungPerPass };
+  return { pass, rec, asked, reached, hungPerPass, dirs, sessions, skip: (ms) => { at += ms; } };
 }
 
 test('L497 m5: hung ended records cost three port limits a pass, and every later file is reached within a bounded number of passes', async () => {
@@ -1069,7 +1069,7 @@ test('L497 m5: hung ended records cost three port limits a pass, and every later
   assert.ok(Math.max(...w.hungPerPass) <= 3, w.hungPerPass.join(' '));
 });
 
-test('L497 m5: slow verdicts take turns, and one that recovers loses its mark, writing nothing while it stays slow', async () => {
+test('L497 m5: slow verdicts take turns, and one that recovers loses its mark a day on, writing nothing while it stays slow', async () => {
   const w = hungVerdicts(8);
   const asked = new Set();
   const seen = (hang) => w.pass({ reviewEnded: (s, i = 0) => { if (s.sessionId === 'R-2') return { ok: false, none: true }; return hang(); } });
@@ -1083,9 +1083,55 @@ test('L497 m5: slow verdicts take turns, and one that recovers loses its mark, w
   for (const r of results) if (r.waiting === 'its session has not ended' && r.name !== 'verdict-w.md') asked.add(r.name);
   assert.equal(asked.size, 8, [...asked].join(' '));
   await seen(() => ({ ok: false, none: true }));
+  assert.equal(marks().length, 8, 'a quick answer inside the day leaves the mark (L520 C)');
+  w.skip(DAY);
   await seen(() => ({ ok: false, none: true }));
   await seen(() => ({ ok: false, none: true }));
-  assert.equal(marks().length, 0, 'a quick answer clears the mark');
+  await seen(() => ({ ok: false, none: true }));
+  assert.equal(marks().length, 0, 'a quick answer a day on clears the mark');
+});
+
+const slowMarks = (rec) => rec.list('fact').filter((f) => f.id.startsWith('hold-intake-slow-') && f.doc?.at);
+// Slow for the verdict under test; the healthy session answers at once.
+const slowOnce = (s) => (s.sessionId === 'R-2' ? { ok: false, none: true } : new Promise((r) => { setTimeout(() => r({ ok: false, none: true }), 30); }));
+
+test('L520 C: a record that hangs on some passes and not others writes one diary line, not one a pass', async () => {
+  const w = hungVerdicts(1);
+  let i = 0;
+  const flapping = (s) => {
+    if (s.sessionId === 'R-2') return { ok: false, none: true };
+    i += 1;
+    return i % 2 ? slowOnce(s) : { ok: false, none: true };
+  };
+  const lines = w.rec.diary().length;
+  for (let n = 0; n < 20; n++) await w.pass({ portMs: 40, reviewEnded: flapping });
+  assert.equal(w.rec.diary().length - lines, 1);
+  assert.equal(slowMarks(w.rec).length, 1);
+});
+
+test('L520 C: a slow verdict that is taken loses its mark at once, and one taken while slow writes none', async () => {
+  const w = hungVerdicts(1);
+  await w.pass({ portMs: 40, reviewEnded: slowOnce });
+  assert.equal(slowMarks(w.rec).length, 1);
+  const ended = (s, text) => ({ ok: true, ended: { verdict_sha256: sha256(text) } });
+  const taken = (s) => (s.sessionId === 'R-2' ? { ok: false, none: true } : ended(s, 'verdict-00.md'));
+  await w.pass({ portMs: 40, reviewEnded: taken });
+  assert.equal(slowMarks(w.rec).length, 0);
+  const lines = w.rec.diary().length;
+  await w.pass({ portMs: 40, reviewEnded: async (s) => { if (s.sessionId === 'R-1') await new Promise((r) => { setTimeout(r, 30); }); return taken(s); } });
+  assert.equal(w.rec.diary().length, lines, 'never marked');
+});
+
+test('L520 C: a slow verdict whose file is gone loses its mark, but only when its outbox was read', async () => {
+  const w = hungVerdicts(1);
+  await w.pass({ portMs: 40, reviewEnded: slowOnce });
+  assert.equal(slowMarks(w.rec).length, 1);
+  const unreadable = (d) => { if (d === '/hung') throw new Error('no'); return w.dirs[d]; };
+  await w.pass({ list: unreadable });
+  assert.equal(slowMarks(w.rec).length, 1, 'an outbox not read says nothing about its files');
+  w.dirs['/hung'] = ['wish-z.md'];
+  await w.pass();
+  assert.equal(slowMarks(w.rec).length, 0);
 });
 
 test('L497: a held file\'s tell that neither the Lead nor the owner took is reported once, and tried again in a day', async () => {
@@ -1227,6 +1273,80 @@ test('L497 m6: a Lead that can\'t be told of a start that may not have run leave
   await p.run({ reply });
   const line = p.owner.filter((t) => /^the Lead L-1's/.test(t));
   assert.deepEqual(line, ["the Lead L-1's think request think-q1.md may not have started. The Lead could not be told (tab closed)."]);
+});
+
+test('L520 A: a Lead that misses the may-not-have-started tell once hears it five minutes later, and is not told twice', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  const blip = async () => ({ ok: false, reason: 'busy' });
+  await p.run({ reply: blip, startMs: 20, startReadonly: () => new Promise(() => {}) });
+  await p.run({ reply: blip });
+  assert.equal(p.told.length, 0);
+  p.E.clock.t += 5 * 60 * 1000;
+  await passes(p);
+  assert.deepEqual(p.told.map((x) => x.text), ['Your think request think-q1.md may not have started; hand it in again under a new name if no report comes.']);
+  p.E.clock.t += OVER_A_DAY;
+  await passes(p);
+  assert.equal(p.told.length, 1);
+});
+
+test('L520 A: an interrupted write the Record refuses once still reaches the Lead on the next pass', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  await p.run({ startMs: 20, startReadonly: () => new Promise(() => {}) });
+  const { rec, off } = refusesMarks(p.rec, 'outbox_interrupted');
+  await p.run({ rec });
+  assert.equal(p.told.length, 0);
+  off();
+  await p.run({ rec });
+  assert.equal(p.told.length, 1);
+});
+
+for (const [name, content, text] of [['plan-a.json', [planCard('C-1')], /^Your plan plan-a\.json may or may not have been applied; check the board before handing it in again\.$/],
+  ['roadmap-a.md', 'a roadmap', /^Your plan roadmap-a\.md may or may not have been applied; check the board before handing it in again\.$/]]) {
+  test(`L520 B: ${name}: the outcome write refused and the Lead blipping in that pass, the Lead still hears`, async () => {
+    const p = planWorld();
+    must(p.launch());
+    p.hand(name, content);
+    const refused = Object.create(p.rec, { write: { value: (x) => (x.kind === 'outbox_applied' ? { ok: false, reason: 'turned down' } : p.rec.write(x)) } });
+    const blip = async () => ({ ok: false, reason: 'busy' });
+    await p.run({ rec: refused, reply: blip });
+    await p.run({ reply: blip });
+    assert.equal(p.rec.read('fact', `intake-applied-L-1-${name}`).doc.state, 'interrupted');
+    assert.equal(p.told.length, 0);
+    assert.ok(p.owner.some((t) => t.endsWith(`the Lead L-1's plan ${name} may or may not have been applied. The Lead could not be told (busy).`)), p.owner.join(' | '));
+    p.E.clock.t += 5 * 60 * 1000;
+    await p.run();
+    assert.equal(p.told.length, 1);
+    assert.match(p.told[0].text, text);
+  });
+}
+
+test('L520 B: a hand-in cut off that is no plan and no request has no note for the Lead', async () => {
+  const p = planWorld();
+  p.hand('wish-a.md', 'a wish');
+  const sha = sha256('a wish');
+  must(p.rec.write({ actor: 'dispatcher', entity: 'fact', id: 'intake-applied-L-1-wish-a.md', expectRev: 0, doc: { session: 'L-1', name: 'wish-a.md', sha256: sha, state: 'applying' }, kind: 'outbox_claim' }));
+  await passes(p, 2);
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-wish-a.md').doc.state, 'interrupted');
+  assert.equal(p.told.length, 0);
+});
+
+test('L520 n1: a second note on the same file reaches the owner at once, not a day after the first', async () => {
+  const p = planWorld();
+  must(p.launch());
+  const blip = async () => ({ ok: false, reason: 'busy' });
+  p.hand('plan-a.json', '{"cards":');
+  await p.run({ reply: blip });
+  p.E.clock.t += 5 * 60 * 1000;
+  await p.run();
+  assert.equal(p.told.length, 1);
+  p.hand('plan-a.json', [planCard('C-1')]);
+  p.E.clock.t += 60_000;
+  await p.run({ reply: blip });
+  const lines = p.owner.filter((t) => /plan-a\.json .*could not be told \(busy\)/.test(t));
+  assert.equal(lines.length, 2, p.owner.join(' | '));
+  assert.match(lines[1], /was applied/);
 });
 
 test('L494: a queued request\'s note to the Lead has the time limit too, and a thrown one is no loose rejection', async () => {
