@@ -1,5 +1,5 @@
 // state-request.mjs — a pause or trip-mode request from the owner's phone, applied to the product (M1 join item 13;
-// lead calls L151 M-1, L213, L219). The Front Door writes `state-<id>.json` { product, state: paused | away, until, tz };
+// lead calls L151 M-1, L213, L219, L515). The Front Door writes `state-<id>.json` { product, state: paused | away, until, tz };
 // the record keeps it as an inert report; this pass is the one place that turns it into the product's state, after
 // checking its text again with the Front Door's own check (M1 outbox.mjs). Only approvals writes a product.
 //
@@ -9,18 +9,21 @@
 // `until` is stored only, and the way back (the owner's "I'm back", a request- file) is lane 2's.
 //
 //   applyStateRequests(ctx) → { applied: [{ report, state }], answers: [{ report, push }], refused: [{ report, reason }] }
-//     Only the newest request per product is applied: newest by the report's own time (the `<id>` in its file name,
-//     YYYYMMDD-HHMM, as the Front Door wrote it), ties broken by the report's record id. The product doc keeps
-//     `request: { id, at }` of the last one applied, and a report not newer than that is never applied, so a restart or
-//     an older report arriving late can't apply again (L219 a).
+//     Requests are ordered by when they reached the Mini: the record's number at the end of the report's id, as a
+//     number (L515 A). The time in the file name is the owner's best guess in the owner's zone, so it is kept as
+//     information only and orders nothing. Only the newest request per product is applied. The product doc keeps
+//     `request: { id, at }` of the last one applied, and a report not newer than that is never applied, so a restart
+//     or a replayed report can't apply again. A report for another product is skipped with no answer: its own pass
+//     answers it (L515 M7).
 //     Every request gets one answer to the owner (L219 b): "Confirmed: …" only after the product write went through, a
-//     "Not applied: …" sentence for one that was passed over or refused. `answers` holds every answer not yet marked
-//     sent: the caller sends each push, then calls markStateAnswerSent(ctx, report). Anything not marked is handed back
-//     next pass. A write the record refused is not answered: the report is tried again next pass (it is still newer),
-//     and MAIN is alerted once per report and reason.
-//   markStateAnswerSent(ctx, report) → { ok } | { ok: false, reason }  kept in ctx.stateDir (state-answers-sent.json);
-//     with no stateDir nothing is kept, so every answer is handed back each pass. A lost file means an answer is sent
-//     again, never that one is lost.
+//     "Not applied: …" sentence for one that was passed over or refused. `answers` holds every answer not yet told:
+//     the caller tells each, then calls markStateAnswerTold. Anything not marked is handed back next pass. A write the
+//     record refused is not answered: the report is tried again next pass (it is still newer), and MAIN is alerted
+//     once per report and reason.
+//   markStateAnswerTold(ctx, report, push) → { ok } | { ok: false, reason }  one fact per report in the Record,
+//     `state-told-<report>` { type: 'state_told', report, answer } (L515 B). A told report is settled: its outcome is
+//     final, so one told "no record yet" or "could not be read" is never applied later (L515 M2, M1). Only the one the
+//     product itself records can have a new outcome, and then the new answer is told; the same answer never is.
 //
 // What each request does to the product (M9 moves.mjs; L219 c):
 //   pause, from active or light → paused, return_to the state it left;  from away → paused, return_to away, the away
@@ -29,26 +32,27 @@
 //   mode → not applied (M9 has no paused → away for a request, and none from light), and the request recorded so it
 //   is not applied later by surprise.
 //   A product with no record yet is not applied: its record is made by onboarding (onboard.mjs), not by a request.
-//   A request whose time is more than a day ahead of the Mini's clock is unreadable: as the newest it would pass over
-//   every real request, and as the stored marker hold them all back (L329's class).
 //
 //   stateRequestStep(ctx) → events   the pass inside schedulePass: applies, then tells the owner each answer as an alert
 //     { type: 'state_answer', product, report, text }, the phone push not being wired (approvals_no_push). An answer is
-//     marked sent only when the sink took it, so a lost one is told again next pass.
+//     marked told only when the sink took it, so a lost one is told again next pass. A mark the record refuses is
+//     alerted to MAIN once and the answer is not told again: a small file in ctx.stateDir holds only those reports, for
+//     as long as the Record can't. With no stateDir either, the answer is told each pass. A throw inside the step is
+//     alerted once and stops only this step, not the rest of the schedule pass (L515 m3).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkOutboxFile } from '../M1-front-door/outbox.mjs';
 import { writeDoc } from './ask-store.mjs';
 import { onceAlerts, safeAlert } from './research-ask.mjs';
 
 export const STATE_REPORT_KIND = 'state-';
-const SENT_FILE = 'state-answers-sent.json';
-const MAX_SENT = 500;
-// The name's time is the owner's own clock in any zone, so only a time past every zone counts as ahead of the Mini's.
-const AHEAD_MS = 26 * 3600 * 1000;
-// checkOutboxFile has already passed the name; this reads the time out of it.
-const TIME_OF = /^state-(\d{8}-\d{4})-[a-z]{2}\.json$/;
+export const STATE_TOLD_FACT = 'state-told-';
+const MARK_FILE = 'state-marks-refused.json';
+const STEP_FILE = 'state-step-failed.json';
+const NOT_SAVED = 'state_refused_state_not_saved';
+// checkOutboxFile has already passed the name's shape; this also says the time is a real one. It orders nothing.
+const TIME_OF = /^state-(\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])-(?:[01]\d|2[0-3])[0-5]\d)-[a-z]{2}\.json$/;
 
 // Every sentence this pass shows the owner (L219 d). Each is pinned in shared/no-promise.test.mjs STATE_APPLY_SHOWN;
 // a new or changed one goes red there until someone reads it. None promises an action: "Confirmed" is said only of a
@@ -63,31 +67,27 @@ export const STATE_ANSWERS = Object.freeze({
   unreadable: () => 'Not applied: that request could not be read. Say it again.',
 });
 
-// Newer: by the report's own time, then by its record id.
-const newer = (a, b) => !b || a.at > b.at || (a.at === b.at && a.id > b.id);
-const stampMs = (t) => Date.UTC(+t.slice(0, 4), +t.slice(4, 6) - 1, +t.slice(6, 8), +t.slice(9, 11), +t.slice(11, 13));
+// The record's number at the end of a report id (`state-<session>-<n>`), one count across every session; null if none.
+const seqOf = (id) => {
+  const m = /-(\d+)$/.exec(String(id));
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isSafeInteger(n) ? n : null;
+};
+const newer = (a, b) => !b || seqOf(a.id) > seqOf(b.id);
 
-function readSent(ctx) {
-  if (!ctx.stateDir) return {};
-  try {
-    const f = join(ctx.stateDir, SENT_FILE);
-    const v = existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {};
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
+const toldId = (report) => `${STATE_TOLD_FACT}${report}`;
+function toldMark(record, report) {
+  const f = record.read('fact', toldId(report));
+  return f ? { rev: f.rev, answer: typeof f.doc?.answer === 'string' ? f.doc.answer : null } : null;
 }
 
-export function markStateAnswerSent(ctx, report) {
-  if (typeof report !== 'string' || !report) return { ok: false, reason: 'which report' };
-  if (!ctx.stateDir) return { ok: false, reason: 'no stateDir: nothing is kept, so the answer is handed back next pass' };
-  const sent = readSent(ctx);
-  sent[report] = true;
-  const keys = Object.keys(sent);
-  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_SENT))) delete sent[k];
+export function markStateAnswerTold(ctx, report, push) {
+  if (typeof report !== 'string' || !report || typeof push !== 'string' || !push) return { ok: false, reason: 'which report and answer' };
   try {
-    mkdirSync(ctx.stateDir, { recursive: true });
-    writeFileSync(join(ctx.stateDir, SENT_FILE), `${JSON.stringify(sent)}\n`);
-    return { ok: true };
-  } catch (e) { return { ok: false, reason: String(e?.code ?? e?.message ?? e) }; }
+    const cur = toldMark(ctx.record, report);
+    const w = writeDoc(ctx.record, 'fact', { id: toldId(report), rev: cur?.rev ?? 0 }, { type: 'state_told', report, answer: push });
+    return w.ok ? { ok: true } : { ok: false, reason: String(w.reason) };
+  } catch (e) { return { ok: false, reason: String(e?.message ?? e) }; }
 }
 
 // The product doc a request makes, or the answer it gets instead.
@@ -108,69 +108,104 @@ export function applyStateRequests(ctx) {
   const { record, product } = ctx;
   const failed = { n: 0 };
   const alert = safeAlert(ctx, failed);
-  const sent = readSent(ctx);
   const refused = [];   // alerted to MAIN once per report and reason
   const answers = [];
   const applied = [];
-  const answer = (report, push) => { if (!sent[report]) answers.push({ report, push }); };
+  const answer = (report, push, mark) => { if (mark?.answer !== push) answers.push({ report, push }); };
 
-  // Every state- report, checked; the readable ones in order, oldest first.
+  // Every state- report of this product, checked; the readable ones in the order they reached the Mini, oldest first.
   const ok = [];
   for (const rep of record.list('report')) {
     const d = rep.doc;
     if (rep.corrupt || !d || d.kind !== STATE_REPORT_KIND) continue;
-    const no = (reason) => { refused.push({ report: rep.id, reason }); answer(rep.id, STATE_ANSWERS.unreadable()); };
     try {
+      const mark = toldMark(record, rep.id);
+      const no = (reason) => { refused.push({ report: rep.id, reason }); answer(rep.id, mark?.answer ?? STATE_ANSWERS.unreadable(), mark); };
       if (d.role !== 'front_door') { no('a state request comes only from the Front Door'); continue; }
       const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
       if (!r.ok) { no(r.reason); continue; }
       if (r.kind !== 'state') { no('not a state request'); continue; }
-      if (r.doc.product !== product) { no('that product is not this record\'s'); continue; }
+      if (r.doc.product !== product) continue;
       const t = TIME_OF.exec(String(d.source))?.[1];
-      if (!t) { no('the request has no time in its name'); continue; }
-      if (stampMs(t) > ctx.now() + AHEAD_MS) { no('the request\'s time lies in the future'); continue; }
-      ok.push({ rep, req: r.doc, at: { id: rep.id, at: t } });
+      if (!t) { no('the request has no real time in its name'); continue; }
+      if (seqOf(rep.id) === null) { no('the report has no record number'); continue; }
+      ok.push({ rep, req: r.doc, mark, at: { id: rep.id, at: t } });
     } catch (e) {
       refused.push({ report: rep.id, reason: 'the pass failed on it', error: String(e?.message ?? e) });
     }
   }
-  ok.sort((a, b) => (newer(a.at, b.at) ? 1 : newer(b.at, a.at) ? -1 : 0));
+  ok.sort((a, b) => seqOf(a.at.id) - seqOf(b.at.id));
 
   const cur = record.read('product', product);
   const last = ok.at(-1);
   const curDoc = cur && !cur.corrupt && cur.doc && typeof cur.doc === 'object' ? cur.doc : null;
   // A marker of the wrong shape counts as none, so it can never hold every later request back.
   const r0 = curDoc?.request;
-  const stored = r0 && typeof r0.id === 'string' && typeof r0.at === 'string' ? r0 : null;
+  const stored = r0 && typeof r0.id === 'string' && seqOf(r0.id) !== null ? r0 : null;
   for (const x of ok) {
-    if (x !== last) { answer(x.rep.id, STATE_ANSWERS.newer(product)); continue; }
-    // The newest one: answered as applied if the product already records it (or a newer one), else applied now.
-    if (stored && !newer(x.at, stored)) {
-      if (stored.id === x.at.id) answer(x.rep.id, curDoc.request_answer ?? STATE_ANSWERS.paused(product));
-      else answer(x.rep.id, STATE_ANSWERS.newer(product));
+    const id = x.rep.id;
+    // The one the product records: its answer is the product's, and may have changed since it was told.
+    if (stored?.id === id) {
+      const was = curDoc.state === 'away' ? STATE_ANSWERS.away(product) : STATE_ANSWERS.paused(product);
+      answer(id, curDoc.request_answer ?? x.mark?.answer ?? was, x.mark);
       continue;
     }
-    if (!curDoc) { answer(x.rep.id, STATE_ANSWERS.noProduct(product)); continue; }
+    if (x.mark) continue;   // settled: told once, its outcome is final and it is never applied later
+    if (x !== last || (stored && !newer(x.at, stored))) { answer(id, STATE_ANSWERS.newer(product)); continue; }
+    if (!curDoc) { answer(id, STATE_ANSWERS.noProduct(product)); continue; }
     const n = nextDoc(curDoc, x.req, x.at);
     const w = writeDoc(record, 'product', { id: product, rev: cur.rev }, { ...n.doc, request_answer: n.answer });
-    if (!w.ok) { refused.push({ report: x.rep.id, reason: `the record refused the product write: ${w.reason}` }); continue; }
-    if (!n.notApplied) applied.push({ report: x.rep.id, state: n.doc.state });
-    answer(x.rep.id, n.answer);
+    if (!w.ok) { refused.push({ report: id, reason: `the record refused the product write: ${w.reason}` }); continue; }
+    if (!n.notApplied) applied.push({ report: id, state: n.doc.state });
+    answer(id, n.answer);
   }
-  onceAlerts(ctx, refused, { file: 'state-refused.json', make: (f) => ({ kind: 'state_request_refused', ...f }), alert,
-    notSaved: 'state_refused_state_not_saved' });
+  onceAlerts(ctx, refused, { file: 'state-refused.json', make: (f) => ({ kind: 'state_request_refused', ...f }), alert, notSaved: NOT_SAVED });
   return { applied, answers, refused, ...(failed.n ? { alerts_failed: failed.n } : {}) };
 }
 
-export function stateRequestStep(ctx) {
+const refusalAlerts = (ctx, refused, file) => onceAlerts(ctx, refused, { file, make: (f) => ({ kind: 'state_request_refused', ...f }),
+  alert: safeAlert(ctx, { n: 0 }), notSaved: NOT_SAVED });
+function readHeld(ctx, file) {
+  if (!ctx.stateDir) return null;
+  try {
+    const f = join(ctx.stateDir, file);
+    if (!existsSync(f)) return null;
+    const v = JSON.parse(readFileSync(f, 'utf8'));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+// The fixed reason the held file keeps: it names the answer, so a new answer for the report is still told.
+const markRefused = (push) => `the owner was told, but the record refused the told mark: ${push}`;
+
+function tellAnswers(ctx) {
   const r = applyStateRequests(ctx);
   const events = r.applied.map((a) => ({ type: 'state_applied', ...a }));
+  const held = readHeld(ctx, MARK_FILE);
+  const stuck = [];
   for (const { report, push } of r.answers) {
-    let took = false;
-    try { took = ctx.alert({ type: 'state_answer', product: ctx.product, report, text: push }) === true; } catch { took = false; }
-    if (!took) { events.push({ type: 'state_answer_not_told', report }); continue; }
-    const m = markStateAnswerSent(ctx, report);
-    if (!m.ok) events.push({ type: 'state_answer_not_marked', report, reason: m.reason });
+    const reason = markRefused(push);
+    if (held?.[report] !== reason) {
+      let took = false;
+      try { took = ctx.alert({ type: 'state_answer', product: ctx.product, report, text: push }) === true; } catch { took = false; }
+      if (!took) { events.push({ type: 'state_answer_not_told', report }); continue; }
+    }
+    const m = markStateAnswerTold(ctx, report, push);
+    if (m.ok) continue;
+    events.push({ type: 'state_answer_not_marked', report, reason: m.reason });
+    stuck.push({ report, reason, error: m.reason });
   }
+  if (stuck.length || held) refusalAlerts(ctx, stuck, MARK_FILE);
   return events;
+}
+
+export function stateRequestStep(ctx) {
+  try {
+    const events = tellAnswers(ctx);
+    if (readHeld(ctx, STEP_FILE)) refusalAlerts(ctx, [], STEP_FILE);
+    return events;
+  } catch (e) {
+    const error = String(e?.message ?? e);
+    refusalAlerts(ctx, [{ report: 'state step', reason: 'the state request step failed', error }], STEP_FILE);
+    return [{ type: 'state_step_failed', error }];
+  }
 }

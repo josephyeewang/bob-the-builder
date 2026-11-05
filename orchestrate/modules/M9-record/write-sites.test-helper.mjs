@@ -56,7 +56,7 @@ export const VARIABLE_SITES = Object.freeze([
     calls: { helper: 'write', local: 'modules/M6-merge-gate/gate.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
   { file: 'modules/M6-merge-gate/merge-outcome.mjs', count: 1, reason: "settleMerge's own write(entity, cur, …) helper rewrites a merge or card it just read (#68)",
     calls: { helper: 'write', local: 'modules/M6-merge-gate/merge-outcome.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
-  { file: 'modules/M2-approvals/ask-store.mjs', count: 1, reason: 'writeDoc(record, entity, cur, doc), M2\'s one writer of asks and gos (cur = null creates)',
+  { file: 'modules/M2-approvals/ask-store.mjs', count: 1, reason: 'writeDoc(record, entity, cur, doc), M2\'s one writer of asks, gos, the product and its told marks (cur = null creates)',
     calls: { helper: 'writeDoc', module: 'modules/M2-approvals/ask-store.mjs', entityArg: 1, actor: 'approvals', modes: ['create', 'update'] } },
   { file: 'modules/M11-dispatcher/moves.mjs', count: 1, reason: 'move(rec, entity, id, patch) re-reads the document and writes it as the dispatcher',
     calls: { helper: 'move', module: 'modules/M11-dispatcher/moves.mjs', entityArg: 1, actor: 'dispatcher', modes: ['update'] } },
