@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto';
 import { note } from './moves.mjs';
 import { STATES } from '../../shared/record.mjs';
+import { pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 const iso = (ms) => new Date(ms).toISOString();
 // Every write here is "only if unchanged since read" (L288 MAT-4): `change(doc)` builds the new doc from the one
@@ -138,7 +139,9 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
     entry = { id: `a${next}`, key, text: String(text), mark, queued_at: iso(now) };
     const all = entriesOf(d).slice();
     const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
-    if (i >= 0) all[i] = entry; else all.push(entry);
+    // A copy already delivered whose mark could not be saved stays held (see holdsDelivered): a site that sees no mark
+    // tells again each pass, and that must not start the day over.
+    if (i >= 0) { const { delivered_at: at, delivered_text: said } = all[i]; all[i] = at ? { ...entry, delivered_at: at, delivered_text: said } : entry; } else all.push(entry);
     const capped = capQueue(rec, all);
     dropped = capped.dropped;
     return { ...withDrops(rec, d, capped.entries, dropped), next };
@@ -277,10 +280,27 @@ const carriedCount = (c) => (c?.n ?? 0) + (c?.k ?? c?.causes?.length ?? 0);
 // the same text) while the send was out. None, when its cause cleared meanwhile (`dropCause`).
 const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.key : !x.key && x.text === sent.text);
 
+// L527: a delivered alert whose told mark the Record refuses stays on the queue with `delivered_at`, because every site
+// reads a missing mark as "not told". Without this it was told every pass, for every alert on the queue. A held entry
+// is not sent for a day from that delivery; each pass its mark is tried again, and once it is saved the entry leaves.
+// A day on it goes out again, so the cause is told daily at most and never lost. The cap lives on the queue, not on the
+// mark that can't be saved. A time that can't be read is no hold: it is sent. `delivered_text` is what went out: a site
+// may replace a held entry with a new fact (a different refusal), so when the mark saves, an entry whose text changed
+// loses its hold and goes out once instead of leaving unsent (L533). A pass is one process, so nothing in memory can cap
+// a queue write refused as well: the entry is then sent each round, which the alert channel turns into an edit of one issue.
+const holdsDelivered = (e, now) => {
+  if (!e.delivered_at) return false;
+  const at = pastTime(e.delivered_at, now);
+  return at !== null && now - at < STILL_WAITING_MS;
+};
+const markRefusedText = (fact, reason) => `a delivered alert's told mark on ${fact} could not be saved (${reason}): that alert now goes out once a day until the mark can be saved`;
+
 /**
  * After one send of entry `sent`: delivered, its mark is written, then it (or the copy that replaced it)
  * leaves the queue (a crash between the two sends it again: twice, never lost). Not delivered, it goes to
  * the back of the queue. An entry whose cause cleared before this ran is gone, and nothing is marked.
+ * Delivered with its mark refused, it stays held (holdsDelivered) and the refusal is told once, as an alert of its own;
+ * `sent.retry` is that held entry's mark tried again, with nothing sent.
  * `sent.carried` is what its text counted ({ n one-offs, causes }): delivered, only that comes off, so alerts
  * dropped while the send was out are told on the next one (#39 check, M1), and its own cause's drop is cleared.
  */
@@ -303,21 +323,37 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
   const told = new Set([...(sent.carried?.causes ?? []), ...(sent.carried?.own ?? [])]);
   if (!e && !carriedCount(sent.carried) && !causesOf(d).some((c) => told.has(c.id))) return { ok: true };
   const gave = [];
+  let markRefused = null;
   // The mark goes on only while the entry is still queued, read after the fact and written at the fact's version
   // read (updateFact's loop): every clear site drops its cause before its clear write, so a mark that would land
   // after the clear finds the entry gone (L335 M-1, L341).
   if (e && sent.mark?.fact) {
     const queued = () => entriesOf(rec.read('fact', ALERT_QUEUE_FACT)?.doc).some((x) => x.id === e.id);
-    const m = updateFact(rec, sent.mark.fact, (doc) => (queued() ? { ...doc, ...sent.mark.fields } : null), sent.mark.kind ?? 'alert_told');
-    if (m?.ok !== true) gave.push(`its mark on ${sent.mark.fact}: ${m?.reason ?? 'no answer'}`);
+    // A mark already on the fact (a copy sent again after a crash) is nothing to write: the Record refuses a write that
+    // changes nothing, and that is no refusal to hold on.
+    const m = updateFact(rec, sent.mark.fact, (doc) => {
+      if (!queued()) return null;
+      const next = { ...doc, ...sent.mark.fields };
+      return doc && same(next, doc) ? null : next;
+    }, sent.mark.kind ?? 'alert_told');
+    if (m?.ok !== true) markRefused = String(m?.reason ?? 'no answer').slice(0, 300);
   }
+  // Tried again and still refused: it was told when it began, and the entry stays as it is.
+  if (markRefused && sent.retry) return { ok: true };
+  const firstRefusal = markRefused && !e.delivered_at;
+  if (firstRefusal) gave.push(`its mark on ${sent.mark.fact}: ${markRefused}`);
   const q = updateFact(rec, ALERT_QUEUE_FACT, (doc) => {
     const cur = doc ?? {};
     const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
     const causes = causesOf(cur).filter((c) => !told.has(c.id));
-    return { ...cur, entries: entriesOf(cur).filter((x) => x.id !== e?.id), dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
+    const unsaid = ({ delivered_at: _at, delivered_text: _said, ...x }) => x;
+    const entries = markRefused
+      ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now), delivered_text: sent.text } : x))
+      : entriesOf(cur).flatMap((x) => (x.id !== e?.id ? [x] : sent.retry && x.text !== x.delivered_text ? [unsaid(x)] : []));
+    return { ...cur, entries, dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
   }, 'alert_sent');
   if (q?.ok !== true) gave.push(`the queue: ${q?.reason ?? 'no answer'}`);
+  else if (firstRefusal) queueAlert(rec, markRefusedText(sent.mark.fact, markRefused), { now });
   return gave.length ? { ok: false, reason: gave.join('; ') } : { ok: true };
 }
 
@@ -365,6 +401,8 @@ export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budge
       if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
       const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
       if (!entriesOf(d).some((x) => x.id === e.id)) continue;
+      // Held, delivered within the day: nothing is sent, and its mark is tried again when the round settles.
+      if (holdsDelivered(e, now)) { done.push([{ ...e, retry: true }, true, null]); if (!later) settle(); continue; }
       // The count of dropped alerts rides on the next copy sent; the copy keeps what it carried, so a second
       // copy, in this round or one alongside it, carries only what none still out carries.
       const sent = { ...e, carried: carryFor(rec, d, e) };

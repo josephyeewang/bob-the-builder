@@ -78,7 +78,7 @@ export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
   let timer;
-  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, reason: `it did not answer within ${ms} ms` }), ms); });
+  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }), ms); });
   try { return await Promise.race([Promise.resolve().then(f), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
 }
 
