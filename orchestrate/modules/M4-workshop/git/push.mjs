@@ -203,7 +203,9 @@ export function createPushScript(deps) {
     const repo = rules.get('product.repo', { product });
     const mirror = rules.get('product.mirror', { product });
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    if (rules.get('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
+    // A flag is read through flag(): the rules file's reader gives true/false as text, so get() would say "true" and
+    // every real push would be refused here.
+    if (rules.flag('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
     if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) no('the product has no valid GitHub repo in the rules');
     if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);

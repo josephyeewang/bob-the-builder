@@ -501,6 +501,9 @@ test('inputs come from the record only; the branch, product and rules are checke
   await w.bundle();
   await refusedAndUntouched(w, /not allow/, { rules: fakeRules({ answers: { push_branch: deny('frozen') }, values: w.values }) });
   await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) });
+  // The rules hand the flag back as the file's text; anything but an exact true is not onboarded, a missing key too.
+  for (const onboarded of ['yes', 'TRUE', 1]) await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': onboarded } }) });
+  { const { 'product.onboarded': _, ...unset } = w.values; await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: unset }) }); }
   for (const repo of ['../x', 'a/b/c', 'evil.com:x/y', 'a b/c', 'owner/..']) {
     const r = await createPushScript({ ...w.ports, testRemote: undefined, rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.repo': repo } }) })('S-1');
     assert.equal(r.ok, false, repo); assert.match(r.reason, /valid GitHub repo/);
