@@ -552,7 +552,7 @@ export function parseStatus(s) {
 export const LEAD_CALLS_FILE = join(homedir(), 'Dropbox', '99.0 Claude Sync', 'audit-results', 'orchestrate-buildspec', 'LEAD-CALLS.md');
 // The lead calls the list may cite. Only the lead adds a number, after writing the call in LEAD-CALLS.md (this file is
 // in LEAD_FILES, so a lane PR cannot change it). Where LEAD-CALLS.md is readable, every number here must be an entry.
-export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 164, 170, 174, 176, 178, 188, 200, 201, 231, 237, 239, 240, 250, 258, 263, 272, 277, 282, 283, 291, 300, 320, 331, 339, 351, 380, 395, 413, 419, 427, 444, 448, 463, 472, 486, 527, 532, 536, 539, 544, 556, 585]);
+export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 164, 170, 174, 176, 178, 188, 200, 201, 231, 237, 239, 240, 250, 258, 263, 272, 277, 282, 283, 291, 300, 320, 331, 339, 351, 380, 395, 413, 419, 427, 444, 448, 463, 472, 486, 527, 532, 536, 539, 544, 556, 585, 589]);
 /**
  * The call numbers LEAD-CALLS.md holds as entries: a table row "| L9 |", a heading "## L57" / "### L134 ·", or a
  * dated log line, at the start of a line, that starts with the call in bold ("- 2026-11-01 · **L170 ..."); an indented sub-bullet is not one. A number only mentioned inside
