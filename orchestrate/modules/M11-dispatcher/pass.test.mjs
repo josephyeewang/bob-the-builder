@@ -47,7 +47,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}` }; },
     stopGroup: async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
     hostLock: extra.hostLock ?? (() => extra.host ?? null),
@@ -499,12 +499,39 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   const l = w.rec.read('launch', sid).doc;
   assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
-  // a launcher that names no head: the session runs, the record refuses the launch, Joe is told
+  // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
   await v.pass();
   assert.equal(v.rec.read('launch', v.sessions[0].id), null);
   assert.match(v.calls.alerts.join('\n'), /launch was not recorded .*head.*merge will be refused/);
+});
+
+test('L204-a: every start writes its session record; one with no outbox, or one the record refuses, is told', async () => {
+  // An earlier session of C-1: this start is the card's second, so its push gets its own record line. Another card's
+  // session does not count.
+  const w = world([card('C-1'), ['session', 'S-old', { state: 'preparing', role: 'worker', product: 'p1', card: 'C-1' }],
+    ['session', 'S-other', { state: 'preparing', role: 'worker', product: 'p1', card: 'C-8' }]]);
+  await w.pass();
+  const sid = w.sessions[0].id;
+  const s = w.rec.read('session', sid).doc;
+  assert.deepEqual([s.state, s.role, s.product, s.card, s.branch, s.outbox, s.attempt, s.pid, s.pid_start, s.launched_at],
+    ['preparing', 'worker', 'p1', 'C-1', 'card/c-1', `/outbox-root/worker/${sid}`, 'a2', 1001, 'start-1', iso(T0)]);
+  assert.equal(w.calls.alerts.length, 0);
+  // A launcher that names no outbox (or not a full path): the session runs, its work can never be pushed, the owner is told.
+  for (const outbox of [undefined, 'outbox/worker/x']) {
+    const v = world([card('C-2')]);
+    v.refuseLaunch(() => ({ ok: true, outbox }));
+    assert.deepEqual((await v.pass()).started, ['C-2']);
+    assert.equal(v.rec.read('session', v.sessions[0].id).doc.outbox, null);
+    assert.match(v.calls.alerts.join('\n'), /card C-2: session .* started, but the launcher did not say where its outbox is, so its work cannot be pushed/);
+  }
+  // The record refuses the session (one by that id is already there, made while the launch ran): the owner is told why.
+  const u = world([card('C-3')]);
+  u.refuseLaunch((x) => { assert.equal(u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }).ok, true); return { ok: true }; });
+  assert.deepEqual((await u.pass()).started, ['C-3']);
+  assert.equal(u.rec.read('session', u.sessions[0].id).doc.card, 'C-9');
+  assert.match(u.calls.alerts.join('\n'), /card C-3: session .* started, but its session record was not written \(.+\), so its work cannot be pushed/);
 });
 
 test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
