@@ -1069,6 +1069,18 @@ test('L497 m5: hung ended records cost three port limits a pass, and every later
   assert.ok(Math.max(...w.hungPerPass) <= 3, w.hungPerPass.join(' '));
 });
 
+test('L546: a hung call measured just under its limit still costs the whole limit, so a fourth is not asked', async (t) => {
+  const w = hungVerdicts();
+  let clock = T0;
+  t.mock.method(Date, 'now', () => clock);
+  const counted = (answer) => {
+    let asked = 0;
+    return w.pass({ reviewEnded: (s) => { if (s.sessionId === 'R-2') return { ok: false, none: true }; asked += 1; clock += 19; return answer(); } }).then(() => asked);
+  };
+  assert.equal(await counted(() => new Promise(() => {})), 3);
+  assert.equal(await counted(() => ({ ok: false, none: true })), 4, 'an answer in time costs only what it took');
+});
+
 test('L497 m5: slow verdicts take turns, and one that recovers loses its mark a day on, writing nothing while it stays slow', async () => {
   const w = hungVerdicts(8);
   const asked = new Set();
