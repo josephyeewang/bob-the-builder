@@ -20,6 +20,7 @@ import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-he
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { wire, notWiredText, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
@@ -186,7 +187,7 @@ const BAD_GROUPS = [
   ['answered by two files, either order', () => rest(['leads'], answer({ leads: 'one' }), answer({ leads: 'two' })), /two port files answer these ports: leads$/],
   ['on two lists', () => rest(['probe'], { notWired: ['probe'], build: () => ({}) }, { notWired: ['probe'], build: () => ({}) }), /these ports are on two lists: probe$/],
   ['the approvals port replaced', () => rest([], answer({ approvals: () => [] })), /only the wiring answers these ports: approvals$/],
-  ['the alert port replaced', () => rest([], answer({ alert: () => true })), /only the wiring answers these ports: alert$/],
+  ['the alert port replaced', () => rest([], answer({ alert: fakeAlert() })), /only the wiring answers these ports: alert$/],
   ['an answer the tick never reads', () => rest([], answer({ lanuch: 'real' })), /no tick step reads these ports: lanuch$/],
   ['a listing the tick never reads', () => rest([], { notWired: ['lanuch'], build: () => ({}) }), /no tick step reads these ports: lanuch$/],
   ['neither answered nor listed', () => rest(['resume']), /nothing answers or lists these ports, which the tick needs: resume$/],
