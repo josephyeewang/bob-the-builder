@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
@@ -21,6 +21,7 @@ import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { wire, checkUser, lastReturn, dispatcherLate, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE, main } from './robot-main.mjs';
+import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -84,6 +85,38 @@ test('R-0b-162 B: `node robot-main.mjs <config>` runs every pass; the ones not w
   const second = boot(w);
   assert.equal(second.code, 0, second.err);
   assert.deepEqual(queued(readRecord(w)), q);
+});
+
+test('L587: a store that won\'t open is told once per reason through the channel, and the job still exits 1', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const diary = join(w.config.recordRoot, 'diary.jsonl');
+  rmSync(diary);
+  mkdirSync(diary);
+  const gh = fakeIssues();
+  const run = async (stopChannel) => {
+    const logs = [];
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: stopChannel ? { stopChannel } : {} });
+    return { code, logs: logs.join('\n') };
+  };
+  const first = await run({ gh, owner: 'owner-login' });
+  assert.equal(first.code, 1);
+  assert.match(first.logs, /robot: not started: .*diary\.jsonl/);
+  assert.equal(gh.issues.size, 1);
+  assert.match(gh.issues.get(1).body, /store_layout/);
+  assert.equal((await run({ gh, owner: 'owner-login' })).code, 1);
+  assert.equal(gh.issues.size, 1, 'the next start finds the open issue');
+  const bare = await run(null);
+  assert.equal(bare.code, 1);
+  assert.match(bare.logs, /could not be told: .*R-0b-02/);
+});
+
+test('L587: a start that fails for any other reason is not told as a stopped Record', async () => {
+  const w = world({ keyMode: 0o755 });
+  const gh = fakeIssues();
+  const logs = [];
+  assert.equal(await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } }), 1);
+  assert.equal(gh.issues.size, 0);
 });
 
 test('R-0b-162 B (L238): the job refuses to start, loudly, unless it runs as the Record\'s and the key folder\'s owner', async () => {

@@ -9,7 +9,9 @@
 // A pass that throws or runs late is told to Joe through the Dispatcher's alert queue (M11 pass.mjs holdAlert, once per
 // pass per day), and the other passes still run. Nothing here sends: the queue's one sender is the Dispatcher's.
 // Exit 0 when the round ran or another round was running; 1 when the config or the wiring could not be loaded (the job's
-// log has the reason, and the heartbeat goes stale); 2 when the round ran past its deadline.
+// log has the reason, and the heartbeat goes stale; a store that stopped the start is also told to the owner, L587); 2
+// when the round ran past its deadline. `stopChannel` ({ gh, owner }) is injected like `deliver`, and needs the same
+// writing token: until the robot App exists (R-0b-02) the stop is only logged.
 
 import { realpathSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -17,6 +19,7 @@ import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-di
 import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
+import { tellStoreStopped } from '../modules/M13-ledger/store-stopped.mjs';
 import { ROBOT_PASSES } from './robot-wiring.mjs';
 
 export const PASS_DEADLINE_MS = 120_000;
@@ -64,6 +67,8 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     wired = await mod.wire(config, { now, log, ...wireOpts });
   } catch (e) {
     log(`robot: not started: ${e.message}`);
+    // A store that won't open has no alert queue, so this is told here, once per reason (L587).
+    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel, log });
     dog?.terminate();
     return 1;
   }

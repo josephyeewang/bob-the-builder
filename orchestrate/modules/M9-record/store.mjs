@@ -107,7 +107,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   const send = (event) => { try { return alert(event) !== false; } catch { return false; } };
   // Told once per process, and only once delivered: a lost one is sent again the next time it comes up (L135).
   const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return true; if (!send(stamp(event))) return false; told.add(k); return true; };
-  const stopFor = (type, reason, key = reason) => { tellOnce({ type, reason }, key); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true }); };
+  // `lost` runs when the alert was not delivered. `stop` names the fault for a job whose start this ends: with no store open,
+  // that job has nothing else to tell the owner from (L587, M13 store-stopped.mjs).
+  const stopFor = (type, reason, key = reason, lost = () => {}) => { if (!tellOnce({ type, reason }, key)) lost(); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true, stop: { type, reason } }); };
   function layoutProblem() {
     const kind = (p) => {
       let st; try { st = lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'none' : `unreadable (${e?.code ?? e})`; }
@@ -154,6 +156,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (linesInDay(at).some((x) => x.cap_key === key)) return;
     const e = stamp(event);
     if (!send(e)) keep(e, { cap_key: key, at: new Date(at).toISOString() });
+  }
+  // A stop found again by every write (L583): the send is still tried each time, and one line a day is kept for delivery.
+  function keepDaily(event, key) {
+    const at = now();
+    const capKey = `${event.type}:${key}`;
+    if (!linesInDay(at).some((x) => x.cap_key === capKey)) keep(stamp(event), { cap_key: capKey, at: new Date(at).toISOString() });
   }
   // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
   // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
@@ -391,7 +399,14 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // Any failure inside recovery stops the store with an alert that names it, once, rather than a raw error on every write
   // (round 9 M6, m2).
   function recoverOrStop() {
-    try { return recover(); } catch (e) { throw e?.store ? e : stopFor('recovery_stopped', `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`, `${e?.code}:${e?.path}`); }
+    try { return recover(); } catch (e) {
+      if (e?.store) throw e;
+      const reason = `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`;
+      const key = `${e?.code}:${e?.path}`;
+      // Kept, as this path has no other way out in production (L583). A store_layout stop is not: the fault may be the folder
+      // or the unsent file itself, so nothing is written, and every later start finds it and tells it (robot-main.mjs).
+      throw stopFor('recovery_stopped', reason, key, () => keepDaily({ type: 'recovery_stopped', reason }, key));
+    }
   }
   function transaction(fn) {
     { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
