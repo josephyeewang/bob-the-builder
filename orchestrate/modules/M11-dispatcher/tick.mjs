@@ -49,13 +49,15 @@ import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
+import { tellLostCards } from './lost-cards.mjs';
+import { tellStuckCards } from './stuck-cards.mjs';
 import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass } from './plan-go.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -259,7 +261,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   });
   await run('undo', () => undoStep({ rec, rules, now, filesOf: p.filesOf, alert }));
   await run('undo-starts', async () => {
-    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), ...portDeadlines });
+    const r = await undoStarts({ rec, rules, now, bands: stops?.bands ?? HELD_BANDS, running: stops?.running ?? p.sessions(), launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot, filesOf: p.filesOf, alert, failureLog: failed('undo-starts'), ...portDeadlines });
     missing.push(...r.missing);
     if (stops) stops.running = r.running;
     return { started: r.started, refused: r.refused, notes: r.notes };
@@ -334,7 +336,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   await run('plan-go', () => approvalsStep({ rec, rules, now, alert, approvals: p.approvals, what: 'plan-go', ...(p.approvalsProductMs !== undefined && { productMs: p.approvalsProductMs }),
     pass: (ctx) => planGoPass(ctx, { alert, startPlanReview: gatedReadonly((x) => p.startPlanReview(x)), planReviewAnswer: (x) => p.planReviewAnswer(x), planRows: (x) => p.planRows(x), planView: (x) => p.planView(x), replyToLead: (x) => p.replyToLead(x), mainSha: (x) => p.mainSha(x), passMs: p.approvalsProductMs ?? APPROVALS_PRODUCT_MS }) }));
   await run('pass', async () => {
-    const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup,
+    const r = await dispatcherPass({ rec, rules, now, account: acct.account, sessions: p.sessions(), probe: p.probe, launch: p.launch, stopGroup: p.stopGroup, outboxRoot: p.outboxRoot,
       saveWork: p.saveWork, hostLock: p.hostLock, pauseLead: p.pauseLead, filesOf: p.filesOf, alert, failureLog: failed('pass'), startsOff: acct.reason, tellMissing: false, stops, ...portDeadlines });
     missing.push(...r.missing);
     bands = r.bands;
@@ -351,6 +353,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
   // A card put on Joe whose alert was not delivered is told again (L130).
   await run('waits', () => retellWaits({ rec, alert, now }));
+  await run('lost-cards', () => tellLostCards({ rec, alert, now, report: failed('lost-cards') }));
+  await run('stuck-cards', () => tellStuckCards({ rec, alert, now, report: failed('stuck-cards') }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }

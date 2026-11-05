@@ -32,6 +32,7 @@ import { editingLimits } from '../M11-dispatcher/gate.mjs';
 import { PRODUCT_STATES } from './policy.mjs';
 import { GO_FREE_KEY, goFreeOn } from '../M9-record/ready.mjs';
 import { SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
+import { plainFolder } from '../M4-workshop/launcher/proposal-wall.mjs';
 
 // M11 has no required-keys file of its own yet (lane 2's folder), so its entry is built here from M11's own exports:
 // every key in KEYS, NEW_KEYS included, each read by M11's need() with its type at the key's own scope, plus the real
@@ -72,6 +73,9 @@ const M11 = Object.freeze({
       const cap = need(rules, M11_KEYS.handoffCapRole, { product });
       if (cap < HANDOFF_CAP_FLOOR) out.push(`M11: ${M11_KEYS.handoffCapRole} must be at least ${HANDOFF_CAP_FLOOR} tokens, not ${cap}: no handoff fits under it, so no Lead can restart`);
     }
+    // Any text reads, so without this line a path no launch can wall passes here and refuses every launch at cutover (L580).
+    const folder = rules.get(M11_KEYS.proposalsOutbox, { product });
+    if (typeof folder === 'string' && !plainFolder(folder)) out.push(`M11: ${M11_KEYS.proposalsOutbox} must be an absolute plain folder path, not ${folder}`);
     // Off, research copies stop at the Dispatcher with no card: a file that left the line out would lose them unseen (L549).
     if (!goFreeOn(rules, product, 'research_copy')) out.push(`M11: ${GO_FREE_KEY}.research_copy must be true at the first cutover`);
     if (!out.some((x) => x.startsWith(`M11: ${M11_KEYS.perState} `))) {

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
-import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
+import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs';
 import { readUnsent } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
@@ -478,6 +478,157 @@ test('L288 plants: a store backlog bigger than one round goes out over later rou
   }
   assert.deepEqual(rounds, [[2, 3], [2, 1], [1, 0]]);
   assert.deepEqual([...w.gh.issues.values()].map((x) => x.title), ['p1\'s Record store: kind-b1', 'p1\'s Record store: kind-b2', 'p1\'s Record store: kind-b3', 'p1\'s Record store: kind-b4', 'p1\'s Record store: kind-b5']);
+});
+
+// A queue that can't shrink: every entry went out, but the Record refuses to take it off.
+const stuckQueue = (w, n) => {
+  for (let i = 0; i < n; i += 1) outbox(w.rec, T0)(`stuck alert ${i}`);
+  return Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+};
+
+test('L558 M3: a stuck queue that fills the round leaves time for the store\'s lines', async () => {
+  for (const [stuck, ms] of [[20, 300], [50, 300], [50, 150], [10, 600]]) {
+    const w = world();
+    const rec = stuckQueue(w, stuck);
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('k1', 'alert_not_queued'));
+    const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * ms;
+    await w.run({ rec, probe: ALIVE, clock });
+    assert.deepEqual(readUnsent(w.root), [], `${stuck} stuck at ${ms} ms: the store's line went in the first round`);
+  }
+});
+
+test('L558 M3: with nothing from the store waiting, the queue has the whole round', async () => {
+  const w = world();
+  for (let i = 0; i < 12; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 6000 });
+  assert.equal(r.sent, 6);
+});
+
+test('L558 M3: store lines the round had no time for are named in `refused`', async () => {
+  const w = world();
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
+  assert.equal(r.sent, 2);
+  assert.match(r.refused, /3 of the store's unsent alerts had no time this round/);
+});
+
+test('L566 N1: a Record send that hangs every round still lets a store line go in each', async () => {
+  for (const writable of [false, true]) {
+    const w = world();
+    const rec = writable ? w.rec : stuckQueue(w, 1);
+    if (writable) outbox(w.rec, T0)('stuck alert 0');
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['h1', 'h2', 'h3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+    const open = w.gh.open;
+    // The time a round sees is this count, not the wall clock: at a budget of exactly two sends a real 30 ms hang can read
+    // as 30 or 29, within budget, and every store line goes in one round (seen on #249's CI).
+    let elapsed = 0;
+    w.gh.open = (o) => {
+      if (!/stuck alert/.test(`${o.title}${o.body}`)) return open(o);
+      elapsed += 30;
+      return new Promise(() => {});
+    };
+    for (let round = 3; round > 0; round -= 1) {
+      await w.run({ rec, probe: ALIVE, sendMs: 30, budgetMs: 50, clock: () => elapsed });
+      assert.equal(readUnsent(w.root).length, round - 1, `writable ${writable}: one store line a round`);
+    }
+  }
+});
+
+test('L566 N1: GitHub at 6 s a call, the store still gets a line out each round', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 3);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['g1', 'g2', 'g3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 6000;
+  for (let round = 3; round > 0; round -= 1) {
+    await w.run({ rec, probe: ALIVE, clock });
+    assert.equal(readUnsent(w.root).length, round - 1);
+  }
+});
+
+test('L566 N1: past the budget only the one line goes: the rest wait and are named', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 1);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['o1', 'o2', 'o3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 60000;
+  const r = await w.run({ rec, probe: ALIVE, clock });
+  assert.equal(readUnsent(w.root).length, 2);
+  assert.match(r.refused, /2 of the store's unsent alerts had no time this round/);
+});
+
+test('L566 N2: a queue the round can\'t get through is named in `refused`', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 60);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
+  const r = await w.run({ rec, probe: ALIVE, clock });
+  assert.ok(r.sent < 60);
+  assert.match(r.refused, /60 alert\(s\) are still in the Record's queue after this round, which did not shrink it/);
+});
+
+test('L579: a backlog that is clearing fails no pass: a shrinking queue stays quiet', async () => {
+  const w = world();
+  for (let i = 0; i < 60; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
+  const r = await w.run({ probe: ALIVE, clock });
+  assert.ok(queued(w.rec).length > 0 && queued(w.rec).length < 60, `${queued(w.rec).length} left`);
+  assert.equal(r.refused ?? '', '');
+});
+
+test('L579: one stuck entry on its own is named', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 1);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /1 alert\(s\) are still in the Record's queue/);
+});
+
+// L593: a delivered alert whose told mark the Record refuses stays on the queue (L527). It went out, so it isn't waiting.
+const heldDelivered = async (w) => {
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === 'stop-m-1' ? { ok: false, reason: 'busy' } : w.rec.write(x)) } });
+  tellThen(outbox(rec, w.now()), 'cause still stands', { fact: 'stop-m-1', fields: { told_at: new Date(w.now()).toISOString() }, kind: 'k' });
+  await w.run({ rec, probe: ALIVE });     // delivered and held; the line about the mark arrives during this round
+  w.tick(5);
+  assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', 'the line about the mark goes out');
+  return rec;
+};
+
+test('L593: a delivered alert held on the queue fails no pass', async () => {
+  const w = world();
+  const rec = await heldDelivered(w);
+  for (let i = 0; i < 4; i += 1) {
+    w.tick(5);
+    const left = queued(rec).length;
+    assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', `round ${i}`);
+    assert.equal(left, 1, 'still held on the queue');
+  }
+});
+
+test('L593: a stuck alert behind a held one is named, and only it is counted', async () => {
+  const w = world();
+  await heldDelivered(w);
+  outbox(w.rec, w.now())('a stuck alert');
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT || x.id === 'stop-m-1' ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+  w.tick(5);
+  assert.equal(queued(rec).length, 2);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /^1 alert\(s\) are still in the Record's queue/);
+});
+
+test('L566 N2: a queue that empties says nothing, and the one failed send is not counted twice', async () => {
+  const w = world();
+  outbox(w.rec, T0)('alert one');
+  assert.equal((await w.run({ probe: ALIVE })).refused ?? '', '');
+  const v = world();
+  outbox(v.rec, T0)('alert two');
+  v.gh.open = async () => { throw new Error('socket hang up'); };
+  assert.doesNotMatch((await v.run({ probe: ALIVE })).refused, /still in the Record's queue/);
+});
+
+test('L566 A7: with store lines waiting the queue gets exactly half of what can be started', async () => {
+  const w = world();
+  for (let i = 0; i < 12; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('s1', 'kind-s1'));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 5000 });
+  assert.equal(queued(w.rec).length, 9); // (5 s - 1 s) / 2 is held back, so 3 s: 3 sends start.
 });
 
 test('L288 plants: an unsent file that can\'t be read is refused, never read as empty (the channel and M9)', async () => {

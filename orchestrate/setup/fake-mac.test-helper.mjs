@@ -160,7 +160,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     prefix,
     lstat(p) {
       const st = lstatSync(at(p)); const o = mac.owners.get(p);
-      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
+      return { isDirectory: () => st.isDirectory(), isFile: () => st.isFile(), isSymbolicLink: () => st.isSymbolicLink(), mode: st.mode, size: st.size, nlink: st.nlink, ino: st.ino, dev: st.dev, uid: o ? o.uid : -1, gid: o ? o.gid : -1 };
     },
     mkdir(p, mode) { mac.log.push(`mkdir ${p}`); mkdirSync(at(p), { mode }); mac.owners.set(p, { uid: mac.rootUid, gid: 0 }); },
     // The setup's one way to change an owner and mode: the real handle-based change, with chown stood in for (a test is not root).
