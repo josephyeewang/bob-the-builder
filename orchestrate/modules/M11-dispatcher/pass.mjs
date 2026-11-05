@@ -34,6 +34,8 @@ import { sensorsFact } from './sensor-facts.mjs';
 import { tellThen, clearCause, isQueued, writeFrom } from './alerts.mjs';
 import { stillWaiting, dueToTell, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 import { exactReverse } from './undo.mjs';
+import { cardBranch } from '../M4-workshop/git/branch.mjs';
+import { workerOutboxProblem } from '../M4-workshop/git/session-outbox.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
@@ -116,6 +118,8 @@ export async function rulesMissingAlert({ rec, factId = RULES_MISSING_FACT, keys
 export const HOLD_FACT = (cause) => `hold-${cause}`;
 // The shared still-waiting repeat, one definition (#164 audit c1).
 export const HOLD_REPEAT_MS = STILL_WAITING_MS;
+const SESSION_OUTBOX_CAUSE = (card) => `session-outbox-${card}`;
+const SESSION_RECORD_CAUSE = (card) => `session-record-${card}`;
 
 /**
  * No silent hold (LEAD-CALLS L38): anything that holds or blocks work tells Joe what and why, once per
@@ -348,8 +352,9 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, reason, signin, configDir }
- *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId)
+ *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, outbox, reason, signin, configDir }
+ *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
+ *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
@@ -359,7 +364,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
   const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
@@ -485,7 +490,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); }
   else {
     if (startsOff) out.notes.push(`nothing but undo cards starts: ${startsOff}`);
-    await starts({ rec, rules, now, b, running, launch, out, alert, report, failureLog, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
+    await starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo: !!startsOff, missing, filesOf, portDeadlineMs, host });
   }
   // The tick tells Joe once for all its steps (`tellMissing` false); run alone, the pass tells him itself.
   out.missing = missing;
@@ -517,12 +522,12 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
 
 // Undo cards' starts, alone, before every other step (L38): the tick's own step, so a failure in the
 // main pass cannot keep an undo from starting. The gate still checks each one (L40).
-export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+export async function undoStarts({ rec, rules, now, bands = HELD_BANDS, running = [], launch, stopGroup, outboxRoot, filesOf, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const out = { started: [], refused: [], notes: [] };
   const missing = [];
   if (factDoc(rec, OUTAGE_FACT)?.doc?.state === 'open') { out.notes.push('outage: nothing starts'); return { ...out, missing, running }; }
   const live = [...running];
-  await starts({ rec, rules, now, b: bands, running: live, launch, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
+  await starts({ rec, rules, now, b: bands, running: live, launch, stopGroup, outboxRoot, out, alert, report: refusalReport({ rec, alert, now, lines: out.notes, failureLog }), failureLog, onlyUndo: true, missing, filesOf, portDeadlineMs, host });
   return { ...out, missing, running: live };
 }
 
@@ -626,6 +631,7 @@ function tellWaits({ rec, groups, alert, now, report }) {
     });
   }
 }
+
 // Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
 // fixed class, not their text (#157 audit m5); any other is keyed by its text with the numbers out.
 const FIXED_CAUSES = [['launcher', /^launcher: /], ['claim', /^not claimed: /], ['rules-error', /^rules: (could not be asked|rules error: )/]];
@@ -635,7 +641,7 @@ export const causeOf = (reason) => FIXED_CAUSES.find(([, re]) => re.test(reason)
 /** Card kinds the start loop never hands to a session. */
 export const NEVER_STARTED = Object.freeze(['lead_daily_card', 'research_copy']);
 
-async function starts({ rec, rules, now, b, running, launch, out, alert, report, failureLog, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
+async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRoot, out, alert, report, failureLog, onlyUndo = false, missing = [], filesOf, portDeadlineMs = PORT_DEADLINE_MS, host = hostname() }) {
   const amberish = b.band !== 'green' || b.own_building !== 'open';
   // Undo cards first, then (in amber) Tier 1 before Tier 2, then the longest in ready, by the Record's clock.
   // The Record's own ready rule (rec.ready: unclaimed, dependencies merged, a go where one is needed; L72).
@@ -736,6 +742,21 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
       holdAlert({ rec, cause: `launch-other-${id}`, text: `card ${id}: the launcher answered with session ${l.sessionId}, not the claimed ${sessionId}; the card stays claimed`, alert, now });
       continue;
     }
+    // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
+    // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
+    // must keep its card claimed or a second one would start.
+    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
+    if (outboxWrong) {
+      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }), portDeadlineMs);
+      const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
+      const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
+        : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`
+          : 'it was stopped and the card went back to ready';
+      out.refused.push([id, `launcher: its outbox ${outboxWrong}`]);
+      holdAlert({ rec, cause: SESSION_OUTBOX_CAUSE(id), text: `card ${id}: session ${sessionId} was refused: the outbox its launcher named ${outboxWrong}; ${then}`, alert, now });
+      continue;
+    }
+    clearHold(rec, HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report);
     // claimed -> running adds the process (pid and its start time) to the claim, and nothing else.
     const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
     if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
@@ -746,6 +767,15 @@ async function starts({ rec, rules, now, b, running, launch, out, alert, report,
     const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
+    // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
+    // attempt), M9's claim break reads its process, and M2 its state. The Dispatcher makes it in preparing (M9: only
+    // the Dispatcher makes one, and the workshop moves it on). `attempt` counts this card's sessions, so each start's
+    // push has its own record line. With no record the work can never be pushed: the owner is told.
+    const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
+    const sr = rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
+      doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: l.outbox, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
+    if (sr.ok) clearHold(rec, HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report);
+    else holdAlert({ rec, cause: SESSION_RECORD_CAUSE(id), text: `card ${id}: session ${sessionId} started, but its session record was not written (${sr.reason}), so its work cannot be pushed`, alert, now });
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).
     clearCause(rec, UNDO_HELD_FACT(id), () => {
