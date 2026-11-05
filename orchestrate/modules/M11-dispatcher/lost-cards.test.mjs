@@ -10,6 +10,9 @@ import { askStore } from '../M2-approvals/ask-store.mjs';
 import { createAsk } from '../M2-approvals/binding.mjs';
 import { LOST_CARDS_FACT, tellLostCards } from './lost-cards.mjs';
 import { putFact } from './pass.mjs';
+import { tick } from './tick.mjs';
+import { ALERT_QUEUE_FACT } from './alerts.mjs';
+import { rulesWith } from './fixtures.test-helper.mjs';
 
 const H = 3600_000;
 const DAY = 24 * H;
@@ -120,4 +123,36 @@ test('L557: it only tells: no card is written, and the corrupt file is left as i
   w.pass(w.T0);
   assert.equal(w.t.record.diary({ since: 0 }).filter((l) => l.entity === 'card').length, before);
   assert.equal(w.t.record.read('card', 'A').corrupt, true);
+});
+
+test('L575: a diary that throws is not swallowed, so the tick step failure tells it', () => {
+  const w = world('A');
+  const good = w.t.record;
+  // The go check reads the diary first and the card walk second: each is tried failing alone.
+  for (const failsOn of [1, 2]) {
+    let n = 0;
+    const rec = Object.create(good, { diary: { value: (o) => { n += 1; if (n === failsOn) throw new Error('the diary could not be opened'); return good.diary(o); } } });
+    assert.throws(() => tellLostCards({ rec, alert: w.alert, now: w.T0, report: (l) => assert.fail(l) }), /could not be opened/, `read ${failsOn}`);
+  }
+});
+
+test('L575: a queued alert that cannot be dropped is reported, and the clear waits for the next pass', () => {
+  const w = world('A');
+  writeFileSync(w.path('A'), 'x');
+  w.pass(w.T0);
+  w.t.recover();
+  const good = w.t.record;
+  const rec = Object.create(good, { read: { value: (e, id) => { if (e === 'fact' && id === ALERT_QUEUE_FACT) throw new Error('the queue could not be read'); return good.read(e, id); } } });
+  const lines = [];
+  tellLostCards({ rec, alert: w.alert, now: w.T0 + 60_000, report: (l) => lines.push(l) });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], new RegExp(LOST_CARDS_FACT));
+  assert.equal(typeof good.read('fact', LOST_CARDS_FACT).doc.told_at, 'string', 'the mark stays until the drop works');
+});
+
+test('L575: a lost card reaches the owner through a real tick', async () => {
+  const w = world('A', 'B');
+  writeFileSync(w.path('A'), 'x');
+  await tick({ rec: w.t.record, rules: rulesWith({}), now: w.T0, ports: { alert: w.alert } });
+  assert.deepEqual(w.alert.texts.filter((t) => /can't be read/.test(t)).map((t) => t.slice(0, 19)), ["card A can't be rea"]);
 });

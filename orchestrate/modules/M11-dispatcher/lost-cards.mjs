@@ -22,7 +22,11 @@ export const LOST_CARDS_FACT = HOLD_FACT('lost-cards');
 
 const lostText = (lost) => `${lost.length === 1 ? 'card' : 'cards'} ${listed(lost)} can't be read, so no pass looks at ${lost.length === 1 ? 'it' : 'them'}: nothing moves until ${lost.length === 1 ? 'it is' : 'they are'} repaired by hand`;
 
-/** Told through the alert path; a diary that can't be read throws, so the tick's step failure tells it. */
+/**
+ * Told through the alert path. A diary that can't be opened throws, so the tick's step failure tells it. A diary with a
+ * broken line does not throw: the store stops reading at that line, so a card written after it is not seen here. That
+ * hold is M9's to tell (the store's diary_damaged), not this check's.
+ */
 export function tellLostCards({ rec, alert, now, report }) {
   const told = goToldCards(rec);
   const ids = new Set(rec.diary({ since: 0 }).flatMap((l) => l.writes ?? []).filter((w) => w.entity === 'card').map((w) => w.id));

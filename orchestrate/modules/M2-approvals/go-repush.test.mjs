@@ -234,6 +234,43 @@ test('L557: the cards the go check tells are the ones of a go still asked', asyn
   assert.deepEqual([...goToldCards(o.t.record)], [], 'another kind of ask');
 });
 
+test('L575: an answered go is no longer told by the go check, so a lost card under it falls to the lost-cards tell', async () => {
+  const w = world();
+  const id = await tier2(w);
+  await w.at(W8);
+  assert.deepEqual([...goToldCards(w.t.record)], ['A'], 'pushed: still asked');
+  change(w, id, { state: 'answered' });
+  assert.deepEqual([...goToldCards(w.t.record)], []);
+});
+
+test('L575: a go ask the Approvals reader does not trust covers no card', async () => {
+  const w = world();
+  const id = await tier2(w);
+  const good = w.t.record;
+  const forged = Object.create(good, { diary: { value: (o) => good.diary(o).map((l) => ((l.writes ?? []).some((x) => x.entity === 'ask' && x.id === id) ? { ...l, actor: 'dispatcher' } : l)) } });
+  const st = askStore(forged);
+  assert.deepEqual(st.asks(), [], 'the reader really does refuse it');
+  assert.deepEqual(st.untrusted, [`ask/${id}`]);
+  assert.deepEqual([...goToldCards(forged)], []);
+});
+
+test('L575: a go card that goes from corrupt to missing has new words, told at once', async () => {
+  const w = world();
+  await tier2(w);
+  const told = () => w.t.alerts.filter((a) => a.type === 'go_card_unreadable').map((a) => a.text);
+  const good = w.t.record;
+  let card = { corrupt: true };
+  w.t.ctx.record = Object.create(good, { read: { value: (e, x) => (e === 'card' ? card : good.read(e, x)) } });
+  await w.at(W8);
+  assert.equal(told().length, 1);
+  card = null;
+  await w.at(W8 + MIN);
+  assert.equal(told().length, 2, 'not held for the daily repeat');
+  assert.notEqual(told()[0], told()[1]);
+  await w.at(W8 + 2 * MIN);
+  assert.equal(told().length, 2, 'and once a day after that');
+});
+
 test('L556: only a go is told: a card that reads, and an ask of another kind, say nothing', async () => {
   const w = world();
   const id = await tier2(w);

@@ -73,12 +73,12 @@ function configAlert(ctx, reason) {
 // then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
 // pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
 // Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
-// the alert's type and reason with its numbers out; its mark is stillWaiting's, kept only once the sink took it
+// the alert's type and reason (or its text, when it has no reason) with its numbers out; its mark is stillWaiting's, kept only once the sink took it
 // (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
 // ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
 // stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
 const ASK_ALERTS = 'ask-alerts.json';
-const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
+const causeOf = (e) => `${e.type}:${String(e.reason ?? e.text ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
   const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
   let marks = {};
