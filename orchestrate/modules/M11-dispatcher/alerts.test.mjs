@@ -1,7 +1,7 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, tellThen, isQueued, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
 
@@ -580,7 +580,7 @@ test('L354 item 5 (Q3b): a mark write that gives up is answered and leaves a dia
   const [e] = queue(rec);
   const broken = { ...rec, write: (w) => (w.id === 'stop-q' ? { ok: false, reason: 'refused' } : rec.write(w)) };
   await sendAlerts(broken, () => true, T0, { sendMs: 50 });
-  assert.deepEqual(queue(rec), [], 'the queue settled');
+  assert.equal(queue(rec).find((x) => x.id === e.id).delivered_at, new Date(T0).toISOString(), 'held as delivered (L527): a mark refused no longer lets it leave');
   assert.match(rec.read('fact', `step-error-alert-settle-${e.id}`)?.doc?.text ?? '', /could not be written/);
 });
 
@@ -592,4 +592,143 @@ test('L354 item 6: a give-up note the Record refuses still reaches the log', asy
   await sendAlerts(refusing, async () => true, T0, { sendMs: 50, report: (l) => lines.push(l) });
   assert.equal(lines.length, 1, lines.join(' | '));
   assert.match(lines[0], /settle gave up .*note was refused \(refused\)/);
+});
+
+// L527: a site reads a missing told mark as "not told", so a delivered alert whose mark the Record refuses was told every
+// pass (7 tells in an hour). The cap can't be that mark: it is the queue entry.
+const MIN = 60_000;
+const DAY = 24 * 60 * MIN;
+const refusingMarks = (real, fact, on = () => true) => {
+  const rec = Object.create(real);
+  Object.defineProperty(rec, 'write', { value: (x) => (x.entity === 'fact' && x.id === fact && on() ? { ok: false, reason: 'busy' } : real.write(x)) });
+  return rec;
+};
+// One pass of a site that tells whenever it sees no mark, then the sender.
+const sitePass = async (rec, fact, now, got) => {
+  if (!rec.read('fact', fact)?.doc?.told_at) tellThen(outbox(rec, now), `cause ${fact} still stands`, { fact, fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  await sendAlerts(rec, (t) => { got.push(t); return true; }, now, { sendMs: 50 });
+};
+
+test('L527: every mark write refused: at most one tell a day, the refusal told once, over three days of passes', async () => {
+  const real = recWith([]);
+  const rec = refusingMarks(real, 'stop-m-1');
+  const got = [];
+  for (let min = 0; min < 3 * 24 * 60; min += 10) await sitePass(rec, 'stop-m-1', T0 + min * MIN, got);
+  const tells = got.filter((t) => /still stands/.test(t));
+  const refusals = got.filter((t) => /told mark on stop-m-1 could not be saved \(busy\)/.test(t));
+  assert.equal(tells.length, 3, `one on each of three days: ${tells.length}`);
+  assert.equal(refusals.length, 1, 'the refusal is told once');
+  assert.equal(queue(real).length, 1, 'held on the queue, one entry');
+});
+
+test('L527: once the mark can be saved the held entry leaves and nothing more is told', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-2', () => refusing);
+  const got = [];
+  await sitePass(rec, 'stop-m-2', T0, got);
+  assert.equal(got.filter((t) => /still stands/.test(t)).length, 1);
+  refusing = false;
+  await sitePass(rec, 'stop-m-2', T0 + 10 * MIN, got);
+  assert.equal(queue(real).length, 0, 'the retried mark let it leave');
+  assert.ok(real.read('fact', 'stop-m-2').doc.told_at, 'marked by the retry, with nothing sent');
+  for (let d = 1; d <= 3; d++) await sitePass(rec, 'stop-m-2', T0 + d * DAY, got);
+  assert.equal(got.filter((t) => /still stands/.test(t)).length, 1);
+});
+
+test('L527: a held entry goes when its cause clears, and a new one is told at once', async () => {
+  const real = recWith([]);
+  const rec = refusingMarks(real, 'stop-m-3');
+  const got = [];
+  await sitePass(rec, 'stop-m-3', T0, got);
+  assert.equal(isQueued(real, 'stop-m-3'), true);
+  assert.equal(dropCause(rec, 'stop-m-3'), true);
+  assert.equal(isQueued(real, 'stop-m-3'), false);
+  await sitePass(rec, 'stop-m-3', T0 + MIN, got);
+  assert.equal(got.filter((t) => /still stands/.test(t)).length, 2);
+});
+
+test('L527: a held time that can not be read holds nothing: the alert is sent', async () => {
+  const real = recWith([]);
+  const rec = refusingMarks(real, 'stop-m-4');
+  const got = [];
+  await sitePass(rec, 'stop-m-4', T0, got);
+  const q = real.read('fact', ALERT_QUEUE_FACT);
+  assert.equal(real.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: q.rev, doc: { ...q.doc, entries: q.doc.entries.map((e) => ({ ...e, delivered_at: 'garbage' })) } }).ok, true);
+  await sendAlerts(rec, (t) => { got.push(t); return true; }, T0 + MIN, { sendMs: 50 });
+  assert.equal(got.filter((t) => /still stands/.test(t)).length, 2);
+});
+
+test('L527: a round that settles later writes no mark until it settles', async () => {
+  const real = recWith([]);
+  const rec = refusingMarks(real, 'stop-m-5');
+  const got = [];
+  await sitePass(rec, 'stop-m-5', T0, got);
+  const writes = [];
+  const watch = Object.create(real);
+  Object.defineProperty(watch, 'write', { value: (x) => { writes.push(x.id); return rec.write(x); } });
+  const r = await sendAlerts(watch, () => true, T0 + MIN, { sendMs: 50, later: true });
+  assert.deepEqual(writes, []);
+  r.settle();
+  assert.equal(writes.filter((id) => id === 'stop-m-5').length, 1, 'the mark, tried once');
+});
+
+test('L533: a new fact replacing a held entry is told once the mark saves, not lost; while refused it waits for the day', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-6', () => refusing);
+  const got = [];
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-6', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  const send = (now) => sendAlerts(rec, (t) => { got.push(t); return true; }, now, { sendMs: 50 });
+  tell('refused: first reason', T0);
+  await send(T0);
+  tell('refused: second reason', T0 + MIN);
+  await send(T0 + MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason'], 'the day cap holds through a new text');
+  refusing = false;
+  await send(T0 + 2 * MIN);
+  await send(T0 + 3 * MIN);
+  await send(T0 + 4 * MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason', 'refused: second reason'], 'told once, then gone');
+  assert.equal(queue(real).length, 0);
+});
+
+test('L533: still refused, the new text is what goes out at the day, and the same text again leaves when the mark saves', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-7', () => refusing);
+  const got = [];
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-7', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  const send = (now) => sendAlerts(rec, (t) => { got.push(t); return true; }, now, { sendMs: 50 });
+  tell('refused: first reason', T0);
+  await send(T0);
+  tell('refused: second reason', T0 + MIN);
+  await send(T0 + DAY + MIN);
+  refusing = false;
+  await send(T0 + DAY + 2 * MIN);
+  await send(T0 + DAY + 3 * MIN);
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: first reason', 'refused: second reason']);
+  assert.equal(queue(real).length, 0);
+});
+
+test('#217 r1 M3: a new fact that replaces an entry while its send is out is still told: what went out is what is remembered', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const rec = refusingMarks(real, 'stop-m-8', () => refusing);
+  const tell = (text, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-8', fields: { told_at: new Date(now).toISOString() }, kind: 'k' });
+  tell('refused: fact A', T0);
+  const p = held();
+  const sending = sendAlerts(rec, p.port, T0, { sendMs: 5_000, budgetMs: 5_000, later: true });
+  await tickOver();
+  assert.deepEqual(p.got, ['refused: fact A']);
+  tell('refused: fact B', T0);
+  p.open();
+  (await sending).settle();
+  const entry = queue(real).find((x) => x.text === 'refused: fact B');
+  assert.equal(entry?.delivered_text, 'refused: fact A', 'B is on the queue, and only A went out');
+  refusing = false;
+  const got = [];
+  for (const m of [1, 2, 3]) await sendAlerts(rec, (t) => { got.push(t); return true; }, T0 + m * MIN, { sendMs: 50 });
+  assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: fact B'], 'B is told once, not lost when the mark saves');
+  assert.equal(queue(real).length, 0);
 });
