@@ -155,6 +155,19 @@ test('L571: the first-cutover command is one self-contained line that needs no U
   for (const word of ['curl', 'wget', 'http', 'node', 'mktemp', 'sha256', 'checker', '$(', '`']) assert.ok(!cmd.includes(word), word);
 });
 
+// A shell on this list that is missing fails the test, never drops out (L592). zsh is the Mac's: Linux CI has none.
+const SHELLS = ['/bin/sh', '/bin/bash', '/bin/dash', ...(process.platform === 'darwin' ? ['/bin/zsh'] : [])];
+
+test('L592: the first-cutover command fits the field, and has no backslash for the paste to lose or double', () => {
+  const cmd = skipCommand({ mode: 'first' });
+  assert.ok(cmd.length <= 256, `${cmd.length} characters`);
+  assert.ok(!cmd.includes('\\'));
+  for (const [i, shell] of SHELLS.entries()) {
+    const r = spawnSync(shell, ['-c', cmd], { env: { PATH: '/usr/bin:/bin', VERCEL_ENV: 'preview', VERCEL_GIT_COMMIT_REF: 'main', VERCEL_GIT_COMMIT_SHA: 'a'.repeat(40) } });
+    assert.equal(r.status, 0, `case ${i}: preview skips`);
+  }
+});
+
 test('L571: through real shells, the first-cutover command agrees with decideBuild on every case', () => {
   const dir = tempDir('m6-first-skip-');
   const FULL = 'a'.repeat(40);
@@ -165,10 +178,9 @@ test('L571: through real shells, the first-cutover command agrees with decideBui
       `${'a'.repeat(20)}|${'b'.repeat(19)}`, `g${'a'.repeat(39)}`, '?'.repeat(40), '*', 'é'.repeat(40), `${'a'.repeat(39)}B`, `|${FULL}`, '$(touch PLANTED)'],
   };
   const cmd = skipCommand({ mode: 'first' });
-  const shells = ['/bin/sh', '/bin/bash', '/bin/dash', '/bin/zsh'].filter((s) => existsSync(s));
-  assert.ok(shells.includes('/bin/sh'));
+  for (const s of SHELLS) assert.ok(existsSync(s), `${s} is missing, so this run would prove less than it says (L592)`);
   let builds = 0;
-  for (const [i, shell] of shells.entries()) {
+  for (const [i, shell] of SHELLS.entries()) {
     const lang = i % 2 ? 'en_US.UTF-8' : 'C'; // both locales cross the shells below without doubling the run
     for (const a of values.VERCEL_ENV) for (const b of values.VERCEL_GIT_COMMIT_REF) for (const c of values.VERCEL_GIT_COMMIT_SHA) {
       const vars = {};
@@ -176,8 +188,10 @@ test('L571: through real shells, the first-cutover command agrees with decideBui
       if (b !== undefined) vars.VERCEL_GIT_COMMIT_REF = b;
       if (c !== undefined) vars.VERCEL_GIT_COMMIT_SHA = c;
       const want = decideBuild({ mode: 'first', env: vars }).build ? 1 : 0;
-      const got = spawnSync(shell, ['-c', cmd], { cwd: dir, env: { PATH: '/usr/bin:/bin', LC_ALL: lang, ...vars } }).status;
-      assert.equal(got, want, `${shell} ${lang} ${JSON.stringify(vars)}`);
+      const r = spawnSync(shell, ['-c', cmd], { cwd: dir, encoding: 'latin1', env: { PATH: '/usr/bin:/bin', LC_ALL: lang, ...vars } });
+      assert.equal(r.status, want, `${shell} ${lang} ${JSON.stringify(vars)}`);
+      assert.equal(r.stdout, '', 'nothing on standard output');
+      assert.equal(r.stderr, want ? '' : 'build-skip: skip: not prod/main/full id\n', `${shell}: a skip says so, naming no value`);
       builds += want;
     }
   }

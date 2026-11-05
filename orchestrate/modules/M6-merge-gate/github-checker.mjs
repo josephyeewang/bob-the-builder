@@ -1577,7 +1577,10 @@ async function ownerOverride({ gh, owner, repo, sha, ownerId, overrideLabel }) {
 
 // Production, then main, then a full commit id, in that order and joined by bars: a bar in any value leaves a bar in the
 // last part, which the first pattern skips. The digits are spelled out because a range like a-f follows the locale.
-const FIRST_COMMAND = `case "\${VERCEL_ENV-}|\${VERCEL_GIT_COMMIT_REF-}|\${VERCEL_GIT_COMMIT_SHA-}" in production\\|main\\|*[!0123456789abcdef]*) exit 0;; production\\|main\\|${'?'.repeat(40)}) exit 1;; esac; exit 0`;
+// The fixed part is in single quotes, not backslashes: a backslash lost or doubled on the way into Vercel's field would
+// make the bars split the pattern, and one alternative matches anything (L592). A skip prints one fixed line for the
+// build log, naming no value, and every skip reaches it. Pasted into a field limited to 256 characters: a test holds this under.
+const FIRST_COMMAND = `case "\${VERCEL_ENV-}|\${VERCEL_GIT_COMMIT_REF-}|\${VERCEL_GIT_COMMIT_SHA-}" in 'production|main|'*[!0123456789abcdef]*);; 'production|main|'${'?'.repeat(40)}) exit 1;; esac; echo build-skip: skip: not prod/main/full id>&2; exit 0`;
 
 function skipCommand({ mode, checkerUrl, sha256 } = {}) {
   if (!MODES.includes(mode)) throw new Error('mode must be first or full');
