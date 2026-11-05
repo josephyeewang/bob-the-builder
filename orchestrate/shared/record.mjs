@@ -41,7 +41,7 @@ export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAM
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
 export const outboxKind = outboxKindOf;
 // The test stand-in's field and move check is M9's own (L72); guard.mjs needs only record-names.mjs, so no load loop.
-import { claimCheck, fixPlanCheck, guardWrite } from '../modules/M9-record/guard.mjs';
+import { claimCheck, fixPlanCheck, guardWrite, keptSince, same } from '../modules/M9-record/guard.mjs';
 
 // Plain-script actors write under their own name; AI roles only through applyOutbox, as `<role>:<sessionId>`.
 // `joe` writes nothing in 0b (the owner acts through `approvals`); it stays a name so old diary lines still parse.
@@ -69,12 +69,30 @@ export const REQUIRED_FIELDS = Object.freeze({
   merge_request: ['card', 'pr', 'session_id', 'head', 'rev', 'requested_at'],
   verdict: ['session_id', 'head'],
 });
+/**
+ * The launches `pick` keeps, newest first, in the order the Record took them. list() gives that order: launches are
+ * create-only and its index is built from the diary. launched_at is a stored time, and one stamped ahead by a clock
+ * that went back must not outrank a later launch (L367, L362 m1). A failed read throws: never an empty list.
+ */
+export const launchesNewestFirst = (rec, pick) => rec.list('launch').filter((l) => l?.doc && pick(l)).reverse();
+
+/**
+ * The Lead session's newest launch and the main commit it started on, or null (R-0b-170, L460): the one source of a
+ * plan's main_commit. A newest launch with no readable head is null, never the launch before it.
+ */
+export function leadLaunchHead(rec, sessionId) {
+  const l = launchesNewestFirst(rec, (x) => x.doc.role === 'lead' && x.doc.session_id === sessionId)[0];
+  return !l?.corrupt && typeof l?.doc.head === 'string' && /^[0-9a-f]{40}$/.test(l.doc.head) ? { id: l.id, head: l.doc.head } : null;
+}
+
 // A launch names a card and head only for the roles that work on one card (0b-5: a Front Door or thinking session has
-// neither; with no role, all are needed). The one check both the fake and the real writer use.
+// neither; with no role, all are needed). A Lead names the main commit it started on as its head, and has no card or
+// card rev (L460). The one check both the fake and the real writer use.
 export const CARD_ROLES = Object.freeze(['worker', 'reviewer', 'auditor']);
 export function missingFields(entity, doc) {
   const blank = (f) => doc?.[f] === undefined || doc?.[f] === null || doc?.[f] === '';
-  const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !['card', 'head'].includes(f) || !doc?.role || CARD_ROLES.includes(doc.role));
+  const free = doc?.role === 'lead' ? ['card', 'rev'] : doc?.role && !CARD_ROLES.includes(doc.role) ? ['card', 'head'] : [];
+  const need = (REQUIRED_FIELDS[entity] ?? []).filter((f) => entity !== 'launch' || !free.includes(f));
   return need.filter(blank);
 }
 
@@ -219,7 +237,8 @@ export function makeRecord(impl) {
 // real Record let writes pass every test that the real one refuses. What it still does not check is the rest of the
 // Store Writer: the ready rule, a claim's and a wait's shape, verdicts and merges. applyOutbox makes the document a
 // create kind makes (a handoff, a report, a lesson: as M9's applyParsed does, once per file content, written as
-// `<role>:<session>`), without M9's file checks (owner, links, size); any other kind it records in the diary only.
+// `<role>:<session>`), without M9's file checks (owner, links, size); any other kind, a plan- file too, it records in the
+// diary only.
 // The claim fakes are simple: ready() is every `ready` card with no claim, release() hands a claimed card back when the
 // session holds it, overdue() and lapseClaims() find none. breakIfDead() breaks only what M9's would and only when the
 // test's `dead(claim)` says the owner is dead (the fake can't tell a dead owner itself, so with no `dead` it never
@@ -265,6 +284,16 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
           if (!fp.ok) return refused(fp.reason);
         }
       }
+      // A wait's since on a re-check, by the Store Writer's own rule (keptSince, L285, L296): a wait that stays on the
+      // same who and what keeps its stored since, whatever the caller sends, so a test sees a cap measured from when
+      // the waiting began. DEPARTURE: a new wait's since is stored as the caller sends it. The Store Writer refuses one
+      // more than 60 s from its own clock and stores now; here a test's pass runs at its own `now` while this clock
+      // stays where the test set it, and the two are the same clock only in the real system.
+      const waits = (entity === 'card' && g.to === 'waiting') || (entity === 'session' && (g.to === 'waiting_input' || g.to === 'waiting_limit'));
+      if (waits && g.doc?.wait && !g.moving && !same(cur?.doc?.wait, g.doc.wait)) {
+        const keep = keptSince({ wait: g.doc.wait, kept: cur?.doc?.wait ?? null, nowMs: now() });
+        if (keep !== null) g.doc.wait = { ...g.doc.wait, since: keep };
+      }
       const rev = expectRev + 1;
       const d = { entity, id, doc: g.doc, rev, createdBy: cur?.createdBy ?? actor, ts: cur?.ts, stateSince: cur?.stateSince };
       touch(d, cur ? cur.doc?.state : undefined);
@@ -289,7 +318,7 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       if (spec.record === 'none') return notARecord(kind);
       if (!spec.entity) return refused(`outbox kind ${kind} has no record rule yet`);
       const actor = `${tag.role}:${tag.sessionId}`;
-      if (spec.mode === 'create') {
+      if (spec.mode === 'create' && spec.entity !== 'card') {
         let buf;
         try { buf = readFileSync(file); } catch (e) { return refused(`can't read ${name} (${e?.code ?? 'error'})`); }
         const sha256 = createHash('sha256').update(buf).digest('hex');

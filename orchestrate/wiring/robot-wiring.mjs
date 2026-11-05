@@ -32,7 +32,7 @@
 //                       not late (audit #137 M6): see dispatcherLate().
 
 import { lstatSync, readFileSync } from 'node:fs';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, recordAndRules, refusing, notWiredText } from './dispatcher-wiring.mjs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
@@ -43,7 +43,8 @@ import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../mod
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS, 'keyDir', 'dispatcherLockFile']);
+// approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), so the robot config refuses it.
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir'), 'keyDir', 'dispatcherLockFile']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
 // #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. M11's default deadline: the Dispatcher's
@@ -60,11 +61,7 @@ const MAX_IDEAS = 100;
 /** Refuses unless this process runs as the Record's owner AND owns the robot key folder, private to it, no access list. */
 export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync, acl = aclProblem }) {
   if (uid !== ownerUid) throw new Error(`the robot job runs only as the Record's owner (uid ${ownerUid}), not uid ${uid}`);
-  let st;
-  try { st = lstat(keyDir); } catch (e) { throw new Error(`the robot key folder ${keyDir} can't be read (${e?.code ?? e})`); }
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`the robot key folder ${keyDir} is not a plain folder`);
-  if (st.uid !== uid) throw new Error(`the robot key folder ${keyDir} belongs to uid ${st.uid}, not to this job's uid ${uid}`);
-  if (st.mode & 0o077) throw new Error(`the robot key folder ${keyDir} can be read by others (mode ${(st.mode & 0o777).toString(8)}); it must be 700`);
+  privateFolder({ path: keyDir, uid, what: 'the robot key folder', lstat });
   // An inherited "everyone may read" access list would pass the mode check and give every key file put inside it to any
   // user (audit #137 M3). Setup refuses one too; this is the second wall.
   const a = acl([keyDir]);
@@ -133,7 +130,7 @@ export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, hold
 }
 
 /**
- * The Dispatcher is on time: every late alert still queued leaves unsent (L130, audit 0b-6 r7 M2; audit #137 M5), so Joe
+ * The Dispatcher is on time: every late alert still queued leaves unsent (L130, audit 0b-6 r7 M2; audit #137 M5), so the owner
  * is not told of stops that have ended. → whether every drop was written.
  */
 export function dropLateAlerts(rec) {

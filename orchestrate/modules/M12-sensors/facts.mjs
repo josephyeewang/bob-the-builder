@@ -10,6 +10,13 @@
 import { makeMasker } from './mask.mjs';
 import { shapeFact } from './fact-shapes.mjs';
 
+/** Who reports the Record refusing alert writes. Each has its own alert (M13 alerts.mjs reportTrouble), so a caller using
+ * another's name would close what that one opened. Kept here because the watcher doesn't import M13. */
+export const TROUBLE_SOURCES = Object.freeze({ CHANNEL: 'alert-channel', HEARTBEAT: 'heartbeat', WATCHER: 'prod-watcher' });
+
+/** Whether the Record holds what put was given: it took the write, or it already holds exactly that (M9's "nothing changed"). */
+export const wasSaved = (answer) => answer?.ok === true || answer?.reason === 'nothing changed';
+
 export function makeFactWriter(rec, { actor = 'sensors', masker = makeMasker(), now = () => new Date() } = {}) {
   function put(id, doc, kind = 'fact') {
     const masked = masker.maskValues(shapeFact({ ...doc, ts: doc.ts ?? now().toISOString() }, (k) => masker.maskSecrets(k).text));

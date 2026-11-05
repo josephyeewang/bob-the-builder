@@ -31,10 +31,12 @@
 //
 // Shared by both callers, the gate's own recover() and the Dispatcher's time limits (L94: one decision function):
 //   PR_FACT(n) → 'pr-<n>', Sensors' reading of pull request n.
-//   prReadingAfter(record, prNumber, mergeId) → the reading's doc, only when Sensors made it and its observed_at is
-//     after the merge's last write by the Record's clock; else null.
+//   prReadingAfter(record, prNumber, mergeId, now?) → the reading's doc, only when Sensors made it and its observed_at
+//     is after the merge's last write by the Record's clock; else null. With `now`, a time more than a minute ahead of
+//     it is unreadable (shared pastTime, L329), so a reading stamped in the future is never fresh.
 //   openTooLong(record, mergeId, now, limitMs) → true once the merge's last write is at least limitMs old (an age the
-//     Record can't give counts as too long, so the limit only ever fires rather than waits forever); false when the
+//     Record can't give, or one stamped in the future, counts as too long, so the limit only ever fires rather than
+//     waits forever); false when the
 //     limit itself is unknown.
 //   prReading(pr) → GitHub's pull request answer in the reading's shape { state, merged, merge_commit_sha, head_sha }.
 //   refusedTwice(cardDoc) → the reason, when the card's last two merge refusals are the same and the owner has not been
@@ -42,6 +44,7 @@
 
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const PR_FACT = (n) => `pr-${n}`;
 
@@ -63,21 +66,30 @@ export function alertTaken(alert, e) {
   try { return alert(e) !== false; } catch { return false; }
 }
 
-export function prReadingAfter(record, prNumber, mergeId) {
+// `now` (ms) lets a reading or a write stamped in the future count as unreadable (L329): a future observed_at is never a
+// fresh reading, so the wait on it goes on and is told. A caller that passes no `now` keeps the old check (readable only).
+export function prReadingAfter(record, prNumber, mergeId, now) {
   if (prNumber == null) return null;
   const id = PR_FACT(prNumber);
   const f = record.read('fact', id);
   if (!f?.doc || f.corrupt || !factFrom('sensors', { id, createdBy: record.meta?.('fact', id)?.createdBy ?? null }, 'pr-')) return null;
-  const seen = Date.parse(f.doc.observed_at ?? '');
-  const changed = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
-  return Number.isFinite(seen) && Number.isFinite(changed) && seen > changed ? f.doc : null;
+  const at = typeof now === 'number' && Number.isFinite(now) ? now : Infinity;
+  const seen = pastTime(f.doc.observed_at, at);
+  const changed = pastTime(record.meta?.('merge', mergeId)?.ts, at);
+  if (seen === null || changed === null || seen <= changed) return null;
+  // A reading is one only when GitHub answered: state open or closed, merged true or false (L246). Anything else (all
+  // null, a state GitHub never gives) is no reading, so the merge waits for a real one and is never refused as open.
+  // Open and merged at once is a contradiction GitHub never gives, so it is no reading either (L347 m3): fail closed.
+  const real = (f.doc.state === 'open' || f.doc.state === 'closed') && typeof f.doc.merged === 'boolean';
+  return real && !(f.doc.state === 'open' && f.doc.merged === true) ? f.doc : null;
 }
 
 export function openTooLong(record, mergeId, now, limitMs) {
   if (!Number.isFinite(limitMs)) return false;
-  const t = Date.parse(record.meta?.('merge', mergeId)?.ts ?? '');
   const at = typeof now === 'function' ? now() : now;
-  return Number.isFinite(t) ? at - t >= limitMs : true;
+  // Through pastTime (L329): a last write that can't be read, or is stamped in the future, counts as old enough.
+  const t = pastTime(record.meta?.('merge', mergeId)?.ts, at);
+  return t === null ? true : at - t >= limitMs;
 }
 
 export const prReading = (pr) => ({ state: pr?.state ?? null, merged: pr?.merged === true, merge_commit_sha: pr?.merge_commit_sha ?? null, head_sha: pr?.head?.sha ?? null });
@@ -92,7 +104,8 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };
   if (m.doc.state !== 'checking' && m.doc.state !== 'merging') return { ok: false, reason: `merge ${id} is ${m.doc.state}, not checking or merging` };
   const write = (entity, cur, fields) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...cur.doc, ...fields }, kind: 'merge_outcome' });
-  const told = (r, what) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, to: what, reason: r.reason }); return r.ok; };
+  // `cardId`: the write refused was the card's, so the line names it (L408 MAT-1): the merge itself may well have moved.
+  const told = (r, what, cardId) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, ...(cardId ? { card: cardId } : {}), to: what, reason: r.reason }); return r.ok; };
 
   if (pr && pr.merged !== true && pr.state !== 'closed' && !openTooLong) return { ok: false, reason: `merge ${id}'s outcome is not known yet: PR ${m.doc.pr} is still open` };
   if (pr?.merged === true && SHA.test(pr.merge_commit_sha ?? '') && pr.head_sha === m.doc.judged_head) {
@@ -101,7 +114,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
     if (!told(write('merge', cur, { state: 'merged', merge_commit: pr.merge_commit_sha, merged_at: iso() }), 'merged')) return { ok: false, reason: 'the move to merged was refused' };
     const card = m.doc.card ? record.read('card', m.doc.card) : null;
     if (card?.doc?.state === 'merging') {
-      if (told(write('card', card, { state: 'merged', merge_commit: pr.merge_commit_sha }), 'merged') && card.doc.kind === 'exact_reverse') markReverted({ record, alert }, card.id);
+      if (told(write('card', card, { state: 'merged', merge_commit: pr.merge_commit_sha }), 'merged', card.id) && card.doc.kind === 'exact_reverse') markReverted({ record, alert }, card.id);
     }
     return { ok: true, outcome: 'merged', card: m.doc.card ?? null };
   }
@@ -147,6 +160,6 @@ function putBack(record, cardId, why, told) {
   const r = at('verified');
   if (r.ok) return { id: card.id, to: 'verified' };
   const r2 = at('in_review');
-  told(r2, 'in_review');
+  told(r2, 'in_review', card.id);
   return r2.ok ? { id: card.id, to: 'in_review' } : null;
 }

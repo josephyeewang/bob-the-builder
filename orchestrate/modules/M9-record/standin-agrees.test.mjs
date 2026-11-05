@@ -8,8 +8,8 @@
 // one takes) fails too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, outboxFile, product, readyCard, seed, plan, PRODUCT } from './fixtures.test-helper.mjs';
-import { recWith } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { setup, outboxFile, product, readyCard, runCard, seed, plan, put, must, iso, PRODUCT } from './fixtures.test-helper.mjs';
+import { recWith, parkOnLimit, setClock } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
 
 const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet|not_a_record$)/;
@@ -68,4 +68,60 @@ test('L228: the stand-in and the Store Writer agree on a new fix card\'s plan, t
     seen.add(real.ok);
   }
   assert.deepEqual([...seen].sort(), [false, true], 'both written and refused cases');
+});
+
+// L296: M11's pass tests run on the stand-in, so a re-checked wait's since must come back as the Store Writer stores it
+// (kept on a re-check of the same who and what; a new wait's own). The same steps, at the same times, on both.
+test('L296: the stand-in and the Store Writer store the same wait.since, step for step, re-checks and a new wait alike', () => {
+  const MIN = 60000;
+  const env = setup({ prefix: 'm9-sa-since-' });
+  product(env);
+  readyCard(env, 'C-1');
+  runCard(env, 'C-1');
+  const t0 = env.clock.t;
+  const fake = recWith([], { now: t0 });
+  parkOnLimit(fake, 'C-1', { ranAt: t0, parkedAt: t0, account: 'a' });
+  const park = { who: 'usage', what: 'limit_hit', since: iso(t0), next_check: iso(t0 + 30 * MIN), resume: 'retry', return_to: 'ready', account: 'a' };
+  must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: park }), 'park');
+  const real = () => env.record.read('card', 'C-1').doc.wait;
+  const stand = () => fake.read('card', 'C-1').doc.wait;
+  const at = (ms) => { env.clock.t = ms; setClock(fake, ms); };
+  const recheck = (fields) => {
+    const nowMs = env.clock.t;
+    const patch = (w) => ({ wait: { ...w, next_check: iso(nowMs + 30 * MIN), ...fields(nowMs, w) } });
+    const r = put(env.record, 'dispatcher', 'card', 'C-1', patch(real()));
+    const f = put(fake, 'dispatcher', 'card', 'C-1', patch(stand()));
+    return { real: r.ok, stand: f.ok };
+  };
+  const steps = [];
+  const step = (what, ms, fields) => { at(ms); const ok = recheck(fields); steps.push([what, ok, real().since, stand().since, real().who, stand().who]); };
+  assert.equal(stand().since, real().since, 'the park');
+  step('re-check two days on, sending now', t0 + 2 * 24 * 60 * MIN, (n) => ({ since: iso(n) }));
+  step('re-check an hour on, sending the kept since', t0 + 2 * 24 * 60 * MIN + 60 * MIN, () => ({}));
+  step('the same wait turned to Joe (a new what)', t0 + 3 * 24 * 60 * MIN, (n) => ({ who: 'joe', what: 'limit_hit: the hit has no readable reset time', since: iso(n) }));
+  step('the Joe wait re-checked an hour on, sending now', t0 + 3 * 24 * 60 * MIN + 60 * MIN, (n) => ({ since: iso(n) }));
+  // Audit #153 m2: who alone, what alone, and a what that differs only by case or a trailing space are each a new wait.
+  const D3 = t0 + 3 * 24 * 60 * MIN;
+  const JOE_WHAT = 'limit_hit: the hit has no readable reset time';
+  step('who alone changes (joe back to usage, the same what)', D3 + 2 * 60 * MIN, (n) => ({ who: 'usage', since: iso(n) }));
+  step('what alone changes (usage, another what)', D3 + 3 * 60 * MIN, (n) => ({ what: 'limit_hit: another reading', since: iso(n) }));
+  step('what differs only by case', D3 + 4 * 60 * MIN, (n) => ({ what: 'LIMIT_HIT: another reading', since: iso(n) }));
+  step('what differs only by a trailing space', D3 + 5 * 60 * MIN, (n) => ({ what: 'LIMIT_HIT: another reading ', since: iso(n) }));
+  step('and that wait re-checked, sending now', D3 + 6 * 60 * MIN, (n) => ({ since: iso(n) }));
+  for (const [what, ok, r, f, rw, fw] of steps) {
+    assert.deepEqual(ok, { real: true, stand: true }, what);
+    assert.equal(f, r, `${what}: since`);
+    assert.equal(fw, rw, `${what}: who`);
+  }
+  assert.equal(real().what, 'LIMIT_HIT: another reading ');
+  assert.notEqual(JOE_WHAT, real().what);
+  // The kept sinces really were kept, and each new wait's really is new.
+  const h = (k) => iso(D3 + k * 60 * MIN);
+  assert.deepEqual(steps.map(([, , r]) => r), [iso(t0), iso(t0), iso(D3), iso(D3), h(2), h(3), h(4), h(5), h(5)]);
+  // The one allowed difference: a re-check naming another past since. The Store Writer refuses it; the stand-in does
+  // not check since against its clock (shared/record.mjs), but still keeps the stored since, never the one sent.
+  at(D3 + 7 * 60 * MIN);
+  const ok = recheck((n) => ({ since: iso(n - 30 * MIN) }));
+  assert.deepEqual(ok, { real: false, stand: true });
+  assert.equal(stand().since, real().since);
 });

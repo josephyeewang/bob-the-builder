@@ -46,7 +46,7 @@ function world() {
   const pass = () => withAlerts(rec, env.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: env.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
+    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   return { env, rec, rules, dead, launched, pass, refuseLaunch: (f) => { answer = f; } };
@@ -87,9 +87,10 @@ test('L72 contract: launch refused: the claim is given back by its holder (M9 re
   assert.deepEqual((await w.pass()).started, ['C-1']);
 });
 
-// The session record as the launcher keeps it: made preparing by the Dispatcher, ended by the workshop.
+// The session record: the real pass made it preparing, with the process (L204-a); the workshop ends it.
 function endedSession(w, sid, card, pid) {
-  must(w.rec.write({ actor: 'dispatcher', entity: 'session', id: sid, expectRev: 0, doc: { state: 'preparing', role: 'worker', card, pid, pid_start: 'start', last_activity: iso(w.env.clock.t) } }), 'session');
+  const s = w.rec.read('session', sid)?.doc;
+  assert.deepEqual([s?.state, s?.card, s?.pid, s?.pid_start], ['preparing', card, pid, 'start'], 'the pass made the session record');
   must(put(w.rec, 'workshop', 'session', sid, { state: 'ended' }), 'session ended');
 }
 
@@ -231,7 +232,8 @@ test('L85 M-1 contract: an interrupted merge waits while its PR is open, is refu
   read({ state: 'open', merged: false });
   w.env.clock.t += 1000;
   assert.deepEqual(await run(), [['MG-1', 'refused:interrupted'], ['C-1', '->verified']]);
-  assert.equal(alerts.length, 1);
+  assert.deepEqual(alerts, [], 'M6 step 3b tells it from the note (L357)');
+  assert.match(w.rec.read('merge', 'MG-1').doc.interrupted_note, /still open after \d+ min/);
   // GitHub finishes the merge after all: the Merge Gate's reconcile, checked by the real Record.
   w.env.clock.t += MIN;
   read({ state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40) });
@@ -240,7 +242,7 @@ test('L85 M-1 contract: an interrupted merge waits while its PR is open, is refu
   const m = w.rec.read('merge', 'MG-1').doc;
   const c = w.rec.read('card', 'C-1').doc;
   assert.deepEqual([m.state, m.merge_commit, c.state, c.merge_commit], ['merged', 'c'.repeat(40), 'merged', 'c'.repeat(40)]);
-  assert.equal(alerts.length, 1);
+  assert.deepEqual(alerts, [], 'merged after all: nothing to tell');
 });
 
 // ---- L72 (5): the planted cases, on the real Record (and the stand-in where the case is the guard's) ----

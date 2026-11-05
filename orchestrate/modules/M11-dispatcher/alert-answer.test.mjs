@@ -93,7 +93,7 @@ async function stageChecking(w) {
   readyCard(w.E, 'C-1');
   let sid = null;
   await dispatcherPass({ rec: w.E.record, rules: w.rules, now: w.E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: HEAD }; },
+    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert: outbox(w.E.record, w.E.clock.t) });
   must(put(w.E.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
   must(w.E.record.applyOutbox({ role: 'worker', sessionId: sid, card: 'C-1' }, outboxFile(w.E, 'worker', sid, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
@@ -159,4 +159,13 @@ test('S4 alerts.mjs: at the untried cap, a new cause-tied entry dropped by its o
   assert.equal(q.entries.some((e) => e.text === 'a cause-tied alert'), false, 'the entry is the one dropped');
   assert.equal(ok, false);
   assert.ok(q.dropped_causes.some((c) => c.key === 'hold-probe:told_at'), 'its drop is counted');
+});
+
+test('L343: a dead card put on the owner whose tell could not keep its since says so in the steps done', () => {
+  const w = world();
+  readyCard(w.E, 'C-1');
+  runCard(w.E, 'C-1');
+  const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.doc?.wait_since ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+  const r = actOnDead({ rec, rules: w.rules, now: w.E.clock.t, restart: [], asks: ['C-1'], alert: outbox(w.rec, w.E.clock.t) });
+  assert.match(r[0][1], /^waiting on Joe; this card's tell could not be kept with its wait \(busy\)/, JSON.stringify(r));
 });

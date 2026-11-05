@@ -144,6 +144,18 @@ test('PLANT a required check that never ran → refusal 1 (P13)', async () => {
   assert.ok(w.judged()[0].refusals.some((x) => x.n === 1 && /test/.test(x.reason)), JSON.stringify(w.judged()[0].refusals));
 });
 
+for (const [name, policy] of [['an empty list of', POLICY.replace('required_checks: [test]', 'required_checks: []')], ['no', POLICY.replace('\nproduct_profile:\n  required_checks: [test]\n', '\n')]]) {
+  test(`PLANT the rules name ${name} required checks → refusal 1, never a quiet would-merge (L96 m-1)`, async () => {
+    const w = world({ policy }); await w.pass(PIN_AT);
+    const { head } = w.land({ 'docs/a.md': 'two' });
+    w.g.checks.set(head, [{ name: 'test', app: { id: 1 }, head_sha: head, status: 'completed', conclusion: 'success' }]);
+    await w.pass();
+    const [j] = w.judged();
+    assert.ok(j.refusals.some((x) => x.n === 1 && /the rules name no required checks/.test(x.reason)), JSON.stringify(j));
+    assert.notEqual(j.verdict, 'would merge');
+  });
+}
+
 test('PLANT a check result for another commit → refusal 6', async () => {
   const w = world(); await w.pass(PIN_AT);
   const { head } = w.land({ 'docs/a.md': 'two' });

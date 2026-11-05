@@ -33,6 +33,7 @@ const notRecord = (file, receiver) => NOT_RECORD_RECEIVERS.some((x) => x.receive
 export const NOT_OBJECT_SITES = Object.freeze([
   { file: 'shared/record.mjs', receiver: 'impl', count: 1, reason: "the Record's front door hands the caller's write to the store, which checks it" },
   { file: 'modules/M6-merge-gate/github-checker.mjs', receiver: 'impl', count: 1, reason: 'the bundled copy of shared/record.mjs' },
+  { file: 'modules/M11-dispatcher/refused-writes.mjs', receiver: 'inner', count: 1, reason: "watchWrites hands each of the tick's own writes to the Record unchanged, only noting a refusal (L323)" },
 ]);
 
 // Other forms of `write` that are not a way round the scan, by file and count (L118 m2). Anything else is a problem.
@@ -90,9 +91,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'report learning create', reason: 'an AI role: its check- and prune- files come in through its outbox (M9 writer.mjs applyOutbox, L140), never a write() call; learning is NEVER_STARTED in 0b' },
   { grant: 'lesson learning create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'lesson learning update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call; learning is Phase 1, so no learning session starts in 0b' },
-  { grant: 'card workshop update', reason: 'no module writes this yet (M4 sets the head on a card after a push); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'card approvals update', reason: 'no module writes this yet (M2 sets or clears needs_joe, approval_required and cancel_reason); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
-  { grant: 'session dispatcher create', reason: 'no module writes this yet (M11 records a session it starts); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'session workshop update', reason: 'no module writes this yet (M4 updates the session it runs), but moves.mjs gives every session move to the Workshop (preparing → running, running → waiting, reporting, stuck, recycling, ended), so dropping it would forbid every session move; kept, and flagged to the lead (L129)' },
   { grant: 'product approvals update', reason: 'no module writes this yet (M2 changes a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'fact live_check create', reason: 'no module writes this yet (M7 live check has only its README); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },

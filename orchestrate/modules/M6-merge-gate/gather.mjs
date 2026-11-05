@@ -25,7 +25,7 @@
 import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { RULES_PATH } from '../M10-rules/reader.mjs';
-import { COMPARE_FILE_LIMIT } from '../M10-rules/git-view.mjs';
+import { COMPARE_FILE_LIMIT, notRead } from '../M10-rules/git-view.mjs';
 import { approveNeeded, goCheck, ROW_FILE } from '../M2-approvals/go.mjs';
 import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
@@ -109,7 +109,7 @@ function watchReads({ view, gh } = {}) {
     .map((k) => [k, async (...a) => { try { return await view[k](...a); } catch (e) { throw note(e); } }]))) : view;
   const g = gh ? { ...gh, get: async (path) => {
     let r;
-    try { r = await gh.get(path); } catch (e) { throw note(e); }
+    try { r = await gh.get(path); } catch (e) { throw note(notRead(e)); }
     if (r?.status !== 200) note(Object.assign(new Error(`GitHub answered ${r?.status} for ${path}`), { status: r?.status }));
     return r;
   } } : gh;
@@ -146,6 +146,12 @@ export async function statusesAt(gh, base, sha) {
   if (!Array.isArray(j.statuses)) throw failed('the statuses answer is not a list');
   return j.statuses.map((s) => ({ context: s?.context, state: s?.state }));
 }
+
+// The rules' required checks, or null. An empty list is no list: with no check named, every check of the list passes
+// with none run, so main would read as green and an undo card, which skips refusal 1, would merge (L96 m-1).
+// The gate compares a check's name exactly, so a name with spaces around it would never match anything.
+export const checkName = (c) => typeof c === 'string' && c !== '' && c === c.trim();
+export const namedChecks = (list) => (Array.isArray(list) && list.length && list.every(checkName) ? list : null);
 
 // main is green when every required check ran there and passed, and no other check or status is red.
 async function mainGreen(gh, base, sha, required, ignoredList) {
@@ -224,7 +230,7 @@ export async function gatherFacts(ctx, merge) {
   });
   const head = SHA.test(f.pr?.head?.sha ?? '') ? f.pr.head.sha : null;
   const mainSha = await attempt(async () => { const s = (await json(gh, `${base}/git/ref/heads/main`)).object?.sha; if (!SHA.test(s ?? '')) throw new Error('no main'); return s; });
-  f.requiredChecks = Array.isArray(get('product_profile.required_checks')) ? get('product_profile.required_checks') : null;
+  f.requiredChecks = namedChecks(get('product_profile.required_checks'));
   // The rules file gives every value as text: an app id is turned into a number here, once, as botId does.
   const ignoredRaw = get('product_profile.checks_ignored');
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
@@ -250,7 +256,7 @@ export async function gatherFacts(ctx, merge) {
   f.files = rawFiles && mb ? await attempt(() => Promise.all(rawFiles.map(async (x) => {
     const e = await view.entry(x.status === 'removed' ? mb : head, x.filename);
     if (!e) { noEntry ??= x.filename; throw new Error(`${x.filename}: no tree entry`); }
-    return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...linesOf(x.patch) };
+    return { path: x.filename, ...(x.previous_filename ? { previous_path: x.previous_filename } : {}), status: x.status === 'changed' ? 'modified' : x.status, mode: e.mode, ...(typeof x.sha === 'string' ? { blob: x.sha } : {}), ...linesOf(x.patch) };
   })), null, markFailed('files')) : null;
   // Why there is no file list (L182). 'too_many': compare was read, but GitHub lists at most COMPARE_FILE_LIMIT files,
   // so the list is cut off; 'no_entry': a listed file is not in its commit's file list (both commits are fixed, so a

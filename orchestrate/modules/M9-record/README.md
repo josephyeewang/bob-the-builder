@@ -10,6 +10,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 |---|---|
 | `writer.mjs` | The Store Writer. `openRecord({ root, product, ownerUid, rules, alert, outbox })` checks every write against the rev read, the legal moves, who may change which fields, and each move's conditions (the ready rule, a passing verdict for the current head, a full wait, one merge at a time, the round cap). Refused writes go to `refusals.jsonl` with an alert and leave no diary line. Also: the outbox, claims (release, dead-owner break, lapse), the ready list and overdue. |
 | `store.mjs` | The files on disk: one diary line per write (`diary.jsonl`, the truth), one file per document, a lock. Folders 755, files 644, and it runs only as the store's owner. Before any read or write it checks the store folder's own names are a real folder or plain file; a link, a pipe or the wrong kind of thing stops the store with one alert naming it. A document changed by hand is quarantined, restored from the diary and alerted. Anything in `docs/` that is not a plain readable file (a folder, a link, a file the owner can't read) is moved into `quarantine/` as it is, never followed, so it can neither block writes nor reach outside the store; Finder's `.DS_Store` is left alone. `recover()` after a crash cuts a torn last diary line and rolls each document forward; a writer that finds a torn line under the lock recovers before it appends, and a line that doesn't read back stops the write before any document moves. |
+| `unsent.mjs` | The store's queue of alerts not yet delivered (`unsent-alerts.jsonl`): its one reader and its one "delivered" mark, and the plain-file opens every side file uses (no link followed, no FIFO waited on). Its own file so the alert channel (M13) can deliver the queue while the Dispatcher is dead without loading `store.mjs`, which only M9 may (L240). |
 | `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
 | `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
 | `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
@@ -29,6 +30,12 @@ A session's claim ends three ways:
 - **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one.
 
 Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
+
+## Plan files
+
+A plan file makes draft cards (R-0b-170, L460). `plan-<name>.json` from a Lead goes through `plan-cards.mjs`: every card is checked first, then all are written in one diary line, or none. `plan_sha256` is the hash of the file and `main_commit` the head on the Lead's newest launch record, so neither can be typed: anything under those names in the plan is ignored, and a `roadmap-` file may not set them. The Record takes only the bytes M11's plan check read (`checked_sha256`). A later plan may change only draft cards, never a card's module or depends_on, and a card it leaves out stays as it was and is named in the answer.
+
+Once a card has a `plan_sha256`, only a plan file can change its plan; a roadmap file trying to is refused (L490). A card's `brief` is frozen once it leaves draft. A plan changes only `ordinary` cards.
 
 ## Facts: families and who may change them
 

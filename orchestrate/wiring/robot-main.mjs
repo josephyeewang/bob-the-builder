@@ -6,12 +6,12 @@
 // runDeadlineMs) plus what the wiring module checks. The same guards as main.mjs, reused from it: the watchdog thread,
 // the run deadline, a dead holder's lock broken and told.
 //
-// A pass that throws, refuses or runs late is told to Joe through the Record's alert queue (M11 pass.mjs holdAlert, once
+// A pass that throws, refuses or runs late is told to the owner through the Record's alert queue (M11 pass.mjs holdAlert, once
 // per pass per day), and the other passes still run. An alert the queue refuses ("could not be queued") is logged, never
 // dropped in silence (L130 m12, as M11 main.mjs). The queue is sent by the robot job's own last pass, `deliver` (L242,
 // robot-wiring.mjs), never by this file directly.
 // Exit 0 when the round ran or another round was running; 1 when the config or the wiring could not be loaded; 2 when the
-// round ran past its deadline. Exit 1 reaches only the job's log today: nothing tells Joe that this job never starts until
+// round ran past its deadline. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
 // M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
 //
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
@@ -33,7 +33,7 @@ export const NOT_QUEUED = 'could not be queued';
 
 /**
  * One round: every pass in order, each with its own deadline. → { [pass]: { ok, result } | { ok: false, error, timedOut?,
- * tell? } }. `tell` says why Joe was NOT told of a failure (the queue refused it, or the queue threw). `hold` is a port
+ * tell? } }. `tell` says why the owner was NOT told of a failure (the queue refused it, or the queue threw). `hold` is a port
  * for a test only.
  */
 export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLINE_MS, hold = holdAlert }) {

@@ -57,7 +57,12 @@ export function readConfig(file, opts = {}) {
 
 // `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4); a test names a
 // file inside its own layout.
-export async function main(argv, { now = Date.now(), log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false, readConfigFn = readConfig, self = SELF } = {}) {
+export async function main(argv, { now, clock, log = (s) => process.stderr.write(`${s}\n`), runDeadlineMs, watchdog = false, readConfigFn = readConfig, self = SELF } = {}) {
+  // The clock is main's own, never the wiring's (audit #127 r2 m-B). The tick reads it before each step, so no wait is
+  // written with a `now` gone stale over a long pass (L321: the Store Writer refuses a since more than 60 s off its
+  // clock). A test that names a fixed `now` and no clock keeps a fixed clock.
+  const clockFn = clock ?? (now === undefined ? () => Date.now() : () => now);
+  now ??= clockFn();
   let config;
   let wired;
   // The watchdog starts first (audit 0b-6 r5 MAT-1): a wiring whose import or wire() never finishes would
@@ -87,7 +92,7 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
-  try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, rec: wired.rec, rules: wired.rules, ports: wired.ports }), late]); } finally { clearTimeout(timer); }
+  try { r = await Promise.race([runTick({ lockFile: config.lockFile, now, clock: clockFn, rec: wired.rec, rules: wired.rules, ports: wired.ports }), late]); } finally { clearTimeout(timer); }
   // Past the deadline the watchdog stays: the late alert below could block too.
   if (!r.late) dog?.terminate();
   if (r.late) {
@@ -100,6 +105,8 @@ export async function main(argv, { now = Date.now(), log = (s) => process.stderr
     return 2;
   }
   if (!r.ran) log(`dispatcher: ${r.reason}`);
+  // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
+  for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
   return 0;
 }
 

@@ -6,8 +6,10 @@ import { tick, ACCOUNT_FACT } from './tick.mjs';
 import { dispatcherPass } from './pass.mjs';
 import { requestMerges, ASK_REFUSED_FACT } from './merges.mjs';
 import { settleMerge } from '../M6-merge-gate/merge-outcome.mjs';
+import { REFUSED_FACT } from './refused-writes.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { rulesWith, usageFact, withAlerts } from './fixtures.test-helper.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { setup, product, readyCard, outboxFile, passingVerdict, put, must, HEAD, PRODUCT, iso } from '../M9-record/fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
@@ -19,12 +21,14 @@ const GREEN = { band: 'green', own_building: 'open', pace: 0.5, prodBlocked: fal
 
 // refuseWait: the Record refuses every card write to waiting (as a rev race or a refused move would), so the ask is
 // refused on every pass. M9 lets an approved card wait since #79, so an approved card no longer does this (L134).
-function world({ refuseWait = false } = {}) {
+// refuseIf: refuses what it answers true for, so a test can turn a write back on.
+function world({ refuseWait = false, refuseIf = null } = {}) {
   const E = setup({ prefix: 'm11-mergeask-', probe: { kill() {}, pidStart: () => 'start' }, host: HOST });
   const real = E.record;
   const waits = (x) => x?.entity === 'card' && x?.doc?.state === 'waiting';
-  const rec = !refuseWait ? real : { ...Object.fromEntries(Object.keys(real).map((k) => [k, typeof real[k] === 'function' ? real[k].bind(real) : real[k]])),
-    write: (x) => (waits(x) || (x?.also ?? []).some(waits) ? { ok: false, reason: 'the wait write is refused in this test' } : real.write(x)) };
+  const no = refuseIf ?? ((x) => waits(x) || (x?.also ?? []).some(waits));
+  const rec = !refuseWait && !refuseIf ? real : { ...Object.fromEntries(Object.keys(real).map((k) => [k, typeof real[k] === 'function' ? real[k].bind(real) : real[k]])),
+    write: (x) => (no(x) ? { ok: false, reason: 'the wait write is refused in this test' } : real.write(x)) };
   product(E);
   const rules = rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) });
   must(rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: E.clock.t }) }), 'usage');
@@ -33,7 +37,7 @@ function world({ refuseWait = false } = {}) {
   let n = 0;
   const pass = () => withAlerts(rec, E.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
+    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   const delivered = [];
@@ -77,12 +81,13 @@ function gateRefuses(w, mgId, reason) {
   assert.equal(r.ok, true, r.reason);
 }
 const askText = /card C-1: the merge was refused twice for the same reason \(409\), but the card could not be put on you/;
+const putOnYou = /a card could not be put on you: C-1/;
 const toldCount = (w) => w.delivered.filter((t) => askText.test(t)).length;
 
-// P-D: a card refused twice whose ask the Record refuses (here every wait write is refused; L134: an approved card is
-// no longer one, M9 lets it wait), and whose "could not ask" alert the queue did not take: the told note is not
-// written, so a later pass tells Joe, once.
-test('audit r5 P-D: the could-not-ask alert answering false writes no told note; Joe is told once on a later tick', async () => {
+// P-D, L405 m2: a card refused twice whose ask the Record refuses (here every wait write is refused; L134: an approved
+// card is no longer one, M9 lets it wait). Where no watcher saw the refusal, the ask tells it, and a queue that did not
+// take that alert writes no told note. Under the real tick the watcher tells it, so the ask adds no second alert.
+test('audit r5 P-D: a could-not-ask alert not taken writes no told note; one no watcher saw is told by the ask', async () => {
   const w = world({ refuseWait: true });
   await verifiedCard(w);
   gateRefuses(w, 'MG-1', '409'); gateRefuses(w, 'MG-2', '409');
@@ -91,10 +96,38 @@ test('audit r5 P-D: the could-not-ask alert answering false writes no told note;
   const r = requestMerges({ rec: w.rec, rules: w.rules, now: w.E.clock.t, b: GREEN, running: [], alert: () => false });
   assert.match(r[0][1], /^not sent to joe: the wait write is refused in this test/);
   assert.equal(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), null, 'no told note while untold');
+  const said = fakeAlert();
+  requestMerges({ rec: w.rec, rules: w.rules, now: w.E.clock.t, b: GREEN, running: [], alert: said });
+  assert.equal(said.calls.filter(([t]) => askText.test(t)).length, 1, 'no watcher here, so the ask tells it');
   for (let i = 0; i < 5; i++) { w.E.clock.t += MIN; await w.runTick(); }
-  assert.equal(toldCount(w), 1, JSON.stringify(w.delivered));
-  assert.ok(w.rec.read('fact', ASK_REFUSED_FACT('C-1', 2)), 'noted once delivered');
+  assert.equal(toldCount(w), 0, JSON.stringify(w.delivered));
+  assert.equal(w.delivered.filter((t) => putOnYou.test(t)).length, 1, JSON.stringify(w.delivered));
   assert.equal(w.rec.list('merge_request').length, 0, 'not requested again');
+});
+
+// L405 m3, m2: the tell refused, then the tell taken with the card write still refused. The tell's clearing must not
+// end the promise the first alert made: the ask's own card write is watched too.
+test('L405: a refused ask stays told each day when its tell lands and its card write does not; one alert, then cleared once it lands', async () => {
+  const down = { tell: true, wait: true };
+  const w = world({ refuseIf: (x) => (down.tell && x?.kind === 'wait_tell') || (down.wait && x?.kind === 'merge_repeat_ask') });
+  await verifiedCard(w);
+  gateRefuses(w, 'MG-1', '409'); gateRefuses(w, 'MG-2', '409');
+  must(put(w.E.review, 'approvals', 'card', 'C-1', { state: 'approved' }), 'approved');
+  const told = () => w.delivered.filter((t) => putOnYou.test(t)).length;
+  w.E.clock.t += MIN; await w.runTick();
+  assert.equal(told(), 1, JSON.stringify(w.delivered));
+  assert.equal(toldCount(w), 0, 'one alert for a refused tell');
+  down.tell = false;
+  w.E.clock.t += MIN; await w.runTick();
+  assert.deepEqual(w.rec.read('fact', REFUSED_FACT('joe_wait')).doc.items.map((x) => `${x.entity}/${x.id}`), ['card/C-1'], 'still held by the card write');
+  assert.equal(told(), 1, 'quiet within the day');
+  assert.equal(toldCount(w), 0, 'one alert for a refused card write');
+  w.E.clock.t += 24 * 60 * MIN; await w.runTick();
+  assert.equal(told(), 2, 'told again a day on');
+  down.wait = false;
+  w.E.clock.t += MIN; await w.runTick();
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'waiting');
+  assert.deepEqual(w.rec.read('fact', REFUSED_FACT('joe_wait')).doc.items, [], 'cleared once it lands');
 });
 
 // P-F: requestMerges lists the card as refused twice, but the gate (another process) records a newer, different

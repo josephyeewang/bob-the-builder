@@ -35,9 +35,9 @@
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
-//     research_copy   designed for the first cutover, but nothing makes one yet and the fixture does not make it
-//                     go-free (todo below, R-0b-135, L204-c). Until it is built, nothing on day one makes a docs change
-//                     for the gate to merge or an Undo to reverse; the ordinary card here is seeded (day-one audit M-2).
+//     research_copy   go-free in the first-cutover rules (L514). M11 researchHandler makes the card and it goes ready
+//                     with no go (test below). Nothing calls that path yet (R-0b-162), so the docs change the gate
+//                     merges and the Undo reverses here is an ordinary seeded card (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
 //                     product.
 //   Product state: active (the fixture's product_state_rules.active.start is within_caps). paused is "no starts" by
@@ -45,7 +45,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FIRST, ENTRY, PENDING, swap } from '../modules/M10-rules/first-cutover.test-helper.mjs';
@@ -54,6 +55,13 @@ import { rulesFromText } from '../modules/M10-rules/from-text.mjs';
 import { firstCutoverProblems } from '../modules/M10-rules/first-cutover.mjs';
 import { makeGitView } from '../modules/M10-rules/git-view.mjs';
 import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
+import { createHash } from 'node:crypto';
+import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
+import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
+import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
+import { blobSha } from '../modules/M10-rules/reader.mjs';
+import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
 import { CARD_CREATORS } from '../modules/M9-record/permissions.mjs';
 import { setup, seed, product as writeProduct, PRODUCT } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { moduleSources, scanSources, stripComments } from '../modules/M9-record/write-sites.test-helper.mjs';
@@ -70,6 +78,14 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
+import { fakeRules, makeRules } from '../shared/rules.mjs';
+import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
+import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
+import { openRecord } from '../modules/M9-record/writer.mjs';
+import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { blobOf } from '../wiring/fake-github.test-helper.mjs';
+import { installedLayout } from '../shared/job-config.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -86,8 +102,9 @@ function dayOne({ text = FIRST, withProduct = true } = {}) {
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
   env.clock.t = T0;
-  // The product document: M2 onboard.mjs writes it (L204-b), but only through the approvals port, not wired yet (L270; see
-  // the writers tests below). With withProduct it is written through the real Record, as approvals would.
+  // The product document: M2 onboard.mjs writes it (L204-b) through the approvals port, which the Dispatcher wiring
+  // answers (L270); the boot test below proves that on the Mac's own path (L292). With withProduct it is written here
+  // through the real Record, as approvals would, so the other tests need no boot.
   // productState is wired here by the test: no production code builds the engine yet, and rulesFromText's own default
   // reads every product as active, so "paused with no document" is this wiring's answer, not yet the Mac's.
   if (withProduct) writeProduct(env, 'active');
@@ -102,6 +119,12 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
+// The day-one engine answers the push; the push world's values stay plain values, as M4's push still reads them
+// (shared/rules.mjs OLD_VALUES_UNTIL_STEP_2).
+function pushRules(w, world) {
+  return makeRules({ rev: 'fake-1', may: (a, x) => w.rules.may(a, x), get: (k, { product } = {}) => (product === world.product ? world.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+}
+
 const UNDO_ID = 'U1';
 function undoTapped(w) {
   const entries = undoEntries(UNDO_ID, {}, { product: P, files: [DOC], pr: 7 });
@@ -132,8 +155,8 @@ test('the kinds list at the top is what the fixture and the modules say', () => 
   assert.equal(rules.num('caps.editing_per_product', { product: P }), 0);
   // script: off.
   assert.equal(rules.get('roles_enabled.script', { product: P }), 'none');
-  // Undo cards are go-free; nothing else is (research_copy is not, and the Lead's daily card has no files).
-  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse']);
+  // Undo cards and research copies are go-free; nothing else is (the Lead's daily card has no files).
+  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse', 'research_copy']);
   assert.deepEqual(rules.get('approvals.plan_go.go_free.lead_daily_card', { product: P }), []);
   assert.ok(CARD_CREATORS.dispatcher.includes('exact_reverse'));
   assert.ok(CARD_KINDS.includes('research_copy') && CARD_KINDS.includes('exact_reverse'));
@@ -203,14 +226,16 @@ for (const kind of USED) {
   });
 }
 
-test('M10\'s start question: a worker for an undo card may start on day one', { todo: 'L199-B (lane 1, M10): an exact-reverse undo start is never refused by the editing caps' }, async () => {
+test('M10\'s start question: a worker for an undo card may start on day one', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
   // pass.mjs asks start_session with editing: true for an undo card too (its worker edits files), and the tier
-  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier).
-  const tier = riskOf(w.rules, cardOf(w.rec, id)).tier;
-  const r = w.rules.may('start_session', { product: P, role: 'worker', tier, editing: true });
+  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier). The card goes
+  // with it, as pass.mjs sends it: the engine knows an undo by the card's kind.
+  const card = cardOf(w.rec, id);
+  const tier = riskOf(w.rules, card).tier;
+  const r = w.rules.may('start_session', { product: P, card, role: 'worker', tier, editing: true });
   assert.equal(r.decision, 'allow', `the engine refuses the undo worker: ${r.reason}`);
 });
 
@@ -227,14 +252,14 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
   // The Mac's launcher (a port): it answers yes, in the shape M11's own tests use.
   const launched = [];
   const r = await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
   assert.deepEqual(r.refused, [], 'the undo card is refused a start');
   assert.deepEqual(r.started, [id]);
   assert.deepEqual(launched, [id]);
@@ -255,10 +280,49 @@ test('the undo card the real undo step makes can pass the first-cutover docs lan
   assert.equal(r.decision, 'allow', `the docs lane refuses the undo: ${r.reason}`);
 });
 
-test('with only production writers, the product reads active and the docs lane is not undo-only', { todo: 'L270 (lane 1, the approvals wiring PR after #121): M2 onboard.mjs writes the product document, but only through the tick approvals port, and the Dispatcher wiring answers that port with "not wired yet"; until it is wired the product reads as paused, so no worker starts and only an exact reverse may merge' }, () => {
-  const { rules } = dayOne({ withProduct: false });
-  const merge = rules.may('merge', { product: P, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
+// The Mac's own first boot (L292): `node main.mjs <config>` as the login job runs it, through the real Dispatcher wiring,
+// a real Record on disk, the real rules reader, engine and lock. The only stand-in is GitHub (wiring/fake-github.test-helper.mjs,
+// put in with `node --import`), answering the rules file at the version Joe approved. Nothing writes the product
+// document but that boot: the approvals step reads the rules' onboarding.state and M2 onboard.mjs writes it as approvals.
+const ROOT_ORCH = ORCH;
+function macBoot() {
+  // An installed copy of this checkout (L253): main.mjs takes only a config and wiring inside the copy it runs from.
+  const L = installedLayout('orch-day-one-boot-', { source: true });
+  const dir = L.base;
+  const f = (n) => join(dir, n);
+  writeFileSync(f('products.json'), JSON.stringify([ENTRY]));
+  const rulesStateDir = f('rules-state');
+  mkdirSync(rulesStateDir, { mode: 0o700 });
+  writeFileSync(join(rulesStateDir, 'approved-rules.json'), JSON.stringify({ [ENTRY.product]: [blobOf(FIRST)] }));
+  const token = f('token');
+  writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
+  chmodSync(token, 0o600);
+  const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
+    recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
+    approvalsStateDir: f('approvals-state') };
+  const configFile = L.write('dispatcher.json', config);
+  writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
+  const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
+  const rec = openRecord({ root: config.recordRoot, product: ENTRY.product, ownerUid: process.getuid(), rules: fakeRules() }).record;
+  return { code: r.status, err: r.stderr, rec };
+}
+
+test('with only production writers, the product reads active and the docs lane is not undo-only (L292: the Mac\'s own boot)', () => {
+  const { code, err, rec } = macBoot();
+  assert.equal(code, 0, err);
+  const p = ENTRY.product;
+  // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
+  assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
+  assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
+  assert.equal((rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => e.text.includes(`${p} is now on`)).length, 1, 'Joe is told the product is on, once');
+  // The engine reads that document as the product's state: the docs lane merges an ordinary docs change, not undo-only.
+  const rules = rulesFromText({ [p]: FIRST }, { productState: (q) => rec.read('product', q)?.doc ?? null, clock: () => T0 });
+  const merge = rules.may('merge', { product: p, card: { id: 'C-2', kind: 'ordinary', tier: 2 }, truncated: false, labels: [], declared_tier: 2, kind: 'ordinary', files: docsChange() });
   assert.equal(merge.decision, 'allow', merge.reason);
+  // And the start gate finds the product record the boot made (it refused "no product record" without it).
+  const start = startGate({ rules, rec, card: { id: 'C-9', kind: 'exact_reverse', product: p, tier: 2, files: [DOC] }, kind: 'undo', product: p, b: green(rules), running: [], exactReverse: true });
+  assert.equal(start.ok, true, start.reason);
 });
 
 test('with no product document today, the gaps are exactly the known ones (paused, undo-only, no product record)', () => {
@@ -271,10 +335,46 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c (lane 2, M11): nothing makes a research_copy card yet, and the first-cutover rules do not set go_free.research_copy' }, () => {
-  const { rules } = dayOne();
-  assert.ok(goFreeKinds(rules, P).includes('research_copy'));
+// L303 (#154 audit Minors 4 and 5): two silences the research path leaves for its wiring. Today nothing calls the
+// handler or researchPass, so neither can happen; lane 4's R-0b-162 wiring PR must close both before it lands.
+test('a research report whose card can\'t go ready or land is told to Joe, every time', { todo: 'L303, R-0b-162 (lane 4): the wiring must tell Joe on every settle() failure (not ready, not landed) from researchHandler and researchPass, or a paused product leaves a draft card and a closed ask in silence' }, () => {
+  assert.fail('R-0b-162 wires researchHandler and researchPass; until then nothing reports their settle() results');
 });
+
+test('a research report sent again after an interrupted intake is told, never stuck in silence', { todo: 'L303, R-0b-162 (lane 4): a re-sent report refused with "already has its research_copy card" after an interrupted intake must reach Joe, with what to do' }, () => {
+  assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
+});
+
+// The real path to a research copy: an ask from the front door, then the report for it.
+const REPORT = '# One thing\n\nIt was found out.\n';
+function reportArrives(w) {
+  const now = w.env.clock.t;
+  const f = outboxFile('ask-request', '20261103-0915-rb', { ask: 'research', product: P, brief: 'find out one thing' });
+  assert.equal(checkOutboxFile(f.name, f.text, { products: [P], seenIds: [] }).ok, true);
+  const asked = w.rec.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(w.env, 'front_door', 'F-1', f.name, f.text));
+  assert.equal(asked.ok, true, asked.reason);
+  assert.equal(openResearchAsks({ record: w.rec, rules: w.rules, product: P, now: () => now, alert: fakeAlert() }).opened.length, 1);
+  return researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
+    sha256: createHash('sha256').update(REPORT).digest('hex'), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now });
+}
+
+test('a research_copy card is ready on day one with no go', () => {
+  const w = dayOne();
+  const made = reportArrives(w);
+  assert.equal(made.ok, true, made.reason);
+  const card = w.rec.read('card', RESEARCH_CARD('R-1'));
+  assert.equal(card.doc.state, 'ready');
+  assert.ok(w.rec.ready().some((c) => c.id === card.id), 'the Record lists it as ready, and no go was ever asked for');
+});
+
+for (const [name, off] of [['left out of', ''], ['false in', '      research_copy: false\n']]) {
+  test(`research copies ${name} the first-cutover rules fail closed: no card, and the kind is not go-free`, () => {
+    const w = dayOne({ text: swap(FIRST, '      research_copy: true\n', off) });
+    assert.deepEqual(goFreeKinds(w.rules, P), ['exact_reverse']);
+    assert.deepEqual(reportArrives(w), { ok: false, reason: RESEARCH_OFF });
+    assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')), null);
+  });
+}
 
 // ---- M6's checks step: the real gatherFacts over fake GitHub, then judge ----
 
@@ -305,9 +405,10 @@ test('M6\'s checks step reads the required checks from the real rules: green pas
   assert.deepEqual(refusal1(missing).map((x) => x.reason), ['required check build has not run']);
 });
 
-test('M6\'s checks step refuses a change when the rules name no required checks', { todo: 'L96 m-1: M6 refusals.mjs must refuse an empty required_checks too; today only the fit check does' }, async () => {
+test('M6\'s checks step refuses a change when the rules name no required checks', async () => {
   const empty = await checksStep(swap(FIRST, 'required_checks: [build, test]', 'required_checks: []'), (h) => [run(h, 'build'), run(h, 'test')]);
-  assert.deepEqual(empty.f.requiredChecks, []);
+  assert.equal(empty.f.requiredChecks, null, 'an empty list is no list');
+  assert.equal(empty.f.main.green, null, 'main is not green on a list that names no check');
   assert.notDeepEqual(refusal1(empty), []);
 });
 
@@ -337,23 +438,35 @@ function readsAndWriters() {
 }
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
-const KNOWN_UNWRITTEN = Object.freeze({
-  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
-});
+const KNOWN_UNWRITTEN = Object.freeze({});
 
-test('a worker the real pass starts has the session record M4\'s push script reads', { todo: 'L204-a (lane 2, M11 + M4): the Dispatcher writes only a launch record; push.mjs reads the session record and stops at "no launch record for this session"' }, async () => {
+test('a worker the real pass starts has the session record M4\'s push script reads', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const root = tempDir('orch-day-one-push-');
+  const world = await pushWorld({ root, record: w.rec, seed: false, card: id, product: P });
   let sid = null;
   await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => {
+      sid = x.sessionId;
+      // The launcher makes the session's own outbox and says where it is (pass.mjs's launch port).
+      const box = join(root, 'outboxes', 'worker', x.sessionId);
+      mkdirSync(box, { recursive: true, mode: 0o700 });
+      return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID), outbox: box };
+    } });
   assert.ok(sid, `the undo card ${id} was not started`);
-  // The fields M4 push.mjs attempt() reads from the session record; switching this on, add a push through the real
-  // createPushScript (L204-a's proof).
   const s = w.rec.read('session', sid)?.doc;
   assert.ok(s, 'no session record');
   for (const k of ['product', 'card', 'branch', 'outbox', 'attempt']) assert.ok(s[k], `the session record has no ${k}`);
+
+  // The worker's work, handed in as a bundle in that outbox, and the real push script with nothing else in the Record.
+  await world.commit('the undo', (dir) => { mkdirSync(dirname(join(dir, DOC)), { recursive: true }); writeFileSync(join(dir, DOC), 'the undo\n'); });
+  await world.bundle(undefined, s.outbox);
+  const tip = (await gitOk(['rev-parse', 'HEAD'], world.cg)).trim();
+  const p = await world.push({ rules: pushRules(w, world) }, sid);
+  assert.equal(p.ok, true, p.reason);
+  assert.ok((await world.ghRefs()).split('\n').includes(`refs/heads/${s.branch} ${tip}`), 'GitHub has the card branch at the worker\'s tip');
 });
 
 // Not run here, logged (day-one audit Minor 4): M2's undo-flag, schedule and binding. The answered Undo ask is seeded;
@@ -367,7 +480,7 @@ test('L97, L129: every Record document production reads, today, has a production
     `documents read with no writer: ${unwritten.map((e) => `${e} (read in ${[...reads.get(e)].join(', ')})`).join('; ')}`);
 });
 
-test('L97: every Record document production reads has a production writer', { todo: `L129: ${Object.entries(KNOWN_UNWRITTEN).map(([e, why]) => `${e} (${why.replace(/^L129: /, '')})`).join('; ')}` }, () => {
+test('L97: every Record document production reads has a production writer', () => {
   const { reads, makers } = readsAndWriters();
   assert.deepEqual([...reads.keys()].filter((e) => !makers.has(e)), []);
 });

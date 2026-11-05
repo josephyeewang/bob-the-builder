@@ -6,7 +6,7 @@
 // THE RULE. The owner is the account with the numeric id accounts.joe.github_id, of type "User" (a login can be renamed;
 // an app or bot account is never the owner). Only the owner's reviews submitted at or after the ask was raised count;
 // raised = the time GitHub logged the robot's review request for the owner (read back from the timeline, never the
-// Mac's clock). In order, DISMISSED included, the owner's latest review that is not a plain comment decides:
+// Mac's clock), stored as outsideTime (kinds.mjs): no later than the Mac's now (L362). In order, DISMISSED included, the owner's latest review that is not a plain comment decides:
 //   APPROVED       → counts, if its commit is the pull request's head now, or carries over to it (M10 carryOver: the
 //                    change's own files identical, and only recorded catch-up merges between);
 //   CHANGES_REQUESTED → "changes requested" (a decision PR records it as declined);
@@ -14,7 +14,7 @@
 // Any review of the owner's made through an app (performed_via_github_app) refuses the count. An Approve given only
 // before the ask was raised counts nothing; the owner is told APPROVE_AGAIN_LINE. Any GitHub error → no count.
 //
-//   await requestReview({ gh, owner, repo, pr, githubId }) → { ok, raised_at } | { ok: false, reason }
+//   await requestReview({ gh, owner, repo, pr, githubId, now }) → { ok, raised_at } | { ok: false, reason }   now in ms
 //   await ownerVerdict({ gh, owner, repo, pr, githubId, raisedAt }) → { ok, verdict: 'approved'|'changes_requested'|
 //     'none', review?, head, line? } | { ok: false, reason }
 //   await countApprove({ gh, view, owner, repo, pr, githubId, raisedAt, catchUps }) → { ok, head, review, carried }
@@ -26,7 +26,7 @@
 // `gh` is a GitHub client ({ get, post, … } → { status, json }); `view` is M10's git view of the same repository.
 
 import { carryOver } from '../M10-rules/carry-over.mjs';
-import { APPROVE_AGAIN_LINE } from './kinds.mjs';
+import { APPROVE_AGAIN_LINE, outsideTime } from './kinds.mjs';
 
 const SHA = /^[0-9a-f]{40}$/;
 const MAX_PAGES = 10;
@@ -53,7 +53,7 @@ async function pages(gh, path) {
 
 const validPr = (pr) => Number.isSafeInteger(pr) && pr > 0;
 
-export async function requestReview({ gh, owner, repo, pr, githubId }) {
+export async function requestReview({ gh, owner, repo, pr, githubId, now }) {
   try {
     if (!validPr(pr)) return fail('bad pull request number');
     const u = await read(gh, `/user/${githubId}`);
@@ -65,8 +65,8 @@ export async function requestReview({ gh, owner, repo, pr, githubId }) {
     const events = await pages(gh, `${base}/issues/${pr}/timeline`);
     const asked = events.filter((e) => e?.event === 'review_requested' && e.requested_reviewer?.id === githubId && ms(e.created_at) !== null);
     if (!asked.length) return fail('GitHub shows no review request for the owner');
-    const at = asked.map((e) => ms(e.created_at)).sort((a, b) => a - b).at(-1);
-    return { ok: true, raised_at: new Date(at).toISOString() };
+    const at = asked.map((e) => e.created_at).sort((a, b) => ms(a) - ms(b)).at(-1);
+    return { ok: true, raised_at: new Date(outsideTime(at, now)).toISOString() };
   } catch (e) {
     return fail(`could not ask for the review: ${String(e?.message ?? e).slice(0, 200)}`);
   }
