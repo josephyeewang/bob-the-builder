@@ -285,6 +285,108 @@ test('L168 M-4: a lost merge_parent_moved alert is told again each pass until de
   }
 });
 
+// L172: the merge commit's read fails while `down` says so. The parent answers `parent` when it works.
+function blip(w, sink = 'ok') {
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  const state = { down: false, parent: null, sink, sent: [], undo: [] };
+  view.commit = async (sha) => {
+    if (sha !== mergeOf(w)?.doc?.merge_commit) return real.commit(sha);
+    if (state.down) throw new Error('GitHub is down');
+    const k = await real.commit(sha);
+    return state.parent ? { ...k, parents: [state.parent] } : k;
+  };
+  w.ctx.view = view;
+  const note = (x) => {
+    w.alerts.push(x);
+    if (x.type === 'merge_parent_moved') state.undo.push(x);
+    if (x.type === 'merge_gate_unsure') state.sent.push(x);
+    return x.type === 'merge_gate_unsure';
+  };
+  w.ctx.alert = fakeAlert({
+    throws: (x) => note(x) && state.sink === 'throws' && 'the alert could not be sent',
+    answer: (x) => x.type !== 'merge_gate_unsure' || state.sink !== 'false',
+  });
+  return state;
+}
+
+test('L172: one failed read of the merge commit tells nothing and marks nothing, and the next pass still asks Undo?', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+  assert.equal(mergeOf(w).doc.parent_read_failures, 1);
+  assert.equal(mergeOf(w).doc.parent_checked_at, undefined, 'not marked, so the next pass reads again');
+  assert.deepEqual([s.undo.length, s.sent.length], [0, 0], 'a failed read is not a moved main');
+  s.down = false;
+  s.parent = 'f'.repeat(40);
+  await gatePass(w.ctx);
+  assert.equal(s.undo.length, 1);
+  assert.equal(s.undo[0].ask_owner, 'Undo?');
+  assert.equal(s.undo[0].parent, s.parent);
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+});
+
+test('L172: the third failed read tells the owner once, later ones do not, and a read that works is still checked', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 0, 'two failures say nothing');
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'told on the third');
+  assert.match(s.sent[0].note, /could not check the parent of .+: 3 reads failed/);
+  assert.equal(s.sent[0].merge, mergeOf(w).id);
+  const rev = mergeOf(w).rev;
+  assert.ok(rev > 0);
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'told once');
+  assert.equal(mergeOf(w).rev, rev, 'nothing more is written while it stays down');
+  assert.equal(mergeOf(w).doc.parent_checked_at, undefined);
+  s.down = false;
+  s.parent = 'f'.repeat(40);
+  await gatePass(w.ctx);
+  assert.equal(s.undo.length, 1, 'the check still happens');
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+});
+
+test('L172: a lost "could not check" alert is told again each pass until delivered, then not again', async () => {
+  for (const mode of ['false', 'throws']) {
+    const w = world();
+    verifiedCard(w);
+    const s = blip(w, mode);
+    s.down = true;
+    for (let i = 0; i < 4; i += 1) await gatePass(w.ctx);
+    assert.equal(s.sent.length, 2, `${mode}: tried on the third and fourth`);
+    assert.equal(mergeOf(w).doc.parent_unread_told_at, undefined, `${mode}: not marked while lost`);
+    s.sink = 'ok';
+    await gatePass(w.ctx);
+    assert.equal(s.sent.length, 3, `${mode}: delivered`);
+    assert.ok(mergeOf(w).doc.parent_unread_told_at, `${mode}: marked once delivered`);
+    await gatePass(w.ctx);
+    assert.equal(s.sent.length, 3, `${mode}: not told again`);
+  }
+});
+
+test('L172: a read that works after failures, with the parent as judged, ends it with no alert', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  s.down = false;
+  await gatePass(w.ctx);
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+  assert.deepEqual([s.undo.length, s.sent.length], [0, 0]);
+});
+
 test('L168 M-4: a parent that matches is marked checked at once, with no alert', async () => {
   const w = world();
   verifiedCard(w);

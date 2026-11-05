@@ -41,6 +41,9 @@ import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, ME
 import { KEYS, minutes, MissingKey } from '../M11-dispatcher/keys.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
+// Failed reads of a merge commit before the owner is told its parent could not be checked (L172).
+const PARENT_READ_TRIES = 3;
+
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
 export const FRESHNESS_FACT = 'blueprint_freshness_alarm';
@@ -487,18 +490,29 @@ export async function gatePass(ctx) {
   // The merge must sit right on the main that was judged; if main moved in between, say so (the merge stands).
   // parent_checked_at on the merge records that the parent matched or the owner was told; an alert that answers false
   // or throws leaves it unmarked, and the next pass checks again until it is delivered (L168 M-4, the site G pattern).
+  // A read that fails says nothing about the parent, so it is not told as a moved main and nothing is marked (L172).
   async function parentCheck(m, sha) {
-    let done;
-    try {
-      const k = await ctx.view.commit(sha);
-      done = k?.parents?.[0] === m.doc.judged_main
-        || alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
-    } catch { done = alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
+    let k;
+    try { k = await ctx.view.commit(sha); } catch { parentUnread(m, sha); return; }
+    const done = k?.parents?.[0] === m.doc.judged_main
+      || alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
     if (!done) return;
     const cur = fresh('merge', m.id);
     if (!cur || cur.doc?.parent_checked_at) return;
     const r = write('merge', cur, { parent_checked_at: iso() });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'parent_checked', reason: r.reason });
+  }
+
+  // Failed reads are counted on the merge. From the third on, the owner is told once, retried until delivered; every
+  // pass keeps reading, so a read that works later still asks Undo? if main moved (L172).
+  function parentUnread(m, sha) {
+    const cur = fresh('merge', m.id);
+    if (!cur || cur.doc?.parent_checked_at || cur.doc?.parent_unread_told_at) return;
+    const failures = (cur.doc.parent_read_failures ?? 0) + 1;
+    const told = failures >= PARENT_READ_TRIES
+      && alertTaken(alert, { type: 'merge_gate_unsure', merge: m.id, note: `could not check the parent of ${short(sha)}: ${failures} reads failed. Still trying; if main moved under this merge, you will be asked Undo?` });
+    const r = write('merge', cur, { parent_read_failures: failures, ...(told ? { parent_unread_told_at: iso() } : {}) });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'parent_read_failures', reason: r.reason });
   }
 
   // An undo card that merged marks the card it undid reverted. That is tried again on later passes until it holds or the
