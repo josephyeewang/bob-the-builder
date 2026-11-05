@@ -340,7 +340,8 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
       const asked = Date.now();
       const e = await guarded(() => reviewEnded(s), portMs);
       const took = Date.now() - asked;
-      endedMs += took;
+      // A timer can fire just before the clock reaches its delay, so a call that hit its limit costs the whole limit (L546).
+      endedMs += e?.timedOut === true ? Math.max(took, portMs) : took;
       const want = e?.ended?.verdict_sha256;
       const held = e?.ok !== true ? (e?.reason ?? 'no answer from the ended record')
         : want === hash || want === NEVER_RAN ? null
