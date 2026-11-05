@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
-import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
+import { heartbeatOnce, DISPATCHER_LATE_MIN, STATUS_FACT } from './heartbeat.mjs';
 
 // `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
 function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
@@ -24,7 +24,7 @@ function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
   let planned = null;
   const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
   const tick = (min) => { t += min * 60e3; };
-  return { rec, gh, writer, world, pass, tick, plan: (p) => { planned = p; }, now };
+  return { rec, gh, writer, world, probes, pass, tick, plan: (p) => { planned = p; }, now };
 }
 const refusingPin = (world) => (w) => ({ get: w.get, put: (id, doc, kind) => (world.refuse && doc.kind === 'fact.heartbeat-issue' ? { ok: false, reason: 'the store is full' } : w.put(id, doc, kind)) });
 const pinnedIssues = (gh) => [...gh.issues.values()].filter((i) => /heartbeat \(pinned\)/.test(i.title));
@@ -684,4 +684,37 @@ test('L402: the Record refusing alert writes: red on the pinned issue every pass
   assert.ok(!r.red.includes('alert-not-saved'));
   assert.equal(issuesFor(h, /refusing alert writes/)[0].closed, true);
   assert.equal(issuesFor(h, /red: front-door/).length, 1);
+});
+
+test('L604: a probe that answers null says not known: no alert, no signed-out fact, and not "All green"', async () => {
+  const h = setup();
+  h.world.fd = null; h.world.account = null;
+  await h.pass();
+  const s = h.writer.get(STATUS_FACT('product 1'));
+  assert.deepEqual([s.front_door_reachable, s.signed_in, s.login, s.red], [null, null, null, []]);
+  assert.ok(!h.writer.get('signed-out-product-1'));
+  const [{ body }] = pinnedIssues(h.gh);
+  assert.match(body, /Nothing red; not known: front door, account\./);
+  assert.doesNotMatch(body, /All green/);
+  assert.match(body, /Front Door reachable from the phone: unknown/);
+  assert.match(body, /signed-in account: unknown/);
+  assert.equal(alertIssues(h.gh).length, 0);
+});
+
+test('L604: signed out and then not known: the fact and its alert stay as they were', async () => {
+  const h = setup();
+  h.world.account = { signedIn: false, login: null };
+  await h.pass();
+  h.world.account = null; h.tick(10); await h.pass();
+  assert.equal(h.writer.get('signed-out-product-1').signed_out, true);
+  assert.deepEqual(alertIssues(h.gh).map((i) => i.closed), [false]);
+});
+
+test('L604: a probe that throws is still red, not unknown', async () => {
+  const h = setup();
+  h.probes.frontDoorReachable = async () => { throw new Error('broken'); };
+  await h.pass();
+  const s = h.writer.get(STATUS_FACT('product 1'));
+  assert.equal(s.front_door_reachable, false);
+  assert.ok(s.red.includes('front-door'));
 });

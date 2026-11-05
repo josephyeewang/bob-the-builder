@@ -6,13 +6,16 @@
 // per fact. Editing the body notifies nobody; each red fact raises its own alert (alerts.mjs: one updated issue,
 // cleared when green). A Mini that is off writes nothing, so "stale" is the outside check's to notice.
 //
-// Facts (probes injected; each returns the value or throws, and a throw counts as red):
+// Facts (probes injected; each returns the value or throws, and a throw counts as red). The front door and account
+// probes may also answer null, "not known" (L604): the line and the status fact say so, nothing is raised or cleared,
+// and no signed-out fact moves. Null is never a pass and never a no, and the issue's first line won't say all green.
 //   dispatcher        last good Dispatcher pass; red when older than 15 minutes or missing.
 //   rules             the M10 Rules file reads and parses.
 //   front door        the Front Door answers through the phone link (Remote Control).
 //   account           the signed-in Claude account, as its label from private config ("account A"), never an
 //                     email address: the probe maps it. Signed out → a `signed-out` fact and one alert; nothing here
-//                     restarts anything (the Dispatcher owns that loop and reads the fact). A change to the account
+//                     restarts anything (the Dispatcher owns that loop, from the Sensors' `signed-in-account`, and no
+//                     code reads the `signed-out` fact back but this file). A change to the account
 //                     named by a planned switch → one push request "switch the phone app to account <B> too"
 //                     (idempotent: the same switch never pushes twice); an unplanned change → an alert of its own.
 //                     Both are keyed by a switch count, so a second switch to the same account is a fresh notice
@@ -39,6 +42,7 @@ const ISSUE_FACT = (product) => `heartbeat-issue-${product.replace(/[^A-Za-z0-9_
 export const STATUS_FACT = (product) => `heartbeat-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
 
 async function probe(fn) { try { return { ok: true, v: await fn() }; } catch { return { ok: false, v: null }; } }
+const notKnown = (r) => r.ok && r.v === null;
 
 export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes, plannedSwitch = null, now = () => new Date() }) {
   const t = now();
@@ -69,19 +73,24 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
     'The M10 Rules file could not be read or parsed. Everything that checks a rule refuses until it is fixed.');
 
   const f = await probe(probes.frontDoorReachable);
-  await set('front-door', !(f.ok && f.v === true), `Front Door reachable from the phone: ${f.ok && f.v === true ? 'yes' : 'no'}`,
+  const unknown = [];
+  const notKnownLine = (name, line) => { unknown.push(name); lines.push(`?     ${line}: unknown (no current reading)`); };
+  if (notKnown(f)) notKnownLine('front door', 'Front Door reachable from the phone');
+  else await set('front-door', !(f.ok && f.v === true), `Front Door reachable from the phone: ${f.ok && f.v === true ? 'yes' : 'no'}`,
     'The Front Door session does not answer through the phone link. Use the GitHub fallbacks (ideas as issues, Approve on the PR) until it is back.');
 
   const a = await probe(probes.account);
   const acct = a.ok ? a.v : null;
   const signedIn = Boolean(acct?.signedIn && acct.login);
   const outId = `signed-out-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
-  if (!signedIn) {
+  if (notKnown(a)) {
+    notKnownLine('account', 'signed-in account');
+  } else if (!signedIn) {
     if (!writer.get(outId)?.signed_out) writer.put(outId, { kind: 'fact.signed-out', product, signed_out: true, since: t.toISOString() });
   } else if (writer.get(outId)?.signed_out) {
     writer.put(outId, { kind: 'fact.signed-out', product, signed_out: false, since: null });
   }
-  await set('signed-out', !signedIn, `signed-in account: ${signedIn ? acct.login : 'signed out'}`,
+  if (!notKnown(a)) await set('signed-out', !signedIn, `signed-in account: ${signedIn ? acct.login : 'signed out'}`,
     'The Mini is signed out of Claude. Sessions cannot start; the Dispatcher will not restart in a loop. Sign the Mini back in.');
 
   const lastId = `heartbeat-account-${product.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -147,10 +156,10 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   if (gh.loginTrouble) { red.push(LOGIN_UNKNOWN); lines.push(`RED   alerts: ${gh.loginTrouble}`); }
 
   writer.put(STATUS_FACT(product), { kind: 'fact.heartbeat-status', product, at: t.toISOString(),
-    front_door_reachable: f.ok && f.v === true, signed_in: signedIn, login: signedIn ? acct.login : null,
+    front_door_reachable: notKnown(f) ? null : f.ok && f.v === true, signed_in: notKnown(a) ? null : signedIn, login: signedIn ? acct.login : null,
     login_told: signedIn && told ? acct.login : (toldBefore ?? last), red });
 
-  const render = () => `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
+  const render = () => `Orchestrate heartbeat. ${red.length ? `RED: ${red.join(', ')}` : unknown.length ? `Nothing red; not known: ${unknown.join(', ')}.` : 'All green.'}\nmini_alive_at: ${t.toISOString()}\n\n${lines.join('\n')}\n`;
   const pinned = () => `${render()}${heartbeatMarker(product)}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
