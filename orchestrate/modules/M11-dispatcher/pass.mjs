@@ -602,6 +602,12 @@ function foldText(g) {
  * product and cause has waited a day, so a return is told afresh (#157 audit m3). Run on a full pass only: a pass that
  * starts undo cards alone sees no groups and must not clear them.
  */
+export const clearHold = (rec, fact, now, report) => clearCause(rec, fact, (moved) => {
+  const cur = rec.read('fact', fact)?.doc;
+  const was = typeof cur === 'object' ? cur : undefined;
+  if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
+}, report);
+
 function tellWaits({ rec, groups, alert, now, report }) {
   let products;
   try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
@@ -621,17 +627,9 @@ function tellWaits({ rec, groups, alert, now, report }) {
       tell: (fields) => { const text = foldText(g); return tellThen(alert, text, { fact, fields: { text, ...fields }, kind: 'hold_alert' }); },
       // Called on every pass with nothing to tell (L320 m1): a queued copy is dropped, and written when a mark shows or
       // something was queued, cleared_at moving the version so a mark on its way conflicts (L449 m1, m2).
-      clear: () => clearHold({ rec, fact, now, report }),
+      clear: () => clearHold(rec, fact, now, report),
     });
   }
-}
-// A hold that has ended: a queued copy is dropped, and a mark written so the same cause is told again if it comes back.
-function clearHold({ rec, fact, now, report }) {
-  return clearCause(rec, fact, (moved) => {
-    const cur = rec.read('fact', fact)?.doc;
-    const was = typeof cur === 'object' ? cur : undefined;
-    if (moved || (cur != null && !(typeof cur === 'object' && cur.told_at == null))) putFact(rec, fact, { ...was, told_at: null, cleared_at: iso(now) }, 'hold_cleared', was, ['told_at']);
-  }, report);
 }
 
 // Refusals whose words carry a changing detail (a session id, an error message) are one cause per card, keyed by a
@@ -758,7 +756,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
       holdAlert({ rec, cause: SESSION_OUTBOX_CAUSE(id), text: `card ${id}: session ${sessionId} was refused: the outbox its launcher named ${outboxWrong}; ${then}`, alert, now });
       continue;
     }
-    clearHold({ rec, fact: HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report });
+    clearHold(rec, HOLD_FACT(SESSION_OUTBOX_CAUSE(id)), now, report);
     // claimed -> running adds the process (pid and its start time) to the claim, and nothing else.
     const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
     if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
@@ -776,7 +774,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     const attempt = `a${rec.list('session').filter((s) => s.doc?.card === id).length + 1}`;
     const sr = rec.write({ actor: 'dispatcher', entity: 'session', id: sessionId, expectRev: 0, kind: 'session',
       doc: { state: 'preparing', role: 'worker', product: product ?? null, card: id, branch: cardBranch(id), outbox: l.outbox, attempt, host, pid: l.pid ?? null, pid_start: l.pidStart ?? null, launched_at: iso(now) } });
-    if (sr.ok) clearHold({ rec, fact: HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report });
+    if (sr.ok) clearHold(rec, HOLD_FACT(SESSION_RECORD_CAUSE(id)), now, report);
     else holdAlert({ rec, cause: SESSION_RECORD_CAUSE(id), text: `card ${id}: session ${sessionId} started, but its session record was not written (${sr.reason}), so its work cannot be pushed`, alert, now });
     running.push({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null });
     // Whether or not the hold was told: an alert still queued for it leaves unsent (audit 0b-6 r8 MAT-1).

@@ -49,13 +49,14 @@ import { phoneLinkStep } from './phone-link.mjs';
 import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
+import { tellLostCards } from './lost-cards.mjs';
 import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass } from './plan-go.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -337,6 +338,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   await run('merges', () => requestMerges({ rec, rules, now, b: bands ?? held, running, startsHeld, missing, alert }));
   // A card put on Joe whose alert was not delivered is told again (L130).
   await run('waits', () => retellWaits({ rec, alert, now }));
+  await run('lost-cards', () => tellLostCards({ rec, alert, now, report: failed('lost-cards') }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
