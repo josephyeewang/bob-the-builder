@@ -23,7 +23,6 @@ const ORCH = join(here, '..');
 // empty when step 2 is done.
 // Counts are lines: a read checked and then compared on the next line counts twice (L104 widened the scan).
 export const NOT_YET_SWEPT = Object.freeze({
-  'modules/M4-workshop/git/push.mjs': { count: 1, lane: 1, what: 'product.onboarded !== true' },
 });
 
 const skip = (r) => !r.endsWith('.mjs') || r.endsWith('.test.mjs') || /test-helper/.test(r)

@@ -245,6 +245,9 @@ async function messages(mirror, shas, names) {
  *   scanner                 { bin, version, config, ignoreFile } for gitleaks
  *   getRobotToken(product)  M6's short-lived robot key (R-0b-86)
  *   readRun, workflowRule, issues, gateCache   the start gate's ports (start-gate.mjs)
+ *   productPlace(product)   { repo: 'owner/name', mirror: '<folder>' }: the wiring builds it from the products.json entry
+ *                           and this Mac's config. Neither is a rules line: one home each (L568).
+ *   outsideWorkflow         the outside check's pinned workflow path, from this Mac's config (L568)
  *   pullRequests.upsert({ repo, branch, base, title, body, token })   opens or updates the PR
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
  *                           never passes it, so every address is https://github.com/<repo>.git.
@@ -257,9 +260,12 @@ async function messages(mirror, shas, names) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, testFstat: fstat } = deps;
+  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, testFstat: fstat } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
+  // So is one that doesn't know where a product lives, or which outside check to trust (L568).
+  if (typeof productPlace !== 'function') throw new Error('createPushScript: productPlace must be a function');
+  if (typeof outsideWorkflow !== 'string' || !outsideWorkflow) throw new Error('createPushScript: outsideWorkflow must name the pinned workflow');
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
   if (uids.worker === ownerUid) throw new Error('createPushScript: the worker user and the owner must be different users');
@@ -323,12 +329,12 @@ export function createPushScript(deps) {
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
     if (!BRANCH.test(String(branch)) || branch !== `card/${card.toLowerCase()}`) no(`the branch "${branch}" is not the card's branch`);
 
-    const repo = rules.get('product.repo', { product });
-    const mirror = rules.get('product.mirror', { product });
+    const { repo, mirror } = productPlace(product) ?? {};
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    if (rules.get('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
-    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) no('the product has no valid GitHub repo in the rules');
-    if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
+    // The one "on" switch, the same line M2 onboard.mjs reads (L204-b, L568).
+    if (rules.get('onboarding.state', { product }) !== 'active') no('the product is not onboarded yet (its entry is not on main)');
+    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) no('the product has no valid GitHub repo on this Mac');
+    if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror on this Mac');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
     const fmt = await git(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
     if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) later(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
@@ -430,7 +436,7 @@ export function createPushScript(deps) {
       if (cardDoc.kind === 'exact_reverse' && Array.isArray(cardDoc.files)) subject.reverses_files = cardDoc.files;
       const d = rules.may('push_branch', subject);
       if (d.decision !== 'allow') no(`the rules do not allow this push: ${d.reason}`);
-      const gate = await startGate({ product, mirror, record, readRun, workflowPath: rules.get('outside_check.workflow', { product }), workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
+      const gate = await startGate({ product, mirror, record, readRun, workflowPath: outsideWorkflow, workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
       if (!gate.ok) later(`the start gate is shut: ${gate.reason}`);
 
       // 7. The push: exactly this commit, exactly this branch, never forced.
