@@ -13,6 +13,7 @@ import { lstatSync, readdirSync, rmSync, mkdirSync, writeFileSync, realpathSync 
 import { join, resolve, sep, dirname, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror } from '../git/safe-git.mjs';
 import { CLAUDE_NAMES, fold } from '../git/push-refusals.mjs';
+import { cardBranch } from '../git/branch.mjs';
 
 // Names Claude reads settings, skills or tool servers from. Compared after `fold` (NFKC, case
 // round-trip, invisible characters removed), because a Mac's disk treats `.Claude` as `.claude`.
@@ -80,7 +81,7 @@ export async function prepareWorkerCopy({ product, card, dest, lastBundle = null
   if (!card || card.repo !== product.repo) return refuse(`card repo "${card?.repo}" is not the product's repo "${product.repo}"`);
   if (!CARD.test(String(card.id))) return refuse('bad card id');
   if (!SHA.test(String(card.commit))) return refuse('card commit is not a full commit id');
-  const branch = `card/${String(card.id).toLowerCase()}`;
+  const branch = cardBranch(card.id);
   if (card.branch && card.branch !== branch) return refuse(`card branch "${card.branch}" is not ${branch}`);
   try { lstatSync(dest); return refuse('copy folder already exists'); } catch { /* good */ }
 

@@ -57,7 +57,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle,
     // The launcher starts the session the claim names (L72), as M4's does.
-    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD }; },
+    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: ({ card }) => { calls.reviewers.push(card); return { ok: true, requestId: `Q-${++n}` }; },
     filesOf: filesOfCommits,
@@ -81,7 +81,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -1002,6 +1002,24 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
   assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
   assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
+});
+
+// #219 audit M-1: a start whose outbox is wrong is stopped, on the undo path and on the normal one alike. Both are told
+// through the tick's own ports: a stop port left behind would keep every such card claimed for nothing.
+test('#219 M-1: the tick gives both start paths the stop port and the outbox root', async () => {
+  const run = async (entries) => {
+    const stopped = [];
+    const w = world([account(), usage(), ...entries], { over: {
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
+      outboxRoot: '/no-such-outbox-root' } });
+    await w.pass();
+    return stopped;
+  };
+  // A normal card reaches only the pass's own starts.
+  assert.deepEqual(await run([card('C-1')]), ['C-1']);
+  // An undo is tried by the undo start and, given back, by the pass: stopped once each.
+  assert.deepEqual(await run(undoEntries('U-1')), ['U-1', 'U-1']);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes

@@ -78,7 +78,10 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-import { fakeRules } from '../shared/rules.mjs';
+import { fakeRules, makeRules } from '../shared/rules.mjs';
+import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
+import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
@@ -116,6 +119,12 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
+// The day-one engine answers the push; the push world's values stay plain values, as M4's push still reads them
+// (shared/rules.mjs OLD_VALUES_UNTIL_STEP_2).
+function pushRules(w, world) {
+  return makeRules({ rev: 'fake-1', may: (a, x) => w.rules.may(a, x), get: (k, { product } = {}) => (product === world.product ? world.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+}
+
 const UNDO_ID = 'U1';
 function undoTapped(w) {
   const entries = undoEntries(UNDO_ID, {}, { product: P, files: [DOC], pr: 7 });
@@ -250,7 +259,7 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
   // The Mac's launcher (a port): it answers yes, in the shape M11's own tests use.
   const launched = [];
   const r = await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
   assert.deepEqual(r.refused, [], 'the undo card is refused a start');
   assert.deepEqual(r.started, [id]);
   assert.deepEqual(launched, [id]);
@@ -429,23 +438,35 @@ function readsAndWriters() {
 }
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
-const KNOWN_UNWRITTEN = Object.freeze({
-  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
-});
+const KNOWN_UNWRITTEN = Object.freeze({});
 
-test('a worker the real pass starts has the session record M4\'s push script reads', { todo: 'L204-a (lane 2, M11 + M4): the Dispatcher writes only a launch record; push.mjs reads the session record and stops at "no launch record for this session"' }, async () => {
+test('a worker the real pass starts has the session record M4\'s push script reads', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const root = tempDir('orch-day-one-push-');
+  const world = await pushWorld({ root, record: w.rec, seed: false, card: id, product: P });
   let sid = null;
   await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => {
+      sid = x.sessionId;
+      // The launcher makes the session's own outbox and says where it is (pass.mjs's launch port).
+      const box = join(root, 'outboxes', 'worker', x.sessionId);
+      mkdirSync(box, { recursive: true, mode: 0o700 });
+      return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID), outbox: box };
+    } });
   assert.ok(sid, `the undo card ${id} was not started`);
-  // The fields M4 push.mjs attempt() reads from the session record; switching this on, add a push through the real
-  // createPushScript (L204-a's proof).
   const s = w.rec.read('session', sid)?.doc;
   assert.ok(s, 'no session record');
   for (const k of ['product', 'card', 'branch', 'outbox', 'attempt']) assert.ok(s[k], `the session record has no ${k}`);
+
+  // The worker's work, handed in as a bundle in that outbox, and the real push script with nothing else in the Record.
+  await world.commit('the undo', (dir) => { mkdirSync(dirname(join(dir, DOC)), { recursive: true }); writeFileSync(join(dir, DOC), 'the undo\n'); });
+  await world.bundle(undefined, s.outbox);
+  const tip = (await gitOk(['rev-parse', 'HEAD'], world.cg)).trim();
+  const p = await world.push({ rules: pushRules(w, world) }, sid);
+  assert.equal(p.ok, true, p.reason);
+  assert.ok((await world.ghRefs()).split('\n').includes(`refs/heads/${s.branch} ${tip}`), 'GitHub has the card branch at the worker\'s tip');
 });
 
 // Not run here, logged (day-one audit Minor 4): M2's undo-flag, schedule and binding. The answered Undo ask is seeded;
@@ -459,7 +480,7 @@ test('L97, L129: every Record document production reads, today, has a production
     `documents read with no writer: ${unwritten.map((e) => `${e} (read in ${[...reads.get(e)].join(', ')})`).join('; ')}`);
 });
 
-test('L97: every Record document production reads has a production writer', { todo: `L129: ${Object.entries(KNOWN_UNWRITTEN).map(([e, why]) => `${e} (${why.replace(/^L129: /, '')})`).join('; ')}` }, () => {
+test('L97: every Record document production reads has a production writer', () => {
   const { reads, makers } = readsAndWriters();
   assert.deepEqual([...reads.keys()].filter((e) => !makers.has(e)), []);
 });
