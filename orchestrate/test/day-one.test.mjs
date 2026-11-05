@@ -35,7 +35,7 @@
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
-//     research_copy   go-free in the first-cutover rules (L514; COPIES_ON adds that line to the fixture). M11 researchHandler makes the card and it goes ready
+//     research_copy   go-free in the first-cutover rules (L514). M11 researchHandler makes the card and it goes ready
 //                     with no go (test below). Nothing calls that path yet (R-0b-162), so the docs change the gate
 //                     merges and the Undo reverses here is an ordinary seeded card (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
@@ -58,7 +58,7 @@ import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
 import { createHash } from 'node:crypto';
 import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
 import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
-import { researchHandler, RESEARCH_CARD } from '../modules/M11-dispatcher/research-intake.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
 import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { blobSha } from '../modules/M10-rules/reader.mjs';
 import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
@@ -94,9 +94,7 @@ const USED = Object.freeze(['review', 'merge', 'undo', 'undo_merge']);
 
 // The engine reads the product's state from the Record's product document (engine.mjs productState: "the product
 // record's doc"), so a Record with no product document reads paused, as it would on the Mac.
-// M10's fixture plus the one go-free line the first cutover turned on (L514). Its fit is M10's test.
-const COPIES_ON = swap(FIRST, '      exact_reverse: true\n', '      exact_reverse: true\n      research_copy: true\n');
-function dayOne({ text = COPIES_ON, withProduct = true } = {}) {
+function dayOne({ text = FIRST, withProduct = true } = {}) {
   let env = null;
   const rules = rulesFromText({ [P]: text }, { productState: (p) => env?.record.read('product', p)?.doc ?? null, clock: () => env?.clock.t ?? T0 });
   env = setup({ prefix: 'orch-day-one-', extra: { rules } });
@@ -338,23 +336,36 @@ test('a research report sent again after an interrupted intake is told, never st
   assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
 });
 
-test('a research_copy card is ready on day one with no go', () => {
-  const w = dayOne();
+// The real path to a research copy: an ask from the front door, then the report for it.
+const REPORT = '# One thing\n\nIt was found out.\n';
+function reportArrives(w) {
   const now = w.env.clock.t;
   const f = outboxFile('ask-request', '20261103-0915-rb', { ask: 'research', product: P, brief: 'find out one thing' });
   assert.equal(checkOutboxFile(f.name, f.text, { products: [P], seenIds: [] }).ok, true);
   const asked = w.rec.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(w.env, 'front_door', 'F-1', f.name, f.text));
   assert.equal(asked.ok, true, asked.reason);
   assert.equal(openResearchAsks({ record: w.rec, rules: w.rules, product: P, now: () => now, alert: fakeAlert() }).opened.length, 1);
-  const report = '# One thing\n\nIt was found out.\n';
-  const sha256 = createHash('sha256').update(report).digest('hex');
-  const made = researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(report, 'research-file'),
-    sha256, blob: blobSha(Buffer.from(report)), size: Buffer.byteLength(report), now });
+  return researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
+    sha256: createHash('sha256').update(REPORT).digest('hex'), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now });
+}
+
+test('a research_copy card is ready on day one with no go', () => {
+  const w = dayOne();
+  const made = reportArrives(w);
   assert.equal(made.ok, true, made.reason);
   const card = w.rec.read('card', RESEARCH_CARD('R-1'));
   assert.equal(card.doc.state, 'ready');
   assert.ok(w.rec.ready().some((c) => c.id === card.id), 'the Record lists it as ready, and no go was ever asked for');
 });
+
+for (const [name, off] of [['left out of', ''], ['false in', '      research_copy: false\n']]) {
+  test(`research copies ${name} the first-cutover rules fail closed: no card, and the kind is not go-free`, () => {
+    const w = dayOne({ text: swap(FIRST, '      research_copy: true\n', off) });
+    assert.deepEqual(goFreeKinds(w.rules, P), ['exact_reverse']);
+    assert.deepEqual(reportArrives(w), { ok: false, reason: RESEARCH_OFF });
+    assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')), null);
+  });
+}
 
 // ---- M6's checks step: the real gatherFacts over fake GitHub, then judge ----
 
