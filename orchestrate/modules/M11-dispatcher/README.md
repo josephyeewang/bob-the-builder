@@ -10,6 +10,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 |---|---|---|
 | `main.mjs` | The runnable entry the login job starts: reads the config, loads the wiring, runs one tick | 55, 65 |
 | `tick.mjs` | One full Dispatcher pass: the safety acts first (stops, undo taps, undo starts), then every other step, each in its own try/catch; `runTick` adds the one-pass-at-a-time lock | 55–60, 63, 64, 67, 68 |
+| `lost-cards.mjs` | Tells the owner about cards that can't be read, once then daily (L557). A tell only; a card with a go still asked is M2's to tell | L557 |
 | `pass.mjs` | `stopPass` (bands, compactions, stops at a safe point), `undoStarts`, and the main step: host.lock, parked work resuming, starts (each writes its launch record), a paused product's Lead hand-off; `holdAlert` | 55, 59, 64, 67 |
 | `pass-lock.mjs` | Only one pass at a time | 55 (M16) |
 | `moves.mjs` | Small rev-checked record moves, by M9's field names. No move stamps a time: the time limits read the Record's own clock (`rec.meta`: when an entry reached its state, and when it was last written). Every wait carries all its fields, its `who` one of M9's `WAIT_WHO` | all |
