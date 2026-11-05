@@ -18,7 +18,7 @@
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
 //   check-safe-directory (read only; sudo to look)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
-//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; then a note to check the token page by eye  (sudo: the token is read as orchestrate)
+//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; each kind of read the watch job makes works; then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)
 //   watch-rules --print-config-line --repo <owner/name> --rules-source <full path>  prints the config line (repo + fingerprint of that file)  (read only)
 //   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value  (read only; sudo to look)

@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
-import { DRAFT_FILE, NOT_JUDGED, VERDICTS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
+import { DRAFT_FILE, NOT_JUDGED, VERDICTS, WATCH_READS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { explain, main, parseArgs } from './watch-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -118,6 +118,16 @@ test('a docs-only change with green checks and no open threads would merge; what
   assert.deepEqual(l.refusals, []);
   assert.deepEqual(l.not_judged, [...NOT_JUDGED], 'every line lists what cannot be judged afterwards');
   assert.deepEqual(l.assumed, { declared_tier: 2, product_state: 'active' }, 'the assumptions are stated on every line');
+});
+
+test('PLANT L591 every read the job makes is a kind on WATCH_READS, the list setup proves, in both rules modes', async () => {
+  for (const mode of ['draft', 'github']) {
+    const w = world({ mode });
+    await w.pass(PIN_AT); w.land({ 'docs/a.md': 'two' }); await w.pass();
+    const notOnList = [...new Set(w.asked.map(([, p]) => p))].filter((p) => !WATCH_READS.some((k) => k.shape.test(p)));
+    assert.deepEqual(notOnList, [], `${mode}: reads the job makes that setup would not prove`);
+    assert.ok(w.asked.length > 5, 'the pass really read');
+  }
 });
 
 test('PLANT a source change → would refuse, out of lane (caught by: the lane rule, refusal 9)', async () => {

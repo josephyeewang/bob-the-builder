@@ -84,6 +84,88 @@ export function readOnlyClient({ token, fetchFn = globalThis.fetch, timeoutMs = 
   });
 }
 
+// ---- the reads ---------------------------------------------------------------------------------------------------------
+
+/**
+ * Every kind of read the job makes of GitHub, the one list (L591): the job makes its reads through it, and setup's prove-token
+ * walks it, so a token that passes setup can do what the job does. `shape` is a request path the kind covers (the job's own
+ * test fails on a read no shape covers). `read(r, on)` makes the read for `on`, the facts of one merged commit.
+ */
+export const WATCH_READS = Object.freeze([
+  { key: 'head', what: 'main\'s latest commit', shape: /\/commits\/main$/, read: (r) => r.get(`${r.base}/commits/main`) },
+  { key: 'commit', what: 'a commit', shape: /\/commits\/[0-9a-f]{40}$/, read: (r, on) => r.get(`${r.base}/commits/${on.sha}`) },
+  { key: 'gitCommit', what: 'a commit\'s parents', shape: /\/git\/commits\/[0-9a-f]{40}$/, read: (r, on) => r.view.commit(on.sha) },
+  { key: 'gitTree', what: 'a commit\'s file modes', shape: /\/git\/trees\/[0-9a-f]{40}\?recursive=1$/, read: (r, on) => r.view.entry(on.sha, 'a-path-for-the-read') },
+  { key: 'compare', what: 'the change between two commits', shape: /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}/, read: (r, on) => r.get(`${r.base}/compare/${on.from}...${on.sha}`) },
+  { key: 'rules', what: 'the rules file at a commit', shape: /\/contents\/.+\?ref=[0-9a-f]{40}$/, read: (r, on) => r.get(`${r.base}/contents/${RULES_PATH}?ref=${on.from}`), absentIsAnAnswer: true },
+  { key: 'commitPulls', what: 'the pull requests of a commit', shape: /\/commits\/[0-9a-f]{40}\/pulls\?/, read: (r, on) => r.get(`${r.base}/commits/${on.sha}/pulls?per_page=${MAX_LIST}`) },
+  { key: 'pull', what: 'a pull request', shape: /\/pulls\/\d+$/, read: (r, on) => r.get(`${r.base}/pulls/${on.pr}`) },
+  { key: 'checks', what: 'the check runs', shape: /\/commits\/[0-9a-f]{40}\/check-runs\?/, read: (r, on) => checksAt(r.gh, r.base, on.head) },
+  { key: 'statuses', what: 'the commit statuses', shape: /\/commits\/[0-9a-f]{40}\/status\?/, read: (r, on) => statusesAt(r.gh, r.base, on.head) },
+  { key: 'threads', what: 'the review threads', shape: /^\/graphql$/, read: (r, on) => threadsOf(r.gh, r.owner, r.repo, on.pr) },
+]);
+const READ = Object.fromEntries(WATCH_READS.map((x) => [x.key, x]));
+const readsOf = ({ gh, owner, repo }) => ({ gh, owner, repo, base: `/repos/${owner}/${repo}`, get: (path) => gh.get(path), view: makeGitView({ gh, owner, repo }) });
+
+const WALK_FOR_A_PULL = 50;
+/** main's latest commit that a merged pull request made → { sha, from, head, pr }, or null. Throws what the read threw. */
+async function latestPulled(r) {
+  const top = await READ.head.read(r);
+  if (top?.status !== 200 || !SHA.test(top.json?.sha ?? '')) throw Object.assign(new Error('head'), { status: top?.status });
+  let sha = top.json.sha;
+  for (let n = 0; n < WALK_FOR_A_PULL && sha; n++) {
+    const c = await READ.gitCommit.read(r, { sha });
+    const from = c?.parents?.[0] ?? null;
+    const list = await READ.commitPulls.read(r, { sha });
+    if (list?.status !== 200) throw Object.assign(new Error('pulls'), { status: list?.status });
+    const found = Array.isArray(list.json) ? (list.json.find((p) => p?.merge_commit_sha === sha) ?? list.json[0]) : null;
+    if (Number.isInteger(found?.number) && from) {
+      const pr = await READ.pull.read(r, { pr: found.number });
+      if (pr?.status !== 200) throw Object.assign(new Error('pull'), { status: pr?.status });
+      if (pr.json?.merged === true && SHA.test(pr.json?.head?.sha ?? '')) return { sha, from, head: pr.json.head.sha, pr: found.number };
+    }
+    sha = from;
+  }
+  return null;
+}
+
+/** The status a read's error carries, or null. */
+const statusIn = (e) => (Number.isInteger(e?.status) ? e.status : Number(/(?:answered|HTTP) (\d{3})/.exec(String(e?.message))?.[1] ?? NaN) || null);
+
+/**
+ * Why a read failed, in fixed words and a status number, or null when GitHub answered it. Stricter than failedRead: there a 403 is
+ * an answer, since it says something about the change; here it is the very thing being tested. A list too long or cut off is a
+ * fact about the list, so the token could read it. Never GitHub's own text.
+ */
+function readFault(x, e) {
+  if (e) {
+    const status = statusIn(e);
+    if (status) return `GitHub answered ${status}`;
+    return e.tooLong || /cut off/.test(String(e.message)) ? null : 'no usable answer came back';
+  }
+  return x?.status === undefined || x.status === 200 ? null : `GitHub answered ${x.status}`;
+}
+
+/**
+ * One real read of each kind in WATCH_READS, on main's latest commit with a pull request (L591). → [{ ok, what, why? }]. No such
+ * commit is said, and does not pass: nothing would have been proven.
+ */
+export async function proveWatchReads({ gh, owner, repo }) {
+  const r = readsOf({ gh, owner, repo });
+  let on;
+  try { on = await latestPulled(r); } catch (e) { return [{ ok: false, what: 'the key can walk main to its latest pull request', why: `${readFault(null, e) ?? 'no usable answer came back'}; give the key the permissions the job needs at GitHub` }]; }
+  if (!on) return [{ ok: false, what: `a commit on main with a pull request, in the latest ${WALK_FOR_A_PULL}`, why: 'there is none, so the reads the job makes could not be tried; merge one pull request, then run this again' }];
+  const out = [];
+  for (const k of WATCH_READS) {
+    let x; let e = null;
+    try { x = await k.read(r, on); } catch (err) { e = err; }
+    if (k.absentIsAnAnswer && (x?.status === 404)) { out.push({ ok: true, what: `the job's read of ${k.what} works (there is none there)` }); continue; }
+    const why = readFault(x, e);
+    out.push({ ok: !why, what: `the job's read of ${k.what} works`, ...(why ? { why: `${why}; give the key this permission at GitHub` } : {}) });
+  }
+  return out;
+}
+
 // ---- the rules ---------------------------------------------------------------------------------------------------------
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -127,13 +209,14 @@ export function draftRules({ dir, sha256: pinned }) {
  * request that put them on main, merged, whose head holds the same file). Reasons start with the HTTP status.
  */
 export function githubRules({ gh, owner, repo }) {
+  const reads = readsOf({ gh, owner, repo });
   let last = null; // the last version approved in this pass: { commit, blob }; the next different version must have landed after it (M10's replay guard)
   return {
     kind: 'github', id: null,
     async at(parent) {
       if (!SHA.test(parent ?? '')) return { reason: 'no commit before this one to read the rules at' };
       let r;
-      try { r = await gh.get(`/repos/${owner}/${repo}/contents/${RULES_PATH}?ref=${parent}`); } catch (e) { return { reason: `read error: the rules file at ${parent.slice(0, 7)} could not be asked for (${failText(e)})` }; }
+      try { r = await READ.rules.read(reads, { from: parent }); } catch (e) { return { reason: `read error: the rules file at ${parent.slice(0, 7)} could not be asked for (${failText(e)})` }; }
       if (r?.status === 404) return { reason: `HTTP 404: there is no rules file at ${parent.slice(0, 7)}` };
       if (r?.status !== 200 || !r.json) return { reason: `HTTP ${r?.status}: the rules file at ${parent.slice(0, 7)} could not be read` };
       const j = r.json; const buf = typeof j.content === 'string' && j.encoding === 'base64' ? Buffer.from(j.content, 'base64') : null;
@@ -203,26 +286,27 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
   const base = `/repos/${owner}/${repo}`;
   const view = makeGitView({ gh, owner, repo });
   const fail = (what, e) => { const err = new Error(`${failText(e)}: ${what}`); err.unreadable = true; throw err; };
-  const get = async (path, what) => {
-    let r; try { r = await gh.get(path); } catch (e) { fail(what, e); }
-    if (r?.status !== 200 || r.json == null) fail(what, `HTTP ${r?.status}`);
-    return r.json;
+  const r = readsOf({ gh, owner, repo });
+  const got = async (asked, what) => {
+    let a; try { a = await asked; } catch (e) { fail(what, e); }
+    if (a?.status !== 200 || a.json == null) fail(what, `HTTP ${a?.status}`);
+    return a.json;
   };
   try {
     const c = await (async () => { try { return await view.commit(sha); } catch (e) { return fail('the commit', e); } })();
-    const pulls = await get(`${base}/commits/${sha}/pulls?per_page=${MAX_LIST}`, 'the pull requests for the commit');
+    const pulls = await got(READ.commitPulls.read(r, { sha }), 'the pull requests for the commit');
     if (!Array.isArray(pulls)) fail('the pull requests for the commit', 'odd answer');
     const listed = pulls.filter((p) => Number.isInteger(p?.number));
-    const commitTime = Date.parse((await get(`${base}/commits/${sha}`, 'the commit')).commit?.committer?.date ?? '');
+    const commitTime = Date.parse((await got(READ.commit.read(r, { sha }), 'the commit')).commit?.committer?.date ?? '');
     if (!Number.isFinite(commitTime)) fail('the commit', 'it has no readable date');
     if (listed.length === 0 && now() - commitTime < FRESH_MS) fail('the pull requests for the commit', 'an empty list for a commit under an hour old; GitHub may not have linked it yet');
     if (listed.length === 0) return { direct: true, sha, mergedAt: new Date(commitTime).toISOString(), mergedBy: null, pr: null };
     const num = (listed.find((p) => p.merge_commit_sha === sha) ?? listed[0]).number;
-    const pr = await get(`${base}/pulls/${num}`, `pull request ${num}`);
+    const pr = await got(READ.pull.read(r, { pr: num }), `pull request ${num}`);
     if (pr.merged !== true) return { direct: true, sha, mergedAt: new Date(commitTime).toISOString(), mergedBy: null, pr: null };
     const headSha = SHA.test(pr?.head?.sha ?? '') ? pr.head.sha : fail(`pull request ${num}`, 'no head');
     const parent = c?.parents?.[0] ?? fail('the commit', 'no parent');
-    const cmp = await get(`${base}/compare/${parent}...${sha}`, 'the change');
+    const cmp = await got(READ.compare.read(r, { from: parent, sha }), 'the change');
     // The gate's own limit and readers (L187 c2): 300+ files, or a check or status list too long to read, are facts.
     const tooMany = Array.isArray(cmp.files) && cmp.files.length >= COMPARE_FILE_LIMIT;
     const raw = Array.isArray(cmp.files) && !tooMany ? cmp.files : null;
@@ -243,16 +327,16 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     // A list GitHub answered but cut off (its count doesn't match it) is not a failed read (L190 minor a): the gate waits
     // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict.
     const list = async (read, what) => {
-      try { return await read(gh, base, headSha); } catch (e) {
+      try { return await read.read(r, { head: headSha }); } catch (e) {
         if (e?.tooLong) { checksTooLong = String(e.message); return null; }
         if (!failedRead(e)) { checksCutOff = failText(e); return null; }
         return fail(what, Number.isInteger(e?.status) ? `HTTP ${e.status}` : e);
       }
     };
-    const checks = await list(checksAt, 'the check runs');
-    const statuses = await list(statusesAt, 'the statuses');
+    const checks = await list(READ.checks, 'the check runs');
+    const statuses = await list(READ.statuses, 'the statuses');
     let threads;
-    try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
+    try { threads = await READ.threads.read(r, { pr: num }); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
     return {
       direct: false, sha, pr: num, mergedAt: pr.merged_at ?? null, mergedBy: pr.merged_by?.login ?? null, prBase: pr.base?.ref ?? null, headSha, checks, statuses, threads, files,
       filesProblem: files ? null : tooMany ? 'too_many' : noEntry ? 'no_entry' : 'unread', ...(noEntry ? { filesMissing: noEntry } : {}), ...(checksTooLong ? { checksTooLong } : {}), ...(checksCutOff ? { checksCutOff } : {}),
@@ -304,6 +388,7 @@ export async function watchPass({ gh, owner, repo, dir, rules, now = () => new D
 
 async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
   const base = `/repos/${owner}/${repo}`;
+  const reads = readsOf({ gh, owner, repo });
   const problems = [];
   let ruleId = null;
   const log = (o) => appendLine(dir, o);
@@ -312,7 +397,7 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
   const lines = readLog(dir);
   let head;
   try {
-    const r = await gh.get(`${base}/commits/main`);
+    const r = await READ.head.read(reads);
     if (r?.status !== 200 || !SHA.test(r.json?.sha ?? '')) throw new Error(`HTTP ${r?.status}`);
     head = r.json.sha;
   } catch (e) { problems.push(`main's head could not be read (${failText(e)})`); return done(null, null, 0, 0); }
@@ -328,7 +413,7 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
   }
   // The pin must still be an ancestor of main's head, proven fresh every pass, whatever the walk below stops at.
   try {
-    const r = await gh.get(`${base}/compare/${pin.sha}...${head}`);
+    const r = await READ.compare.read(reads, { from: pin.sha, sha: head });
     if (r?.status !== 200) throw new Error(`HTTP ${r?.status}`);
     if (r.json?.status === 'ahead' || r.json?.status === 'identical') pinOk = true; else problems.push(`the pin ${pin.sha.slice(0, 7)} is no longer an ancestor of main (compare says ${r.json?.status})`);
   } catch (e) { problems.push(`the pin could not be checked against main (${failText(e)})`); }

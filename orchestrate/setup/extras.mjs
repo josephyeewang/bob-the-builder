@@ -15,6 +15,7 @@
 
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { proveWatchReads } from '../modules/M6-merge-gate/watch-only.mjs';
 import { mirrorPath, proposalRows, proposalsParentOf } from './layout.mjs';
 import { aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
 
@@ -200,6 +201,8 @@ const API = 'https://api.github.com';
  *    may not" one, not a rate limit or anything else that also says 403.
  * What a PASS proves is only that this token cannot WRITE PULL REQUESTS. It does not prove the token cannot write code (Contents), or
  * that it covers only one repository: the closing note in setup.mjs tells the person to look at GitHub's token page by eye.
+ *  - (4) one real read of each kind the watch job makes (WATCH_READS), on main's latest commit with a pull request, so a token
+ *    that passes can do the job's work (L591); no such commit does not pass. A failed read doesn't skip (3): a token that can write is told.
  * Only status numbers and fixed sentences are ever printed: never the token, never what GitHub sent back. → [{ ok, what, why? }]
  */
 export async function proveToken(io, cfg) {
@@ -233,6 +236,10 @@ export async function proveToken(io, cfg) {
   item(info.private === true, `${repo} is a private repository`, 'it is public, so reading it works with any token and says nothing about this one; name the private repository the token is meant to watch');
   item(info.archived !== true, `${repo} is not archived`, 'an archived repository refuses every write, so a refused write would prove nothing');
   if (out.some((x) => !x.ok)) return out;
+  // One real read of each kind the job makes (L591). What's said is status numbers and fixed sentences, as everywhere here.
+  const toRead = async (path, init) => { const x = await call(path, init); if (x.status === 0) throw Object.assign(new Error('no answer'), { name: 'NoAnswer' }); let json = null; try { json = JSON.parse(x.text); } catch { /* none */ } return { status: x.status, json }; };
+  const [owner, name] = repo.split('/');
+  for (const row of await proveWatchReads({ gh: { get: (p) => toRead(p), post: (p, body) => toRead(p, { method: 'POST', body: JSON.stringify(body) }) }, owner, repo: name })) item(row.ok, row.what, row.why);
   const list = await call(`/repos/${repo}/pulls?state=open&per_page=1`);
   item(list.status === 200, `reading ${repo}'s open pull requests works`, list.status === 0 ? `no answer (${list.error})` : `GitHub answered ${list.status}${list.rateRemaining === '0' ? ' (a rate limit; wait and run it again)' : ''}`);
   if (list.status !== 200) return out;
