@@ -21,6 +21,10 @@
 // WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
 // request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
 //   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
+// WIRED (A3b, L703): the plan reviewer's two ports, from the same file. startPlanReview writes a plan request (the card
+// and its plan's fingerprint) into the same requests folder; the runner checks it against the Record and starts the
+// reviewer. planReviewAnswer reads the answer from the runner's own ended record beside its status file. Another
+// product's card is refused, as the GitHub reads refuse it.
 // The stamp check (is the reviewers' installed copy at main?) compares the copy's stamp with root's own record beside
 // that copy (install-check.mjs mainSeenFile), which root's updater writes each time it fetches main. Not with mainSha:
 // the copy is the orchestrate code, fetched from the repository updater.json names, not the product's (L639). A record
@@ -42,7 +46,7 @@ import { pastTime } from '../shared/still-waiting.mjs';
 import { readRowAt } from '../modules/M6-merge-gate/gather.mjs';
 import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['filesOf', 'gateAlive', 'healthy', 'resume']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -142,5 +146,11 @@ export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = p
 
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function reviewPorts(ctx) {
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid }) };
+  const runner = reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid });
+  const own = (product) => {
+    if (product !== ctx.entry.product) throw new Error(`this Dispatcher runs product ${ctx.entry.product}, so it can't ask about product ${product}'s plans`);
+  };
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...runner,
+    startPlanReview: (x) => { own(x?.product); return runner.startPlanReview(x); },
+    planReviewAnswer: (x) => { own(x?.product); return runner.planReviewAnswer(x); } };
 }

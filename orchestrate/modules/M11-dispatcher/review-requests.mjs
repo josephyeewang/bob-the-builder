@@ -6,7 +6,9 @@
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
 //   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main, runnerLog })
-//                                                             → { requestReview, hasReviewer, reviewAlerts }
+//                                                             → { requestReview, hasReviewer, planReviewsRunning,
+//                                                                 reviewAlerts, startPlanReview, planReviewAnswer }
+//   writePlanReviewRequest({ dir, card, fingerprint, key })   → asks for a plan reviewer (L703); its session is the request id
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now, report })    → tells each runner alert once, and each hold while it lasts
@@ -32,8 +34,8 @@
 
 import { closeSync, constants, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
+import { dirname, join } from 'node:path';
+import { readReviewStatus, planAnswerFor, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
@@ -42,6 +44,7 @@ import { causeOf } from './pass.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 const HEX40 = /^[0-9a-f]{40}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
  * One request file, given its name only once it is whole (the runner wakes on the folder and must never read half of
@@ -53,16 +56,40 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
   if (!REVIEW_ROLES.includes(role)) return { ok: false, reason: `"${role}" is not a review role` };
   const id = newId();
   if (typeof id !== 'string' || !REQUEST_ID.test(id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
+  const w = writeRequestFile(dir, id, { card, head, role, request_id: id });
+  return w.ok ? { ok: true, requestId: id } : w;
+}
+
+// One request file: written whole under a hidden name, then given its own name, never over another. `same`: a file
+// already under that name is this very request (a plan's id is its key's hash), so it counts as written. → { ok, exists? }
+function writeRequestFile(dir, id, body, { same = false } = {}) {
   const tmp = join(dir, `.${id}.tmp`);
   const final = join(dir, `${id}.json`);
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, JSON.stringify({ card, head, role, request_id: id })); } finally { closeSync(fd); }
-    linkSync(tmp, final);
+    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, JSON.stringify(body)); } finally { closeSync(fd); }
+    try { linkSync(tmp, final); } catch (e) { if (same && e?.code === 'EEXIST') return { ok: true, exists: true }; throw e; }
   } catch (e) {
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
   } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
-  return { ok: true, requestId: id };
+  return { ok: true };
+}
+
+/**
+ * Asks the runner for a plan reviewer (L703): a request { card, fingerprint, request_id, role: plan_reviewer }. The
+ * request id is the sha256 of plan-go's `key` (card and fingerprint), so asking again for the same plan names the same
+ * request: one still waiting is left as it is, and one the runner already took is refused there as seen, never started
+ * twice. The session plan-go keeps is that request id; the runner's launch records carry it, and planReviewAnswer reads
+ * by it. The runner checks the request against the Record (a Tier-1 draft whose plan has this fingerprint) and starts
+ * the reviewer itself, retrying its own failed starts. → { ok: true, session } | { ok: false, reason }
+ */
+export function writePlanReviewRequest({ dir, card, fingerprint, key }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) return { ok: false, reason: 'the plan names no fingerprint (64 hex)' };
+  if (typeof key !== 'string' || !key) return { ok: false, reason: 'the start names no key' };
+  const id = createHash('sha256').update(key).digest('hex');
+  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true });
+  return w.ok ? { ok: true, session: id } : w;
 }
 
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
@@ -138,6 +165,10 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     // never sees them. Throws when the status can't be trusted, so the tick counts them as at the cap, never as none.
     planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt }) => ({ card, session_id: sessionId, started_at: startedAt })),
     reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
+    // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
+    // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
+    startPlanReview: ({ card, fingerprint, key }) => writePlanReviewRequest({ dir: requests, card, fingerprint, key }),
+    planReviewAnswer: ({ card, fingerprint, session }) => planAnswerFor({ root: dirname(status), uid: reviewUid, card, fingerprint, session }),
   };
 }
 
