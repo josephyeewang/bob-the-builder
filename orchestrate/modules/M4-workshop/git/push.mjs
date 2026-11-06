@@ -285,6 +285,12 @@ async function messages(mirror, shas, names, about) {
  *   scanner                 { bin, version, config, ignoreFile } for gitleaks
  *   getRobotToken(product)  M6's short-lived robot key (R-0b-86)
  *   readRun, workflowRule, issues, gateCache   the start gate's ports (start-gate.mjs)
+ *   productPlace(product)   { repo: 'owner/name', mirror: '<folder>' }: the wiring builds it from the products.json entry
+ *                           and this Mac's config. Neither is a rules line: one home each (L568). products.json keeps
+ *                           `repo` as the bare name with `owner` beside it, so the wiring joins them:
+ *                           repo: `${entry.owner}/${entry.repo}`. Passing entry.repo alone makes every push wait (L719 m5).
+ *                           It may be async; the push awaits it.
+ *   outsideWorkflow         the outside check's pinned workflow path, from this Mac's config (L568)
  *   pullRequests.upsert({ repo, branch, base, title, body, token })   opens or updates the PR
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
  *                           never passes it, so every address is https://github.com/<repo>.git.
@@ -299,10 +305,13 @@ async function messages(mirror, shas, names, about) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
+  const { record, rules, productPlace, outsideWorkflow, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   if (testGit !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testGit is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
+  // So is one that doesn't know where a product lives, or which outside check to trust (L568).
+  if (typeof productPlace !== 'function') throw new Error('createPushScript: productPlace must be a function');
+  if (typeof outsideWorkflow !== 'string' || !outsideWorkflow) throw new Error('createPushScript: outsideWorkflow must name the pinned workflow');
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
   if (uids.worker === ownerUid) throw new Error('createPushScript: the worker user and the owner must be different users');
@@ -370,14 +379,14 @@ export function createPushScript(deps) {
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
     if (!BRANCH.test(String(branch)) || branch !== cardBranch(card)) no(`the branch "${branch}" is not the card's branch`);
 
-    const repo = rules.get('product.repo', { product });
-    const mirror = rules.get('product.mirror', { product });
+    // Awaited: the wiring may read products.json asynchronously (L719 m3). A throw here is a wait, via settle (L669 M1).
+    const { repo, mirror } = (await productPlace(product)) ?? {};
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    // A flag is read through flag(): the rules file's reader gives true/false as text (L702 landing). The product's setup
-    // is not about the bundle: fixed in the rules, the same bytes go on (L669 M1).
-    if (rules.flag('product.onboarded', { product }) !== true) later('the product is not onboarded yet (its entry is not on main)');
-    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) later('the product has no valid GitHub repo in the rules');
-    if (typeof mirror !== 'string' || !isAbsolute(mirror)) later('the product has no mirror in the rules');
+    // The one "on" switch, the same line M2 onboard.mjs reads (L204-b, L568); only the exact word active is on. The
+    // product's setup is not about the bundle: once it is fixed on main or on this Mac, the same bytes go on (L669 M1).
+    if (rules.get('onboarding.state', { product }) !== 'active') later('the product is not onboarded yet (its entry is not on main)');
+    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) later('the product has no valid GitHub repo on this Mac');
+    if (typeof mirror !== 'string' || !isAbsolute(mirror)) later('the product has no mirror on this Mac');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
     // What a branch's commits are about: a research copy's are made here, from main in the mirror; any other's come from
     // the bundle.
@@ -490,7 +499,7 @@ export function createPushScript(deps) {
       if (cardDoc.kind === 'exact_reverse' && Array.isArray(cardDoc.files)) subject.reverses_files = cardDoc.files;
       const d = rules.may('push_branch', subject);
       if (d.decision !== 'allow') no(`the rules do not allow this push: ${d.reason}`);
-      const gate = await startGate({ product, mirror, record, readRun, workflowPath: rules.get('outside_check.workflow', { product }), workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
+      const gate = await startGate({ product, mirror, record, readRun, workflowPath: outsideWorkflow, workflowRule, vercelProject: rules.get('product.vercel_project', { product }), cache: gateCache, issues, now: now() });
       if (!gate.ok) later(`the start gate is shut: ${gate.reason}`);
 
       // 7. The push: exactly this commit, exactly this branch, never forced.

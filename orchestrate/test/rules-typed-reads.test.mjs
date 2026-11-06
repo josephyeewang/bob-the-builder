@@ -22,7 +22,8 @@ const ORCH = join(here, '..');
 // exact: one more fails (a new old-style read), one fewer fails too, so this list is cut as each sweep lands and is
 // empty when step 2 is done.
 // Counts are lines: a read checked and then compared on the next line counts twice (L104 widened the scan).
-// Empty: the last one, M4 push.mjs's product.onboarded, moved to flag() (lane 2). Nothing is added back.
+// Empty: the last one, M4 push.mjs's product.onboarded, moved to flag() (lane 2) and then left the rules file for
+// onboarding.state (L568). Nothing is added back.
 export const NOT_YET_SWEPT = Object.freeze({});
 
 const skip = (r) => !r.endsWith('.mjs') || r.endsWith('.test.mjs') || /test-helper/.test(r)

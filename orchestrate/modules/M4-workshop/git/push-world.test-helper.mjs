@@ -140,13 +140,18 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
 
   const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
   const issues = []; const prs = [];
-  const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF, 'proposals.outbox': proposals };
+  const values = { 'onboarding.state': 'active', 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'proposals.outbox': proposals };
+  // Where the product lives and which outside check to trust come from the wiring, not the rules file (L568).
+  const place = { repo: REPO, mirror };
   // push_branch is M10's real engine on its sample policy (L81 sweep): the push is asked what the engine reads.
   const answers = { push_branch: (s) => { onPushAsked(s); return realEngine().may('push_branch', s); } };
   const run = { workflow_path: WF, event: 'schedule', head_branch: 'main', run_at: fresh(), steps: [{ product, conclusion: 'success' }] };
   const ports = {
     record,
     rules: fakeRules({ answers, values }),
+    // The place for the product asked about, and none for any other: a push that asks with the wrong key waits (L719 m1).
+    productPlace: (p) => (p === product ? place : null),
+    outsideWorkflow: WF,
     privateDir,
     scanner: scannerOverride ?? fake.setup,
     getRobotToken: async () => 'robot-key-for-test',

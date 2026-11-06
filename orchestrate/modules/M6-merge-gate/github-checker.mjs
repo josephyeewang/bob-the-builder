@@ -3182,7 +3182,7 @@ Object.defineProperties(__bob_e, {
 //   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
 //   rules.num('claims.stuck_min', { product })                      // → a whole number ≥ 0, or undefined (L96)
 //   rules.dec('usage.pace_min_share', { product })                  // → a number ≥ 0 that may have a fraction, or undefined (L104)
-//   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
+//   rules.flag('caps.shakedown', { product })                       // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
 //                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
