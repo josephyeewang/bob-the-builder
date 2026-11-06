@@ -83,7 +83,11 @@ export function readOnlyClient({ token, fetchFn = globalThis.fetch, timeoutMs = 
       signal: AbortSignal.timeout(timeoutMs),
     });
     // How many reads are left this hour, so a 403 that is a rate limit is told from one that is a missing permission (L707 m3).
-    return { status: res.status, json: res.status === 200 ? await res.json() : null, rateRemaining: res.headers?.get?.('x-ratelimit-remaining') ?? null };
+    // GitHub's per-minute (secondary) limit is a 403 or 429 with a retry-after header or "rate limit" in its text while the
+    // hourly count is not empty (#270 r2 n1). The text is only matched, never kept.
+    const limitedText = res.status === 403 || res.status === 429 ? await Promise.resolve().then(() => res.text()).then((t) => /rate limit/i.test(String(t)), () => false) : false;
+    return { status: res.status, json: res.status === 200 ? await res.json() : null, rateRemaining: res.headers?.get?.('x-ratelimit-remaining') ?? null,
+      rateLimited: limitedText || res.headers?.get?.('retry-after') != null };
   };
   return Object.freeze({
     get: async (path) => { if (!path.startsWith('/repos/') || /\/\.\.(\/|$|\?)/.test(path)) throw new Error('only repository reads are allowed'); return call('GET', path); },
@@ -171,7 +175,9 @@ export function readFault(x, e, last = null) {
   let status;
   if (e) {
     status = statusIn(e);
-    if (!status) return e.tooLong || /cut off/.test(String(e.message)) ? null : { kind: 'trouble', status: null, said: 'no usable answer came back from GitHub' };
+    // Only a plain Error the readers throw themselves on a count mismatch is "cut off"; a network or marked failure is not (#270 r2 n2).
+    const cutOff = e.name === 'Error' && e.unreadable !== true && /cut off/.test(String(e.message));
+    if (!status) return e.tooLong || cutOff ? null : { kind: 'trouble', status: null, said: 'no usable answer came back from GitHub' };
   } else {
     if (x?.status === undefined) return null;   // a git-view read: it throws on anything but a good answer
     status = x.status;

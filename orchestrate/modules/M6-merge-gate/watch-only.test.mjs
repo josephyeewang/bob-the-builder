@@ -1685,3 +1685,25 @@ test('#259 r2 M1: text-scan hits in ordinary code ("Create your user profile", c
   assert.equal(u[0], 'needs-joe label', JSON.stringify(u));
   assert.ok(u.slice(1, 5).every((x) => x.startsWith('scan_not_built: ')), JSON.stringify(u));
 });
+
+// #270 r2 (L712): GitHub's per-minute limit is a rate limit, not a missing permission; only the readers' own count mismatch is "cut off".
+test('L712 n1: a 403 per-minute limit with hourly reads left is trouble, never the permission advice', async () => {
+  const { readFault: rf } = await import('./watch-only.mjs');
+  const answer = (status, text, headers = {}) => async () => ({ status, headers: new Headers({ 'x-ratelimit-remaining': '4000', ...headers }), text: async () => text, json: async () => ({}) });
+  for (const [status, text, headers] of [[403, '{"message":"You have exceeded a secondary rate limit"}', {}], [403, '{}', { 'retry-after': '60' }], [429, '', {}]]) {
+    const c = readOnlyClient({ token: () => 'a-token-that-is-long-enough', fetchFn: answer(status, text, headers) });
+    const x = await c.get('/repos/o/r/commits/' + 'a'.repeat(40) + '/check-runs?per_page=100');
+    assert.equal(rf(x, null).kind, 'trouble', `${status} ${text} ${JSON.stringify(headers)}`);
+  }
+  const plain = readOnlyClient({ token: () => 'a-token-that-is-long-enough', fetchFn: answer(403, '{"message":"Resource not accessible by integration"}') });
+  const x = await plain.get('/repos/o/r/commits/' + 'a'.repeat(40) + '/check-runs?per_page=100');
+  assert.equal(x.rateLimited, false);
+  assert.equal(rf(x, null).kind, 'permission');
+});
+
+test('L712 n2: only a plain, unmarked "cut off" Error is an answer; a network or marked failure with those words is not', async () => {
+  const { readFault: rf } = await import('./watch-only.mjs');
+  assert.equal(rf(null, new Error('the check runs are cut off (3 listed of 5)')), null);
+  assert.equal(rf(null, new TypeError('socket cut off by peer')).kind, 'trouble');
+  assert.equal(rf(null, Object.assign(new Error('cut off'), { unreadable: true })).kind, 'trouble');
+});
