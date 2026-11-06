@@ -75,6 +75,9 @@ export const TIMEOUT_MINUTES = ['cancel_grace_min: 10', 'park_wait_min: 60', 'de
   'checking_max_min: 60', 'reporting_max_min: 30', 'in_review_no_reviewer_min: 60', 'front_door_stuck_min: 30',
   'usage_unknown_max_min: 30'].map((l) => `  ${l}\n`).join('');
 
+// The one product key the Workshop's push needs from the rules file (M4 required-keys.mjs, L612).
+export const PUSH_KEYS = '  vercel_project: sample-app\n';
+
 // The sample made into a first-cutover entry: no lead lane, no editing, no import list, the modules' keys given.
 export const FIRST = [
   (t) => swap(t, '  lead:\n    - docs/blueprint/**\n', ''),
@@ -87,5 +90,6 @@ export const FIRST = [
   (t) => swap(t, '      own_building_share: 70\n', '      own_building_share: 70\n      editing_per_product: 1\n      editing_per_mac: 2\n'),
   (t) => swap(t, '  red_runs: [undo]\n', '  red_runs: [undo]\n  pace_min_share: 0.143\n'),
   (t) => swap(t, '\ntimeouts:\n', `\ntimeouts:\n${TIMEOUT_MINUTES}`),
+  (t) => swap(t, 'product:\n  cutover_stage: first\n', `product:\n  cutover_stage: first\n${PUSH_KEYS}`),
   (t) => `${t}${MODULE_PART}`,
 ].reduce((t, f) => f(t), SAMPLE);

@@ -315,6 +315,225 @@ test('L168 M-4: a lost merge_parent_moved alert is told again each pass until de
   }
 });
 
+// L172: the merge commit's read fails while `down` says so. The parent answers `parent` when it works.
+function blip(w, sink = 'ok') {
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  const state = { down: false, parent: null, sink, sent: [], undo: [] };
+  view.commit = async (sha) => {
+    if (sha !== mergeOf(w)?.doc?.merge_commit) return real.commit(sha);
+    if (state.down) throw new Error('GitHub is down');
+    const k = await real.commit(sha);
+    return state.parent ? { ...k, parents: [state.parent] } : k;
+  };
+  w.ctx.view = view;
+  const note = (x) => {
+    w.alerts.push(x);
+    if (x.type === 'merge_parent_moved') state.undo.push(x);
+    if (x.type === 'merge_gate_unsure') state.sent.push(x);
+    return x.type === 'merge_gate_unsure';
+  };
+  w.ctx.alert = fakeAlert({
+    throws: (x) => note(x) && state.sink === 'throws' && 'the alert could not be sent',
+    answer: (x) => x.type !== 'merge_gate_unsure' || state.sink !== 'false',
+  });
+  return state;
+}
+
+test('L172: one failed read of the merge commit tells nothing and marks nothing, and the next pass still asks Undo?', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'merged');
+  assert.equal(mergeOf(w).doc.parent_read_failures, 1);
+  assert.equal(mergeOf(w).doc.parent_checked_at, undefined, 'not marked, so the next pass reads again');
+  assert.deepEqual([s.undo.length, s.sent.length], [0, 0], 'a failed read is not a moved main');
+  s.down = false;
+  s.parent = 'f'.repeat(40);
+  await gatePass(w.ctx);
+  assert.equal(s.undo.length, 1);
+  assert.equal(s.undo[0].ask_owner, 'Undo?');
+  assert.equal(s.undo[0].parent, s.parent);
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+});
+
+test('L172, L601: the third failed read tells the owner, the next day\'s pass tells again, and a read that works is still checked', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 0, 'two failures say nothing');
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'told on the third');
+  assert.match(s.sent[0].note, /could not check the parent of .+: 3 reads failed/);
+  assert.equal(s.sent[0].merge, mergeOf(w).id);
+  const rev = mergeOf(w).rev;
+  assert.ok(rev > 0);
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'told once that day');
+  assert.equal(mergeOf(w).rev, rev, 'nothing more is written that day while it stays down');
+  assert.equal(mergeOf(w).doc.parent_checked_at, undefined);
+  w.env.clock.t += 23 * 3_600_000;
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'not yet a day');
+  w.env.clock.t += 3_600_000;
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 2, 'told again a day on');
+  assert.match(s.sent[1].note, /reads are still failing/);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 2, 'then quiet for another day');
+  s.down = false;
+  s.parent = 'f'.repeat(40);
+  await gatePass(w.ctx);
+  assert.equal(s.undo.length, 1, 'the check still happens');
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+});
+
+test('L172: a lost "could not check" alert is told again each pass until delivered, then not again', async () => {
+  for (const mode of ['false', 'throws']) {
+    const w = world();
+    verifiedCard(w);
+    const s = blip(w, mode);
+    s.down = true;
+    for (let i = 0; i < 4; i += 1) await gatePass(w.ctx);
+    assert.equal(s.sent.length, 2, `${mode}: tried on the third and fourth`);
+    assert.equal(mergeOf(w).doc.parent_unread_told_at, undefined, `${mode}: not marked while lost`);
+    s.sink = 'ok';
+    await gatePass(w.ctx);
+    assert.equal(s.sent.length, 3, `${mode}: delivered`);
+    assert.ok(mergeOf(w).doc.parent_unread_told_at, `${mode}: marked once delivered`);
+    await gatePass(w.ctx);
+    assert.equal(s.sent.length, 3, `${mode}: not told again`);
+  }
+});
+
+test('L601: a told mark in the future does not hold back the next day\'s word (L329)', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  for (let i = 0; i < 3; i += 1) await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1);
+  const m = mergeOf(w);
+  must(recOf(w).write({ actor: 'merge_gate', entity: 'merge', id: m.id, expectRev: m.rev, doc: { ...m.doc, parent_unread_told_at: new Date(w.env.clock.t + 3_600_000 * 72).toISOString() } }), 'a mark from the future');
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 2);
+});
+
+test('L601: with the start gate shut, the parent check still reads, counts, tells and asks Undo?, and nothing else moves', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  tick(w, 121);   // the outside check has not been green for 2 h: the start gate is shut
+  const marksBefore = w.g.writes.length;
+  for (const want of [2, 3, 3]) {
+    const r = await gatePass(w.ctx);
+    assert.equal(r.ran, false, 'the gate is shut');
+    assert.equal(mergeOf(w).doc.parent_read_failures, want, 'the count goes on while the gate is shut');
+  }
+  assert.equal(s.sent.length, 1, '"could not check" is told while the gate is shut');
+  s.down = false;
+  s.parent = 'f'.repeat(40);
+  await gatePass(w.ctx);
+  assert.equal(s.undo.length, 1, 'Undo? is asked while the gate is shut');
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+  assert.equal(w.g.writes.length, marksBefore, 'no GitHub write went out, so complete() stayed below the gate');
+});
+
+test('L601: a count that can\'t be saved still tells "could not check", and says so', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  const real = w.ctx.record;
+  const wrap = {};
+  for (const k of Object.keys(real)) wrap[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  wrap.write = (req) => (req.entity === 'merge' && req.doc?.parent_read_failures !== undefined ? { ok: false, reason: 'planted refusal' } : real.write(req));
+  w.ctx.record = wrap;
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1);
+  assert.match(s.sent[0].note, /a read failed and the count could not be saved/);
+  assert.equal(w.alerts.filter((a) => a.type === 'merge_gate_write_refused').length, 1);
+  assert.equal(mergeOf(w).doc.parent_read_failures, undefined);
+});
+
+test('L601: with the start gate shut, a merge whose marks failed gets no GitHub write until the gate opens', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.marked_at, undefined, 'the marks failed');
+  w.g.answer.status = null;
+  tick(w, 121);
+  const before = w.g.writes.length;
+  for (let i = 0; i < 3; i += 1) assert.equal((await gatePass(w.ctx)).ran, false);
+  assert.equal(w.g.writes.length, before, 'complete() runs only past the start gate');
+  assert.equal(mergeOf(w).doc.marked_at, undefined);
+  assert.equal(mergeOf(w).doc.parent_read_failures, 3, 'the parent check still ran');
+});
+
+test('L601: with the start gate shut, an audit-passed merge whose parent was never checked is still read', async () => {
+  for (const state of ['audited_ok', 'audit_flagged']) {
+    const w = world(limited());
+    verifiedCard(w);
+    const s = blip(w);
+    s.down = true;
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    const conclusion = state === 'audited_ok' ? 'success' : 'failure';
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion } }), 'fact');
+    must(put(w.env.record, 'merge_gate', 'merge', m.id, { state }, { data: { fact: 'audit-run-1' } }), state);
+    assert.equal(mergeOf(w).doc.parent_checked_at, undefined, 'never checked before the gate shuts');
+    tick(w, 121);
+    s.down = false;
+    s.parent = 'f'.repeat(40);
+    assert.equal((await gatePass(w.ctx)).ran, false);
+    assert.equal(s.undo.length, 1, `${state}: Undo? is asked`);
+    assert.ok(mergeOf(w).doc.parent_checked_at, state);
+  }
+});
+
+test('L601: a count refused on the third read tells "could not check" once, not twice', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 0);
+  const real = w.ctx.record;
+  const wrap = {};
+  for (const k of Object.keys(real)) wrap[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  wrap.write = (req) => (req.entity === 'merge' && req.doc?.parent_read_failures !== undefined ? { ok: false, reason: 'planted refusal' } : real.write(req));
+  w.ctx.record = wrap;
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'the third read is told once');
+  assert.match(s.sent[0].note, /3 reads failed/);
+});
+
+test('L172: a read that works after failures, with the parent as judged, ends it with no alert', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  s.down = false;
+  await gatePass(w.ctx);
+  assert.ok(mergeOf(w).doc.parent_checked_at);
+  assert.deepEqual([s.undo.length, s.sent.length], [0, 0]);
+});
+
 test('L168 M-4: a parent that matches is marked checked at once, with no alert', async () => {
   const w = world();
   verifiedCard(w);

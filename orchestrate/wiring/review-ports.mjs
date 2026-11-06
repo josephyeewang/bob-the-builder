@@ -11,13 +11,13 @@
 // A product other than this Dispatcher's is refused: one Dispatcher runs one product (M9), and reading another
 // product's repository would answer for the wrong one.
 //
-// WIRED (A3a): planRows({ product, card }) → { <row id>: row }, the rows the card names (its `rows` in the Record),
-// each read from docs/blueprint/rows/<id>.yaml at main's current commit with the Merge Gate's own row reader (M6
-// gather.mjs readRowAt), so the go asked and the go checked read a row the same way. A card the Record doesn't have,
-// one naming no rows, and a row that is missing or can't be parsed at that commit throw: plan-go tells it under the
-// card, and no go is asked on a row that wasn't read. M2 raiseGo then checks the rows against the card (plain ids, each
-// row's done_when, the card's done_when is their pass tests). The read-only client refuses any `..` in a path, so a
-// row id can't reach outside the rows folder.
+// WIRED (A3a): planRows({ product, card }) → { <row id>: row }, the rows the card names: the row files among its files
+// (M2's ROW_FILE; cards have no rows field, L684), each read from docs/blueprint/rows/<id>.yaml at main's current
+// commit with the Merge Gate's own row reader (M6 gather.mjs readRowAt), so the go asked and the go checked read a row
+// the same way. A card the Record doesn't have, one with no row file among its files, and a row that is missing or
+// can't be parsed at that commit throw: plan-go tells it under the card, and no go is asked on a row that wasn't read.
+// M2 raiseGo then checks the rows against the card (plain ids, each row's done_when, the card's done_when is their
+// pass tests). The read-only client refuses any `..` in a path, so a row id can't reach outside the rows folder.
 // WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
 // request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
 //   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
