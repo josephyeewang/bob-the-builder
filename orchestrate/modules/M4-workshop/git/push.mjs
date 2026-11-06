@@ -84,13 +84,20 @@ const later = (reason) => { const e = new Refusal(reason); e.retry = true; throw
 // One rule for every git call in this script (L680). A git that did not finish (safe-git's time limit, a failed start, or
 // its refusal to run: code -1) says nothing about the bundle, so it is a wait. Git's own non-zero answer is judged by what
 // the command asks about: the bundle's own bytes or names (BUNDLE) is final, `no`; GitHub or the mirror (PLACE) may pass
-// by itself, `later`. `final` is the reason said either way.
+// by itself, `later`. `final` is the reason said either way. A BUNDLE answer that is the Mac's (MAC_FAULT), or says
+// nothing at all, is a wait too (L702 M1): a broken bundle always says so (early EOF, missing objects), and a final
+// refusal is keyed on the bundle's bytes, so it could never be taken back.
 const BUNDLE = 'bundle';
 const PLACE = 'GitHub or the mirror';
-// git's words for a mirror it could not write (a stale lock, a full or read-only disk): not the bundle's fault.
-const MIRROR_FAULT = /cannot lock ref|unable to create '[^']*\.lock'|\.lock': File exists|no space left on device|disk quota exceeded|read-only file system/i;
+// git's and the system's words for a fault of the Mac, not the bundle: a mirror it could not write (a stale lock, a full
+// or read-only disk, a folder it may not write), or a helper that was killed or could not start (memory, file handles,
+// processes). safe-git runs git with LANG=C, so these are always in English.
+export const MAC_FAULT = /cannot lock ref|unable to create '[^']*\.lock'|\.lock': File exists|no space left on device|disk quota exceeded|read-only file system|died of signal|out of memory|permission denied|too many open files|cannot fork|unable to fork|resource temporarily unavailable/i;
 const gitAnswer = (r, about, final) => {
-  if (r.code === -1) later(`git did not finish: ${plainError(String(r.stderr ?? '').slice(0, 200))}`);
+  const said = String(r.stderr ?? '');
+  if (r.code === -1) later(`git did not finish: ${plainError(said.slice(0, 200))}`);
+  if (about === BUNDLE && !said.trim()) later('git failed with no message, so it is not judged the bundle\'s');
+  if (about === BUNDLE && MAC_FAULT.test(said)) later(`git failed on this Mac, not on the bundle: ${plainError(said.trim().split('\n').find((l) => MAC_FAULT.test(l)) ?? '').slice(0, 200)}`);
   return about === BUNDLE ? no(final) : later(final);
 };
 // Tests only (createPushScript's testGit): { bin, timeouts: { <command>: ms }, failStart: [<command>] } for this run's git
@@ -413,14 +420,13 @@ export function createPushScript(deps) {
         // A branch already on GitHub is checked below as this push; pushing the same commit again changes nothing.
         tip = remoteTip ?? await commitReport(mirror, research, report, holding);
       } else {
-        await gitDo(['bundle', 'verify', '-q', copy], { gitDir: mirror, purpose: 'push-bundle-verify' }, BUNDLE, 'the bundle does not verify against the mirror (a missing earlier commit?)');
+        // Not -q: git's -q verify fails a bundle missing an earlier commit with no words at all, which gitAnswer would
+        // take for a wait (L702 M1); without it git says "lacks these prerequisite commits", so it stays final.
+        await gitDo(['bundle', 'verify', copy], { gitDir: mirror, purpose: 'push-bundle-verify' }, BUNDLE, 'the bundle does not verify against the mirror (a missing earlier commit?)');
         // `bundle verify` reads the header and the earlier commits, never the pack: a cut-off pack, or one missing an
         // object, fails here, and that is the bundle's (L680 M1). A lock or a full disk is the mirror's, and passes.
         const fb = await run(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', copy, `refs/heads/${branch}:${holding}`], { gitDir: mirror, purpose: 'push-fetch-bundle' });
-        if (fb.code !== 0) {
-          const mirrorFault = MIRROR_FAULT.test(String(fb.stderr));
-          gitAnswer(fb, mirrorFault ? PLACE : BUNDLE, mirrorFault ? 'could not take the bundle in: the mirror could not be written' : 'the bundle could not be taken in: its pack is cut off or missing objects');
-        }
+        if (fb.code !== 0) gitAnswer(fb, BUNDLE, 'the bundle could not be taken in: its pack is cut off or missing objects');
         const got = (await gitText(['rev-parse', '--verify', `${holding}^{commit}`], { gitDir: mirror, purpose: 'push-fetch-bundle' }, BUNDLE, 'the bundle\'s branch does not name a commit')).trim();
         if (got !== tip) no('the bundle\'s branch is not the commit its header names');
       }
@@ -450,7 +456,11 @@ export function createPushScript(deps) {
         names.set(sha, ch.map((e) => e.path));
         for (const e of ch) if (e.status !== 'D' && /^1(00644|00755|20000)$/.test(e.newMode)) blobs.set(`${e.newId} ${e.path}`, { id: e.newId, path: e.path });
       }
-      const mb = (await gitText(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' }, PLACE, 'could not find where the branch leaves main')).trim();
+      // Exit 1 is git's "no common commit": the branch shares no history with main, final (L702 minor 3).
+      const mbr = await run(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' });
+      if (mbr.code === 1) no('the branch shares no history with main');
+      if (mbr.code !== 0) gitAnswer(mbr, PLACE, 'could not find where the branch leaves main');
+      const mb = mbr.stdout.toString('utf8').trim();
       const net = await changes(mirror, [mb, tip], of);
       why.push(...refusedEntries(net));
       if (why.length) no(`the branch touches files no card may: ${[...new Set(why)].slice(0, 5).join('; ')}`);
@@ -479,7 +489,16 @@ export function createPushScript(deps) {
       if (!gate.ok) later(`the start gate is shut: ${gate.reason}`);
 
       // 7. The push: exactly this commit, exactly this branch, never forced.
-      await gitDo(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth }, PLACE, 'GitHub refused the push');
+      const p = await run(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth });
+      if (p.code !== 0) {
+        // GitHub's own words (its `remote:` lines), path-cut, so Joe can act on them (L702 minor 2). A file over GitHub's
+        // size limit (GH001) or its secret blocking (GH013) is never lifted for the same commits: final. Any other
+        // refusal may pass by itself.
+        const said = plainError(String(p.stderr ?? '').split('\n').filter((l) => l.startsWith('remote:')).map((l) => l.slice('remote:'.length).trim()).filter(Boolean).join(' ')).slice(0, 400);
+        const why = said ? `GitHub refused the push: ${said}` : 'GitHub refused the push';
+        if (p.code !== -1 && /\bGH00[1]\b|\bGH013\b/.test(said)) no(why);
+        gitAnswer(p, PLACE, why);
+      }
       const card_doc = cardDoc;
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }

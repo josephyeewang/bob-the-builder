@@ -1367,26 +1367,63 @@ test('L680: a git that does not start is a wait, and so is a git too old to trus
   await nothingPushed(w, 'version');
 });
 
+// git's and the system's words for a fault of the Mac (push.mjs MAC_FAULT), each as git says it (L702 M1: pinned). Each
+// text holds only its own word, so taking any one word out of MAC_FAULT fails its row (the first three once all held two).
+const MAC_WORDS = [
+  "error: cannot lock ref 'refs/orchestrate/incoming/C-1/p-x': is at 0123456 but expected 89abcde\n",
+  "fatal: Unable to create '/m/refs/orchestrate/incoming/C-1/p-x.lock': Not a directory\n",
+  "error: unable to write file /m/x.lock': File exists\n",
+  'fatal: write error: No space left on device\n',
+  'fatal: write error: Disk quota exceeded\n',
+  'error: unable to create temporary file: Read-only file system\n',
+  'error: index-pack died of signal 9\n',
+  'fatal: Out of memory, malloc failed (tried to allocate 8388608 bytes)\n',
+  "fatal: Unable to create temporary file '/m/objects/pack/tmp_pack_XXXXXX': Permission denied\n",
+  'fatal: Too many open files\n',
+  'fatal: cannot fork() for index-pack: Cannot allocate memory\n',
+  'error: unable to fork\n',
+  'error: Resource temporarily unavailable\n',
+];
+
 test('L680: git\'s own answer is final about the bundle, and a wait about GitHub or the mirror', async () => {
   const cases = [
     // About the bundle's own names and commits: final.
-    [{ cmd: 'check-ref-format', code: 1 }, /is not a valid name/, undefined],
+    [{ cmd: 'check-ref-format', code: 128, stderr: "fatal: 'card/c-1' is not a valid branch name\n" }, /is not a valid name/, undefined],
     [{ cmd: 'diff-tree', code: 128, stderr: 'fatal: bad object\n' }, /could not list a commit's changes/, undefined],
-    [{ cmd: 'rev-list', code: 128 }, /could not list the branch's commits/, undefined],
-    [{ cmd: 'cat-file', code: 128 }, /could not read commit/, undefined],
+    [{ cmd: 'rev-list', code: 128, stderr: 'fatal: bad object\n' }, /could not list the branch's commits/, undefined],
+    [{ cmd: 'cat-file', code: 128, stderr: 'fatal: bad object\n' }, /could not read commit/, undefined],
     [{ cmd: 'bundle', code: 1, stderr: 'error: missing prerequisite\n' }, /does not verify/, undefined],
     [{ cmd: 'fetch', has: '.bundle', code: 128, stderr: 'fatal: early EOF\n' }, /its pack is cut off or missing objects/, undefined],
+    // A commit's added lines, read for an allow comment, are the bundle's own (L702 minor 6, plant X14).
+    [{ cmd: 'diff-tree', has: '--no-color', code: 128, stderr: 'fatal: bad object\n' }, /could not read a commit's changes/, undefined],
+    // A real git's answer to a bundle missing an earlier commit says so (verify without -q): final.
+    [{ cmd: 'bundle', code: 1, stderr: 'error: Repository lacks these prerequisite commits:\nerror: 0123456789012345678901234567890123456789\n' }, /does not verify/, undefined],
     // About GitHub or the mirror: a wait.
-    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: "error: cannot lock ref 'refs/x': File exists\n" }, /the mirror could not be written/, true],
+    // The bundle's command failing for a reason of the Mac's, or with no words at all: a wait (L702 M1, minor 1).
+    ...MAC_WORDS.map((stderr) => [{ cmd: 'fetch', has: '.bundle', code: 1, stderr }, /git failed on this Mac, not on the bundle/, true]),
+    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: '' }, /git failed with no message/, true],
+    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: '  \n' }, /git failed with no message/, true],
+    [{ cmd: 'diff-tree', code: 128, stderr: 'fatal: Out of memory, malloc failed (tried to allocate 1048576 bytes)\n' }, /not on the bundle/, true],
+    [{ cmd: 'bundle', code: 1, stderr: 'error: Too many open files\n' }, /not on the bundle/, true],
+    [{ cmd: 'rev-list', code: 128, stderr: '' }, /git failed with no message/, true],
     [{ cmd: 'ls-remote', code: 128 }, /could not read GitHub/, true],
-    [{ cmd: 'push', code: 1 }, /GitHub refused the push/, true],
+    // Where the branch leaves main, and the mirror after the push: the mirror's, a wait (L702 minor 6, plant X8).
+    [{ cmd: 'merge-base', has: 'refs/heads/main', code: 128, stderr: 'fatal: bad object\n' }, /could not find where the branch leaves main/, true],
+    [{ cmd: 'fetch', has: 'refs/heads/main', code: 128, stderr: 'fatal: unable to access\n' }, /could not fetch main from GitHub/, true],
+    [{ cmd: 'push', code: 1 }, /^GitHub refused the push$/, true],
+    // GitHub's own words go in the reason, path-cut (L702 minor 2); its size limit and secret blocking are final.
+    [{ cmd: 'push', code: 1, stderr: 'remote: error: GH001: Large files detected. You may want to try Git Large File Storage.\nremote: error: File docs/big.bin is 120.00 MB\n' }, /^GitHub refused the push: error: GH001: Large files detected\..* is 120\.00 MB$/, undefined],
+    [{ cmd: 'push', code: 1, stderr: 'remote: error: GH013: Repository rule violations found for refs/heads/card/c-1.\nremote: - Push cannot contain secrets\n' }, /^GitHub refused the push: error: GH013: Repository rule violations/, undefined],
+    [{ cmd: 'push', code: 1, stderr: 'remote: Internal Server Error /Users/someone/x\nTo /some/where\n ! [remote rejected] card/c-1 (failed)\n' }, /^GitHub refused the push: Internal Server Error <path>$/, true],
   ];
   for (const [rule, re, retry] of cases) {
-    const name = `${rule.cmd} ${rule.code}`;
+    const name = `${rule.cmd} ${rule.code} ${JSON.stringify(rule.stderr ?? '')}`;
     const { w, push } = await withFake([rule]);
     const r = await push();
     assert.equal(r.ok, false, name);
     assert.match(r.reason, re, name);
+    // git's words reach Joe path-cut (L702: the Mac-fault reason through plainError).
+    assert.doesNotMatch(r.reason, /\/m\/|\/Users\//, name);
     assert.equal(r.retry, retry, `${name}: ${r.reason}`);
     await nothingPushed(w, name);
   }
@@ -1406,6 +1443,38 @@ test('L680 minor: merge-base --is-ancestor\'s exit 1 is "moved" (final); any oth
     assert.match(r.reason, re, String(code));
     assert.equal(r.retry, retry, `${code}: ${r.reason}`);
     assert.equal(await w.ghRefs(), before);
+  }
+});
+
+test('L702 minor 3: merge-base main <tip>\'s exit 1 is "no shared history" (final); any other failure of it is a wait', async () => {
+  for (const [code, re, retry] of [[1, /^the branch shares no history with main$/, undefined], [128, /could not find where the branch leaves main/, true]]) {
+    const { w, push } = await withFake([{ cmd: 'merge-base', has: 'refs/heads/main', code, stderr: code === 128 ? 'fatal: bad object\n' : '' }]);
+    const r = await push();
+    assert.equal(r.ok, false, String(code));
+    assert.match(r.reason, re, String(code));
+    assert.equal(r.retry, retry, `${code}: ${r.reason}`);
+    await nothingPushed(w, String(code));
+  }
+});
+
+// Each git call of the research copy is about main in the mirror, not the report's bytes: a wait (L702 minor 6, plants
+// X9-X12, X15, X16).
+test('L702 minor 6: each git call of the research copy that fails is a wait, and nothing is pushed', async () => {
+  for (const [rule, re] of [
+    [{ cmd: 'ls-tree' }, /could not read main's files/],
+    [{ cmd: 'mktree' }, /could not build the copy's files/],
+    [{ cmd: 'hash-object' }, /could not store the report/],
+    [{ cmd: 'rev-parse', has: 'main^{commit}' }, /could not read main in the mirror/],
+    [{ cmd: 'rev-parse', has: 'main^{tree}' }, /could not read main in the mirror/],
+    [{ cmd: 'commit-tree' }, /could not make the copy's commit/],
+    [{ cmd: 'update-ref', has: 'refs/orchestrate/incoming/' }, /could not hold the copy's commit/],
+  ]) {
+    const name = `${rule.cmd} ${rule.has ?? ''}`;
+    const w = await researchWorld();
+    const fake = makeFakeGit(join(w.root, 'fake-git'), [{ ...rule, code: 128, stderr: 'fatal: bad object\n' }]);
+    const r = await researchRefused(w, re, undefined, { testGit: { bin: fake.bin } });
+    assert.equal(r.retry, true, `${name}: ${r.reason}`);
+    assert.ok(fake.calls().includes(rule.cmd), name);
   }
 });
 

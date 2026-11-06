@@ -284,7 +284,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (first != null && o.doc.birth !== f.at.birth) { f.why = `the proposals folder has ${first}'s file number but a different creation time (re-dated or replaced), so it may be ${first}'s; give ${f.product} a new folder`; continue; }
     if (first != null) { f.why = `the proposals folder was ${first}'s first, so the files ${first} took in from it would be taken in again; give ${f.product} a new folder`; continue; }
     const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, ino: f.at.ino, birth: f.at.birth, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
-    if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${w.reason})`;
+    if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${plainError(String(w.reason))})`;
   }
   for (const f of folders) {
     const { product, dir } = f;
@@ -321,11 +321,14 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       return w;
     };
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
-    // cause, not every pass (L233 M-3, m4).
-    const tellUnrecorded = (said, key) => {
+    // cause, not every pass (L233 M-3, m4). `daily`: told again once its told time is 24 h old, as stillWaiting does
+    // (L702 minor 5), for a wait that goes on.
+    const tellUnrecorded = (said, key, { daily = false } = {}) => {
       note(`proposals ${product}: ${shown}: ${said}`);
-      if (rec.read('fact', toldFactId(product, name))?.doc?.told === key || isQueued(rec, toldFactId(product, name))) return undefined;
-      return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key }, kind: 'proposal_told' });
+      const mark = rec.read('fact', toldFactId(product, name))?.doc;
+      const at = daily ? pastTime(mark?.told_at, now) : null;
+      if ((mark?.told === key && (!daily || (at !== null && now - at < STILL_WAITING_MS))) || isQueued(rec, toldFactId(product, name))) return undefined;
+      return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key, ...(daily ? { told_at: new Date(now).toISOString() } : {}) }, kind: 'proposal_told' });
     };
     // A refusal is recorded once per reason and bytes, and told once (not every pass while the file sits there).
     // A refusal with no bytes to name (a bad name, too big, a link, another owner) never erases a recorded state (L254):
@@ -376,7 +379,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         else if (!w?.ok && old?.waiting_since === undefined && markSince === undefined) {
           // Nothing kept says when it began: told once a day for these bytes, never once a pass (the L233 M-3 rule;
           // L680 minor: once a day, as any wait is).
-          tellUnrecorded(`${shown} in ${product}'s proposals folder waits and was not used: ${why}. Its wait could not be recorded (${plainError(w?.reason ?? 'no answer')})`, `wait ${hash} ${Math.floor(now / STILL_WAITING_MS)}`);
+          tellUnrecorded(`${shown} in ${product}'s proposals folder waits and was not used: ${why}. Its wait could not be recorded (${plainError(w?.reason ?? 'no answer')})`, `wait ${hash}`, { daily: true });
           return;
         }
       }
@@ -412,7 +415,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const key = String(prev.doc.sha256);
       const text = old.interrupted_text ? `${old.interrupted_text}; ${said}` : said;
       const w = put({ ...prev.doc, state: 'interrupted', at: new Date(now).toISOString(), interrupted_text: text, interrupted_key: key }, 'proposal_interrupted');
-      if (!w.ok) { r.refused = `could not record the interruption: ${w.reason}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
+      if (!w.ok) { r.refused = `could not record the interruption: ${plainError(String(w.reason))}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
       tellThen(alert, text, { fact: intakeFactId(product, name), fields: { told_interrupted: key }, kind: 'proposal_told' });
     }
     // Bytes this name used, or may have, before: never again, whatever the fact says now (L254). A heartbeat is a poll.
@@ -484,7 +487,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // Recorded, so new bytes under its name are refused and told like any other kind's (L233 M-5).
       if (!(prev?.doc?.state === 'held' && prev.doc.sha256 === hash)) {
         const w = put({ sha256: hash, state: 'held', at: new Date(now).toISOString() }, 'proposal_bundle');
-        if (!w.ok) { r.refused = `could not record the bundle: ${w.reason}`; tellUnrecorded(`${shown} in ${product}'s proposals folder could not be recorded (${w.reason}); its proposal waits`, `bundle ${hash}`); continue; }
+        if (!w.ok) { r.refused = `could not record the bundle: ${plainError(String(w.reason))}`; tellUnrecorded(`${shown} in ${product}'s proposals folder could not be recorded (${plainError(String(w.reason))}); its proposal waits`, `bundle ${hash}`); continue; }
       }
       r.held = `taken in with ${pair}`;
       continue;
@@ -550,7 +553,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (parsed.kind !== 'heartbeat' && bytesStop(bytesSeen([hash, ...(useBundle ? [useBundle] : [])], true))) continue;
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
-    if (!claim.ok) { r.refused = `could not record the intake: ${claim.reason}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${claim.reason}); it was not used`, `claim ${hash}`); continue; }
+    if (!claim.ok) { r.refused = `could not record the intake: ${plainError(String(claim.reason))}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${plainError(String(claim.reason))}); it was not used`, `claim ${hash}`); continue; }
     let done;
     try { done = await use(); } catch (e) { done = { ok: false, reason: e.message }; }
     if (done?.ok) {

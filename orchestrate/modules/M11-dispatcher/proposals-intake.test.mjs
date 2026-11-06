@@ -681,6 +681,74 @@ test('L680 (plant R10): a rules answer for now that carries a local path reaches
   assert.ok(w.calls.alerts.every((t) => !t.includes('/Users/someone')));
 });
 
+test('L702 minor 7: ten causes in a day are each told once, and the record keeps at most nine, none past a day old', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const toReview = () => ({ ok: true });
+  const fid = retryFactId('a', 'proposal-C-1.md');
+  const at = (i) => NOW + i * 10 * 60_000;
+  for (let i = 0; i < 10; i += 1) await w.pass({ docsCheck: async () => ({ retry: `cause ${i}` }), toReview, now: at(i) });
+  assert.equal(waitAlerts(w).length, 10, waitAlerts(w).join(' | '));
+  const told = w.rec.read('fact', fid).doc.told_causes;
+  // The eight told last before this one, and this one: the first cause has fallen off (the cap of 8, plant X20).
+  assert.deepEqual(Object.values(told).sort(), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => new Date(at(i)).toISOString()));
+  // A day on, a new cause: every cause told the day before is dropped (the 24 h prune, plant X19).
+  await w.pass({ docsCheck: async () => ({ retry: 'cause 10' }), toReview, now: at(9) + 25 * HOUR });
+  assert.deepEqual(Object.values(w.rec.read('fact', fid).doc.told_causes), [new Date(at(9) + 25 * HOUR).toISOString()]);
+});
+
+test('L702 minor 7: the cause recorded as told is the cause in the tell, even when the mark names another (plant X22)', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const toReview = () => ({ ok: true });
+  const fid = retryFactId('a', 'proposal-C-1.md');
+  await w.pass({ docsCheck: async () => ({ retry: 'cause A' }), toReview, now: NOW });
+  const [hashA] = Object.keys(w.rec.read('fact', fid).doc.told_causes);
+  await w.pass({ docsCheck: async () => ({ retry: 'cause B' }), toReview, now: NOW + 10 * 60_000 });
+  const cur = w.rec.read('fact', fid);
+  const [hashB] = Object.keys(cur.doc.told_causes).filter((h) => h !== hashA);
+  assert.ok(hashB && cur.doc.since.endsWith(`|${hashB}`), cur.doc.since);
+  // A mark whose start can't be used (a clock that ran ahead) and no wait start: the wait starts again, and is told with
+  // cause A, which was told lately while the mark names B.
+  const { waiting_since: _drop, ...rest } = cur.doc;
+  assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fid, expectRev: cur.rev, doc: { ...rest, since: `2099-01-01T00:00:00.000Z|${hashB}` } }).ok, true);
+  const t = NOW + 20 * 60_000;
+  await w.pass({ docsCheck: async () => ({ retry: 'cause A' }), toReview, now: t });
+  assert.equal(waitAlerts(w).length, 3, waitAlerts(w).join(' | '));
+  assert.ok(waitAlerts(w).at(-1).includes('cause A'));
+  assert.equal(w.rec.read('fact', fid).doc.told_causes[hashA], new Date(t).toISOString());
+});
+
+test('L702 minor 5: a wait the record will not keep is told again 24 h after its tell, not at UTC midnight', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'write', { value: (x) => (x.kind === 'proposal_wait' ? { ok: false, reason: 'refused' } : w.rec.write(x)) });
+  const stuck = { rec, docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) };
+  const late = Date.parse('2026-11-02T23:59:00Z');
+  for (const m of [0, 2, 60, 23 * 60, 24 * 60 + 1]) await w.pass({ ...stuck, now: late + m * 60_000 });
+  const told = w.calls.alerts.filter((t) => t.includes('proposal-C-1.md') && /could not be recorded/.test(t));
+  assert.equal(told.length, 2, told.join(' | '));
+});
+
+test('L702 minor 4: a record write the Record refuses with a local path reaches Joe with the path cut', async () => {
+  for (const kind of ['proposal_bundle', 'proposal_claim']) {
+    const w = world();
+    put(w, 'research-r1.md', 'x');
+    put(w, 'proposal-C-1.md', 'docs change');
+    put(w, 'bundle-C-1.bundle', 'bytes');
+    const rec = Object.create(w.rec);
+    Object.defineProperty(rec, 'write', { value: (x) => (x.kind === kind ? { ok: false, reason: 'EACCES: /Users/someone/private/record/x.json' } : w.rec.write(x)) });
+    const out = await w.pass({ rec, docsCheck: async () => null, toReview: () => ({ ok: true }) });
+    assert.ok(out.some((r) => /<path>/.test(r.refused ?? '')), `${kind}: ${JSON.stringify(out)}`);
+    assert.ok(out.every((r) => !String(r.refused ?? '').includes('/Users/someone')), kind);
+    assert.ok(w.calls.alerts.length > 0 && w.calls.alerts.every((t) => !t.includes('/Users/someone')), `${kind}: ${w.calls.alerts.join(' | ')}`);
+  }
+});
+
 test('at the second cutover a proposal goes to review once; with no route to review it is refused', async () => {
   const w = world();
   put(w, 'proposal-C-1.md', 'change');
