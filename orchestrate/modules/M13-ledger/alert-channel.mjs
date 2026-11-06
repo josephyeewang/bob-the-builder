@@ -47,7 +47,7 @@ import { TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
 import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, holdsDelivered, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
-import { markSent, readUnsent } from '../M9-record/unsent.mjs';
+import { clearHeldFlag, markSent, readHeldFlag, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
@@ -405,7 +405,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     // process's memory, where this pass can't see it. Not known what is held is not clean either (#260 r1 m1).
     const heldLines = [];
     if (held?.error) heldLines.push(`what the store holds in memory could not be read: ${held.error}`);
-    if (typeof held?.disk === 'string') heldLines.push(`the store's disk can't take a write (${held.disk.slice(0, 200)}): a warning any process on this store raises now (the Dispatcher too) may be held in that process's memory only, where this round can't see it`);
+    if (typeof held?.disk === 'string') heldLines.push(`${held.disk.slice(0, 200)}: a warning any process on this store raises now (the Dispatcher too) may be held in that process's memory only, where this round can't see it`);
     if (held && !held.error && (held.held.length || held.dropped)) {
       let heldSent = 0; let heldTried = 0;
       for (const x of held.held) {
@@ -420,6 +420,31 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       out.held = held.held.length;
       if (held.held.length) heldLines.push(`${held.held.length} of the store's warnings could not be written to its disk (is it full?) and are held in this process only (${heldSent} sent this round); they are lost if it stops`);
       if (held.dropped) heldLines.push(`${held.dropped} count(s) of alerts the Record's queue would not take could not be written to the store's disk and are lost (is it full?)`);
+    }
+    // The held flag (#260 r2 M1): another process on this store (the Dispatcher, which exits after each pass) held
+    // warnings on no disk. Its first warning is told here, on the 'held' key its own process would use, and the flag is
+    // cleared once told; the round says what the flag says, so the rest are not lost unheard. This process's own flag
+    // is its held list above.
+    let flagged;
+    try { flagged = readHeldFlag(recordRoot); } catch (e) { heldLines.push(`the store's held flag could not be read: ${msg(e)}`); }
+    if (flagged && flagged.flag?.pid !== process.pid) {
+      const f = flagged.flag ?? {};
+      const ev = f.event && typeof f.event === 'object' && !Array.isArray(f.event) ? f.event : null;
+      let told = !ev;
+      if (ev) {
+        const text = storeText(ev, target);
+        const id = typeof f.id === 'string' ? f.id : 'flag';
+        let why;
+        try { why = await within(sendMs, () => raiseWhy(alerts, gh, alertKey(target, 'held', id), text, id)); } catch (e) { why = msg(e); }
+        if (why !== null) { out.failed += 1; failedOn(text, why); } else { out.sent += 1; told = true; }
+      }
+      const who = Number.isSafeInteger(f.pid) ? `process ${f.pid}` : 'a process';
+      const when = typeof f.at === 'string' ? ` at ${f.at.slice(0, 40)}` : '';
+      const n = Number.isSafeInteger(f.held) ? f.held : null;
+      heldLines.push(flagged.flag
+        ? `${who} on this store held ${n ?? 'some'} warning(s) in its memory only${when}, as the store's disk could not take them${f.dropped ? `, and lost ${f.dropped} count(s) of alerts` : ''}: ${!ev ? 'none can be told from here' : !told ? 'the first could not be told this round' : n > 1 ? 'the first is told this round, and the others are lost if that process has stopped' : 'it is told this round'}`
+        : 'the store\'s held flag is set but can\'t be read: a process on this store held warnings in its memory only, and they are lost if it stopped');
+      if (told) { try { clearHeldFlag(recordRoot, flagged.raw); } catch (e) { heldLines.push(`the store's held flag could not be cleared: ${msg(e)}`); } }
     }
     // Any alert this round should have delivered and did not: the robot job counts the pass as failed (L288 MAT-2 d).
     // It names the first one and what GitHub said, so Joe has something to act on (L298 Minor 5); masked like the issue.

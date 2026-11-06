@@ -8,7 +8,7 @@ import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs';
-import { readUnsent } from '../M9-record/unsent.mjs';
+import { makeHeldFlag, readHeldFlag, readUnsent, setHeldFlag } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
 import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
@@ -1069,9 +1069,9 @@ test('L620: a heldHere that throws is a refusal; one that answers null or none a
 // ---- #260 r1: a store disk that can't take a write, a store answer that can't be read, and a held line flushed ----
 test('#260 r1 M2: a store disk that can\'t take a write makes the round not clean, with nothing held here', async () => {
   const w = world();
-  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 0, disk: 'a write failed (ENOSPC)' }) });
+  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 0, disk: 'the store\'s disk is full (ENOSPC)' }) });
   assert.equal(r.sent, 0);
-  assert.match(r.refused, /the store's disk can't take a write \(a write failed \(ENOSPC\)\): a warning any process on this store raises now \(the Dispatcher too\) may be held in that process's memory only/);
+  assert.match(r.refused, /the store's disk is full \(ENOSPC\): a warning any process on this store raises now \(the Dispatcher too\) may be held in that process's memory only/);
   assert.doesNotMatch(r.refused, /held in this process only/);
   const ok = world();
   assert.equal((await ok.run({ rec: withHeld(ok.rec, { held: [], dropped: 0, disk: null }) })).refused, undefined, 'a disk that takes writes adds nothing');
@@ -1091,4 +1091,58 @@ test('#260 r1 m2: the store is asked before its file is read, so a held line it 
   assert.equal(r.refused, undefined);
   assert.match(w.gh.openIssues()[0].body, /put back on file/);
   assert.equal(readUnsent(w.root).length, 0, 'and marked delivered');
+});
+
+// ---- #260 r2 M1 a: the held flag another process left (the Dispatcher exits after each pass) ----
+
+const OTHER = process.pid + 100000;
+const flagIn = (root, x = {}) => { makeHeldFlag(root); setHeldFlag(root, { pid: OTHER, at: '2026-11-05T08:00:00Z', held: 2, dropped: 0, id: 'abcd0009', event: { at: '2026-11-05T08:00:00Z', type: 'diary_damaged', reason: 'a broken line' }, ...x }); };
+
+test('#260 r2 M1: another process\'s held flag is told once on the held key, cleared, and that round is not clean; the next is', async () => {
+  const w = world();
+  flagIn(w.root);
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, new RegExp(`process ${OTHER} on this store held 2 warning\\(s\\) in its memory only at 2026-11-05T08:00:00Z, as the store's disk could not take them`));
+  const open = w.gh.openIssues();
+  assert.equal(open.length, 1);
+  assert.equal(open[0].assignee, 'owner-login');
+  assert.match(open[0].body, /a broken line/);
+  assert.equal(readHeldFlag(w.root), null, 'cleared once told');
+  w.tick(5);
+  const r2 = await w.run();
+  assert.equal(r2.refused, undefined, 'the next round is clean');
+  assert.equal(w.gh.openIssues().length, 1);
+});
+
+test('#260 r2 M1: a flag GitHub refuses is a failed send, named, and the flag stays up for the next round', async () => {
+  const w = world();
+  flagIn(w.root);
+  w.gh.open = async () => { throw new Error('GitHub is down'); };
+  const r = await w.run();
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /GitHub is down/);
+  assert.equal(readHeldFlag(w.root).flag.id, 'abcd0009');
+});
+
+test('#260 r2 M1: this process\'s own flag is left to its held list; a torn flag is a refusal, never clean', async () => {
+  const w = world();
+  flagIn(w.root, { pid: process.pid });
+  const r = await w.run();
+  assert.equal(r.refused, undefined);
+  assert.equal(w.gh.openIssues().length, 0);
+  assert.ok(readHeldFlag(w.root), 'not cleared from here');
+  const w2 = world();
+  makeHeldFlag(w2.root);
+  writeFileSync(join(w2.root, 'held-flag'), '{"pid":4'.padEnd(4096, ' '));
+  const r2 = await w2.run();
+  assert.match(r2.refused, /the store's held flag is set but can't be read/);
+});
+
+test('#260 r2 M1: a flag with lost counts says so; one with no warning says none can be told from here', async () => {
+  const w = world();
+  flagIn(w.root, { held: 0, dropped: 3, id: null, event: null });
+  const r = await w.run();
+  assert.match(r.refused, /held 0 warning\(s\) .*, and lost 3 count\(s\) of alerts: none can be told from here/);
+  assert.equal(readHeldFlag(w.root), null);
 });

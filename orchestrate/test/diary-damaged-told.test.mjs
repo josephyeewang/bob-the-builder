@@ -6,12 +6,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { deliverAlertsPass } from '../modules/M13-ledger/alert-channel.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
-import { readUnsent } from '../modules/M9-record/unsent.mjs';
+import { readHeldFlag, readUnsent } from '../modules/M9-record/unsent.mjs';
 import { PRODUCT, UID, seed, setup } from '../modules/M9-record/fixtures.test-helper.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -146,6 +148,80 @@ test('L620: on a full disk the damage is held in memory, the delivery pass tells
   assert.match(r.refused ?? '', heldRefusal, 'a round that holds a warning on no disk is never clean');
 });
 
+// ---- #260 r2 M1: a Dispatcher's held warning outlives its process, through the held flag ----
+
+// The Dispatcher's side runs in its own process, which holds the warning on a full disk, tries once more at exit
+// (main.mjs's flushHeld, the disk still full) and ends. The robot's pass, in this process, then tells it.
+const here = (p) => pathToFileURL(fileURLToPath(new URL(p, import.meta.url))).href;
+function dispatcherHolds(root, text, { fault = true } = {}) {
+  const src = `
+    import { openRecordWithStore } from ${JSON.stringify(here('../modules/M9-record/writer.mjs'))};
+    import { PRODUCT, UID, rulesFor } from ${JSON.stringify(here('../modules/M9-record/rules.test-helper.mjs'))};
+    import { fakeAlert } from ${JSON.stringify(here('./fake-alert.test-helper.mjs'))};
+    import { flushHeld } from ${JSON.stringify(here('../modules/M11-dispatcher/main.mjs'))};
+    const o = openRecordWithStore({ root: process.argv[1], product: PRODUCT, ownerUid: UID, rules: rulesFor(), alert: fakeAlert({ answer: false }), now: () => Date.parse('2026-11-05T08:00:00Z'), ...(process.argv[3] === 'fault' ? { faultAt: 'unsent_fails' } : {}) });
+    o.record.keepAlert(process.argv[2], 'q6-k');
+    flushHeld(o.record, (s) => console.log(s));`;
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;   // a plain child, not a test file reporting to this runner
+  return execFileSync(process.execPath, ['--input-type=module', '-e', src, root, text, fault ? 'fault' : 'real'], { encoding: 'utf8', env });
+}
+
+// (a) on a real full disk, both formats the host may use (L664): the store is opened while there is room (its flag
+// takes its block), the disk is filled, a Dispatcher process holds a warning and exits, and the robot's round tells it
+// with the disk still full: the flag was set and cleared in place. Off unless ORCH_FULLDISK_TEST=1, never in CI.
+for (const [fmt, size] of [['HFS+', 4096], ['APFS', 65536]]) {
+  test(`#260 r2 M1 a: on a real full ${fmt} RAM disk, a Dispatcher's held warning reaches the owner after it exits`, { skip: process.env.ORCH_FULLDISK_TEST !== '1' }, async () => {
+    const { appendFileSync, cpSync, rmSync } = await import('node:fs');
+    const dev = execFileSync('hdiutil', ['attach', '-nomount', `ram://${size}`], { encoding: 'utf8' }).trim().split(/\s+/)[0];
+    const name = `orch-flag-${process.pid}`;
+    try {
+      assert.match(dev, /^\/dev\/disk[0-9]+$/, `hdiutil gave ${dev}`);
+      execFileSync('diskutil', ['erasevolume', fmt, name, dev], { stdio: 'ignore' });
+      const mounted = join('/', 'Volumes', name);
+      const env = logOnly();
+      const root = join(mounted, 'store');
+      cpSync(env.root, root, { recursive: true });
+      const env2 = { ...env, root };
+      opened(env2).store.damaged();
+      assert.equal(readFileSync(join(root, 'held-flag')).length, 4096, 'the flag took its block while there was room');
+      const filler = join(mounted, 'filler');
+      try { for (;;) appendFileSync(filler, Buffer.alloc(65536, 120)); } catch { /* full */ }
+      try { for (;;) appendFileSync(filler, Buffer.alloc(4096, 120)); } catch { /* fuller */ }
+      try { for (;;) appendFileSync(filler, 'x'); } catch { /* really full */ }
+      const log = dispatcherHolds(root, `#260 r2 ${fmt}: an alert the Dispatcher could not queue`, { fault: false });
+      const flag = readHeldFlag(root);
+      const robot = opened(env2);
+      const gh = fakeIssues();
+      const r = await deliver(env2, robot, gh);
+      console.log(`#260 r2 ${fmt}: dispatcher said ${JSON.stringify(log.trim())}; flag ${JSON.stringify(flag?.flag ?? null)}; pass ${JSON.stringify(r)}; flag after ${JSON.stringify(readHeldFlag(root))}`);
+      assert.equal(flag?.flag?.held, 1, 'the flag was set on the full disk');
+      assert.ok([...gh.issues.values()].some((x) => x.body.includes(`#260 r2 ${fmt}: an alert`)), 'told');
+      assert.match(r.refused ?? '', /on this store held 1 warning\(s\) in its memory only/);
+      assert.equal(readHeldFlag(root), null, 'cleared in place on the full disk');
+      rmSync(filler, { force: true });
+    } finally {
+      try { execFileSync('hdiutil', ['detach', dev, '-force'], { stdio: 'ignore' }); } catch { /* detached already */ }
+    }
+  });
+}
+
+test('#260 r2 M1 (Q6): a warning a Dispatcher held on a full disk is told by the robot\'s next round after it exits, then the flag is down', async () => {
+  const env = logOnly();
+  const log = dispatcherHolds(env.root, 'Q6: an alert the Dispatcher could not queue');
+  assert.match(log, /dispatcher: 1 warning\(s\) the store could not write are held in this process only and end with it; the held flag tells the robot's alert pass/);
+  assert.equal(readUnsent(env.root).length, 0, 'nothing reached the file');
+  const robot = opened(env);
+  const gh = fakeIssues();
+  const r = await deliver(env, robot, gh);
+  assert.ok([...gh.issues.values()].some((x) => /Q6: an alert the Dispatcher could not queue/.test(x.body)), 'told');
+  assert.match(r.refused ?? '', /process \d+ on this store held 1 warning\(s\) in its memory only/, 'the told round is not clean');
+  assert.equal(readHeldFlag(env.root), null);
+  env.clock.t += 5 * 60_000;
+  const r2 = await deliver(env, robot, gh);
+  assert.equal(r2.refused, undefined, 'the next round is clean');
+});
+
 // The same on a real full disk (audit #242 r1 P15). It mounts its own 2 MB RAM disk as the user (no sudo, nothing
 // installed), fills it, and detaches it in finally. Off unless ORCH_FULLDISK_TEST=1, and never in CI (L647).
 test('L620: on a real full RAM disk the damage reaches the owner and the round is not clean', { skip: process.env.ORCH_FULLDISK_TEST !== '1' }, async () => {
@@ -180,7 +256,7 @@ test('L620: on a real full RAM disk the damage reaches the owner and the round i
     console.log(`L620 real full disk: held ${JSON.stringify(held.held.map((x) => x.event.type))} dropped ${held.dropped}; on file ${readUnsent(root).length}; pass ${JSON.stringify(r)}; issues ${[...gh.issues.values()].map((x) => x.title).join(' | ')}`);
     assert.equal(told(gh).length, 1, 'told on a full disk');
     assert.match(r.refused ?? '', heldRefusal);
-    assert.match(r.refused ?? '', /the store's disk can't take a write/);
+    assert.match(r.refused ?? '', /the store's disk is full \(ENOSPC\)/);
     const text = readFileSync(join(root, 'unsent-alerts.jsonl'), 'utf8');
     assert.ok(text.startsWith(seeded) && text.endsWith('\n'), 'no part line was left on the file');
     // The disk frees: the held line goes back to the file, is sent from there, and the round is clean.
@@ -192,4 +268,43 @@ test('L620: on a real full RAM disk the damage reaches the owner and the round i
   } finally {
     try { execFileSync('hdiutil', ['detach', dev, '-force'], { stdio: 'ignore' }); } catch { /* detached already */ }
   }
+});
+
+test('#260 r2 M1 b: main() tries the store\'s held lines once more as the Dispatcher exits, and logs what is still held', async () => {
+  const { installedLayout } = await import('../shared/job-config.test-helper.mjs');
+  const { main } = await import('../modules/M11-dispatcher/main.mjs');
+  const L = installedLayout('orch-flush-', { dirs: ['wiring'] });
+  const self = L.write('modules/M11-dispatcher/main.mjs', 'export {};\n');
+  const m11 = fileURLToPath(new URL('../modules/M11-dispatcher/', import.meta.url));
+  const wiring = L.path('wiring/wiring.mjs');
+  writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(m11, 'fixtures.test-helper.mjs'))};
+export const asked = [];
+const base = recWith();
+const rec = { ...base, read: (...a) => base.read(...a), write: (...a) => base.write(...a), heldHere: () => { asked.push(1); return { held: [{ id: 'h1', event: { type: 'diary_damaged' } }], dropped: 2, disk: 'full' }; } };
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(L.base, 'pass.lock') }));
+  const logs = [];
+  const code = await main([config], { self, now: Date.parse('2026-11-05T08:00:00Z'), log: (s) => logs.push(s) });
+  assert.equal(code, 0, logs.join(' | '));
+  assert.ok((await import(wiring)).asked.length >= 1, 'heldHere was asked');
+  assert.ok(logs.includes('dispatcher: 1 warning(s) the store could not write and 2 lost count(s) are held in this process only and end with it; the held flag tells the robot\'s alert pass'), logs.join(' | '));
+});
+
+test('#260 r2 M1 b: the exit flush never throws; an error or a throw is logged', async () => {
+  const { flushHeld } = await import('../modules/M11-dispatcher/main.mjs');
+  const logs = [];
+  flushHeld({ heldHere: () => ({ error: 'boom' }) }, (s) => logs.push(s));
+  flushHeld({ heldHere: () => { throw new Error('bang'); } }, (s) => logs.push(s));
+  flushHeld({ heldHere: () => ({ held: [], dropped: 0, disk: null }) }, (s) => logs.push(s));
+  flushHeld({}, (s) => logs.push(s));
+  assert.deepEqual(logs, ['dispatcher: what the store holds in memory could not be read: boom', 'dispatcher: the store\'s held warnings could not be tried again: bang']);
 });

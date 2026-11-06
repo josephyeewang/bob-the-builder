@@ -26,7 +26,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
-import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
+import { HELD_FLAG, UNSENT, appendPlain, clearHeldFlag, makeHeldFlag, markSent, plainFd, readHeldFlag, readPlain, readUnsent, setHeldFlag } from './unsent.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
@@ -118,7 +118,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const r = kind(root);
     if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
     for (const d of ['docs', 'tmp', 'quarantine']) { const k = kind(join(root, d)); if (k !== 'folder' && k !== 'none') return `the store's ${d}/ is ${k}, not a folder`; }
-    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl', HELD_FLAG]) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
     // The lock files are made by a hard link from a temp name (lock.mjs createWhole), so a second name is normal for a moment
     // and stays if the maker was killed; they are never written in place, so only a link or the wrong kind is refused (round 11 M1, M2).
     for (const f of ['lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none' && !/hard link/.test(k)) return `the store's ${f} is ${k}, not a plain file`; }
@@ -127,6 +127,9 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
   for (const d of [root, P.docs, P.tmp, P.quarantine]) mkdir755(d);
   for (const f of [P.diary, P.refusals, P.seen, P.unsent]) { if (!existsSync(f)) writeFileSync(f, '', { mode: 0o644, flag: 'a' }); chmodSync(f, 0o644); }
+  // The held flag takes its block now, while there is room, so setting it later needs none (#260 r2 M1). On a disk
+  // already full it can't be made: then nothing outlasts a held warning, and the pass's disk probe is what tells.
+  try { makeHeldFlag(root); } catch { /* full already */ }
 
   const lock = makeLock({ dir: root, host, timeoutMs: lockTimeoutMs, probe, disabled: testNoLock });
   const say = (event) => send(stamp(event));
@@ -151,32 +154,51 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // A held line goes back to the file as soon as the disk takes it, oldest first (#260 r1 m2): then it is resent from
   // there like any other, and the delivery pass stops refusing. The first that still fails stops the rest.
   function flushHeld() {
+    if (!unsentHere.length) return;
     while (unsentHere.length) {
-      try { appendUnsent(`${JSON.stringify(unsentHere[0])}\n`); } catch { return; }
+      try { appendUnsent(`${JSON.stringify(unsentHere[0])}\n`); } catch { flagHeld(); return; }
       unsentHere.shift();
     }
+    // All on file now: this process's flag is taken down (the lines are told from the file). A flag another process
+    // set is left for the pass. A count already lost (dropped) keeps it up.
+    if (droppedHere) { flagHeld(); return; }
+    try { const f = readHeldFlag(root); if (f?.flag?.pid === process.pid) clearHeldFlag(root, f.raw); } catch { /* told again: over, never under */ }
   }
   // Can the store's disk take a write now (#260 r1 M2)? One block, written and flushed in a temp file of this process's
   // own (the start-up sweep removes it if the process dies first). null when it can, else why not. Another process on
   // this store (the Dispatcher) holds its own warnings on a full disk where no other process can see them, so a full
   // disk is told by itself.
+  // The answer names what failed (#260 r2 c3): a full disk, or a temp folder that is missing or can't be written.
   function diskProblem() {
-    if (diskFull()) return 'test: no space left on the device';
+    if (diskFull()) return 'the store\'s disk is full (test: no space left on the device)';
     const f = join(P.tmp, `${process.pid}-disk-probe-${randomBytes(4).toString('hex')}`);
     try {
       const fd = openSync(f, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       try {
         const b = Buffer.alloc(4096, 0x20);
         const n = writeSync(fd, b);
-        if (n !== b.length) return `only ${n} of ${b.length} bytes could be written (is it full?)`;
+        if (n !== b.length) return `the store's disk is full (only ${n} of ${b.length} bytes could be written)`;
         fsyncSync(fd);
       } finally { closeSync(fd); }
       return null;
-    } catch (e) { return `a write failed (${e?.code ?? e?.message ?? e})`; } finally { try { unlinkSync(f); } catch { /* not made */ } }
+    } catch (e) {
+      const code = e?.code ?? e?.message ?? String(e);
+      if (code === 'ENOSPC' || code === 'EDQUOT') return `the store's disk is full (${code})`;
+      if (code === 'ENOENT') return `the store's tmp/ folder is missing (${code})`;
+      if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return `the store's tmp/ folder can't be written (${code})`;
+      return `the store can't take a write (${code})`;
+    } finally { try { unlinkSync(f); } catch { /* not made */ } }
   }
+  // Whenever this process holds something on no disk, the held flag says so, outlasting the process (#260 r2 M1): the
+  // Dispatcher exits after each pass. It names the first held warning, which the robot's pass then tells.
+  const flagHeld = () => {
+    if (!unsentHere.length && !droppedHere) return;
+    const first = unsentHere[0];
+    try { setHeldFlag(root, { pid: process.pid, at: new Date(now()).toISOString(), held: unsentHere.length, dropped: droppedHere, id: first?.id ?? null, event: first?.event ?? null }); } catch { /* the flag's own block is gone too */ }
+  };
   const keep = (e, extra = {}) => {
     const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };
-    try { appendUnsent(`${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
+    try { appendUnsent(`${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); flagHeld(); }
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
   // What the unsent file says was kept in the last day, each with its cap_key. Delivered lines count too, so a resend is
@@ -218,7 +240,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (kept.length < KEEP_PER_WINDOW) { keep(stamp({ type: 'alert_not_queued', text: String(text) }), mark); return; }
     const n = lines.filter((x) => x.outcome === 'kept_back').length + 1;
     if (n > KEPT_BACK_MAX) return;
-    try { appendUnsent(`${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { droppedHere += 1; return; }
+    try { appendUnsent(`${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { droppedHere += 1; flagHeld(); return; }
     // The highest step reached, not only a count exactly on one: a lasting fault's count settles between steps (L558 M1).
     const step = KEPT_BACK_STEPS.findLast((x) => x <= n);
     if (!lines.some((x) => x.cap_key === `kept-back-${step}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${step} more ${step === 1 ? 'alert' : 'alerts'} could not be queued in the last day and ${step === 1 ? 'was' : 'were'} kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${step}`, at: mark.at });

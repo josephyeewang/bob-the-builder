@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { UNSENT, appendPlain, markSent, readUnsent } from './unsent.mjs';
+import { HELD_FLAG, HELD_FLAG_BYTES, UNSENT, appendPlain, clearHeldFlag, makeHeldFlag, markSent, readHeldFlag, readUnsent, setHeldFlag } from './unsent.mjs';
 
 const line = (x) => `${JSON.stringify(x)}\n`;
 
@@ -74,4 +74,78 @@ test('#260 r1 M1: a write that lands nothing is thrown too', () => {
   const { f, before } = started();
   assert.throws(() => appendPlain(f, line({ id: 'b', outcome: 'unsent', event: { type: 't' } }), { write: () => 0 }), (e) => e.code === 'ENOSPC');
   assert.equal(readFileSync(f, 'utf8'), before);
+});
+
+// ---- #260 r2 m1 / c1: a newline always goes first, and a 1-byte short write is never cut back ----
+
+test('#260 r2 m1: a line appended right after another writer\'s cut-short line still parses (Q7)', () => {
+  const { root, f } = started();
+  const race = (fd, bytes) => { appendFileSync(f, '{"id":"other","outcome":"unsent","ev'); return writeSync(fd, bytes); };
+  appendPlain(f, line({ id: 'ours', outcome: 'unsent', event: { type: 'diary_damaged' } }), { write: race });
+  assert.deepEqual(readUnsent(root).map((x) => x.id), ['ours'], 'ours parses on its own line');
+});
+
+test('#260 r2 c1: a short write that lands only the leading newline is never cut back, so another writer\'s line is kept (Q8)', () => {
+  const { root, f, before } = started();
+  writeFileSync(f, `${before}{"torn`);
+  const other = line({ id: 'o', outcome: 'unsent', event: { type: 'x' } });
+  const one = (fd, bytes) => { const n = writeSync(fd, bytes.subarray(0, 1)); appendFileSync(f, other); return n; };
+  assert.throws(() => appendPlain(f, line({ id: 'ours', outcome: 'unsent', event: { type: 't' } }), { write: one }), (e) => e.code === 'ENOSPC');
+  assert.ok(readFileSync(f, 'utf8').endsWith(other), 'their line is byte-for-byte intact');
+  assert.deepEqual(readUnsent(root).map((x) => x.id), ['o']);
+});
+
+// ---- #260 r2 M1 a: the held flag ----
+
+const flagged = () => { const root = tempDir('m9-flag-'); makeHeldFlag(root); return root; };
+const sizeOf = (root) => readFileSync(join(root, HELD_FLAG)).length;
+
+test('#260 r2 M1: the held flag is made clear at a fixed size, set and read back, and never changes size', () => {
+  const root = flagged();
+  assert.equal(sizeOf(root), HELD_FLAG_BYTES);
+  assert.equal(readHeldFlag(root), null, 'clear reads as nothing held');
+  makeHeldFlag(root);
+  setHeldFlag(root, { pid: 41, at: 'T', held: 2, dropped: 0, id: 'w1', event: { type: 'diary_damaged', reason: 'r' } });
+  assert.equal(sizeOf(root), HELD_FLAG_BYTES);
+  makeHeldFlag(root);
+  const r = readHeldFlag(root);
+  assert.deepEqual(r.flag, { pid: 41, at: 'T', held: 2, dropped: 0, id: 'w1', event: { type: 'diary_damaged', reason: 'r' } }, 'a second make never clears a set flag');
+  assert.equal(clearHeldFlag(root, r.raw), true);
+  assert.equal(readHeldFlag(root), null);
+  assert.equal(sizeOf(root), HELD_FLAG_BYTES);
+});
+
+test('#260 r2 M1: clearing compares first, so a flag set again since it was read is kept', () => {
+  const root = flagged();
+  setHeldFlag(root, { pid: 41, at: 'T1', held: 1, dropped: 0, id: 'w1', event: { type: 't' } });
+  const told = readHeldFlag(root);
+  setHeldFlag(root, { pid: 42, at: 'T2', held: 1, dropped: 0, id: 'w2', event: { type: 't' } });
+  assert.equal(clearHeldFlag(root, told.raw), false);
+  assert.equal(readHeldFlag(root).flag.id, 'w2');
+});
+
+test('#260 r2 M1: an oversized warning is shrunk to fit, and the flag still reads', () => {
+  const root = flagged();
+  setHeldFlag(root, { pid: 41, at: 'T', held: 1, dropped: 0, id: 'w1', event: { type: 'diary_damaged', reason: 'é'.repeat(5000), extra: 'z'.repeat(9000) } });
+  const r = readHeldFlag(root);
+  assert.equal(sizeOf(root), HELD_FLAG_BYTES);
+  assert.equal(r.flag.event.type, 'diary_damaged');
+  assert.equal(r.flag.event.reason.length, 600);
+  assert.equal(r.flag.event.extra, undefined);
+});
+
+test('#260 r2 M1: a torn flag reads as set but unreadable; a link or a wrong size is refused, never read as clear', () => {
+  const root = flagged();
+  writeFileSync(join(root, HELD_FLAG), '{"pid":4'.padEnd(HELD_FLAG_BYTES, ' '));
+  const r = readHeldFlag(root);
+  assert.ok(r && r.flag === null, 'torn is set, not clear');
+  const linked = tempDir('m9-flag-');
+  writeFileSync(join(linked, 'real'), ' '.repeat(HELD_FLAG_BYTES));
+  symlinkSync(join(linked, 'real'), join(linked, HELD_FLAG));
+  assert.throws(() => readHeldFlag(linked));
+  assert.throws(() => setHeldFlag(linked, { pid: 1, at: 'T', held: 1, dropped: 0 }));
+  const short = tempDir('m9-flag-');
+  writeFileSync(join(short, HELD_FLAG), ' ');
+  assert.throws(() => setHeldFlag(short, { pid: 1, at: 'T', held: 1, dropped: 0 }), /is not 4096 bytes/);
+  assert.equal(readHeldFlag(tempDir('m9-flag-')), null, 'a store with no flag (older) holds nothing');
 });
