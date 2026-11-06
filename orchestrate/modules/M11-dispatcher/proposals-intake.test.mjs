@@ -700,10 +700,10 @@ test('plant L268 m-3: a used file\'s second refusal is told even after a first w
   assert.equal(count(w, /larger than/), 2);
 });
 
-test('plant L268 m-3: the same folder by another spelling (./ and a trailing slash) is still one folder', async () => {
+test('plant L268 m-3: the same folder by another spelling (// and a trailing slash) is still one folder', async () => {
   const w = world({ products: ['a', 'b'] });
   put(w, 'research-r1.md', 'x');
-  await w.pass({ rules: rulesFor({ a: w.dirs.a, b: w.dirs.a.replace(/\/a$/, '/./a/') }) });
+  await w.pass({ rules: rulesFor({ a: w.dirs.a, b: w.dirs.a.replace(/\/a$/, '//a/') }) });
   assert.equal(w.calls.handed.length, 0);
   assert.equal(count(w, /also/), 2);
 });

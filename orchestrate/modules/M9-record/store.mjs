@@ -27,12 +27,26 @@ import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
 import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
 // Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
 // copy that can't be put in place after the commit point (a portable stand-in for a locked file or a full disk).
-const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong', 'rename_fails']);
-// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
+// L545, the cap on alerts kept with no queue (keepAlert). Each line is its own GitHub issue, so 20 a day: more distinct
+// causes than one bad day should have, and still a list the owner can read. ALERT_QUEUE_MAX is the queue's size, not that.
+// A line can't be changed once delivered, and one written at the day's end would never come if the fault stopped first,
+// so the count past 20 is told as it grows, at these steps: "at least N", each step once a day at most, as the count can
+// sit at a step while old lines leave the day. Counting stops at the last step, which bounds each day's growth when a
+// text changes every pass; nothing trims the file.
+const KEEP_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const KEEP_PER_WINDOW = 20;
+export const KEPT_BACK_STEPS = Object.freeze([1, 10, 100, 1000]);
+const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
+// A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
+const KEPT_BACK_TEXT_MAX = 300;
+
+const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails']);
+// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test. `cutback_fails` fails the cut-back too.
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 // The one test for a name that becomes part of a path: no slash, not all dots, short enough to be a file name (rounds 5 m-2, 6).
@@ -121,11 +135,47 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // when an alert is kept and one when it is delivered, so a keep from outside the lock never races a resend. If even the
   // append fails, this process holds the alert in memory and resends it the same way.
   const unsentHere = [];
-  const keep = (e) => {
-    const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e };
+  const keep = (e, extra = {}) => {
+    const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };
     try { appendPlain(P.unsent, `${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
+  // What the unsent file says was kept in the last day, each with its cap_key. Delivered lines count too, so a resend is
+  // no new issue. A file that can't be read gives none: told twice beats not told.
+  function linesInDay(at) {
+    const since = at - KEEP_WINDOW_MS;
+    try { return readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since ? [x] : []; } catch { return []; } }); } catch { return []; }
+  }
+  // A fault that every open finds again (L575): told once a day, not once per open, since each kept line is one issue.
+  // The keep path, as a Record that refuses writes has no other. The mark goes in with the line, so a delivered one holds.
+  function sayOrKeepDaily(event) {
+    const at = now();
+    const key = `${event.type}:${event.reason}`;
+    if (linesInDay(at).some((x) => x.cap_key === key)) return;
+    const e = stamp(event);
+    if (!send(e)) keep(e, { cap_key: key, at: new Date(at).toISOString() });
+  }
+  // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
+  // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
+  // the last day, with nothing in memory (a pass is one process). Past the total, a key is counted, not kept, and the
+  // owner hears the count at each step. Only ever appends; it reads no document and hands nothing back.
+  function keepAlert(text, key) {
+    // A long key keeps its hash, so two alerts that differ past the cut stay two (L558 Minor 1).
+    const whole = String(key);
+    const capKey = whole.length <= 300 ? whole : `${whole.slice(0, 200)}#${createHash('sha256').update(whole).digest('hex')}`;
+    const at = now();
+    const lines = linesInDay(at);
+    if (lines.some((x) => x.cap_key === capKey)) return;
+    const mark = { cap_key: capKey, at: new Date(at).toISOString() };
+    const kept = lines.filter((x) => x.outcome === 'unsent' && x.event?.type === 'alert_not_queued');
+    if (kept.length < KEEP_PER_WINDOW) { keep(stamp({ type: 'alert_not_queued', text: String(text) }), mark); return; }
+    const n = lines.filter((x) => x.outcome === 'kept_back').length + 1;
+    if (n > KEPT_BACK_MAX) return;
+    try { appendPlain(P.unsent, `${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { return; }
+    // The highest step reached, not only a count exactly on one: a lasting fault's count settles between steps (L558 M1).
+    const step = KEPT_BACK_STEPS.findLast((x) => x <= n);
+    if (!lines.some((x) => x.cap_key === `kept-back-${step}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${step} more ${step === 1 ? 'alert' : 'alerts'} could not be queued in the last day and ${step === 1 ? 'was' : 'were'} kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${step}`, at: mark.at });
+  }
   function resend() {
     let waiting = [];
     try { waiting = readUnsent(root); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
@@ -196,7 +246,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       if (end < 0) return;   // only a partial line so far
       for (const raw of text.slice(0, end).split('\n')) {
         if (damaged) break;
-        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); say({ type: 'diary_damaged', reason: damaged }); }
+        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
       }
       offset += Buffer.byteLength(text.slice(0, end + 1), 'utf8');
     } finally { closeSync(fd); }
@@ -397,7 +447,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
-              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
+              if (faultAt === 'append_fails' || faultAt === 'cutback_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
               const body = faultAt === 'readback_wrong' ? text.replace(`"seq":${line.seq},`, `"seq":${line.seq + 1},`) : text;
               const wrote = writeSync(fd, faultAt === 'short_write' ? body.slice(0, Math.floor(body.length / 2)) : body);
               if (wrote !== Buffer.byteLength(body, 'utf8')) throw storeFail(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
@@ -405,7 +455,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
               // (0b-2 audit MIN-7). If it can't be cut, writes stop until the owner looks.
-              try { ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; say({ type: 'diary_damaged', reason: damaged }); }
+              try { if (faultAt === 'cutback_fails') throw storeFail('test: the cut-back failed'); ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
               throw e;
             } finally { closeSync(fd); }
           } catch (e) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw e; }
@@ -478,5 +528,6 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     },
     alert: say,
     alertOrKeep: sayOrKeep,
+    keepAlert,
   });
 }
