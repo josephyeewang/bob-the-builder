@@ -36,7 +36,7 @@ import { join } from 'node:path';
 import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
-import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
+import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
 import { tellThen, clearCause, writeFrom, queuedMarks } from './alerts.mjs';
 import { causeOf } from './pass.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
@@ -134,6 +134,9 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
+    // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list
+    // never sees them. Throws when the status can't be trusted, so the tick counts them as at the cap, never as none.
+    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt }) => ({ card, session_id: sessionId, started_at: startedAt })),
     reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
   };
 }

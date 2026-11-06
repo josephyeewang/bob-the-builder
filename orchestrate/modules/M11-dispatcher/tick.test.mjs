@@ -55,7 +55,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     board: () => [], healthy: () => true, resume: () => false,
     outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
-    sessions: () => [...sessions], probe: () => idle,
+    sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
     // The launcher starts the session the claim names (L72), as M4's does.
     launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
@@ -164,6 +164,53 @@ test('L440: the plan-go step starts a reviewer through the read-only gate, and a
   await w.pass(1, { rules, ports: planPorts });
   assert.equal(started.length, 1);
   assert.equal(seen[0].session, 'S-review');
+});
+
+// L688: plan reviewers run as the review user, so the Dispatcher's session list never shows them; the runner's status
+// does. They count toward the plan-review Lead's read-only cap, an unreadable count holds the start (never 0), and
+// another Lead's start never reads them.
+test('L688: plan reviewers seen only in the review status count toward the read-only cap, and an unreadable count holds the start', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const reviewers = (n) => Array.from({ length: n }, (_, i) => ({ card: `C-${10 + i}`, session_id: `S-${i}`, started_at: iso(T0 - MIN) }));
+  const go = async (over) => {
+    const started = [];
+    const stateDir = join(tempDir('m11-approvals-'), 'm2');
+    const w = world([account(), usage(), card('C-3', plan)]);
+    await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-new' }; }, planReviewAnswer: async () => ({ ok: true }), ...over } });
+    return { started, alerts: w.calls.alerts.join(' | ') };
+  };
+  const three = await go({ planReviewsRunning: () => reviewers(3) });
+  assert.equal(three.started.length, 1, three.alerts);
+  const four = await go({ planReviewsRunning: () => reviewers(4) });
+  assert.equal(four.started.length, 0);
+  assert.match(four.alerts, /no plan reviewer could start for card C-3.*already has 4 read-only sessions/);
+  // One the Dispatcher lists too is counted once.
+  const both = await go({ planReviewsRunning: () => reviewers(3), sessions: () => [{ id: 'S-0', kind: 'readonly', lead: 'plan-review' }] });
+  assert.equal(both.started.length, 1, both.alerts);
+  const plus = await go({ planReviewsRunning: () => reviewers(3), sessions: () => [{ id: 'S-other', kind: 'readonly', lead: 'plan-review' }] });
+  assert.equal(plus.started.length, 0);
+  assert.match(plus.alerts, /already has 4 read-only sessions/);
+  const unread = await go({ planReviewsRunning: () => { throw new Error('the review status is stale'); } });
+  assert.equal(unread.started.length, 0);
+  assert.match(unread.alerts, /the running sessions could not be counted, so no read-only session starts \(the review status is stale\)/);
+  const unwired = await go({ planReviewsRunning: undefined });
+  assert.equal(unwired.started.length, 0);
+  assert.match(unwired.alerts, /the running sessions could not be counted/);
+  const noList = await go({ sessions: () => { throw new Error('no session list'); } });
+  assert.equal(noList.started.length, 0);
+  assert.match(noList.alerts, /the running sessions could not be counted, so no read-only session starts \(no session list\)/);
+});
+
+test('L688: another Lead\'s read-only start never reads the plan reviewers', async () => {
+  const dir = join(tempDir('m11-ro-'), 'lead');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'think-q1.md'), 'Is A safe?');
+  const started = [];
+  const w = world([account(), usage()], { over: { outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
+    startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, planReviewsRunning: () => { throw new Error('read'); } } });
+  await w.pass();
+  assert.deepEqual(started, ['think'], w.calls.alerts.join(' | '));
 });
 
 test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {

@@ -55,7 +55,7 @@ import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, liste
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { planGoPass } from './plan-go.mjs';
+import { planGoPass, PLAN_REVIEW_LEAD } from './plan-go.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
@@ -294,7 +294,18 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     if (outageOpen) return { ok: false, reason: 'outage: nothing starts' };
     const acct = signedInAccount({ rec, rules, now });
     if (!acct.account) return { ok: false, reason: acct.reason };
-    const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running: p.sessions(), lead: x.lead });
+    // The running list (L688): the Dispatcher's sessions, and for the plan-review Lead also the plan reviewers the review
+    // runner says run, since they run as the review user. A list that can't be read refuses the start, so an unknown
+    // count is at the cap, never 0; while sessions() is not wired, every read-only start is refused, saying why.
+    let running;
+    try {
+      running = [...p.sessions()];
+      if (x.lead === PLAN_REVIEW_LEAD) {
+        const ids = new Set(running.map((s) => s?.id));
+        for (const r of p.planReviewsRunning()) if (!ids.has(r.session_id)) running.push({ id: r.session_id, kind: 'readonly', lead: PLAN_REVIEW_LEAD, card: r.card });
+      }
+    } catch (e) { return { ok: false, reason: `the running sessions could not be counted, so no read-only session starts (${String(e?.message ?? e).slice(0, 200)})` }; }
+    const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running, lead: x.lead });
     if (!g.ok && g.missing) missing.push(g.missing);
     return g.ok ? start(x) : { ok: false, reason: g.reason };
   };
