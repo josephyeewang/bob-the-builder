@@ -3337,10 +3337,10 @@ function asReaderText(v) {
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
   'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
-  // M11 reads typed (L123); these five stay red only because their modules read per-product keys with no product
-  // (merges.mjs time limits, pass.mjs:149-151, lead-restart.mjs context.*). Lane 2 passes the product (L104 O-1, L131).
+  // M11 reads typed (L123); these were here because their modules read per-product keys with no product. Lane 2 passes
+  // the product (L104 O-1, L131): lead-restart.test came off with L564, account-ports.test with L584.
   // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
-  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'lead-restart.test', 'account-ports.test', 'fixtures.test-helper']
+  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'fixtures.test-helper']
     .map((n) => [`modules/M11-dispatcher/${n}.mjs`, { owner: 'lane 2', pr: 'M11 per-product reads pass the product (L104 O-1 step 2, L131)' }])),
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
