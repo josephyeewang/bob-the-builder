@@ -270,22 +270,22 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
 // L595: a paused product's undo, through one real tick: the real rules text, the real Record, M11's real steps. Only the
 // ports are stand-ins. The rules draft's paused state is start: none, which is what stopped this card at M9 alone.
 const pause = (w) => { const r = w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: w.rec.read('product', P).rev, doc: { state: 'paused', return_to: 'active' } }); assert.equal(r.ok, true, r.reason); };
-async function oneTick(w) {
+async function oneTick(w, { sessions = [] } = {}) {
   const dir = tempDir('orch-day-one-tick-');
-  const sessions = [];
   const launched = [];
+  const stops = [];
   const alert = fakeAlert();
   const ports = {
     alert, board: () => [], healthy: () => true, resume: () => false, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [], sessions: () => [...sessions], probe: () => ({ size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } }),
     launch: async ({ card, kind, product, sessionId }) => { launched.push(card.id); sessions.push({ id: sessionId, product, kind, card: card.id, pgid: 101 }); return { ok: true, sessionId, outbox: `/outbox-root/worker/${sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; },
-    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
+    stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: () => ({ ok: true, requestId: 'Q-1' }), filesOf: filesOfCommits,
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
   };
   await tick({ rec: w.rec, rules: w.rules, now: T0, ports });
-  return { launched, alert };
+  return { launched, alert, sessions, stops };
 }
 
 test('L595: the Undo tapped on a paused product starts in the next tick', async () => {
@@ -296,6 +296,22 @@ test('L595: the Undo tapped on a paused product starts in the next tick', async 
   assert.deepEqual(launched, [id]);
   assert.equal(w.rec.read('card', id).doc.state, 'running');
   assert.deepEqual(alert.texts.filter((t) => /can't start|is waiting/.test(t)), []);
+});
+
+// #252 r1 m3: this PR first lets an undo run on a paused product, so the next tick must leave it running.
+test('L595: a running undo on a paused product is not stopped or parked by the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const first = await oneTick(w);
+  assert.deepEqual(first.launched, [id]);
+  const second = await oneTick(w, { sessions: first.sessions });
+  assert.deepEqual(second.launched, []);
+  assert.deepEqual(second.stops, []);
+  // A stop is first only wanted (a pending stop fact) until the session reaches a safe point: none may be wanted.
+  const wanted = w.rec.list('fact').filter((f) => f.doc?.state === 'pending' && f.doc?.card === id);
+  assert.deepEqual(wanted.map((f) => f.id), []);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
 });
 
 test('L595: an undo card already in ready when the product is paused stays on the list and starts', async () => {

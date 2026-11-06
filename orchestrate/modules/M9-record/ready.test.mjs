@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GO_FREE, goFreeKinds, goFreeOn, goNeeded, readyCheck, rootOf } from './ready.mjs';
 import { PRODUCT, fingerprintFor, must, plan, product, put, readyCard, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
-import { STATES } from '../../shared/record-names.mjs';
+import { STATES, CARD_KINDS } from '../../shared/record-names.mjs';
 
 // An in-memory view: cards by id, gos, the product state, and who created each card.
 function view({ cards = {}, gos = [], productState = 'active', creators = {} } = {}) {
@@ -142,8 +142,18 @@ test('L595: an undo card is ready on a paused product; nothing else is, and an u
   assert.equal(none.ok, false);
   assert.match(none.reason, /no product record/);
   assert.match(at('paused', { 'C-1': 'lead:L-1' }).reason, /made by lead:L-1 needs the owner's go/, 'the wrong creator still needs a go');
-  const ordinary = card();
-  assert.match(check('C-1', ordinary, withGo(ordinary, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
+  // A record that is there but can't be read refuses too (#252 r1 m1): the exception needs it readable, not just present.
+  const withProduct = (doc) => { const v = view({ cards: { 'C-1': er }, creators, productState: 'paused' }); return { ...v, get: (e, id) => (e === 'product' ? doc : v.get(e, id)) }; };
+  for (const doc of [{ id: PRODUCT, corrupt: true }, { id: PRODUCT, doc: {} }, { id: PRODUCT, doc: { state: 7 } }]) {
+    const r = check('C-1', er, withProduct(doc));
+    assert.equal(r.ok, false, JSON.stringify(doc));
+  }
+  assert.match(check('C-1', er, withProduct({ id: PRODUCT, corrupt: true })).reason, /its record can't be read/);
+  // Every other card kind stays held on a paused product (#252 r1 m2).
+  for (const kind of CARD_KINDS.filter((k) => k !== 'exact_reverse')) {
+    const c = card({ kind });
+    assert.match(check('C-1', c, withGo(c, {}, { productState: 'paused' })).reason, /is paused; no work starts/, kind);
+  }
   const script = card({ kind: 'script' });
   assert.match(check('C-1', script, withGo(script, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
   const norule = check('C-1', er, view({ cards: { 'C-1': er }, creators, productState: 'paused' }), rulesFor({ 'product_state_rules.paused.start': undefined }));
