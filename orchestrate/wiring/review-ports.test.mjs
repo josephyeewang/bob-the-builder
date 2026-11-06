@@ -51,6 +51,15 @@ test('A1: a main read that fails, answers oddly or names no commit throws, never
     (e) => e.unreadable === true && /socket hang up/.test(e.message));
 });
 
+test('A1: mainSha reads main afresh on each call, never a kept answer (audit #256 r1 m3)', async () => {
+  const shas = ['a'.repeat(40), 'b'.repeat(40)];
+  let n = 0;
+  const gh = { get: async () => ({ status: 200, json: { object: { sha: shas[n++] } } }) };
+  const r = githubReads({ gh, entry: ENTRY });
+  assert.equal(await r.mainSha({ product: ENTRY.product }), shas[0]);
+  assert.equal(await r.mainSha({ product: ENTRY.product }), shas[1]);
+});
+
 test('A1: planView answers isDir from the commit\'s tree, a fresh view each call', async () => {
   const tree = 'd'.repeat(40);
   const blob = 'b'.repeat(40);
@@ -74,11 +83,12 @@ test('A1: the read-only client refuses anything but a repository read, so these 
   assert.throws(() => githubReads({ gh: null, entry: ENTRY }), /need the read-only client/);
 });
 
-test('A1: wait waits, and a wait it can\'t read waits no time', async () => {
+test('A1: wait waits, and a wait it can\'t read waits no time', { timeout: 5000 }, async () => {
   const t = Date.now();
   await wait(30);
   assert.ok(Date.now() - t >= 25);
-  for (const ms of [-5, NaN, undefined, 'x', Infinity]) {
+  // Text and a BigInt too: the timer itself would wait '1500' out, and throw on 5n (audit #256 r1 m2).
+  for (const ms of [-5, NaN, undefined, 'x', Infinity, '1500', 5n]) {
     const s = Date.now();
     await wait(ms);
     assert.ok(Date.now() - s < 1000, String(ms));

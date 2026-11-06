@@ -179,6 +179,11 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   for (const k of ['launch', 'probe', 'board']) assert.throws(() => filled.ports[k](), { message: notWiredText(k) });
   assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'gh', 'limitedSync', 'log', 'now', 'rec', 'rules', 'stateDir']);
   assert.ok(Object.isFrozen(seen[0]));
+  // The client in ctx is the rules reader's read-only one: frozen, and its one write-shaped call refuses (audit #256 r1 m1).
+  assert.ok(Object.isFrozen(seen[0].gh));
+  assert.deepEqual(Object.keys(seen[0].gh).sort(), ['get', 'post']);
+  await assert.rejects(seen[0].gh.post('/repos/o/r/pulls', {}), /only write-shaped/);
+  await assert.rejects(seen[0].gh.get('/user'), /only repository reads/);
   assert.equal(seen[0].limitedSync, 'the sync');
   assert.equal(seen[0].rec, filled.rec);
   assert.equal(seen[0].rules, filled.rules);
