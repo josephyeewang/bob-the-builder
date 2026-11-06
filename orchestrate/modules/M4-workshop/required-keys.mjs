@@ -1,8 +1,9 @@
 // required-keys.mjs — the rules keys the Workshop's push reads, and whether a product's rules give it what it needs
 // (LEAD-CALLS L601, the audit of #244 M-2; L165's class line: the fit check covers every file that reads rules).
 //
-// WHY. A rules file with no product.repo passed M10's first-cutover fit check, then every push was refused. The fit
-// check asks each module that reads the rules with that module's own list, so this is the Workshop's.
+// WHY. The fit check asks each module that reads the rules with that module's own list, so this is the Workshop's.
+// Under L612 only product.vercel_project is a rules line. A missing product.repo (which once passed the fit check and
+// then had every push refused) is not caught here: repo comes from code, and that harm closes when #237 lands.
 //
 //   REQUIRED_KEYS   the keys a push can't work without
 //   OPTIONAL_KEYS   keys it reads but handles when missing (each says what happens)
