@@ -107,7 +107,7 @@ export function planWatchApp(io, cfg, { raw, text, app, rulesSha256 = null, dry 
   if (pinSame && old && old.id === app.id && old.installation === app.installation && old.keyFile === app.keyFile && Object.keys(old).length === 3) return { ops: [], problems: [] };
   const key = checkWatchAppKey(io, cfg2)[0];
   if (!key.ok) return { ops: [], problems: [`the key is not in place as it must be (${key.why}): put it there first, then run this again; nothing was changed`] };
-  const copy = checkRulesCopy(io, cfg2)[0];
+  const copy = checkRulesHash(io, cfg2)[0];
   if (!copy.ok) return { ops: [], problems: [`the rules copy in place does not match the config's pin (${copy.why}); nothing was changed`] };
   const notes = [...(key.skip && dry ? ['   (the key could not be looked at without root; the real run checks it)'] : []), ...(copy.skip && dry ? ['   (the rules copy could not be looked at without root; the real run checks it)'] : [])];
   const pinNote = pinSame ? '' : `, rules pin ${short(rulesSha256)}… (it was ${oldPin ? `${short(oldPin)}…` : 'none'})`;
@@ -129,13 +129,29 @@ export function checkWatchAppConfig(io, cfg, app, rulesSha256 = null) {
   const what = `${ROOT_CONFIG_PATH} names the watcher App ${app.id}, installation ${app.installation}, key ${app.keyFile}${rulesSha256 ? `, rules pin ${short(rulesSha256)}…` : ''}`;
   let w; try { w = parseConfig(JSON.parse(io.readConfig(ROOT_CONFIG_PATH, { strict: true }))).watch; } catch (e) { return [{ ok: false, what, why: `could not be read back (${e.message})` }]; }
   const a = w?.app; const ok = !!a && a.id === app.id && a.installation === app.installation && a.keyFile === app.keyFile && (rulesSha256 === null || w.rulesSha256 === rulesSha256);
-  return [{ ok, what, ...(ok ? {} : { why: 'the file read back does not name it' }) }, ...checkRulesCopy(io, { ...cfg, watch: w }), ...checkWatchAppKey(io, { ...cfg, watch: w })];
+  return [{ ok, what, ...(ok ? {} : { why: 'the file read back does not name it' }) }, ...checkRulesHash(io, { ...cfg, watch: w }), ...checkWatchAppKey(io, { ...cfg, watch: w })];
 }
 
 /** check-watch-rules, read only: the rules copy, then the watcher App's key (L627). */
 export const checkWatchRules = (io, cfg) => { const r = checkRulesCopy(io, cfg); return cfg.watch?.rulesSha256 ? [...r, ...checkWatchAppKey(io, cfg)] : r; };
 
 /** The rules copy alone (watch-rules' read-back): read only → [{ ok, what, why? }]; needs root to look (the folder is orchestrate's 0700). */
+/**
+ * The rules copy in place hashes to the config's pin (L633): a plain file, read as root, its owner and mode not judged. So
+ * watch-app can bring a pin set by hand in the job file back into the config even while the copy is not yet root's 0644
+ * (a hand re-pin installs it as orchestrate's 600); `watch-rules` then rewrites it as root's, and check-watch-rules
+ * judges all of it.
+ */
+export function checkRulesHash(io, cfg) {
+  const f = watchRulesPath(cfg); const what = `${f} hashes to the config's pin`;
+  if (!cfg.watch?.rulesSha256) return [{ ok: false, what, why: WATCH_NO_HASH }];
+  if (io.euid() !== 0) return [{ ok: true, skip: true, what, why: 'the folder is orchestrate-only; needs root to look; run with sudo' }];
+  let st; try { st = io.lstat(f); } catch { return [{ ok: false, what, why: 'missing (run watch-rules --rules-source <file>)' }]; }
+  if (st.isSymbolicLink() || !st.isFile()) return [{ ok: false, what, why: 'is not a plain file' }];
+  let h; try { h = sha(io.readRules(io.at(f))); } catch (e) { return [{ ok: false, what, why: `could not be read (${e.message})` }]; }
+  return h === cfg.watch.rulesSha256 ? [{ ok: true, what }] : [{ ok: false, what, why: `hashes to ${short(h)}…, the pin is ${short(cfg.watch.rulesSha256)}…` }];
+}
+
 export function checkRulesCopy(io, cfg) {
   const f = watchRulesPath(cfg); const what = `${f} is root:wheel's 0644 copy of the rules, and hashes to the config's value`;
   if (!cfg.watch) return [{ ok: true, what: 'the watch-only week is not set up (no "watch" entry in the config)' }];

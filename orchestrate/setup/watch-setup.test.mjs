@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, fstatSync, linkSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
@@ -12,7 +12,7 @@ import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } from './daemons.mjs';
 import { readConfigFile, realIo } from './mac.mjs';
 import { readUser } from './users-folders.mjs';
-import { checkWatchAppConfig, checkWatchAppKey, checkWatchRules, planWatchApp, planWatchRules, watchAppKeyPath, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
+import { checkRulesCopy, checkRulesHash, checkWatchAppConfig, checkWatchAppKey, checkWatchRules, planWatchApp, planWatchRules, watchAppKeyPath, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
 import { parseArgs as watchRunArgs } from '../modules/M6-merge-gate/watch-run.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -307,7 +307,7 @@ test('r7 c-C class check: the setup code reads cfg.watch in exactly these places
     const n = (readFileSync(new URL(`./${f}`, here), 'utf8').match(/cfg\.watch\b/g) ?? []).length;   // each read, not each line
     if (n) at[f] = n;
   }
-  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 17 });   // +6 (L627): the App's key path, the job's three App arguments and check-watch-rules' key check, each reached only past the fingerprint gate
+  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 20 });   // +6 (L627): the App's key path, the job's three App arguments and check-watch-rules' key check, each reached only past the fingerprint gate; +3 (L633): checkRulesHash, which reads only the fingerprint itself
 });
 
 test('R6 m-1 a named pipe given as the rules file is refused at once, not waited on', { skip: process.platform === 'win32' }, () => {
@@ -581,7 +581,7 @@ test('L633 watch-app --rules-sha256: the config takes the pin of the rules copy 
 
 test('PLANT L633 watch-app --rules-sha256: a pin the rules copy does not hash to is refused, changing nothing; the same App with a new pin is not "nothing to do"', () => {
   const w = appWorld(); const before = readFileSync(w.f, 'utf8');
-  const r = w.go(['watch-app', ...APPARGS, '--rules-sha256', HASH2]); assert.equal(r.code, 1); assert.match(r.text, /rules copy in place does not match.*hashes to/);
+  const r = w.go(['watch-app', ...APPARGS, '--rules-sha256', HASH2]); assert.equal(r.code, 1); assert.match(r.text, /rules copy in place does not match.*hashes to .*the pin is/);
   assert.equal(readFileSync(w.f, 'utf8'), before);
   assert.equal(w.go(['watch-app', ...APPARGS]).code, 0);
   repinCopy(w);
@@ -594,4 +594,26 @@ test('L633 --rules-sha256: 64 hex only, and only for watch-app; the read-back FA
   assert.throws(() => parseArgs(['check-watch-rules', '--rules-sha256', HASH]), /only for watch-app/);
   const w = appWorld(); assert.equal(w.go(['watch-app', ...APPARGS]).code, 0);
   assert.match(failing(checkWatchAppConfig(w.mac, parseInstallConfig(NOAPP), APP, HASH2))[0].why, /does not name it/);
+});
+
+test('L633 watch-app --rules-sha256 on a hand re-pinned Mini: the copy is orchestrate\'s 600 at the new pin; watch-app takes the pin (the hash alone is judged), then watch-rules makes the copy root\'s 0644 and check-watch-rules passes', () => {
+  const w = appWorld(); repinCopy(w);
+  const p = watchRulesPath(w.cfg); const o = readUser(w.mac, 'orchestrate'); chmodSync(w.mac.at(p), 0o600); w.mac.owners.set(p, { uid: o.uid, gid: o.gid });
+  assert.match(failing(checkRulesCopy(w.mac, { ...w.cfg, watch: { ...w.cfg.watch, rulesSha256: HASH2 } }))[0].why, /owner is uid .*mode is 600/);
+  const r = w.go(['watch-app', ...APPARGS, '--rules-sha256', HASH2]); assert.equal(r.code, 0, r.text); assert.match(r.text, /done: all 3 items PASS/);
+  const src = join(w.ext, 'rules2.yaml'); writeFileSync(src, RULES2);
+  const wr = w.go(['watch-rules', '--rules-source', src]); assert.equal(wr.code, 0, wr.text); assert.match(wr.text, /write .*rules-draft\.yaml\s+\(root:wheel 0644/);
+  const c = w.go(['check-watch-rules']); assert.equal(c.code, 0, c.text);
+});
+
+test('PLANT L633 the hash check: a link, a folder, a missing copy and a non-root look are each told; the owner and mode are not judged', () => {
+  const w = appWorld(); const cfg2 = { ...w.cfg, watch: { ...w.cfg.watch, rulesSha256: HASH } };
+  assert.equal(checkRulesHash(w.mac, cfg2)[0].ok, true);
+  const p = watchRulesPath(w.cfg); const f = w.mac.at(p);
+  chmodSync(f, 0o600); assert.equal(checkRulesHash(w.mac, cfg2)[0].ok, true); chmodSync(f, 0o644);
+  assert.match(checkRulesHash(w.mac, { ...cfg2, watch: { ...cfg2.watch, rulesSha256: HASH2 } })[0].why, /the pin is/);
+  const keep = `${f}.keep`; renameSync(f, keep); symlinkSync(keep, f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /not a plain file/);
+  rmSync(f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /missing/);
+  mkdirSync(f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /not a plain file/); rmSync(f, { recursive: true }); renameSync(keep, f);
+  w.mac.as = 501; assert.equal(checkRulesHash(w.mac, cfg2)[0].skip, true);
 });
