@@ -2793,7 +2793,7 @@ const outboxKind = outboxKindOf;
 const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
-  'front_door', 'thinking', 'learning', 'script']);
+  'front_door', 'thinking', 'learning', 'script', 'plan_reviewer']);
 
 // A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
 // a diary kind only.

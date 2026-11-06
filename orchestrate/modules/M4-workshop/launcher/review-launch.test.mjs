@@ -21,7 +21,7 @@ import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smoke
 const PIN = '2.1.300';
 const ME = process.getuid();
 // The review roles run as this test's own user; every other role as someone else (the review user is separate).
-const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
+const UIDS = { ...Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000])), plan_reviewer: ME };
 
 const initFor = (role, over = {}) => {
   const p = DESIGN_PROFILES[role];
