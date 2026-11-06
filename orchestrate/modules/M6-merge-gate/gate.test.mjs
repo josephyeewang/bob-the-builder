@@ -435,6 +435,62 @@ test('L601: a count that can\'t be saved still tells "could not check", and says
   assert.equal(mergeOf(w).doc.parent_read_failures, undefined);
 });
 
+test('L601: with the start gate shut, a merge whose marks failed gets no GitHub write until the gate opens', async () => {
+  const w = world(limited());
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  w.g.answer.status = () => ({ status: 500, json: null });
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.marked_at, undefined, 'the marks failed');
+  w.g.answer.status = null;
+  tick(w, 121);
+  const before = w.g.writes.length;
+  for (let i = 0; i < 3; i += 1) assert.equal((await gatePass(w.ctx)).ran, false);
+  assert.equal(w.g.writes.length, before, 'complete() runs only past the start gate');
+  assert.equal(mergeOf(w).doc.marked_at, undefined);
+  assert.equal(mergeOf(w).doc.parent_read_failures, 3, 'the parent check still ran');
+});
+
+test('L601: with the start gate shut, an audit-passed merge whose parent was never checked is still read', async () => {
+  for (const state of ['audited_ok', 'audit_flagged']) {
+    const w = world(limited());
+    verifiedCard(w);
+    const s = blip(w);
+    s.down = true;
+    await gatePass(w.ctx);
+    const m = mergeOf(w);
+    const conclusion = state === 'audited_ok' ? 'success' : 'failure';
+    must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: m.doc.merge_commit, conclusion } }), 'fact');
+    must(put(w.env.record, 'merge_gate', 'merge', m.id, { state }, { data: { fact: 'audit-run-1' } }), state);
+    assert.equal(mergeOf(w).doc.parent_checked_at, undefined, 'never checked before the gate shuts');
+    tick(w, 121);
+    s.down = false;
+    s.parent = 'f'.repeat(40);
+    assert.equal((await gatePass(w.ctx)).ran, false);
+    assert.equal(s.undo.length, 1, `${state}: Undo? is asked`);
+    assert.ok(mergeOf(w).doc.parent_checked_at, state);
+  }
+});
+
+test('L601: a count refused on the third read tells "could not check" once, not twice', async () => {
+  const w = world();
+  verifiedCard(w);
+  const s = blip(w);
+  s.down = true;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 0);
+  const real = w.ctx.record;
+  const wrap = {};
+  for (const k of Object.keys(real)) wrap[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  wrap.write = (req) => (req.entity === 'merge' && req.doc?.parent_read_failures !== undefined ? { ok: false, reason: 'planted refusal' } : real.write(req));
+  w.ctx.record = wrap;
+  await gatePass(w.ctx);
+  assert.equal(s.sent.length, 1, 'the third read is told once');
+  assert.match(s.sent[0].note, /3 reads failed/);
+});
+
 test('L172: a read that works after failures, with the parent as judged, ends it with no alert', async () => {
   const w = world();
   verifiedCard(w);
