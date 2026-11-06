@@ -3,7 +3,7 @@
 // logic, and the real one, where installed, for the bypass cases.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync, utimesSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, symlinkSync, readFileSync, existsSync, renameSync, chmodSync, copyFileSync, linkSync, fstatSync, appendFileSync, utimesSync } from 'node:fs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { join, dirname, delimiter } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
@@ -11,6 +11,9 @@ import { gzipSync, deflateSync } from 'node:zlib';
 import { gitOk, git, initMirror, callLog } from './safe-git.mjs';
 import { createPushScript, readBundleHeader, githubUrl, SETTLE_MS } from './push.mjs';
 import { researchCardDoc, RESEARCH_CARD } from '../../M11-dispatcher/research-intake.mjs';
+import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
+import { createDocsCheck } from '../../M11-dispatcher/proposal-route.mjs';
+import { folderProblem } from '../../M11-dispatcher/proposals-intake.mjs';
 import { SETTLE_MS as INTAKE_SETTLE_MS } from '../../M11-dispatcher/proposals-intake.mjs';
 import { researchCopyProblem } from '../../M6-merge-gate/refusals.mjs';
 import { refusedPath } from './push-refusals.mjs';
@@ -25,7 +28,7 @@ import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
 import { fileURLToPath } from 'node:url';
-import { pushWorld, makeFakeScanner, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
+import { pushWorld, makeFakeScanner, makeFakeGit, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
 // Tests can't chown, so every file here is the test user's. The worker door expects that user by default (the worker
@@ -580,8 +583,8 @@ test('inputs come from the record only; the branch, product and rules are checke
   }
   const r = await createPushScript(w.ports)('S-404');
   assert.match(r.reason, /no launch record/);
-  // Filed under "unknown", never under String(undefined) (R-0b-127).
-  assert.equal(w.record.read('fact', 'push.unknown.unknown').doc.result, 'refused');
+  // No fact without a real card and attempt (L325 m3): never a shared "unknown", never String(undefined).
+  assert.equal(w.record.read('fact', 'push.unknown.unknown'), null);
   assert.equal(w.record.read('fact', 'push.undefined.undefined'), null);
 });
 
@@ -1002,7 +1005,9 @@ test('R-0b-47 round 4 MIN-3: a git failure\'s reason carries no folder path, and
   // A lock file on the mirror's branch makes the last git step fail with git's own error text.
   const r = await w.push({ afterStage: () => { mkdirSync(join(w.mirror, 'refs/heads/card'), { recursive: true }); writeFileSync(join(w.mirror, 'refs/heads/card/c-1.lock'), ''); } });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /^the push script failed: git update-ref failed .*<path>/);
+  // L680: the push went out, and the mirror could not be written: the mirror's, so a wait that says so.
+  assert.equal(r.retry, true, r.reason);
+  assert.match(r.reason, /pushed, but the mirror's copy of the branch could not be moved/);
   assert.ok(!r.reason.includes(w.root), r.reason);
   assert.ok(!JSON.stringify(w.record.read('fact', 'push.C-1.a1').doc).includes(w.root), 'the record holds a folder path');
   assert.deepEqual(readdirSync(w.ports.privateDir), []);
@@ -1026,7 +1031,7 @@ test('R-0b-47 round 4 MIN-1, real gitleaks: a secret laid across two rows of an 
 test('#32 round 3 (L51): every push-script call that names the GitHub address passes it as the allowed address', () => {
   const src = readFileSync(new URL('./push.mjs', import.meta.url), 'utf8');
   assert.match(src, /const auth = \{ extraConfig: tokenConfig\(token\), address: url \};/);
-  const calls = src.split('\n').filter((l) => /\bgit(Ok)?\(\[/.test(l) && /, url[,\]]/.test(l));
+  const calls = src.split('\n').filter((l) => /\b(git|gitOk|gitDo|gitText|run)\(\[/.test(l) && /, url[,\]]/.test(l));
   assert.equal(calls.length, 3, calls.join('\n'));
   for (const l of calls) assert.match(l, /\.\.\.auth \}/, l);
 });
@@ -1042,7 +1047,7 @@ test('R-0b-127: a proposal bundle is verified, fetched for its card\'s branch on
   await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
   const sha256 = await w.propose();
   callLog.length = 0;
-  const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(r.ok, true, r.reason);
   const tip = (await gitOk(['rev-parse', 'refs/heads/card/c-1'], w.cg)).trim();
   assert.equal(r.tip, tip);
@@ -1056,7 +1061,7 @@ test('R-0b-127: a proposal bundle is verified, fetched for its card\'s branch on
   const f = w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`).doc;
   assert.equal(f.result, 'pushed');
   assert.equal(f.from, 'proposal');
-  assert.equal(w.record.read('fact', 'push.C-1.a1'), null, 'the worker\'s fact was written');
+  assert.equal(w.record.read('fact', 'push.C-1.a1'), null, 'a proposal must not write a worker\'s fact');
   // Only the card's branch is fetched from the bundle, into the attempt's holding ref, which is gone afterwards.
   const fetches = callLog.filter((c) => c.purpose === 'push-fetch-bundle' && c.args[0] === 'fetch');
   assert.equal(fetches.length, 1);
@@ -1069,13 +1074,13 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   const w = await world();
   await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
   const sha256 = await w.propose();
-  const first = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  const first = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(first.ok, true, first.reason);
   const id = `push.C-1.p-${sha256.slice(0, 12)}`;
   const fact = w.record.read('fact', id);
   const refs = await w.ghRefs();
   callLog.length = 0;
-  const again = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  const again = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.deepEqual(again, { ok: true, already: true, product: PRODUCT, card: 'C-1', branch: first.branch, tip: first.tip, binaries: first.binaries ?? [] });
   assert.equal(callLog.length, 0, 'git ran for bytes already pushed');
   assert.equal(await w.ghRefs(), refs);
@@ -1085,10 +1090,11 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   // The proposal's own checks still run first (#170 r1 m1): another product, or the card gone from the Record, is
   // refused, not answered from the fact; a corrupt fact is not a push (m2).
   const view = (read) => ({ ...w.record, read });
-  const other = await w.pushP({ product: 'other-app', card: 'C-1', sha256 });
+  w.hold(sha256, 'C-1', 'other-app');
+  const other = await w.pushP({ product: 'other-app', card: 'C-1' });
   assert.equal(other.ok, false);
   assert.equal(other.already, undefined);
-  const gone = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => (e === 'card' ? null : w.record.read(e, i))) });
+  const gone = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: view((e, i) => (e === 'card' ? null : w.record.read(e, i))) });
   assert.equal(gone.ok, false);
   assert.match(gone.reason, /card C-1 is not in the Record/);
   // Those refusals are added to the recorded push, never written over it.
@@ -1098,28 +1104,29 @@ test('L274 (6): the same bytes pushed twice answer the recorded push: no second 
   // New bytes for the same card are a new attempt, pushed and recorded beside the first.
   await w.commit('more docs', (c) => writeFileSync(join(c, 'README.md'), 'better still\n'));
   const sha2 = await w.propose();
-  const next = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: sha2 });
+  const next = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(next.ok, true, next.reason);
   assert.equal(next.already, undefined);
   assert.equal(w.record.read('fact', `push.C-1.p-${sha2.slice(0, 12)}`).doc.result, 'pushed');
   assert.deepEqual(w.record.read('fact', id).doc, kept);
+  w.hold(sha256);
   // Rules that throw (not a refusal) still go through settle: refused, recorded, never thrown out (#170 r2).
-  const broke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
+  const broke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { rules: { ...w.ports.rules, get: () => { throw new Error('rules broke'); } } });
   assert.equal(broke.ok, false);
   assert.match(w.record.read('fact', id).doc.last_refusal.reason, /rules broke/);
   // So does the shortcut's read of the push fact, when it throws (once, here): it answers, never throws (L344).
   let throws = 1;
-  const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
+  const factBroke = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: view((e, i) => { if (e === 'fact' && i === id && throws-- > 0) throw new Error('record broke'); return w.record.read(e, i); }) });
   assert.equal(factBroke.ok, false);
   assert.equal(factBroke.already, undefined);
-  const corrupt = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { record: view((e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === id ? { ...r, corrupt: true } : r; }) });
+  const corrupt = await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: view((e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === id ? { ...r, corrupt: true } : r; }) });
   assert.equal(corrupt.already, undefined, 'a corrupt fact answered as a push');
   // A refused attempt is not "already": the same bytes are tried again.
   const w2 = await world();
   await w2.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
   const sha3 = await w2.propose();
-  assert.equal((await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 }, { fstat: ownedBy(ME + 7) })).ok, false);
-  const retry = await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: sha3 });
+  assert.equal((await w2.pushP({ product: PRODUCT, card: 'C-1' }, { testFstat: ownedBy(ME + 7) })).ok, false);
+  const retry = await w2.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(retry.ok, true, retry.reason);
   assert.equal(retry.already, undefined);
 });
@@ -1128,10 +1135,11 @@ test('L274 (2): a proposal for a card the Record lacks is refused at the push sc
   const w = await world();
   await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
   const sha256 = await w.propose();
+  w.hold(sha256, 'C-9');
   const refs = await w.ghRefs();
   // The look first: refused, and it records nothing.
   for (const look of [true, false]) {
-    const r = await w.pushP({ product: PRODUCT, card: 'C-9', sha256 }, { look });
+    const r = await w.pushP({ product: PRODUCT, card: 'C-9' }, { look });
     assert.equal(r.ok, false);
     assert.match(r.reason, /card C-9 is not in the Record/);
     if (look) assert.equal(w.record.read('fact', `push.C-9.p-${sha256.slice(0, 12)}`), null, 'a look recorded a refusal');
@@ -1148,9 +1156,10 @@ test('R-0b-127: look answers the net change\'s files and pushes, asks and record
   const sha256 = await w.propose();
   const before = await w.ghRefs();
   pushAsked.length = 0;
-  const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { look: true });
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true });
   assert.equal(r.ok, true, r.reason);
-  assert.deepEqual(r.files, [{ path: 'README.md', status: 'modified' }], 'the net change, not each commit\'s');
+  assert.deepEqual(r.files, [{ path: 'README.md', status: 'modified', mode: '100644' }], 'the net change, not each commit\'s');
+  assert.equal(r.sha256, sha256, 'it says which bytes it looked at');
   assert.equal(await w.ghRefs(), before);
   assert.equal(w.prs.length, 0);
   assert.equal(pushAsked.length, 0, 'the rules were asked');
@@ -1159,7 +1168,8 @@ test('R-0b-127: look answers the net change\'s files and pushes, asks and record
   // A look at a refused change is refused the same way.
   const w2 = await world();
   await w2.commit('wf', (c) => writeFileSync(join(c, '.github/workflows/x.yml'), 'on: push\n'));
-  const l2 = await w2.pushP({ product: PRODUCT, card: 'C-1', sha256: await w2.propose() }, { look: true });
+  await w2.propose();
+  const l2 = await w2.pushP({ product: PRODUCT, card: 'C-1' }, { look: true });
   assert.equal(l2.ok, false);
   assert.match(l2.reason, /\.github\/workflows\/x\.yml/);
 });
@@ -1175,7 +1185,7 @@ test('R-0b-127 planted (D3): a proposal touching a workflow file, and one adding
     await w.commit(what, fn);
     const sha256 = await w.propose();
     const before = await w.ghRefs();
-    const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
     assert.equal(r.ok, false, `${what} was not refused`);
     assert.match(r.reason, re, what);
     assert.equal(await w.ghRefs(), before, `GitHub changed on ${what}`);
@@ -1192,7 +1202,7 @@ test('R-0b-127 planted (L76 (3), L77 m2): a proposals bundle owned by orchestrat
     await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
     const sha256 = await w.propose();
     const before = await w.ghRefs();
-    const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 }, { fstat: ownedBy(uid) });
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { testFstat: ownedBy(uid) });
     assert.equal(r.ok, false, `a bundle owned by ${who} was pushed`);
     assert.equal(r.reason, `the bundle is owned by user ${uid}, not user ${ME}`);
     assert.equal(await w.ghRefs(), before);
@@ -1202,7 +1212,7 @@ test('R-0b-127 planted (L76 (3), L77 m2): a proposals bundle owned by orchestrat
   await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   await w.bundle();
   const joe = w.ports.ownerUid;
-  const r = await refusedAndUntouched(w, /owned by user/, { fstat: ownedBy(joe) });
+  const r = await refusedAndUntouched(w, /owned by user/, { testFstat: ownedBy(joe) });
   assert.equal(r.reason, `the bundle is owned by user ${joe}, not user ${ME}`);
   // And the normal worker bundle, owned by the worker, pushes.
   w = await world();
@@ -1221,18 +1231,519 @@ test('R-0b-127: the proposal\'s bytes must be the ones the intake recorded; a sw
   await w.commit('more', (c) => writeFileSync(join(c, 'app.txt'), 'sneaked in\n'));
   const swapped = await w.propose();
   assert.notEqual(swapped, recorded);
+  w.hold(recorded);
   const before = await w.ghRefs();
-  const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: recorded });
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'the bundle\'s bytes are not the ones the intake recorded');
   assert.equal(await w.ghRefs(), before);
-  const l = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: recorded }, { look: true });
+  const l = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true });
   assert.equal(l.reason, 'the bundle\'s bytes are not the ones the intake recorded', 'a look checks the bytes too');
   assert.equal(w.record.read('fact', `push.C-1.p-${recorded.slice(0, 12)}`).doc.result, 'refused');
-  // The bytes now in the folder, with their own hash, are a new attempt and go through.
-  const ok = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: swapped });
+  // The bytes now in the folder, once the intake holds their own hash, are a new attempt and go through.
+  w.hold(swapped);
+  const ok = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(ok.ok, true, ok.reason);
   assert.equal(w.record.read('fact', `push.C-1.p-${swapped.slice(0, 12)}`).doc.result, 'pushed');
+});
+
+// ---- R-0b-128 part 2: the conditions on the proposal door (L325)
+
+const bundleFile = (w) => join(w.proposals, 'bundle-C-1.bundle');
+const docChange = async (w) => { await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n')); return w.propose(); };
+
+test('L325 m1: the push script reads which bytes from the intake\'s fact: nothing held, or a hash from the caller, pushes nothing', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const p = join(w.proposals, 'bundle-C-1.bundle');
+  await gitOk(['bundle', 'create', '-q', p, 'refs/heads/card/c-1', '^refs/heads/main'], w.cg);
+  const sha256 = createHash('sha256').update(readFileSync(p)).digest('hex');
+  const before = await w.ghRefs();
+  // No fact: even the right hash, named by the caller, is nothing.
+  const none = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  // A wait, never final: the intake read it held this same pass, so only a Record fault or a race says otherwise (L680).
+  assert.deepEqual(none, { ok: false, reason: 'the intake holds no bundle for this card', retry: true });
+  assert.equal(await w.ghRefs(), before);
+  // A file the intake refused is not held.
+  w.hold(sha256, 'C-1', PRODUCT, 'refused');
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).reason, 'the intake holds no bundle for this card');
+  // Another product's fact holds nothing for this one.
+  w.hold(sha256, 'C-1', 'other-app');
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).reason, 'the intake holds no bundle for this card');
+  // A hash that isn't one, however the fact came to say so.
+  w.hold('x'.repeat(64));
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).reason, 'the intake holds no bundle for this card');
+  // A held fact that reads back corrupt holds nothing, though its hash is the right one (L597 minor).
+  w.hold(sha256);
+  const heldId = intakeFactId(PRODUCT, 'bundle-C-1.bundle');
+  const corruptView = { ...w.record, read: (e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === heldId ? { ...r, corrupt: true } : r; } };
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: corruptView })).reason, 'the intake holds no bundle for this card');
+  w.hold('x'.repeat(64));
+  assert.equal(await w.ghRefs(), before);
+  assert.deepEqual(w.record.list('fact').filter((f) => f.id.startsWith('push.')), [], 'a refusal with no attempt files no fact');
+  // Held: a caller's other hash changes nothing, and the fact is what is checked.
+  w.hold(sha256);
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1', sha256: 'a'.repeat(64) });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`).doc.result, 'pushed');
+});
+
+test('L325 m2: a refusal that may pass by itself says retry: true and files that; a final one does not', async () => {
+  const ok = async () => { const w = await world(); await docChange(w); return w; };
+  const answer = async (w, over) => { const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, over); assert.equal(r.ok, false); return r; };
+  const cases = [
+    ['no robot key', async (w) => ({ getRobotToken: async () => '' }), /^no robot key/],
+    ['a robot key that throws', async () => ({ getRobotToken: async () => { throw new Error('no'); } }), /^no robot key/],
+    ['GitHub unreadable', async (w) => ({ testRemote: () => join(w.root, 'nowhere.git') }), /^could not read GitHub$/],
+    ['fetch failed', async (w) => { await gitOk(['update-ref', '-d', 'refs/heads/main'], { gitDir: w.gh }); return {}; }, /^could not fetch main from GitHub$/],
+    ['the mirror', async (w) => { w.values['product.mirror'] = join(w.root, 'no-mirror'); return {}; }, /^mirror: /],
+    ['a mirror that fails its own check', async (w) => { mkdirSync(join(w.mirror, 'hooks'), { recursive: true }); writeFileSync(join(w.mirror, 'hooks', 'post-update'), '#!/bin/sh\n'); return {}; }, /^mirror: mirror has hooks: post-update$/],
+    ['the start gate', async () => ({ workflowRule: async () => ({ ok: false, reason: 'no rule' }) }), /^the start gate is shut: /],
+    ['GitHub refused', async (w) => { const h = join(w.gh, 'hooks', 'pre-receive'); writeFileSync(h, '#!/bin/sh\nexit 1\n'); chmodSync(h, 0o755); return {}; }, /^GitHub refused the push$/],
+  ];
+  for (const [name, set, re] of cases) {
+    const w = await ok();
+    const r = await answer(w, await set(w));
+    assert.match(r.reason, re, name);
+    assert.equal(r.retry, true, name);
+    const [f] = w.record.list('fact').filter((x) => x.id.startsWith('push.C-1.p-'));
+    assert.equal(f.doc.retry, true, `${name}: the fact says so`);
+  }
+  // Final ones: no retry.
+  const w = await world();
+  await w.commit('wf', (c) => writeFileSync(join(c, '.github/workflows/x.yml'), 'on: push\n'));
+  await w.propose();
+  const end = await answer(w, {});
+  assert.equal(end.retry, undefined);
+  assert.equal(w.record.list('fact').filter((x) => x.id.startsWith('push.C-1.p-'))[0].doc.retry, undefined);
+  const w2 = await world();
+  w2.hold('a'.repeat(64));
+  // No bundle in the folder at the moment: it may yet be there (the owner's tab rewriting it), so it is a wait (L669 M1).
+  const gone = await answer(w2, {});
+  assert.equal(gone.reason, 'no bundle in the outbox');
+  assert.equal(gone.retry, true);
+});
+
+test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, the script itself) is a wait, never a final no', async () => {
+  const view = (w, read) => ({ ...w.record, read });
+  const cases = [
+    ['the Record throwing', (w) => ({ record: view(w, (e, i) => { if (e === 'fact') throw new Error(`EIO: ${w.root}/record/x.json`); return w.record.read(e, i); }) }), /^the push script failed: EIO: <path>/],
+    ['the card not there this once', (w) => ({ record: view(w, (e, i) => (e === 'card' ? null : w.record.read(e, i))) }), /^card C-1 is not in the Record$/],
+    ['not onboarded yet', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) }), /not onboarded/],
+    ['no proposals folder in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }), /no proposals folder in the rules/],
+    ['the outbox gone', (w) => { rmSync(w.proposals, { recursive: true, force: true }); return {}; }, /^the outbox is missing$/],
+    // L680 (plants R5, R6): the product's setup is fixed in the rules, and the same bytes go on.
+    ['no repo in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.repo': undefined } }) }), /no valid GitHub repo in the rules/],
+    ['no mirror in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.mirror': undefined } }) }), /no mirror in the rules/],
+  ];
+  for (const [name, set, re] of cases) {
+    const w = await world();
+    await docChange(w);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, set(w));
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, re, name);
+    assert.ok(!r.reason.includes(w.root), `${name}: no local path`);
+    assert.equal(r.retry, true, `${name}: may pass by itself`);
+    assert.ok(!(await w.ghRefs()).includes('refs/heads/card/c-1'), `${name}: nothing pushed`);
+  }
+});
+
+// ---- L680: one rule for every git call. A git that did not finish or start is a wait; git's own answer is final when
+// the command asks about the bundle, and a wait when it asks about GitHub or the mirror. ----
+const nothingPushed = async (w, name) => assert.ok(!(await w.ghRefs()).includes('refs/heads/card/c-1'), `${name}: nothing pushed`);
+const withFake = async (rules, testGit = {}) => {
+  const w = await world();
+  await docChange(w);
+  const fake = makeFakeGit(join(w.root, 'fake-git'), rules);
+  return { w, fake, push: () => w.pushP({ product: PRODUCT, card: 'C-1' }, { testGit: { bin: fake.bin, ...testGit } }) };
+};
+
+test('L680: the fake git runs the real one for a command it has no rule for, so a push through it passes', async () => {
+  const { w, fake, push } = await withFake([]);
+  const r = await push();
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(fake.calls().includes('diff-tree') && fake.calls().includes('ls-remote'), fake.calls().join(' '));
+  assert.ok((await w.ghRefs()).includes('refs/heads/card/c-1'));
+});
+
+test('L680: a git that runs past its time limit is a wait, whatever it was asked', async () => {
+  for (const [cmd, has] of [['check-ref-format'], ['ls-remote'], ['bundle'], ['fetch', '.bundle'], ['rev-list'], ['diff-tree'], ['cat-file'], ['push']]) {
+    const { w, push } = await withFake([{ cmd, has, sleep: true }], { timeouts: { [cmd]: 1500 } });
+    const r = await push();
+    assert.equal(r.ok, false, cmd);
+    assert.match(r.reason, /git did not finish/, cmd);
+    assert.equal(r.retry, true, `${cmd}: a stall may pass by itself`);
+    await nothingPushed(w, cmd);
+  }
+});
+
+test('L680: a git that does not start is a wait, and so is a git too old to trust', async () => {
+  for (const cmd of ['check-ref-format', 'diff-tree', 'bundle', 'fetch']) {
+    const { w, push } = await withFake([], { failStart: [cmd] });
+    const r = await push();
+    assert.equal(r.ok, false, cmd);
+    assert.equal(r.retry, true, `${cmd}: ${r.reason}`);
+    await nothingPushed(w, cmd);
+  }
+  const { w, push } = await withFake([{ cmd: '--version', stdout: 'git version 1.0.0\n' }]);
+  const r = await push();
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /older than/);
+  assert.equal(r.retry, true);
+  await nothingPushed(w, 'version');
+});
+
+// git's and the system's words for a fault of the Mac (push.mjs MAC_FAULT), each as git says it (L702 M1: pinned). Each
+// text holds only its own word, so taking any one word out of MAC_FAULT fails its row (the first three once all held two).
+const MAC_WORDS = [
+  "error: cannot lock ref 'refs/orchestrate/incoming/C-1/p-x': is at 0123456 but expected 89abcde\n",
+  "fatal: Unable to create '/m/refs/orchestrate/incoming/C-1/p-x.lock': Not a directory\n",
+  "error: unable to write file /m/x.lock': File exists\n",
+  'fatal: write error: No space left on device\n',
+  'fatal: write error: Disk quota exceeded\n',
+  'error: unable to create temporary file: Read-only file system\n',
+  'error: index-pack died of signal 9\n',
+  'fatal: Out of memory, malloc failed (tried to allocate 8388608 bytes)\n',
+  "fatal: Unable to create temporary file '/m/objects/pack/tmp_pack_XXXXXX': Permission denied\n",
+  'fatal: Too many open files\n',
+  'fatal: cannot fork() for index-pack\n',
+  'fatal: mmap failed: Cannot allocate memory\n',
+  "error: unable to write file '/m/objects/pack/x.pack': Operation not permitted\n",
+  'fatal: read error: Input/output error\n',
+  'error: unable to fork\n',
+  'error: Resource temporarily unavailable\n',
+];
+
+test('L680: git\'s own answer is final about the bundle, and a wait about GitHub or the mirror', async () => {
+  const cases = [
+    // About the bundle's own names and commits: final.
+    [{ cmd: 'check-ref-format', code: 128, stderr: "fatal: 'card/c-1' is not a valid branch name\n" }, /is not a valid name/, undefined],
+    [{ cmd: 'diff-tree', code: 128, stderr: 'fatal: bad object\n' }, /could not list a commit's changes/, undefined],
+    [{ cmd: 'rev-list', code: 128, stderr: 'fatal: bad object\n' }, /could not list the branch's commits/, undefined],
+    [{ cmd: 'cat-file', code: 128, stderr: 'fatal: bad object\n' }, /could not read commit/, undefined],
+    [{ cmd: 'bundle', code: 1, stderr: 'error: missing prerequisite\n' }, /does not verify/, undefined],
+    [{ cmd: 'fetch', has: '.bundle', code: 128, stderr: 'fatal: early EOF\n' }, /its pack is cut off or missing objects/, undefined],
+    // A commit's added lines, read for an allow comment, are the bundle's own (L702 minor 6, plant X14).
+    [{ cmd: 'diff-tree', has: '--no-color', code: 128, stderr: 'fatal: bad object\n' }, /could not read a commit's changes/, undefined],
+    // A real git's answer to a bundle missing an earlier commit says so (verify without -q): final.
+    [{ cmd: 'bundle', code: 1, stderr: 'error: Repository lacks these prerequisite commits:\nerror: 0123456789012345678901234567890123456789\n' }, /does not verify/, undefined],
+    // About GitHub or the mirror: a wait.
+    // The bundle's command failing for a reason of the Mac's, or with no words at all: a wait (L702 M1, minor 1).
+    ...MAC_WORDS.map((stderr) => [{ cmd: 'fetch', has: '.bundle', code: 1, stderr }, /git failed on this Mac, not on the bundle/, true]),
+    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: '' }, /git failed with no message/, true],
+    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: '  \n' }, /git failed with no message/, true],
+    [{ cmd: 'diff-tree', code: 128, stderr: 'fatal: Out of memory, malloc failed (tried to allocate 1048576 bytes)\n' }, /not on the bundle/, true],
+    [{ cmd: 'bundle', code: 1, stderr: 'error: Too many open files\n' }, /not on the bundle/, true],
+    [{ cmd: 'rev-list', code: 128, stderr: '' }, /git failed with no message/, true],
+    [{ cmd: 'ls-remote', code: 128 }, /could not read GitHub/, true],
+    // Where the branch leaves main, and the mirror after the push: the mirror's, a wait (L702 minor 6, plant X8).
+    [{ cmd: 'merge-base', has: 'refs/heads/main', code: 128, stderr: 'fatal: bad object\n' }, /could not find where the branch leaves main/, true],
+    [{ cmd: 'fetch', has: 'refs/heads/main', code: 128, stderr: 'fatal: unable to access\n' }, /could not fetch main from GitHub/, true],
+    [{ cmd: 'push', code: 1 }, /^GitHub refused the push$/, true],
+    // GitHub's own words go in the reason, path-cut (L702 minor 2); its size limit and secret blocking are final.
+    [{ cmd: 'push', code: 1, stderr: 'remote: error: GH001: Large files detected. You may want to try Git Large File Storage.\nremote: error: File docs/big.bin is 120.00 MB\n' }, /^GitHub refused the push: error: GH001: Large files detected\..* is 120\.00 MB$/, undefined],
+    // In GitHub's own order GH001 comes last, after the trace and one line per large file (#262 r4 N1, L713): still final,
+    // and its line is told first.
+    [{ cmd: 'push', code: 1, stderr: 'remote: error: Trace: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nremote: error: See https://gh.io/lfs for more information.\nremote: error: File docs/a-very-long-folder-name/and-a-long-file-name-number-one.bin is 120.00 MB; this exceeds GitHub\'s file size limit of 100.00 MB\nremote: error: File docs/a-very-long-folder-name/and-a-long-file-name-number-two.bin is 130.00 MB; this exceeds GitHub\'s file size limit of 100.00 MB\nremote: error: GH001: Large files detected. You may want to try Git Large File Storage - https://git-lfs.github.com.\n' }, /^GitHub refused the push: error: GH001: Large files detected\./, undefined],
+    // A bundle whose object asks for more memory than any Mac has is broken: final (#262 r4 N2).
+    [{ cmd: 'fetch', has: '.bundle', code: 128, stderr: 'fatal: Out of memory, malloc failed (tried to allocate 1152921504606846977 bytes)\n' }, /its pack is cut off or missing objects|does not|could not/, undefined],
+    [{ cmd: 'push', code: 1, stderr: 'remote: error: GH013: Repository rule violations found for refs/heads/card/c-1.\nremote: - Push cannot contain secrets\n' }, /^GitHub refused the push: error: GH013: Repository rule violations/, undefined],
+    [{ cmd: 'push', code: 1, stderr: 'remote: Internal Server Error /Users/someone/x\nTo /some/where\n ! [remote rejected] card/c-1 (failed)\n' }, /^GitHub refused the push: Internal Server Error <path>$/, true],
+  ];
+  for (const [rule, re, retry] of cases) {
+    const name = `${rule.cmd} ${rule.code} ${JSON.stringify(rule.stderr ?? '')}`;
+    const { w, push } = await withFake([rule]);
+    const r = await push();
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, re, name);
+    // git's words reach Joe path-cut (L702: the Mac-fault reason through plainError).
+    assert.doesNotMatch(r.reason, /\/m\/|\/Users\//, name);
+    assert.equal(r.retry, retry, `${name}: ${r.reason}`);
+    await nothingPushed(w, name);
+  }
+});
+
+test('L680 minor: merge-base --is-ancestor\'s exit 1 is "moved" (final); any other failure of it is a wait', async () => {
+  for (const [code, re, retry] of [[1, /has moved/, undefined], [128, /could not compare the branch on GitHub/, true]]) {
+    const w = await world();
+    await docChange(w);
+    assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).ok, true);
+    await w.commit('more', (c) => writeFileSync(join(c, 'README.md'), 'better still\n'));
+    await w.propose();
+    const before = await w.ghRefs();
+    const fake = makeFakeGit(join(w.root, 'fake-git'), [{ cmd: 'merge-base', has: '--is-ancestor', code }]);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { testGit: { bin: fake.bin } });
+    assert.equal(r.ok, false, String(code));
+    assert.match(r.reason, re, String(code));
+    assert.equal(r.retry, retry, `${code}: ${r.reason}`);
+    assert.equal(await w.ghRefs(), before);
+  }
+});
+
+test('L702 minor 3: merge-base main <tip>\'s exit 1 is "no shared history" (final); any other failure of it is a wait', async () => {
+  for (const [code, re, retry] of [[1, /^the branch shares no history with main$/, undefined], [128, /could not find where the branch leaves main/, true]]) {
+    const { w, push } = await withFake([{ cmd: 'merge-base', has: 'refs/heads/main', code, stderr: code === 128 ? 'fatal: bad object\n' : '' }]);
+    const r = await push();
+    assert.equal(r.ok, false, String(code));
+    assert.match(r.reason, re, String(code));
+    assert.equal(r.retry, retry, `${code}: ${r.reason}`);
+    await nothingPushed(w, String(code));
+  }
+});
+
+// Each git call of the research copy is about main in the mirror, not the report's bytes: a wait (L702 minor 6, plants
+// X9-X12, X15, X16).
+test('L702 minor 6: each git call of the research copy that fails is a wait, and nothing is pushed', async () => {
+  for (const [rule, re] of [
+    [{ cmd: 'ls-tree' }, /could not read main's files/],
+    [{ cmd: 'mktree' }, /could not build the copy's files/],
+    [{ cmd: 'hash-object' }, /could not store the report/],
+    [{ cmd: 'rev-parse', has: 'main^{commit}' }, /could not read main in the mirror/],
+    [{ cmd: 'rev-parse', has: 'main^{tree}' }, /could not read main in the mirror/],
+    [{ cmd: 'commit-tree' }, /could not make the copy's commit/],
+    [{ cmd: 'update-ref', has: 'refs/orchestrate/incoming/' }, /could not hold the copy's commit/],
+  ]) {
+    const name = `${rule.cmd} ${rule.has ?? ''}`;
+    const w = await researchWorld();
+    const fake = makeFakeGit(join(w.root, 'fake-git'), [{ ...rule, code: 128, stderr: 'fatal: bad object\n' }]);
+    const r = await researchRefused(w, re, undefined, { testGit: { bin: fake.bin } });
+    assert.equal(r.retry, true, `${name}: ${r.reason}`);
+    assert.ok(fake.calls().includes(rule.cmd), name);
+  }
+});
+
+test('L680 (plant R4): a bundle in the outbox that is a link is refused for good; one not there is a wait', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  const p = join(w.proposals, 'bundle-C-1.bundle');
+  renameSync(p, join(w.root, 'real.bundle'));
+  symlinkSync(join(w.root, 'real.bundle'), p);
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'the bundle in the outbox is a link');
+  assert.equal(r.retry, undefined, 'final');
+  await nothingPushed(w, 'link');
+  assert.ok(sha256);
+});
+
+// The auditor's three broken bundles (r2): `bundle verify` reads only the header, so each fails at the fetch, and each is
+// the bundle's own fault: refused, never a wait (L680 M1).
+const rehold = (w) => w.hold(createHash('sha256').update(readFileSync(join(w.proposals, 'bundle-C-1.bundle'))).digest('hex'));
+const raw = async (w, args, input) => { const r = await git(args, { ...w.cg, input }); assert.equal(r.code, 0, r.stderr); return r.stdout; };
+
+test('L680 M1: a cut-off bundle, one whose branch names a tree, and one missing an object are each refused, never a wait', async () => {
+  const control = await world();
+  await docChange(control);
+  assert.equal((await control.pushP({ product: PRODUCT, card: 'C-1' })).ok, true, 'control: a whole bundle passes');
+  const breaks = {
+    'cut off': async (w) => { const p = join(w.proposals, 'bundle-C-1.bundle'); const b = readFileSync(p); writeFileSync(p, b.subarray(0, b.length - 30)); },
+    'a tree for a branch': async (w) => {
+      const tree = (await raw(w, ['rev-parse', 'card/c-1^{tree}'])).toString().trim();
+      const objs = (await raw(w, ['ls-tree', '-r', 'card/c-1'])).toString().trim().split('\n').map((l) => l.split(/\s+/)[2]);
+      const pack = await raw(w, ['pack-objects', '-q', '--stdout'], Buffer.from(`${[...objs, tree].join('\n')}\n`));
+      writeFileSync(join(w.proposals, 'bundle-C-1.bundle'), Buffer.concat([Buffer.from(`# v2 git bundle\n${tree} refs/heads/card/c-1\n\n`), pack]));
+    },
+    'a missing object': async (w) => {
+      const tip = (await raw(w, ['rev-parse', 'card/c-1'])).toString().trim();
+      const main = (await raw(w, ['rev-parse', 'main'])).toString().trim();
+      const pack = await raw(w, ['pack-objects', '-q', '--stdout'], Buffer.from(`${tip}\n`));
+      writeFileSync(join(w.proposals, 'bundle-C-1.bundle'), Buffer.concat([Buffer.from(`# v2 git bundle\n-${main} first\n${tip} refs/heads/card/c-1\n\n`), pack]));
+    },
+  };
+  for (const [name, spoil] of Object.entries(breaks)) {
+    const w = await world();
+    await docChange(w);
+    await spoil(w);
+    rehold(w);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+    assert.equal(r.ok, false, name);
+    assert.equal(r.retry, undefined, `${name}: the bundle's own fault is final: ${r.reason}`);
+    assert.ok(!r.reason.includes(w.root), `${name}: no local path`);
+    await nothingPushed(w, name);
+  }
+});
+
+test('L325 m3: refusals with no real card or attempt share no fact, at any door', async () => {
+  const w = await world();
+  const before = w.record.list('fact').length;
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'no/such' })).ok, false);
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-77' })).ok, false);
+  assert.equal((await createPushScript(w.ports)('S-404')).ok, false);
+  assert.equal((await createPushScript(w.ports).pushResearch({ product: PRODUCT, card: 'no/such' })).ok, false);
+  assert.equal(w.record.list('fact').length, before);
+});
+
+test('L325 m4: the branch already at this tip is an answer of ok, and a pushed fact is never written over', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  const first = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(first.ok, true, first.reason);
+  const id = `push.C-1.p-${sha256.slice(0, 12)}`;
+  const fact = structuredClone(w.record.read('fact', id));
+  const noFact = { record: { ...w.record, read: (e, i) => (e === 'fact' && i === id ? null : w.record.read(e, i)) } };
+  // The fact lost after the push: the branch is checked again and stays where it is.
+  const refs = await w.ghRefs();
+  const again = await w.pushP({ product: PRODUCT, card: 'C-1' }, noFact);
+  assert.equal(again.ok, true, again.reason);
+  assert.equal(again.tip, first.tip);
+  assert.equal(await w.ghRefs(), refs);
+  // Main has since taken that commit: no new commits, and still ok, with nothing pushed.
+  await gitOk(['update-ref', 'refs/heads/main', first.tip], { gitDir: w.gh });
+  const merged = await w.pushP({ product: PRODUCT, card: 'C-1' }, noFact);
+  assert.equal(merged.ok, true, merged.reason);
+  assert.equal(merged.commits, 0);
+  assert.equal(merged.tip, first.tip);
+  assert.deepEqual(w.record.read('fact', id).doc, fact.doc, 'the pushed fact is kept');
+  // A look at that same state has no change to show, and a worker's door keeps its refusal.
+  const look = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true, ...noFact });
+  assert.equal(look.ok, false);
+  assert.match(look.reason, /no new commits/);
+});
+
+test('L325 m5: a rename over the bundle after the open pushes what was opened', async () => {
+  const w = await world();
+  await w.commit('docs', (c) => writeFileSync(join(c, 'README.md'), 'better\n'));
+  const sha256 = await w.propose();
+  const tip = (await gitOk(['rev-parse', 'refs/heads/card/c-1'], w.cg)).trim();
+  const other = join(w.root, 'other.bundle');
+  await w.commit('more', (c) => writeFileSync(join(c, 'app.txt'), 'sneaked in\n'));
+  await gitOk(['bundle', 'create', '-q', other, 'refs/heads/card/c-1', '^refs/heads/main'], w.cg);
+  const swap = (fd) => { const st = fstatSync(fd); renameSync(other, bundleFile(w)); return st; };
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { testFstat: swap });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.tip, tip, 'the bytes on the handle, not the name');
+  assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${tip}`));
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`).doc.tip, tip);
+});
+
+test('L325 m5: a bundle that grows past the cap while it is read is refused', async () => {
+  const w = await world();
+  await docChange(w);
+  const size = statSync(bundleFile(w)).size;
+  const before = await w.ghRefs();
+  const grow = (fd) => { const st = fstatSync(fd); appendFileSync(bundleFile(w), 'x'.repeat(2 << 20)); return st; };
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { testFstat: grow, bundleCap: size + 100 });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, `the bundle is larger than ${size + 100} bytes`);
+  assert.equal(await w.ghRefs(), before);
+});
+
+test('L325 m5: a sha that differs only in its last character is another hash', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  w.hold(`${sha256.slice(0, -1)}${sha256.endsWith('0') ? '1' : '0'}`);
+  const before = await w.ghRefs();
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'the bundle\'s bytes are not the ones the intake recorded');
+  assert.equal(await w.ghRefs(), before);
+});
+
+test('L325 m6: the push script and the intake agree on how loose a proposals folder may be', async () => {
+  const w = await world();
+  await docChange(w);
+  for (const mode of [0o700, 0o750, 0o755, 0o770, 0o777, 0o751, 0o760]) {
+    chmodSync(w.proposals, mode);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { look: true });
+    const intake = folderProblem(w.proposals, ME);
+    assert.equal(r.ok, intake === null, `mode ${mode.toString(8)}: ${r.reason} / ${intake}`);
+    if (!r.ok) assert.equal(r.reason, 'the folder is looser than 750');
+  }
+});
+
+test('L325 cosmetics: no root as the worker or owner; the test fstat port outside tests; a worker attempt can\'t take a door\'s prefix', async () => {
+  const w = await world();
+  assert.throws(() => createPushScript({ ...w.ports, ownerUid: 0 }), /ownerUid must be a Mac user id/);
+  assert.throws(() => createPushScript({ ...w.ports, uids: { worker: 0 } }), /uids\.worker must be a Mac user id/);
+  const ctx = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  try {
+    assert.throws(() => createPushScript({ ...w.ports, testFstat: fstatSync }), /testFstat is for tests only/);
+    assert.equal(typeof createPushScript(w.ports), 'function');
+  } finally { process.env.NODE_TEST_CONTEXT = ctx; }
+  for (const attempt of ['p-abc', 'r-abc']) {
+    const cur = w.record.read('session', 'S-1');
+    assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, attempt } }).ok, true);
+    assert.equal((await w.push()).reason, 'the launch record has a bad attempt id');
+  }
+  const cur = w.record.read('session', 'S-1');
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, card: 7 } }).ok, true);
+  assert.equal((await w.push()).reason, 'the launch record has a bad card id');
+});
+
+// ---- R-0b-128 part 2: the real docs check: the push script's own list, M10's own answer (L77 m1)
+
+// The card as its creator would have written it, declared Tier 2.
+const tierTwo = (w) => ({ ...w.record, read: (e, i) => { const r = w.record.read(e, i); return e === 'card' && r ? { ...r, doc: { ...r.doc, tier: 2 } } : r; } });
+const realDocsCheck = (w, rules = { may: (a, s) => realEngine().may(a, s) }, over = {}) => createDocsCheck({ record: tierTwo(w), rules, pushProposal: createPushScript({ ...w.ports, uids: { worker: ME + 1 }, ownerUid: ME, ...over }).pushProposal });
+const check = (w, sha256, ...args) => realDocsCheck(w, ...args)({ product: PRODUCT, card: 'C-1', bundle: { path: join(w.proposals, 'bundle-C-1.bundle'), sha256 } });
+const added = async (w, file, mode) => {
+  await w.commit('change', (c) => { mkdirSync(dirname(join(c, file)), { recursive: true }); writeFileSync(join(c, file), 'text\n'); if (mode) chmodSync(join(c, file), mode); });
+  return w.propose();
+};
+
+test('R-0b-128: the docs check passes a real docs change, and nothing is pushed or recorded by asking', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const before = await w.ghRefs();
+  assert.equal(await check(w, sha256), null);
+  assert.equal(await w.ghRefs(), before);
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`), null);
+});
+
+test('R-0b-128: the docs check says no to code and to a runnable doc, from the bundle\'s own files', async () => {
+  for (const [file, mode, re] of [['app.txt', undefined, /outside the docs and research lane/], ['docs/run.md', 0o755, /mode "?100755"? is a link, submodule or runnable file/]]) {
+    const w = await world();
+    const sha256 = await added(w, file, mode);
+    assert.match(await check(w, sha256), re, file);
+  }
+});
+
+test('R-0b-128: the docs check asks M10 with the list the push script read', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const asked = [];
+  const answer = await check(w, sha256, { may: (a, s) => { asked.push([a, s]); return { decision: 'deny', reason: 'not this lane\'s change' }; } });
+  assert.equal(answer, 'not this lane\'s change');
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0][0], 'merge');
+  assert.deepEqual(asked[0][1].files, [{ path: 'docs/notes.md', status: 'added', mode: '100644' }]);
+  assert.equal(asked[0][1].declared_tier, 2);
+  assert.equal(asked[0][1].truncated, false);
+});
+
+test('R-0b-128, L597 (2): a look that could not finish is a wait, and so are bytes moved since the pass checked them; a final look refusal is a refusal', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  assert.deepEqual(await check(w, sha256, undefined, { getRobotToken: async () => '' }), { retry: 'no robot key for this product' });
+  assert.deepEqual(await check(w, 'a'.repeat(64)), { retry: 'the bundle held changed while it was checked' });
+  w.hold('b'.repeat(64));
+  assert.deepEqual(await check(w, sha256), { retry: 'the bundle\'s bytes are not the ones the intake recorded' });
+  w.hold(sha256);
+  await w.commit('ci', (c) => writeFileSync(join(c, '.github/workflows/ci.yml'), 'name: other\n'));
+  const code = await w.propose();
+  assert.match((await check(w, code)).refuse, /touches files no card may/);
+});
+
+test('L597 (2): M10 saying no for a reason that is not the change (a pause, its own error) is a wait; its answer about the change is final', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const said = (decision, reason) => ({ may: () => ({ decision, reason }) });
+  assert.deepEqual(await check(w, sha256, said('deny', 'product is paused: only an exact reverse may merge')), { retry: 'the rules said no for now: product is paused: only an exact reverse may merge' });
+  assert.deepEqual(await check(w, sha256, makeRules({ may: () => { throw new Error('rules unreadable for p1'); } })), { retry: 'the rules said no for now: rules error: rules unreadable for p1' });
+  assert.equal(await check(w, sha256, said('deny', 'not this lane\'s change; MAIN merges it as today: x')), 'not this lane\'s change; MAIN merges it as today: x');
+  assert.equal(await check(w, sha256, said('ask', 'Tier 1')), 'Tier 1');
+});
+
+test('L597 (4): the docs check sends the card\'s own tier: a Tier 1 card\'s docs change is not the docs lane\'s', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const tier = (t) => ({ ...w.record, read: (e, i) => { const r = w.record.read(e, i); return e === 'card' && r ? { ...r, doc: { ...r.doc, tier: t } } : r; } });
+  const pushProposal = createPushScript({ ...w.ports, uids: { worker: ME + 1 }, ownerUid: ME }).pushProposal;
+  const rules = { may: (a, s) => realEngine().may(a, s) };
+  const bundle = { path: join(w.proposals, 'bundle-C-1.bundle'), sha256 };
+  assert.equal(await createDocsCheck({ record: tier(2), rules, pushProposal })({ product: PRODUCT, card: 'C-1', bundle }), null);
+  for (const t of [1, undefined]) assert.match(await createDocsCheck({ record: tier(t), rules, pushProposal })({ product: PRODUCT, card: 'C-1', bundle }), /not declared Tier 2/, String(t));
 });
 
 test('R-0b-127: the proposal door\'s own inputs: no product, a bad card, no or a bad sha256, no proposals folder, a folder not the owner\'s', async () => {
@@ -1241,16 +1752,15 @@ test('R-0b-127: the proposal door\'s own inputs: no product, a bad card, no or a
   const sha256 = await w.propose();
   const before = await w.ghRefs();
   const cases = [
-    [{ card: 'C-1', sha256 }, {}, 'the proposal names no product'],
-    [{ product: PRODUCT, card: '../C-1', sha256 }, {}, 'the proposal has a bad card id'],
-    [{ product: PRODUCT, card: 'C-1' }, {}, 'the proposal has no sha256 of the bundle the intake recorded'],
-    [{ product: PRODUCT, card: 'C-1', sha256: sha256.toUpperCase() }, {}, 'the proposal has no sha256 of the bundle the intake recorded'],
-    [{ product: PRODUCT, card: 'C-1', sha256: sha256.slice(0, 40) }, {}, 'the proposal has no sha256 of the bundle the intake recorded'],
-    [{ product: PRODUCT, card: 'C-1', sha256 }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }, 'the product has no proposals folder in the rules'],
-    [{ product: PRODUCT, card: 'C-1', sha256 }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': 'proposals' } }) }, 'the product has no proposals folder in the rules'],
-    [{ product: PRODUCT, card: 'C-1', sha256 }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': `${w.proposals}/../proposals` } }) }, 'the product has no proposals folder in the rules'],
+    [{ card: 'C-1' }, {}, 'the proposal names no product'],
+    [{ product: PRODUCT, card: '../C-1' }, {}, 'the proposal has a bad card id'],
+    [{ product: PRODUCT, card: 7 }, {}, 'the proposal has a bad card id'],
+    [{ product: PRODUCT, card: ['C-1'] }, {}, 'the proposal has a bad card id'],
+    [{ product: PRODUCT, card: 'C-1' }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }, 'the product has no proposals folder in the rules'],
+    [{ product: PRODUCT, card: 'C-1' }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': 'proposals' } }) }, 'the product has no proposals folder in the rules'],
+    [{ product: PRODUCT, card: 'C-1' }, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': `${w.proposals}/../proposals` } }) }, 'the product has no proposals folder in the rules'],
     // The owner is someone else and so is the bundle (as faked): the folder, really the test user's, is refused first.
-    [{ product: PRODUCT, card: 'C-1', sha256 }, { ownerUid: ME + 5, uids: { worker: ME + 1 }, fstat: ownedBy(ME + 5) }, `the folder is owned by user ${ME}, not user ${ME + 5}`],
+    [{ product: PRODUCT, card: 'C-1' }, { ownerUid: ME + 5, uids: { worker: ME + 1 }, testFstat: ownedBy(ME + 5) }, `the folder is owned by user ${ME}, not user ${ME + 5}`],
   ];
   for (const [input, over, reason] of cases) {
     const r = await w.pushP(input, over);
@@ -1259,9 +1769,10 @@ test('R-0b-127: the proposal door\'s own inputs: no product, a bad card, no or a
   }
   assert.equal(await w.ghRefs(), before);
   assert.equal(w.prs.length, 0);
-  // A card that can't name a fact still writes one, under "unknown", so the refusal is on the record.
-  assert.equal(w.record.read('fact', 'push.C-1.unknown').doc.result, 'refused');
-  assert.equal(w.record.read('fact', 'push.unknown.' + `p-${sha256.slice(0, 12)}`).doc.result, 'refused');
+  // Input that can't name a fact writes none (L325 m3); the caller has the answer. A real one still does.
+  assert.equal(w.record.read('fact', 'push.C-1.unknown'), null);
+  assert.equal(w.record.read('fact', `push.unknown.p-${sha256.slice(0, 12)}`), null);
+  assert.equal(w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`).doc.result, 'refused');
 });
 
 test('R-0b-127: a push script is never made without the worker\'s and the owner\'s users, or with one user for both', async () => {
@@ -1454,7 +1965,7 @@ test('L290: a report that is not the bytes the intake recorded is refused before
   }
   // Written over after the file was opened: the read is of that one handle, so the new bytes are what is judged.
   const w = await researchWorld();
-  await researchRefused(w, REASON, undefined, { fstat: (fd) => { writeFileSync(w.file, same); utimesSync(w.file, SETTLED, SETTLED); return fstatSync(fd); } });
+  await researchRefused(w, REASON, undefined, { testFstat: (fd) => { writeFileSync(w.file, same); utimesSync(w.file, SETTLED, SETTLED); return fstatSync(fd); } });
 });
 
 test('L286: a report the secret scan can\'t read is refused like any file, and nothing is staged', async () => {
@@ -1464,7 +1975,7 @@ test('L286: a report the secret scan can\'t read is refused like any file, and n
 
 test('L290: the one safe open: a link, a second name, the wrong owner, a folder that is a link or anyone else\'s, or a file still settling', async () => {
   const w = await researchWorld();
-  await researchRefused(w, /owned by user/, undefined, { fstat: ownedBy(ME + 7) });
+  await researchRefused(w, /owned by user/, undefined, { testFstat: ownedBy(ME + 7) });
   await researchRefused(w, /owned by user/, undefined, { ownerUid: ME + 7, uids: { worker: ME } });
   writeFileSync(w.file, REPORT_BYTES); // written just now
   await researchRefused(w, /changed a moment ago/);
@@ -1578,11 +2089,11 @@ test('L387: all three doors write the head they pushed, and a repeat of it write
   const w = await world();
   await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   const sha256 = await w.propose();
-  const p = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
+  const p = await w.pushP({ product: PRODUCT, card: 'C-1' });
   assert.equal(p.ok, true, p.reason);
   assert.equal(w.record.read('card', 'C-1').doc.head, p.tip);
   const rev = w.record.read('card', 'C-1').rev;
-  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1', sha256 })).already, true);
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).already, true);
   assert.equal(w.record.read('card', 'C-1').rev, rev);
   const rw = await researchWorld();
   const r = await rw.pushR();
@@ -1617,7 +2128,7 @@ test('L387: a refused head write is finished by the next try of the same bytes, 
   const w = await world();
   await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   const sha256 = await w.propose();
-  const input = { product: PRODUCT, card: 'C-1', sha256 };
+  const input = { product: PRODUCT, card: 'C-1' };
   assert.equal((await w.pushP(input, { record: refusing(w.record) })).ok, true);
   assert.equal(w.record.read('card', 'C-1').doc.head, undefined);
   const p = await w.pushP(input);
