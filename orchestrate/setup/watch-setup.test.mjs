@@ -4,14 +4,15 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, fstatSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fstatSync, linkSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
 import { parseInstallConfig } from './install.mjs';
 import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } from './daemons.mjs';
 import { readConfigFile, realIo } from './mac.mjs';
-import { checkWatchRules, planWatchRules, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
+import { readUser } from './users-folders.mjs';
+import { checkWatchAppConfig, checkWatchAppKey, checkWatchRules, planWatchApp, planWatchRules, watchAppKeyPath, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
 import { main, parseArgs } from './setup.mjs';
 import { parseArgs as watchRunArgs } from '../modules/M6-merge-gate/watch-run.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -21,9 +22,10 @@ const BASE = '/Library/orch-test';
 const RULES = 'version: 1\nlanes:\n  docs: { risky: false }\n';
 const HASH = createHash('sha256').update(RULES).digest('hex');
 const REPO = 'example-org/example-repo';
+const APP = { id: '1234567', installation: '7654321', keyFile: 'watch-app-key' };   // L627: the read-only watcher App
 const RAW = {
   base: BASE, owner: 'sam', products: ['alpha'], address: 'https://example.invalid/org/repo.git', label: 'com.example.orch-test',
-  runnerConfig: '/tmp/x/review.json', extras: [], watch: { repo: REPO, rulesSha256: HASH },
+  runnerConfig: '/tmp/x/review.json', extras: [], watch: { repo: REPO, rulesSha256: HASH, app: APP },
 };
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
 
@@ -38,6 +40,11 @@ function world({ raw = RAW, as = 0 } = {}) {
   };
   const run = (args) => { const s = sink(); const code = main(argv(args), { io: mac, out: s.out, err: s.err }); return { code, text: s.lines.join('\n') }; };
   const first = run(['users-folders']); assert.equal(first.code, 0, first.text);
+  const cfg0 = parseInstallConfig(raw);
+  if (cfg0.watch?.app) {   // the watcher App's key, as the owner puts it in place: orchestrate's own 0600 file (never a real key)
+    const k = watchAppKeyPath(cfg0); writeFileSync(mac.at(k), 'k'.repeat(1700)); chmodSync(mac.at(k), 0o600);
+    const o = readUser(mac, 'orchestrate'); mac.owners.set(k, { uid: o.uid, gid: o.gid });
+  }
   mac.as = as;
   return { mac, ext, src, raw, cfg: parseInstallConfig(raw), run };
 }
@@ -45,7 +52,7 @@ const failing = (res) => res.filter((r) => !r.ok);
 
 test('config: watch must be { repo, rulesSha256 }; anything else is refused; absent is fine', () => {
   assert.equal(parseConfig({ base: BASE, owner: 'sam', products: [] }).watch, undefined);
-  assert.deepEqual(parseConfig(RAW).watch, { repo: REPO, rulesSha256: HASH });
+  assert.deepEqual(parseConfig(RAW).watch, { repo: REPO, rulesSha256: HASH, app: APP });
   assert.deepEqual(parseConfig({ ...RAW, watch: { repo: REPO } }).watch, { repo: REPO });   // L150 m4: the repo alone is a valid watch (prove-token needs it before the rules are in place)
   for (const bad of [{}, { rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH.toUpperCase() }, { repo: REPO, rulesSha256: HASH.slice(1) }, { repo: 'no-slash', rulesSha256: HASH }, { repo: '../x/y', rulesSha256: HASH }, { repo: REPO, rulesSha256: HASH, extra: 1 }, [], 'x', null]) {
     assert.throws(() => parseConfig({ ...RAW, watch: bad }), /watch/, JSON.stringify(bad));
@@ -300,7 +307,7 @@ test('r7 c-C class check: the setup code reads cfg.watch in exactly these places
     const n = (readFileSync(new URL(`./${f}`, here), 'utf8').match(/cfg\.watch\b/g) ?? []).length;   // each read, not each line
     if (n) at[f] = n;
   }
-  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 11 });
+  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 17 });   // +6 (L627): the App's key path, the job's three App arguments and check-watch-rules' key check, each reached only past the fingerprint gate
 });
 
 test('R6 m-1 a named pipe given as the rules file is refused at once, not waited on', { skip: process.platform === 'win32' }, () => {
@@ -401,4 +408,155 @@ test('L194 PLANT the rules copy must be root:wheel: a copy in another group FAIL
   const r = w.run(['watch-rules', '--rules-source', w.src]); assert.equal(r.code, 0, r.text); assert.doesNotMatch(r.text, /nothing to do/);
   assert.deepEqual(w.mac.owners.get(p), { uid: w.mac.rootUid, gid: 0 });
   assert.deepEqual(failing(checkWatchRules(w.mac, w.cfg)), []);
+});
+
+// ---- L627: the watch job reads check runs as the read-only watcher App (L624's three arguments, all or none)
+
+test('L627 config: watch.app is exactly { id, installation, keyFile }, digits for the ids and a bare file name for the key', () => {
+  assert.deepEqual(parseConfig(RAW).watch.app, APP);
+  assert.equal(parseConfig({ ...RAW, watch: { repo: REPO, rulesSha256: HASH } }).watch.app, undefined);
+  const bad = [
+    { id: APP.id, installation: APP.installation },                                   // a key missing
+    { ...APP, extra: 'x' },                                                          // a key too many
+    { ...APP, id: 1234567 }, { ...APP, id: '' }, { ...APP, id: '0123' }, { ...APP, installation: '12a' },
+    { ...APP, keyFile: '/abs/key' }, { ...APP, keyFile: '../key' }, { ...APP, keyFile: 'a/b' }, { ...APP, keyFile: '..' }, { ...APP, keyFile: '' }, { ...APP, keyFile: '.hidden' },
+    null, [], 'x',
+  ];
+  for (const app of bad) assert.throws(() => parseConfig({ ...RAW, watch: { repo: REPO, rulesSha256: HASH, app } }), /watch\.app/, JSON.stringify(app));
+});
+
+test('L627 job: with an App, the hourly job passes all three arguments, the key in the keys folder, and watch-run accepts them', () => {
+  const w = world();
+  const text = watchPlist(w.mac, w.cfg);
+  const key = `${BASE}/keys/${APP.keyFile}`;
+  assert.equal(watchAppKeyPath(w.cfg), key);
+  assert.ok(text.includes(`<string>--app-id</string><string>${APP.id}</string><string>--app-installation</string><string>${APP.installation}</string><string>--app-key-file</string><string>${key}</string>`), text);
+  const args = [...text.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  const once = args.slice(args.indexOf('once'));
+  const end = once.indexOf(key) + 1; assert.ok(end > 0);
+  const o = watchRunArgs(once.slice(0, end));
+  assert.equal(o.appId, APP.id); assert.equal(o.appInstallation, APP.installation); assert.equal(o.appKeyFile, key);
+  assert.ok(!text.includes('k'.repeat(40)), 'the key text never goes in the job file');
+});
+
+test('L627 job: with no App in the config, none of the three arguments (watch-run refuses one or two of them)', () => {
+  const raw = { ...RAW, watch: { repo: REPO, rulesSha256: HASH } };
+  const w = world({ raw });
+  const text = watchPlist(w.mac, w.cfg);
+  for (const a of ['--app-id', '--app-installation', '--app-key-file']) assert.ok(!text.includes(a), a);
+});
+
+test('L627 check: the watcher App key is orchestrate\'s own plain 0600 file of a key\'s size; never read', () => {
+  const w = world(); w.run(['watch-rules', '--rules-source', w.src]);
+  assert.deepEqual(failing(checkWatchRules(w.mac, w.cfg)), []);
+  assert.equal(w.run(['check-watch-rules']).code, 0);
+  assert.deepEqual(failing(checkWatchAppKey(w.mac, w.cfg)), []);
+});
+
+test('PLANT L627 check: no App named, mode 644, a wrong owner, a link, a second name, a wrong size, an access list, and a missing key each FAIL', () => {
+  const w = world(); w.run(['watch-rules', '--rules-source', w.src]);
+  const k = watchAppKeyPath(w.cfg); const f = w.mac.at(k);
+  const why = () => failing(checkWatchRules(w.mac, w.cfg)).map((r) => r.why).join(' | ');
+  const noApp = parseInstallConfig({ ...RAW, watch: { repo: REPO, rulesSha256: HASH } });
+  assert.match(failing(checkWatchRules(w.mac, noApp)).map((r) => r.why).join(' | '), /no "app"/);
+  chmodSync(f, 0o644); assert.match(why(), /mode is 644/); chmodSync(f, 0o600);
+  const own = w.mac.owners.get(k);
+  w.mac.owners.set(k, { ...own, uid: own.uid + 1 }); assert.match(why(), /not orchestrate/); w.mac.owners.set(k, own);
+  const body = readFileSync(f);
+  writeFileSync(f, 'k'.repeat(50)); assert.match(why(), /size is not a key/); writeFileSync(f, body);
+  const second = `${f}-second`; linkSync(f, second); assert.match(why(), /second name/); rmSync(second);
+  assert.equal(w.mac.run('/bin/chmod', ['+a', 'everyone allow read', f]).status, 0); assert.match(why(), /access list/);
+  rmSync(f); writeFileSync(f, body); chmodSync(f, 0o600);
+  rmSync(f); symlinkSync(w.src, f); assert.match(why(), /not a plain file/);
+  rmSync(f); assert.match(why(), /missing/);
+  writeFileSync(f, body); chmodSync(f, 0o600); assert.deepEqual(failing(checkWatchRules(w.mac, w.cfg)), []);
+});
+
+test('L627 check without root: the key check is skipped as NEEDS ROOT, never a pass', () => {
+  const w = world({ as: 501 });
+  const r = checkWatchAppKey(w.mac, w.cfg); assert.equal(r.length, 1); assert.equal(r[0].skip, true);
+});
+
+// ---- L630: watch-app names the watcher App in root's config, so no one edits that file by hand
+
+const NOAPP = { ...RAW, watch: { repo: REPO, rulesSha256: HASH } };
+/** A world whose root config has no App yet, and the App's key already in the keys folder. `raw()` reads root's config back. */
+function appWorld() {
+  const w = world({ raw: NOAPP });
+  const k = watchAppKeyPath(parseInstallConfig(RAW)); writeFileSync(w.mac.at(k), 'k'.repeat(1700)); chmodSync(w.mac.at(k), 0o600);
+  const o = readUser(w.mac, 'orchestrate'); w.mac.owners.set(k, { uid: o.uid, gid: o.gid });
+  const f = w.mac.at(ROOT_CONFIG_PATH); rmSync(f, { force: true }); writeFileSync(f, JSON.stringify(NOAPP)); chmodSync(f, 0o644);
+  const go = (args) => { const s = sink(); const code = main(args, { io: w.mac, out: s.out, err: s.err }); return { code, text: s.lines.join('\n') }; };   // root's config as it is now, not rewritten
+  return { ...w, key: k, f, go, raw: () => JSON.parse(readFileSync(f, 'utf8')) };
+}
+const APPARGS = ['--app-id', APP.id, '--app-installation', APP.installation, '--app-key-name', APP.keyFile];
+
+test('L630 watch-app: a dry run changes nothing; the run adds watch.app and keeps every other entry; a second run does nothing; the job then carries the App', () => {
+  const w = appWorld(); const before = readFileSync(w.f, 'utf8');
+  const dry = w.go(['watch-app', ...APPARGS, '--dry-run']); assert.equal(dry.code, 0, dry.text);
+  assert.match(dry.text, /would run: write .*orchestrate-setup\.json\.new \(root:wheel 0644\): the config with watch\.app = App 1234567, installation 7654321, key .*keys\/watch-app-key/);
+  assert.match(dry.text, /would run: rename /); assert.equal(readFileSync(w.f, 'utf8'), before);
+  const r = w.go(['watch-app', ...APPARGS]); assert.equal(r.code, 0, r.text); assert.match(r.text, /done: all 2 items PASS/);
+  assert.deepEqual(w.raw(), { ...NOAPP, watch: { ...NOAPP.watch, app: APP } });
+  const st = statSync(w.f); assert.equal(st.mode & 0o7777, 0o644);
+  assert.throws(() => statSync(`${w.f}.new`), 'no file left beside the config');
+  const again = w.go(['watch-app', ...APPARGS]); assert.equal(again.code, 0); assert.match(again.text, /nothing to do/);
+  assert.match(watchPlist(w.mac, parseInstallConfig(w.raw())), /<string>--app-id<\/string><string>1234567<\/string>/);
+  assert.deepEqual(failing(checkWatchRules(w.mac, parseInstallConfig(w.raw()))).filter((x) => /watch-app-key/.test(x.what)), []);
+});
+
+test('PLANT L630 watch-app refuses, changing nothing: the key not in place, a bad id, a key name with a slash, no watch entry', () => {
+  const w = appWorld(); const before = readFileSync(w.f, 'utf8');
+  rmSync(w.mac.at(w.key));
+  let r = w.go(['watch-app', ...APPARGS]); assert.equal(r.code, 1); assert.match(r.text, /the key is not in place.*missing/);
+  writeFileSync(w.mac.at(w.key), 'k'.repeat(1700)); chmodSync(w.mac.at(w.key), 0o644);
+  r = w.go(['watch-app', ...APPARGS]); assert.equal(r.code, 1); assert.match(r.text, /the key is not in place.*mode is 644/); chmodSync(w.mac.at(w.key), 0o600);
+  r = w.go(['watch-app', '--app-id', 'x1', '--app-installation', APP.installation, '--app-key-name', APP.keyFile]); assert.equal(r.code, 1); assert.match(r.text, /watch\.app\.id/);
+  r = w.go(['watch-app', '--app-id', APP.id, '--app-installation', APP.installation, '--app-key-name', '../k']); assert.equal(r.code, 1); assert.match(r.text, /keyFile must be a bare file name/);
+  assert.equal(readFileSync(w.f, 'utf8'), before);
+  const plain = { ...RAW }; delete plain.watch; writeFileSync(w.f, JSON.stringify(plain));
+  r = w.go(['watch-app', ...APPARGS]); assert.equal(r.code, 1); assert.match(r.text, /no "watch" entry/);
+});
+
+test('L630 watch-app: all three flags or none; the flags belong to watch-app only; without root the real run is refused', () => {
+  assert.throws(() => parseArgs(['watch-app', '--app-id', '1', '--app-installation', '2']), /needs all three/);
+  assert.throws(() => parseArgs(['watch-app']), /needs all three/);
+  assert.throws(() => parseArgs(['check-watch-rules', ...APPARGS]), /only for watch-app/);
+  const w = appWorld(); const before = readFileSync(w.f, 'utf8');
+  w.mac.as = 501;
+  const s = sink(); const code = main(['watch-app', ...APPARGS, '--config', w.f], { io: w.mac, out: s.out, err: s.err });
+  assert.equal(code, 2, s.lines.join('\n')); assert.match(s.lines.join('\n'), /refused/); assert.equal(readFileSync(w.f, 'utf8'), before);
+});
+
+test('PLANT L630 watch-app: the config changed after the plan → the run stops before it writes, and the change is kept', () => {
+  const w = appWorld();
+  const cfg = parseInstallConfig(NOAPP); const text = readFileSync(w.f, 'utf8');
+  const plan = planWatchApp(w.mac, cfg, { raw: NOAPP, text, app: APP });
+  assert.deepEqual(plan.problems, []); assert.equal(plan.ops.length, 3);
+  const edited = JSON.stringify({ ...NOAPP, extras: ['edited'] }); writeFileSync(w.f, edited);
+  assert.throws(() => { for (const o of plan.ops) o.run(); }, /changed after this plan was made/);
+  assert.equal(readFileSync(w.f, 'utf8'), edited);
+});
+
+test('L630 watch-app: a different App already named is replaced, and the step says which it named', () => {
+  const w = appWorld();
+  writeFileSync(w.f, JSON.stringify({ ...NOAPP, watch: { ...NOAPP.watch, app: { ...APP, id: '999' } } }));
+  const dry = w.go(['watch-app', ...APPARGS, '--dry-run']); assert.match(dry.text, /\(it named App 999\)/);
+  assert.equal(w.go(['watch-app', ...APPARGS]).code, 0); assert.equal(w.raw().watch.app.id, APP.id);
+});
+
+test('PLANT L630 watch-app read-back: a config that does not name this App FAILs, so a run that did not land never says PASS', () => {
+  const w = appWorld();
+  const bad = failing(checkWatchAppConfig(w.mac, parseInstallConfig(NOAPP), APP)); assert.match(bad[0].what, /names the watcher App/); assert.match(bad[0].why, /does not name it/);
+  writeFileSync(w.f, JSON.stringify({ ...NOAPP, watch: { ...NOAPP.watch, app: { ...APP, installation: '1' } } }));
+  assert.match(failing(checkWatchAppConfig(w.mac, parseInstallConfig(NOAPP), APP))[0].why, /does not name it/);
+});
+
+test('L630 watch-app: a file a cut-off run left beside the config is replaced, and a link there is removed, never followed', () => {
+  const w = appWorld();
+  writeFileSync(`${w.f}.new`, 'half');
+  assert.equal(w.go(['watch-app', ...APPARGS]).code, 0); assert.equal(w.raw().watch.app.id, APP.id);
+  const w2 = appWorld(); const victim = join(w2.ext, 'victim'); writeFileSync(victim, 'keep');
+  symlinkSync(victim, `${w2.f}.new`);
+  assert.equal(w2.go(['watch-app', ...APPARGS]).code, 0); assert.equal(readFileSync(victim, 'utf8'), 'keep');
 });
