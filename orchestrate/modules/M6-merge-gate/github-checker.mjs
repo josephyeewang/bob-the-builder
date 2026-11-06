@@ -1497,19 +1497,22 @@ Object.defineProperties(__bob_e, {
 //
 // WHY. GitHub's free plan can't stop a hand push to main, and Vercel builds whatever lands on a branch it watches. So
 // the deploy itself asks the question: Vercel runs one pasted command before each build, and its exit code decides
-// (exit 0 = SKIP the build, exit 1 = BUILD). That command downloads this checker at a pinned commit, checks its sha256
-// and runs it. Every failure (a failed download, a wrong hash, a crash, an unreadable GitHub answer) leaves the commit
-// undeployed: the command only builds when the checker prints BUILD_TOKEN, so a crash that exits 1 still skips.
-// Two modes, pinned in the command string:
-//   first — skip every build that is not production on main; a main commit then builds with no mark check.
-//   full  — a main commit builds only if it carries the robot's mark (mark.mjs; an undo is a marked merge too, its
+// (exit 0 = SKIP the build, exit 1 = BUILD). Two modes, pinned in the command string:
+//   first — skip every build that is not production on main; a main commit then builds with no mark check. The answer
+//           needs only Vercel's own env, so the command is a self-contained shell check that downloads nothing (L571):
+//           a hosted checker nobody hosts would fail, and a failed download skips, so nothing would ever deploy and
+//           nothing would say so. first-mode shell text and decideBuild 'first' must agree; a test runs both.
+//   full  — the command downloads this checker at a pinned commit, checks its sha256 and runs it. Every failure (a
+//           failed download, a wrong hash, a crash, an unreadable GitHub answer) leaves the commit undeployed: the
+//           command only builds when the checker prints BUILD_TOKEN, so a crash that exits 1 still skips.
+//           A main commit builds only if it carries the robot's mark (mark.mjs; an undo is a marked merge too, its
 //           exact reverse recomputed by the checker), or the owner's override label: added to the merged pull request
 //           by the owner's numeric GitHub id, as a person (type User, not via an app), and not removed since.
 // A branch push (the robot's included) is never production on main, so it builds nothing.
 //
 //   decideBuild({ mode, env }) → { build, reason, needsMarkCheck? }      the env-only part (full mode stops here with needsMarkCheck)
 //   await decideBuildFull({ env, gh, robotBotId, ownerId, overrideLabel = 'owner-deploy' }) → { build, reason }
-//   skipCommand({ mode, checkerUrl, sha256 }) → the one-line shell command pasted into Vercel
+//   skipCommand({ mode, checkerUrl, sha256 }) → the one-line shell command pasted into Vercel; first mode takes neither checkerUrl nor sha256
 //   makeFetchGh({ token, fetchImpl }) → a read-only GitHub client ({ get(path) } → { status, json }) on api.github.com
 //   await main(argv, env, { gh, out }?) → 0 (skip) | 1 (build); never throws; prints BUILD_TOKEN before returning 1
 // Vercel's env: VERCEL_ENV, VERCEL_GIT_COMMIT_REF, VERCEL_GIT_COMMIT_SHA, VERCEL_GIT_REPO_OWNER, VERCEL_GIT_REPO_SLUG.
@@ -1582,8 +1585,16 @@ async function ownerOverride({ gh, owner, repo, sha, ownerId, overrideLabel }) {
   return no('no merged pull request carries the owner\'s label');
 }
 
+// Production, then main, then a full commit id, in that order and joined by bars: a bar in any value leaves a bar in the
+// last part, which the first pattern skips. The digits are spelled out because a range like a-f follows the locale.
+// The fixed part is in single quotes, not backslashes: a backslash lost or doubled on the way into Vercel's field would
+// make the bars split the pattern, and one alternative matches anything (L592). A skip prints one fixed line for the
+// build log, naming no value, and every skip reaches it. Pasted into a field limited to 256 characters: a test holds this under.
+const FIRST_COMMAND = `case "\${VERCEL_ENV-}|\${VERCEL_GIT_COMMIT_REF-}|\${VERCEL_GIT_COMMIT_SHA-}" in 'production|main|'*[!0123456789abcdef]*);; 'production|main|'${'?'.repeat(40)}) exit 1;; esac; echo build-skip: skip: not prod/main/full id>&2; exit 0`;
+
 function skipCommand({ mode, checkerUrl, sha256 } = {}) {
   if (!MODES.includes(mode)) throw new Error('mode must be first or full');
+  if (mode === 'first') return FIRST_COMMAND;
   if (typeof checkerUrl !== 'string' || !PINNED_URL.test(checkerUrl)) throw new Error('the checker URL must be https and pinned to a 40-hex commit (no branch, tag or short id)');
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error('sha256 must be 64 lowercase hex characters');
   // Each step must succeed for the next to run; any failure falls through to `exit 0` (skip). Only the exact token
