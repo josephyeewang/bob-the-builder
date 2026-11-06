@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
-import { CHECKS_NOT_KNOWN, DRAFT_FILE, NOT_JUDGED, VERDICTS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
+import { CHECKS_NOT_KNOWN, DRAFT_FILE, NOT_JUDGED, REASONS_KEPT, REASON_CHARS, VERDICTS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { explain, main, parseArgs } from './watch-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1535,4 +1535,39 @@ test('L632: the App client\'s allow-list takes the owner and repo literally (a "
   for (const [o, r] of [['someXowner', 'a.b+c'], ['some.owner', 'aXb+c'], ['some.owner', 'a.bbc'], ['some.owner', 'a.b+c/x']]) {
     await assert.rejects(() => c.get(at(o, r)), /reads only this repo's check runs/, `${o}/${r}`);
   }
+});
+
+// ───────────────────────────── L644: the log says why a class is risky
+
+test('L644: each judged record keeps why each risky class was named, so a real migration can be told from the line check', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'src/a.mjs': 'two' });
+  w.land({ 'db/migrations/002_x.sql': 'alter table t add c int;' }, { at: undefined });
+  await w.pass();
+  const [code, mig] = w.judged();
+  assert.ok(code.risky.includes('schema'), JSON.stringify(code));
+  assert.ok(code.risky_reasons.schema.every((x) => !x.includes('db/migrations/')), JSON.stringify(code.risky_reasons));
+  assert.ok(code.risky_reasons.schema.some((x) => x.includes('src/a.mjs') && /not a line known to be harmless/.test(x)), JSON.stringify(code.risky_reasons));
+  assert.ok(mig.risky.includes('schema'));
+  assert.ok(mig.risky_reasons.schema.some((x) => x.includes('db/migrations/002_x.sql') && !/not a line known to be harmless/.test(x)), JSON.stringify(mig.risky_reasons));
+  for (const r of [code, mig]) assert.deepEqual(Object.keys(r.risky_reasons).sort(), [...r.risky].sort(), 'a reason for each risky class, and only those');
+  assert.equal(code.verdict, (await (async () => { const v = world(); await v.pass(PIN_AT); v.land({ 'src/a.mjs': 'two' }); await v.pass(); return v.judged()[0].verdict; })()));
+});
+
+test('L644: the reasons are capped, so one big pull request can\'t grow a log line without end', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const files = {}; for (let i = 0; i < REASONS_KEPT + 7; i++) files[`src/f${i}-${'x'.repeat(300)}.mjs`] = `line ${i}`;
+  w.land(files);
+  await w.pass();
+  const r = w.judged()[0].risky_reasons.schema;
+  assert.equal(r.length, REASONS_KEPT + 1, JSON.stringify(r));
+  assert.ok(r.slice(0, REASONS_KEPT).every((x) => x.length <= REASON_CHARS));
+  assert.match(r.at(-1), /^and \d+ more$/);
+});
+
+test('L644: a push with no pull request logs no reasons, as it has no risky classes', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.push({ 'docs/a.md': 'two' });
+  await w.pass();
+  assert.deepEqual(w.judged()[0].risky_reasons, {});
 });

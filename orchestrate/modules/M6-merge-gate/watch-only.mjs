@@ -165,9 +165,21 @@ export function githubRules({ gh, owner, repo }) {
 /** Only a refusal 8 that says the owner's Approve is NEEDED is a plain \"would ask\"; refusal 14 and an Approve check that could not run are refusals. */
 export const asksApprove = (r) => r?.n === 8 && /needs the owner's Approve|the rules ask for the owner's Approve/.test(r.reason ?? '');
 
+export const REASONS_KEPT = 5;
+export const REASON_CHARS = 200;
+function keptReasons(reasons) {
+  const out = {};
+  for (const [cls, list] of Object.entries(reasons ?? {})) {
+    const all = Array.isArray(list) ? list.map((x) => String(x)) : [String(list)];
+    out[cls] = all.slice(0, REASONS_KEPT).map((x) => (x.length > REASON_CHARS ? `${x.slice(0, REASON_CHARS - 1)}…` : x));
+    if (all.length > REASONS_KEPT) out[cls].push(`and ${all.length - REASONS_KEPT} more`);
+  }
+  return out;
+}
+
 export function judgeMerged(facts, rules) {
   const NJ = [...NOT_JUDGED];
-  if (facts.direct) return { verdict: VERDICTS[2], refusals: [{ n: 9, reason: 'a push to main with no pull request: the gate only merges pull requests' }], tier: null, risky: [], not_judged: NJ, assumed: ASSUMED };
+  if (facts.direct) return { verdict: VERDICTS[2], refusals: [{ n: 9, reason: 'a push to main with no pull request: the gate only merges pull requests' }], tier: null, risky: [], risky_reasons: {}, not_judged: NJ, assumed: ASSUMED };
   const { policy, engine } = rules;
   const get = (key) => { try { return engine.get(key, { product: PRODUCT }); } catch { return undefined; } };
   const files = facts.files;
@@ -175,6 +187,10 @@ export function judgeMerged(facts, rules) {
   const c = files ? engine.classify({ product: PRODUCT, files, truncated: false, labels, declared_tier: ASSUMED.declared_tier }) : null;
   const tier = c && (c.tier === 1 || c.tier === 2) ? c.tier : null;
   const risky = c?.risky ?? ['unclassifiable'];
+  // Why each risky class was named (L644): the line check names `schema` on any code line, so the log keeps the reasons,
+  // or a real migration can't be told from a line-check hit. Capped so one big pull request can't grow a line without
+  // end: at most REASONS_KEPT per class, each cut to REASON_CHARS, and how many more there were.
+  const riskyReasons = c ? keptReasons(c.reasons) : { unclassifiable: [files === null || files === undefined ? 'the files were not read' : 'not classified'] };
   const sha7 = String(facts.sha).slice(0, 7);
   const card = { id: `watch-${sha7}`, doc: { kind: 'ordinary', head: facts.headSha, tier: ASSUMED.declared_tier } };
   let lane = null;
@@ -198,7 +214,7 @@ export function judgeMerged(facts, rules) {
   const refusals = j.refusals.filter((r) => !NJ.includes(r.n));
   const hard = refusals.filter((r) => !asksApprove(r));
   const verdict = hard.length ? VERDICTS[2] : refusals.length ? VERDICTS[1] : j.decision === 'hold' ? VERDICTS[3] : VERDICTS[0];
-  return { verdict, refusals, tier, risky, not_judged: NJ, assumed: ASSUMED, ...(j.hold ? { hold: j.hold } : {}) };
+  return { verdict, refusals, tier, risky, risky_reasons: riskyReasons, not_judged: NJ, assumed: ASSUMED, ...(j.hold ? { hold: j.hold } : {}) };
 }
 
 /**
