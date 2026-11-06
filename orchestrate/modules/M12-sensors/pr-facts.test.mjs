@@ -37,6 +37,33 @@ test('a planted pull request: changed files and diff summary sit beside checks, 
   assert.equal(rec.diary().at(-1).actor, 'sensors');
 });
 
+test('L619: a checks-only failure writes checks_at_head null (not known) and keeps state, merged and the merge commit', async () => {
+  const merged = { ...fakeGh, pr: async (n) => ({ ...(await fakeGh.pr(n)), state: 'closed', merged: true, merge_commit_sha: 'c'.repeat(40) }) };
+  for (const checks of [async () => { throw new Error('check runs answered 403'); }, async () => ({ check_runs: [] })]) {
+    const rec = memoryRecord();
+    assert.equal((await writePrFact(makeFactWriter(rec), { ...merged, checks }, 7)).ok, true);
+    const d = rec.read('fact', 'pr-7').doc;
+    assert.equal(d.checks_at_head, null, 'not known, never [] ("no checks")');
+    assert.deepEqual([d.state, d.merged, d.merge_commit_sha, d.head_sha], ['closed', true, 'c'.repeat(40), 'b'.repeat(40)]);
+    assert.equal(d.behind_main, 4);
+    assert.equal(d.unresolved_threads.length, 1);
+  }
+  const rec = memoryRecord();
+  await writePrFact(makeFactWriter(rec), { ...merged, checks: async () => [] }, 7);
+  assert.deepEqual(rec.read('fact', 'pr-7').doc.checks_at_head, [], 'GitHub listing none stays an empty list');
+});
+
+test('L619: any other failed read still blanks the whole fact', async () => {
+  const boom = async () => { throw new Error('GitHub down'); };
+  for (const k of ['pr', 'files', 'threads', 'behindBy']) {
+    const rec = memoryRecord();
+    await writePrFact(makeFactWriter(rec), { ...fakeGh, [k]: boom }, 7);
+    const d = rec.read('fact', 'pr-7').doc;
+    assert.deepEqual([d.state, d.merged, d.merge_commit_sha, d.head_sha], [null, null, null, null], k);
+    assert.equal(d.checks_at_head, undefined, `${k}: nothing else is claimed`);
+  }
+});
+
 test('outside text in the PR fact is masked and escaped', async () => {
   const rec = memoryRecord();
   await writePrFact(makeFactWriter(rec), fakeGh, 7);

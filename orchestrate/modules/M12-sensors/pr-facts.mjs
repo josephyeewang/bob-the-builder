@@ -15,7 +15,8 @@
 // state is `open` or `closed`, any case, else null (L97 m-1: another GitHub API says CLOSED, which M6 and M11 would
 // read as never closed).
 //   files(number)    → [{ filename, status, additions, deletions, previous_filename? }]
-//   checks(sha)      → [{ name, status, conclusion, output_summary? }]
+//   checks(sha)      → [{ name, status, conclusion, output_summary? }]; a throw here alone gives checks_at_head: null
+//                      (not known) and keeps the rest (L619: check runs need the robot App's client, L617)
 //   threads(number)  → [{ resolved, author, body, path? }]
 //   behindBy(number) → integer commits behind base
 
@@ -45,8 +46,14 @@ export async function prFact(gh, number, { prepare = makePrepare(), now = () => 
 async function readPr(gh, number, observed_at, prepare) {
   const [pr, files, threads, behind] = await Promise.all([gh.pr(number), gh.files(number), gh.threads(number), gh.behindBy(number)]);
   if (!pr || typeof pr !== 'object' || !Array.isArray(files) || !Array.isArray(threads)) throw new Error('a GitHub answer of the wrong shape');
-  const checks = await gh.checks(pr.head_sha);
-  if (!Array.isArray(checks)) throw new Error('a GitHub answer of the wrong shape');
+  // checks_at_head: null means NOT KNOWN (the check runs could not be read), never "no checks"; [] means GitHub listed
+  // none. Only this read is kept apart (L619): without the robot App every check read fails, and blanking the whole fact
+  // for it would hide every merge from M11. Any other failed read still makes the whole reading unknown.
+  let checks = null;
+  try {
+    const c = await gh.checks(pr.head_sha);
+    if (Array.isArray(c)) checks = c;
+  } catch { /* not known */ }
   const st = typeof pr.state === 'string' ? pr.state.toLowerCase() : null;
   const merged = pr.merged === true;
   const changed = files.map((f) => ({
@@ -72,7 +79,7 @@ async function readPr(gh, number, observed_at, prepare) {
       added: changed.reduce((n, f) => n + (f.added ?? 0), 0),
       removed: changed.reduce((n, f) => n + (f.removed ?? 0), 0),
     },
-    checks_at_head: checks.map((c) => ({ name: prepare(c.name, 'check-name'), status: c.status, conclusion: c.conclusion ?? null,
+    checks_at_head: checks === null ? null : checks.map((c) => ({ name: prepare(c.name, 'check-name'), status: c.status, conclusion: c.conclusion ?? null,
       ...(c.output_summary ? { summary: prepare(c.output_summary, 'check-output') } : {}) })),
     unresolved_threads: threads.filter((t) => !t.resolved).map((t) => ({ author: prepare(t.author, 'commit-author'),
       body: prepare(t.body, 'review-thread'), ...(t.path ? { path: keepPath(t.path) } : {}) })),

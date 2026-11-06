@@ -50,10 +50,12 @@ function recordedGh({ over = {}, fail = false, open } = {}) {
   };
 }
 const usage = (now) => ({ source: 'test', h5: { used_pct: 20, resets_at: iso(now + 60 * MIN) }, week: { used_pct: 30, resets_at: iso(now + 3 * 24 * 60 * MIN) } });
-const ports = (now, { gh = recordedGh({ open: [] }) } = {}) => ({
+// The robot App's client for check runs (L617): a separate client over the same recorded answers.
+const appGh = (gh) => ({ calls: [], get(path) { this.calls.push(['GET', path]); return gh.get(path); } });
+const ports = (now, { gh = recordedGh({ open: [] }), checksGh = appGh(gh) } = {}) => ({
   whoIsSignedIn: async () => ACCT, readUsage: async () => usage(now),
   probes: { network: async () => true, reachable: async () => true, minibase: async () => true },
-  github: { gh, owner: 'sample-org', repo: 'sample-app' },
+  github: { gh, checksGh, owner: 'sample-org', repo: 'sample-app' },
 });
 const world = () => { const w = setup({ prefix: 'm12-loop-' }); return { rec: w.record, w }; };
 const fact = (rec, id) => rec.read('fact', id)?.doc;
@@ -95,6 +97,16 @@ test('the recorded open pull request reads as open, merged false and no merge co
   await sensorsPass({ rec, ports: ports(T0, { gh: recordedGh({ open: [{ number: REC.open }] }) }), now: () => new Date(T0) });
   const pr = fact(rec, `pr-${REC.open}`);
   assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha], ['open', false, null]);
+});
+
+test('L617/L619: with no robot App client yet, a merged PR still reads as merged; its checks are not known (null), not none', async () => {
+  const { rec } = world();
+  const gh = recordedGh({ open: [{ number: REC.merged }] });
+  await sensorsPass({ rec, ports: ports(T0, { gh, checksGh: null }), now: () => new Date(T0) });
+  const pr = fact(rec, `pr-${REC.merged}`);
+  assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha], ['closed', true, REC.answers[`/pulls/${REC.merged}`].merge_commit_sha]);
+  assert.equal(pr.checks_at_head, null);
+  assert.ok(gh.calls.every(([, path]) => !path.includes('/check-runs')), 'the fine-grained client is never asked for check runs');
 });
 
 test('PLANT an uppercase CLOSED from GitHub is stored as closed', async () => {
@@ -217,13 +229,31 @@ test('prsToRead: every open PR plus every PR a merge still waits on (newest merg
 });
 
 test('the PR reader: any answer but 200 throws (so the reading is unknown), and a check list for a non-commit is refused', async () => {
-  const reader = prReader({ gh: recordedGh(), owner: 'sample-org', repo: 'sample-app' });
+  const reader = prReader({ gh: recordedGh(), checksGh: appGh(recordedGh()), owner: 'sample-org', repo: 'sample-app' });
   await assert.rejects(reader.pr(99999), /pull 99999 answered 404/);
   await assert.rejects(reader.files(99999), /answered 404/);
   await assert.rejects(reader.checks('not-a-sha'), /no head commit/);
   const noPost = prReader({ gh: { get: recordedGh().get.bind(recordedGh()) }, owner: 'sample-org', repo: 'sample-app' });
   await assert.rejects(noPost.threads(REC.merged), /cannot run the review-threads query/);
   assert.throws(() => prReader({ gh: recordedGh(), owner: 'sample-org/../x', repo: 'sample-app' }));
+});
+
+test('L617: check runs are read only with the robot App\'s client; without it they are not known, never "none"', async () => {
+  const gh = recordedGh();
+  const sha = REC.answers[`/pulls/${REC.merged}`].head.sha;
+  const noApp = prReader({ gh, owner: 'sample-org', repo: 'sample-app' });
+  await assert.rejects(noApp.checks(sha), /not known: they need the robot App/);
+  assert.equal(gh.calls.length, 0, 'the fine-grained client is never asked for check runs');
+  const app = appGh(recordedGh());
+  const withApp = prReader({ gh, checksGh: app, owner: 'sample-org', repo: 'sample-app' });
+  assert.ok(Array.isArray(await withApp.checks(sha)));
+  assert.equal(app.calls.length, 1);
+  assert.match(app.calls[0][1], /\/check-runs/);
+  assert.equal(gh.calls.length, 0);
+  const forbidden = prReader({ gh, checksGh: { get: async () => ({ status: 403, json: { message: 'Resource not accessible by personal access token' } }) }, owner: 'sample-org', repo: 'sample-app' });
+  await assert.rejects(forbidden.checks(sha), /check runs answered 403/);
+  assert.throws(() => prReader({ gh, checksGh: gh, owner: 'sample-org', repo: 'sample-app' }), /robot App's client/);
+  assert.throws(() => prReader({ gh, checksGh: {}, owner: 'sample-org', repo: 'sample-app' }), /no get\(\)/);
 });
 
 // ---- the beat and the job ----
