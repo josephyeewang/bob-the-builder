@@ -328,6 +328,12 @@ test('L696 M1: the rows lane takes a card\'s rows from its own row files as well
   assert.equal(push(own, [file('docs/blueprint/rows/R-2.yaml')], ['R-2']).decision, 'allow', 'card.rows still counts');
   assert.match(push(own, [file('docs/blueprint/rows/R-2.yaml')]).reason, /out of lane/, 'a row in neither is not its own');
   assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml', 'removed')]).decision, 'deny', 'removing its own row is still out of lane');
+  // Both paths the card's own rows: only the status rule (engine.mjs, added or modified) refuses these (audit #266 m1-r3).
+  const two = { files: ['docs/blueprint/rows/R-1.yaml', 'docs/blueprint/rows/R-3.yaml'] };
+  for (const how of ['renamed', 'copied']) {
+    assert.match(push(two, [file('docs/blueprint/rows/R-1.yaml', how, { previous_path: 'docs/blueprint/rows/R-3.yaml' })]).reason, /out of lane/, `a ${how} row file, both its rows the card's own`);
+    assert.match(push(own, [file('docs/blueprint/rows/R-1.yaml', how, { previous_path: 'docs/blueprint/rows/R-3.yaml' })], ['R-3']).reason, /out of lane/, `a ${how} row file, its old row from card.rows`);
+  }
   assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml'), file('docs/blueprint/rows/R-2.yaml')], ['R-2']).decision, 'allow', 'rows and files together: the union, not one or the other (audit #266 m1-r2)');
   assert.match(push(own, [file('docs/blueprint/rows/r-1.yaml')]).reason, /out of lane/, 'a row path whose case differs from the card\'s file is refused, never allowed');
   assert.match(push({ files: ['src/a.mjs', 'docs/research/R-1.yaml'] }, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'a file that is not a row file adds no row');

@@ -100,7 +100,7 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   assert.equal(good.ok, true, good.reason);
 });
 
-test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each file as { path, status }; the old subject is refused', async () => {
+test('L81: push_branch is asked the card as { id, rows, doc: { lane, files } } and each file as { path, status }; the old subject is refused', async () => {
   const w = await world();
   await w.commit('work', (c) => { writeFileSync(join(c, 'app.txt'), 'changed\n'); writeFileSync(join(c, 'new.txt'), 'new\n'); });
   await w.bundle();
