@@ -394,6 +394,15 @@ test('audit #150 M2: a kept lock keeps the watchdog; a round that ends clean sto
   assert.equal(dogs.at(-1).stopped, 1);
 });
 
+test('audit #150 r2 Minor 2: a late round (exit 2) keeps the lock and its watchdog', async () => {
+  const dogs = []; const startDog = (ms) => { const d = { ms, stopped: 0, terminate() { d.stopped += 1; } }; dogs.push(d); return d; };
+  const w = world({ extra: { runDeadlineMs: 50 } });
+  const code = await main([w.configFile], { self: w.main, log: () => {}, watchdog: true, startDog, passDeadlineMs: 60_000, wireOpts: { deliver: () => new Promise(() => {}), fetchFn: fakeGitHubFetch(w.fake) } });
+  assert.equal(code, 2); assert.equal(existsSync(w.config.lockFile), true);
+  assert.equal(dogs.length, 2, 'the config\'s own limit restarts the watchdog once');
+  assert.equal(dogs[1].ms > 50, true); assert.equal(dogs[1].stopped, 0, 'the lock stays, so the watchdog must');
+});
+
 test('audit #150 Minor 3: dispatcherLockFile set to the job\'s own lockFile is refused, written two ways', async () => {
   const w = world();
   await assert.rejects(wire({ ...w.config, dispatcherLockFile: w.config.lockFile }, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /own lockFile/);
