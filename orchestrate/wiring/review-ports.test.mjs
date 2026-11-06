@@ -8,11 +8,11 @@ import { ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { fakeGitHubFetch } from './fake-github.test-helper.mjs';
 import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW, reviewRunner, MAIN_SEEN_STALE_MS } from './review-ports.mjs';
 import { reviewConfig, writeSeen, writeStatus } from './review-ports.test-helper.mjs';
-import { mkdtempSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
+import { readdirSync, readFileSync, chmodSync } from 'node:fs';
 import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { GIT_MS } from '../modules/M4-workshop/launcher/review-updater.mjs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 const COMMIT = 'c'.repeat(40);
 const TOKEN = 't'.repeat(40);
@@ -115,7 +115,7 @@ test('A1, A2: the port file answers exactly what it took off its list', () => {
 });
 
 // ---- A2 (L615, L639): the review runner's ports, against a throwaway runner folder of this user's.
-const temp = () => mkdtempSync(join(tmpdir(), 'orch-review-ports-'));
+const temp = () => tempDir('orch-review-ports-');
 const T0 = Date.parse('2026-11-05T12:00:00Z');
 const MIN = 60_000;
 const D = 'd'.repeat(40);
