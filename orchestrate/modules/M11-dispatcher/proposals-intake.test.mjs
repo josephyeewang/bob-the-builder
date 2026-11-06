@@ -783,6 +783,25 @@ test('L549: new bytes under a used proposal name are taken only once the push re
   assert.notEqual(sent[0], sent[1], 'the new bundle, not the old one');
 });
 
+// L718 M1: a route that lost its card ends 'lost', told; its bytes went nowhere, so its names take new bytes. A cancel
+// ('over') and one sent to review keep them.
+for (const [ended, takes] of [['lost', true], ['over', false], ['sent', false]]) {
+  test(`L718 M1: new bytes under a used proposal name after a route ended ${ended} are ${takes ? 'taken' : 'refused'}`, async () => {
+    const w = world();
+    put(w, 'proposal-C-1.md', 'p');
+    writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b');
+    const sent = [];
+    const toReview = (x) => { sent.push(x.bundle.sha256); return { ok: true }; };
+    const rules = rulesFor(w.dirs, { a: 'second' });
+    assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+    writeFileSync(join(w.dirs.a, 'proposal-C-1.md'), 'p2');
+    writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b2');
+    seed(w.rec, 'fact', ROUTE_FACT('C-1'), { ended, reason: 'someone else holds the card' });
+    const row = one(await w.pass({ rules, toReview }), 'proposal-C-1.md');
+    if (takes) { assert.equal(row.applied, true); assert.equal(sent.length, 2); } else { assert.equal(row.refused, 'the same name with new content'); assert.equal(sent.length, 1); }
+  });
+}
+
 test('L549: end to end, the intake takes the card at the revision it checked and the route pass hands it to review', async () => {
   const w = world();
   put(w, 'proposal-C-1.md', 'p');

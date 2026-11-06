@@ -51,14 +51,15 @@
 // Joe is told at once, then daily while it waits (L325 m2, L597). Only a real answer about the change is final; the
 // refusal names it (MAIN merges code by hand, or the push script refused the bundle). A proposal refused over its
 // bundle is looked at again once the bundle held is other bytes, and a held bundle never handed on may be replaced.
-// A proposal the push refused for good (routeRefused) gives its card back, so its two names take new bytes (L549).
+// A proposal whose route ended refused at the push, or lost its card to another holder (routeReopened), gives its
+// names back, so they take new bytes (L549, L718 M1). A cancelled one keeps them.
 // A kind whose handler is not passed in is left untouched and unrecorded, so it is taken in once the handler lands.
 //
 //   proposalsPass({ rec, rules, products, ownerUid, wait, alert, note, handlers, docsCheck, toReview, now }) → [result]
 //   proposalsReadBack({ dir, ownerUid, canRead, canWrite, settings }) → [] | every problem (Joe's setup batch)
 
 import { createHash } from 'node:crypto';
-import { routeRefused } from './proposal-route.mjs';
+import { routeReopened, shownName, textOr } from './proposal-route.mjs';
 import { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants as C } from 'node:fs';
 import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
@@ -123,8 +124,9 @@ export const BYTES = 'bytes';
 export const SOURCE_OF = Object.freeze({
   proposal: 'proposal-file', bundle: BYTES, research: 'research-file', idea: 'idea-file', claim: 'proposal-file', heartbeat: 'proposal-file',
 });
-/** A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). */
-export const shownName = (name) => cleanOutside(name, 'proposal-name');
+// A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). Defined in the route,
+// which fences the push script's reasons the same way (L718 M2), and named here as before.
+export { shownName };
 /** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
 export function fenceFor(kind, text) {
   const source = Object.hasOwn(SOURCE_OF, kind) ? SOURCE_OF[kind] : null;
@@ -203,9 +205,6 @@ export function readProposalFile(dir, name, { ownerUid, kind, fs = { openSync, f
     return { ok: true, sha256: h.digest('hex'), size: total, text: bytes.toString('utf8'), blob: blobSha(bytes) };
   } finally { fs.closeSync(fd); }
 }
-
-// An answer's text, or `none` when it has none: an empty or odd answer never reads as a pass, nor as "[object Object]".
-const textOr = (v, none) => (typeof v === 'string' && v.trim() ? v : none);
 
 const statOf = (p) => { try { const s = lstatSync(p); return `${s.size}:${s.mtimeMs}:${s.ino}`; } catch { return null; } };
 
@@ -433,9 +432,9 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (prev.doc.sha256 === hash && was === 'refused' && !(cardKey !== null && cardKey !== prev.doc.card_key) && !bundleMoved) { r.refused = prev.doc.why; continue; }
       // L78 n2: a heartbeat's new bytes are a new poll. Every other kind: new bytes on a used name are refused, and so
       // is a held bundle's, once its bytes may have gone on with a proposal. A bundle held but never handed on is not
-      // used, so a corrected one replaces it (the header's rule; L597 (2)). A proposal the push refused for good: the
-      // card is ready again, so its two names take new bytes (L549).
-      const refiled = ['proposal', 'bundle'].includes(parsed.kind) && routeRefused(rec, parsed.id);
+      // used, so a corrected one replaces it (the header's rule; L597 (2)). A proposal whose route ended refused or lost:
+      // its bytes went nowhere, so its two names take new bytes (L549, L718 M1).
+      const refiled = ['proposal', 'bundle'].includes(parsed.kind) && routeReopened(rec, parsed.id);
       const replaceable = ['refused', 'interrupted'].includes(was) || (parsed.kind === 'bundle' && was === 'held' && !mayHaveGone(prev.doc.sha256)) || refiled;
       if (prev.doc.sha256 !== hash && parsed.kind !== 'heartbeat' && !replaceable) {
         r.refused = 'the same name with new content';
