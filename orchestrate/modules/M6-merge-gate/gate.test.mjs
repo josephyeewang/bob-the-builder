@@ -93,11 +93,11 @@ function requestMerge(w, id, pr, head) {
 
 // M10's real engine on its sample policy answers the merge and the classification; the values stay the world's.
 const here = dirname(fileURLToPath(import.meta.url));
-function realRules(w, { deep }) {
+function realRules(w, { deep, state = () => ({ state: 'active' }) }) {
   const policy = parsePolicy(readFileSync(join(here, '../M10-rules/fixtures/policy.yaml'), 'utf8'));
   assert.ok(policy.ok, policy.reason);
   const eng = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: policy.policy, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
-    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => w.env.clock.t, deepMerge: deep }));
+    productState: state, running: () => 0, rolesDir: join(here, '../M10-rules/roles'), clock: () => w.env.clock.t, deepMerge: deep }));
   w.ctx.rules = fakeRules({ values: w.values, answers: { merge: (sub) => eng.may('merge', sub) }, classify: (c) => eng.classify(c) });
 }
 
@@ -154,6 +154,36 @@ test('the undo route: a flagged merge\'s exact reverse goes first, merges with n
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'reverted');
   assert.ok(r.did.some((d) => d.step === 'reverted' && d.card === 'C-1'));
   assert.equal(w.g.repo.files(w.g.main).get('src/a.mjs').text, 'one');
+});
+
+// L595: the whole way on a paused product, on M10's real engine reading the Record's state. The undo card goes ready,
+// runs, is reviewed and merges; an ordinary change queued before the pause does not.
+for (const stage of ['first', 'second']) test(`L595: on a paused product the undo merges through the real gate and an ordinary change does not (${stage} cutover)`, async () => {
+  const w = world({ values: { 'product.cutover_stage': stage } });
+  const DOC = 'docs/note.md';
+  w.g.main = w.g.commit([w.g.main], { [DOC]: 'one' }, { from: w.g.main });
+  verifiedCard(w, 'C-1', { files: { [DOC]: 'two' } });
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  assert.ok(flagged, JSON.stringify(mergeOf(w).doc));
+  must(w.env.record.write({ actor: 'sensors', entity: 'fact', id: 'audit-run-1', expectRev: 0, doc: { type: 'audit_run', commit: flagged, conclusion: 'failure' } }), 'fact');
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w).doc.state, 'audit_flagged');
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'C-2', { pr: 8, files: { 'docs/other.md': 'b' } });
+  must(w.env.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.env.record.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
+  realRules(w, { deep: stage === 'second', state: () => w.env.record.read('product', PRODUCT).doc });
+  await gatePass(w.ctx);
+  assert.ok(mergeOf(w, 'C-2').doc.reasons?.some((x) => /product is paused/.test(x)), JSON.stringify(mergeOf(w, 'C-2').doc));
+  w.env.clock.t += 60_000;
+  verifiedCard(w, 'U-1', { pr: 9, files: { [DOC]: 'one' }, undo: flagged });
+  const r = await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'merged', JSON.stringify({ did: r.did, reasons: u.doc.reasons, alerts: w.alerts }));
+  assert.equal(w.env.record.read('card', 'C-1').doc.state, 'reverted');
+  assert.equal(w.g.repo.files(w.g.main).get(DOC).text, 'one');
+  assert.notEqual(w.env.record.read('card', 'C-2').doc.state, 'merged');
 });
 
 // An undo skips refusal 1, so refusal 2 is what stops it: main is never green on a list that names no check.
