@@ -13,6 +13,9 @@
 # copy before step b has no such script), this file runs step b only, then hands over to the copy's own file. Root never
 # runs setup code from a folder anyone else can write. Safe to run again: a step already done says it has nothing to do.
 # It never reads or prints the key or the token: it only checks the key file is there.
+# The whole script is one { } block, so bash has read all of it before the first step: a copy of this file that changes
+# while it runs (a synced folder) changes nothing. After step b it reads no file outside /Library/orchestrate.
+{
 set -u
 umask 022
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -122,3 +125,5 @@ echo "new judgements this pass: $((after - before)); lines with 403 in the new e
 [ "$n403" = 0 ] || stop pass "the pass met a 403: see the error log lines above"
 [ "${code:-x}" = 0 ] || stop pass "the pass did not finish with exit 0 within 3 minutes (exit ${code:-unknown})"
 echo "ALL DONE: steps b, a, a2, c and d passed, and the watch pass finished with no 403."
+exit 0
+}

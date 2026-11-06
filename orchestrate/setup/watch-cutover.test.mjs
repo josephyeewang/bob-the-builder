@@ -95,6 +95,12 @@ test('L643: the key is only checked to be there; nothing reads it, and printed l
   assert.equal(hide.stdout, 'a <token hidden> b\n<key hidden>\n');
 });
 
+test('L643: bash reads the whole file before the first step, and it names nothing in a home folder or Dropbox and sources nothing', () => {
+  const body = lines.filter((l) => l && !l.startsWith('#'));
+  assert.equal(body[0], '{'); assert.deepEqual(body.slice(-2), ['exit 0', '}']);
+  assert.doesNotMatch(TEXT.replace(/^#.*$/gm, ''), /Dropbox|\/Users\/|~\/|(^|[;&|]\s*)source\s|(^|[;&|]\s*)\.\s/m);
+});
+
 test('L643: the end waits for a real pass and fails on a 403 or a pass that did not end with exit 0', () => {
   assert.match(TEXT, /\[ "\$n403" = 0 \] \|\| stop pass/);
   assert.match(TEXT, /\[ "\$\{code:-x\}" = 0 \] \|\| stop pass/);
