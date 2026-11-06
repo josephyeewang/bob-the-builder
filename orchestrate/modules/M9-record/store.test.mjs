@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecordWithStore } from './writer.mjs';
 import { KEEP_PER_WINDOW, openStore } from './store.mjs';
-import { HELD_FLAG_BYTES, readHeldFlag, readUnsent, setHeldFlag } from './unsent.mjs';
+import { HELD_FLAG_BYTES, heldHolders, isOwnHolder, readHeldFlag, readUnsent, setHeldFlag } from './unsent.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const card = (extra = {}) => ({ state: 'draft', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, ...extra });
@@ -637,7 +637,8 @@ test('#260 r2 M1: a flush leaves a flag another process set, for the pass to tel
   setHeldFlag(env.root, { pid: process.pid + 100000, at: 'T', held: 1, dropped: 0, id: 'theirs', event: { type: 'x' } });
   full = false;
   o.record.heldHere();
-  assert.equal(readHeldFlag(env.root).flag.id, 'theirs');
+  const f = readHeldFlag(env.root).flag;
+  assert.deepEqual(heldHolders(f).map((h) => [h.pid, h.held]), [[process.pid + 100000, 1]], 'only this store\'s own entry left the flag (#260 r3 M1)');
 });
 
 test('#260 r2 M1: a lost count (a kept-back line that could not be written) sets the flag and keeps it up after a flush', () => {
@@ -652,6 +653,50 @@ test('#260 r2 M1: a lost count (a kept-back line that could not be written) sets
   full = false;
   o.record.heldHere();
   assert.equal(readHeldFlag(env.root)?.flag?.dropped, 1, 'a lost count is never taken down by a flush');
+});
+
+// ---- #260 r3: the flag at the moment of holding, a lost count after a real flush, and a reused pid ----
+
+test('#260 r3 m3 (K1): the flag is set the moment a warning is held, with no flush and no heldHere (a pass killed before its exit flush)', () => {
+  const env = setup({ prefix: 'm9-flag-' });
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: 'unsent_fails' });
+  o.record.keepAlert('held at once', 'k-at-once');
+  const f = readHeldFlag(env.root)?.flag;
+  assert.ok(f, 'set at hold time');
+  assert.equal(f.held, 1);
+  assert.ok(isOwnHolder(heldHolders(f)[0]), 'named as this store, by pid and token');
+  assert.match(f.event.text, /held at once/);
+});
+
+test('#260 r3 m3 (K12): a held line and a lost count; once the disk frees, the flush writes the line and the flag stays up for the count', () => {
+  const env = setup({ prefix: 'm9-flag-' });
+  const ok = viaWriter(env, { alert: lostAlert() });
+  for (let i = 0; i < KEEP_PER_WINDOW; i += 1) ok.record.keepAlert(`alert ${i}`, `key-${i}`);
+  let full = true;
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: { step: 'unsent_fails', while: () => full } });
+  o.store.alertOrKeep({ type: 'tamper', reason: 'K12 held line' });
+  o.record.keepAlert('one past the cap', 'key-past');
+  const h = o.record.heldHere();
+  assert.deepEqual([h.held.length, h.dropped], [1, 1], 'one line held and one count lost');
+  full = false;
+  assert.deepEqual([o.record.heldHere().held.length], [0], 'the line went to the file');
+  const f = readHeldFlag(env.root)?.flag;
+  assert.ok(f, 'the flag is still up');
+  assert.deepEqual([f.held, f.dropped], [0, 1], 'it says the count is lost');
+});
+
+test('#260 r3 m1 (S3): a dead process\'s flag is not cleared by a later process that happens to reuse its pid', () => {
+  const env = setup({ prefix: 'm9-flag-' });
+  viaWriter(env);
+  setHeldFlag(env.root, { pid: process.pid, at: '2026-11-05T07:00:00Z', held: 1, dropped: 0, id: 'deadbeefdeadbeef', event: { type: 'alert_not_queued', text: 'S3-A from a dead process' } });
+  let full = true;
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: { step: 'unsent_fails', while: () => full } });
+  o.record.keepAlert('S3-mine', 'S3-mine');
+  full = false;
+  o.record.heldHere();
+  const f = readHeldFlag(env.root);
+  assert.ok(f && /S3-A/.test(f.raw), 'the dead process\'s warning is still flagged');
+  assert.deepEqual(heldHolders(f.flag).map(isOwnHolder), [false], 'and only it: this store took out its own entry');
 });
 
 // ---- #260 r2 c3: the disk probe says what failed ----

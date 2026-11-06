@@ -8,7 +8,7 @@ import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs';
-import { makeHeldFlag, readHeldFlag, readUnsent, setHeldFlag } from '../M9-record/unsent.mjs';
+import { heldHolders, makeHeldFlag, newHeldToken, readHeldFlag, readUnsent, setHeldFlag } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
 import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
@@ -1127,7 +1127,7 @@ test('#260 r2 M1: a flag GitHub refuses is a failed send, named, and the flag st
 
 test('#260 r2 M1: this process\'s own flag is left to its held list; a torn flag is a refusal, never clean', async () => {
   const w = world();
-  flagIn(w.root, { pid: process.pid });
+  flagIn(w.root, { pid: process.pid, token: newHeldToken() });
   const r = await w.run();
   assert.equal(r.refused, undefined);
   assert.equal(w.gh.openIssues().length, 0);
@@ -1145,4 +1145,59 @@ test('#260 r2 M1: a flag with lost counts says so; one with no warning says none
   const r = await w.run();
   assert.match(r.refused, /held 0 warning\(s\) .*, and lost 3 count\(s\) of alerts: none can be told from here/);
   assert.equal(readHeldFlag(w.root), null);
+});
+
+// ---- #260 r3: several holders in one flag; this process's own entry; a flag with no count ----
+
+test('#260 r3 M1: a flag with several holders tells the first warning once and names every holder and the total', async () => {
+  const w = world();
+  flagIn(w.root, { token: 'x1' });
+  setHeldFlag(w.root, { pid: OTHER + 1, token: 'x2', at: '2026-11-05T08:01:00Z', held: 1, dropped: 2, id: 'abcd0010', event: { type: 'diary_damaged', reason: 'the second' } });
+  const r = await w.run();
+  assert.equal(r.sent, 1, 'the first warning only');
+  assert.match(w.gh.openIssues()[0].body, /a broken line/);
+  assert.match(r.refused, new RegExp(`2 processes on this store held 3 warning\\(s\\) in all in their memory only, as the store's disk could not take them, and lost 2 count\\(s\\) of alerts \\(process ${OTHER} at 2026-11-05T08:00:00Z, 2; process ${OTHER + 1} at 2026-11-05T08:01:00Z, 1 and 2 lost\\): the first is told this round, and the others are lost if those processes have stopped`));
+  assert.equal(readHeldFlag(w.root), null);
+});
+
+test('#260 r3 M1: this process\'s own entry is not told from the flag and stays in it after the clear; the others are told and cleared', async () => {
+  const w = world();
+  const mine = newHeldToken();
+  flagIn(w.root, { pid: process.pid, token: mine });
+  setHeldFlag(w.root, { pid: OTHER, token: 'x1', at: '2026-11-05T08:01:00Z', held: 1, dropped: 0, id: 'abcd0011', event: { type: 'diary_damaged', reason: 'theirs' } });
+  const r = await w.run();
+  assert.equal(r.sent, 0, 'the first warning is this process\'s own; the other\'s warning is not in the flag');
+  assert.match(r.refused, new RegExp(`process ${OTHER} on this store held 1 warning\\(s\\) in its memory only at 2026-11-05T08:01:00Z, as the store's disk could not take them: the first is this process's own, told above, and none of the others' can be told from here`));
+  assert.deepEqual(heldHolders(readHeldFlag(w.root).flag).map((h) => [h.pid, h.token]), [[process.pid, mine]], 'only this process\'s own entry is left');
+  const r2 = await w.run();
+  assert.equal(r2.refused, undefined, 'its own alone is left to its held list');
+});
+
+test('#260 r3 m1: a flag with this pid but a token no store here made is another process\'s (a reused pid), and is told', async () => {
+  const w = world();
+  flagIn(w.root, { pid: process.pid, token: 'not-made-here' });
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.equal(readHeldFlag(w.root), null);
+});
+
+test('#260 r3 c2: a flag with no usable count does not say "it is told this round" as if it held one', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify({ pid: OTHER, at: '2026-11-05T08:00:00Z', id: 'abcd0012', event: { type: 'diary_damaged', reason: 'r' } }).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, /held some warning\(s\) in its memory only.*: the first is told this round; how many it held is not known, and any others are lost if that process has stopped/);
+  assert.doesNotMatch(r.refused, /it is told this round/);
+});
+
+test('#260 r3 M1: holders folded out of a full flag are counted in the round, never dropped', async () => {
+  const w = world();
+  flagIn(w.root, { token: 'x0', event: { type: 'diary_damaged', reason: 'r'.repeat(3000) } });
+  for (let i = 1; i <= 120; i += 1) setHeldFlag(w.root, { pid: OTHER + i, token: `x${i}`, at: 'T', held: 1, dropped: 0 }, { settleMs: 0 });
+  const f = readHeldFlag(w.root).flag;
+  assert.ok(f.cut.holders > 0);
+  const r = await w.run();
+  assert.match(r.refused, /121 processes on this store held 122 warning\(s\) in all/);
+  assert.match(r.refused, new RegExp(`${f.cut.holders} more not named, as the flag is full, ${f.cut.held}`));
 });

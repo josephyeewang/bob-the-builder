@@ -13,7 +13,7 @@ import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { deliverAlertsPass } from '../modules/M13-ledger/alert-channel.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
-import { readHeldFlag, readUnsent } from '../modules/M9-record/unsent.mjs';
+import { heldHolders, readHeldFlag, readUnsent } from '../modules/M9-record/unsent.mjs';
 import { PRODUCT, UID, seed, setup } from '../modules/M9-record/fixtures.test-helper.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -190,14 +190,17 @@ for (const [fmt, size] of [['HFS+', 4096], ['APFS', 65536]]) {
       try { for (;;) appendFileSync(filler, Buffer.alloc(4096, 120)); } catch { /* fuller */ }
       try { for (;;) appendFileSync(filler, 'x'); } catch { /* really full */ }
       const log = dispatcherHolds(root, `#260 r2 ${fmt}: an alert the Dispatcher could not queue`, { fault: false });
+      // A second pass on the same full disk merges into the flag in place (#260 r3 M1).
+      dispatcherHolds(root, `#260 r3 ${fmt}: a second pass's alert`, { fault: false });
       const flag = readHeldFlag(root);
       const robot = opened(env2);
       const gh = fakeIssues();
       const r = await deliver(env2, robot, gh);
       console.log(`#260 r2 ${fmt}: dispatcher said ${JSON.stringify(log.trim())}; flag ${JSON.stringify(flag?.flag ?? null)}; pass ${JSON.stringify(r)}; flag after ${JSON.stringify(readHeldFlag(root))}`);
       assert.equal(flag?.flag?.held, 1, 'the flag was set on the full disk');
+      assert.equal(heldHolders(flag?.flag).length, 2, 'and the second pass merged in on the full disk');
       assert.ok([...gh.issues.values()].some((x) => x.body.includes(`#260 r2 ${fmt}: an alert`)), 'told');
-      assert.match(r.refused ?? '', /on this store held 1 warning\(s\) in its memory only/);
+      assert.match(r.refused ?? '', /2 processes on this store held 2 warning\(s\) in all in their memory only/);
       assert.equal(readHeldFlag(root), null, 'cleared in place on the full disk');
       rmSync(filler, { force: true });
     } finally {
@@ -220,6 +223,48 @@ test('#260 r2 M1 (Q6): a warning a Dispatcher held on a full disk is told by the
   env.clock.t += 5 * 60_000;
   const r2 = await deliver(env, robot, gh);
   assert.equal(r2.refused, undefined, 'the next round is clean');
+});
+
+// ---- #260 r3 M1: several processes hold on one full-disk spell; the flag keeps every one ----
+
+const bodiesOf = (gh) => [...gh.issues.values()].map((x) => x.body).join('\n----\n');
+
+test('#260 r3 M1 (S1): two Dispatcher passes each hold a warning on a full disk; the robot round tells the first and names both, with the total', async () => {
+  const env = logOnly();
+  opened(env).store.damaged();
+  dispatcherHolds(env.root, 'S1-A: the first pass could not queue this');
+  const pidA = readHeldFlag(env.root).flag.pid;
+  dispatcherHolds(env.root, 'S1-B: the second pass could not queue this');
+  const f = readHeldFlag(env.root).flag;
+  assert.deepEqual(heldHolders(f).map((h) => h.pid).length, 2, 'the second pass merged in, it did not overwrite');
+  const pidB = f.also[0].pid;
+  assert.notEqual(pidA, pidB);
+  assert.equal(f.pid, pidA, 'the first pass stays first');
+  assert.match(f.event.text, /S1-A/);
+  const gh = fakeIssues();
+  const r = await deliver(env, opened(env), gh);
+  assert.match(bodiesOf(gh), /S1-A/, 'the first warning is told');
+  assert.match(r.refused ?? '', new RegExp(`2 processes on this store held 2 warning\\(s\\) in all in their memory only.*process ${pidA}.*process ${pidB}.*the first is told this round, and the others are lost if those processes have stopped`));
+  assert.equal(readHeldFlag(env.root), null, 'cleared once told');
+});
+
+test('#260 r3 M1 (S2): a robot process that holds its own warning does not wipe the Dispatcher\'s flag; both are told', async () => {
+  const env = logOnly();
+  opened(env).store.damaged();
+  dispatcherHolds(env.root, 'S2-A: the Dispatcher could not queue this');
+  const pidA = readHeldFlag(env.root).flag.pid;
+  let full = true;
+  const robot = opened(env, { faultAt: { step: 'unsent_fails', while: () => full } });
+  robot.record.keepAlert('S2-R: the robot could not queue this', 'S2-R');
+  const mid = readHeldFlag(env.root).flag;
+  assert.deepEqual(heldHolders(mid).map((h) => h.pid), [pidA, process.pid], 'the robot merged in behind the Dispatcher');
+  full = false;
+  const gh = fakeIssues();
+  const r = await deliver(env, robot, gh);
+  assert.match(bodiesOf(gh), /S2-R/, 'the robot\'s own is told');
+  assert.match(bodiesOf(gh), /S2-A/, 'the Dispatcher\'s is told');
+  assert.match(r.refused ?? '', new RegExp(`process ${pidA} on this store held 1 warning\\(s\\) in its memory only`), 'the round is not clean');
+  assert.equal(readHeldFlag(env.root), null);
 });
 
 // The same on a real full disk (audit #242 r1 P15). It mounts its own 2 MB RAM disk as the user (no sudo, nothing

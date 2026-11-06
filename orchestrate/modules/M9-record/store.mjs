@@ -26,7 +26,7 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
-import { HELD_FLAG, UNSENT, appendPlain, clearHeldFlag, makeHeldFlag, markSent, plainFd, readHeldFlag, readPlain, readUnsent, setHeldFlag } from './unsent.mjs';
+import { HELD_FLAG, UNSENT, appendPlain, dropHeldHolder, makeHeldFlag, markSent, newHeldToken, plainFd, readPlain, readUnsent, setHeldFlag } from './unsent.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
@@ -131,6 +131,8 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // already full it can't be made: then nothing outlasts a held warning, and the pass's disk probe is what tells.
   try { makeHeldFlag(root); } catch { /* full already */ }
 
+  // This store instance in the held flag, alongside its pid (#260 r3 m1).
+  const heldToken = newHeldToken();
   const lock = makeLock({ dir: root, host, timeoutMs: lockTimeoutMs, probe, disabled: testNoLock });
   const say = (event) => send(stamp(event));
   // An alert about a step that is done and never redone (a file moved to quarantine, a torn line cut, a claim broken):
@@ -159,10 +161,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       try { appendUnsent(`${JSON.stringify(unsentHere[0])}\n`); } catch { flagHeld(); return; }
       unsentHere.shift();
     }
-    // All on file now: this process's flag is taken down (the lines are told from the file). A flag another process
-    // set is left for the pass. A count already lost (dropped) keeps it up.
+    // All on file now: this store's own entry in the flag is taken out (the lines are told from the file), matched on
+    // its pid and token, so a dead process whose pid this one reuses keeps its own (#260 r3 m1). Other holders stay
+    // for the pass, and the flag is cleared only when none is left (#260 r3 M1). A count already lost keeps it up.
     if (droppedHere) { flagHeld(); return; }
-    try { const f = readHeldFlag(root); if (f?.flag?.pid === process.pid) clearHeldFlag(root, f.raw); } catch { /* told again: over, never under */ }
+    try { dropHeldHolder(root, { pid: process.pid, token: heldToken }); } catch { /* told again: over, never under */ }
   }
   // Can the store's disk take a write now (#260 r1 M2)? One block, written and flushed in a temp file of this process's
   // own (the start-up sweep removes it if the process dies first). null when it can, else why not. Another process on
@@ -190,11 +193,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     } finally { try { unlinkSync(f); } catch { /* not made */ } }
   }
   // Whenever this process holds something on no disk, the held flag says so, outlasting the process (#260 r2 M1): the
-  // Dispatcher exits after each pass. It names the first held warning, which the robot's pass then tells.
+  // Dispatcher exits after each pass. It names the first held warning, which the robot's pass then tells. The flag
+  // merges every holder's entry (#260 r3 M1); this store's is its pid and a token of its own (#260 r3 m1).
   const flagHeld = () => {
     if (!unsentHere.length && !droppedHere) return;
     const first = unsentHere[0];
-    try { setHeldFlag(root, { pid: process.pid, at: new Date(now()).toISOString(), held: unsentHere.length, dropped: droppedHere, id: first?.id ?? null, event: first?.event ?? null }); } catch { /* the flag's own block is gone too */ }
+    try { setHeldFlag(root, { pid: process.pid, token: heldToken, at: new Date(now()).toISOString(), held: unsentHere.length, dropped: droppedHere, id: first?.id ?? null, event: first?.event ?? null }); } catch { /* the flag's own block is gone too */ }
   };
   const keep = (e, extra = {}) => {
     const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };

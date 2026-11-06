@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { HELD_FLAG, HELD_FLAG_BYTES, UNSENT, appendPlain, clearHeldFlag, makeHeldFlag, markSent, readHeldFlag, readUnsent, setHeldFlag } from './unsent.mjs';
+import { HELD_FLAG, HELD_FLAG_BYTES, UNSENT, appendPlain, clearHeldFlag, dropHeldHolder, heldCut, heldHolders, isOwnHolder, makeHeldFlag, markSent, newHeldToken, readHeldFlag, readUnsent, setHeldFlag } from './unsent.mjs';
 
 const line = (x) => `${JSON.stringify(x)}\n`;
 
@@ -109,7 +109,9 @@ test('#260 r2 M1: the held flag is made clear at a fixed size, set and read back
   assert.equal(sizeOf(root), HELD_FLAG_BYTES);
   makeHeldFlag(root);
   const r = readHeldFlag(root);
-  assert.deepEqual(r.flag, { pid: 41, at: 'T', held: 2, dropped: 0, id: 'w1', event: { type: 'diary_damaged', reason: 'r' } }, 'a second make never clears a set flag');
+  const { gen, total, ...rest } = r.flag;
+  assert.deepEqual(rest, { pid: 41, token: null, at: 'T', held: 2, dropped: 0, id: 'w1', event: { type: 'diary_damaged', reason: 'r' }, also: [] }, 'a second make never clears a set flag');
+  assert.deepEqual([gen, total], [1, { holders: 1, held: 2, dropped: 0 }]);
   assert.equal(clearHeldFlag(root, r.raw), true);
   assert.equal(readHeldFlag(root), null);
   assert.equal(sizeOf(root), HELD_FLAG_BYTES);
@@ -121,7 +123,8 @@ test('#260 r2 M1: clearing compares first, so a flag set again since it was read
   const told = readHeldFlag(root);
   setHeldFlag(root, { pid: 42, at: 'T2', held: 1, dropped: 0, id: 'w2', event: { type: 't' } });
   assert.equal(clearHeldFlag(root, told.raw), false);
-  assert.equal(readHeldFlag(root).flag.id, 'w2');
+  assert.equal(readHeldFlag(root).flag.id, 'w1', 'the earliest warning stays the one to tell (#260 r3 M1)');
+  assert.deepEqual(readHeldFlag(root).flag.also.map((h) => h.pid), [42]);
 });
 
 test('#260 r2 M1: an oversized warning is shrunk to fit, and the flag still reads', () => {
@@ -148,4 +151,116 @@ test('#260 r2 M1: a torn flag reads as set but unreadable; a link or a wrong siz
   writeFileSync(join(short, HELD_FLAG), ' ');
   assert.throws(() => setHeldFlag(short, { pid: 1, at: 'T', held: 1, dropped: 0 }), /is not 4096 bytes/);
   assert.equal(readHeldFlag(tempDir('m9-flag-')), null, 'a store with no flag (older) holds nothing');
+});
+
+// ---- #260 r3 M1, m1, m2: several holders merge into the one flag ----
+
+const holder = (pid, token, held, extra = {}) => ({ pid, token, at: `T${pid}`, held, dropped: 0, id: `w${pid}`, event: { type: 'alert_not_queued', text: `from ${pid}` }, ...extra });
+
+test('#260 r3 M1: a second holder merges in: the earliest warning stays the one to tell, later holders are named in also, counts sum', () => {
+  const root = flagged();
+  setHeldFlag(root, holder(41, 'a', 1));
+  setHeldFlag(root, holder(42, 'b', 2, { dropped: 3 }));
+  setHeldFlag(root, holder(43, 'c', 1));
+  const f = readHeldFlag(root).flag;
+  assert.deepEqual([f.pid, f.token, f.id, f.event.text], [41, 'a', 'w41', 'from 41'], 'the first holder and its warning stay at the top');
+  assert.deepEqual(f.also.map((h) => [h.pid, h.token, h.held, h.dropped]), [[42, 'b', 2, 3], [43, 'c', 1, 0]]);
+  assert.deepEqual(f.total, { holders: 3, held: 4, dropped: 3 });
+  assert.equal(f.gen, 3);
+  setHeldFlag(root, holder(42, 'b', 5));
+  const g = readHeldFlag(root).flag;
+  assert.deepEqual(g.also.map((h) => [h.pid, h.held, h.at]), [[42, 5, 'T42'], [43, 1, 'T43']], 'a holder that sets again is updated in place, not added twice');
+  assert.deepEqual(g.total, { holders: 3, held: 7, dropped: 0 });
+  setHeldFlag(root, holder(41, 'a', 2, { id: 'w41b', at: 'later' }));
+  const h = readHeldFlag(root).flag;
+  assert.deepEqual([h.held, h.id, h.at], [2, 'w41b', 'T41'], 'the first holder updating itself keeps its place and first time');
+});
+
+test('#260 r3 m1: the same pid with another token is another holder (a reused pid), and only a token made here is this process\'s own', () => {
+  const root = flagged();
+  const mine = newHeldToken();
+  setHeldFlag(root, holder(process.pid, undefined, 1));
+  setHeldFlag(root, holder(process.pid, mine, 1));
+  const f = readHeldFlag(root).flag;
+  assert.deepEqual(heldHolders(f).map((x) => [x.pid, x.token ?? null]), [[process.pid, null], [process.pid, mine]]);
+  assert.deepEqual(heldHolders(f).map(isOwnHolder), [false, true]);
+  assert.equal(isOwnHolder({ pid: process.pid + 1, token: mine }), false, 'the token alone is not enough');
+  assert.equal(dropHeldHolder(root, { pid: process.pid, token: mine }), true);
+  assert.deepEqual(heldHolders(readHeldFlag(root).flag).map((x) => x.token ?? null), [null], 'the dead process\'s entry stays');
+});
+
+test('#260 r3 M1: a holder drops only its own entry; the flag clears only when nothing else is left', () => {
+  const root = flagged();
+  for (const [pid, t] of [[41, 'a'], [42, 'b'], [43, 'c']]) setHeldFlag(root, holder(pid, t, 1));
+  assert.equal(dropHeldHolder(root, { pid: 42, token: 'b' }), true);
+  assert.deepEqual(heldHolders(readHeldFlag(root).flag).map((x) => x.pid), [41, 43]);
+  assert.equal(dropHeldHolder(root, { pid: 99, token: 'z' }), false, 'a holder not in it changes nothing');
+  assert.equal(dropHeldHolder(root, { pid: 41, token: 'a' }), true);
+  const f = readHeldFlag(root).flag;
+  assert.deepEqual([f.pid, f.id, f.event, f.also.length, f.total.holders], [43, null, null, 0, 1], 'the next holder moves up, with no warning of its own to tell');
+  assert.equal(dropHeldHolder(root, { pid: 43, token: 'c' }), true);
+  assert.equal(readHeldFlag(root), null, 'the last one out clears it');
+});
+
+test('#260 r3 M1: the flag stays within its 4 KiB when full: the oldest later holders fold into cut, the first holder, its warning id and the total never go', () => {
+  const root = flagged();
+  setHeldFlag(root, holder(1, 't1', 1, { event: { type: 'diary_damaged', reason: 'r'.repeat(3000) } }), { settleMs: 0 });
+  for (let i = 2; i <= 200; i += 1) setHeldFlag(root, holder(i, `t${i}`, i, { dropped: 1 }), { settleMs: 0 });
+  const r = readHeldFlag(root);
+  assert.equal(readFileSync(join(root, HELD_FLAG)).length, HELD_FLAG_BYTES);
+  const f = r.flag;
+  assert.deepEqual([f.pid, f.id], [1, 'w1']);
+  assert.deepEqual(f.total, { holders: 200, held: 200 * 201 / 2, dropped: 199 });
+  const c = heldCut(f);
+  assert.ok(c.holders > 0, 'some were folded');
+  assert.equal(c.holders + f.also.length + 1, 200, 'every holder is named or counted');
+  assert.equal(f.also.at(-1).pid, 200, 'the newest is named');
+  assert.equal(c.held + f.also.reduce((a, h) => a + h.held, 0) + f.held, f.total.held);
+  setHeldFlag(root, holder(1, 't1', 1, { event: { type: 'x', text: 'é'.repeat(4000) } }), { settleMs: 0 });
+  assert.equal(readHeldFlag(root).flag.total.holders, 200, 'still whole after the first holder grows');
+});
+
+test('#260 r3 M1: a flag that can\'t be read is replaced by the merge, and says an earlier one was lost', () => {
+  const root = flagged();
+  writeFileSync(join(root, HELD_FLAG), '{"pid":4'.padEnd(HELD_FLAG_BYTES, ' '));
+  setHeldFlag(root, holder(41, 'a', 1));
+  const f = readHeldFlag(root).flag;
+  assert.deepEqual([f.pid, f.torn_before], [41, true]);
+});
+
+test('#260 r3 m2: a set whose entry another rewrite took in the moment after it wrote merges itself back in', () => {
+  const root = flagged();
+  setHeldFlag(root, holder(41, 'a', 1));
+  const before = readHeldFlag(root).raw;
+  let raced = 0;
+  // The robot's clear lands right after this set wrote (it compared against the flag it told, which this set changed
+  // only an instant before): the setter's own entry is gone, and it must put it back.
+  setHeldFlag(root, holder(42, 'b', 1), { afterWrite: (i) => { if (i === 0) { raced += 1; writeFileSync(join(root, HELD_FLAG), ' '.repeat(HELD_FLAG_BYTES)); } } });
+  assert.equal(raced, 1);
+  const f = readHeldFlag(root).flag;
+  assert.ok(f && heldHolders(f).some((x) => x.pid === 42), 'the setter is back in the flag');
+  assert.notEqual(readHeldFlag(root).raw, before);
+});
+
+test('#260 r3 m2: a clear re-reads just before it writes, so a set that lands after its compare is kept', () => {
+  const root = flagged();
+  setHeldFlag(root, holder(41, 'a', 1));
+  const told = readHeldFlag(root);
+  const ok = clearHeldFlag(root, told.raw, { between: () => setHeldFlag(root, holder(42, 'b', 1), { settleMs: 0 }) });
+  assert.equal(ok, false);
+  assert.deepEqual(heldHolders(readHeldFlag(root).flag).map((x) => x.pid), [41, 42]);
+  assert.equal(readHeldFlag(root).flag.gen, 2, 'each write moves the generation on');
+});
+
+test('#260 r3 M1: a clear with keep leaves only the holders it accepts (the robot\'s own), with the first one\'s warning if it is kept', () => {
+  const root = flagged();
+  setHeldFlag(root, holder(41, 'a', 1));
+  setHeldFlag(root, holder(42, 'b', 2));
+  const r = readHeldFlag(root);
+  assert.equal(clearHeldFlag(root, r.raw, { keep: (h) => h.pid === 42 }), true);
+  const f = readHeldFlag(root).flag;
+  assert.deepEqual([f.pid, f.held, f.id, f.total.holders], [42, 2, null, 1]);
+  const r2 = readHeldFlag(root);
+  assert.equal(clearHeldFlag(root, r2.raw, { keep: (h) => h.pid === 42 }), true);
+  assert.equal(readHeldFlag(root).flag.pid, 42, 'kept again');
 });
