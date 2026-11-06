@@ -10,9 +10,10 @@
 # then it starts one watch pass and shows the end of the job's logs, with a count of HTTP 403 answers.
 #
 # Steps a to d run from the copy step b installed: run from anywhere else (the first run comes from outside, since the
-# copy before step b has no such script), this file runs step b only, then hands over to the copy's own file, and only
-# when that file is the same as this one, so steps a to d run the text that was checked. Root never runs setup code from a
-# folder anyone else can write, and steps a to d all use the one copy the link named when they began. Safe to run again: a step already done says it has nothing to do.
+# copy before step b has no such script), this file runs step b only, then hands over to the copy's own file. It hands
+# over only when that file's bytes are the bytes of the file bash started from (resolved before step b moved the link),
+# so steps a to d run the text that was started. Root never runs setup code from a folder anyone else can write, and
+# steps a to d all use the one copy the link named when they began. Safe to run again: a step already done says so.
 # It never reads or prints the key or the token: it only checks the key file is there.
 # The whole script is one { } block, so bash has read all of it before the first step: a copy of this file that changes
 # while it runs (a synced folder) changes nothing. After step b it reads no file outside /Library/orchestrate.
@@ -73,9 +74,10 @@ if [ "${1:-}" != "--after-b" ]; then
   (cd / && env -i PATH="$PATH" "$NODE" "$UPDATER" "$COPY/updater.json") 2>&1 | hide; r=${PIPESTATUS[0]}
   [ "$r" = 0 ] || stop b "the updater failed (exit $r): see its lines above; the copy was not moved"
   echo "the copy is at: $(readlink "$COPY")"
-  NEW="$COPY/setup/watch-cutover.sh"
+  # The new copy's file by its real folder, so the cmp and the exec name one file even if the link moves between them.
+  NEW="$(cd "$COPY/setup" 2>/dev/null && pwd -P)/watch-cutover.sh"
   [ -f "$NEW" ] || stop b "the copy has no setup/watch-cutover.sh, so main does not have the watcher change yet"
-  cmp -s "$0" "$NEW" || stop b "main's copy of this script is not the file you ran (yours $(shasum -a 256 "$0" | cut -c1-8)…, main's $(shasum -a 256 "$NEW" | cut -c1-8)…), so steps a to d, which run main's copy, were not run"
+  cmp -s "$HERE" "$NEW" || stop b "main's copy of this script is not the file you ran (yours $(shasum -a 256 "$HERE" | cut -c1-8)…, main's $(shasum -a 256 "$NEW" | cut -c1-8)…), so steps a to d, which run main's copy, were not run"
   # Steps a to d go on from the copy's own file: root's, not this one.
   exec /bin/bash "$NEW" --after-b
 fi

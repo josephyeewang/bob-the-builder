@@ -165,6 +165,12 @@ next; rm -rf "$T/L/install/orchestrate.v-old"; mkv "$T" old 1
 run "$T" /bin/bash "$T/L/install/orchestrate/setup/watch-cutover.sh"
 [ "$(rc "$T")" = 0 ] && grep -q "review-updater" "$T/ctl/calls" && has "$T" "^ALL DONE" && ok "runs b, then a to d" || bad "rc $(rc "$T") $(tail -2 "$T/out")"
 
+echo "S10b run as the installed copy's own file, when main's copy of the script has changed"
+next; rm -rf "$T/L/install/orchestrate.v-old"; mkv "$T" old 1; : > "$T/ctl/differ"
+run "$T" /bin/bash "$T/L/install/orchestrate/setup/watch-cutover.sh"
+stops "$T" b "main's copy of this script is not the file you ran" && ok "stops at b: the file started from is compared, not the link's new file" || bad "rc $(rc "$T"): $(tail -2 "$T/out")"
+[ "$(setupcalls "$T")" = 0 ] && ok "no setup call" || bad "setup ran"
+
 echo "S11 an HTTP 403 in the pass's new error lines"
 for e in "HTTP 403 Forbidden for /repos/o/r/check-runs" "GitHub answered 403 for /repos/o/r/pulls/7" "GitHub refused the token request (403)"; do
   next; outer "$T" FAKE_ERR="$e"

@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,9 +75,9 @@ test('L643: step b runs the updater exactly as its job does, then hands over to 
   assert.match(TEXT, /\(cd \/ && env -i PATH="\$PATH" "\$NODE" "\$UPDATER" "\$COPY\/updater\.json"\)/);
   assert.match(TEXT, /^export PATH=\/usr\/bin:\/bin:\/usr\/sbin:\/sbin$/m);
   assert.match(TEXT, /^umask 022$/m);
-  assert.match(TEXT, /NEW="\$COPY\/setup\/watch-cutover\.sh"/);
+  assert.match(TEXT, /NEW="\$\(cd "\$COPY\/setup" 2>\/dev\/null && pwd -P\)\/watch-cutover\.sh"/, 'the new file by its real folder');
   assert.match(TEXT, /exec \/bin\/bash "\$NEW" --after-b/);
-  assert.match(TEXT, /cmp -s "\$0" "\$NEW" \|\| stop b /, 'steps a to d run only the text that was checked');
+  assert.match(TEXT, /cmp -s "\$HERE" "\$NEW" \|\| stop b /, 'steps a to d run only the text bash started from, resolved before step b');
   assert.match(TEXT, /\[ "\$HERE" = "\$COPY_REAL\/setup\/watch-cutover\.sh" \] \|\| stop a /, 'steps a to d run only from the current copy\'s own file');
   assert.match(TEXT, /^NODE="\$COPY_REAL\/bin\/node"$/m); assert.match(TEXT, /^SETUP="\$COPY_REAL\/setup\/setup\.mjs"$/m);
 });
@@ -119,6 +119,17 @@ test('#261 r1: the behaviour harness runs the script against a stand-in install,
     assert.ok(end, `the harness did not finish:\n${r.stdout}\n${r.stderr}`);
     assert.equal(end[2], '0', r.stdout.split('\n').filter((l) => /FAIL|^S\d/.test(l)).join('\n'));
     assert.equal(r.status, 0);
-    assert.ok(Number(end[1]) >= 68, `only ${end[1]} checks ran`);
+    assert.ok(Number(end[1]) >= 70, `only ${end[1]} checks ran`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('#261 r2: setup.mjs runs when started through a linked folder, as steps a to d start it through the copy\'s link', () => {
+  const dir = tempDir('orch-setup-linked-');
+  try {
+    symlinkSync(join(HERE, '..'), join(dir, 'orchestrate'));
+    for (const at of [join(HERE, 'setup.mjs'), join(dir, 'orchestrate', 'setup', 'setup.mjs')]) {
+      const r = spawnSync(process.execPath, [at, '--help'], { encoding: 'utf8' });
+      assert.match(`${r.stdout}${r.stderr}`, /^usage: node setup\.mjs /m, `${at} did not run: ${JSON.stringify(r)}`);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

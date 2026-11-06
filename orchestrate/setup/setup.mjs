@@ -33,6 +33,7 @@
 // refused when running as root: under sudo it would move where root writes while every printed path still read
 // /Library/... (L90 minor b). Exit: 0 fine, 1 a check failed or a problem was found, 2 usage or not root.
 
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -195,4 +196,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   return bad.length ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });
+// Run as a script, also through a link such as the installed copy's (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so the two are compared with argv[1] resolved, as the checker files do.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });
