@@ -2318,6 +2318,7 @@ const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   ledger: ['air-health', 'alert-', 'idea-issue-', 'push-request-', 'heartbeat-', 'signed-out-'],
   workshop: ['push.'],
   merge_gate: ['reverse-', 'merge-limit-told-'],
+  approvals: ['state-told-'],
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'wait-tell-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
@@ -2414,7 +2415,7 @@ const WRITERS = Object.freeze({
   // and every row here is used by a write site or says why not (L112).
   // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
   // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
-  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
+  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, approvals: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
   report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
@@ -2941,6 +2942,19 @@ function makeRecord(impl) {
     diary(opts = {}) { return impl.diary(opts); },
     // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
     keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
+    // What the store holds in this process only, on no disk (L620): { held: [{ id, event }], dropped: n }. null is not
+    // known: an implementation without it, one that throws, or an answer not of that shape. Never a guess of none.
+    heldHere() {
+      // null only when the implementation has none (no store). A store whose answer throws or has a shape this doesn't
+      // know answers { error }: what it holds is not known, and the delivery pass refuses a clean round (#260 r1 m1).
+      if (typeof impl.heldHere !== 'function') return null;
+      try {
+        const h = impl.heldHere();
+        const ok = h && Array.isArray(h.held) && Number.isSafeInteger(h.dropped) && h.dropped >= 0 && (h.disk === null || typeof h.disk === 'string')
+          && h.held.every((x) => x && typeof x.id === 'string' && x.event && typeof x.event === 'object' && !Array.isArray(x.event));
+        return ok ? { held: h.held, dropped: h.dropped, disk: h.disk } : { error: 'the store\'s answer has a shape this does not know' };
+      } catch (e) { return { error: String(e?.message ?? e).slice(0, 200) }; }
+    },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {

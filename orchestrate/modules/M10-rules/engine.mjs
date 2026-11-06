@@ -210,7 +210,7 @@ export function makeEngine({ products, rulesState, productState, running, rolesD
   function outOfLane(pol, card, files) {
     const lane = card?.doc?.lane;
     if (!LANES.includes(lane)) return ['card has no lane'];
-    const rows = [...(Array.isArray(card.rows) ? card.rows : []), ...(Array.isArray(card?.doc?.files) ? card.doc.files : []).map((f) => (typeof f === 'string' ? ROW_FILE.exec(f)?.[1] : null)).filter(Boolean)];   // card.rows ∪ its own row files (L696)
+    const rows = [...(Array.isArray(card.rows) ? card.rows : []), ...(Array.isArray(card?.doc?.files) && card.kind !== 'lead_daily_card' ? card.doc.files : []).map((f) => (typeof f === 'string' ? ROW_FILE.exec(f)?.[1] : null)).filter(Boolean)];   // card.rows ∪ its own row files (L696); a go-free daily card adds none (L704)
     const docsPaths = compileList(pol.docs_paths ?? ['docs/**']);
     const out = [];
     for (const f of files) {

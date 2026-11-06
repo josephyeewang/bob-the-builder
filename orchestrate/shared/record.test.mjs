@@ -41,7 +41,8 @@ test('the stand-in refuses a field or a move M9 does not allow that actor, as th
   // Facts by family (L74): the dispatcher makes facts only in its own families, so it can't take Sensors' pr- first.
   assert.match(make('dispatcher', 'fact', 'F-1', { text: 'x' }).reason, /fact F-1 is in no family; dispatcher may not create it/);
   assert.match(make('dispatcher', 'fact', 'pr-7', { text: 'x' }).reason, /fact pr-7 is in sensors's family, not dispatcher's/);
-  assert.match(make('approvals', 'fact', 'outage', { text: 'x' }).reason, /approvals may not create fact/);
+  assert.match(make('approvals', 'lesson', 'L-1', { text: 'x' }).reason, /approvals may not create lesson/);
+  assert.match(make('approvals', 'fact', 'outage', { text: 'x' }).reason, /fact outage is in dispatcher's family, not approvals's/);
   // The claim's two steps, by M9's own check (guard.mjs claimCheck, L72): ready → claimed names a session and no
   // process, and is stamped; claimed → running adds pid and pid_start and nothing else; no other write changes it.
   {
@@ -181,4 +182,19 @@ test('L151 m7: the stand-in refuses a missing file, a link and the wrong folder 
   assert.equal(bare.applyOutbox(lead, join(root, 'lead', 'L-1', 'think-3.md')).reason, 'file is a link');
   assert.ok(isNotARecord(bare.applyOutbox(lead, think)));
   assert.equal(rec.diary().length, 0);
+});
+
+// L620: what the store holds on no disk. null means not known, never "none held".
+test('L620, #260 r1 m1: heldHere passes the store\'s answer through; null only with no store, and a throw or a bad shape is { error }', () => {
+  const held = { held: [{ id: 'a1', event: { type: 'diary_damaged', reason: 'x' } }], dropped: 2, disk: 'a write failed (ENOSPC)' };
+  assert.deepEqual(makeRecord({ heldHere: () => held }).heldHere(), held);
+  assert.deepEqual(makeRecord({ heldHere: () => ({ held: [], dropped: 0, disk: null }) }).heldHere(), { held: [], dropped: 0, disk: null });
+  assert.equal(makeRecord({}).heldHere(), null, 'an implementation without it: no store, nothing held');
+  assert.equal(memoryRecord().heldHere(), null, 'the stand-in has no store');
+  assert.deepEqual(makeRecord({ heldHere() { throw new Error('boom'); } }).heldHere(), { error: 'boom' }, 'a throw is not known, never none');
+  for (const bad of [undefined, null, 3, {}, { held: [] }, { held: 'x', dropped: 0, disk: null }, { held: [], dropped: -1, disk: null }, { held: [], dropped: 1.5, disk: null },
+    { held: [], dropped: 0 }, { held: [], dropped: 0, disk: 7 }, { held: [{ event: {} }], dropped: 0, disk: null }, { held: [{ id: 'a', event: null }], dropped: 0, disk: null },
+    { held: [{ id: 'a', event: [] }], dropped: 0, disk: null }]) {
+    assert.match(makeRecord({ heldHere: () => bad }).heldHere()?.error ?? '', /shape this does not know/, JSON.stringify(bad));
+  }
 });

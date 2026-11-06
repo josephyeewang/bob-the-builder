@@ -22,7 +22,8 @@ import { readMark } from './mark.mjs';
 import { readNeedsJoe } from './checker-entry.mjs';
 import { gatherFacts } from './gather.mjs';
 import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
-import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, settleMerge } from './merge-outcome.mjs';
+import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, settleMerge, reconcileMerge } from './merge-outcome.mjs';
+import { markReverted } from './undo.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 const POLICY = 'tiers: {}\n';
@@ -796,7 +797,9 @@ test('L110 m-6 (G14): a merge stopped in checking, its PR still open, is refused
 // L130 M5: recover() writes MERGED_OUTSIDE ("the owner was told") only when its alert was taken; an alert that answers
 // false, or throws, leaves MERGED_OUTSIDE_UNTOLD, which the Dispatcher tells (merges.mjs, alert-answer.test S3).
 for (const [name, answer, want] of [['taken', () => true, MERGED_OUTSIDE], ['not queued', () => false, MERGED_OUTSIDE_UNTOLD],
-  ['thrown', () => { throw new Error('queue gone'); }, MERGED_OUTSIDE_UNTOLD]]) {
+  ['thrown', () => { throw new Error('queue gone'); }, MERGED_OUTSIDE_UNTOLD],
+  // L583 (5): no alert wired at all is "not delivered", never told (the gate's own default).
+  ['none wired', null, MERGED_OUTSIDE_UNTOLD]]) {
   test(`L130: a stopped checking merge GitHub shows merged at another head is refused; the alert ${name} -> ${want === MERGED_OUTSIDE ? 'told' : 'untold'}`, async () => {
     const w = world(limited());
     verifiedCard(w);
@@ -812,13 +815,14 @@ for (const [name, answer, want] of [['taken', () => true, MERGED_OUTSIDE], ['not
     const pr = w.g.pulls.get(7);
     Object.assign(pr, { head: w.g.commit([w.g.main], { 'src/a.mjs': 'three' }, { from: w.g.main }), state: 'closed', merged: true, merge_commit_sha: 'e'.repeat(40) });
     let asked = 0;
-    w.ctx.alert = (a) => { asked += 1; w.alerts.push(a); return answer(); };
+    if (answer) w.ctx.alert = (a) => { asked += 1; w.alerts.push(a); return answer(); };
+    else delete w.ctx.alert;
     tick(w, 1);
     await gatePass(w.ctx);
     const m = mergeOf(w);
     assert.equal(m.doc.state, 'refused');
     assert.deepEqual(m.doc.reasons, [want]);
-    assert.equal(asked, 1);
+    assert.equal(asked, answer ? 1 : 0);
     assert.equal(cardOf(w).state, 'verified');
     assert.equal(gatePuts(w), 0, 'the gate never merged it');
   });
@@ -3593,4 +3597,20 @@ test('L356 gate.mjs: a refused clear of the landed reading steps aside with an a
   assert.equal(again().doc.wait_reading ?? null, null, 'cleared on the next pass');
   assert.equal(gatePuts(w), puts + 1, 'and it went on');
   assert.equal(refused().length, 1);
+});
+
+// L583 (5): an M6 call with no alert wired answers "not told", so its caller tells the owner itself, never "told".
+test('L583: markReverted, reconcileMerge and settleMerge with no alert wired: told false, nothing thrown', () => {
+  const none = { read: () => null };
+  assert.deepEqual(markReverted({ record: none }, 'card-9'), { ok: false, reason: 'not a merged undo card', told: false });
+  const m = { id: 'merge-1', rev: 2, doc: { state: 'refused', reasons: ['interrupted'], pr: 7, judged_head: 'a'.repeat(40) } };
+  const rec = { read: (e) => (e === 'merge' ? m : null) };
+  const r = reconcileMerge({ record: rec, now: 0 }, 'merge-1', { pr: { merged: true, merge_commit_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40) } });
+  assert.equal(r.ok, false);
+  assert.equal(r.told, false);
+  // settleMerge: a refused write with no alert wired is answered, not thrown.
+  const checking = { id: 'merge-2', rev: 1, doc: { state: 'checking', pr: 8, judged_head: 'a'.repeat(40) } };
+  const refusing = { read: (e) => (e === 'merge' ? checking : null), write: () => ({ ok: false, reason: 'planted refusal' }) };
+  assert.deepEqual(settleMerge({ record: refusing, now: 0 }, 'merge-2', { pr: { merged: true, merge_commit_sha: 'b'.repeat(40), head_sha: 'a'.repeat(40) } }),
+    { ok: false, reason: 'the move to merging was refused' });
 });

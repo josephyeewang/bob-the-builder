@@ -35,7 +35,7 @@ export function undoneBy(record, card) {
   return null;
 }
 
-export function markReverted({ record, alert = () => {} }, undoCardId) {
+export function markReverted({ record, alert = () => false }, undoCardId) {
   // told: the alert was delivered (not false, no throw). The gate retries until it was, or the mark holds (L135 site G).
   const no = (reason) => { let told; try { told = alert({ type: 'undo_not_marked', card: undoCardId, reason }) !== false; } catch { told = false; } return { ok: false, reason, told }; };
   const u = record.read('card', undoCardId);
