@@ -80,7 +80,7 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-import { fakeRules, makeRules } from '../shared/rules.mjs';
+import { fakeRules } from '../shared/rules.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
@@ -122,10 +122,9 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
-// The day-one engine answers the push; the push world's values stay plain values, as M4's push still reads them
-// (shared/rules.mjs OLD_VALUES_UNTIL_STEP_2).
+// The day-one engine answers the push; the push world's values reach it as the rules reader gives them, as text.
 function pushRules(w, world) {
-  return makeRules({ rev: 'fake-1', may: (a, x) => w.rules.may(a, x), get: (k, { product } = {}) => (product === world.product ? world.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+  return fakeRules({ answers: { push_branch: (x) => w.rules.may('push_branch', x) }, values: world.values });
 }
 
 const UNDO_ID = 'U1';
