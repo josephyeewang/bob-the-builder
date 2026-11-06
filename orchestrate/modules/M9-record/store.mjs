@@ -86,7 +86,7 @@ function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l
 // Finder leaves these when the owner looks at docs/ by eye; they are not documents (round 8 m2).
 const IGNORED = new Set(['.DS_Store']);
 
-export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
+export function openStore({ root, ownerUid, alert = () => false, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
   probe = realProbe, faultAt, testNoLock = false } = {}) {
   if (typeof root !== 'string' || !isAbsolute(root)) throw new Error('store root must be an absolute path');
   if (!Number.isInteger(ownerUid)) throw new Error('store needs the owner uid (ownerUid)');

@@ -57,7 +57,10 @@ export function safeAlert(ctx, failed) {
   return (a) => {
     if (typeof ctx.alert !== 'function') return false;
     try {
-      if (ctx.alert(a) === false) { failed.n += 1; return false; }
+      const r = ctx.alert(a);
+      // A promise is no answer yet, and this path can't wait for one, so it counts as lost and is told again (L163).
+      if (typeof r?.then === 'function') { r.then(null, () => {}); failed.n += 1; return false; }
+      if (r === false) { failed.n += 1; return false; }
       return true;
     } catch { failed.n += 1; return false; }
   };
