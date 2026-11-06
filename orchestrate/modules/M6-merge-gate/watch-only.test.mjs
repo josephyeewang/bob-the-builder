@@ -1554,15 +1554,55 @@ test('L644: each judged record keeps why each risky class was named, so a real m
   assert.equal(code.verdict, (await (async () => { const v = world(); await v.pass(PIN_AT); v.land({ 'src/a.mjs': 'two' }); await v.pass(); return v.judged()[0].verdict; })()));
 });
 
-test('L644: the reasons are capped, so one big pull request can\'t grow a log line without end', async () => {
+test('L644: the reasons are capped at 5 per class, each cut to 200 characters, with the exact count left over', async () => {
+  // Literal numbers, not the module's constants: raising the cap must fail here (#259 r1 m1).
+  assert.equal(REASONS_KEPT, 5); assert.equal(REASON_CHARS, 200);
   const w = world(); await w.pass(PIN_AT);
-  const files = {}; for (let i = 0; i < REASONS_KEPT + 7; i++) files[`src/f${i}-${'x'.repeat(300)}.mjs`] = `line ${i}`;
+  const files = {}; for (let i = 0; i < 12; i++) files[`src/f${String(i).padStart(2, '0')}-${'x'.repeat(300)}.mjs`] = `line ${i}`;
   w.land(files);
   await w.pass();
   const r = w.judged()[0].risky_reasons.schema;
-  assert.equal(r.length, REASONS_KEPT + 1, JSON.stringify(r));
-  assert.ok(r.slice(0, REASONS_KEPT).every((x) => x.length <= REASON_CHARS));
-  assert.match(r.at(-1), /^and \d+ more$/);
+  assert.equal(r.length, 6, JSON.stringify(r));
+  assert.equal(r[5], 'and 7 more');
+  // The first five, in the order classify gave them, each cut to 200 with the mark.
+  assert.deepEqual(r.slice(0, 5).map((x) => x.slice(0, 7)), ['src/f00', 'src/f01', 'src/f02', 'src/f03', 'src/f04']);
+  for (const x of r.slice(0, 5)) { assert.equal(x.length, 200); assert.ok(x.endsWith('…'), x); }
+});
+
+test('L644: exactly 5 reasons are all kept, with no "and N more"; a short reason is kept whole', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const files = {}; for (let i = 0; i < 5; i++) files[`src/g${i}.mjs`] = `line ${i}`;
+  w.land(files);
+  await w.pass();
+  const r = w.judged()[0].risky_reasons.schema;
+  assert.equal(r.length, 5, JSON.stringify(r));
+  assert.ok(r.every((x) => !/^and \d+ more$/.test(x) && !x.endsWith('…')), JSON.stringify(r));
+});
+
+test('#259 r1 M1: a migration with three code files keeps the migration\'s reason, ahead of the line-check hits, before the cap', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'app/a.mjs': 'one', 'components/b.mjs': 'one', 'config/c.mjs': 'one' });
+  // Each code file now changes (an added and a removed line): six line-check hits, all sorting before db/.
+  w.land({ 'app/a.mjs': 'two', 'components/b.mjs': 'two', 'config/c.mjs': 'two', 'db/migrations/003_x.sql': 'alter table t add c int;' }, { at: '2026-11-03T11:00:00Z' });
+  await w.pass();
+  const mig = w.judged().at(-1);
+  const r = mig.risky_reasons.schema;
+  // The migration's own two reasons (its path, and a table change) come first; then line-check hits fill the cap.
+  assert.deepEqual(r.slice(0, 2), ['db/migrations/003_x.sql', 'db/migrations/003_x.sql (table change in added lines)'], JSON.stringify(r));
+  assert.ok(r.slice(2, 5).every((x) => /: line \d+ may change the database: /.test(x)), JSON.stringify(r));
+  assert.equal(r.at(-1), 'and 4 more', 'six code hits and the migration file\'s own line hit, less the three kept');
+  // The line-check hits that are kept stay in the order classify gave them.
+  const paths = r.slice(2, 5).map((x) => x.split(' ')[0]);
+  assert.deepEqual(paths, [...paths].sort(), JSON.stringify(paths));
+});
+
+test('#259 r1 m2: with no files read, the reason says why: too many, a missing entry, or not read', async () => {
+  const rs = await draftRulesFor();
+  const facts = (over) => ({ direct: false, sha: 'a'.repeat(40), headSha: 'b'.repeat(40), pr: 5, prBase: 'main', labels: [], checks: [], statuses: [], threads: { ok: true, unresolved: 0 }, files: null, ...over });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'too_many' }), rs).risky_reasons, { unclassifiable: ['the change has 300 or more files, too many to read, so none were classified'] });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'no_entry', filesMissing: 'src/gone.mjs' }), rs).risky_reasons, { unclassifiable: ['a listed file was not in its commit: src/gone.mjs'] });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'unread' }), rs).risky_reasons, { unclassifiable: ['the files were not read'] });
+  assert.deepEqual(judgeMerged(facts({}), rs).risky_reasons, { unclassifiable: ['the files were not read'] });
 });
 
 test('L644: a push with no pull request logs no reasons, as it has no risky classes', async () => {
