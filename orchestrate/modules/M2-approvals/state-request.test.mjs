@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { outboxFile } from '../M1-front-door/outbox.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
@@ -24,8 +24,8 @@ function report(id, input, { role = 'front_door', rid, product = PRODUCT, text }
 }
 
 // The real record, with extra reports in its list; write can be swapped to plant a refusal.
-function setup({ state = 'active', reports = [], stateDir = true, doc = {} } = {}) {
-  const t = m2env();
+function setup({ state = 'active', reports = [], stateDir = true, doc = {}, envOpts } = {}) {
+  const t = m2env(envOpts);
   if (state !== null) must(t.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: 0, doc: { state, ...doc } }), 'product');
   const extra = [...reports];
   const rec = t.record;
@@ -237,9 +237,14 @@ test('L515 A: the name\'s time orders nothing: one dated far ahead neither wins 
 });
 
 test('a newest report at or before the product\'s marker is never applied, even with the marked report gone from the list', () => {
+  // A marker with no list of what it decided (L606 M2): whether this one once applied can't be told, so it is told that.
   const s = setup({ doc: { request: { id: 'state-F-999999', at: '20261103-0900' } }, reports: [report('20261103-0915-ap', { state: 'paused' })] });
-  assert.deepEqual(pass(s).answers.map((a) => a.push), [STATE_ANSWERS.newer(PRODUCT)]);
+  assert.deepEqual(pass(s).answers.map((a) => a.push), [STATE_ANSWERS.cantTell(PRODUCT)]);
   assert.equal(s.product().doc.state, 'active');
+  // With the list, one not on it was never applied: told so.
+  const k = setup({ doc: { request: { id: 'state-F-999999', at: '20261103-0900' }, request_untold: {} }, reports: [report('20261103-0915-ap', { state: 'paused' })] });
+  assert.deepEqual(pass(k).answers.map((a) => a.push), [STATE_ANSWERS.newer(PRODUCT)]);
+  assert.equal(k.product().doc.state, 'active');
 });
 
 test('a report with no record number can\'t be ordered: unreadable, never applied', () => {
@@ -258,6 +263,9 @@ test('L515 M5: a pause sent after a flight west, with an earlier local clock, st
 
 test('L515 M7: another product\'s report gets no answer and no alert here; its own pass answers it', () => {
   const s = setup({ reports: [report('20261103-0915-ae', { state: 'paused' }, { product: 'other-app' })] });
+  // A record holds one product's doc (M9 writer), so the other product's doc is answered at the read.
+  const read = s.ctx.record.read;
+  s.ctx.record.read = (e, i) => (e === 'product' && i === 'other-app' ? { rev: 1, doc: { state: 'active' } } : read(e, i));
   const r = pass(s);
   assert.deepEqual([r.answers, r.refused, r.applied], [[], [], []]);
   assert.equal(s.product().doc.state, 'active');
@@ -386,4 +394,85 @@ test('L515 m4: the step runs before schedulePass reads the product, so the windo
   const r = await schedulePass(s.ctx);
   assert.equal(r.ok, true, r.reason);
   assert.ok(log.lastIndexOf('read') > log.indexOf('write') && log.includes('write'), log.join(' '));
+});
+
+// L606 M1 + L686: a request naming a product with no record is answered by whichever pass sees it first, and the
+// shared told mark keeps every other pass quiet.
+test('L686: a typo\'d product is told exactly once across several passes and several products', async () => {
+  const rep = report('20261103-0915-ba', { state: 'paused' }, { product: 'smaple-app' });
+  const s = setup({ reports: [rep] });
+  const seen = told(s);
+  const other = { ...s.ctx, product: 'other-app' };
+  for (let i = 0; i < 3; i++) { await schedulePass(s.ctx); await schedulePass(other); }
+  assert.deepEqual(seen(), [{ type: 'state_answer', product: 'smaple-app', report: rep.id, text: STATE_ANSWERS.noProduct('smaple-app') }]);
+  assert.equal(s.product().doc.state, 'active', 'nothing applied to the real product');
+});
+
+test('L686: a lost tell of a typo\'d product (the sink answers false) is told again on the next pass, then not again', async () => {
+  const rep = report('20261103-0915-bb', { state: 'paused' }, { product: 'smaple-app' });
+  const s = setup({ reports: [rep] });
+  const lost = told(s, { answer: false });
+  await schedulePass(s.ctx);
+  assert.equal(lost().length, 1, 'tried');
+  const seen = told(s);
+  await schedulePass(s.ctx);
+  await schedulePass(s.ctx);
+  assert.deepEqual(seen().map((a) => [a.product, a.text]), [['smaple-app', STATE_ANSWERS.noProduct('smaple-app')]]);
+});
+
+// L606 M2: an applied request is never told "Not applied". Its outcome is carried on the product doc until it is
+// marked told, so a newer request arriving first doesn't turn it into "a newer one came in".
+test('L606 M2: a pause applied but not yet told, then a newer request decided too: the pause is told "Confirmed", never "Not applied"', async () => {
+  const a = report('20261103-0915-bc', { state: 'paused' });
+  const s = setup({ reports: [a] });
+  told(s, { answer: false });
+  await schedulePass(s.ctx);
+  assert.equal(s.product().doc.state, 'paused', 'applied');
+  s.extra.push(report('20261103-0920-bd', { state: 'away', tz: 'Europe/Paris', until: '2026-11-10' }));
+  await schedulePass(s.ctx);   // the newer one is decided and replaces the pause as the recorded request; both tells lost
+  assert.equal(s.product().doc.request.id, s.extra[1].id);
+  const seen = told(s);
+  await schedulePass(s.ctx);
+  const texts = seen().map((x) => [x.report, x.text]);
+  assert.deepEqual(texts, [[a.id, STATE_ANSWERS.paused(PRODUCT)], [s.extra[1].id, STATE_ANSWERS.awayWhilePaused(PRODUCT)]]);
+  assert.ok(!seen().some((x) => /^Not applied: a newer/.test(x.text) || x.text === STATE_ANSWERS.newer(PRODUCT)));
+  await schedulePass(s.ctx);
+  await schedulePass(s.ctx);
+  assert.equal(seen().length, 2, 're-telling stops');
+});
+
+test('L606 M2: a request decided and told by an earlier pass, its told mark then lost, is told the same answer again', () => {
+  const a = report('20261103-0915-be', { state: 'paused' });
+  const s = setup({ reports: [a] });
+  const first = pass(s).answers;
+  assert.deepEqual(first.map((x) => x.push), [STATE_ANSWERS.paused(PRODUCT)]);
+  s.extra.push(report('20261103-0920-bf', { state: 'paused' }));
+  const second = pass(s).answers;
+  assert.equal(second.find((x) => x.report === a.id).push, STATE_ANSWERS.paused(PRODUCT));
+});
+
+test('L606 N4: a bad approvals config holds the asks, not the owner\'s pause: it is applied and answered', async () => {
+  const rep = report('20261103-0915-bg', { state: 'paused' });
+  const s = setup({ reports: [rep], envOpts: { values: { 'approvals.push_windows': [] } } });
+  const seen = told(s);
+  const r = await schedulePass(s.ctx);
+  assert.equal(r.ok, false);
+  assert.equal(s.product().doc.state, 'paused');
+  assert.deepEqual(seen().map((x) => x.text), [STATE_ANSWERS.paused(PRODUCT)]);
+});
+
+test('L606 P4b: a state folder that can\'t be written is alerted once, not every pass, when nothing is refused', async () => {
+  const s = setup();
+  const blocker = join(tempDir('orch-state-req-'), 'a-file');
+  writeFileSync(blocker, 'x');
+  s.ctx.stateDir = join(blocker, 'state');
+  const seen = fakeAlert(); s.ctx.alert = seen;
+  // The state step's own once-files (onceAlerts); the schedule pass's other files are M2's config marks, not this.
+  for (let i = 0; i < 3; i++) stateRequestStep(s.ctx);
+  assert.deepEqual(seen.texts.filter((x) => /not_saved/.test(String(x.kind))), []);
+  // A refusal still gets through, and the folder that can't keep it is told.
+  s.box.write = () => ({ ok: false, reason: 'planted refusal' });
+  s.extra.push(report('20261103-0915-bh', { state: 'paused' }));
+  stateRequestStep(s.ctx);
+  assert.equal(seen.texts.filter((x) => x.kind === 'state_refused_state_not_saved').length, 1);
 });

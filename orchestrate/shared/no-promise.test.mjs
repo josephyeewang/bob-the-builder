@@ -197,6 +197,7 @@ export const STATE_APPLY_SHOWN = Object.freeze([
   'Not applied: <product> is in light mode, and trip mode can\'t be set from light mode.',
   'Not applied: <product> has no record on the Mini yet.',
   'Not applied: that request could not be read. Say it again.',
+  'Not sure: a later request for <product> came in before this one\'s answer was saved, so whether it was applied can\'t be told.',
 ]);
 test('L219 d: every answer the state-request pass can give the owner is an approved sentence, and the list is exact', () => {
   const shown = Object.values(STATE_ANSWERS).map((f) => f('<product>'));

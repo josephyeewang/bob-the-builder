@@ -14,7 +14,7 @@
 //     information only and orders nothing. Only the newest request per product is applied. The product doc keeps
 //     `request: { id, at }` of the last one applied, and a report not newer than that is never applied, so a restart
 //     or a replayed report can't apply again. A report for another product is skipped with no answer: its own pass
-//     answers it (L515 M7).
+//     answers it (L515 M7); one naming a product with no record, which no pass answers, is told it has none (L686).
 //     Every request gets one answer to the owner (L219 b): "Confirmed: …" only after the product write went through, a
 //     "Not applied: …" sentence for one that was passed over or refused. `answers` holds every answer not yet told:
 //     the caller tells each, then calls markStateAnswerTold. Anything not marked is handed back next pass. A write the
@@ -65,6 +65,7 @@ export const STATE_ANSWERS = Object.freeze({
   awayFromLight: (p) => `Not applied: ${p} is in light mode, and trip mode can't be set from light mode.`,
   noProduct: (p) => `Not applied: ${p} has no record on the Mini yet.`,
   unreadable: () => 'Not applied: that request could not be read. Say it again.',
+  cantTell: (p) => `Not sure: a later request for ${p} came in before this one's answer was saved, so whether it was applied can't be told.`,
 });
 
 // The record's number at the end of a report id (`state-<session>-<n>`), one count across every session; null if none.
@@ -111,7 +112,7 @@ export function applyStateRequests(ctx) {
   const refused = [];   // alerted to MAIN once per report and reason
   const answers = [];
   const applied = [];
-  const answer = (report, push, mark) => { if (mark?.answer !== push) answers.push({ report, push }); };
+  const answer = (report, push, mark, named) => { if (mark?.answer !== push) answers.push({ report, push, ...(named ? { product: named } : {}) }); };
 
   // Every state- report of this product, checked; the readable ones in the order they reached the Mini, oldest first.
   const ok = [];
@@ -125,7 +126,12 @@ export function applyStateRequests(ctx) {
       const r = checkOutboxFile(String(d.source ?? ''), String(d.text ?? ''));
       if (!r.ok) { no(r.reason); continue; }
       if (r.kind !== 'state') { no('not a state request'); continue; }
-      if (r.doc.product !== product) continue;
+      if (r.doc.product !== product) {
+        // Another product's request: its own pass answers it. A product with no record has no pass that will, so any
+        // pass answers it (L606 M1, L686); the told mark is one per report, so it is told once across every pass.
+        if (!mark && record.read('product', String(r.doc.product)) === null) answer(rep.id, STATE_ANSWERS.noProduct(r.doc.product), null, r.doc.product);
+        continue;
+      }
       const t = TIME_OF.exec(String(d.source))?.[1];
       if (!t) { no('the request has no real time in its name'); continue; }
       if (seqOf(rep.id) === null) { no('the report has no record number'); continue; }
@@ -142,6 +148,15 @@ export function applyStateRequests(ctx) {
   // A marker of the wrong shape counts as none, so it can never hold every later request back.
   const r0 = curDoc?.request;
   const stored = r0 && typeof r0.id === 'string' && seqOf(r0.id) !== null ? r0 : null;
+  // What the product write decided for a report whose answer is not yet marked told (L606 M2): the request it replaced
+  // and the ones it passed over. A later pass reads its answer here, so one that applied is never told "Not applied".
+  // Kept only while the report has no told mark; one it doesn't hold is told it can't be told, never the opposite.
+  const untoldWas = curDoc?.request_untold && typeof curDoc.request_untold === 'object' && !Array.isArray(curDoc.request_untold) ? curDoc.request_untold : {};
+  const hasUntold = curDoc?.request_untold === untoldWas;
+  const untold = {};
+  const unmarked = new Set(ok.filter((x) => !x.mark).map((x) => x.rep.id));
+  for (const [k, v] of Object.entries(untoldWas)) if (unmarked.has(k) && typeof v === 'string') untold[k] = v;
+  if (stored && unmarked.has(stored.id)) untold[stored.id] = typeof curDoc.request_answer === 'string' ? curDoc.request_answer : STATE_ANSWERS.cantTell(product);
   for (const x of ok) {
     const id = x.rep.id;
     // The one the product records: its answer is the product's, and may have changed since it was told.
@@ -151,10 +166,13 @@ export function applyStateRequests(ctx) {
       continue;
     }
     if (x.mark) continue;   // settled: told once, its outcome is final and it is never applied later
-    if (x !== last || (stored && !newer(x.at, stored))) { answer(id, STATE_ANSWERS.newer(product)); continue; }
+    // Older than the one recorded: decided by an earlier pass. Every product write carries forward the unmarked ones it
+    // decided, so one not there was never applied; a doc written before that list says nothing, so it can't be told.
+    if (stored && !newer(x.at, stored)) { answer(id, typeof untoldWas[id] === 'string' ? untoldWas[id] : hasUntold ? STATE_ANSWERS.newer(product) : STATE_ANSWERS.cantTell(product)); continue; }
+    if (x !== last) { untold[id] = STATE_ANSWERS.newer(product); answer(id, STATE_ANSWERS.newer(product)); continue; }
     if (!curDoc) { answer(id, STATE_ANSWERS.noProduct(product)); continue; }
     const n = nextDoc(curDoc, x.req, x.at);
-    const w = writeDoc(record, 'product', { id: product, rev: cur.rev }, { ...n.doc, request_answer: n.answer });
+    const w = writeDoc(record, 'product', { id: product, rev: cur.rev }, { ...n.doc, request_answer: n.answer, request_untold: untold });
     if (!w.ok) { refused.push({ report: id, reason: `the record refused the product write: ${w.reason}` }); continue; }
     if (!n.notApplied) applied.push({ report: id, state: n.doc.state });
     answer(id, n.answer);
@@ -182,11 +200,11 @@ function tellAnswers(ctx) {
   const events = r.applied.map((a) => ({ type: 'state_applied', ...a }));
   const held = readHeld(ctx, MARK_FILE);
   const stuck = [];
-  for (const { report, push } of r.answers) {
+  for (const { report, push, product: named } of r.answers) {
     const reason = markRefused(push);
     if (held?.[report] !== reason) {
       let took = false;
-      try { took = ctx.alert({ type: 'state_answer', product: ctx.product, report, text: push }) === true; } catch { took = false; }
+      try { took = ctx.alert({ type: 'state_answer', product: named ?? ctx.product, report, text: push }) === true; } catch { took = false; }
       if (!took) { events.push({ type: 'state_answer_not_told', report }); continue; }
     }
     const m = markStateAnswerTold(ctx, report, push);

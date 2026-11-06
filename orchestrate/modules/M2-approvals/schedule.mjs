@@ -275,7 +275,8 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
 export async function schedulePass(ctx) {
   const events = [];
   const cfg = readConfig(ctx.rules, ctx.product);
-  if (!cfg.ok) { configAlert(ctx, cfg.reason); return fail(cfg.reason, { events }); }
+  // A bad config holds the asks, not the owner's pause: the state step still runs and answers (L606 N4).
+  if (!cfg.ok) { configAlert(ctx, cfg.reason); events.push(...stateRequestStep(ctx)); return fail(cfg.reason, { events }); }
   configAlert(ctx, null);
   // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
   // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the

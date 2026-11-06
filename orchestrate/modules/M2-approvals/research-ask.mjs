@@ -81,6 +81,8 @@ export function onceAlerts(ctx, refused, { file: name, make, alert, notSaved }) 
   }
   // A state file that can't be saved is alerted, never thrown: the pass must still hand back the asks it opened, so
   // their "on your waiting list" push goes out (L84 3). The cost is only that a refusal may be alerted again.
+  // Written only when it changed, so a folder that can't be written is alerted once per change, not every pass (L606 P4b).
+  if (JSON.stringify(now) === JSON.stringify(last) && (existsSync(file) || !Object.keys(now).length)) return;
   try { mkdirSync(ctx.stateDir, { recursive: true }); writeFileSync(file, `${JSON.stringify(now)}\n`); }
   catch (e) { alert({ kind: notSaved, reason: String(e?.code ?? e?.message ?? e) }); }
 }
