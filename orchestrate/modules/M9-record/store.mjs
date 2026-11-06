@@ -139,13 +139,16 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // Kept-back counts whose own line could not be written (L620): nothing else holds them, so they are counted here and
   // heldHere() says so, rather than vanishing.
   let droppedHere = 0;
+  // Daily marks that are on no disk (#260 lane 1 m1): a good send whose mark could not be written, and a held line
+  // delivered from memory. linesInDay counts them, so a full disk tells a fault once a day here too, not once per read.
+  const markedHere = [];
   const appendUnsent = (text) => {
     if (faultAt === 'unsent_fails') throw Object.assign(new Error('test: no space left on the device'), { code: 'ENOSPC' });
     appendPlain(P.unsent, text);
   };
   const keep = (e, extra = {}) => {
     const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };
-    try { appendUnsent( `${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
+    try { appendUnsent(`${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
   // What the unsent file says was kept in the last day, each with its cap_key. Delivered lines count too, so a resend is
@@ -155,7 +158,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   function linesInDay(at) {
     const since = at - KEEP_WINDOW_MS;
     const inDay = (x) => typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since;
-    const here = unsentHere.filter(inDay);
+    const here = [...unsentHere, ...markedHere].filter(inDay);
     try { return [...readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return inDay(x) ? [x] : []; } catch { return []; } }), ...here]; } catch { return here; }
   }
   // A fault that every open finds again (L575): told once a day, not once per open, since each kept line is one issue.
@@ -169,7 +172,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (!send(e)) { keep(e, mark); return; }
     // Delivered at once: the mark still goes in, or the next open would tell it again (L620 m2). It has no event and an
     // outcome readUnsent never resends; a mark that can't be written means told again, never not told.
-    try { appendUnsent(`${JSON.stringify({ outcome: 'told_at_once', ...mark })}\n`); } catch { /* told again next open */ }
+    try { appendUnsent(`${JSON.stringify({ outcome: 'told_at_once', ...mark })}\n`); } catch { markedHere.push(mark); /* a later open tells it again */ }
   }
   // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
   // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
@@ -199,7 +202,11 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       if (!send({ ...x.event, resent: true })) continue;
       try { markSent(root, x.id, new Date(now()).toISOString()); } catch { /* sent twice, never lost */ }
     }
-    for (let i = unsentHere.length - 1; i >= 0; i--) if (send({ ...unsentHere[i].event, resent: true })) unsentHere.splice(i, 1);
+    for (let i = unsentHere.length - 1; i >= 0; i--) {
+      if (!send({ ...unsentHere[i].event, resent: true })) continue;
+      const [x] = unsentHere.splice(i, 1);
+      if (typeof x.cap_key === 'string') markedHere.push({ cap_key: x.cap_key, at: x.at });   // its daily mark stays
+    }
   }
   // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
   const docPath = (entity, id) => {

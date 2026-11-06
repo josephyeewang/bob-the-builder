@@ -540,3 +540,28 @@ test('L620: on a full disk, re-reading a damaged diary holds one copy of its war
   for (let i = 0; i < 5; i += 1) { o.record.write({ actor: 'dispatcher', entity: 'fact', id: `f-${i}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }); o.store.damaged(); }
   assert.equal(o.record.heldHere().held.filter((x) => x.event.type === 'diary_damaged').length, 1);
 });
+
+test('#260 m1: on a full disk with a working channel, a fault is told once a day in this process, not once per read', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  const a = goodAlert();
+  const o = viaWriter(env, { alert: a, faultAt: 'unsent_fails' });
+  for (let i = 0; i < 4; i += 1) { o.record.write({ actor: 'dispatcher', entity: 'fact', id: `f-${i}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }); o.store.damaged(); }
+  assert.equal(a.texts.filter((e) => e.type === 'diary_damaged').length, 1);
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+});
+
+test('#260 m1: a held daily warning delivered from memory keeps its mark, so the same day it is not told again', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  let up = false;
+  const a = fakeAlert({ answer: () => up });
+  const o = viaWriter(env, { alert: a, faultAt: 'unsent_fails' });
+  assert.equal(o.record.heldHere().held.length, 1, 'held, as the channel was down');
+  up = true;
+  for (let i = 0; i < 3; i += 1) { o.record.write({ actor: 'dispatcher', entity: 'fact', id: `g-${i}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }); o.store.damaged(); }
+  const dd = a.texts.filter((e) => e.type === 'diary_damaged');
+  assert.equal(dd.filter((e) => e.resent).length, 1, 'resent once from memory');
+  assert.equal(dd.filter((e) => !e.resent).length, 1, 'and no second new warning that day');
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+});
