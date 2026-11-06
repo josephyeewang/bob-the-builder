@@ -85,8 +85,10 @@ import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { LAST_PASS_FACT, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
+import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -369,7 +371,7 @@ function macBoot() {
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
     recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
-    approvalsStateDir: f('approvals-state') };
+    approvalsStateDir: f('approvals-state'), ...reviewConfig(dir, { reviewUid: process.getuid() + 1 }) };
   const configFile = L.write('dispatcher.json', config);
   writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
   const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
@@ -382,6 +384,10 @@ test('with only production writers, the product reads active and the docs lane i
   const { code, err, rec } = macBoot();
   assert.equal(code, 0, err);
   const p = ENTRY.product;
+  // The review user is another user (the Dispatcher's own may not be it, L674), so this boot's status is not theirs and
+  // the limits step says exactly that (L674 re-rules L652 for this boot).
+  assert.equal(rec.read('fact', LAST_PASS_FACT)?.doc?.steps?.limits, 'failed');
+  assert.equal(rec.read('fact', STEP_ERROR_FACT('limits'))?.doc?.error, "no review was asked for: the review runner's folder is not owned by the review user");
   // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
   assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
   assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);

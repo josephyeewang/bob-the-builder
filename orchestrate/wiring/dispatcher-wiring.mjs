@@ -35,6 +35,13 @@
 //                  the folder and the product's subfolder are made if missing (the parent must exist) and the start is
 //                  refused unless each is a plain folder of this user's, private (no group or other access) and
 //                  writable (L295 MAT-1): a folder M2 can't write would turn a product on with Joe never told.
+//   reviewRequestsDir  the review runner's requests/ folder, where a review is asked for (M4 review-runner.mjs FOLDERS)
+//   reviewStatusFile   the runner's status.json: what runs, and its alerts. Missing, or older than 3 minutes, is an error
+//   reviewUid          the review user's Mac user id: the status file and its folder must be that user's. It may be
+//                  neither the Dispatcher's own user nor ownerUid (L674)
+//   reviewRunnerLog    the runner's log file (M4 review-daemons.mjs RUNNER_LOG in its log folder), named in an alert
+//   reviewInstallRoot  the reviewers' installed copy, which root's updater keeps (review-updater.mjs installRoot). Its
+//                  own key: the Dispatcher's installRoot may be a copy of this user's, so the two can differ (L639)
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -58,8 +65,11 @@ import { NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mj
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
-export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
+// The review runner's (L615, L639; review-ports.mjs reviewRunner). The Dispatcher's alone: the robot config refuses them.
+export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewStatusFile', 'reviewUid', 'reviewRunnerLog', 'reviewInstallRoot']);
+export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
+  ...REVIEW_CONFIG_KEYS]);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid')]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
 // on a list throws when called: never a stand-in answer. To wire one, change its port file; this file doesn't change.
@@ -177,10 +187,11 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
  * has one home, or the start stops: a port both answered and listed, on two lists, answered by two files, a port the tick
  * doesn't read, one neither answered nor listed, or a file answering `alert` or `approvals`. The cleanup group follows
  * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
- * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now }; `gh` is the read-only
- * GitHub client the rules reader uses (L615).
+ * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid }; `gh` is the
+ * read-only GitHub client the rules reader uses (L615). `selfUid` is this process's user; main.mjs passes none, and a test
+ * stands in for it (L674).
  */
-export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS } = {}) {
+export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS, selfUid = process.getuid() } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
@@ -188,7 +199,7 @@ export async function wire(config, { limitedSync, log = (s) => process.stderr.wr
   const ports = { alert: logOnlyAlert(log) };
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
-  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now });
+  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now, selfUid });
   const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
   const lists = groups.flatMap((g) => g.notWired);
   const listed = new Set(lists);

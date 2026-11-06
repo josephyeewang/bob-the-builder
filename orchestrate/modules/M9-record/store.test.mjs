@@ -439,3 +439,18 @@ test('a lock with a second name (made by link, its maker killed before the unlin
   assert.ok(!existsSync(temp), 'the dead maker\'s temp name is cleared');
   assert.ok(!existsSync(join(env.root, 'lock')), 'the lock is free');
 });
+
+test('L163: a store with no alert calls nothing delivered, and one that must not be lost is kept', () => {
+  const env = setup();
+  const unsent = (root) => readFileSync(join(root, 'unsent-alerts.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length;
+  const root = join(env.root, 'no-sink');
+  const s = openStore({ root, ownerUid: UID });
+  assert.equal(s.alert({ type: 't' }), false);
+  assert.equal(s.alertOrKeep({ type: 't' }), false);
+  assert.equal(unsent(root), 1);
+  const through = join(env.root, 'no-sink-record');
+  const { store } = openRecordWithStore({ root: through, product: PRODUCT, ownerUid: UID, rules: rulesFor() });
+  assert.equal(store.alert({ type: 't' }), false, 'the record\'s own default is the same');
+  assert.equal(store.alertOrKeep({ type: 't' }), false);
+  assert.equal(unsent(through), 1);
+});
