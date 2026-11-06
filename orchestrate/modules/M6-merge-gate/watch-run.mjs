@@ -15,7 +15,8 @@
 //
 // CHECK RUNS (L624). The fine-grained token can't read check runs (GitHub has no Checks permission for it), so each
 // `once` mints the robot App's installation token through token.mjs, as the scripts' own Mac user, from the --app-*
-// arguments, and reads check runs with it in a read-only client (GETs on /repos only). The token lives in memory for the
+// arguments, and reads check runs with it in a client that takes only GET /repos/<owner>/<repo>/commits/<sha>/check-runs
+// (L631 Minor 3); anything else is refused before it reaches GitHub. The token lives in memory for the
 // pass. With no App arguments, or a mint that fails, the check runs are not known: the pass says so and exits 1, and
 // that pass is not clean, so the week cannot count. Never a classic token, and never the fine-grained one for checks.
 
@@ -99,7 +100,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   try { mkdirSync(o.dir, { recursive: true, mode: 0o700 }); } catch { err('the folder could not be made'); return 2; }
   const [owner, repo] = o.repo.split('/');
   const gh = readOnlyClient({ token: tokenFile(o.tokenFile), ...(fetchFn ? { fetchFn } : {}) });
-  const checksGh = o.appId ? await appChecksClient(o, { fetchFn, err, ...(uid !== undefined ? { uid } : {}) }) : null;
+  const checksGh = o.appId ? await appChecksClient(o, { owner, repo, fetchFn, err, ...(uid !== undefined ? { uid } : {}) }) : null;
   if (!o.appId) err(`PROBLEM  ${CHECKS_NOT_KNOWN}: give once --app-id, --app-installation and --app-key-file`);
   const rules = o.rules === 'draft' ? draftRules({ dir: o.dir, sha256: o.rulesSha256 }) : githubRules({ gh, owner, repo });
   try {
@@ -127,17 +128,24 @@ export function appMintClient({ fetchFn = globalThis.fetch, timeoutMs = 15_000 }
   });
 }
 
-// The check-runs client for one pass: the robot App's installation token, minted now, in a read-only client. null, with
-// the reason said, when it can't be minted (the check runs are then not known).
-async function appChecksClient(o, { fetchFn, err, uid = process.getuid?.() }) {
+// The check-runs client for one pass: the robot App's installation token, minted now, in a read-only client that asks
+// for nothing but this repo's check runs at one commit (L631 Minor 3). null, with the reason said, when it can't be
+// minted (the check runs are then not known).
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+async function appChecksClient(o, { owner, repo, fetchFn, err, uid = process.getuid?.() }) {
   const m = await mintInstallationToken({ keyDir: dirname(o.appKeyFile), keyFile: basename(o.appKeyFile), appId: o.appId, installationId: o.appInstallation,
     http: appMintClient(fetchFn ? { fetchFn } : {}), uid, scriptsUid: uid });
   if (!m.ok) { err(`PROBLEM  ${CHECKS_NOT_KNOWN}: the robot App's token could not be minted (${m.reason})`); return null; }
   const token = m.token;
-  return readOnlyClient({ token: () => token, ...(fetchFn ? { fetchFn } : {}) });
+  const inner = readOnlyClient({ token: () => token, ...(fetchFn ? { fetchFn } : {}) });
+  const only = new RegExp(`^/repos/${esc(owner)}/${esc(repo)}/commits/[0-9a-f]{40}/check-runs\\?per_page=[0-9]{1,3}$`);
+  return { get: async (path, ...rest) => { if (typeof path !== 'string' || !only.test(path)) throw Object.assign(new Error('the App\'s client reads only this repo\'s check runs'), { unreadable: true }); return inner.get(path, ...rest); } };
 }
 
 // Started as a program? Compare real paths: launchd starts it through the installed link, so argv[1] is the link while
 // import.meta.url is the real file.
 const started = (() => { try { return process.argv[1] ? realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) : false; } catch { return false; } })();
 if (started) process.exitCode = await main(process.argv.slice(2));
+
+// For the tests only: the check-runs client one pass would use.
+export const watchChecksClientForTest = appChecksClient;
