@@ -20,6 +20,9 @@ import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
+import { tick } from '../modules/M11-dispatcher/tick.mjs';
+import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
+import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
@@ -110,7 +113,7 @@ test('R-0b-162 B: caught-up pushes once when the Dispatcher COMES BACK, never wh
   let t = Date.parse('2026-11-03T10:00:00Z');
   const { rec, passes } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
   const dispatcherPass = () => rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
-    doc: { at: new Date(t).toISOString(), steps: {} }, kind: 'full_pass' });
+    doc: { at: new Date(t).toISOString(), started_at: new Date(t).toISOString(), steps: {} }, kind: 'full_pass' });
   const round = () => runPasses({ rec, passes, now: () => t });
   assert.ok(dispatcherPass().ok);
   t += MIN; assert.ok(dispatcherPass().ok);
@@ -308,8 +311,8 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
   const w = world();
   let t = Date.parse('2026-11-03T10:00:00Z');
   const { rec, passes } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
-  const pass = (atMs) => { const r = rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
-    doc: { at: new Date(atMs).toISOString(), steps: {} }, kind: 'full_pass' }); assert.ok(r.ok, JSON.stringify(r)); };
+  const pass = (atMs, startMs = atMs) => { const r = rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: new Date(atMs).toISOString(), started_at: new Date(startMs).toISOString(), steps: {} }, kind: 'full_pass' }); assert.ok(r.ok, JSON.stringify(r)); };
   pass(t);
   const now = t + 21 * MIN;
   const live = (minAgo) => ({ live: true, takenAt: now - minAgo * MIN });
@@ -336,9 +339,83 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
   assert.equal(lateQ().length, 0, 'the ended stop is no longer queued');
   // Caught-up's gap counts from a pass's END: a 20-minute pass followed at once by the next is not a return; a real stop is.
   t += MIN; const start = t;
-  t += 20 * MIN; pass(start);                  // started 20 min ago, written (ended) now
+  t += 20 * MIN; pass(t, start);               // started 20 min ago, written (ended) now
   t += MIN; pass(t);
   assert.notEqual(lastReturn(rec, { nowMs: t })?.back, t, 'a slow pass is not an outage (the return found, if any, is the earlier real stop)');
   t += 20 * MIN; pass(t);
   assert.equal(lastReturn(rec, { nowMs: t })?.back, t);
+});
+
+// ---- audit #150 r1 (L613) ----
+
+const noPorts = () => { const noop = () => [];
+  return { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hasSession: () => true, gateAlive: () => true,
+    hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop, sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }),
+    startMinibase: async () => ({ ok: true }), cleanup: { copiesRoot: '/none', sealRoot: '/none', mirrorFor: () => null }, approvals: () => [] }; };
+
+test('audit #150 M1: on stamps the real tick writes, one slow pass with no gap is no return; a real stop is', async () => {
+  const w = world();
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
+  const realPass = (stepMs) => tick({ rec, rules: rulesWith(), now: t, clock: () => { t += stepMs; return t; }, ports: noPorts() });
+  await realPass(1000);
+  t += MIN;
+  await realPass(2 * MIN);   // about 26 minutes long
+  const f = rec.read('fact', LAST_PASS_FACT).doc;
+  assert.ok(Date.parse(f.at) - Date.parse(f.started_at) > 15 * MIN, 'the pass ran longer than the gap limit');
+  assert.equal(lastReturn(rec, { nowMs: t }), null, 'no gap, so no return');
+  t += 20 * MIN;
+  const back = t;
+  await realPass(1000);
+  const r = lastReturn(rec, { nowMs: t });
+  assert.equal(r?.back, Date.parse(rec.read('fact', LAST_PASS_FACT).doc.at), 'the return is the pass after the real stop');
+  assert.ok(r.back > back);
+});
+
+test('audit #150 M1: a pass with no started_at, from before it was written, is no return', async () => {
+  const w = world();
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
+  const old = () => assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: new Date(t).toISOString(), steps: {} }, kind: 'full_pass' }).ok);
+  old(); t += 30 * MIN; old();
+  assert.equal(lastReturn(rec, { nowMs: t }), null);
+});
+
+test('audit #150 M2: a kept lock keeps the watchdog; a round that ends clean stops it', async () => {
+  const dogs = []; const startDog = (ms) => { const d = { ms, stopped: 0, terminate() { d.stopped += 1; } }; dogs.push(d); return d; };
+  const run = async (deliver) => { const w = world(); dogs.length = 0;
+    const code = await main([w.configFile], { self: w.main, log: () => {}, watchdog: true, startDog, passDeadlineMs: 20, wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) } });
+    return { code, lock: existsSync(w.config.lockFile) }; };
+  assert.deepEqual(await run(() => new Promise(() => {})), { code: 0, lock: true });
+  assert.equal(dogs.at(-1).stopped, 0, 'the lock stays, so the watchdog must');
+  assert.deepEqual(await run(() => ({ sent: 0 })), { code: 0, lock: false });
+  assert.equal(dogs.at(-1).stopped, 1);
+});
+
+test('audit #150 Minor 3: dispatcherLockFile set to the job\'s own lockFile is refused, written two ways', async () => {
+  const w = world();
+  await assert.rejects(wire({ ...w.config, dispatcherLockFile: w.config.lockFile }, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /own lockFile/);
+  await assert.rejects(wire({ ...w.config, dispatcherLockFile: `${dirname(w.config.lockFile)}/./x/../${w.config.lockFile.split('/').at(-1)}` }, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /own lockFile/);
+});
+
+test('audit #150 P26: a config with no dispatcherLockFile is refused', async () => {
+  const w = world(); const { dispatcherLockFile: _, ...config } = w.config;
+  await assert.rejects(wire(config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), /dispatcherLockFile/);
+});
+
+test('audit #150 P21: the wired heartbeat reads the lock file its config names: a live holder is no late alert, no holder is', async () => {
+  const w = world();
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec, passes } = await wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), now: () => t, log: () => {} });
+  assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: 0, doc: { at: new Date(t).toISOString(), started_at: new Date(t).toISOString(), steps: {} }, kind: 'full_pass' }).ok);
+  t += 21 * MIN;
+  const lateQ = () => queued(rec).filter((x) => /^the Dispatcher's last full pass was/.test(x));
+  writeFileSync(w.config.dispatcherLockFile, JSON.stringify({ pid: process.pid, taken_at: new Date(t - 20 * MIN).toISOString() }));
+  await passes.heartbeat().catch(() => {});
+  assert.equal(lateQ().length, 0, 'a live 20-minute pass');
+  rmSync(w.config.dispatcherLockFile);
+  await passes.heartbeat().catch(() => {});
+  assert.equal(lateQ().length, 1, 'no holder');
 });

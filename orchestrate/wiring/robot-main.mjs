@@ -67,14 +67,14 @@ const realOf = (p) => { try { return realpathSync(p); } catch { return null; } }
 const SELF = realOf(fileURLToPath(import.meta.url));
 
 // `self`: this script's real path, checked as one of the installed copy's code files (audit #144 m4).
-export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {}, hold = holdAlert, passDeadlineMs = PASS_DEADLINE_MS, self = SELF } = {}) {
+export async function main(argv, { now = () => Date.now(), log = (s) => process.stderr.write(`${s}\n`), watchdog = false, wireOpts = {}, hold = holdAlert, passDeadlineMs = PASS_DEADLINE_MS, self = SELF, startDog = startWatchdog } = {}) {
   let config; let wired;
-  let dog = watchdog ? startWatchdog(RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) : null;
+  let dog = watchdog ? startDog(RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) : null;
   try {
     if (!argv[0]) throw new Error('usage: robot-main.mjs <config.json>');
     config = readConfig(argv[0], { self });
     const limit = config.runDeadlineMs ?? RUN_DEADLINE_MS;
-    if (dog && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startWatchdog(limit + WATCHDOG_MARGIN_MS); }
+    if (dog && config.runDeadlineMs !== undefined) { dog.terminate(); dog = startDog(limit + WATCHDOG_MARGIN_MS); }
     const mod = await import(pathToFileURL(config.wiring).href);
     if (typeof mod.wire !== 'function') throw new Error('the wiring module has no wire()');
     wired = await mod.wire(config, { now, log, ...wireOpts });
@@ -110,7 +110,9 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
       if (v.ok && Number(v.result?.failed) > 0) log(`robot: ${p} ran, and ${v.result.failed} of its items failed`);
     }
     if (keepLock) log('robot: a pass ran past its time limit and may still be running; the lock stays until this process exits');
-    dog?.terminate();
+    // A kept lock needs the watchdog: a pass that goes on to block the thread would otherwise hold the lock for good, and
+    // every later round would exit 0 (audit #150 M2; M11 main.mjs: past the deadline the watchdog stays).
+    if (!keepLock) dog?.terminate();
     return 0;
   } finally { clearTimeout(timer); if (!keepLock) l.release(); }
 }

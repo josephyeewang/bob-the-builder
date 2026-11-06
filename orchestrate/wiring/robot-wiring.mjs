@@ -32,6 +32,7 @@
 //                       not late (audit #137 M6): see dispatcherLate().
 
 import { lstatSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
@@ -47,8 +48,8 @@ import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir'), 'keyDir', 'dispatcherLockFile']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
-// #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. M11's default deadline: the Dispatcher's
-// config may set a shorter one, never a longer one the robot job would need to know.
+// #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. Nothing
+// stops the Dispatcher's config from setting a longer one, so setup must not: a healthy pass would then read as stuck.
 export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
@@ -70,9 +71,10 @@ export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync, acl = aclP
 
 /**
  * The Dispatcher's most recent return, from the Record's diary: two of its passes (`last-full-pass` writes) in a row where
- * more than RETURN_GAP_MIN passed between the first one ENDING (its diary line's time) and the next one starting (its
- * `at`), the later one within the last day. → { downSince, back } (ISO, ms) | null. Measured from the end, as
- * dispatcherLate() counts a running pass as not late (audit #137 M6): a slow pass is not an outage.
+ * more than RETURN_GAP_MIN passed between the first one ENDING (its diary line's time) and the next one STARTING (its
+ * `started_at`), the later one within the last day. → { downSince, back } (ISO, ms) | null. `at` is no start: it is the
+ * last step's time, about the pass's end (L321), so a gap measured to it counts the pass's own length (audit #150 M1): a
+ * slow pass is not an outage. A pass with no `started_at`, from before it was written, is no return.
  * WHY. caught-up.mjs was written to run inside the Dispatcher's own pass, where "now is more than 15 minutes after the
  * last good pass" means "the Mini has just come back". In this job that same test would be true for every minute the
  * Dispatcher is still DOWN, and the one push for the return (keyed by downSince) would go out mid-outage, saying
@@ -80,7 +82,7 @@ export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync, acl = aclP
  * came back. A return more than a day old is not looked for (the job's first run must not report old history).
  */
 export function lastReturn(rec, { nowMs, gapMin = RETURN_GAP_MIN, withinMs = DAY_MS }) {
-  const at = []; const end = [];
+  const at = []; const start = []; const end = [];
   for (const l of rec.diary({ since: 0 })) {
     if (l.actor !== 'dispatcher') continue;
     for (const w of l.writes ?? []) {
@@ -88,12 +90,13 @@ export function lastReturn(rec, { nowMs, gapMin = RETURN_GAP_MIN, withinMs = DAY
       const t = Date.parse(w.doc?.at);
       if (!Number.isFinite(t)) continue;
       const e = Date.parse(l.ts);
-      at.push(t); end.push(Number.isFinite(e) && e >= t ? e : t);
+      const s = Date.parse(w.doc?.started_at);
+      at.push(t); start.push(s); end.push(Number.isFinite(e) && e >= t ? e : t);
     }
   }
   for (let i = at.length - 1; i > 0; i--) {
     if (nowMs - at[i] > withinMs) break;
-    if (at[i] - end[i - 1] > gapMin * 60e3) return { downSince: new Date(at[i - 1]).toISOString(), back: at[i] };
+    if (start[i] - end[i - 1] > gapMin * 60e3) return { downSince: new Date(at[i - 1]).toISOString(), back: at[i] };
   }
   return null;
 }
@@ -110,8 +113,8 @@ export function lockHolder(file, { read = (f) => readFileSync(f, 'utf8'), dead =
 }
 
 /**
- * Is the Dispatcher late? (audit #137 M6, the lead's ruling) Late = no full pass (the `last-full-pass` fact, stamped at a
- * pass's START) within M13's DISPATCHER_LATE_MIN, AND its pass lock not held by a live process; a live holder longer than
+ * Is the Dispatcher late? (audit #137 M6, the lead's ruling) Late = no full pass (the `last-full-pass` fact, dated about a
+ * pass's END) within M13's DISPATCHER_LATE_MIN, AND its pass lock not held by a live process; a live holder longer than
  * LIVE_PASS_MAX_MS is stuck, and counts as late too. Also late: no full pass on record (unless the first one is running),
  * or one more than 10 minutes in the future (heartbeat.mjs's own rule). → null when on time, else { since (ms | null), text }.
  * `since` keys the alert: each stop of the Dispatcher is told once (and again each day it lasts).
@@ -158,6 +161,8 @@ export async function ideaIssues(gh, { owner, repo }) {
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
   uid = process.getuid?.(), deliver = null, hold = holdAlert } = {}) {
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
+  // Its own live pid in that file would read as a running Dispatcher, every round, for ever (audit #150 Minor 3).
+  if (resolve(c.dispatcherLockFile) === resolve(c.lockFile)) throw new Error('dispatcherLockFile is this job\'s own lockFile: it must be the Dispatcher\'s');
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
   const { rec, gh, entry } = await recordAndRules(c, { who: 'robot', log, fetchFn, now });
 
