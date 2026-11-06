@@ -962,7 +962,17 @@ function check(raw) {
   if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
-  for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+  for (const s of PRODUCT_STATES) {
+    const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+    // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
+    // doors that read it, so a typo could hold one door and pass another. `tier1_merge` must be there: with it missing
+    // or blank every undo start is denied, and no other check names the key (L562). A missing or blank `start` passes
+    // here; the fit check names it through M9's keys, and on a later rules change a start is refused and told per card.
+    for (const [key, known, must] of [['start', START_RULES, false], ['tier1_merge', TIER1_MERGE_RULES, true]]) {
+      const v = rules[key];
+      if ((must || (v !== undefined && v !== null)) && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
+    }
+  }
 
   for (const [cls, action] of Object.entries(mapOf(raw.failure_classes, 'failure_classes'))) {
     if (!FAILURE_ACTIONS.includes(action)) bad(`failure_classes.${cls} must be one of ${FAILURE_ACTIONS.join(', ')}`);
@@ -2929,6 +2939,21 @@ function makeRecord(impl) {
     read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
     list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
+    // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
+    keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
+    // What the store holds in this process only, on no disk (L620): { held: [{ id, event }], dropped: n }. null is not
+    // known: an implementation without it, one that throws, or an answer not of that shape. Never a guess of none.
+    heldHere() {
+      // null only when the implementation has none (no store). A store whose answer throws or has a shape this doesn't
+      // know answers { error }: what it holds is not known, and the delivery pass refuses a clean round (#260 r1 m1).
+      if (typeof impl.heldHere !== 'function') return null;
+      try {
+        const h = impl.heldHere();
+        const ok = h && Array.isArray(h.held) && Number.isSafeInteger(h.dropped) && h.dropped >= 0 && (h.disk === null || typeof h.disk === 'string')
+          && h.held.every((x) => x && typeof x.id === 'string' && x.event && typeof x.event === 'object' && !Array.isArray(x.event));
+        return ok ? { held: h.held, dropped: h.dropped, disk: h.disk } : { error: 'the store\'s answer has a shape this does not know' };
+      } catch (e) { return { error: String(e?.message ?? e).slice(0, 200) }; }
+    },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {
@@ -3324,11 +3349,10 @@ function asReaderText(v) {
 // back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
-  'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
-  // M11 reads typed (L123); these five stay red only because their modules read per-product keys with no product
-  // (merges.mjs time limits, pass.mjs:149-151, lead-restart.mjs context.*). Lane 2 passes the product (L104 O-1, L131).
+  // M11 reads typed (L123); these were here because their modules read per-product keys with no product. Lane 2 passes
+  // the product (L104 O-1, L131): lead-restart.test came off with L564, account-ports.test with L584.
   // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
-  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'lead-restart.test', 'account-ports.test', 'fixtures.test-helper']
+  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'fixtures.test-helper']
     .map((n) => [`modules/M11-dispatcher/${n}.mjs`, { owner: 'lane 2', pr: 'M11 per-product reads pass the product (L104 O-1 step 2, L131)' }])),
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test

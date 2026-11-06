@@ -46,15 +46,18 @@ import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
+import { BRANCH, cardBranch } from './branch.mjs';
+import { workerOutboxProblem } from './session-outbox.mjs';
+import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 
+export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
 // A research copy refused with this reason is told to the owner at once (M11 researchCopyPass).
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
-export const BRANCH = /^card\/[a-z0-9][a-z0-9-]{0,63}$/;
 // git's change letters (diff-tree --raw --no-renames) as M10 names them; a type change (T) is a modified file.
 const CHANGE_STATUS = Object.freeze({ A: 'added', M: 'modified', D: 'removed', T: 'modified' });
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
@@ -241,12 +244,13 @@ async function messages(mirror, shas, names) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
+ *   outboxRoot              the outboxes' root folder: a worker's outbox must really be <root>/worker/<session id>
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, fstat } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, fstat } = deps;
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
@@ -260,7 +264,8 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the launch record names no product');
     if (!CARD.test(String(card))) no('the launch record has a bad card id');
     if (!ATTEMPT.test(String(att))) no('the launch record has a bad attempt id');
-    if (typeof outbox !== 'string' || !isAbsolute(outbox)) no('the launch record has no outbox');
+    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot });
+    if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }
 
@@ -271,9 +276,9 @@ export function createPushScript(deps) {
     if (!SHA256.test(String(sha256))) no('the proposal has no sha256 of the bundle the intake recorded');
     // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
     if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
-    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
+    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
   }
 
   /** A research copy's attempt id: new bytes are a new attempt. Null for a card with no readable sha256. */
@@ -296,19 +301,21 @@ export function createPushScript(deps) {
     const { file, sha256, blob, size } = d.source ?? {};
     if (typeof ask !== 'string' || !RESEARCH_ID.test(ask) || file !== researchFileName(ask) || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== researchPath(ask)) no(`card ${card} does not name its ask's one file`);
     if (!SHA256.test(String(sha256)) || !SHA.test(String(blob)) || !Number.isSafeInteger(size) || size <= 0) no(`card ${card} has no proof of the report's bytes`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
     const research = { ask, file, sha256, blob, size, path: d.files[0] };
-    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
+    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
   }
 
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
-    if (!BRANCH.test(String(branch)) || branch !== `card/${card.toLowerCase()}`) no(`the branch "${branch}" is not the card's branch`);
+    if (!BRANCH.test(String(branch)) || branch !== cardBranch(card)) no(`the branch "${branch}" is not the card's branch`);
 
     const repo = rules.get('product.repo', { product });
     const mirror = rules.get('product.mirror', { product });
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    if (rules.get('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
+    // A flag is read through flag(): the rules file's reader gives true/false as text, so get() would say "true" and
+    // every real push would be refused here.
+    if (rules.flag('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
     if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) no('the product has no valid GitHub repo in the rules');
     if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);

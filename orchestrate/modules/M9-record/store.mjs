@@ -26,13 +26,28 @@ import { chmodSync, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdi
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { makeLock, processDead, realProbe, sleepMs } from './lock.mjs';
-import { UNSENT, appendPlain, markSent, plainFd, readPlain, readUnsent } from './unsent.mjs';
+import { HELD_FLAG, UNSENT, appendPlain, dropHeldHolder, makeHeldFlag, markSent, newHeldToken, plainFd, readPlain, readUnsent, setHeldFlag } from './unsent.mjs';
+import { pastTime } from '../../shared/still-waiting.mjs';
 
 export const FAULT_POINTS = Object.freeze(['locked', 'temp_written', 'diary_torn', 'diary_written', 'renamed', 'dir_synced', 'released']);
 // Test faults that don't kill the process: a failed append, a short write, a line that reads back wrong, and a document
 // copy that can't be put in place after the commit point (a portable stand-in for a locked file or a full disk).
-const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong', 'rename_fails']);
-// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
+// L545, the cap on alerts kept with no queue (keepAlert). Each line is its own GitHub issue, so 20 a day: more distinct
+// causes than one bad day should have, and still a list the owner can read. ALERT_QUEUE_MAX is the queue's size, not that.
+// A line can't be changed once delivered, and one written at the day's end would never come if the fault stopped first,
+// so the count past 20 is told as it grows, at these steps: "at least N", each step once a day at most, as the count can
+// sit at a step while old lines leave the day. Counting stops at the last step, which bounds each day's growth when a
+// text changes every pass; nothing trims the file.
+const KEEP_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const KEEP_PER_WINDOW = 20;
+export const KEPT_BACK_STEPS = Object.freeze([1, 10, 100, 1000]);
+const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
+// A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
+const KEPT_BACK_TEXT_MAX = 300;
+
+const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails', 'unsent_fails']);
+// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test. `cutback_fails` fails the cut-back too.
+// `unsent_fails` makes every append to the unsent file fail as a full disk does (ENOSPC), for the held-in-memory path (L620).
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 // The one test for a name that becomes part of a path: no slash, not all dots, short enough to be a file name (rounds 5 m-2, 6).
@@ -72,7 +87,7 @@ function docAt(path) { const l = look(path); return l.kind === 'none' ? null : l
 // Finder leaves these when the owner looks at docs/ by eye; they are not documents (round 8 m2).
 const IGNORED = new Set(['.DS_Store']);
 
-export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
+export function openStore({ root, ownerUid, alert = () => false, now = () => Date.now(), host = hostname(), lockTimeoutMs = 10000,
   probe = realProbe, faultAt, testNoLock = false } = {}) {
   if (typeof root !== 'string' || !isAbsolute(root)) throw new Error('store root must be an absolute path');
   if (!Number.isInteger(ownerUid)) throw new Error('store needs the owner uid (ownerUid)');
@@ -103,7 +118,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     const r = kind(root);
     if (r !== 'folder' && r !== 'none') return `the store folder ${root} is ${r}`;
     for (const d of ['docs', 'tmp', 'quarantine']) { const k = kind(join(root, d)); if (k !== 'folder' && k !== 'none') return `the store's ${d}/ is ${k}, not a folder`; }
-    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
+    for (const f of ['diary.jsonl', 'refusals.jsonl', 'outbox-seen.jsonl', 'unsent-alerts.jsonl', HELD_FLAG]) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none') return `the store's ${f} is ${k}, not a plain file`; }
     // The lock files are made by a hard link from a temp name (lock.mjs createWhole), so a second name is normal for a moment
     // and stays if the maker was killed; they are never written in place, so only a link or the wrong kind is refused (round 11 M1, M2).
     for (const f of ['lock', 'break.lock']) { const k = kind(join(root, f)); if (k !== 'file' && k !== 'none' && !/hard link/.test(k)) return `the store's ${f} is ${k}, not a plain file`; }
@@ -112,7 +127,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }
   for (const d of [root, P.docs, P.tmp, P.quarantine]) mkdir755(d);
   for (const f of [P.diary, P.refusals, P.seen, P.unsent]) { if (!existsSync(f)) writeFileSync(f, '', { mode: 0o644, flag: 'a' }); chmodSync(f, 0o644); }
+  // The held flag takes its block now, while there is room, so setting it later needs none (#260 r2 M1). On a disk
+  // already full it can't be made: then nothing outlasts a held warning, and the pass's disk probe is what tells.
+  try { makeHeldFlag(root); } catch { /* full already */ }
 
+  // This store instance in the held flag, alongside its pid (#260 r3 m1).
+  const heldToken = newHeldToken();
   const lock = makeLock({ dir: root, host, timeoutMs: lockTimeoutMs, probe, disabled: testNoLock });
   const say = (event) => send(stamp(event));
   // An alert about a step that is done and never redone (a file moved to quarantine, a torn line cut, a claim broken):
@@ -121,19 +141,127 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // when an alert is kept and one when it is delivered, so a keep from outside the lock never races a resend. If even the
   // append fails, this process holds the alert in memory and resends it the same way.
   const unsentHere = [];
-  const keep = (e) => {
-    const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e };
-    try { appendPlain(P.unsent, `${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
+  // Kept-back counts whose own line could not be written (L620): nothing else holds them, so they are counted here and
+  // heldHere() says so, rather than vanishing.
+  let droppedHere = 0;
+  // Daily marks that are on no disk (#260 lane 1 m1): a good send whose mark could not be written, and a held line
+  // delivered from memory. linesInDay counts them, so a full disk tells a fault once a day here too, not once per read.
+  const markedHere = [];
+  // The test fault: a string is a disk that stays full; { step: 'unsent_fails', while } is full while `while()` is true.
+  const diskFull = () => faultAt === 'unsent_fails' || (faultAt?.step === 'unsent_fails' && (typeof faultAt.while !== 'function' || faultAt.while()));
+  const appendUnsent = (text) => {
+    if (diskFull()) throw Object.assign(new Error('test: no space left on the device'), { code: 'ENOSPC' });
+    appendPlain(P.unsent, text);
+  };
+  // A held line goes back to the file as soon as the disk takes it, oldest first (#260 r1 m2): then it is resent from
+  // there like any other, and the delivery pass stops refusing. The first that still fails stops the rest.
+  function flushHeld() {
+    if (!unsentHere.length) return;
+    while (unsentHere.length) {
+      try { appendUnsent(`${JSON.stringify(unsentHere[0])}\n`); } catch { flagHeld(); return; }
+      unsentHere.shift();
+    }
+    // All on file now: this store's own entry in the flag is taken out (the lines are told from the file), matched on
+    // its pid and token, so a dead process whose pid this one reuses keeps its own (#260 r3 m1). Other holders stay
+    // for the pass, and the flag is cleared only when none is left (#260 r3 M1). A count already lost keeps it up.
+    if (droppedHere) { flagHeld(); return; }
+    try { dropHeldHolder(root, { pid: process.pid, token: heldToken }); } catch { /* told again: over, never under */ }
+  }
+  // Can the store's disk take a write now (#260 r1 M2)? One block, written and flushed in a temp file of this process's
+  // own (the start-up sweep removes it if the process dies first). null when it can, else why not. Another process on
+  // this store (the Dispatcher) holds its own warnings on a full disk where no other process can see them, so a full
+  // disk is told by itself.
+  // The answer names what failed (#260 r2 c3): a full disk, or a temp folder that is missing or can't be written.
+  function diskProblem() {
+    if (diskFull()) return 'the store\'s disk is full (test: no space left on the device)';
+    const f = join(P.tmp, `${process.pid}-disk-probe-${randomBytes(4).toString('hex')}`);
+    try {
+      const fd = openSync(f, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try {
+        const b = Buffer.alloc(4096, 0x20);
+        const n = writeSync(fd, b);
+        if (n !== b.length) return `the store's disk is full (only ${n} of ${b.length} bytes could be written)`;
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
+      return null;
+    } catch (e) {
+      const code = e?.code ?? e?.message ?? String(e);
+      if (code === 'ENOSPC' || code === 'EDQUOT') return `the store's disk is full (${code})`;
+      if (code === 'ENOENT') return `the store's tmp/ folder is missing (${code})`;
+      if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return `the store's tmp/ folder can't be written (${code})`;
+      return `the store can't take a write (${code})`;
+    } finally { try { unlinkSync(f); } catch { /* not made */ } }
+  }
+  // Whenever this process holds something on no disk, the held flag says so, outlasting the process (#260 r2 M1): the
+  // Dispatcher exits after each pass. It names the first held warning, which the robot's pass then tells. The flag
+  // merges every holder's entry (#260 r3 M1); this store's is its pid and a token of its own (#260 r3 m1).
+  const flagHeld = () => {
+    if (!unsentHere.length && !droppedHere) return;
+    const first = unsentHere[0];
+    try { setHeldFlag(root, { pid: process.pid, token: heldToken, at: new Date(now()).toISOString(), held: unsentHere.length, dropped: droppedHere, id: first?.id ?? null, event: first?.event ?? null }); } catch { /* the flag's own block is gone too */ }
+  };
+  const keep = (e, extra = {}) => {
+    const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };
+    try { appendUnsent(`${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); flagHeld(); }
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
+  // What the unsent file says was kept in the last day, each with its cap_key. Delivered lines count too, so a resend is
+  // no new issue. A file that can't be read gives none: told twice beats not told.
+  // Lines held in memory (L620) count as well: on a full disk, every re-read of a damaged diary would otherwise hold
+  // one more copy, each its own issue.
+  function linesInDay(at) {
+    const since = at - KEEP_WINDOW_MS;
+    const inDay = (x) => typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since;
+    const here = [...unsentHere, ...markedHere].filter(inDay);
+    try { return [...readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return inDay(x) ? [x] : []; } catch { return []; } }), ...here]; } catch { return here; }
+  }
+  // A fault that every open finds again (L575): told once a day, not once per open, since each kept line is one issue.
+  // The keep path, as a Record that refuses writes has no other. The mark goes in with the line, so a delivered one holds.
+  function sayOrKeepDaily(event) {
+    const at = now();
+    const key = `${event.type}:${event.reason}`;
+    if (linesInDay(at).some((x) => x.cap_key === key)) return;
+    const e = stamp(event);
+    const mark = { cap_key: key, at: new Date(at).toISOString() };
+    if (!send(e)) { keep(e, mark); return; }
+    // Delivered at once: the mark still goes in, or the next open would tell it again (L620 m2). It has no event and an
+    // outcome readUnsent never resends; a mark that can't be written means told again, never not told.
+    try { appendUnsent(`${JSON.stringify({ outcome: 'told_at_once', ...mark })}\n`); } catch { markedHere.push(mark); /* a later open tells it again */ }
+  }
+  // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
+  // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
+  // the last day, with nothing in memory (a pass is one process). Past the total, a key is counted, not kept, and the
+  // owner hears the count at each step. Only ever appends; it reads no document and hands nothing back.
+  function keepAlert(text, key) {
+    // A long key keeps its hash, so two alerts that differ past the cut stay two (L558 Minor 1).
+    const whole = String(key);
+    const capKey = whole.length <= 300 ? whole : `${whole.slice(0, 200)}#${createHash('sha256').update(whole).digest('hex')}`;
+    const at = now();
+    const lines = linesInDay(at);
+    if (lines.some((x) => x.cap_key === capKey)) return;
+    const mark = { cap_key: capKey, at: new Date(at).toISOString() };
+    const kept = lines.filter((x) => x.outcome === 'unsent' && x.event?.type === 'alert_not_queued');
+    if (kept.length < KEEP_PER_WINDOW) { keep(stamp({ type: 'alert_not_queued', text: String(text) }), mark); return; }
+    const n = lines.filter((x) => x.outcome === 'kept_back').length + 1;
+    if (n > KEPT_BACK_MAX) return;
+    try { appendUnsent(`${JSON.stringify({ outcome: 'kept_back', ...mark, text: String(text).slice(0, KEPT_BACK_TEXT_MAX) })}\n`); } catch { droppedHere += 1; flagHeld(); return; }
+    // The highest step reached, not only a count exactly on one: a lasting fault's count settles between steps (L558 M1).
+    const step = KEPT_BACK_STEPS.findLast((x) => x <= n);
+    if (!lines.some((x) => x.cap_key === `kept-back-${step}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${step} more ${step === 1 ? 'alert' : 'alerts'} could not be queued in the last day and ${step === 1 ? 'was' : 'were'} kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${step}`, at: mark.at });
+  }
   function resend() {
+    flushHeld();
     let waiting = [];
     try { waiting = readUnsent(root); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
     for (const x of waiting) {
       if (!send({ ...x.event, resent: true })) continue;
       try { markSent(root, x.id, new Date(now()).toISOString()); } catch { /* sent twice, never lost */ }
     }
-    for (let i = unsentHere.length - 1; i >= 0; i--) if (send({ ...unsentHere[i].event, resent: true })) unsentHere.splice(i, 1);
+    for (let i = unsentHere.length - 1; i >= 0; i--) {
+      if (!send({ ...unsentHere[i].event, resent: true })) continue;
+      const [x] = unsentHere.splice(i, 1);
+      if (typeof x.cap_key === 'string') markedHere.push({ cap_key: x.cap_key, at: x.at });   // its daily mark stays
+    }
   }
   // Every path from an id goes through here, so an id like ../../x can never name a file outside the store (round 5 m-2).
   const docPath = (entity, id) => {
@@ -196,7 +324,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
       if (end < 0) return;   // only a partial line so far
       for (const raw of text.slice(0, end).split('\n')) {
         if (damaged) break;
-        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); say({ type: 'diary_damaged', reason: damaged }); }
+        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
       }
       offset += Buffer.byteLength(text.slice(0, end + 1), 'utf8');
     } finally { closeSync(fd); }
@@ -397,7 +525,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
-              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
+              if (faultAt === 'append_fails' || faultAt === 'cutback_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
               const body = faultAt === 'readback_wrong' ? text.replace(`"seq":${line.seq},`, `"seq":${line.seq + 1},`) : text;
               const wrote = writeSync(fd, faultAt === 'short_write' ? body.slice(0, Math.floor(body.length / 2)) : body);
               if (wrote !== Buffer.byteLength(body, 'utf8')) throw storeFail(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
@@ -405,7 +533,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
               // (0b-2 audit MIN-7). If it can't be cut, writes stop until the owner looks.
-              try { ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; say({ type: 'diary_damaged', reason: damaged }); }
+              try { if (faultAt === 'cutback_fails') throw storeFail('test: the cut-back failed'); ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
               throw e;
             } finally { closeSync(fd); }
           } catch (e) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw e; }
@@ -478,5 +606,14 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     },
     alert: say,
     alertOrKeep: sayOrKeep,
+    keepAlert,
+    // What this process holds that is on no disk (L620): warnings whose unsent line could not be written (a full disk),
+    // still in memory, and the kept-back counts lost the same way; and whether the disk takes a write now (`disk`, null
+    // when it does). Held lines go back to the file first if the disk now takes them (#260 r1 m2). The delivery pass
+    // sends what is still held and refuses a clean round while any is held or the disk is full. Copies.
+    heldHere() {
+      flushHeld();
+      return { held: unsentHere.map((x) => ({ id: x.id, event: structuredClone(x.event) })), dropped: droppedHere, disk: diskProblem() };
+    },
   });
 }

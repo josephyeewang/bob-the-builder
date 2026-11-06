@@ -37,7 +37,7 @@ function world({ refuseWait = false, refuseIf = null } = {}) {
   let n = 0;
   const pass = () => withAlerts(rec, E.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
+    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   const delivered = [];

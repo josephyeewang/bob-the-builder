@@ -25,6 +25,7 @@
 //   watch-rules --print-config-line --repo <owner/name> --rules-source <full path>  prints the config line (repo + fingerprint of that file)  (read only)
 //   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value  (read only; sudo to look)
 //   check-token  the token file's owner, mode and size (never its text)  (read only; sudo to look)
+//   watch-app --app-id <id> --app-installation <id> --app-key-name <name> [--rules-sha256 <hex>] [--dry-run]  name the watcher App in root's config (the key must already be in the keys folder); every other entry is kept  (root)
 //
 // The config: as root, ONLY the root-owned file at ROOT_CONFIG_PATH (layout.mjs), opened without following links, owned
 // by root, written by no one else, in folders only root writes (NEW-1). Without sudo, `--config <file>` may name another
@@ -34,6 +35,7 @@
 // refused when running as root: under sudo it would move where root writes while every printed path still read
 // /Library/... (L90 minor b). Exit: 0 fine, 1 a check failed or a problem was found, 2 usage or not root.
 
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { realIo, rootProblem } from './mac.mjs';
@@ -42,7 +44,7 @@ import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
-import { checkWatchRules, planWatchRules, watchConfigLine } from './watch-setup.mjs';
+import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, watchConfigLine } from './watch-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 // What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
@@ -50,28 +52,37 @@ const TOKEN_PAGE_NOTE = [
   'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
   "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
   '  - Repository access: only the one repository named in the config;',
-  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, and nothing else.',
+  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Checks = Read-only, Commit statuses = Read-only (the watch job reads these two to judge a merge), and nothing else.',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
-const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules'];
+const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, pin: null, sha256: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
     else if (a === '--print-config-line') o.printLine = true;
+    else if (a === '--rules-sha256') {
+      const v = rest[++i];
+      if (typeof v !== 'string' || !/^[0-9a-f]{64}$/.test(v)) throw new Error('--rules-sha256 needs the rules file\'s 64-hex fingerprint');
+      o.pin = v;
+    } else if (a === '--app-id' || a === '--app-installation' || a === '--app-key-name') {
+      const v = rest[++i];
+      if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
+      o.app[{ '--app-id': 'id', '--app-installation': 'installation', '--app-key-name': 'keyFile' }[a]] = v;
+    }
     else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
-      if (a === '--pin') { if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error('--pin must be a version, x.y.z'); o.pin = v; continue; }
+      if (a === '--pin') { if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error('--pin must be a version, x.y.z'); o.claudePin = v; continue; }
       if (a === '--sha256') { if (!/^[0-9a-f]{64}$/.test(v)) throw new Error('--sha256 must be 64 lower-case hex characters'); o.sha256 = v; continue; }
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else if (a === '--rules-source') o.rulesSource = v; else if (a === '--only') o.only = v; else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
@@ -84,9 +95,12 @@ export function parseArgs(argv) {
   if (o.rulesSource !== null && cmd !== 'watch-rules') throw new Error('--rules-source is only for watch-rules');
   if (cmd === 'watch-rules' && !o.rulesSource) throw new Error('watch-rules needs --rules-source <the full path of the rules file>');
   if (o.only !== null && !(cmd === 'daemons' && ['place', 'load', 'unload', 'list', 'check'].includes(sub))) throw new Error('--only is only for daemons place, load, unload, list and check');
+  if (Object.keys(o.app).length && cmd !== 'watch-app') throw new Error('--app-id, --app-installation and --app-key-name are only for watch-app');
+  if (o.pin !== null && cmd !== 'watch-app') throw new Error('--rules-sha256 is only for watch-app');
+  if (cmd === 'watch-app' && Object.keys(o.app).length !== 3) throw new Error('watch-app needs all three: --app-id <id> --app-installation <id> --app-key-name <the key file\'s name in the keys folder>');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
-  if ((o.pin !== null || o.sha256 !== null) && cmd !== 'add-to-install') throw new Error('--pin and --sha256 are only for add-to-install');
-  if (cmd === 'add-to-install' && (o.pin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
+  if ((o.claudePin !== null || o.sha256 !== null) && cmd !== 'add-to-install') throw new Error('--pin and --sha256 are only for add-to-install');
+  if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
   return o;
 }
 
@@ -106,10 +120,11 @@ function report(res, out) {
 export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), runUpdater = spawnUpdater } = {}) {
   if (o.cmd === 'users-folders') return plan(io, cfg);   // carries the wall itself
   if (o.cmd === 'proposals') return guarded(io, cfg, planProposals(io, cfg));   // the base wall first (L150 m3), then its own wall for the parent (extras.mjs)
+  if (o.cmd === 'watch-app') return guarded(io, cfg, planWatchApp(io, cfg, { raw: o.raw, text: o.text, app: o.app, rulesSha256: o.pin, dry: o.dry }));
   if (o.cmd === 'watch-rules') return guarded(io, cfg, planWatchRules(io, cfg, { source: o.rulesSource, readSource: (p) => io.readRules(p) }));
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
-    : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.pin, sha256: o.sha256, readSource })
+    : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'token' ? planToken(io, cfg)
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
@@ -134,6 +149,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     const text = io.readConfig(o.config ?? ROOT_CONFIG_PATH, { strict: asRoot || !o.config });
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
+    if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only);   // a name that is no job of this config is refused before anything runs
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
@@ -177,7 +193,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
-    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkWatchRules(io, cfg)
+    : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
   if (!after) { out('done.'); return 0; }
@@ -187,4 +203,9 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   return bad.length ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });
+// Run as a script, also through a link such as the installed copy's (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so the two are compared with argv[1] resolved, as the checker files do.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) Promise.resolve(main(process.argv.slice(2))).then((c) => { process.exitCode = c; });

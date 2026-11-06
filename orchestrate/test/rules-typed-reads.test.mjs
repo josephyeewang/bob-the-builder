@@ -22,9 +22,8 @@ const ORCH = join(here, '..');
 // exact: one more fails (a new old-style read), one fewer fails too, so this list is cut as each sweep lands and is
 // empty when step 2 is done.
 // Counts are lines: a read checked and then compared on the next line counts twice (L104 widened the scan).
-export const NOT_YET_SWEPT = Object.freeze({
-  'modules/M4-workshop/git/push.mjs': { count: 1, lane: 1, what: 'product.onboarded !== true' },
-});
+// Empty: the last one, M4 push.mjs's product.onboarded, moved to flag() (lane 2). Nothing is added back.
+export const NOT_YET_SWEPT = Object.freeze({});
 
 const skip = (r) => !r.endsWith('.mjs') || r.endsWith('.test.mjs') || /test-helper/.test(r)
   || r.startsWith('modules/M10-rules/') || r === 'shared/rules.mjs' || r.startsWith('test/');
@@ -144,13 +143,10 @@ test('L104, L123: the files still handed old values are named, exist, name an ow
   // L134 m-A: the exact set, not just the count, so a swap (one off, another on) is caught too. A PR that takes a file
   // off edits this set; nothing is ever added to it.
   assert.deepEqual([...names].sort(), [
-    'modules/M11-dispatcher/account-ports.test.mjs',
     'modules/M11-dispatcher/fixtures.test-helper.mjs',
-    'modules/M11-dispatcher/lead-restart.test.mjs',
     'modules/M11-dispatcher/merges.test.mjs',
     'modules/M11-dispatcher/pass.test.mjs',
     'modules/M11-dispatcher/tick.test.mjs',
-    'modules/M4-workshop/git/push.test.mjs',
   ], 'the old-values list changed: it may only shrink, and the set here shrinks with it');
   // This file is not on it, so its fakes hand text back (the test above).
   assert.equal(fakeRules({ values: { n: 30 } }).get('n', P), '30');

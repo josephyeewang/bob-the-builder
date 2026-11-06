@@ -18,9 +18,15 @@ import { fakeRules } from '../shared/rules.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY, SAMPLE } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
-import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, notWiredText } from './dispatcher-wiring.mjs';
+import { LAST_PASS_FACT, STEPS, STEP_ERROR_FACT, runTick } from '../modules/M11-dispatcher/tick.mjs';
+import { wire, notWiredText, checkConfig, PORT_GROUPS, TICK_PORTS } from './dispatcher-wiring.mjs';
+import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
+import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
+import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
+import { reviewConfig } from './review-ports.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
@@ -32,21 +38,25 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // PINNED HERE, not imported from the wiring (audit #127 M-1): a port the wiring quietly answers, or a step the tick
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
-const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
+const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
+  'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
-const PORTS_WIRED = Object.freeze(['approvals']);
+const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
-const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'outboxRoot', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
+// LEAD-RULED (L652, re-ruled by L674 for the separate-process boots): the boot's review user is another user (this one's
+// uid + 1), since the Dispatcher's own user may not be it, so the runner's status here is not that user's and the limits
+// step fails with exactly that. The in-process test below pins limits 'ok' on the healthy path. The lead checks this line.
+const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
 const EXPECTED_STEPS = Object.freeze({
   stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
-  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
+  pass: NW('sessions'), limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
@@ -63,7 +73,7 @@ function world({ extra = {}, omit = [], products = [ENTRY] } = {}) {
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
-    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...extra };
+    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...reviewConfig(dir, { reviewUid: process.getuid() + 1 }), ...extra };
   for (const k of omit) delete config[k];
   const configFile = L.write('dispatcher.json', config);
   const main = L.path('modules/M11-dispatcher/main.mjs');
@@ -76,7 +86,8 @@ function world({ extra = {}, omit = [], products = [ENTRY] } = {}) {
 function boot(w) {
   const r = spawnSync(process.execPath, ['--import', FAKE, w.main, w.configFile], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, ORCH_FAKE_GITHUB: w.f('fake-github.json') }, encoding: 'utf8', timeout: 60_000 });
-  return { code: r.status, err: r.stderr };
+  // A boot that hangs or is killed says so, so a failing test names that and not only a code of null.
+  return { code: r.status, err: r.error || r.signal ? `${r.stderr}\nthe boot did not finish: ${r.error?.code ?? r.error ?? ''} ${r.signal ?? ''}` : r.stderr };
 }
 
 // The record as main.mjs left it, opened again for reading.
@@ -145,10 +156,129 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
   }
 });
 
+// Audit #263 m1: a review path that is relative would resolve against the Dispatcher's working folder, so requests would go
+// where the runner never reads. Each must be absolute, and none may be left out.
+test('A2: each review path must be absolute, and present', () => {
+  const w = world();
+  for (const k of ['reviewRequestsDir', 'reviewStatusFile', 'reviewRunnerLog', 'reviewInstallRoot']) {
+    assert.throws(() => checkConfig({ ...w.config, [k]: 'review-runner/x' }), { message: `config: ${k} must be an absolute path` }, k);
+    const gone = { ...w.config };
+    delete gone[k];
+    assert.throws(() => checkConfig(gone), { message: `config: ${k} must be an absolute path` }, `${k} left out`);
+  }
+  assert.equal(checkConfig(w.config), w.config, 'the whole config passes');
+});
+
+// L674: the review user is neither the Dispatcher's own user nor the workers' (ownerUid). In process, through wire().
+test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or the workers\', and starts with another', async () => {
+  const me = process.getuid();
+  const opts = (w) => ({ log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  const self = world({ extra: { reviewUid: me } });
+  await assert.rejects(wire(self.config, opts(self)), /config: reviewUid is the Dispatcher's own user/);
+  // The workers' user: the Record's owner must be this process, so the Dispatcher's own user is stood in for.
+  const workers = world({ extra: { reviewUid: me } });
+  await assert.rejects(wire(workers.config, { ...opts(workers), selfUid: me + 2 }), /config: reviewUid is the workers' user \(ownerUid\)/);
+  const other = world();
+  const { ports } = await wire(other.config, opts(other));
+  assert.equal(typeof ports.hasReviewer, 'function', 'another user\'s uid starts');
+  assert.throws(() => ports.hasReviewer('c-1', 'reviewer', 'a'.repeat(40)), /not owned by the review user/);
+});
+
+// L674: the healthy path, in process. The status is this user's, so this user stands in for the review user, and the
+// Dispatcher's own and the workers' users are stood in for; the review port file itself is the real one.
+test('A2 (L674): with a status of the review user\'s, the real review ports run the limits step clean', async () => {
+  const me = process.getuid();
+  const w = world({ extra: reviewConfig(tempDir('orch-review-ok-')) });
+  w.approve([blobOf(FIRST)]);
+  const groups = PORT_GROUPS.map((g) => (g.build !== reviewPorts ? g
+    : { ...g, build: (ctx) => reviewPorts({ ...ctx, config: { ...ctx.config, ownerUid: me + 3 } }) }));
+  const { rec, rules, ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake), groups, selfUid: me + 2 });
+  const r = await runTick({ lockFile: w.config.lockFile, now: Date.now(), clock: () => Date.now(), rec, rules, ports });
+  assert.equal(r.ran, true, r.reason);
+  const pass = rec.read('fact', LAST_PASS_FACT)?.doc;
+  assert.equal(pass.steps.limits, 'ok', rec.read('fact', STEP_ERROR_FACT('limits'))?.doc?.error);
+  assert.deepEqual(pass.steps, Object.fromEntries(STEPS.map((s) => [s, s === 'limits' || EXPECTED_STEPS[s] === 'ok' ? 'ok' : 'failed'])));
+});
+
+// The seam: a port file fills its ports without this wiring changing.
+// Groups for `wire`: the ones a test is about, and one more holding every other port, so that a test changes only what it means to.
+const rest = (taken, ...groups) => [...groups, {
+  notWired: TICK_PORTS.filter((k) => !['alert', 'approvals', 'cleanup', ...taken].includes(k)),
+  build: () => (taken.includes('cleanup') ? {} : { cleanup: workerPorts({}).cleanup }),
+}];
+test('the seam: each port has one home; a port file gets ctx and fills its ports, and the rest keep refusing', async () => {
+  const lists = [NOT_WIRED_WORKER, NOT_WIRED_REVIEW, NOT_WIRED_PHONE];
+  assert.deepEqual(lists.flat().sort(), [...PORTS_NOT_WIRED].sort(), 'every refusing port is on exactly one port file\'s list');
+  assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
+  assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
+  assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
+  const config = reviewConfig(tempDir('orch-review-keys-'));
+  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
+    ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+  assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
+
+  const w = world();
+  const seen = [];
+  const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
+  const filled = await wire(w.config, { ...opts, limitedSync: 'the sync', groups: rest(['sessions', 'hostLock', 'launch', 'probe', 'board'],
+    { notWired: ['launch', 'probe'], build: (ctx) => { seen.push(ctx); return { sessions: 'a real port' }; } },
+    { notWired: ['board'], build: () => ({ hostLock: 'another' }) }) });
+  assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
+  for (const k of ['launch', 'probe', 'board']) assert.throws(() => filled.ports[k](), { message: notWiredText(k) });
+  assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'gh', 'limitedSync', 'log', 'now', 'rec', 'rules', 'selfUid', 'stateDir']);
+  assert.equal(seen[0].selfUid, process.getuid(), 'main.mjs passes none: this process\'s own user');
+  assert.ok(Object.isFrozen(seen[0]));
+  // The client in ctx is the rules reader's read-only one: frozen, and its one write-shaped call refuses (audit #256 r1 m1).
+  assert.ok(Object.isFrozen(seen[0].gh));
+  assert.deepEqual(Object.keys(seen[0].gh).sort(), ['get', 'post']);
+  await assert.rejects(seen[0].gh.post('/repos/o/r/pulls', {}), /only write-shaped/);
+  await assert.rejects(seen[0].gh.get('/user'), /only repository reads/);
+  assert.equal(seen[0].limitedSync, 'the sync');
+  assert.equal(seen[0].rec, filled.rec);
+  assert.equal(seen[0].rules, filled.rules);
+});
+
+// Every way a port can lose its one home stops a start: the groups the wiring is given, what stops it, the port it names.
+const answer = (o) => ({ notWired: [], build: () => o });
+const BAD_GROUPS = [
+  ['answered by one file, listed by a later one', () => rest(['launch'], answer({ launch: 'real' }), { notWired: ['launch'], build: () => ({}) }), /these ports are wired but still listed as not wired: launch$/],
+  ['listed by one file, answered by a later one', () => rest(['launch'], { notWired: ['launch'], build: () => ({}) }, answer({ launch: 'real' })), /these ports are wired but still listed as not wired: launch$/],
+  ['answered by two files, either order', () => rest(['leads'], answer({ leads: 'one' }), answer({ leads: 'two' })), /two port files answer these ports: leads$/],
+  ['on two lists', () => rest(['probe'], { notWired: ['probe'], build: () => ({}) }, { notWired: ['probe'], build: () => ({}) }), /these ports are on two lists: probe$/],
+  ['the approvals port replaced', () => rest([], answer({ approvals: () => [] })), /only the wiring answers these ports: approvals$/],
+  ['the alert port replaced', () => rest([], answer({ alert: fakeAlert() })), /only the wiring answers these ports: alert$/],
+  ['an answer the tick never reads', () => rest([], answer({ lanuch: 'real' })), /no tick step reads these ports: lanuch$/],
+  ['a listing the tick never reads', () => rest([], { notWired: ['lanuch'], build: () => ({}) }), /no tick step reads these ports: lanuch$/],
+  ['neither answered nor listed', () => rest(['resume']), /nothing answers or lists these ports, which the tick needs: resume$/],
+  ['no cleanup at all', () => rest(['cleanup']), /nothing answers or lists these ports, which the tick needs: cleanup$/],
+  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.mirrorFor, cleanup\.git, cleanup\.saveWork, cleanup\.copiesRoot$/],
+  ['a port file that is async, so answers nothing yet', () => rest(['cleanup'], { notWired: [], build: async () => ({ cleanup: {} }) }), /nothing answers or lists these ports, which the tick needs: cleanup$/],
+];
+for (const [name, groups, why] of BAD_GROUPS) {
+  test(`the seam: a port ${name} stops the start`, async () => {
+    const w = world();
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {}, groups: groups() }), why);
+  });
+}
+
+test('the seam: the cleanup group follows the same rules, by its own list', () => {
+  assert.deepEqual([...NOT_WIRED_CLEANUP].sort(), [...CLEANUP_NOT_WIRED].sort());
+  assert.equal(cleanupProblem(workerPorts({}).cleanup), null, 'as it stands');
+  const cleanup = (changes) => {
+    const c = Object.getOwnPropertyDescriptors(workerPorts({}).cleanup);
+    return Object.defineProperties({}, { ...c, ...changes });
+  };
+  assert.match(cleanupProblem(cleanup({ mirrorFor: { enumerable: true, value: () => 'real' } })), /still listed as not wired: cleanup\.mirrorFor$/);
+  assert.match(cleanupProblem(cleanup({ copiesRoot: { enumerable: true, value: '/real/folder' } })), /still listed as not wired: cleanup\.copiesRoot$/);
+  assert.match(cleanupProblem({}), new RegExp(`still listed as not wired: ${CLEANUP_PORTS.map((k) => `cleanup\\.${k}`).join(', ')}$`), 'gone is not wired');
+  assert.match(cleanupProblem(cleanup({ extra: { enumerable: true, value: 1 } })), /no tick step reads these ports: cleanup\.extra$/);
+});
+
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
   const src = readFileSync(TICK, 'utf8');
   const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
   assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...PORTS_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
+  assert.deepEqual([...TICK_PORTS].sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'what the start insists on is what the tick reads');
   const w = world();
   const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
   assert.deepEqual(Object.keys(ports).sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'no port is answered by anything but a refusal or a pinned wiring');
@@ -279,4 +409,12 @@ test('L295 Minor 2: a second boot does not queue "is now on" again (the entry an
   assert.equal(first.length, 1);
   assert.equal(boot(w).code, 0);
   assert.deepEqual(on(readRecord(w)), first);
+});
+
+test('A1 (L615): through the real wiring, mainSha reads main with the rules reader\'s own client, and other products are refused', async () => {
+  const w = world();
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  assert.equal(await ports.mainSha({ product: P }), w.fake.commit);
+  await assert.rejects(ports.mainSha({ product: 'other' }), /can't read product other/);
+  assert.equal(typeof (await ports.planView({ product: P })).isDir, 'function');
 });
