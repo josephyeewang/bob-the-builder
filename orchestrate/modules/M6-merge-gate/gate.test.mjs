@@ -3600,7 +3600,7 @@ test('L356 gate.mjs: a refused clear of the landed reading steps aside with an a
 });
 
 // L583 (5): an M6 call with no alert wired answers "not told", so its caller tells the owner itself, never "told".
-test('L583: markReverted and reconcileMerge with no alert wired answer told: false', () => {
+test('L583: markReverted, reconcileMerge and settleMerge with no alert wired: told false, nothing thrown', () => {
   const none = { read: () => null };
   assert.deepEqual(markReverted({ record: none }, 'card-9'), { ok: false, reason: 'not a merged undo card', told: false });
   const m = { id: 'merge-1', rev: 2, doc: { state: 'refused', reasons: ['interrupted'], pr: 7, judged_head: 'a'.repeat(40) } };
@@ -3608,4 +3608,9 @@ test('L583: markReverted and reconcileMerge with no alert wired answer told: fal
   const r = reconcileMerge({ record: rec, now: 0 }, 'merge-1', { pr: { merged: true, merge_commit_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40) } });
   assert.equal(r.ok, false);
   assert.equal(r.told, false);
+  // settleMerge: a refused write with no alert wired is answered, not thrown.
+  const checking = { id: 'merge-2', rev: 1, doc: { state: 'checking', pr: 8, judged_head: 'a'.repeat(40) } };
+  const refusing = { read: (e) => (e === 'merge' ? checking : null), write: () => ({ ok: false, reason: 'planted refusal' }) };
+  assert.deepEqual(settleMerge({ record: refusing, now: 0 }, 'merge-2', { pr: { merged: true, merge_commit_sha: 'b'.repeat(40), head_sha: 'a'.repeat(40) } }),
+    { ok: false, reason: 'the move to merging was refused' });
 });
