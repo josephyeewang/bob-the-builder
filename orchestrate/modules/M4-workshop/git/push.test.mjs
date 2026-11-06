@@ -109,7 +109,7 @@ test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each
   assert.equal(r.ok, true, r.reason);
   assert.equal(pushAsked.length, 1);
   const s = pushAsked[0];
-  assert.deepEqual(s.card, { id: 'C-1', kind: undefined, rows: [], doc: { lane: 'product' } });
+  assert.deepEqual(s.card, { id: 'C-1', kind: undefined, rows: [], doc: { lane: 'product', files: [] } });
   assert.deepEqual(s.files.map((f) => [f.path, f.status]).sort(), [['app.txt', 'modified'], ['new.txt', 'added']]);
   // The subject the push used to send (the card's id, bare names): the real engine refuses it.
   assert.equal(realEngine().may('push_branch', { product: PRODUCT, card: 'C-1', files: ['app.txt'] }).decision, 'deny');
@@ -122,6 +122,29 @@ test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each
   await w2.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   await w2.bundle();
   await refusedAndUntouched(w2, /card has no lane/, { record: noLane });
+});
+
+// Audit #266 M1-r2 (L696, L704): a card's rows are the row files it lists, so the push hands M10 the card's files. A
+// lead-lane card whose only row is its row file pushes an edit to that row through the real push script and real M10;
+// a go-free daily card listing the same file may not, and another card's row stays out of lane.
+test('#266 M1-r2: a lead-lane card editing its own row file is allowed by the real push and real M10; a daily card is not', async () => {
+  const ROW = 'docs/blueprint/rows/R-1.yaml';
+  // The Record keeps a card's lane as created, so the push reads the card through a record that shows it as planned.
+  const asCard = (w, doc) => { const t = w.record; const rec = Object.fromEntries(Object.keys(t).map((k) => [k, typeof t[k] === 'function' ? t[k].bind(t) : t[k]])); rec.read = (e, id) => { const r = t.read(e, id); return e === 'card' && r ? { ...r, doc: { ...r.doc, ...doc } } : r; }; return { record: rec }; };
+  const edit = async (w, path) => { await w.commit('row', (c) => { mkdirSync(join(c, 'docs/blueprint/rows'), { recursive: true }); writeFileSync(join(c, path), 'status: built\n'); }); await w.bundle(); };
+  const w = await world();
+  const lead = asCard(w, { lane: 'lead', files: ['src/a.mjs', ROW] });
+  await edit(w, ROW);
+  pushAsked.length = 0;
+  const r = await w.push(lead);
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(pushAsked[0].card, { id: 'C-1', kind: undefined, rows: [], doc: { lane: 'lead', files: ['src/a.mjs', ROW] } });
+  const other = await world();
+  await edit(other, 'docs/blueprint/rows/R-2.yaml');
+  await refusedAndUntouched(other, /out of lane: docs\/blueprint\/rows\/R-2\.yaml/, asCard(other, { lane: 'lead', files: ['src/a.mjs', ROW] }));
+  const daily = await world();
+  await edit(daily, ROW);
+  await refusedAndUntouched(daily, /out of lane: docs\/blueprint\/rows\/R-1\.yaml/, asCard(daily, { lane: 'lead', kind: 'lead_daily_card', files: [ROW] }));
 });
 
 async function refusedAndUntouched(w, re, over) {
@@ -1319,7 +1342,7 @@ test('L286: one commit on main, made by the script: the report byte for byte at 
   assert.equal(researchCopyProblem({ card, files: [{ path: RPATH, status: 'added', mode: '100644', blob: blobOf(REPORT_BYTES) }] }), null);
   // M10's real push_branch was asked, and took the card by its docs lane (L384 5).
   assert.equal(pushAsked.length, 1);
-  assert.deepEqual(pushAsked[0].card, { id: RC, kind: 'research_copy', rows: [], doc: { lane: 'docs' } });
+  assert.deepEqual(pushAsked[0].card, { id: RC, kind: 'research_copy', rows: [], doc: { lane: 'docs', files: [RPATH] } });
   assert.deepEqual(pushAsked[0].files, [{ path: RPATH, status: 'added' }]);
   // The same core: the scan ran, a PR opened with the card's words, the fact says what door it came by.
   assert.match(w.fake.calls(), /git\ndir\nstdin/, 'the secret scan ran');

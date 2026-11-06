@@ -405,11 +405,12 @@ export function createPushScript(deps) {
       const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
       if (!scan.ok) no(scan.reason);
 
-      // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane } } and each
+      // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane, files } } and each
       // file as { path, status } (shared/README.md). Asked with the card's id and bare names, the real engine refused
       // every push (L81 sweep). A change letter M10 has no word for stays unknown, so the push is refused.
+      // The card's files carry its rows: a card's rows are the row files it lists (L684, L696; audit #266 M1-r2).
       const cardDoc = record.read('card', card)?.doc ?? {};
-      const subject = { product, card: { id: card, kind: cardDoc.kind, rows: Array.isArray(cardDoc.rows) ? cardDoc.rows : [], doc: { lane: cardDoc.lane } }, files };
+      const subject = { product, card: { id: card, kind: cardDoc.kind, rows: Array.isArray(cardDoc.rows) ? cardDoc.rows : [], doc: { lane: cardDoc.lane, files: Array.isArray(cardDoc.files) ? cardDoc.files : [] } }, files };
       // An exact reverse names the reversed commit's files (the card's own list, which M11 took from that commit); M10 lets
       // such a push through only when every changed file is in it, and the merge still checks the reverse on GitHub.
       if (cardDoc.kind === 'exact_reverse' && Array.isArray(cardDoc.files)) subject.reverses_files = cardDoc.files;
