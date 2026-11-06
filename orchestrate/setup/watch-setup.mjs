@@ -95,23 +95,29 @@ export function planWatchRules(io, cfg, { source, readSource }) {
  * writes the new text beside it (root:wheel 0644) and renames it over the config in one step. Every other entry is kept as
  * it was. Refused when the result would not load, when there is no watch entry, or when the key is not in place yet (the
  * job must never be pointed at a key that is not there). The same App already named → nothing to do.
+ * `rulesSha256` (L633), optional: also pins the rules through the config, so a job placed from it judges by the rules
+ * copy in place; refused unless that copy hashes to it (so a re-pin that changed only the job file is brought back here).
  */
-export function planWatchApp(io, cfg, { raw, text, app, dry = false }) {
+export function planWatchApp(io, cfg, { raw, text, app, rulesSha256 = null, dry = false }) {
   if (!raw?.watch) return { ops: [], problems: ['the config has no "watch" entry (repo and rulesSha256); add it first'] };
-  const next = { ...raw, watch: { ...raw.watch, app: { id: app.id, installation: app.installation, keyFile: app.keyFile } } };
+  const next = { ...raw, watch: { ...raw.watch, ...(rulesSha256 !== null ? { rulesSha256 } : {}), app: { id: app.id, installation: app.installation, keyFile: app.keyFile } } };
   let cfg2; try { cfg2 = { ...cfg, watch: parseConfig(next).watch }; } catch (e) { return { ops: [], problems: [`${e.message}; nothing was changed`] }; }
-  const old = raw.watch.app;
-  if (old && old.id === app.id && old.installation === app.installation && old.keyFile === app.keyFile && Object.keys(old).length === 3) return { ops: [], problems: [] };
+  const old = raw.watch.app; const oldPin = raw.watch.rulesSha256;
+  const pinSame = rulesSha256 === null || rulesSha256 === oldPin;
+  if (pinSame && old && old.id === app.id && old.installation === app.installation && old.keyFile === app.keyFile && Object.keys(old).length === 3) return { ops: [], problems: [] };
   const key = checkWatchAppKey(io, cfg2)[0];
   if (!key.ok) return { ops: [], problems: [`the key is not in place as it must be (${key.why}): put it there first, then run this again; nothing was changed`] };
-  const notes = key.skip && dry ? ['   (the key could not be looked at without root; the real run checks it)'] : [];
+  const copy = checkRulesCopy(io, cfg2)[0];
+  if (!copy.ok) return { ops: [], problems: [`the rules copy in place does not match the config's pin (${copy.why}); nothing was changed`] };
+  const notes = [...(key.skip && dry ? ['   (the key could not be looked at without root; the real run checks it)'] : []), ...(copy.skip && dry ? ['   (the rules copy could not be looked at without root; the real run checks it)'] : [])];
+  const pinNote = pinSame ? '' : `, rules pin ${short(rulesSha256)}… (it was ${oldPin ? `${short(oldPin)}…` : 'none'})`;
   const body = `${JSON.stringify(next, null, 2)}\n`; const tmp = `${ROOT_CONFIG_PATH}.new`; const was = sha(text);
   return { ops: [
     op(`check ${ROOT_CONFIG_PATH} still holds the text this plan was made from`, () => {
       const now = io.readConfig(ROOT_CONFIG_PATH, { strict: true });
       if (sha(now) !== was) throw new Error(`${ROOT_CONFIG_PATH} changed after this plan was made; nothing was changed`);
     }),
-    op(`write ${tmp} (root:wheel 0644): the config with watch.app = App ${app.id}, installation ${app.installation}, key ${watchAppKeyPath(cfg2)}${old ? ` (it named App ${old.id})` : ''}${notes.join('')}`, () => {
+    op(`write ${tmp} (root:wheel 0644): the config with watch.app = App ${app.id}, installation ${app.installation}, key ${watchAppKeyPath(cfg2)}${old ? ` (it named App ${old.id})` : ''}${pinNote}${notes.join('')}`, () => {
       io.unlink(tmp); io.writeOwned(tmp, body, { uid: io.rootUid, gid: 0, mode: 0o644 });
     }),
     op(`rename ${tmp} over ${ROOT_CONFIG_PATH}`, () => io.rename(tmp, ROOT_CONFIG_PATH)),
@@ -119,11 +125,11 @@ export function planWatchApp(io, cfg, { raw, text, app, dry = false }) {
 }
 
 /** watch-app's read-back: root's config, read again as root reads it, names exactly this App, and its key passes. */
-export function checkWatchAppConfig(io, cfg, app) {
-  const what = `${ROOT_CONFIG_PATH} names the watcher App ${app.id}, installation ${app.installation}, key ${app.keyFile}`;
+export function checkWatchAppConfig(io, cfg, app, rulesSha256 = null) {
+  const what = `${ROOT_CONFIG_PATH} names the watcher App ${app.id}, installation ${app.installation}, key ${app.keyFile}${rulesSha256 ? `, rules pin ${short(rulesSha256)}…` : ''}`;
   let w; try { w = parseConfig(JSON.parse(io.readConfig(ROOT_CONFIG_PATH, { strict: true }))).watch; } catch (e) { return [{ ok: false, what, why: `could not be read back (${e.message})` }]; }
-  const a = w?.app; const ok = !!a && a.id === app.id && a.installation === app.installation && a.keyFile === app.keyFile;
-  return [{ ok, what, ...(ok ? {} : { why: 'the file read back does not name it' }) }, ...checkWatchAppKey(io, { ...cfg, watch: w })];
+  const a = w?.app; const ok = !!a && a.id === app.id && a.installation === app.installation && a.keyFile === app.keyFile && (rulesSha256 === null || w.rulesSha256 === rulesSha256);
+  return [{ ok, what, ...(ok ? {} : { why: 'the file read back does not name it' }) }, ...checkRulesCopy(io, { ...cfg, watch: w }), ...checkWatchAppKey(io, { ...cfg, watch: w })];
 }
 
 /** check-watch-rules, read only: the rules copy, then the watcher App's key (L627). */
