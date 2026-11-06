@@ -278,9 +278,8 @@ test('#260 r2 M1 b: main() tries the store\'s held lines once more as the Dispat
   const m11 = fileURLToPath(new URL('../modules/M11-dispatcher/', import.meta.url));
   const wiring = L.path('wiring/wiring.mjs');
   writeFileSync(wiring, `import { recWith, rulesWith } from ${JSON.stringify(join(m11, 'fixtures.test-helper.mjs'))};
-export const asked = [];
 const base = recWith();
-const rec = { ...base, read: (...a) => base.read(...a), write: (...a) => base.write(...a), heldHere: () => { asked.push(1); return { held: [{ id: 'h1', event: { type: 'diary_damaged' } }], dropped: 2, disk: 'full' }; } };
+const rec = { ...base, read: (...a) => base.read(...a), write: (...a) => base.write(...a), heldHere: () => ({ held: [{ id: 'h1', event: { type: 'diary_damaged' } }], dropped: 2, disk: 'full' }) };
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
@@ -295,7 +294,7 @@ export async function wire() {
   const logs = [];
   const code = await main([config], { self, now: Date.parse('2026-11-05T08:00:00Z'), log: (s) => logs.push(s) });
   assert.equal(code, 0, logs.join(' | '));
-  assert.ok((await import(wiring)).asked.length >= 1, 'heldHere was asked');
+  // This line comes only from heldHere's answer, so it also shows heldHere was asked.
   assert.ok(logs.includes('dispatcher: 1 warning(s) the store could not write and 2 lost count(s) are held in this process only and end with it; the held flag tells the robot\'s alert pass'), logs.join(' | '));
 });
 
