@@ -21,8 +21,12 @@ import { OUTBOX_KINDS, OUTBOX_KIND_PATTERN } from '../../shared/record.mjs';
 // The one path of the role files folder (roles/ beside this file); every module that loads the profiles uses it (L235).
 export const ROLES_DIR = fileURLToPath(new URL('./roles', import.meta.url));
 
+// plan_reviewer (L683, L687): the fresh read-only reviewer of a Tier-1 card's plan before its go, started by the review
+// runner as the review user. It reads and cannot write: its answer comes back through the runner's status.
 export const ROLE_FILES = Object.freeze(['lead', 'worker', 'reviewer', 'incident', 'scout', 'writer', 'front_door',
-  'thinking', 'script', 'explore']);
+  'thinking', 'script', 'explore', 'plan_reviewer']);
+// A read-only role may hold only these tools and hand in nothing, so a widened file is refused at load, not only by a test.
+export const READ_ONLY = Object.freeze({ plan_reviewer: Object.freeze(['Read', 'Glob', 'Grep']) });
 export const ROLE_ALIASES = Object.freeze({ auditor: 'reviewer' });
 export const NEVER_STARTED = Object.freeze(['learning']);
 
@@ -63,6 +67,10 @@ export function checkProfile(role, p) {
     if (t === 'Workflow' && role !== 'script') no('Workflow is allowed only in the script profile');
   }
   if (new Set(p.tools).size !== p.tools.length) no('a tool is listed twice');
+  if (Object.hasOwn(READ_ONLY, role)) {
+    const extra = p.tools.filter((t) => !READ_ONLY[role].includes(t));
+    if (extra.length) no(`a read-only role may not hold ${extra.join(', ')}`);
+  }
   if (!MODES.includes(p.permission_mode)) no('bad permission_mode');
   if (typeof p.restricted_mode !== 'boolean') no('restricted_mode must be true or false');
   if (!Array.isArray(p.outbox_kinds)) no('outbox_kinds must be a list');
@@ -70,6 +78,7 @@ export function checkProfile(role, p) {
     if (typeof k !== 'string' || !OUTBOX_KIND_PATTERN.test(k)) no(`bad outbox kind ${JSON.stringify(k)}`);
     if (!Object.hasOwn(OUTBOX_KINDS, k) || !OUTBOX_KINDS[k].roles.includes(role)) no(`outbox kind ${k} is not listed for ${role}`);
   }
+  if (Object.hasOwn(READ_ONLY, role) && p.outbox_kinds.length) no('a read-only role hands in nothing, so it has no outbox kinds');
   if (!byTier(p.auto_resume, (b) => typeof b === 'boolean')) no('bad auto_resume');
   if (p.context !== `context.${role}`) no('context must name this role\'s rules key');
   if (p.skills !== undefined && !(Array.isArray(p.skills) && p.skills.every((s) => s === 'orchestrate') && role === 'front_door')) no('only the front_door may name a skill, and only orchestrate');
