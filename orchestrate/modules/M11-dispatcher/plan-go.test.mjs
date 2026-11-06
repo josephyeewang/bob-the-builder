@@ -20,6 +20,7 @@ import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
 import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { planRows } from '../../wiring/review-ports.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -87,6 +88,42 @@ test('Tier 2: asked with no plan check and no reviewer, once', async () => {
   assert.equal(asks(w)[0].doc.kind, 'go_t2');
   assert.equal(asks(w)[0].doc.plan_check, undefined);
   assert.equal(w.started.length, 0);
+});
+
+// A3a: the wired planRows, reading the row files among the card's files from GitHub at main, gives M2 rows its go checks accept, and a row
+// file whose pass test has drifted from the card's bar is told, never asked on.
+function githubRows(w, files) {
+  const base = '/repos/sample-org/sample-app';
+  const gh = { get: async (p) => {
+    if (p === `${base}/git/ref/heads/main`) return { status: 200, json: { object: { sha: 'f'.repeat(40) } } };
+    const m = new RegExp(`^${base}/contents/docs/blueprint/rows/([^/?]+)\\.yaml\\?ref=${'f'.repeat(40)}$`).exec(p);
+    if (m && files[m[1]] !== undefined) return { status: 200, json: { encoding: 'base64', content: Buffer.from(files[m[1]]).toString('base64') } };
+    return { status: 404, json: null };
+  } };
+  return planRows({ gh, entry: { product: PRODUCT, owner: 'sample-org', repo: 'sample-app' }, rec: w.t.record });
+}
+test('A3a: the wired planRows reads rows M2 asks a go on; a drifted, missing or unnamed row is told, not asked', async () => {
+  const files = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
+  const w = world();
+  card(w, 'A', { files });
+  const yaml = (id, done) => `id: ${id}\nwhat: row ${id}\nmodule: M1\ntier: 2\ndone_when: ${done}\nstatus: planned\n`;
+  await pass(w, { planRows: githubRows(w, { 'R-1': yaml('R-1', ROWS['R-1'].done_when) }) });
+  assert.equal(asks(w).length, 1, w.sent.join(' | '));
+  const w2 = world();
+  card(w2, 'A', { files });
+  await pass(w2, { planRows: githubRows(w2, { 'R-1': yaml('R-1', 'a different test') }) });
+  assert.equal(asks(w2).length, 0);
+  assert.ok(w2.sent.some((s) => /card A could not be asked for a go: the card's done_when is not its rows' pass tests/.test(s)), w2.sent.join(' | '));
+  const w3 = world();
+  card(w3, 'A', { files });
+  await pass(w3, { planRows: githubRows(w3, {}) });
+  assert.equal(asks(w3).length, 0);
+  assert.ok(w3.sent.some((s) => /planRows: row R-1 is missing at main fffffff/.test(s)), w3.sent.join(' | '));
+  const w4 = world();
+  card(w4, 'A');
+  await pass(w4, { planRows: githubRows(w4, { 'R-1': yaml('R-1', ROWS['R-1'].done_when) }) });
+  assert.equal(asks(w4).length, 0);
+  assert.ok(w4.sent.some((s) => /card A names no row file/.test(s)), w4.sent.join(' | '));
 });
 
 test('only the root is asked: a fix card runs on its root\'s go', async () => {

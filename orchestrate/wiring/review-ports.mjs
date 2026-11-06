@@ -11,6 +11,13 @@
 // A product other than this Dispatcher's is refused: one Dispatcher runs one product (M9), and reading another
 // product's repository would answer for the wrong one.
 //
+// WIRED (A3a): planRows({ product, card }) → { <row id>: row }, the rows the card names (its `rows` in the Record),
+// each read from docs/blueprint/rows/<id>.yaml at main's current commit with the Merge Gate's own row reader (M6
+// gather.mjs readRowAt), so the go asked and the go checked read a row the same way. A card the Record doesn't have,
+// one naming no rows, and a row that is missing or can't be parsed at that commit throw: plan-go tells it under the
+// card, and no go is asked on a row that wasn't read. M2 raiseGo then checks the rows against the card (plain ids, each
+// row's done_when, the card's done_when is their pass tests). The read-only client refuses any `..` in a path, so a
+// row id can't reach outside the rows folder.
 // WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
 // request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
 //   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
@@ -32,8 +39,10 @@ import { mainSeenFile, readMainSeen } from '../modules/M4-workshop/launcher/inst
 import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { GIT_MS } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pastTime } from '../shared/still-waiting.mjs';
+import { readRowAt } from '../modules/M6-merge-gate/gather.mjs';
+import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'planRows', 'filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'filesOf', 'gateAlive', 'healthy', 'resume']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -55,6 +64,37 @@ export function githubReads({ gh, entry }) {
     },
     // A new view each call: its answers are kept for the call's own pass only, so a later pass reads GitHub again.
     planView: async ({ product } = {}) => { own(product); return makeGitView({ gh, owner: entry.owner, repo: entry.repo }); },
+  };
+}
+
+/**
+ * The planRows port for one product: `rec` the Record, for the card's files. A card names no rows of its own (M2
+ * README), so its rows are the row files among its predicted files, read the way the Merge Gate reads them
+ * (gather.mjs, ROW_FILE): the go and the gate agree on which rows a card covers. A card with no row file names no rows,
+ * which is told, never asked on.
+ */
+const ROW_PLAIN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;   // M2's ROW_ID (not exported), checked before GitHub is asked
+export function planRows({ gh, entry, rec }) {
+  if (!rec || typeof rec.read !== 'function') throw new Error('planRows needs the Record');
+  const { mainSha } = githubReads({ gh, entry });
+  const base = `/repos/${entry.owner}/${entry.repo}`;
+  return async ({ product, card } = {}) => {
+    // One commit for every row: main is read first (which also refuses another product).
+    const sha = await mainSha({ product });
+    const doc = rec.read('card', card)?.doc;
+    if (!doc) throw new Error(`the Record has no card ${card}`);
+    if (!Array.isArray(doc.files)) throw new Error(`card ${card} has no file list`);
+    const ids = new Set();
+    for (const f of doc.files) { const m = typeof f === 'string' ? ROW_FILE.exec(f) : null; if (m) ids.add(m[1]); }
+    if (!ids.size) throw new Error(`card ${card} names no row file (docs/blueprint/rows/<id>.yaml) among its files`);
+    const rows = {};
+    for (const id of [...ids].sort()) {
+      if (!ROW_PLAIN.test(id)) throw new Error(`card ${card} names a row file whose id is not plain`);
+      const row = await readRowAt(gh, base, id, sha);
+      if (!row) throw new Error(`row ${id} is missing at main ${sha.slice(0, 7)}, or can't be read`);
+      rows[id] = row;
+    }
+    return rows;
   };
 }
 
@@ -103,5 +143,5 @@ export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = p
 
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function reviewPorts(ctx) {
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid }) };
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid }) };
 }

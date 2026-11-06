@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { readOnlyClient } from '../modules/M6-merge-gate/watch-only.mjs';
 import { ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { fakeGitHubFetch } from './fake-github.test-helper.mjs';
-import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW, reviewRunner, MAIN_SEEN_STALE_MS } from './review-ports.mjs';
+import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW, reviewRunner, MAIN_SEEN_STALE_MS, planRows } from './review-ports.mjs';
+import { doneBar } from '../modules/M2-approvals/go.mjs';
 import { reviewConfig, writeSeen, writeStatus } from './review-ports.test-helper.mjs';
 import { mkdtempSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
 import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
@@ -109,8 +110,8 @@ test('A1: a wait it can\'t read waits no time', { timeout: 5000 }, async (t) => 
 });
 
 test('A1, A2: the port file answers exactly what it took off its list', () => {
-  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, config: reviewConfig(temp()), now: Date.now, selfUid: SELF }));
-  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config: reviewConfig(temp()), now: Date.now, selfUid: SELF }));
+  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   for (const k of answered) assert.ok(!NOT_WIRED_REVIEW.includes(k), k);
 });
 
@@ -208,7 +209,7 @@ test('A2: the stale limit is two of the updater\'s turns plus its fetch limit: 2
 // is not trusted, so the stamp hold stays.
 test('A2: reviewPorts reads root\'s record only if root owns it, so a fresh record of this user\'s keeps the hold', () => {
   const config = reviewConfig(temp());
-  const ports = reviewPorts({ gh: client(), entry: ENTRY, config, now: Date.now, selfUid: SELF });
+  const ports = reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: SELF });
   const s = stamp(ports.reviewAlerts());
   assert.equal(s?.keep, true);
   assert.match(s.text, /its record of main is missing or can't be trusted/);
@@ -230,7 +231,7 @@ test('A2: a review uid that is the Dispatcher\'s own or the workers\' stops the 
   assert.doesNotThrow(() => reviewRunner({ config: { ...config, ownerUid: me + 1 }, now: Date.now, selfUid: SELF }));
   // With no stand-in, the Dispatcher's own user is this process's (main.mjs passes none).
   assert.throws(() => reviewRunner({ config, now: Date.now }), /Dispatcher's own user/);
-  assert.throws(() => reviewPorts({ gh: client(), entry: ENTRY, config, now: Date.now }), /Dispatcher's own user/);
+  assert.throws(() => reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config, now: Date.now }), /Dispatcher's own user/);
 });
 
 test('A2: a review uid that is not a Mac user id stops the start', () => {
@@ -238,4 +239,74 @@ test('A2: a review uid that is not a Mac user id stops the start', () => {
     const config = { ...reviewConfig(temp()), reviewUid };
     assert.throws(() => reviewRunner({ config, now: Date.now, selfUid: SELF }), /config: reviewUid must be a Mac user id/, String(reviewUid));
   }
+});
+
+// ---- A3a: planRows, the row files among a card's files (M2's ROW_FILE, as the gate reads them), read at main's
+// current commit with the Merge Gate's row reader.
+const MAIN = 'e'.repeat(40);
+const rowAnswer = (text) => ({ status: 200, json: { encoding: 'base64', content: Buffer.from(text).toString('base64') } });
+const rowPath = (id, sha = MAIN) => `${base}/contents/docs/blueprint/rows/${id}.yaml?ref=${sha}`;
+const rf = (id) => `docs/blueprint/rows/${id}.yaml`;
+const cardRec = (cards) => ({ read: (entity, id) => (entity === 'card' && cards[id] ? { doc: cards[id] } : null) });
+function rowsWorld(answers, cards = { 'C-1': { files: ['src/a.mjs', rf('R-2'), rf('R-1')] } }) {
+  const gh = table({ [`${base}/git/ref/heads/main`]: { status: 200, json: { object: { sha: MAIN } } }, ...answers });
+  return { gh, read: planRows({ gh, entry: ENTRY, rec: cardRec(cards) }) };
+}
+
+test('A3a: planRows reads each row the card names at main\'s one commit, and their pass tests are the card\'s bar', async () => {
+  const w = rowsWorld({ [rowPath('R-1')]: rowAnswer('id: R-1\ndone_when: "one passes"\n'), [rowPath('R-2')]: rowAnswer('id: R-2\ndone_when: two passes\n') });
+  const rows = await w.read({ product: ENTRY.product, card: 'C-1' });
+  assert.deepEqual(rows, { 'R-1': { id: 'R-1', done_when: 'one passes' }, 'R-2': { id: 'R-2', done_when: 'two passes' } });
+  assert.equal(doneBar(rows), 'one passes\n---\ntwo passes');
+  assert.deepEqual(w.gh.asked, [`${base}/git/ref/heads/main`, rowPath('R-1'), rowPath('R-2')], 'main once, then every row at that commit');
+});
+
+test('A3a: planRows refuses another product before reading anything', async () => {
+  const w = rowsWorld({});
+  await assert.rejects(w.read({ product: 'other', card: 'C-1' }), /can't read product other/);
+  assert.deepEqual(w.gh.asked, []);
+});
+
+test('A3a: a card the Record lacks, with no file list, or with no row file among its files, throws; no rows are made up', async () => {
+  const w = rowsWorld({}, {
+    'C-0': { files: [] }, 'C-5': { files: ['src/a.mjs', 'docs/blueprint/rows/R-1.yml', 'docs/blueprint/rows/sub/R-1.yaml', 'x/docs/blueprint/rows/R-1.yaml', 5] },
+    'C-2': {}, 'C-3': { files: rf('R-1') }, 'C-4': { files: [rf('.hidden')] }, 'C-6': { rows: ['R-1'], files: ['src/a.mjs'] },
+  });
+  await assert.rejects(w.read({ product: ENTRY.product, card: 'C-9' }), /the Record has no card C-9/);
+  for (const c of ['C-0', 'C-5', 'C-6']) await assert.rejects(w.read({ product: ENTRY.product, card: c }), new RegExp(`card ${c} names no row file \\(docs/blueprint/rows/<id>\\.yaml\\) among its files`), c);
+  for (const c of ['C-2', 'C-3']) await assert.rejects(w.read({ product: ENTRY.product, card: c }), new RegExp(`card ${c} has no file list`), c);
+  await assert.rejects(w.read({ product: ENTRY.product, card: 'C-4' }), /names a row file whose id is not plain/);
+  assert.deepEqual(w.gh.asked, Array(7).fill(`${base}/git/ref/heads/main`), 'no row is read for any of them');
+});
+
+test('A3a: a row file listed twice, or under its old and new spelling of case, is read once per id', async () => {
+  const w = rowsWorld({ [rowPath('R-1')]: rowAnswer('id: R-1\ndone_when: x\n') }, { 'C-1': { files: [rf('R-1'), rf('R-1'), 'DOCS/Blueprint/rows/R-1.YAML'] }, 'C-7': { files: ['DOCS/Blueprint/rows/R-1.YAML'] } });
+  assert.deepEqual(Object.keys(await w.read({ product: ENTRY.product, card: 'C-1' })), ['R-1']);
+  assert.equal(w.gh.asked.filter((p) => p.includes('/contents/')).length, 1);
+  // The gate's pattern ignores case (M2 ROW_FILE), so a row file spelled in capitals is still a row file here.
+  assert.deepEqual(Object.keys(await w.read({ product: ENTRY.product, card: 'C-7' })), ['R-1']);
+});
+
+test('A3a: the wired review ports read the card from the Record they are given', async () => {
+  const gh = table({ [`${base}/git/ref/heads/main`]: { status: 200, json: { object: { sha: MAIN } } }, [rowPath('R-1')]: rowAnswer('id: R-1\ndone_when: x\n') });
+  const ports = reviewPorts({ gh, entry: ENTRY, rec: cardRec({ 'C-1': { files: [rf('R-1')] } }), config: reviewConfig(temp()), now: Date.now, selfUid: SELF });
+  assert.deepEqual(await ports.planRows({ product: ENTRY.product, card: 'C-1' }), { 'R-1': { id: 'R-1', done_when: 'x' } });
+});
+
+test('A3a: a row missing, unparsed or unread at main throws, naming the row and the commit', async () => {
+  const ok = rowAnswer('id: R-1\ndone_when: x\n');
+  for (const [answer, why] of [
+    [{ status: 404, json: null }, /row R-2 is missing at main eeeeeee, or can't be read/],
+    [rowAnswer('a: [unclosed\n\tb'), /row R-2 is missing at main eeeeeee, or can't be read/],
+    [{ status: 200, json: [{ name: 'x' }] }, /row R-2 is missing at main eeeeeee, or can't be read/],
+    [{ status: 500, json: null }, /answered 500/],
+    [new Error('socket hang up'), /socket hang up/],
+  ]) await assert.rejects(rowsWorld({ [rowPath('R-1')]: ok, [rowPath('R-2')]: answer }).read({ product: ENTRY.product, card: 'C-1' }), why);
+});
+
+test('A3a: a main that can\'t be read throws before any row is read', async () => {
+  const gh = table({ [`${base}/git/ref/heads/main`]: { status: 404, json: null } });
+  await assert.rejects(planRows({ gh, entry: ENTRY, rec: cardRec({ 'C-1': { files: [rf('R-1')] } }) })({ product: ENTRY.product, card: 'C-1' }), /answered 404/);
+  assert.equal(gh.asked.length, 1);
+  assert.throws(() => planRows({ gh, entry: ENTRY }), /planRows needs the Record/);
 });
