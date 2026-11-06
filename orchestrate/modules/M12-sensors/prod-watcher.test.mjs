@@ -16,7 +16,7 @@ function fakeVercel() {
   const s = {
     deployments: [], live: null,
     envs: [{ id: 'env_1', key: 'DATABASE_URL', target: ['production'], type: 'encrypted', updatedAt: 1, value: FAKE.dbPassword }],
-    project: { commandForIgnoringBuildStep: 'node scripts/skip.mjs', buildCommand: null, framework: 'nextjs', nodeVersion: '22.x', link: { type: 'github', org: 'o', repo: 'r', productionBranch: 'main' } },
+    project: { commandForIgnoringBuildStep: 'node scripts/skip.mjs', buildCommand: null, framework: 'nextjs', nodeVersion: '22.x', autoExposeSystemEnvs: true, link: { type: 'github', org: 'o', repo: 'r', productionBranch: 'main' } },
     domains: [{ name: 'example.test' }],
     answer: {}, // per list: an answer body that replaces the normal one (an error body, a renamed field)
   };
@@ -39,8 +39,9 @@ function setup(rulesEntry = { stage: 'first' }) {
   const v = fakeVercel();
   const writer = makeFactWriter(rec);
   const alerts = makeAlerts({ rec, gh, owner: 'owner' });
-  const pass = () => watchOnce({ vercel: v.reader, rulesEntry, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
-  return { rec, gh, v, pass, writer };
+  const box = { ...alerts }; // a test may swap one port (a lost clear)
+  const pass = () => watchOnce({ vercel: v.reader, rulesEntry, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts: box, product: 'product 1' });
+  return { rec, gh, v, pass, writer, alerts: box };
 }
 const kinds = (out) => out.map((o) => o.kind);
 
@@ -115,6 +116,138 @@ test('M4: a project setting changed (the build-skip command) → alert names the
   assert.match((await t.pass())[0].subject, /^project:productionDomains:/);
   t.v.s.domains.push({ name: 'preview.test', gitBranch: 'dev' });
   assert.deepEqual(await t.pass(), [], 'a branch domain is not a production domain');
+});
+
+test('L592 a: the reader passes on the system-variables setting; a missing one reads as null, like the other fields', async () => {
+  const v = fakeVercel();
+  v.s.project.autoExposeSystemEnvs = true;
+  assert.equal((await v.reader.settings()).autoExposeSystemEnvs, true);
+  v.s.project.autoExposeSystemEnvs = false;
+  assert.equal((await v.reader.settings()).autoExposeSystemEnvs, false);
+  delete v.s.project.autoExposeSystemEnvs;
+  const s = await v.reader.settings();
+  assert.ok(Object.hasOwn(s, 'autoExposeSystemEnvs'));
+  assert.equal(s.autoExposeSystemEnvs, null);
+  assert.equal(s.buildCommand, null, 'the same as another absent setting');
+});
+
+// A raise that reaches Joe: a new issue, or a comment on a changed or returned one. 'updated' and 'suppressed' do not.
+const TOLD = ['opened', 'changed'];
+const raisedFor = (out, field) => out.filter((o) => o.kind === 'setting-changed' && o.subject.startsWith(`project:${field}:`) && o.result !== 'cleared');
+const ownerClosesAll = (gh) => { for (const [i, x] of gh.issues) if (!x.closed) gh.ownerCloses(i); };
+// Walks a field through values after a baseline at the first; answers each step's raise results for that field.
+async function walk(field, values, { closeBetween }) {
+  const t = setup();
+  t.v.s.project[field] = values[0];
+  await t.pass();
+  const steps = [];
+  for (const v of values.slice(1)) {
+    t.v.s.project[field] = v;
+    steps.push(raisedFor(await t.pass(), field).map((o) => o.result));
+    if (closeBetween) ownerClosesAll(t.gh);
+  }
+  return steps;
+}
+
+for (const closeBetween of [true, false]) {
+  test(`L716 M1: the box off, on, off again is told every time (${closeBetween ? 'Joe closes each issue' : 'nobody closes anything'})`, async () => {
+    const steps = await walk('autoExposeSystemEnvs', [true, false, true, false], { closeBetween });
+    assert.equal(steps.length, 3);
+    for (const [i, r] of steps.entries()) { assert.equal(r.length, 1, `step ${i}`); assert.ok(TOLD.includes(r[0]), `step ${i} closeBetween=${closeBetween}: ${r[0]}`); }
+  });
+
+  test(`L716 M1: the build-skip command changed, put back and changed again is told every time (${closeBetween ? 'Joe closes each issue' : 'nobody closes anything'})`, async () => {
+    const steps = await walk('commandForIgnoringBuildStep', ['node scripts/skip.mjs', 'exit 1', 'node scripts/skip.mjs', 'exit 1'], { closeBetween });
+    for (const [i, r] of steps.entries()) { assert.equal(r.length, 1, `step ${i}`); assert.ok(TOLD.includes(r[0]), `step ${i} closeBetween=${closeBetween}: ${r[0]}`); }
+  });
+}
+
+test('L716 M1: a change clears the old value\'s alert; one already told is not told again while it stands', async () => {
+  const t = setup();
+  await t.pass();
+  t.v.s.project.commandForIgnoringBuildStep = 'exit 1';
+  await t.pass();
+  assert.equal(t.gh.issues.get(1).closed, false);
+  t.v.s.project.commandForIgnoringBuildStep = 'exit 2';
+  const out = await t.pass();
+  assert.deepEqual(out.filter((o) => o.kind === 'setting-changed').map((o) => o.result), ['cleared', 'opened']);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  assert.deepEqual(await t.pass(), []);
+});
+
+test('L716 M1: a lost clear does not hold the baseline, and is tried again next pass', async () => {
+  const t = setup();
+  await t.pass();
+  t.v.s.project.commandForIgnoringBuildStep = 'exit 1';
+  await t.pass();
+  const realClear = t.alerts.clear; let lose = true;
+  t.alerts.clear = async (a) => (lose && a.key.includes('|setting-changed|') ? false : realClear(a));
+  t.v.s.project.commandForIgnoringBuildStep = 'exit 2';
+  await t.pass();
+  assert.equal(t.writer.get(stateFactId('product 1')).unclear.length, 1);
+  lose = false;
+  const out = await t.pass();
+  assert.deepEqual(out.map((o) => [o.kind, o.result]), [['setting-changed', 'cleared']]);
+  assert.equal(t.gh.issues.get(1).closed, true);
+  assert.deepEqual(t.writer.get(stateFactId('product 1')).unclear, []);
+});
+
+const sysOff = (out) => out.filter((o) => o.kind === 'system-vars-off');
+test('L716 Minor 1, 2: the box off, not reported, or "false" at the first pass is told, with its own words', async () => {
+  for (const [value, words] of [[false, /are off/], ['false', /are off/], [undefined, /did not report/], [null, /did not report/], ['yes', /did not report/]]) {
+    const t = setup();
+    if (value === undefined) delete t.v.s.project.autoExposeSystemEnvs; else t.v.s.project.autoExposeSystemEnvs = value;
+    const out = await t.pass();
+    assert.deepEqual(sysOff(out).map((o) => o.result), ['opened'], String(value));
+    assert.match(t.gh.issues.get(1).title, words, String(value));
+    assert.match(t.gh.issues.get(1).body, /Enable access to System Environment Variables/);
+    assert.equal(t.writer.get(stateFactId('product 1')).baseline, true, 'the first pass still saves its baseline');
+  }
+  const on = setup(); on.v.s.project.autoExposeSystemEnvs = 'true';
+  assert.deepEqual(await on.pass(), [], 'the text "true" is on');
+});
+
+for (const closeBetween of [true, false]) {
+  test(`L716 Minor 1: the box on again clears the alert; off again after that is told again (${closeBetween ? 'Joe closes it' : 'nobody closes it'})`, async () => {
+    const t = setup();
+    t.v.s.project.autoExposeSystemEnvs = false;
+    await t.pass();
+    if (closeBetween) ownerClosesAll(t.gh);
+    t.v.s.project.autoExposeSystemEnvs = true;
+    assert.deepEqual(sysOff(await t.pass()).map((o) => o.result), ['cleared']);
+    if (closeBetween) ownerClosesAll(t.gh);
+    t.v.s.project.autoExposeSystemEnvs = false;
+    const again = sysOff(await t.pass()).map((o) => o.result);
+    assert.equal(again.length, 1); assert.ok(TOLD.includes(again[0]), `closeBetween=${closeBetween}: ${again[0]}`);
+    assert.deepEqual(sysOff(await t.pass()).map((o) => o.result), ['updated'], 'standing: not told again within the day');
+  });
+}
+
+test('L716 Minor 1: off then not reported is told as a new state', async () => {
+  const t = setup();
+  t.v.s.project.autoExposeSystemEnvs = false;
+  await t.pass();
+  delete t.v.s.project.autoExposeSystemEnvs;
+  assert.deepEqual(sysOff(await t.pass()).map((o) => o.result), ['changed']);
+});
+
+test('L716 Minor 4: a setting the old baseline lacks is compared, told once, and raised again if that raise was lost', async () => {
+  let lose = true;
+  const raise = sink((a) => (lose && a.key.includes('|setting-changed|project:autoExposeSystemEnvs:') ? false : 'opened'));
+  const t = lossSetup(raise);
+  await t.pass();
+  const id = stateFactId('product 1');
+  const old = t.writer.get(id);
+  const { autoExposeSystemEnvs: _drop, ...without } = old.settings;
+  t.writer.put(id, { ...old, settings: without });
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed').filter((x) => x.startsWith('project:autoExposeSystemEnvs:')).length, 1);
+  raise.reset(); lose = false;
+  await t.pass();
+  assert.equal(subjects(raise, 'setting-changed').filter((x) => x.startsWith('project:autoExposeSystemEnvs:')).length, 1, 'raised again after the loss');
+  raise.reset();
+  await t.pass();
+  assert.deepEqual(subjects(raise, 'setting-changed'), [], 'told once');
 });
 
 test('case 5: a cancelled build (build-skip refused it) or a failed one raises nothing', async () => {
