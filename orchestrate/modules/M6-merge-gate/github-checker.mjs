@@ -2939,6 +2939,8 @@ function makeRecord(impl) {
     read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
     list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
+    // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
+    keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {
@@ -3334,10 +3336,10 @@ function asReaderText(v) {
 // back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
-  // M11 reads typed (L123); these five stay red only because their modules read per-product keys with no product
-  // (merges.mjs time limits, pass.mjs:149-151, lead-restart.mjs context.*). Lane 2 passes the product (L104 O-1, L131).
+  // M11 reads typed (L123); these were here because their modules read per-product keys with no product. Lane 2 passes
+  // the product (L104 O-1, L131): lead-restart.test came off with L564, account-ports.test with L584.
   // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
-  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'lead-restart.test', 'account-ports.test', 'fixtures.test-helper']
+  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'fixtures.test-helper']
     .map((n) => [`modules/M11-dispatcher/${n}.mjs`, { owner: 'lane 2', pr: 'M11 per-product reads pass the product (L104 O-1 step 2, L131)' }])),
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test
