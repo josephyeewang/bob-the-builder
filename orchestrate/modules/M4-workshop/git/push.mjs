@@ -80,6 +80,9 @@ const no = (reason) => { throw new Refusal(reason); };
 // intake held it): the caller keeps the work and tries again (`retry: true` on the answer), where every other refusal is
 // the end of it (L325 m2, L597 (2)).
 const later = (reason) => { const e = new Refusal(reason); e.retry = true; throw e; };
+// A local git run that did not finish (safe-git's own time limit, a spawn failure or its refusal: code -1) says nothing
+// about the bundle: it is a wait. Git's own exit code is its answer, and `final` is said (L669 M1).
+const gitAnswer = (r, final) => (r.code === -1 ? later(`git did not finish: ${plainError(String(r.stderr ?? '').slice(0, 200))}`) : no(final));
 
 /** An error's text with its folder paths cut to <path>, at most 200 characters: one rule for every error a caller shows. */
 export const plainError = (m) => String(m).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200);
@@ -89,7 +92,7 @@ const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Author
 
 /** The folder a file is taken from: a plain folder, not a link, owned by `folderUid` when that is given. */
 function checkFolder(folder, folderUid) {
-  let ost; try { ost = lstatSync(folder); } catch { no('the outbox is missing'); }
+  let ost; try { ost = lstatSync(folder); } catch { later('the outbox is missing'); }
   if (ost.isSymbolicLink() || !ost.isDirectory()) no('the outbox is not a plain folder');
   if (folderUid !== undefined && ost.uid !== folderUid) no(`the folder is owned by user ${ost.uid}, not user ${folderUid}`);
   if (folderUid !== undefined && (ost.mode & FOLDER_LOOSE) !== 0) no('the folder is looser than 750');
@@ -104,7 +107,7 @@ function stageBundle(outbox, card, dir, cap, { uid, folderUid, sha256, fstat = f
   if (!isUid(uid)) no('no owner to check the bundle against');
   checkFolder(outbox, folderUid);
   let fd;
-  try { fd = openSync(join(outbox, bundleName(card)), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch { no('no bundle in the outbox (or it is a link)'); }
+  try { fd = openSync(join(outbox, bundleName(card)), C.O_RDONLY | C.O_NOFOLLOW | (C.O_NONBLOCK ?? 0)); } catch (e) { (e?.code === 'ELOOP' ? no : later)(e?.code === 'ELOOP' ? 'the bundle in the outbox is a link' : 'no bundle in the outbox'); }
   const copy = join(dir, 'card.bundle');
   let out;
   try {
@@ -297,9 +300,10 @@ export function createPushScript(deps) {
   /** A proposal's inputs: the caller names product and card, the intake's fact the bytes, and the rest is the rules'. */
   function proposalInputs({ product, card }, sha256) {
     // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
-    if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
+    // Not there, or not readable, this once: a wait, as at the intake's own check (L597 (2), L669 M1).
+    if (!record.read('card', card)?.doc) later(`card ${card} is not in the Record`);
     const folder = proposalFolder(rules, product);
-    if (!folder) no('the product has no proposals folder in the rules');
+    if (!folder) later('the product has no proposals folder in the rules');
     return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
   }
 
@@ -335,20 +339,21 @@ export function createPushScript(deps) {
     const repo = rules.get('product.repo', { product });
     const mirror = rules.get('product.mirror', { product });
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    if (rules.get('product.onboarded', { product }) !== true) no('the product is not onboarded yet (its entry is not on main)');
-    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) no('the product has no valid GitHub repo in the rules');
-    if (typeof mirror !== 'string' || !isAbsolute(mirror)) no('the product has no mirror in the rules');
+    // The product's setup is not about the bundle: fixed in the rules, the same bytes go on (L669 M1).
+    if (rules.get('product.onboarded', { product }) !== true) later('the product is not onboarded yet (its entry is not on main)');
+    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) later('the product has no valid GitHub repo in the rules');
+    if (typeof mirror !== 'string' || !isAbsolute(mirror)) later('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
     const fmt = await git(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
     if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) later(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
     if (fmt.code !== 0) no(`the branch "${branch}" is not a valid name`);
 
     const url = testRemote ? testRemote(repo) : githubUrl(repo);
-    if (!testRemote && !url.startsWith('https://github.com/')) no('the push address is not on github.com');
-    if (testRemote && (typeof url !== 'string' || !isAbsolute(url))) no('the test remote is not a local folder');
+    if (!testRemote && !url.startsWith('https://github.com/')) later('the push address is not on github.com');
+    if (testRemote && (typeof url !== 'string' || !isAbsolute(url))) later('the test remote is not a local folder');
 
     const v = await checkGitVersion();
-    if (!v.ok) no(v.reason);
+    if (!v.ok) later(v.reason);
     const m = checkMirror(mirror);
     if (!m.ok) later(`mirror: ${m.reason}`);
 
@@ -384,9 +389,10 @@ export function createPushScript(deps) {
         tip = remoteTip ?? await commitReport(mirror, research, report, holding);
       } else {
         const bv = await git(['bundle', 'verify', '-q', copy], { gitDir: mirror, purpose: 'push-bundle-verify' });
-        if (bv.code !== 0) no('the bundle does not verify against the mirror (a missing earlier commit?)');
+        if (bv.code !== 0) gitAnswer(bv, 'the bundle does not verify against the mirror (a missing earlier commit?)');
         const fb = await git(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', copy, `refs/heads/${branch}:${holding}`], { gitDir: mirror, purpose: 'push-fetch-bundle' });
-        if (fb.code !== 0) no('could not take the bundle in');
+        // The bundle verified just above: a fetch that fails now is the mirror's (a stale lock, a full disk), not the bundle's.
+        if (fb.code !== 0) later('could not take the bundle in');
         const got = (await gitOk(['rev-parse', '--verify', `${holding}^{commit}`], { gitDir: mirror, purpose: 'push-fetch-bundle' })).trim();
         if (got !== tip) no('the bundle\'s branch is not the commit its header names');
       }
@@ -394,7 +400,7 @@ export function createPushScript(deps) {
       // 4. New commits and the paths they touch.
       if (remoteTip) {
         const ff = await git(['merge-base', '--is-ancestor', remoteTip, tip], { gitDir: mirror, purpose: 'push-fast-forward' });
-        if (ff.code !== 0) no('the branch on GitHub has moved; the fix round must start from it (never a force push)');
+        if (ff.code !== 0) gitAnswer(ff, 'the branch on GitHub has moved; the fix round must start from it (never a force push)');
       }
       // Counted from the branch on GitHub, unless this is that same commit (a retry, after a stop or a refused head write)
       // or a research copy: those are checked whole, from main, and pushing the same commit changes nothing.
@@ -477,7 +483,7 @@ export function createPushScript(deps) {
 
   async function settle(inputs, factParts, { look = false, from } = {}) {
     let res;
-    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${plainError(e.message)}`, ...(e.retry ? { retry: true } : {}) }; }
+    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${plainError(e?.message ?? e)}`, ...(e?.retry || !(e instanceof Refusal) ? { retry: true } : {}) }; }
     // Every reason is masked once, here, before the record: a secret used as a file name is cut to
     // its first four characters, and git's own error text loses its folder paths (round 3 MIN-3, COS-4).
     if (!res.ok) res = { ...res, reason: maskPath(res.reason) };

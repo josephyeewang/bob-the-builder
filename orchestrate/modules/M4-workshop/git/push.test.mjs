@@ -1289,7 +1289,31 @@ test('L325 m2: a refusal that may pass by itself says retry: true and files that
   assert.equal(w.record.list('fact').filter((x) => x.id.startsWith('push.C-1.p-'))[0].doc.retry, undefined);
   const w2 = await world();
   w2.hold('a'.repeat(64));
-  assert.equal((await answer(w2, {})).retry, undefined, 'no bundle in the folder is final');
+  // No bundle in the folder at the moment: it may yet be there (the owner's tab rewriting it), so it is a wait (L669 M1).
+  const gone = await answer(w2, {});
+  assert.equal(gone.reason, 'no bundle in the outbox');
+  assert.equal(gone.retry, true);
+});
+
+test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, the script itself) is a wait, never a final no', async () => {
+  const view = (w, read) => ({ ...w.record, read });
+  const cases = [
+    ['the Record throwing', (w) => ({ record: view(w, (e, i) => { if (e === 'fact') throw new Error(`EIO: ${w.root}/record/x.json`); return w.record.read(e, i); }) }), /^the push script failed: EIO: <path>/],
+    ['the card not there this once', (w) => ({ record: view(w, (e, i) => (e === 'card' ? null : w.record.read(e, i))) }), /^card C-1 is not in the Record$/],
+    ['not onboarded yet', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) }), /not onboarded/],
+    ['no proposals folder in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }), /no proposals folder in the rules/],
+    ['the outbox gone', (w) => { rmSync(w.proposals, { recursive: true, force: true }); return {}; }, /^the outbox is missing$/],
+  ];
+  for (const [name, set, re] of cases) {
+    const w = await world();
+    await docChange(w);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, set(w));
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, re, name);
+    assert.ok(!r.reason.includes(w.root), `${name}: no local path`);
+    assert.equal(r.retry, true, `${name}: may pass by itself`);
+    assert.ok(!(await w.ghRefs()).includes('refs/heads/card/c-1'), `${name}: nothing pushed`);
+  }
 });
 
 test('L325 m3: refusals with no real card or attempt share no fact, at any door', async () => {

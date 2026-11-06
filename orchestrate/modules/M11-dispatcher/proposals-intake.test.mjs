@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, lstatSync, openSync, readSync, closeSync, renameSync, utimesSync } from 'node:fs';
+import { writeFileSync, symlinkSync, linkSync, mkdirSync, chmodSync, fstatSync, lstatSync, openSync, readSync, closeSync, renameSync, utimesSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   proposalsPass, proposalsReadBack, intakeFactId, bytesFactId, retryFactId, folderFactId, waitingFactId, toldFactId, folderProblem, proposalName,
@@ -389,10 +389,195 @@ test('L597 (4): a docs check that throws is never a pass: no review starts, howe
     put(w2, 'proposal-C-1.md', 'docs change');
     put(w2, 'bundle-C-1.bundle', 'bytes');
     const row = one(await w2.pass({ docsCheck: async () => odd, toReview: () => { reviews += 1; return { ok: true }; } }), 'proposal-C-1.md');
-    assert.match(row.refused, /^First cutover/, String(odd));
-    assert.ok(!row.refused.includes('[object Object]'));
+    // It says nothing about the change, so it is a wait, never a final refusal (L669 minor).
+    assert.match(row.waiting ?? '', /the docs check gave no answer/, String(odd));
+    assert.equal(row.refused, undefined, String(odd));
   }
   assert.equal(reviews, 0);
+});
+
+// ---- L669 (#262 r1 audit): the wait's record, its key, and the surviving plants A2, A4, A6, A18, A19 ----
+
+test('L669 M2: a wait the record will not keep is told once, not on every pass', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'write', { value: (x) => (x.kind === 'proposal_wait' ? { ok: false, reason: 'refused' } : w.rec.write(x)) });
+  const stuck = routeWith(w, { look: () => ({ ok: false, retry: true, reason: 'mirror: a hook is installed in the mirror' }), may: allowAll });
+  for (const h of [0, 1, 2, 5]) {
+    const row = one(await w.pass({ rec, docsCheck: stuck, toReview: () => ({ ok: true }), now: NOW + h * HOUR }), 'proposal-C-1.md');
+    assert.match(row.waiting ?? '', /a hook is installed/, `pass at +${h}h`);
+  }
+  const told = w.calls.alerts.filter((t) => t.includes('proposal-C-1.md') && /wait/.test(t));
+  assert.equal(told.length, 1, told.join(' | '));
+  assert.match(told[0], /could not be recorded/);
+  // Its told mark landed but its start did not: the start is taken from the mark, so it is not a new wait each pass.
+  const w2 = world();
+  put(w2, 'proposal-C-1.md', 'docs change');
+  put(w2, 'bundle-C-1.bundle', 'bytes');
+  const began = new Date(NOW - 2 * HOUR).toISOString();
+  seed(w2.rec, 'fact', retryFactId('a', 'proposal-C-1.md'), { product: 'a', name: 'proposal-C-1.md', since: `${began}|00000000`, told_at: began });
+  const rec2 = Object.create(w2.rec);
+  Object.defineProperty(rec2, 'write', { value: (x) => (x.kind === 'proposal_wait' ? { ok: false, reason: 'refused' } : w2.rec.write(x)) });
+  const stuck2 = routeWith(w2, { look: () => ({ ok: false, retry: true, reason: 'mirror: a hook is installed in the mirror' }), may: allowAll });
+  for (const h of [0, 1, 2, 5]) await w2.pass({ rec: rec2, docsCheck: stuck2, toReview: () => ({ ok: true }), now: NOW + h * HOUR });
+  assert.equal(waitAlerts(w2).length, 1, waitAlerts(w2).join(' | '));
+  assert.ok(waitAlerts(w2)[0].includes(`has waited since ${began}`));
+});
+
+test('L669 (plant A4): a new cause for the same wait is told at once and kept on the record', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const toReview = () => ({ ok: true });
+  const paused = routeWith(w, { look: docsFiles, may: () => ({ decision: 'deny', reason: 'product is paused: only an exact reverse may merge' }) });
+  await w.pass({ docsCheck: paused, toReview, now: NOW });
+  const first = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
+  assert.match(first.why, /product is paused/);
+  const hook = routeWith(w, { look: () => ({ ok: false, retry: true, reason: 'mirror: a hook is installed in the mirror' }), may: allowAll });
+  await w.pass({ docsCheck: hook, toReview, now: NOW + HOUR });
+  const now2 = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
+  assert.match(now2.why, /a hook is installed/, 'the new cause is on the record');
+  assert.equal(now2.waiting_since, first.waiting_since, 'the same wait: its start is kept');
+  assert.equal(waitAlerts(w).length, 2, 'told at once, not at the next daily tell');
+  assert.match(waitAlerts(w)[1], /a hook is installed/);
+  assert.equal(w.calls.notes.filter((n) => n.includes('waits:')).length, 2);
+});
+
+test('L669 (plant A2): a wait that ends drops its tell still queued, so Joe never hears of a wait that is over', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const toReview = () => ({ ok: true });
+  const stuck = routeWith(w, { look: () => ({ ok: false, retry: true, reason: 'mirror: a hook is installed in the mirror' }), may: allowAll });
+  // The pass queues the tell, and it is not sent before the next pass.
+  await proposalsPass({ ...w.base, rec: w.rec, docsCheck: stuck, toReview, now: NOW });
+  assert.equal(waitAlerts(w).length, 0);
+  assert.equal(one(await w.pass({ docsCheck: routeWith(w, { look: docsFiles, may: allowAll }), toReview, now: NOW + HOUR }), 'proposal-C-1.md').applied, true);
+  assert.equal(waitAlerts(w).length, 0, 'the ended wait is not told');
+  assert.equal(w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since, undefined);
+});
+
+test('L669 (plant A6): a held bundle whose bytes record cannot be read counts as maybe handed on, so new bytes do not replace it', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'old bytes');
+  const toReview = () => ({ ok: true });
+  await w.pass({ docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview });
+  const oldSha = createHash('sha256').update('old bytes').digest('hex');
+  assert.equal(fact(w, 'bundle-C-1.bundle').state, 'held');
+  put(w, 'bundle-C-1.bundle', 'new bytes');
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'read', { value: (e, i) => { if (e === 'fact' && i === bytesFactId(oldSha)) throw new Error('EIO: read failed'); return w.rec.read(e, i); } });
+  const out = await w.pass({ rec, docsCheck: async () => null, toReview });
+  assert.equal(one(out, 'bundle-C-1.bundle').refused, 'the same name with new content');
+  assert.equal(fact(w, 'bundle-C-1.bundle').sha256, oldSha, 'the held bytes stay');
+});
+
+test('L669 (plant A18): a wait fact whose id is not its own product and name is never ended by another file', async () => {
+  const w = world();
+  put(w, 'research-r1.md', 'x');
+  const id = retryFactId('a', 'proposal-C-9.md');
+  seed(w.rec, 'fact', id, { product: 'a', name: 'proposal-C-1.md', waiting_since: new Date(NOW - HOUR).toISOString(), why: 'planted' });
+  await w.pass();
+  const d = w.rec.read('fact', id).doc;
+  assert.equal(d.why, 'planted');
+  assert.equal(d.ended_at, undefined);
+});
+
+test('L669 (plant A19): the waiting file\'s name reaches the wait tell fenced', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) });
+  const [told] = waitAlerts(w);
+  assert.ok(told.startsWith(`${shownName('proposal-C-1.md')} in a's proposals folder has waited since`), told);
+});
+
+test('L669 minor: a folder that could not be listed this pass does not end the waits in it', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const stuck = { docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) };
+  await w.pass({ ...stuck, now: NOW });
+  const before = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
+  await w.pass({ ...stuck, now: NOW + HOUR, list: () => { throw new Error('EIO'); } });
+  assert.equal(w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since, before.waiting_since, 'still waiting');
+  await w.pass({ ...stuck, now: NOW + 2 * HOUR });
+  assert.equal(waitAlerts(w).length, 1, 'the same wait, not told afresh');
+});
+
+test('L669 minor: a card that cannot be read for one pass holds the file back without ending its wait; the path is cut', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const stuck = { docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) };
+  await w.pass({ ...stuck, now: NOW });
+  const before = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
+  const rec = swapCards(w, {});
+  rec.read = (e, i) => { if (e === 'card') throw new Error('EBUSY: /Users/someone/private/record/card/C-1.json'); return w.rec.read(e, i); };
+  assert.match(one(await w.pass({ ...stuck, rec, now: NOW + HOUR }), 'proposal-C-1.md').refused, /could not be read \(EBUSY: <path>\)/);
+  assert.equal(w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since, before.waiting_since, 'the wait goes on');
+  assert.ok(w.calls.alerts.every((t) => !t.includes('/Users/someone')));
+  await w.pass({ ...stuck, now: NOW + 2 * HOUR });
+  assert.equal(waitAlerts(w).length, 1, 'the same wait, not told afresh');
+});
+
+test('L669 minor: a first-cutover refusal is looked at again once its card changes', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'a change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  let checks = 0;
+  const docsCheck = async () => { checks += 1; return 'app/x.ts is not a docs file'; };
+  const toReview = () => ({ ok: true });
+  assert.match(one(await w.pass({ docsCheck, toReview }), 'proposal-C-1.md').refused, /^First cutover/);
+  await w.pass({ docsCheck, toReview });
+  assert.equal(checks, 1, 'the same card: not checked again');
+  const rec = swapCards(w, { 'C-1': (o) => ({ ...o, rev: o.rev + 1 }) });
+  await w.pass({ rec, docsCheck, toReview });
+  assert.equal(checks, 2, 'a changed card: checked again');
+});
+
+test('L669 minor: a held bundle whose proposal left the folder stays held, its bytes kept', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) });
+  unlinkSync(join(w.dirs.a, 'proposal-C-1.md'));
+  const out = await w.pass({ docsCheck: async () => null, toReview: () => ({ ok: true }) });
+  assert.equal(one(out, 'bundle-C-1.bundle').held, 'held; proposal-C-1.md is not in the folder');
+  assert.equal(one(out, 'bundle-C-1.bundle').refused, undefined);
+  assert.equal(fact(w, 'bundle-C-1.bundle').state, 'held');
+});
+
+test('L669 M1 (M10): the rules failing to read come back as a wait, not as "not this lane\'s change"', async () => {
+  for (const fault of ['could not be read (EACCES: <path>)', 'no readable rules', 'the rules name no docs or research lane']) {
+    const w = world();
+    put(w, 'proposal-C-1.md', 'docs change');
+    put(w, 'bundle-C-1.bundle', 'bytes');
+    const check = routeWith(w, { look: docsFiles, may: () => ({ decision: 'deny', reason: `not this lane's change; MAIN merges it as today: ${fault}` }) });
+    const row = one(await w.pass({ docsCheck: check, toReview: () => ({ ok: true }) }), 'proposal-C-1.md');
+    assert.match(row.waiting ?? '', /the rules could not say/, fault);
+    assert.equal(row.refused, undefined, fault);
+  }
+  // A real "outside the lane" answer is still final.
+  const w = world();
+  put(w, 'proposal-C-1.md', 'a change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const lane = routeWith(w, { look: docsFiles, may: () => ({ decision: 'deny', reason: 'not this lane\'s change; MAIN merges it as today: app/x.ts is outside the docs and research lane' }) });
+  assert.match(one(await w.pass({ docsCheck: lane, toReview: () => ({ ok: true }) }), 'proposal-C-1.md').refused, /^First cutover/);
+});
+
+test('L669 minor: a card read that throws with a local path reaches Joe with the path cut', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  let boom = 1;
+  const check = routeWith(w, { look: docsFiles, may: allowAll, record: { read: (e, i) => { if (e === 'card' && boom) { boom = 0; throw new Error('EACCES: /Users/someone/private/record/card-C-1.json'); } return w.rec.read(e, i); } } });
+  await w.pass({ docsCheck: check, toReview: () => ({ ok: true }) });
+  const [told] = waitAlerts(w);
+  assert.ok(told && !told.includes('/Users/someone'), told);
 });
 
 test('at the second cutover a proposal goes to review once; with no route to review it is refused', async () => {
