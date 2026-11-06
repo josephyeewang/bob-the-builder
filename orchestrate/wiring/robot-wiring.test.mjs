@@ -211,6 +211,19 @@ test('audit #144 r2 n1: a config that names no installRoot is refused by main, w
   assert.match(lines.join('\n'), /installRoot must be a full path/);
 });
 
+test('L639: the robot config refuses the review runner\'s keys, which are the Dispatcher\'s alone', async () => {
+  const { REVIEW_CONFIG_KEYS } = await import('./dispatcher-wiring.mjs');
+  const { CONFIG_KEYS: ROBOT } = await import('./robot-wiring.mjs');
+  assert.equal(REVIEW_CONFIG_KEYS.length, 5);
+  const { checkConfig } = await import('./dispatcher-wiring.mjs');
+  const base = { product: P, ownerUid: process.getuid() };
+  assert.equal(checkConfig(base, { keys: ROBOT, paths: [] }), base);
+  for (const k of REVIEW_CONFIG_KEYS) {
+    assert.ok(!ROBOT.includes(k), k);
+    assert.throws(() => checkConfig({ ...base, [k]: '/x' }, { keys: ROBOT, paths: [] }), new RegExp(`config: unknown key ${k}`));
+  }
+});
+
 // ---- the #137 follow-up (L265; audit-pr137 M1-M7, M9) ----
 
 const lockOf = (w) => w.config.lockFile;

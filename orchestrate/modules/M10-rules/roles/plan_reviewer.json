@@ -1,0 +1,17 @@
+{
+  "role": "plan_reviewer",
+  "model": "main",
+  "effort": "high",
+  "effort_floor": "high",
+  "effort_max": "xhigh",
+  "tools": [
+    "Read",
+    "Glob",
+    "Grep"
+  ],
+  "permission_mode": "dontAsk",
+  "restricted_mode": false,
+  "outbox_kinds": [],
+  "auto_resume": false,
+  "context": "context.plan_reviewer"
+}
