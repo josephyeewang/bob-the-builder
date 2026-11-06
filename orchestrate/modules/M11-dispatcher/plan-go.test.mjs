@@ -22,6 +22,8 @@ import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { planRows } from '../../wiring/review-ports.mjs';
 import { sleepMs } from '../M9-record/lock.mjs';
+import { startGate, fileSet } from './gate.mjs';
+import { rulesWith } from './fixtures.test-helper.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -1509,6 +1511,23 @@ async function withGo(w, id) {
   answer(w, asks(w).find((a) => a.doc.card === id && a.doc.state !== 'consumed').id, 'Go', true);
 }
 const stateOf = (w, id) => w.t.record.read('card', id).doc.state;
+
+test('L696 M1: a card whose rows are only its row files gets its go, moves to ready and passes the start gate', async () => {
+  const files = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
+  const yaml = (id) => `id: ${id}\nwhat: row ${id}\nmodule: M1\ntier: 2\ndone_when: ${ROWS[id].done_when}\nstatus: planned\n`;
+  const w = world();
+  card(w, 'A', { files });
+  w.ports.planRows = githubRows(w, { 'R-1': yaml('R-1') });
+  await withGo(w, 'A');
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready', w.sent.join(' | '));
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.rows, undefined, 'the card names its rows only through its files');
+  const GREEN = { band: 'green', own_building: 'open', prodBlocked: false };
+  const g = startGate({ rules: rulesWith(), rec: w.t.record, card: { id: 'A', ...doc }, kind: 'editing', product: PRODUCT, b: GREEN, running: [] });
+  assert.deepEqual(g, { ok: true });
+  assert.ok(fileSet({ id: 'A', ...doc }, { dailyPatterns: [] }).files.has('docs/blueprint/rows/r-1.yaml'), 'the row is in the card\'s file set');
+});
 
 test('R-0b-170: an ordinary card moves to ready in the pass that records its go, once', async () => {
   const w = world();

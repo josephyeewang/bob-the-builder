@@ -72,8 +72,8 @@ export function githubReads({ gh, entry }) {
  * README), so its rows are the row files among its predicted files, read the way the Merge Gate reads them
  * (gather.mjs, ROW_FILE): the go and the gate agree on which rows a card covers. A card with no row file names no rows,
  * which is told, never asked on.
+ * An id that is not plain is read like any other (the path is encoded); M2's go refuses it (checkRows).
  */
-const ROW_PLAIN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;   // M2's ROW_ID (not exported), checked before GitHub is asked
 export function planRows({ gh, entry, rec }) {
   if (!rec || typeof rec.read !== 'function') throw new Error('planRows needs the Record');
   const { mainSha } = githubReads({ gh, entry });
@@ -89,7 +89,6 @@ export function planRows({ gh, entry, rec }) {
     if (!ids.size) throw new Error(`card ${card} names no row file (docs/blueprint/rows/<id>.yaml) among its files`);
     const rows = {};
     for (const id of [...ids].sort()) {
-      if (!ROW_PLAIN.test(id)) throw new Error(`card ${card} names a row file whose id is not plain`);
       const row = await readRowAt(gh, base, id, sha);
       if (!row) throw new Error(`row ${id} is missing at main ${sha.slice(0, 7)}, or can't be read`);
       rows[id] = row;

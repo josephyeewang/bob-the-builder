@@ -269,14 +269,18 @@ test('A3a: planRows refuses another product before reading anything', async () =
 
 test('A3a: a card the Record lacks, with no file list, or with no row file among its files, throws; no rows are made up', async () => {
   const w = rowsWorld({}, {
-    'C-0': { files: [] }, 'C-5': { files: ['src/a.mjs', 'docs/blueprint/rows/R-1.yml', 'docs/blueprint/rows/sub/R-1.yaml', 'x/docs/blueprint/rows/R-1.yaml', 5] },
+    'C-0': { files: [] }, 'C-5': { files: ['src/a.mjs', 'docs/blueprint/rows/R-1.yml', 'docs/blueprint/rows/sub/R-1.yaml', 'x/docs/blueprint/rows/R-1.yaml', './docs/blueprint/rows/R-1.yaml', '../docs/blueprint/rows/R-1.yaml', 5] },
     'C-2': {}, 'C-3': { files: rf('R-1') }, 'C-4': { files: [rf('.hidden')] }, 'C-6': { rows: ['R-1'], files: ['src/a.mjs'] },
   });
   await assert.rejects(w.read({ product: ENTRY.product, card: 'C-9' }), /the Record has no card C-9/);
   for (const c of ['C-0', 'C-5', 'C-6']) await assert.rejects(w.read({ product: ENTRY.product, card: c }), new RegExp(`card ${c} names no row file \\(docs/blueprint/rows/<id>\\.yaml\\) among its files`), c);
   for (const c of ['C-2', 'C-3']) await assert.rejects(w.read({ product: ENTRY.product, card: c }), new RegExp(`card ${c} has no file list`), c);
-  await assert.rejects(w.read({ product: ENTRY.product, card: 'C-4' }), /names a row file whose id is not plain/);
-  assert.deepEqual(w.gh.asked, Array(7).fill(`${base}/git/ref/heads/main`), 'no row is read for any of them');
+  assert.deepEqual(w.gh.asked, Array(6).fill(`${base}/git/ref/heads/main`), 'no row is read for any of them');
+  // L696 m1: an id that is not plain is read like any other, its path encoded; M2's go refuses it (checkRows)
+  w.gh.asked.length = 0;
+  await assert.rejects(w.read({ product: ENTRY.product, card: 'C-4' }), /row \.hidden is missing at main/);
+  assert.equal(w.gh.asked.length, 2);
+  assert.match(w.gh.asked[1], /\/contents\/docs\/blueprint\/rows\/\.hidden\.yaml\?ref=/);
 });
 
 test('A3a: a row file listed twice, or under its old and new spelling of case, is read once per id', async () => {

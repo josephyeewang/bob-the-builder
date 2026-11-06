@@ -319,6 +319,24 @@ test('one product with no usable rules stops every start on the Mac (MAT-10)', (
   assert.equal(w.rules.get('caps.rounds', { product: 'app' }), 3, 'a per-product value of a healthy product still reads');
 });
 
+test('L696 M1: the rows lane takes a card\'s rows from its own row files as well as card.rows', () => {
+  const w = world();
+  const push = (doc, files, rows) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', ...(rows ? { rows } : {}), doc: { lane: 'lead', ...doc } }, files });
+  const own = { files: ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'] };
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml')]).decision, 'allow', 'no rows field: the row file in its files is its row');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml', 'added')], []).decision, 'allow');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-2.yaml')], ['R-2']).decision, 'allow', 'card.rows still counts');
+  assert.match(push(own, [file('docs/blueprint/rows/R-2.yaml')]).reason, /out of lane/, 'a row in neither is not its own');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml', 'removed')]).decision, 'deny', 'removing its own row is still out of lane');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml'), file('docs/blueprint/rows/R-2.yaml')], ['R-1', 'R-2']).decision, 'allow', 'rows and files together: the union');
+  assert.match(push(own, [file('docs/blueprint/rows/r-1.yaml')]).reason, /out of lane/, 'a row path whose case differs from the card\'s file is refused, never allowed');
+  assert.match(push({ files: ['src/a.mjs', 'docs/research/R-1.yaml'] }, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'a file that is not a row file adds no row');
+  assert.match(push({}, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'neither rows nor files: every row path is refused, as before');
+  for (const files of [undefined, 'docs/blueprint/rows/R-1.yaml', [7, null, 'docs/blueprint/rows/R-1.yml', 'x/docs/blueprint/rows/R-1.yaml']]) {
+    assert.match(push({ files }, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, JSON.stringify(files));
+  }
+});
+
 test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {
   const w = world();
   const push = (lane, files, card = {}) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', rows: ['R-1'], doc: { lane }, ...card }, files });

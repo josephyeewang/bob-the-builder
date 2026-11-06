@@ -102,22 +102,25 @@ test('M13: a path outside the repo refuses', () => {
 
 test('row 61: a card names the row files it touches; named rows overlap on the shared row only', () => {
   assert.equal(go({ card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-2.yaml'] } }).ok, true);
-  assert.match(go({ card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-3.yaml'] } }).reason, /without naming it/);
+  // L696 M1: a row file among the card's files names its row, so it is the card's own (cards carry no rows field; L684)
+  assert.equal(go({ card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-3.yaml'] } }).ok, true);
+  assert.deepEqual([...fileSet({ rows: ['R-2'], files: ['docs/blueprint/rows/R-3.yaml'] }, { dailyPatterns: [] }).files].sort(), ['docs/blueprint/rows/r-2.yaml', 'docs/blueprint/rows/r-3.yaml']);
   const set = (rows) => fileSet({ rows, files: [] }, { dailyPatterns: [] }).files;
   const meet = (x, y) => [...x].some((f) => y.has(f));
   assert.equal(meet(set(['R-1']), set(['R-1'])), true);
   assert.equal(meet(set(['R-1']), set(['R-2'])), false);
 });
 
-// (b) for the lead (L72): M9's card has no `rows` field, so no card in the Record can name a row, and the gate refuses
-// every card that touches a row file. Kept as a todo until M9 has the field (or the gate stops reading it).
-test('row 61 through the Record: two cards each touching only their own row file start together; a shared row id overlaps', { todo: 'M9 card has no rows field (b)' }, () => {
-  const rec = setup({ cards: [card('a', ['docs/blueprint/rows/R-1.yaml'], { rows: ['R-1'] })] });
+// L696 M1: M9's card has no `rows` field, so the gate takes a card's rows from the row files among its files.
+test('row 61 through the Record: two cards each touching only their own row file start together; a shared row overlaps, whatever its case', () => {
+  const rec = setup({ cards: [card('a', ['src/a.js', 'docs/blueprint/rows/R-1.yaml'])] });
   const run = [{ id: 'S-a', product: 'p1', kind: 'editing', card: 'a' }];
-  assert.equal(go({ rec, running: run, card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-2.yaml'] } }).ok, true);
-  assert.equal(go({ rec, running: run, card: { id: 'b', tier: 2, rows: ['R-1'], files: [] } }).ok, false);
-  // a row file the card does not name is not its own
-  assert.match(go({ rec, running: run, card: { id: 'b', tier: 2, rows: ['R-2'], files: ['docs/blueprint/rows/R-3.yaml'] } }).reason, /without naming it/);
+  assert.deepEqual(go({ rec, running: run, card: { id: 'b', tier: 2, files: ['docs/blueprint/rows/R-2.yaml'] } }), { ok: true });
+  for (const b of [{ files: ['docs/blueprint/rows/R-1.yaml'] }, { files: ['DOCS/Blueprint/Rows/r-1.YAML'] }, { rows: ['r-1'], files: [] }]) {
+    const r = go({ rec, running: run, card: { id: 'b', tier: 2, ...b } });
+    assert.equal(r.ok, false, JSON.stringify(b));
+    assert.match(r.reason, /r-1\.yaml/i, JSON.stringify(b));
+  }
 });
 
 test("row 61 / M13: a card touching blueprint.yaml or cards/x.md can't run beside the Lead's daily card", () => {
