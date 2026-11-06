@@ -1068,6 +1068,11 @@ test('add-to-install: every refusal comes before any change', async () => {
     ['another version folder in the copy', { claudeBin: 'X' }, (w) => { const f = join(w.ext, 'review.json'); writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), claudeBin: pinnedBinary(w.root, '2.1.300') })); }, /claudeBin must be/],
     ['a hooks folder elsewhere in the copy', { hooksDir: 'X' }, (w) => { const f = join(w.ext, 'review.json'); writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), hooksDir: join(w.root, 'claude-code', 'hooks') })); }, /hooksDir must be/],
     ['a runner config for another copy', { installRoot: '/elsewhere' }, null, /installRoot must be/],
+    // JSON that is not one object: a test for truth would skip every check (#243 r1 Minor 1).
+    ...['null', '0', 'false', '""'].map((t) => [`a review.json holding ${t}`, {}, (w) => writeFileSync(join(w.ext, 'review.json'), t), /must be one JSON object/]),
+    // A wiring of the right form that the copy does not hold: refused at the plan, not after every step (#243 r1 Minor 2).
+    ['a wiring the copy does not hold', {}, (w) => { const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, wiring: `${c.installRoot}/modules/M4-workshop/launcher/nope.mjs` })); }, /wiring .*is not a file in the copy/],
+    ['a budget module the copy does not hold', {}, (w) => { const f = join(w.ext, 'review.json'); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, budget: `${c.installRoot}/modules/M4-workshop/launcher/gone.mjs` })); }, /budget .*is not a file in the copy/],
     ['an updater config the updater refuses', {}, (w) => { const f = join(real(w), UPDATER_CONFIG); const c = JSON.parse(readFileSync(f, 'utf8')); writeFileSync(f, JSON.stringify({ ...c, keep: ['bin'] })); }, /updater\.json was refused/],
   ];
   for (const [name, over, change, why] of cases) {
@@ -1077,6 +1082,30 @@ test('add-to-install: every refusal comes before any change', async () => {
     assert.equal(r.code, 1, name); assert.match(r.text, why, name); assert.match(r.text, /nothing was changed/, name);
     assert.deepEqual(tree(real(w)), before, name); assert.equal(w.mac.log.length, n, name);
   }
+});
+
+test('add-to-install: the base wall comes first, at the plan and again as the first step (#243 r1 Minor 7)', async () => {
+  const w = await readyToAdd(); const o = parseArgs(ADD); const rs = (p) => readFileSync(p, 'utf8');
+  const before = tree(real(w)); const n = w.mac.log.length;
+  const p = planCommand(w.mac, w.cfg, o, { readSource: rs });
+  assert.deepEqual(p.problems, []); assert.match(p.ops[0].text, /^check that every folder above .* is root's alone/);
+  // Changed after the plan: the first step stops the run before any change.
+  chmodSync(w.mac.at('/Library'), 0o777);
+  assert.throws(() => { for (const x of p.ops) x.run(); }, /not safe for root to work in/);
+  assert.deepEqual(tree(real(w)), before); assert.equal(w.mac.log.length, n);
+  // Already unsafe at the plan: no steps at all.
+  const q = planCommand(w.mac, w.cfg, o, { readSource: rs });
+  assert.deepEqual(q.ops, []); assert.match(q.problems.join(), /folders above .* are not safe for root to work in/);
+});
+
+test('add-to-install: review.json goes into the copy byte for byte, never re-written by a parser', async () => {
+  const w = await readyToAdd(); const f = join(w.ext, 'review.json');
+  const c = JSON.parse(readFileSync(f, 'utf8'));
+  const text = `{  "hooksDir" : ${JSON.stringify(c.hooksDir)},\n\t"pin": "${PIN}" ,${JSON.stringify(Object.fromEntries(Object.entries(c).filter(([k]) => k !== 'hooksDir' && k !== 'pin'))).slice(1, -1)} }\r\n`;
+  assert.notEqual(text, JSON.stringify(JSON.parse(text))); assert.notEqual(text, `${JSON.stringify(JSON.parse(text), null, 1)}\n`);
+  writeFileSync(f, text);
+  const r = w.run(ADD); assert.equal(r.code, 0, r.text);
+  assert.equal(readFileSync(join(real(w), RUNNER_CONFIG), 'utf8'), text);
 });
 
 test('add-to-install: on a Mac with nothing installed it says so and changes nothing', async () => {
@@ -1123,7 +1152,7 @@ test('add-to-install: a dry run lists the steps and changes nothing; the flags b
   assert.throws(() => parseArgs(['install', '--pin', PIN]), /only for add-to-install/);
   // watch-app's --rules-sha256 and this command's --pin are kept apart: neither is taken for the other (merge with main, #243).
   assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA, '--rules-sha256', SHA]), /only for watch-app/);
-  assert.throws(() => parseArgs(['watch-app', '--pin', PIN]), /only for add-to-install/);
+  assert.throws(() => parseArgs(['watch-app', '--app-id', '1', '--app-installation', '2', '--app-key-name', 'app-key', '--pin', PIN]), /only for add-to-install/);
   assert.equal(parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA]).claudePin, PIN);
 });
 

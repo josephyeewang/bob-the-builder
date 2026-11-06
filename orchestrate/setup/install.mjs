@@ -106,8 +106,11 @@ function readRunnerConfig(io, cfg, { readSource, carried, problems }) {
   const P = installPaths(cfg);
   let rc; let rcText = null;
   try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
-  if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
-  if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
+  let parsed = false;
+  if (rcText !== null) { try { rc = JSON.parse(rcText); parsed = true; } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
+  // null, 0, false and "" are JSON too, and a test for truth would let them skip every check below (#243 r1 Minor 1).
+  if (parsed && (rc === null || typeof rc !== 'object')) { problems.push(`the runner config ${cfg.runnerConfig} must be one JSON object`); rc = undefined; }
+  if (rc && rc.installRoot !== io.at(P.installRoot)) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
   const inCopy = io.at(P.installRoot);
   for (const n of names) {
@@ -194,6 +197,12 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   if (rc && typeof rc === 'object') {
     const want = { pin, claudeBin: pinnedBinary(inCopy, pin), hooksDir: join(inCopy, HOOKS) };
     for (const [k, v] of Object.entries(want)) if (rc[k] !== v) problems.push(`the runner config's ${k} must be ${v}`);
+    // The copy is here to look in: a wiring or budget it does not hold would pass the plan and fail only after every step (#243 r1 Minor 2).
+    for (const n of RUNNER_MODULES) {
+      if (typeof rc[n] !== 'string' || !rc[n].startsWith(`${inCopy}/`)) continue;   // its form was refused above
+      let st = null; try { st = io.lstatReal(io.at(join(copy, rc[n].slice(inCopy.length + 1)))); } catch { /* missing */ }
+      if (!st?.isFile()) problems.push(`the runner config's ${n} (${rc[n]}) is not a file in the copy`);
+    }
   }
   if (problems.length) return { ops: [], problems, installed: false };
 
