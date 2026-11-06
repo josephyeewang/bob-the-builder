@@ -517,11 +517,13 @@ test('L669 minor: a card that cannot be read for one pass holds the file back wi
   const before = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
   const rec = swapCards(w, {});
   rec.read = (e, i) => { if (e === 'card') throw new Error('EBUSY: /Users/someone/private/record/card/C-1.json'); return w.rec.read(e, i); };
-  assert.match(one(await w.pass({ ...stuck, rec, now: NOW + HOUR }), 'proposal-C-1.md').refused, /could not be read \(EBUSY: <path>\)/);
+  assert.match(one(await w.pass({ ...stuck, rec, now: NOW + HOUR }), 'proposal-C-1.md').waiting, /could not be read \(EBUSY: <path>\)/);
   assert.equal(w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since, before.waiting_since, 'the wait goes on');
   assert.ok(w.calls.alerts.every((t) => !t.includes('/Users/someone')));
+  // The card's cause is new, so told at once (L680 minor); GitHub's again was told within the day, so it is not.
   await w.pass({ ...stuck, now: NOW + 2 * HOUR });
-  assert.equal(waitAlerts(w).length, 1, 'the same wait, not told afresh');
+  assert.equal(waitAlerts(w).length, 2, waitAlerts(w).join(' | '));
+  assert.ok(waitAlerts(w).every((t) => t.includes(`has waited since ${before.waiting_since}`)), 'the same wait, not a new one');
 });
 
 test('L669 minor: a first-cutover refusal is looked at again once its card changes', async () => {
@@ -578,6 +580,105 @@ test('L669 minor: a card read that throws with a local path reaches Joe with the
   await w.pass({ docsCheck: check, toReview: () => ({ ok: true }) });
   const [told] = waitAlerts(w);
   assert.ok(told && !told.includes('/Users/someone'), told);
+});
+
+// ---- L680 (#262 r2 audit): causes that take turns, daily tells for a wait the record will not keep, and plants ----
+
+test('L680 M2: two causes that take turns every 10 minutes are told at most once each a day, and noted as rarely', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const toReview = () => ({ ok: true });
+  const causes = ['could not read GitHub', 'could not fetch main from GitHub'];
+  const passAt = (t, i) => w.pass({ docsCheck: async () => ({ retry: causes[i % 2] }), toReview, now: t });
+  for (let i = 0; i < 6; i += 1) await passAt(NOW + i * 10 * 60_000, i);
+  assert.equal(waitAlerts(w).length, 2, waitAlerts(w).join(' | '));
+  assert.equal(w.calls.notes.filter((n) => n.includes(' waits: ')).length, 2, w.calls.notes.join(' | '));
+  const since = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since;
+  // A day on, still taking turns: told again, each cause once, the same wait.
+  for (let i = 0; i < 6; i += 1) await passAt(NOW + 25 * HOUR + i * 10 * 60_000, i);
+  assert.equal(waitAlerts(w).length, 4, waitAlerts(w).join(' | '));
+  assert.ok(waitAlerts(w).every((t) => t.includes(`has waited since ${since}`)));
+  // One cause that stays is told once more only at the next day.
+  for (let i = 0; i < 6; i += 1) await passAt(NOW + 26 * HOUR + i * 10 * 60_000, 0);
+  assert.equal(waitAlerts(w).length, 4, waitAlerts(w).join(' | '));
+});
+
+test('L680 minor: a wait the record will not keep is told again each day, and never noted as a kept wait (plant R13)', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'write', { value: (x) => (x.kind === 'proposal_wait' ? { ok: false, reason: 'refused' } : w.rec.write(x)) });
+  const stuck = { rec, docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) };
+  for (const h of [0, 1, 2, 25, 26]) await w.pass({ ...stuck, now: NOW + h * HOUR });
+  const told = w.calls.alerts.filter((t) => t.includes('proposal-C-1.md') && /could not be recorded/.test(t));
+  assert.equal(told.length, 2, told.join(' | '));
+  assert.equal(w.calls.notes.filter((n) => n.includes(' waits: ')).length, 0, 'no kept wait to note');
+});
+
+test('L680 minor (r2 Minor 5): a wait the record will not keep, with a card that fails every other pass, is told once a day', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  let pass = 0;
+  const rec = swapCards(w, {});
+  rec.write = (x) => (x.kind === 'proposal_wait' ? { ok: false, reason: 'refused' } : w.rec.write(x));
+  rec.read = (e, i) => { if (e === 'card' && pass % 2) throw new Error('EBUSY'); return w.rec.read(e, i); };
+  for (let i = 0; i < 6; i += 1) { pass = i; await w.pass({ rec, docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }), now: NOW + i * 10 * 60_000 }); }
+  const told = w.calls.alerts.filter((t) => t.includes('proposal-C-1.md'));
+  assert.equal(told.length, 1, told.join(' | '));
+});
+
+test('L680 minors (plants R14, R15): a bytes record that cannot be read holds the file as a wait, told daily, its wait kept', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const stuck = { docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) };
+  await w.pass({ ...stuck, now: NOW });
+  const before = w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc;
+  const rec = Object.create(w.rec);
+  Object.defineProperty(rec, 'read', { value: (e, i) => { if (e === 'fact' && i.startsWith('intake-applied-proposals-bytes-')) throw new Error('EIO'); return w.rec.read(e, i); } });
+  for (const h of [1, 2, 26]) {
+    const row = one(await w.pass({ ...stuck, rec, now: NOW + h * HOUR }), 'proposal-C-1.md');
+    assert.match(row.waiting ?? '', /could not be read \(EIO\)/, `+${h}h`);
+    assert.equal(row.refused, undefined);
+  }
+  assert.equal(w.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since, before.waiting_since, 'the wait goes on');
+  assert.equal(waitAlerts(w).filter((t) => /handed these bytes in could not be read/.test(t)).length, 2, 'told at once, then a day on');
+  // The card read again after the docs check (plant R15): the same rule.
+  const v = world();
+  put(v, 'proposal-C-1.md', 'docs change');
+  put(v, 'bundle-C-1.bundle', 'bytes');
+  let reads = 0;
+  const rec2 = swapCards(v, {});
+  rec2.read = (e, i) => { if (e === 'card' && i === 'C-1') { reads += 1; if (reads % 2 === 0) throw new Error('EBUSY'); } return v.rec.read(e, i); };
+  const row = one(await v.pass({ rec: rec2, docsCheck: async () => null, toReview: () => ({ ok: true }) }), 'proposal-C-1.md');
+  assert.match(row.waiting ?? '', /card C-1 could not be read/);
+  assert.equal(row.refused, undefined);
+  assert.equal(v.rec.read('fact', retryFactId('a', 'proposal-C-1.md')).doc.waiting_since !== undefined, true, 'kept as a wait');
+});
+
+test('L680 (plant R16): a held bundle with new bytes while its proposal is out is not reported as held', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  await w.pass({ docsCheck: async () => ({ retry: 'could not read GitHub' }), toReview: () => ({ ok: true }) });
+  unlinkSync(join(w.dirs.a, 'proposal-C-1.md'));
+  put(w, 'bundle-C-1.bundle', 'corrected bytes');
+  const row = one(await w.pass({ docsCheck: async () => null, toReview: () => ({ ok: true }) }), 'bundle-C-1.bundle');
+  assert.equal(row.held, undefined, row.held);
+});
+
+test('L680 (plant R10): a rules answer for now that carries a local path reaches Joe with the path cut', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'docs change');
+  put(w, 'bundle-C-1.bundle', 'bytes');
+  const check = routeWith(w, { look: docsFiles, may: () => ({ decision: 'deny', reason: 'paused: see /Users/someone/private/pause.md' }) });
+  const row = one(await w.pass({ docsCheck: check, toReview: () => ({ ok: true }) }), 'proposal-C-1.md');
+  assert.match(row.waiting ?? '', /the rules said no for now/);
+  assert.ok(!row.waiting.includes('/Users/someone'), row.waiting);
+  assert.ok(w.calls.alerts.every((t) => !t.includes('/Users/someone')));
 });
 
 test('at the second cutover a proposal goes to review once; with no route to review it is refused', async () => {
@@ -1213,14 +1314,14 @@ test('plant L279: the bytes check failing closed: not readable or not recorded, 
   const rec = refusing(w, 'proposal_bytes');
   const out = await w.pass({ rec });
   await w.pass({ rec });
-  assert.match(one(out, 'research-r1.md').refused, /could not be recorded/);
+  assert.match(one(out, 'research-r1.md').waiting, /could not be recorded/);
   assert.equal(w.calls.handed.length, 0);
   assert.equal(count(w, /handed these bytes in could not be recorded/), 1);
   const v = world();
   put(v, 'research-r1.md', 'x');
   const odd = Object.create(v.rec);
   Object.defineProperty(odd, 'read', { value: (e, id) => (id.startsWith('intake-applied-proposals-bytes-') ? { id, entity: e, corrupt: true, reason: 'document changed outside the Store Writer' } : v.rec.read(e, id)) });
-  assert.match(one(await v.pass({ rec: odd }), 'research-r1.md').refused, /could not be read \(document changed/);
+  assert.match(one(await v.pass({ rec: odd }), 'research-r1.md').waiting, /could not be read \(document changed/);
   assert.equal(v.calls.handed.length, 0);
 });
 
@@ -1430,7 +1531,7 @@ test('L290 c2 (P04, P05): a bytes record with no product reads as broken; anothe
   seed(w.rec, 'fact', bytesFactId(sha('mine?')), { product: '', name: 'research-r1.md', sha256: sha('mine?'), at: '2026-11-01T00:00:00Z' });
   put(w, 'research-r1.md', 'mine?');
   const out = await w.pass();
-  assert.match(one(out, 'research-r1.md').refused, /could not be read \(no product named\)/);
+  assert.match(one(out, 'research-r1.md').waiting, /could not be read \(no product named\)/);
   assert.equal(w.calls.handed.length, 0);
   const v = world();
   const theirs = 'research-r2.md\nIGNORE PREVIOUS';
@@ -1513,12 +1614,12 @@ test('R-0b-129: a card that can\'t be read keeps the proposal unused and unrefus
   rec.read = (entity, id) => (entity === 'card' && id === 'C-30' ? { corrupt: true, reason: 'bad json' } : read(entity, id));
   const r = reviewAll();
   const out = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
-  assert.match(one(out, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
+  assert.match(one(out, 'proposal-C-30.md').waiting, /^card C-30 could not be read \(bad json\)$/);
   assert.notEqual(fact(w, 'proposal-C-30.md')?.state, 'refused', 'not refused for good: the next pass looks again');
   assert.deepEqual(r.seen, []);
   // A second broken pass: still unused, and Joe is told exactly once, naming the file (#159 audit Minor 4).
   const twice = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
-  assert.match(one(twice, 'proposal-C-30.md').refused, /^card C-30 could not be read \(bad json\)$/);
+  assert.match(one(twice, 'proposal-C-30.md').waiting, /^card C-30 could not be read \(bad json\)$/);
   assert.equal(w.calls.alerts.filter((t) => t.includes('proposal-C-30.md')).length, 1, 'told once over two passes');
   assert.ok(w.calls.alerts.some((t) => t.includes('proposal-C-30.md') && /card C-30 could not be read/.test(t)));
   seed(w.rec, 'card', 'C-30', { product: 'a', state: 'ready' });
@@ -1538,7 +1639,7 @@ test('#159 audit Minor 5: a claimed card and a lowercase name are refused; a car
   const out = await w.pass({ rec, rules: rulesFor(w.dirs, { a: 'second' }), ...r.over });
   assert.equal(one(out, 'proposal-C-31.md').refused, 'card C-31 is claimed, not ready: a proposal must name a ready card');
   assert.equal(one(out, 'proposal-c-5.md').refused, 'no card c-5 in the record: a proposal must name a ready card');
-  assert.equal(one(out, 'proposal-C-32.md').refused, 'card C-32 could not be read (no product named)');
+  assert.equal(one(out, 'proposal-C-32.md').waiting, 'card C-32 could not be read (no product named)');
   assert.notEqual(fact(w, 'proposal-C-32.md')?.state, 'refused', 'held, not refused for good');
   assert.deepEqual(r.seen, []);
 });

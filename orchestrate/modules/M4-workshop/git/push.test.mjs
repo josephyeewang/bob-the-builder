@@ -28,7 +28,7 @@ import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
 import { fileURLToPath } from 'node:url';
-import { pushWorld, makeFakeScanner, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
+import { pushWorld, makeFakeScanner, makeFakeGit, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
 // Tests can't chown, so every file here is the test user's. The worker door expects that user by default (the worker
@@ -979,7 +979,9 @@ test('R-0b-47 round 4 MIN-3: a git failure\'s reason carries no folder path, and
   // A lock file on the mirror's branch makes the last git step fail with git's own error text.
   const r = await w.push({ afterStage: () => { mkdirSync(join(w.mirror, 'refs/heads/card'), { recursive: true }); writeFileSync(join(w.mirror, 'refs/heads/card/c-1.lock'), ''); } });
   assert.equal(r.ok, false);
-  assert.match(r.reason, /^the push script failed: git update-ref failed .*<path>/);
+  // L680: the push went out, and the mirror could not be written: the mirror's, so a wait that says so.
+  assert.equal(r.retry, true, r.reason);
+  assert.match(r.reason, /pushed, but the mirror's copy of the branch could not be moved/);
   assert.ok(!r.reason.includes(w.root), r.reason);
   assert.ok(!JSON.stringify(w.record.read('fact', 'push.C-1.a1').doc).includes(w.root), 'the record holds a folder path');
   assert.deepEqual(readdirSync(w.ports.privateDir), []);
@@ -1003,7 +1005,7 @@ test('R-0b-47 round 4 MIN-1, real gitleaks: a secret laid across two rows of an 
 test('#32 round 3 (L51): every push-script call that names the GitHub address passes it as the allowed address', () => {
   const src = readFileSync(new URL('./push.mjs', import.meta.url), 'utf8');
   assert.match(src, /const auth = \{ extraConfig: tokenConfig\(token\), address: url \};/);
-  const calls = src.split('\n').filter((l) => /\bgit(Ok)?\(\[/.test(l) && /, url[,\]]/.test(l));
+  const calls = src.split('\n').filter((l) => /\b(git|gitOk|gitDo|gitText|run)\(\[/.test(l) && /, url[,\]]/.test(l));
   assert.equal(calls.length, 3, calls.join('\n'));
   for (const l of calls) assert.match(l, /\.\.\.auth \}/, l);
 });
@@ -1233,7 +1235,8 @@ test('L325 m1: the push script reads which bytes from the intake\'s fact: nothin
   const before = await w.ghRefs();
   // No fact: even the right hash, named by the caller, is nothing.
   const none = await w.pushP({ product: PRODUCT, card: 'C-1', sha256 });
-  assert.deepEqual(none, { ok: false, reason: 'the intake holds no bundle for this card' });
+  // A wait, never final: the intake read it held this same pass, so only a Record fault or a race says otherwise (L680).
+  assert.deepEqual(none, { ok: false, reason: 'the intake holds no bundle for this card', retry: true });
   assert.equal(await w.ghRefs(), before);
   // A file the intake refused is not held.
   w.hold(sha256, 'C-1', PRODUCT, 'refused');
@@ -1303,6 +1306,9 @@ test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, th
     ['not onboarded yet', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) }), /not onboarded/],
     ['no proposals folder in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }), /no proposals folder in the rules/],
     ['the outbox gone', (w) => { rmSync(w.proposals, { recursive: true, force: true }); return {}; }, /^the outbox is missing$/],
+    // L680 (plants R5, R6): the product's setup is fixed in the rules, and the same bytes go on.
+    ['no repo in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.repo': undefined } }) }), /no valid GitHub repo in the rules/],
+    ['no mirror in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.mirror': undefined } }) }), /no mirror in the rules/],
   ];
   for (const [name, set, re] of cases) {
     const w = await world();
@@ -1313,6 +1319,144 @@ test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, th
     assert.ok(!r.reason.includes(w.root), `${name}: no local path`);
     assert.equal(r.retry, true, `${name}: may pass by itself`);
     assert.ok(!(await w.ghRefs()).includes('refs/heads/card/c-1'), `${name}: nothing pushed`);
+  }
+});
+
+// ---- L680: one rule for every git call. A git that did not finish or start is a wait; git's own answer is final when
+// the command asks about the bundle, and a wait when it asks about GitHub or the mirror. ----
+const nothingPushed = async (w, name) => assert.ok(!(await w.ghRefs()).includes('refs/heads/card/c-1'), `${name}: nothing pushed`);
+const withFake = async (rules, testGit = {}) => {
+  const w = await world();
+  await docChange(w);
+  const fake = makeFakeGit(join(w.root, 'fake-git'), rules);
+  return { w, fake, push: () => w.pushP({ product: PRODUCT, card: 'C-1' }, { testGit: { bin: fake.bin, ...testGit } }) };
+};
+
+test('L680: the fake git runs the real one for a command it has no rule for, so a push through it passes', async () => {
+  const { w, fake, push } = await withFake([]);
+  const r = await push();
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(fake.calls().includes('diff-tree') && fake.calls().includes('ls-remote'), fake.calls().join(' '));
+  assert.ok((await w.ghRefs()).includes('refs/heads/card/c-1'));
+});
+
+test('L680: a git that runs past its time limit is a wait, whatever it was asked', async () => {
+  for (const [cmd, has] of [['check-ref-format'], ['ls-remote'], ['bundle'], ['fetch', '.bundle'], ['rev-list'], ['diff-tree'], ['cat-file'], ['push']]) {
+    const { w, push } = await withFake([{ cmd, has, sleep: true }], { timeouts: { [cmd]: 1500 } });
+    const r = await push();
+    assert.equal(r.ok, false, cmd);
+    assert.match(r.reason, /git did not finish/, cmd);
+    assert.equal(r.retry, true, `${cmd}: a stall may pass by itself`);
+    await nothingPushed(w, cmd);
+  }
+});
+
+test('L680: a git that does not start is a wait, and so is a git too old to trust', async () => {
+  for (const cmd of ['check-ref-format', 'diff-tree', 'bundle', 'fetch']) {
+    const { w, push } = await withFake([], { failStart: [cmd] });
+    const r = await push();
+    assert.equal(r.ok, false, cmd);
+    assert.equal(r.retry, true, `${cmd}: ${r.reason}`);
+    await nothingPushed(w, cmd);
+  }
+  const { w, push } = await withFake([{ cmd: '--version', stdout: 'git version 1.0.0\n' }]);
+  const r = await push();
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /older than/);
+  assert.equal(r.retry, true);
+  await nothingPushed(w, 'version');
+});
+
+test('L680: git\'s own answer is final about the bundle, and a wait about GitHub or the mirror', async () => {
+  const cases = [
+    // About the bundle's own names and commits: final.
+    [{ cmd: 'check-ref-format', code: 1 }, /is not a valid name/, undefined],
+    [{ cmd: 'diff-tree', code: 128, stderr: 'fatal: bad object\n' }, /could not list a commit's changes/, undefined],
+    [{ cmd: 'rev-list', code: 128 }, /could not list the branch's commits/, undefined],
+    [{ cmd: 'cat-file', code: 128 }, /could not read commit/, undefined],
+    [{ cmd: 'bundle', code: 1, stderr: 'error: missing prerequisite\n' }, /does not verify/, undefined],
+    [{ cmd: 'fetch', has: '.bundle', code: 128, stderr: 'fatal: early EOF\n' }, /its pack is cut off or missing objects/, undefined],
+    // About GitHub or the mirror: a wait.
+    [{ cmd: 'fetch', has: '.bundle', code: 1, stderr: "error: cannot lock ref 'refs/x': File exists\n" }, /the mirror could not be written/, true],
+    [{ cmd: 'ls-remote', code: 128 }, /could not read GitHub/, true],
+    [{ cmd: 'push', code: 1 }, /GitHub refused the push/, true],
+  ];
+  for (const [rule, re, retry] of cases) {
+    const name = `${rule.cmd} ${rule.code}`;
+    const { w, push } = await withFake([rule]);
+    const r = await push();
+    assert.equal(r.ok, false, name);
+    assert.match(r.reason, re, name);
+    assert.equal(r.retry, retry, `${name}: ${r.reason}`);
+    await nothingPushed(w, name);
+  }
+});
+
+test('L680 minor: merge-base --is-ancestor\'s exit 1 is "moved" (final); any other failure of it is a wait', async () => {
+  for (const [code, re, retry] of [[1, /has moved/, undefined], [128, /could not compare the branch on GitHub/, true]]) {
+    const w = await world();
+    await docChange(w);
+    assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).ok, true);
+    await w.commit('more', (c) => writeFileSync(join(c, 'README.md'), 'better still\n'));
+    await w.propose();
+    const before = await w.ghRefs();
+    const fake = makeFakeGit(join(w.root, 'fake-git'), [{ cmd: 'merge-base', has: '--is-ancestor', code }]);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' }, { testGit: { bin: fake.bin } });
+    assert.equal(r.ok, false, String(code));
+    assert.match(r.reason, re, String(code));
+    assert.equal(r.retry, retry, `${code}: ${r.reason}`);
+    assert.equal(await w.ghRefs(), before);
+  }
+});
+
+test('L680 (plant R4): a bundle in the outbox that is a link is refused for good; one not there is a wait', async () => {
+  const w = await world();
+  const sha256 = await docChange(w);
+  const p = join(w.proposals, 'bundle-C-1.bundle');
+  renameSync(p, join(w.root, 'real.bundle'));
+  symlinkSync(join(w.root, 'real.bundle'), p);
+  const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'the bundle in the outbox is a link');
+  assert.equal(r.retry, undefined, 'final');
+  await nothingPushed(w, 'link');
+  assert.ok(sha256);
+});
+
+// The auditor's three broken bundles (r2): `bundle verify` reads only the header, so each fails at the fetch, and each is
+// the bundle's own fault: refused, never a wait (L680 M1).
+const rehold = (w) => w.hold(createHash('sha256').update(readFileSync(join(w.proposals, 'bundle-C-1.bundle'))).digest('hex'));
+const raw = async (w, args, input) => { const r = await git(args, { ...w.cg, input }); assert.equal(r.code, 0, r.stderr); return r.stdout; };
+
+test('L680 M1: a cut-off bundle, one whose branch names a tree, and one missing an object are each refused, never a wait', async () => {
+  const control = await world();
+  await docChange(control);
+  assert.equal((await control.pushP({ product: PRODUCT, card: 'C-1' })).ok, true, 'control: a whole bundle passes');
+  const breaks = {
+    'cut off': async (w) => { const p = join(w.proposals, 'bundle-C-1.bundle'); const b = readFileSync(p); writeFileSync(p, b.subarray(0, b.length - 30)); },
+    'a tree for a branch': async (w) => {
+      const tree = (await raw(w, ['rev-parse', 'card/c-1^{tree}'])).toString().trim();
+      const objs = (await raw(w, ['ls-tree', '-r', 'card/c-1'])).toString().trim().split('\n').map((l) => l.split(/\s+/)[2]);
+      const pack = await raw(w, ['pack-objects', '-q', '--stdout'], Buffer.from(`${[...objs, tree].join('\n')}\n`));
+      writeFileSync(join(w.proposals, 'bundle-C-1.bundle'), Buffer.concat([Buffer.from(`# v2 git bundle\n${tree} refs/heads/card/c-1\n\n`), pack]));
+    },
+    'a missing object': async (w) => {
+      const tip = (await raw(w, ['rev-parse', 'card/c-1'])).toString().trim();
+      const main = (await raw(w, ['rev-parse', 'main'])).toString().trim();
+      const pack = await raw(w, ['pack-objects', '-q', '--stdout'], Buffer.from(`${tip}\n`));
+      writeFileSync(join(w.proposals, 'bundle-C-1.bundle'), Buffer.concat([Buffer.from(`# v2 git bundle\n-${main} first\n${tip} refs/heads/card/c-1\n\n`), pack]));
+    },
+  };
+  for (const [name, spoil] of Object.entries(breaks)) {
+    const w = await world();
+    await docChange(w);
+    await spoil(w);
+    rehold(w);
+    const r = await w.pushP({ product: PRODUCT, card: 'C-1' });
+    assert.equal(r.ok, false, name);
+    assert.equal(r.retry, undefined, `${name}: the bundle's own fault is final: ${r.reason}`);
+    assert.ok(!r.reason.includes(w.root), `${name}: no local path`);
+    await nothingPushed(w, name);
   }
 });
 

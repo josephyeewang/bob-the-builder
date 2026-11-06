@@ -22,6 +22,9 @@ import { plainError } from '../M4-workshop/git/push.mjs';
 export const NOT_THIS_LANE = 'not this lane\'s change';
 // M10's docs-lane check says these when its rules can't be read or name no lane (lane-check.mjs docsLaneProblem): a
 // rules fault worded as an answer about the change. Fixed in the rules, the same bytes pass, so each is a wait (L669).
+// "could not be read (...)" is M10's catch-all for a check that threw: always a wait here, even if the change itself had
+// made it throw. With git's own path strings nothing in the change can make problem() throw today (r2 cosmetic 2); a
+// check that could would need its own answer here.
 const LANE_RULES_FAULTS = [/^could not be read \(/, /^no readable rules$/, /^the rules name no docs or research lane$/];
 const LANE_PREFIX = `${NOT_THIS_LANE}; MAIN merges it as today: `;
 

@@ -41,8 +41,9 @@
 
 import { lstatSync, openSync, fstatSync, readSync, writeSync, closeSync, mkdtempSync, rmSync, constants as C } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { join, isAbsolute } from 'node:path';
-import { git, gitOk, checkMirror, checkGitVersion } from './safe-git.mjs';
+import { git, checkMirror, checkGitVersion } from './safe-git.mjs';
 import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
@@ -80,9 +81,34 @@ const no = (reason) => { throw new Refusal(reason); };
 // intake held it): the caller keeps the work and tries again (`retry: true` on the answer), where every other refusal is
 // the end of it (L325 m2, L597 (2)).
 const later = (reason) => { const e = new Refusal(reason); e.retry = true; throw e; };
-// A local git run that did not finish (safe-git's own time limit, a spawn failure or its refusal: code -1) says nothing
-// about the bundle: it is a wait. Git's own exit code is its answer, and `final` is said (L669 M1).
-const gitAnswer = (r, final) => (r.code === -1 ? later(`git did not finish: ${plainError(String(r.stderr ?? '').slice(0, 200))}`) : no(final));
+// One rule for every git call in this script (L680). A git that did not finish (safe-git's time limit, a failed start, or
+// its refusal to run: code -1) says nothing about the bundle, so it is a wait. Git's own non-zero answer is judged by what
+// the command asks about: the bundle's own bytes or names (BUNDLE) is final, `no`; GitHub or the mirror (PLACE) may pass
+// by itself, `later`. `final` is the reason said either way.
+const BUNDLE = 'bundle';
+const PLACE = 'GitHub or the mirror';
+// git's words for a mirror it could not write (a stale lock, a full or read-only disk): not the bundle's fault.
+const MIRROR_FAULT = /cannot lock ref|unable to create '[^']*\.lock'|\.lock': File exists|no space left on device|disk quota exceeded|read-only file system/i;
+const gitAnswer = (r, about, final) => {
+  if (r.code === -1) later(`git did not finish: ${plainError(String(r.stderr ?? '').slice(0, 200))}`);
+  return about === BUNDLE ? no(final) : later(final);
+};
+// Tests only (createPushScript's testGit): { bin, timeouts: { <command>: ms }, failStart: [<command>] } for this run's git
+// calls, so a test can make one command stall past its time limit, fail to start, or answer as it likes.
+const gitTest = new AsyncLocalStorage();
+function run(args, opts) {
+  const t = gitTest.getStore();
+  if (!t) return git(args, opts);
+  const cmd = args[0];
+  return git(args, { ...opts, ...(t.bin ? { gitBin: t.bin } : {}), ...(t.timeouts?.[cmd] ? { timeoutMs: t.timeouts[cmd] } : {}), ...(t.failStart?.includes(cmd) ? { gitBin: '/nonexistent/git' } : {}) });
+}
+/** git `args`, through the one rule: its answer when it exits 0, else a wait or a refusal (gitAnswer). */
+async function gitDo(args, opts, about, final) {
+  const r = await run(args, opts);
+  if (r.code !== 0) gitAnswer(r, about, final);
+  return r;
+}
+const gitText = async (args, opts, about, final) => (await gitDo(args, opts, about, final)).stdout.toString('utf8');
 
 /** An error's text with its folder paths cut to <path>, at most 200 characters: one rule for every error a caller shows. */
 export const plainError = (m) => String(m).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200);
@@ -166,8 +192,7 @@ function readReport(folder, { file, sha256, size }, { uid, folderUid, fstat = fs
 async function treeWith(mirror, tree, [name, ...rest], blob) {
   const rows = [];
   if (tree) {
-    const r = await git(['ls-tree', '-z', tree], { gitDir: mirror, purpose: 'push-research-tree' });
-    if (r.code !== 0) no('could not read main\'s files');
+    const r = await gitDo(['ls-tree', '-z', tree], { gitDir: mirror, purpose: 'push-research-tree' }, PLACE, 'could not read main\'s files');
     rows.push(...r.stdout.toString('latin1').split('\0').filter(Boolean));
   }
   const have = rows.find((row) => row.slice(row.indexOf('\t') + 1) === name);
@@ -175,22 +200,20 @@ async function treeWith(mirror, tree, [name, ...rest], blob) {
   if (have && (type === 'tree') !== (rest.length > 0)) no(`main has ${name} as ${type === 'tree' ? 'a folder' : 'a file'}, so the report can't go there`);
   const entry = rest.length ? `040000 tree ${await treeWith(mirror, id ?? null, rest, blob)}\t${name}` : `100644 blob ${blob}\t${name}`;
   const kept = rows.filter((row) => row !== have);
-  const m = await git(['mktree', '-z'], { gitDir: mirror, purpose: 'push-research-tree', input: Buffer.from(`${[...kept, entry].join('\0')}\0`, 'latin1') });
-  if (m.code !== 0) no('could not build the copy\'s files');
+  const m = await gitDo(['mktree', '-z'], { gitDir: mirror, purpose: 'push-research-tree', input: Buffer.from(`${[...kept, entry].join('\0')}\0`, 'latin1') }, PLACE, 'could not build the copy\'s files');
   return m.stdout.toString().trim();
 }
 
 /** The copy's one commit on main, held at `holding`: the report's bytes exactly as they are, at the card's one path. */
 async function commitReport(mirror, { path, blob, ask }, bytes, holding) {
-  const made = await git(['hash-object', '-w', '--stdin', '--no-filters'], { gitDir: mirror, purpose: 'push-research-blob', input: bytes });
-  if (made.code !== 0) no('could not store the report');
+  const made = await gitDo(['hash-object', '-w', '--stdin', '--no-filters'], { gitDir: mirror, purpose: 'push-research-blob', input: bytes }, PLACE, 'could not store the report');
   if (made.stdout.toString().trim() !== blob) no(REPORT_CHANGED);
-  const main = (await gitOk(['rev-parse', '--verify', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'push-research-commit' })).trim();
-  const was = (await gitOk(['rev-parse', '--verify', 'refs/heads/main^{tree}'], { gitDir: mirror, purpose: 'push-research-commit' })).trim();
+  const main = (await gitText(['rev-parse', '--verify', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'push-research-commit' }, PLACE, 'could not read main in the mirror')).trim();
+  const was = (await gitText(['rev-parse', '--verify', 'refs/heads/main^{tree}'], { gitDir: mirror, purpose: 'push-research-commit' }, PLACE, 'could not read main in the mirror')).trim();
   const tree = await treeWith(mirror, was, path.split('/'), blob);
   if (tree === was) no(`main already holds these bytes at ${path}`);
-  const tip = (await gitOk(['commit-tree', tree, '-p', main, '-m', `Copy research ask ${ask}'s report to ${path}`], { gitDir: mirror, purpose: 'push-research-commit' })).trim();
-  await gitOk(['update-ref', holding, tip], { gitDir: mirror, purpose: 'push-research-commit' });
+  const tip = (await gitText(['commit-tree', tree, '-p', main, '-m', `Copy research ask ${ask}'s report to ${path}`], { gitDir: mirror, purpose: 'push-research-commit' }, PLACE, 'could not make the copy\'s commit')).trim();
+  await gitDo(['update-ref', holding, tip], { gitDir: mirror, purpose: 'push-research-commit' }, PLACE, 'could not hold the copy\'s commit');
   return tip;
 }
 
@@ -219,30 +242,27 @@ export function readBundleHeader(path, branch) {
 }
 
 /** Commit ids with their parents: [[sha, [parents]]]. */
-async function newCommits(mirror, tip, exclude) {
-  const out = await gitOk(['rev-list', '--parents', tip, '--not', ...exclude], { gitDir: mirror, purpose: 'push-new-commits' });
+async function newCommits(mirror, tip, exclude, about) {
+  const out = await gitText(['rev-list', '--parents', tip, '--not', ...exclude], { gitDir: mirror, purpose: 'push-new-commits' }, about, 'could not list the branch\'s commits');
   return out.trim().split('\n').filter(Boolean).map((l) => { const [s, ...p] = l.split(' '); return [s, p]; });
 }
 
-async function changes(mirror, args) {
-  const r = await git(['diff-tree', '-r', '-z', '--raw', '--no-renames', '--no-ext-diff', '--no-textconv', '--no-commit-id', ...args], { gitDir: mirror, purpose: 'push-paths' });
-  if (r.code !== 0) no('could not list a commit\'s changes');
+async function changes(mirror, args, about) {
+  const r = await gitDo(['diff-tree', '-r', '-z', '--raw', '--no-renames', '--no-ext-diff', '--no-textconv', '--no-commit-id', ...args], { gitDir: mirror, purpose: 'push-paths' }, about, 'could not list a commit\'s changes');
   return parseRawZ(r.stdout);
 }
 
-async function addedAllowComment(mirror, sha) {
-  const r = await git(['diff-tree', '-p', '-r', '--text', '--no-renames', '--no-ext-diff', '--no-textconv', '--no-commit-id', '--no-color', sha], { gitDir: mirror, purpose: 'push-allow-lines' });
-  if (r.code !== 0) no('could not read a commit\'s changes');
+async function addedAllowComment(mirror, sha, about) {
+  const r = await gitDo(['diff-tree', '-p', '-r', '--text', '--no-renames', '--no-ext-diff', '--no-textconv', '--no-commit-id', '--no-color', sha], { gitDir: mirror, purpose: 'push-allow-lines' }, about, 'could not read a commit\'s changes');
   return r.stdout.toString('utf8').split('\n').some((l) => l.startsWith('+') && /gitleaks:allow/i.test(l));
 }
 
 // Each commit's whole object (author, committer and every other header line, then the message;
 // R-0b-47 round 2 MAT-B) and the names of the files it touches, for the stdin scan.
-async function messages(mirror, shas, names) {
+async function messages(mirror, shas, names, about) {
   const res = [];
   for (const sha of shas) {
-    const r = await git(['cat-file', 'commit', sha], { gitDir: mirror, purpose: 'push-messages' });
-    if (r.code !== 0) no(`could not read commit ${sha.slice(0, 12)}`);
+    const r = await gitDo(['cat-file', 'commit', sha], { gitDir: mirror, purpose: 'push-messages' }, about, `could not read commit ${sha.slice(0, 12)}`);
     res.push([sha, `${r.stdout.toString('utf8')}\n${(names.get(sha) ?? []).join('\n')}\n`]);
   }
   return res;
@@ -259,6 +279,7 @@ async function messages(mirror, shas, names) {
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
  *                           never passes it, so every address is https://github.com/<repo>.git.
  *   testFstat(fd)           tests only, refused outside them: stands in for fstat on the bundle's handle.
+ *   testGit                 tests only, refused outside them: { bin, timeouts, failStart } for every git call (gitTest).
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
@@ -268,8 +289,9 @@ async function messages(mirror, shas, names) {
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat, testGit } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
+  if (testGit !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testGit is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
@@ -293,7 +315,9 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the proposal names no product');
     if (typeof card !== 'string' || !CARD.test(card)) no('the proposal has a bad card id');
     const f = record.read('fact', intakeFactId(product, bundleName(card)));
-    if (f?.corrupt || f?.doc?.state !== 'held' || !SHA256.test(String(f.doc.sha256))) no('the intake holds no bundle for this card');
+    // The intake read the fact held this same pass: anything else here is a Record fault or a race, never the bundle's
+    // (L680 cosmetic 1).
+    if (f?.corrupt || f?.doc?.state !== 'held' || !SHA256.test(String(f.doc.sha256))) later('the intake holds no bundle for this card');
     return f.doc.sha256;
   }
 
@@ -344,15 +368,18 @@ export function createPushScript(deps) {
     if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) later('the product has no valid GitHub repo in the rules');
     if (typeof mirror !== 'string' || !isAbsolute(mirror)) later('the product has no mirror in the rules');
     if ([...NEVER, base].includes(branch) || branch.startsWith('orchestrate/')) no(`the branch "${branch}" may never be pushed`);
-    const fmt = await git(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
+    // What a branch's commits are about: a research copy's are made here, from main in the mirror; any other's come from
+    // the bundle.
+    const of = research ? PLACE : BUNDLE;
+    const fmt = await run(['check-ref-format', '--branch', branch], { gitDir: mirror, purpose: 'push-branch-name' });
     if (fmt.code === -1 && fmt.stderr.startsWith('safe-git: refused: ')) later(`mirror: ${fmt.stderr.slice('safe-git: refused: '.length)}`);
-    if (fmt.code !== 0) no(`the branch "${branch}" is not a valid name`);
+    if (fmt.code !== 0) gitAnswer(fmt, BUNDLE, `the branch "${branch}" is not a valid name`);
 
     const url = testRemote ? testRemote(repo) : githubUrl(repo);
     if (!testRemote && !url.startsWith('https://github.com/')) later('the push address is not on github.com');
     if (testRemote && (typeof url !== 'string' || !isAbsolute(url))) later('the test remote is not a local folder');
 
-    const v = await checkGitVersion();
+    const v = await checkGitVersion(gitTest.getStore()?.bin ? { gitBin: gitTest.getStore().bin } : {});
     if (!v.ok) later(v.reason);
     const m = checkMirror(mirror);
     if (!m.ok) later(`mirror: ${m.reason}`);
@@ -375,36 +402,39 @@ export function createPushScript(deps) {
       let tip = research ? null : readBundleHeader(copy, branch);
 
       // 3. Main (and the card branch) fresh from GitHub, then the bundle into the holding ref.
-      const lr = await git(['ls-remote', '--heads', url, `refs/heads/${branch}`], { gitDir: mirror, purpose: 'push-ls-remote', ...auth });
-      if (lr.code !== 0) later('could not read GitHub');
+      const lr = await gitDo(['ls-remote', '--heads', url, `refs/heads/${branch}`], { gitDir: mirror, purpose: 'push-ls-remote', ...auth }, PLACE, 'could not read GitHub');
       const remoteTip = /^([0-9a-f]{40})\t/.exec(lr.stdout.toString())?.[1] ?? null;
       const specs = ['+refs/heads/main:refs/heads/main'];
       if (remoteTip) specs.push(`+refs/heads/${branch}:${remoteRef}`);
-      const fm = await git(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', url, ...specs], { gitDir: mirror, purpose: 'push-fetch-main', ...auth });
-      if (fm.code !== 0) later('could not fetch main from GitHub');
-      if (!remoteTip) await git(['update-ref', '-d', remoteRef], { gitDir: mirror, purpose: 'push-fetch-main' });
+      await gitDo(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', url, ...specs], { gitDir: mirror, purpose: 'push-fetch-main', ...auth }, PLACE, 'could not fetch main from GitHub');
+      if (!remoteTip) await run(['update-ref', '-d', remoteRef], { gitDir: mirror, purpose: 'push-fetch-main' });
 
       if (research) {
         // A branch already on GitHub is checked below as this push; pushing the same commit again changes nothing.
         tip = remoteTip ?? await commitReport(mirror, research, report, holding);
       } else {
-        const bv = await git(['bundle', 'verify', '-q', copy], { gitDir: mirror, purpose: 'push-bundle-verify' });
-        if (bv.code !== 0) gitAnswer(bv, 'the bundle does not verify against the mirror (a missing earlier commit?)');
-        const fb = await git(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', copy, `refs/heads/${branch}:${holding}`], { gitDir: mirror, purpose: 'push-fetch-bundle' });
-        // The bundle verified just above: a fetch that fails now is the mirror's (a stale lock, a full disk), not the bundle's.
-        if (fb.code !== 0) later('could not take the bundle in');
-        const got = (await gitOk(['rev-parse', '--verify', `${holding}^{commit}`], { gitDir: mirror, purpose: 'push-fetch-bundle' })).trim();
+        await gitDo(['bundle', 'verify', '-q', copy], { gitDir: mirror, purpose: 'push-bundle-verify' }, BUNDLE, 'the bundle does not verify against the mirror (a missing earlier commit?)');
+        // `bundle verify` reads the header and the earlier commits, never the pack: a cut-off pack, or one missing an
+        // object, fails here, and that is the bundle's (L680 M1). A lock or a full disk is the mirror's, and passes.
+        const fb = await run(['fetch', '-q', '--no-tags', '--no-write-fetch-head', '--no-auto-gc', '--no-recurse-submodules', copy, `refs/heads/${branch}:${holding}`], { gitDir: mirror, purpose: 'push-fetch-bundle' });
+        if (fb.code !== 0) {
+          const mirrorFault = MIRROR_FAULT.test(String(fb.stderr));
+          gitAnswer(fb, mirrorFault ? PLACE : BUNDLE, mirrorFault ? 'could not take the bundle in: the mirror could not be written' : 'the bundle could not be taken in: its pack is cut off or missing objects');
+        }
+        const got = (await gitText(['rev-parse', '--verify', `${holding}^{commit}`], { gitDir: mirror, purpose: 'push-fetch-bundle' }, BUNDLE, 'the bundle\'s branch does not name a commit')).trim();
         if (got !== tip) no('the bundle\'s branch is not the commit its header names');
       }
 
       // 4. New commits and the paths they touch.
       if (remoteTip) {
-        const ff = await git(['merge-base', '--is-ancestor', remoteTip, tip], { gitDir: mirror, purpose: 'push-fast-forward' });
-        if (ff.code !== 0) gitAnswer(ff, 'the branch on GitHub has moved; the fix round must start from it (never a force push)');
+        // Exit 1 is git's "not an ancestor": the branch moved, final. Any other failure is the mirror's (a missing object).
+        const ff = await run(['merge-base', '--is-ancestor', remoteTip, tip], { gitDir: mirror, purpose: 'push-fast-forward' });
+        if (ff.code === 1) no('the branch on GitHub has moved; the fix round must start from it (never a force push)');
+        if (ff.code !== 0) gitAnswer(ff, PLACE, 'could not compare the branch on GitHub with this one');
       }
       // Counted from the branch on GitHub, unless this is that same commit (a retry, after a stop or a refused head write)
       // or a research copy: those are checked whole, from main, and pushing the same commit changes nothing.
-      const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip && remoteTip !== tip && !research ? [remoteRef] : [])]);
+      const commits = await newCommits(mirror, tip, ['refs/heads/main', ...(remoteTip && remoteTip !== tip && !research ? [remoteRef] : [])], of);
       // A proposal's branch that is already this commit, with main past it too: nothing is left to push (L274 (6)).
       if (!commits.length && sha256 !== undefined && !look && remoteTip === tip) return { ok: true, product, card, branch, tip, commits: 0, pr: null, binaries: [] };
       if (!commits.length) no('the bundle holds no new commits');
@@ -415,13 +445,13 @@ export function createPushScript(deps) {
       for (const [sha, parents] of commits) {
         if (parents.length === 0) no(`commit ${sha.slice(0, 12)} is a first commit`);
         if (parents.length > 1) no(`commit ${sha.slice(0, 12)} is a merge; a worker never merges`);
-        const ch = await changes(mirror, [sha]);
+        const ch = await changes(mirror, [sha], of);
         why.push(...refusedEntries(ch));
         names.set(sha, ch.map((e) => e.path));
         for (const e of ch) if (e.status !== 'D' && /^1(00644|00755|20000)$/.test(e.newMode)) blobs.set(`${e.newId} ${e.path}`, { id: e.newId, path: e.path });
       }
-      const mb = (await gitOk(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' })).trim();
-      const net = await changes(mirror, [mb, tip]);
+      const mb = (await gitText(['merge-base', 'refs/heads/main', tip], { gitDir: mirror, purpose: 'push-paths' }, PLACE, 'could not find where the branch leaves main')).trim();
+      const net = await changes(mirror, [mb, tip], of);
       why.push(...refusedEntries(net));
       if (why.length) no(`the branch touches files no card may: ${[...new Set(why)].slice(0, 5).join('; ')}`);
       if (research && (net.length !== 1 || net[0].path !== research.path || net[0].newId !== research.blob || net[0].newMode !== '100644')) no('the branch is not exactly the report at its one path');
@@ -431,8 +461,8 @@ export function createPushScript(deps) {
 
       // 5. The secret scan.
       const shas = commits.map(([s]) => s);
-      for (const sha of shas) if (await addedAllowComment(mirror, sha)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
-      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
+      for (const sha of shas) if (await addedAllowComment(mirror, sha, of)) no(`commit ${sha.slice(0, 12)} adds a "gitleaks:allow" comment`);
+      const scan = await scanSecrets({ setup: scanner, mirror, shas, blobs: [...blobs.values()], messages: await messages(mirror, shas, names, of), privateDir: work, allowedBinaries: allowList(rules.get('product.allowed_binaries', { product })) });
       if (!scan.ok) no(scan.reason);
 
       // 6. The rules, then the start gate. M10's push_branch reads the card as { id, kind, rows, doc: { lane } } and each
@@ -449,15 +479,14 @@ export function createPushScript(deps) {
       if (!gate.ok) later(`the start gate is shut: ${gate.reason}`);
 
       // 7. The push: exactly this commit, exactly this branch, never forced.
-      const p = await git(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth });
-      if (p.code !== 0) later('GitHub refused the push');
+      await gitDo(['push', '--porcelain', '--atomic', '--no-verify', url, `${tip}:refs/heads/${branch}`], { gitDir: mirror, purpose: 'push', ...auth }, PLACE, 'GitHub refused the push');
       const card_doc = cardDoc;
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
-      await gitOk(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' });
+      await gitDo(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' }, PLACE, 'pushed, but the mirror\'s copy of the branch could not be moved');
       return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries };
     } finally {
-      await git(['update-ref', '-d', holding], { gitDir: mirror, purpose: 'push-cleanup' });
+      await run(['update-ref', '-d', holding], { gitDir: mirror, purpose: 'push-cleanup' });
       rmSync(work, { recursive: true, force: true });
     }
   }
@@ -483,7 +512,7 @@ export function createPushScript(deps) {
 
   async function settle(inputs, factParts, { look = false, from } = {}) {
     let res;
-    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${plainError(e?.message ?? e)}`, ...(e?.retry || !(e instanceof Refusal) ? { retry: true } : {}) }; }
+    try { res = await gitTest.run(testGit, () => attempt(inputs(), { look })); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${plainError(e?.message ?? e)}`, ...(e?.retry || !(e instanceof Refusal) ? { retry: true } : {}) }; }
     // Every reason is masked once, here, before the record: a secret used as a file name is cut to
     // its first four characters, and git's own error text loses its folder paths (round 3 MIN-3, COS-4).
     if (!res.ok) res = { ...res, reason: maskPath(res.reason) };

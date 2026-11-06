@@ -62,6 +62,33 @@ process.exit(mode === 'leak' || mode === 'leakname' ? 1 : 0);
   return { setup: { bin, version: '8.30.1', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
 }
 
+// ---- a fake git (L680): stalls, fails or answers as its rules say for one command, and runs the real git otherwise ----
+// `rules`: [{ cmd, has?, sleep?, code?, stderr?, stdout? }]. `cmd` is git's command (the first word after the leading
+// options; '--version' for the version check), `has` a text one of its words must hold (a bundle's '.bundle'). The
+// first rule that fits is used: `sleep` stalls past any time limit, else it prints and exits with `code`. Pass
+// `{ bin }` as createPushScript's testGit (with `timeouts` for a stall); setRules changes the rules mid-test.
+const REAL_GIT = ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin'].map((d) => join(d, 'git')).find((f) => existsSync(f));
+export function makeFakeGit(dir, rules = []) {
+  mkdirSync(dir, { recursive: true });
+  const bin = join(dir, 'git');
+  const file = join(dir, 'rules.json');
+  const setRules = (r) => writeFileSync(file, JSON.stringify(r));
+  setRules(rules);
+  writeFileSync(bin, `#!${process.execPath}
+const fs = require('fs'); const { spawnSync } = require('child_process');
+const a = process.argv.slice(2);
+let i = 0; while (i < a.length && a[i] !== '--version' && a[i].startsWith('-')) i += a[i] === '-c' ? 2 : 1;
+const cmd = a[i] ?? '';
+fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, cmd + '\\n');
+const rule = JSON.parse(fs.readFileSync(${JSON.stringify(file)}, 'utf8')).find((r) => r.cmd === cmd && (!r.has || a.some((w) => w.includes(r.has))));
+if (!rule) { const r = spawnSync(${JSON.stringify(REAL_GIT)}, a, { stdio: 'inherit' }); process.exit(r.status ?? 1); }
+if (rule.sleep) setTimeout(() => process.exit(0), 600000);
+else { if (rule.stdout) process.stdout.write(rule.stdout); if (rule.stderr) process.stderr.write(rule.stderr); process.exitCode = rule.code ?? 0; }
+`);
+  chmodSync(bin, 0o755);
+  return { bin, setRules, calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').split('\n').filter(Boolean) : []) };
+}
+
 /**
  * The world in `root` (a fresh temporary folder). `record`: the Record the push reads (a fresh stand-in when left
  * out). `seed`: write session S-1 and card C-1 into it as the real Record takes them (push.test.mjs); the launch test
