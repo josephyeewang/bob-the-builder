@@ -74,10 +74,12 @@ test('start_session: roles (MAT-11)', () => {
   assert.equal(start(w, { role: 'auditor' }).decision, 'allow');
   for (const role of ['explore', 'learning', 'nobody']) assert.equal(start(w, { role }).decision, 'deny', role);
   assert.match(start(w, { role: 'script' }).reason, /script profile is off/);
-  const on = world({ policies: { app: pol(set('', 'script: none', 'script: 2.1.300')) } });
+  const on = world({ policies: { app: pol(set('', 'script: none', 'script: 2.1.316')) } });
   assert.equal(start(on, { role: 'script' }).decision, 'allow');
-  const pinMoved = world({ policies: { app: pol((t) => set('', 'script: none', 'script: 2.1.300')(t).replace('pin: 2.1.300', 'pin: 2.1.301')) } });
+  const pinMoved = world({ policies: { app: pol((t) => set('', 'script: none', 'script: 2.1.316')(t).replace('pin: 2.1.316', 'pin: 2.1.317')) } });
   assert.equal(start(pinMoved, { role: 'script' }).decision, 'deny', 'a pin change switches script off (and the tool list expires)');
+  const oneMoved = world({ policies: { app: pol((t) => t.replace('pin: 2.1.316', 'pin: 2.1.317')) } });
+  assert.match(start(oneMoved).reason, /re-check the list/, 'one product, pin not the checked version: no role starts, and the reason says why');
   assert.equal(start(w, { tier: 3 }).decision, 'deny');
   assert.equal(start(w, { editing: 'yes' }).decision, 'deny');
 });
@@ -301,7 +303,7 @@ test('Mac-wide values take the strictest product (MAT-10, R-0b-18)', () => {
 });
 
 test('must-match values: a pin, model, account or home-zone mismatch stops every start (MAT-10, R2-M5(b))', () => {
-  for (const [from, to, why] of [['pin: 2.1.300', 'pin: 2.1.301', /pin mismatch/], ['main: claude-opus-5-5', 'main: other-model', /models.main mismatch/],
+  for (const [from, to, why] of [['pin: 2.1.316', 'pin: 2.1.317', /pin mismatch/], ['main: claude-opus-5-5', 'main: other-model', /models.main mismatch/],
     ['current: sample-org', 'current: other-org', /accounts.current mismatch/], ['tz: America/New_York', 'tz: Europe/London', /accounts.joe.tz mismatch/]]) {
     const w = world({ policies: { app: pol(), other: pol(set('', from, to)) } });
     assert.match(start(w).reason, why);

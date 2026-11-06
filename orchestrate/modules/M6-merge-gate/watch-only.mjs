@@ -26,6 +26,12 @@
 // FILES (in `dir`, the runner's own folder): log.jsonl (one JSON line per commit, pin or pass), rules-draft.yaml, watch.lock.
 // Explanations are NOT in `dir`: they come from a file the owner's Mac user owns, in a folder only that user can write (`<base>/watch-notes`, which orchestrate can read).
 // The token is read from a file the runner's own user owns, mode 0600; never put in a log line, an error or an argument.
+//
+// CHECK RUNS (L624). GitHub gives fine-grained tokens no Checks permission at all; only a GitHub App reads check runs. So
+// they are read through `checksGh`, a read-only client holding the robot App's installation token (watch-run.mjs mints
+// it each pass); `gh`, the fine-grained token, reads everything else. With no `checksGh` the check runs are NOT KNOWN:
+// every pull request's commit is "not judged" with that reason and the pass names it as a problem, so a week without the
+// App never counts. Never "no checks", never a pass, and never the fine-grained client in its place.
 
 import { closeSync, constants, fstatSync, openSync, readFileSync, appendFileSync, existsSync, statSync, lstatSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -199,7 +205,9 @@ export function judgeMerged(facts, rules) {
  * Gathers the facts for one commit on main. → { unreadable: "<reason>" } when a read FAILED (the commit is tried again
  * next pass, never judged on a gap), else the facts. A list too long to read whole is a fact (refusal 1), not a failure.
  */
-export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => Date.now() }) {
+export const CHECKS_NOT_KNOWN = 'the check runs are not known: they are read only with the robot App\'s token, and none is set up (L624)';
+
+export async function gatherMerged({ gh, checksGh = null, owner, repo, policy, sha, now = () => Date.now() }) {
   const base = `/repos/${owner}/${repo}`;
   const view = makeGitView({ gh, owner, repo });
   const fail = (what, e) => { const err = new Error(`${failText(e)}: ${what}`); err.unreadable = true; throw err; };
@@ -241,15 +249,19 @@ export async function gatherMerged({ gh, owner, repo, policy, sha, now = () => D
     let checksTooLong;
     let checksCutOff;
     // A list GitHub answered but cut off (its count doesn't match it) is not a failed read (L190 minor a): the gate waits
-    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict.
-    const list = async (read, what) => {
-      try { return await read(gh, base, headSha); } catch (e) {
+    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict. Only that
+    // count mismatch, which checksAt and statusesAt throw themselves with no HTTP status, is "cut off". Any answer with a
+    // status that isn't 200 (a 404 or 422 too: an App not installed on this repo, a token not covering it) is a read
+    // that failed, so the commit is not judged (L631 M1). Treating a 404 as "cut off" gave a final "would refuse" for a
+    // made-up reason and a clean pass.
+    const list = async (read, what, client = gh) => {
+      try { return await read(client, base, headSha); } catch (e) {
         if (e?.tooLong) { checksTooLong = String(e.message); return null; }
-        if (!failedRead(e)) { checksCutOff = failText(e); return null; }
+        if (!failedRead(e) && !Number.isInteger(e?.status)) { checksCutOff = failText(e); return null; }
         return fail(what, Number.isInteger(e?.status) ? `HTTP ${e.status}` : e);
       }
     };
-    const checks = await list(checksAt, 'the check runs');
+    const checks = checksGh ? await list(checksAt, 'the check runs', checksGh) : fail('the check runs', CHECKS_NOT_KNOWN);
     const statuses = await list(statusesAt, 'the statuses');
     let threads;
     try { threads = await threadsOf(gh, owner, repo, num); } catch (e) { if (e?.unreadable) throw e; fail('the review threads', e); }
@@ -294,17 +306,19 @@ function takeLock(dir, nowMs) {
  * One pass. `rules` is draftRules(...) or githubRules(...). → { judged, skipped, problems, locked? }. Never writes to GitHub.
  * Every pass line records the main head it saw, the pin, and whether the pin is still an ancestor.
  */
-export async function watchPass({ gh, owner, repo, dir, rules, now = () => new Date().toISOString(), maxWalk = MAX_WALK }) {
+export async function watchPass({ gh, checksGh = null, owner, repo, dir, rules, now = () => new Date().toISOString(), maxWalk = MAX_WALK }) {
   if (!NAME.test(owner ?? '') || !NAME.test(repo ?? '') || owner === '.' || owner === '..' || repo === '.' || repo === '..') throw new Error('watch needs an owner and repo');
+  if (checksGh && (checksGh === gh || typeof checksGh.get !== 'function')) throw new Error('check runs need the robot App\'s own read client, not the fine-grained one (L624)');
   const at = now();
   const release = takeLock(dir, Date.parse(at));
   if (!release) return { judged: 0, skipped: 0, problems: [], locked: true };
-  try { return await pass({ gh, owner, repo, dir, rules, at, now, maxWalk }); } finally { release(); }
+  try { return await pass({ gh, checksGh, owner, repo, dir, rules, at, now, maxWalk }); } finally { release(); }
 }
 
-async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
+async function pass({ gh, checksGh, owner, repo, dir, rules, at, now, maxWalk }) {
   const base = `/repos/${owner}/${repo}`;
   const problems = [];
+  if (!checksGh) problems.push(CHECKS_NOT_KNOWN);
   let ruleId = null;
   const log = (o) => appendLine(dir, o);
   const done = (head, pin, judged, skipped) => { log({ pass: true, at, head, pin_sha: pin, pin_ok: pinOk, rules: ruleId ?? rules.kind, judged, skipped, problems }); return { judged, skipped, problems }; };
@@ -368,7 +382,7 @@ async function pass({ gh, owner, repo, dir, rules, at, now, maxWalk }) {
     try { parent = (await makeGitView({ gh, owner, repo }).commit(sha)).parents?.[0] ?? null; } catch (e) { notJudged(`${failText(e)}: the commit could not be read`); continue; }
     const r = await rules.at(parent);
     if (!r.policy) { notJudged(r.reason); continue; }
-    const facts = await gatherMerged({ gh, owner, repo, policy: r.policy, sha, now: () => Date.parse(at) });
+    const facts = await gatherMerged({ gh, checksGh, owner, repo, policy: r.policy, sha, now: () => Date.parse(at) });
     if (facts.unreadable) { notJudged(facts.unreadable); continue; }
     const v = judgeMerged(facts, r);
     log({ sha, at, seen_at: firstSeen.get(sha) ?? at, merged_at: facts.mergedAt, pr: facts.pr, merged_by: facts.mergedBy, direct: facts.direct, rules: r.id ?? ruleId, ...v });
