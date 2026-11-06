@@ -197,6 +197,15 @@ export function makeRecord(impl) {
     diary(opts = {}) { return impl.diary(opts); },
     // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
     keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
+    // What the store holds in this process only, on no disk (L620): { held: [{ id, event }], dropped: n }. null is not
+    // known: an implementation without it, one that throws, or an answer not of that shape. Never a guess of none.
+    heldHere() {
+      try {
+        const h = optional('heldHere', () => null)();
+        if (!h || !Array.isArray(h.held) || !Number.isSafeInteger(h.dropped) || h.dropped < 0) return null;
+        return h.held.every((x) => x && typeof x.id === 'string' && x.event && typeof x.event === 'object') ? { held: h.held, dropped: h.dropped } : null;
+      } catch { return null; }
+    },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {

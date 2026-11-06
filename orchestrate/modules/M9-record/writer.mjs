@@ -734,6 +734,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
     keepAlert: (text, key) => { store.keepAlert(text, key); },
+    heldHere: () => store.heldHere(),
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }

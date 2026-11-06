@@ -182,3 +182,17 @@ test('L151 m7: the stand-in refuses a missing file, a link and the wrong folder 
   assert.ok(isNotARecord(bare.applyOutbox(lead, think)));
   assert.equal(rec.diary().length, 0);
 });
+
+// L620: what the store holds on no disk. null means not known, never "none held".
+test('L620: heldHere passes the store\'s answer through, and answers null (not known) for none, a throw or a bad shape', () => {
+  const held = { held: [{ id: 'a1', event: { type: 'diary_damaged', reason: 'x' } }], dropped: 2 };
+  assert.deepEqual(makeRecord({ heldHere: () => held }).heldHere(), held);
+  assert.deepEqual(makeRecord({ heldHere: () => ({ held: [], dropped: 0 }) }).heldHere(), { held: [], dropped: 0 });
+  assert.equal(makeRecord({}).heldHere(), null, 'an implementation without it: not known');
+  assert.equal(memoryRecord().heldHere(), null, 'the stand-in has no store: not known');
+  assert.equal(makeRecord({ heldHere() { throw new Error('boom'); } }).heldHere(), null);
+  for (const bad of [undefined, 3, {}, { held: [] }, { held: 'x', dropped: 0 }, { held: [], dropped: -1 }, { held: [], dropped: 1.5 },
+    { held: [{ event: {} }], dropped: 0 }, { held: [{ id: 'a', event: null }], dropped: 0 }]) {
+    assert.equal(makeRecord({ heldHere: () => bad }).heldHere(), null, JSON.stringify(bad));
+  }
+});

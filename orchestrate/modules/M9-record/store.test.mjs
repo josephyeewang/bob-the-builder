@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PRODUCT, UID, must, put, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
 import { openRecordWithStore } from './writer.mjs';
-import { openStore } from './store.mjs';
+import { KEEP_PER_WINDOW, openStore } from './store.mjs';
+import { readUnsent } from './unsent.mjs';
 
 const card = (extra = {}) => ({ state: 'draft', product: PRODUCT, module: 'M1', kind: 'ordinary', round: 1, ...extra });
 const docFile = (env, entity, id) => join(env.root, 'docs', entity, `${id}.json`);
@@ -438,4 +439,103 @@ test('a lock with a second name (made by link, its maker killed before the unlin
   assert.equal(alerts.filter((a) => a.type === 'store_layout').length, 0, 'no false layout alert');
   assert.ok(!existsSync(temp), 'the dead maker\'s temp name is cleared');
   assert.ok(!existsSync(join(env.root, 'lock')), 'the lock is free');
+});
+
+// ---- L620: what the store holds on no disk, and m2's daily mark ----
+const brokenMiddleDiary = (env) => {
+  for (const n of [1, 2, 3]) seed(env, 'card', `C-${n}`, card({ round: n }));
+  const diary = join(env.root, 'diary.jsonl');
+  const ls = readFileSync(diary, 'utf8').trim().split('\n');
+  ls[1] = 'this is not a diary line';
+  writeFileSync(diary, `${ls.join('\n')}\n`);
+};
+const lostAlert = () => { const calls = []; const f = (e) => { calls.push(e); return false; }; f.calls = calls; return f; };
+const goodAlert = () => { const calls = []; const f = (e) => { calls.push(e); return true; }; f.calls = calls; return f; };
+const unsentLines = (env) => readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+// The diary is read on first use, so each open here reads it (damaged()), as the Record's first read would.
+const viaWriter = (env, extra = {}) => { const o = openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, now: () => env.clock.t, ...extra }); o.store.damaged(); return o; };
+
+test('L620: the production Record, built through writer.mjs, answers heldHere with a real value, not null', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  const o = viaWriter(env, { alert: lostAlert() });
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+});
+
+test('L620: on a full disk a damaged diary\'s warning is held in memory, and heldHere names it; nothing is on disk', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  const before = readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8');
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: 'unsent_fails' });
+  assert.ok(o.store.damaged());
+  const h = o.record.heldHere();
+  assert.equal(h.dropped, 0);
+  assert.deepEqual(h.held.map((x) => x.event.type), ['diary_damaged']);
+  assert.match(h.held[0].id, /^[0-9a-f]{16}$/);
+  assert.equal(readFileSync(join(env.root, 'unsent-alerts.jsonl'), 'utf8'), before, 'the full disk took nothing');
+  h.held[0].event.type = 'changed';
+  assert.equal(o.record.heldHere().held[0].event.type, 'diary_damaged', 'heldHere hands out copies');
+});
+
+test('L620: a kept-back count that cannot be written is counted as dropped, not lost without a word', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  const ok = viaWriter(env, { alert: lostAlert() });
+  for (let i = 0; i < KEEP_PER_WINDOW; i += 1) ok.record.keepAlert(`alert ${i}`, `key-${i}`);
+  assert.deepEqual(ok.record.heldHere(), { held: [], dropped: 0 });
+  const full = viaWriter(env, { alert: lostAlert(), faultAt: 'unsent_fails' });
+  full.record.keepAlert('one past the cap', 'key-past');
+  full.record.keepAlert('two past the cap', 'key-past-2');
+  assert.deepEqual(full.record.heldHere(), { held: [], dropped: 2 });
+});
+
+test('L620 m2: a warning delivered at once still writes its daily mark, so ten opens tell it once', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  const a = goodAlert();
+  for (let i = 0; i < 10; i += 1) { viaWriter(env, { alert: a }); env.clock.t += 60_000; }
+  assert.equal(a.calls.filter((e) => e.type === 'diary_damaged').length, 1);
+  const marks = unsentLines(env).filter((x) => x.outcome === 'told_at_once');
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0].event, undefined, 'a mark has no event');
+  assert.match(marks[0].cap_key, /^diary_damaged:/);
+  // Lane 1's check 1: a mark-only line is not waiting, not held and not dropped.
+  assert.deepEqual(readUnsent(env.root).filter((x) => x.event.type === 'diary_damaged'), []);
+  assert.deepEqual(viaWriter(env, { alert: a }).record.heldHere(), { held: [], dropped: 0 });
+  // A day on, it is told again.
+  env.clock.t += 24 * 60 * 60_000;
+  viaWriter(env, { alert: a });
+  assert.equal(a.calls.filter((e) => e.type === 'diary_damaged').length, 2);
+});
+
+test('L620 m2: a mark that cannot be written after a good send stays quiet: no throw, nothing held, nothing dropped', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  const a = goodAlert();
+  let o;
+  assert.doesNotThrow(() => { o = viaWriter(env, { alert: a, faultAt: 'unsent_fails' }); });
+  assert.equal(a.calls.filter((e) => e.type === 'diary_damaged').length, 1, 'the owner was told');
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+  // With no mark the next open tells it again: told twice, never not told.
+  viaWriter(env, { alert: a, faultAt: 'unsent_fails' });
+  assert.equal(a.calls.filter((e) => e.type === 'diary_damaged').length, 2);
+});
+
+test('L620 m2: a kept line, then a good send the same day, is still told once that day (either kind of mark counts)', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  viaWriter(env, { alert: lostAlert() });
+  assert.equal(unsentLines(env).filter((x) => x.outcome === 'unsent' && x.event?.type === 'diary_damaged').length, 1);
+  env.clock.t += 60 * 60_000;
+  const a = goodAlert();
+  viaWriter(env, { alert: a });
+  // The open resends the kept line (resend()), but no second new warning is made that day.
+  assert.equal(a.calls.filter((e) => e.type === 'diary_damaged' && !e.resent).length, 0);
+  assert.equal(unsentLines(env).filter((x) => x.outcome === 'told_at_once').length, 0);
+});
+
+test('L620: on a full disk, re-reading a damaged diary holds one copy of its warning, not one per read', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: 'unsent_fails' });
+  for (let i = 0; i < 5; i += 1) { o.record.write({ actor: 'dispatcher', entity: 'fact', id: `f-${i}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }); o.store.damaged(); }
+  assert.equal(o.record.heldHere().held.filter((x) => x.event.type === 'diary_damaged').length, 1);
 });

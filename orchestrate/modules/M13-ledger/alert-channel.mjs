@@ -393,6 +393,29 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       try { markSent(recordRoot, x.id, when().toISOString()); } catch { /* raised again next round */ }
     }
     out.storeLeft = storeLeft;
+    // What the store holds in this process only, on no disk (L620): a warning whose unsent line could not be written,
+    // as on a full disk, is in no file this pass reads, and the store's own resend only logs. The robot process that
+    // found it runs this pass, so it is sent from here, on its own key (a repeat edits the same issue). Sent or not, the
+    // round is never clean while any is held: the disk that refused the line still refuses.
+    let held;
+    try { held = rec?.heldHere?.() ?? null; } catch (e) { held = { error: msg(e) }; }
+    const heldLines = [];
+    if (held?.error) heldLines.push(`what the store holds in memory could not be read: ${held.error}`);
+    else if (held && (held.held.length || held.dropped)) {
+      let heldSent = 0; let heldTried = 0;
+      for (const x of held.held) {
+        if (clock() - start + sendMs > budgetMs && (storeTried > 0 || heldTried > 0)) break;
+        heldTried += 1;
+        const text = storeText(x.event, target);
+        let why;
+        try { why = await within(sendMs, () => raiseWhy(alerts, gh, alertKey(target, 'held', x.id), text, x.id)); } catch (e) { why = msg(e); }
+        if (why !== null) { out.failed += 1; failedOn(text, why); continue; }
+        out.sent += 1; heldSent += 1;
+      }
+      out.held = held.held.length;
+      if (held.held.length) heldLines.push(`${held.held.length} of the store's warnings could not be written to its disk (is it full?) and are held in this process only (${heldSent} sent this round); they are lost if it stops`);
+      if (held.dropped) heldLines.push(`${held.dropped} count(s) of alerts the Record's queue would not take could not be written to the store's disk and are lost (is it full?)`);
+    }
     // Any alert this round should have delivered and did not: the robot job counts the pass as failed (L288 MAT-2 d).
     // It names the first one and what GitHub said, so Joe has something to act on (L298 Minor 5); masked like the issue.
     if (out.failed) {
@@ -402,7 +425,7 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       out.refused = `${out.failed} alert(s) could not be delivered this round and stay queued for the next; the first, "${t}": ${why}`;
     }
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
-    const plus = [];
+    const plus = [...heldLines];
     // The queue is sent from its head, so while it can't shrink the entries past a round's reach are not sent at all. A
     // queue that didn't shrink is named, so that can't wait unheard; a backlog that is clearing fails no pass (L566 N2,
     // L579). The one that failed is named above, so it is taken off the count. Arrivals during a round can over-tell.

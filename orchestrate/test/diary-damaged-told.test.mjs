@@ -127,3 +127,56 @@ test('L575: once the disk works again, the next write cuts the part-line and the
   assert.equal(well.store.damaged(), null);
   assert.equal(kept(env).length, 1, 'the owner was still told once');
 });
+
+// ---- L620: a full disk. keep() can't write the warning, so the store holds it in memory; the pass must still tell it ----
+const heldRefusal = /store's warnings could not be written to its disk \(is it full\?\) and are held in this process only/;
+
+test('L620: on a full disk the damage is held in memory, the delivery pass tells the owner, and the round is not clean', async () => {
+  const env = logOnly();
+  brokenMiddle(env);
+  const o = opened(env, { faultAt: 'unsent_fails' });
+  assert.ok(o.store.damaged());
+  assert.match(tryWrite(o), /diary is damaged/);
+  assert.deepEqual(kept(env), [], 'nothing reached the file');
+  assert.equal(o.record.heldHere().held.filter((x) => x.event.type === 'diary_damaged').length, 1);
+  const gh = fakeIssues();
+  const r = await deliver(env, o, gh);
+  assert.equal(told(gh).length, 1, 'told on a full disk');
+  assert.equal(told(gh)[0].assignee, 'owner-login');
+  assert.match(r.refused ?? '', heldRefusal, 'a round that holds a warning on no disk is never clean');
+});
+
+// The same on a real full disk (audit #242 r1 P15). It mounts its own 2 MB RAM disk as the user (no sudo, nothing
+// installed), fills it, and detaches it in finally. Off unless ORCH_FULLDISK_TEST=1, and never in CI (L647).
+test('L620: on a real full RAM disk the damage reaches the owner and the round is not clean', { skip: process.env.ORCH_FULLDISK_TEST !== '1' }, async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { appendFileSync, cpSync, rmSync } = await import('node:fs');
+  const dev = execFileSync('hdiutil', ['attach', '-nomount', 'ram://4096'], { encoding: 'utf8' }).trim().split(/\s+/)[0];
+  assert.match(dev, /^\/dev\/disk[0-9]+$/, `hdiutil gave ${dev}`);
+  const name = `orch-l620-${process.pid}`;
+  try {
+    execFileSync('diskutil', ['erasevolume', 'HFS+', name, dev], { stdio: 'ignore' });
+    const mounted = join('/', 'Volumes', name);
+    const env = logOnly();
+    brokenMiddle(env);
+    const root = join(mounted, 'store');
+    cpSync(env.root, root, { recursive: true });
+    const filler = join(mounted, 'filler');
+    const chunk = Buffer.alloc(4096, 120);
+    try { for (;;) appendFileSync(filler, chunk); } catch { /* full */ }
+    try { for (;;) appendFileSync(filler, 'x'); } catch { /* really full */ }
+    const env2 = { ...env, root };
+    let o; let err = null;
+    try { o = opened(env2); o.store.damaged(); } catch (e) { err = e.message; }
+    assert.equal(err, null, 'the store opens on a full disk');
+    const held = o.record.heldHere();
+    const gh = fakeIssues();
+    const r = await deliver(env2, o, gh);
+    console.log(`L620 real full disk: held ${JSON.stringify(held.held.map((x) => x.event.type))} dropped ${held.dropped}; on file ${readUnsent(root).length}; pass ${JSON.stringify(r)}; issues ${[...gh.issues.values()].map((x) => x.title).join(' | ')}`);
+    assert.equal(told(gh).length, 1, 'told on a full disk');
+    assert.match(r.refused ?? '', heldRefusal);
+    rmSync(filler, { force: true });
+  } finally {
+    try { execFileSync('hdiutil', ['detach', dev, '-force'], { stdio: 'ignore' }); } catch { /* detached already */ }
+  }
+});

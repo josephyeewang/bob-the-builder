@@ -1011,3 +1011,57 @@ test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page
   answers.push([200, [said('robot[bot]', 'no time', 'x')]]);
   assert.equal(await gh.latestOwnComment(7, SINCE), false);
 });
+
+// ---- L620: warnings the store holds in this process only (a full disk) ----
+const withHeld = (rec, h) => ({ ...rec, heldHere: typeof h === 'function' ? h : () => h });
+const HELD = { held: [{ id: 'abcd0001', event: { at: '2026-11-03T08:00:00Z', type: 'diary_damaged', reason: 'a broken line' } }], dropped: 0 };
+
+test('L620: a held warning is sent from the pass, on its own key, and the round is still not clean', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.equal(r.sent, 1);
+  assert.equal(r.failed, 0);
+  assert.equal(r.held, 1);
+  assert.match(r.refused, /1 of the store's warnings could not be written to its disk \(is it full\?\) and are held in this process only \(1 sent this round\)/);
+  const open = w.gh.openIssues();
+  assert.equal(open.length, 1);
+  assert.match(open[0].body, /diary_damaged/);
+  assert.match(open[0].body, /a broken line/);
+  // Next round: still held, raised again on the same key, so the same issue, not a second.
+  w.tick(5);
+  const r2 = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.match(r2.refused, /held in this process only/);
+  assert.equal(w.gh.openIssues().length, 1);
+});
+
+test('L620: a held warning GitHub refuses is a failed send, named, and the held line stays', async () => {
+  const w = world();
+  w.gh.open = async () => { throw new Error('GitHub is down'); };
+  const r = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /could not be delivered this round/);
+  assert.match(r.refused, /GitHub is down/);
+  assert.match(r.refused, /\(0 sent this round\)/);
+});
+
+test('L620: dropped kept-back counts alone make the round not clean', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 3 }) });
+  assert.equal(r.sent, 0);
+  assert.match(r.refused, /3 count\(s\) of alerts the Record's queue would not take could not be written to the store's disk and are lost/);
+  assert.doesNotMatch(r.refused, /held in this process only/);
+});
+
+test('L620: a heldHere that throws is a refusal; one that answers null or none adds nothing', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, () => { throw new Error('boom'); }) });
+  assert.match(r.refused, /what the store holds in memory could not be read: boom/);
+  for (const h of [null, { held: [], dropped: 0 }]) {
+    const w2 = world();
+    const r2 = await w2.run({ rec: withHeld(w2.rec, h) });
+    assert.equal(r2.refused, undefined, JSON.stringify(h));
+    assert.equal(r2.held, undefined);
+  }
+  const w3 = world();
+  assert.equal((await w3.run()).refused, undefined, 'a Record with no heldHere at all');
+});
