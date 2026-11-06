@@ -476,3 +476,43 @@ test('L606 P4b: a state folder that can\'t be written is alerted once, not every
   stateRequestStep(s.ctx);
   assert.equal(seen.texts.filter((x) => x.kind === 'state_refused_state_not_saved').length, 1);
 });
+
+test('L700 M1-r3 (P6): three requests decided over four passes, every tell lost: each is told its true answer from the list', () => {
+  const p1 = report('20261103-0915-ca', { state: 'paused' });
+  const s = setup({ reports: [p1] });
+  pass(s);                                                  // p1 applied, answer not told
+  const a2 = report('20261103-0920-cb', { state: 'away', tz: 'Europe/Paris', until: '2026-11-10' });
+  s.extra.push(a2); pass(s);                                // a2 decided: away while paused
+  const p3 = report('20261103-0925-cc', { state: 'paused' });
+  s.extra.push(p3); pass(s);                                // p3 decided: pause while paused
+  const a4 = report('20261103-0930-cd', { state: 'paused' });
+  s.extra.push(a4); pass(s);
+  const by = Object.fromEntries(pass(s).answers.map((x) => [x.report, x.push]));
+  assert.equal(by[p1.id], STATE_ANSWERS.paused(PRODUCT), 'p1 carried forward through two later writes');
+  assert.equal(by[a2.id], STATE_ANSWERS.awayWhilePaused(PRODUCT));
+  assert.equal(by[p3.id], STATE_ANSWERS.paused(PRODUCT));
+  assert.equal(by[a4.id], STATE_ANSWERS.paused(PRODUCT));
+});
+
+test('L700 m1-r3 (P8): a doc with no list: an older untold report says "can\'t tell", and keeps saying it after a newer request lands', () => {
+  const A = report('20261103-0900-ea', { state: 'away', tz: 'Europe/Paris', until: '2026-11-10' }, { rid: 'state-F-100' });
+  const B = report('20261103-0905-eb', { state: 'paused' }, { rid: 'state-F-101' });
+  const s = setup({ state: 'paused', doc: { return_to: 'away', away: { tz: 'Europe/Paris', until: '2026-11-10' }, request: { id: B.id, at: '20261103-0905' }, request_answer: STATE_ANSWERS.paused(PRODUCT) }, reports: [A, B] });
+  assert.equal(pass(s).answers.find((q) => q.report === A.id).push, STATE_ANSWERS.cantTell(PRODUCT));
+  const C = report('20261103-0910-ec', { state: 'paused' }, { rid: 'state-F-102' });
+  s.extra.push(C);
+  pass(s);                                                  // C decided; the write keeps A's answer in the list
+  assert.equal(s.product().doc.request_untold[A.id], STATE_ANSWERS.cantTell(PRODUCT));
+  assert.equal(pass(s).answers.find((q) => q.report === A.id)?.push, STATE_ANSWERS.cantTell(PRODUCT));
+});
+
+test('L700 (plant k06): the stored request of a doc with no saved answer, replaced before it is told, is later told "can\'t tell"', () => {
+  const B = report('20261103-0905-gb', { state: 'paused' }, { rid: 'state-F-201' });
+  const s = setup({ state: 'paused', doc: { return_to: 'active', request: { id: B.id, at: '20261103-0905' } }, reports: [B] });
+  const C = report('20261103-0910-gc', { state: 'paused' }, { rid: 'state-F-202' });
+  s.extra.push(C);
+  pass(s);                                                  // C decided; B was the stored request, its answer unknown
+  assert.equal(s.product().doc.request.id, C.id);
+  assert.equal(s.product().doc.request_untold[B.id], STATE_ANSWERS.cantTell(PRODUCT));
+  assert.equal(pass(s).answers.find((q) => q.report === B.id)?.push, STATE_ANSWERS.cantTell(PRODUCT));
+});

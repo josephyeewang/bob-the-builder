@@ -155,7 +155,6 @@ export function applyStateRequests(ctx) {
   const hasUntold = curDoc?.request_untold === untoldWas;
   const untold = {};
   const unmarked = new Set(ok.filter((x) => !x.mark).map((x) => x.rep.id));
-  for (const [k, v] of Object.entries(untoldWas)) if (unmarked.has(k) && typeof v === 'string') untold[k] = v;
   if (stored && unmarked.has(stored.id)) untold[stored.id] = typeof curDoc.request_answer === 'string' ? curDoc.request_answer : STATE_ANSWERS.cantTell(product);
   for (const x of ok) {
     const id = x.rep.id;
@@ -168,7 +167,9 @@ export function applyStateRequests(ctx) {
     if (x.mark) continue;   // settled: told once, its outcome is final and it is never applied later
     // Older than the one recorded: decided by an earlier pass. Every product write carries forward the unmarked ones it
     // decided, so one not there was never applied; a doc written before that list says nothing, so it can't be told.
-    if (stored && !newer(x.at, stored)) { answer(id, typeof untoldWas[id] === 'string' ? untoldWas[id] : hasUntold ? STATE_ANSWERS.newer(product) : STATE_ANSWERS.cantTell(product)); continue; }
+    // The chosen answer goes into the new list too, so a later write keeps it (m1-r3). This is the one carry-forward of
+    // the list: the loop runs oldest first, so every unmarked report older than the stored one passes here before the write.
+    if (stored && !newer(x.at, stored)) { untold[id] = typeof untoldWas[id] === 'string' ? untoldWas[id] : hasUntold ? STATE_ANSWERS.newer(product) : STATE_ANSWERS.cantTell(product); answer(id, untold[id]); continue; }
     if (x !== last) { untold[id] = STATE_ANSWERS.newer(product); answer(id, STATE_ANSWERS.newer(product)); continue; }
     if (!curDoc) { answer(id, STATE_ANSWERS.noProduct(product)); continue; }
     const n = nextDoc(curDoc, x.req, x.at);
