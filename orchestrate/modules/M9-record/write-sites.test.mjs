@@ -166,7 +166,7 @@ const SNAPSHOT = {
   session: { dispatcher: { create: '*', update: '*' }, workshop: { update: '*' } },
   merge: { merge_gate: { create: '*', update: '*' } },
   // #68: each fact writer changes only facts it created, under its own families (FACT_FAMILIES).
-  fact: Object.fromEntries(['sensors', 'ledger', 'workshop', 'dispatcher', 'merge_gate', 'live_check'].map((r) => [r, { create: '*', update: '*', own: true }])),
+  fact: Object.fromEntries(['sensors', 'ledger', 'workshop', 'dispatcher', 'merge_gate', 'approvals', 'live_check'].map((r) => [r, { create: '*', update: '*', own: true }])),
   product: { approvals: { create: '*', update: '*' } },
   handoff: { lead: { create: '*' }, learning: { create: '*' } },
   report: Object.fromEntries(['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script', 'front_door', 'incident', 'lead', 'learning'].map((r) => [r, { create: '*' }])),
