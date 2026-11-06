@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
-import { CHECKS_NOT_KNOWN, DRAFT_FILE, NOT_JUDGED, VERDICTS, WATCH_READS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
+import { CHECKS_NOT_KNOWN, DRAFT_FILE, NOT_JUDGED, REASONS_KEPT, REASON_CHARS, VERDICTS, WATCH_READS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { explain, main, parseArgs } from './watch-run.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -1545,4 +1545,100 @@ test('L632: the App client\'s allow-list takes the owner and repo literally (a "
   for (const [o, r] of [['someXowner', 'a.b+c'], ['some.owner', 'aXb+c'], ['some.owner', 'a.bbc'], ['some.owner', 'a.b+c/x']]) {
     await assert.rejects(() => c.get(at(o, r)), /reads only this repo's check runs/, `${o}/${r}`);
   }
+});
+
+// ───────────────────────────── L644: the log says why a class is risky
+
+test('L644: each judged record keeps why each risky class was named, so a real migration can be told from the line check', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'src/a.mjs': 'two' });
+  w.land({ 'db/migrations/002_x.sql': 'alter table t add c int;' }, { at: undefined });
+  await w.pass();
+  const [code, mig] = w.judged();
+  assert.ok(code.risky.includes('schema'), JSON.stringify(code));
+  assert.ok(code.risky_reasons.schema.every((x) => !x.includes('db/migrations/')), JSON.stringify(code.risky_reasons));
+  assert.ok(code.risky_reasons.schema.some((x) => x.includes('src/a.mjs') && /not a line known to be harmless/.test(x)), JSON.stringify(code.risky_reasons));
+  assert.ok(mig.risky.includes('schema'));
+  assert.ok(mig.risky_reasons.schema.some((x) => x.includes('db/migrations/002_x.sql') && !/not a line known to be harmless/.test(x)), JSON.stringify(mig.risky_reasons));
+  for (const r of [code, mig]) assert.deepEqual(Object.keys(r.risky_reasons).sort(), [...r.risky].sort(), 'a reason for each risky class, and only those');
+  assert.equal(code.verdict, (await (async () => { const v = world(); await v.pass(PIN_AT); v.land({ 'src/a.mjs': 'two' }); await v.pass(); return v.judged()[0].verdict; })()));
+});
+
+test('L644: the reasons are capped at 5 per class, each cut to 200 characters, with the exact count left over', async () => {
+  // Literal numbers, not the module's constants: raising the cap must fail here (#259 r1 m1).
+  assert.equal(REASONS_KEPT, 5); assert.equal(REASON_CHARS, 200);
+  const w = world(); await w.pass(PIN_AT);
+  const files = {}; for (let i = 0; i < 12; i++) files[`src/f${String(i).padStart(2, '0')}-${'x'.repeat(300)}.mjs`] = `line ${i}`;
+  w.land(files);
+  await w.pass();
+  const r = w.judged()[0].risky_reasons.schema;
+  assert.equal(r.length, 6, JSON.stringify(r));
+  assert.equal(r[5], 'and 7 more');
+  // The first five, in the order classify gave them, each cut to 200 with the mark.
+  assert.deepEqual(r.slice(0, 5).map((x) => x.slice(0, 7)), ['src/f00', 'src/f01', 'src/f02', 'src/f03', 'src/f04']);
+  for (const x of r.slice(0, 5)) { assert.equal(x.length, 200); assert.ok(x.endsWith('…'), x); }
+});
+
+test('L644: exactly 5 reasons are all kept, with no "and N more"; a short reason is kept whole', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  const files = {}; for (let i = 0; i < 5; i++) files[`src/g${i}.mjs`] = `line ${i}`;
+  w.land(files);
+  await w.pass();
+  const r = w.judged()[0].risky_reasons.schema;
+  assert.equal(r.length, 5, JSON.stringify(r));
+  assert.ok(r.every((x) => !/^and \d+ more$/.test(x) && !x.endsWith('…')), JSON.stringify(r));
+});
+
+test('#259 r1 M1: a migration with three code files keeps the migration\'s reason, ahead of the line-check hits, before the cap', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'app/a.mjs': 'one', 'components/b.mjs': 'one', 'config/c.mjs': 'one' });
+  // Each code file now changes (an added and a removed line): six line-check hits, all sorting before db/.
+  w.land({ 'app/a.mjs': 'two', 'components/b.mjs': 'two', 'config/c.mjs': 'two', 'db/migrations/003_x.sql': 'alter table t add c int;' }, { at: '2026-11-03T11:00:00Z' });
+  await w.pass();
+  const mig = w.judged().at(-1);
+  const r = mig.risky_reasons.schema;
+  // The migration's own two reasons (its path, and a table change) come first; then line-check hits fill the cap.
+  assert.deepEqual(r.slice(0, 2), ['db/migrations/003_x.sql', 'db/migrations/003_x.sql (table change in added lines)'], JSON.stringify(r));
+  assert.ok(r.slice(2, 5).every((x) => /: line \d+ may change the database: /.test(x)), JSON.stringify(r));
+  assert.equal(r.at(-1), 'and 4 more', 'six code hits and the migration file\'s own line hit, less the three kept');
+  // The line-check hits that are kept stay in the order classify gave them.
+  const paths = r.slice(2, 5).map((x) => x.split(' ')[0]);
+  assert.deepEqual(paths, [...paths].sort(), JSON.stringify(paths));
+});
+
+test('#259 r1 m2: with no files read, the reason says why: too many, a missing entry, or not read', async () => {
+  const rs = await draftRulesFor();
+  const facts = (over) => ({ direct: false, sha: 'a'.repeat(40), headSha: 'b'.repeat(40), pr: 5, prBase: 'main', labels: [], checks: [], statuses: [], threads: { ok: true, unresolved: 0 }, files: null, ...over });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'too_many' }), rs).risky_reasons, { unclassifiable: ['the change has 300 or more files, too many to read, so none were classified'] });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'no_entry', filesMissing: 'src/gone.mjs' }), rs).risky_reasons, { unclassifiable: ['a listed file was not in its commit: src/gone.mjs'] });
+  assert.deepEqual(judgeMerged(facts({ filesProblem: 'unread' }), rs).risky_reasons, { unclassifiable: ['the files were not read'] });
+  assert.deepEqual(judgeMerged(facts({}), rs).risky_reasons, { unclassifiable: ['the files were not read'] });
+});
+
+test('L644: a push with no pull request logs no reasons, as it has no risky classes', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.push({ 'docs/a.md': 'two' });
+  await w.pass();
+  assert.deepEqual(w.judged()[0].risky_reasons, {});
+});
+
+test('#259 r2 M1: text-scan hits in ordinary code ("Create your user profile", createTable) never push a migration past the cap', async () => {
+  const rs = await draftRulesFor();
+  const f = (path, added, removed = []) => ({ path, status: removed.length ? 'modified' : 'added', added_lines: added, removed_lines: removed });
+  const judged = (files, labels = []) => judgeMerged({ direct: false, sha: 'a'.repeat(40), headSha: 'b'.repeat(40), pr: 5, prBase: 'main', labels, checks: [], statuses: [], threads: { ok: true, unresolved: 0 }, files }, rs).risky_reasons;
+  const r = judged([
+    f('app/signup.tsx', ['<h1>Create your user profile</h1>'], ['<h1>Create a user profile</h1>']),
+    f('components/form.tsx', ['// create a function for the form'], ['// create the function']),
+    f('lib/c.ts', ['await knex.schema.createTable("x")'], ['await knex.schema.createTable("y")']),
+    f('db/migrations/001_x.sql', ['alter table t add c int;']),
+  ]).schema;
+  assert.equal(r[0], 'db/migrations/001_x.sql', JSON.stringify(r));
+  // Then the scan hits, in the order classify gave them, ahead of every line-check hit.
+  assert.ok(r.slice(1, 5).every((x) => / \(table change in (added|removed) lines\)$/.test(x)), JSON.stringify(r));
+  assert.deepEqual(r.slice(1, 3), ['app/signup.tsx (table change in added lines)', 'app/signup.tsx (table change in removed lines)']);
+  assert.match(r.at(-1), /^and \d+ more$/);
+  // The same sort keeps a label ahead of the one-per-file scan_not_built lines (#259 r2 Minor).
+  const u = judged(['a', 'b', 'c', 'd', 'e'].map((x) => f(`src/${x}.mjs`, ['x()'])), ['needs-joe']).unclassifiable;
+  assert.equal(u[0], 'needs-joe label', JSON.stringify(u));
+  assert.ok(u.slice(1, 5).every((x) => x.startsWith('scan_not_built: ')), JSON.stringify(u));
 });
