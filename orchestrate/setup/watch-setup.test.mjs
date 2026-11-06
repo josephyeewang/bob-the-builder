@@ -614,6 +614,6 @@ test('PLANT L633 the hash check: a link, a folder, a missing copy and a non-root
   assert.match(checkRulesHash(w.mac, { ...cfg2, watch: { ...cfg2.watch, rulesSha256: HASH2 } })[0].why, /the pin is/);
   const keep = `${f}.keep`; renameSync(f, keep); symlinkSync(keep, f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /not a plain file/);
   rmSync(f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /missing/);
-  mkdirSync(f); assert.match(checkRulesHash(w.mac, cfg2)[0].why, /not a plain file/); rmSync(f, { recursive: true }); renameSync(keep, f);
-  w.mac.as = 501; assert.equal(checkRulesHash(w.mac, cfg2)[0].skip, true);
+  mkdirSync(f); assert.equal(checkRulesHash(w.mac, cfg2)[0].why, 'is not a plain file', 'told by the check itself, before any read'); rmSync(f, { recursive: true }); renameSync(keep, f);
+  w.mac.as = 501; const look = checkRulesHash(w.mac, cfg2)[0]; assert.equal(look.skip, true); assert.match(look.why, /needs root/);
 });
