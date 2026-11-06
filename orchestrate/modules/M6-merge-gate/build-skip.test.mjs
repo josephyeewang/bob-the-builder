@@ -172,8 +172,8 @@ test('L571: through real shells, the first-cutover command agrees with decideBui
   const dir = tempDir('m6-first-skip-');
   const FULL = 'a'.repeat(40);
   const values = {
-    VERCEL_ENV: [undefined, '', 'production', 'preview', 'development', 'Production', 'production ', 'production\n', '*', 'production|main', 'production|main|'],
-    VERCEL_GIT_COMMIT_REF: [undefined, '', 'main', 'mainx', 'Main', 'x|main', '$(touch PLANTED)', '`touch PLANTED`', 'main\n', 'ma*', 'main;exit 1', '"; exit 1; "', `main|${FULL}`, FULL],
+    VERCEL_ENV: [undefined, '', 'production', 'preview', 'development', 'Production', 'production ', 'production\n', '*', 'production|main', 'production|main|', 'xproduction', 'x'], // xproduction and x: a loosened leading pattern builds (#241 r2 Minor 3)
+    VERCEL_GIT_COMMIT_REF: [undefined, '', 'main', 'mainx', 'Main', 'x|main', '$(touch PLANTED)', '`touch PLANTED`', 'main\n', 'ma*', 'main;exit 1', '"; exit 1; "', `main|${FULL}`, FULL, 'production|main'],
     VERCEL_GIT_COMMIT_SHA: [undefined, '', FULL, '0123456789abcdef0123456789abcdef01234567', FULL.slice(1), `${FULL}a`, FULL.toUpperCase(), `${FULL}\n`, `\n${FULL}`,
       `${'a'.repeat(20)}|${'b'.repeat(19)}`, `g${'a'.repeat(39)}`, '?'.repeat(40), '*', 'é'.repeat(40), `${'a'.repeat(39)}B`, `|${FULL}`, '$(touch PLANTED)'],
   };
