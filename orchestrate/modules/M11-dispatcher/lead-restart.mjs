@@ -15,7 +15,7 @@
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
-import { tellThen, writeFrom } from './alerts.mjs';
+import { plain, tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
 import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
@@ -47,9 +47,11 @@ export function recordLeadLaunch({ rec, now, alert, sessionId, head, product = n
 export const estimateTokens = (text) => Math.ceil(Buffer.byteLength(String(text), 'utf8') / 4);
 
 /** The intake's vet for handoff files: refuses one over the cap, so the session can write it again. */
-export const handoffVet = (rules) => ({ kind, text }) => {
+export const handoffVet = (rules) => ({ session, kind, text }) => {
   if (kind !== 'handoff-') return null;
-  const cap = need(rules, KEYS.handoffCapRole);
+  // Said here, so the owner hears the true cause: the rules are fine, and need() would say they have no value (L584 M1).
+  if (!session?.product) throw new Error(`the session names no product, so ${KEYS.handoffCapRole} can't be read for it`);
+  const cap = need(rules, KEYS.handoffCapRole, { product: session.product });
   const est = estimateTokens(text);
   return est > cap ? `the handoff is about ${est} tokens, over the ${cap} cap` : null;
 };
@@ -79,16 +81,21 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
 /**
  * One pass for one Lead. `size` = readSize() of its transcript; `inFlight` = leadInFlight()'s
  * answer; `send(text)` = sendSafe to this Lead -> { outcome }; `stopSession()`, `startLead({
- * handoff })` -> { ok, reason, sessionId }; `mainSha({ product })` -> sha; `alert(text)`. Returns the action taken.
+ * handoff })` -> { ok, reason, sessionId }; `mainSha({ product })` -> sha; `alert(text)`.
+ * `handoffRefused`: why this pass's intake refused the Lead's handoff file, if it did. A refusal writes no fact, so the
+ * tick hands it on, and the Lead and the owner hear the true cause (L584 M1). Returns the action taken. Throws when the
+ * Lead's id or rules can't be read: the tick tells that Lead and goes on to the next (tellLeadSkipped).
  */
-export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, mainSha, alert }) {
-  const sid = lead.sessionId;
-  if (!SID.test(String(sid))) return 'refused: a session id the outbox names cannot hold';
-  const soft = need(rules, KEYS.leadSoft);
-  const hard = need(rules, KEYS.leadHard);
-  const cap = need(rules, KEYS.handoffCapRole);
+export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, send, stopSession, startLead, mainSha, alert, handoffRefused }) {
+  const sid = lead?.sessionId;
+  if (!namesSession(sid)) throw new Error('its session id is missing, or is one the outbox names cannot hold');
+  if (!lead.product) throw new Error('it names no product, so its rules can\'t be read');
+  const soft = need(rules, KEYS.leadSoft, { product: lead.product });
+  const hard = need(rules, KEYS.leadHard, { product: lead.product });
+  const cap = need(rules, KEYS.handoffCapRole, { product: lead.product });
   let cur = rec.read('fact', RESTART_FACT(sid));
-  let st = cur?.doc ?? { phase: 'none', reasks: 0 };
+  // Spread, not `??`: the hard-line alert's mark makes this fact with no phase, and that Lead still needs its WRAP.
+  let st = { phase: 'none', reasks: 0, ...cur?.doc };
   const pendingRefused = (id, what) => holdAlert({ rec, cause: `lead-launch-pending-${id}`, text: `the Lead ${id} has ${what}`, alert, now });
   // Main is read before the start, so the record names the commit the new Lead started on, not one that landed after.
   const startNext = async () => {
@@ -211,9 +218,9 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
     return 'restarted';
   }
   if (!answered) return 'waiting for the handoff';
-  const why = timedOut && !(size.endedAt != null && sentAt !== null && size.endedAt > sentAt) && !used ? 'no answer within a day of the ask'
+  const why = handoffRefused ?? (timedOut && !(size.endedAt != null && sentAt !== null && size.endedAt > sentAt) && !used ? 'no answer within a day of the ask'
     : used?.state === 'refused' ? 'the record refused it' : used?.state === 'interrupted' ? 'its hand-in was interrupted'
-    : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap';
+    : used?.state === 'applied' ? 'a handoff under that name was already used before the WRAP' : 'it is missing or over the cap');
   if ((st.reasks ?? 0) < 1) {
     const r = await send(`Your handoff was not used (${why}). Write ${HANDOFF_NAME(sid)} again, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE.`);
     if (r?.outcome !== 'sent') {
@@ -235,7 +242,19 @@ export async function leadRestartStep({ rec, rules, now, lead, size, inFlight, s
   return giveUp(why);
 }
 
+/**
+ * One Lead whose step threw: the owner is told which Lead, which product and why, once a day, and the tick goes on to the
+ * next Lead, so one product's problem holds no other product's Lead (L584 M2).
+ */
+export function tellLeadSkipped({ rec, lead, error, alert, now }) {
+  const sid = lead?.sessionId;
+  const where = lead?.product ? `product ${plain(lead.product)}` : 'no product named';
+  // A bad id gets its own cause too, so two bad Leads are both told; the id goes into a fact name, so only its safe letters.
+  return holdAlert({ rec, cause: `lead-skipped-${String(sid ?? 'no-session').replace(/[^A-Za-z0-9-]/g, '_').slice(0, 80)}`, alert, now,
+    text: `the Lead ${sid == null ? 'with no session id' : plain(sid)} (${where}) was skipped this pass: ${plain(error?.message ?? error)}; the other Leads still ran, and it is tried again next pass` });
+}
+
 const startFailedText = (sid, reason) => `the Lead ${sid} was stopped after its handoff, but the new Lead did not start: ${reason ?? 'no answer'}; it is tried again every pass`;
 const reaskRefusedText = (sid, outcome, since) => `the Lead ${sid} did not hand in a usable handoff, and the second ask could not be sent since ${since} (${outcome ?? 'no answer'}); it is tried again at each finished turn`;
-const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running`;
+const gaveUpText = (sid, why, asked = true) => `the Lead ${sid} did not hand in a usable handoff ${asked ? 'after a second ask' : 'within a day of the ask'} (${why ?? 'no reason recorded'}); it keeps running, and a restart now needs a person`;
 const wrapText = (sid, cap) => `WRAP: this session is large. Write your handoff to your outbox as ${HANDOFF_NAME(sid)}, under ${cap} tokens (about ${cap * 4} bytes), then reply DONE. Requests still queued in your outbox do not carry over: name any you still need in the handoff.`;

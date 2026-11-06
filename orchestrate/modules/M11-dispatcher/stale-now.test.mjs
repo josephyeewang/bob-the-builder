@@ -279,6 +279,7 @@ export { rec };
   assert.ok(reads.length >= 13, `the clock was read before each step (${reads.length})`);
   const at = rec.read('fact', LAST_PASS_FACT).doc.at;
   assert.ok(reads.map((x) => new Date(x).toISOString()).includes(at) && Date.parse(at) >= T0 + 13 * MIN, at);
+  assert.equal(rec.read('fact', LAST_PASS_FACT).doc.started_at, new Date(T0).toISOString(), 'audit #150 M1: the pass\'s start is kept beside it');
 });
 
 test('L332 MAT-1 (Probe A): a dead ask refused at an outage\'s end stays told while the card is stuck, though no pass asks again', async () => {

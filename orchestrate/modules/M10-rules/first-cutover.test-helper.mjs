@@ -25,18 +25,14 @@ export const ENTRY = { product: 'sample-app', owner: 'sample-org', repo: 'sample
 
 // Reasons the real readers give today on any rules file, each a known gap in the readers, not in the file, and labeled
 // so in the check's own output (known-gaps.mjs; L96 m-D, L115). They go as these land:
-//   - M11's Mac-wide reads of per-product keys (L115 M-A, L131, L144): lane 2's L104 sweep passes the product at the
-//     three context.* reads left (the time limits and context.worker.split_after_compactions went with #68). (usage.red_runs's went with #79, and the Dispatcher-wide
-//     NEW_KEYS with #94, which made them Mac-wide in shared/rules.mjs.)
+//   (M11's Mac-wide reads of per-product keys went with L564, the three context.* reads; the time limits and
+//   context.worker.split_after_compactions with #68; usage.red_runs with #79; the Dispatcher-wide NEW_KEYS with #94.)
 //   (Numbers and flags as text went with #94: M11 reads through num/dec/flag, L148.)
-// The test 'the pending reasons are exactly these' then fails, and this list is cut to what is left; at [] the todo
-// test below passes.
+// The test 'the pending reasons are exactly these' fails when a new one appears; the list is at [] today.
 export const SCOPE = (k) => `M11: ${k} is read without the product, so the real engine gives none${scopeLabel(k)}`;
 // (The six per-product time limits M11 read without the product went with #68: merges.mjs and pass.mjs read each for
 // its product, and timeouts.claimed_no_session_min is no longer read; L144, lane 2's L104 O-1 step 2.)
-export const PENDING = Object.freeze([
-  SCOPE('context.lead.soft'), SCOPE('context.lead.hard'), SCOPE('context.handoff_cap.role'),
-]);
+export const PENDING = Object.freeze([]);
 export const fit = (...a) => firstCutoverProblems(...a).filter((x) => !PENDING.includes(x));
 
 // The keys the merge gate (M6), Approvals (M2), the Record (M9) and the Dispatcher (M11) read (L86): go_free in the
@@ -67,7 +63,7 @@ context:
     soft: 120000
     hard: 160000
   handoff_cap:
-    role: 3
+    role: 8000
   worker:
     split_after_compactions: 2
 claims:

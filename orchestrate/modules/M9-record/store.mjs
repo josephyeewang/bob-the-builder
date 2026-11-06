@@ -45,8 +45,8 @@ const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
 // A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
 const KEPT_BACK_TEXT_MAX = 300;
 
-const TEST_FAULTS = Object.freeze(['append_fails', 'short_write', 'readback_wrong', 'rename_fails']);
-// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test.
+const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails']);
+// Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test. `cutback_fails` fails the cut-back too.
 
 const SAFE_ID = /^[A-Za-z0-9._-]+$/;
 // The one test for a name that becomes part of a path: no slash, not all dots, short enough to be a file name (rounds 5 m-2, 6).
@@ -140,6 +140,21 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
     try { appendPlain(P.unsent, `${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
   };
   const sayOrKeep = (event) => { const e = stamp(event); if (send(e)) return true; keep(e); return false; };
+  // What the unsent file says was kept in the last day, each with its cap_key. Delivered lines count too, so a resend is
+  // no new issue. A file that can't be read gives none: told twice beats not told.
+  function linesInDay(at) {
+    const since = at - KEEP_WINDOW_MS;
+    try { return readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since ? [x] : []; } catch { return []; } }); } catch { return []; }
+  }
+  // A fault that every open finds again (L575): told once a day, not once per open, since each kept line is one issue.
+  // The keep path, as a Record that refuses writes has no other. The mark goes in with the line, so a delivered one holds.
+  function sayOrKeepDaily(event) {
+    const at = now();
+    const key = `${event.type}:${event.reason}`;
+    if (linesInDay(at).some((x) => x.cap_key === key)) return;
+    const e = stamp(event);
+    if (!send(e)) keep(e, { cap_key: key, at: new Date(at).toISOString() });
+  }
   // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
   // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
   // the last day, with nothing in memory (a pass is one process). Past the total, a key is counted, not kept, and the
@@ -149,9 +164,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
     const whole = String(key);
     const capKey = whole.length <= 300 ? whole : `${whole.slice(0, 200)}#${createHash('sha256').update(whole).digest('hex')}`;
     const at = now();
-    const since = at - KEEP_WINDOW_MS;
-    let lines = [];
-    try { lines = readPlain(P.unsent).split('\n').flatMap((l) => { try { const x = JSON.parse(l); return typeof x?.cap_key === 'string' && (pastTime(x.at, at) ?? -Infinity) > since ? [x] : []; } catch { return []; } }); } catch { /* the keep below is still tried */ }
+    const lines = linesInDay(at);
     if (lines.some((x) => x.cap_key === capKey)) return;
     const mark = { cap_key: capKey, at: new Date(at).toISOString() };
     const kept = lines.filter((x) => x.outcome === 'unsent' && x.event?.type === 'alert_not_queued');
@@ -233,7 +246,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
       if (end < 0) return;   // only a partial line so far
       for (const raw of text.slice(0, end).split('\n')) {
         if (damaged) break;
-        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); say({ type: 'diary_damaged', reason: damaged }); }
+        try { absorb(JSON.parse(raw)); } catch (e) { damaged = String(e?.message ?? e).slice(0, 200); sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
       }
       offset += Buffer.byteLength(text.slice(0, end + 1), 'utf8');
     } finally { closeSync(fd); }
@@ -434,7 +447,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
             const size = fstatSync(fd).size;
             try {
               if (faultAt !== undefined && (faultAt === 'diary_torn' || faultAt?.step === 'diary_torn')) { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); fsyncSync(fd); fault('diary_torn'); }
-              if (faultAt === 'append_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
+              if (faultAt === 'append_fails' || faultAt === 'cutback_fails') { writeSync(fd, text.slice(0, Math.floor(text.length / 2))); throw storeFail('test: the append failed partway'); }
               const body = faultAt === 'readback_wrong' ? text.replace(`"seq":${line.seq},`, `"seq":${line.seq + 1},`) : text;
               const wrote = writeSync(fd, faultAt === 'short_write' ? body.slice(0, Math.floor(body.length / 2)) : body);
               if (wrote !== Buffer.byteLength(body, 'utf8')) throw storeFail(`diary append wrote ${wrote} of ${Buffer.byteLength(body, 'utf8')} bytes`);
@@ -442,7 +455,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
             } catch (e) {
               // A part-written line (a full disk) is cut back off, so the next line doesn't join it and become unreadable
               // (0b-2 audit MIN-7). If it can't be cut, writes stop until the owner looks.
-              try { ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; say({ type: 'diary_damaged', reason: damaged }); }
+              try { if (faultAt === 'cutback_fails') throw storeFail('test: the cut-back failed'); ftruncateSync(fd, size); fsyncSync(fd); } catch { damaged = 'a failed diary append could not be cut back'; sayOrKeepDaily({ type: 'diary_damaged', reason: damaged }); }
               throw e;
             } finally { closeSync(fd); }
           } catch (e) { for (const t of temps) { try { unlinkSync(t); } catch { /* gone */ } } throw e; }
