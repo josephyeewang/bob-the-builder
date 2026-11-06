@@ -78,6 +78,8 @@ test('start_session: roles (MAT-11)', () => {
   assert.equal(start(on, { role: 'script' }).decision, 'allow');
   const pinMoved = world({ policies: { app: pol((t) => set('', 'script: none', 'script: 2.1.316')(t).replace('pin: 2.1.316', 'pin: 2.1.317')) } });
   assert.equal(start(pinMoved, { role: 'script' }).decision, 'deny', 'a pin change switches script off (and the tool list expires)');
+  const oneMoved = world({ policies: { app: pol((t) => t.replace('pin: 2.1.316', 'pin: 2.1.317')) } });
+  assert.match(start(oneMoved).reason, /re-check the list/, 'one product, pin not the checked version: no role starts, and the reason says why');
   assert.equal(start(w, { tier: 3 }).decision, 'deny');
   assert.equal(start(w, { editing: 'yes' }).decision, 'deny');
 });

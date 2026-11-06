@@ -90,6 +90,7 @@ test('each missing or wrong piece is named', () => {
     [swap(FIRST, '  editing_per_product: 0\n', ''), 'caps.editing_per_product must be 0'],
     [swap(FIRST, '    - docs/research/**\n', '    - app/**\n'), 'lanes.research: "app/**" is outside docs/domains/, docs/research/ and docs/*.md'],
     [swap(FIRST, 'script: none', 'script: 2.1.316'), 'roles_enabled.script must be none'],
+    [swap(FIRST, 'pin: 2.1.316', 'pin: 2.1.318'), 'claude_code.pin is 2.1.318, but the tool list is checked against 2.1.316: every role would be refused'],
   ];
   for (const [text, want] of cases) assert.ok(fit(text).includes(want), want);
   // A corrupt file is one reason, not a list of follow-on ones.
