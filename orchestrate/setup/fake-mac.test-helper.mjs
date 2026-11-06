@@ -40,6 +40,8 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     log: [],                    // every changing call, in order
     failNextDsclCreate: false,  // a test sets this to make the next dscl -create fail once
     fetchLog: [], github: null,
+    // Programs run as another user that a test stands in for: mac.programs.set('<full path>', (who, args) => ({ status, stdout, stderr })).
+    programs: new Map(),
     gitSafeOther: [],          // safe.directory values from the system file or an include: seen by a read of ALL scopes, never by --global
     gitSafe: new Map(),        // user → their `git config --global` safe.directory values
     secretInput: null,          // what the stand-in terminal returns for the hidden read (null = there is no terminal)
@@ -119,6 +121,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       if (rest[2] === '--add' && rest[3] === 'safe.directory' && rest[4]) { mac.log.push(`git config --global --add safe.directory ${rest[4]} (as ${who})`); mac.gitSafe.set(who, [...store, rest[4]]); return { status: 0, stdout: '', stderr: '' }; }
       return { status: 129, stdout: '', stderr: 'usage: git config [<options>]' };
     }
+    const stand = mac.programs.get(prog); if (stand) return stand(who, rest);
     return { status: 127, stdout: '', stderr: `fake mac: ${prog} is not stood in for` };
   };
   const ports = (p) => ({
