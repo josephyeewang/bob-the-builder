@@ -1,5 +1,5 @@
-// required-keys.test.mjs — the Record's key list matches every rules read in ready.mjs and writer.mjs (L86 2, 9;
-// L96 M-1, m-4; L123): every key read is listed, every listed key is read, in any quote kind and through the typed reads
+// required-keys.test.mjs — the Record's key list matches every rules read in any of its non-test files (L86 2, 9;
+// L96 M-1, m-4; L123; L165): every key read is listed, every listed key is read, in any quote kind and through the typed reads
 // (num, dec, flag, plain or ?.), template and const-named keys included, and a read whose key can't be named fails.
 // The reader is M10's rules-reads.test-helper.mjs, which M2's test shares.
 import { test } from 'node:test';
@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { REQUIRED_KEYS, OPTIONAL_KEYS } from './required-keys.mjs';
 import { GO_FREE, GO_FREE_KEY } from './ready.mjs';
-import { listed, readsListed, rulesReads } from '../M10-rules/rules-reads.test-helper.mjs';
+import { KEYS as M11_KEYS } from '../M11-dispatcher/keys.mjs';
+import { listed, moduleReads, moduleSources, readsListed, rulesReads } from '../M10-rules/rules-reads.test-helper.mjs';
 
 const read = (f) => readFileSync(new URL(f, import.meta.url), 'utf8');
 const LIST = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
@@ -25,14 +26,33 @@ function recordReads(ready = read('ready.mjs'), writer = read('writer.mjs')) {
 }
 const unlisted = (keys) => [...keys].filter((k) => !listed(LIST, k));
 
-test('every rules key ready.mjs and writer.mjs read is on the Record\'s list, and every listed key is read', () => {
-  const { keys, nonLiteral } = recordReads();
-  assert.equal(nonLiteral, 0, 'every rules read names its key');
+// Every non-test file in the module (L165).
+const SOURCES = moduleSources(new URL('./', import.meta.url));
+const stripWriter = (t) => { let w = t; for (const h of HELPERS) w = w.replace(h, ''); return w.replace(/\n\s*get\(entity, id\) \{/, '\n'); };
+const FILES = { 'writer.mjs': { helpers: ['get', 'num'], prep: stripWriter } };
+const UNNAMED = { 'required-keys.mjs': { count: 3, why: 'policyProblems walks REQUIRED_KEYS itself, so these reads take their key from the list this test checks' } };
+const scan = (sources = SOURCES, unnamed = UNNAMED) => moduleReads(sources, { files: FILES, unnamed, keyMaps: { KEYS: M11_KEYS } });
+
+test('every rules key any file in the Record reads is on its list, and every listed key is read', () => {
+  const { keys, problems } = scan();
+  assert.deepEqual(problems, [], 'every rules read names its key, or says why not');
+  assert.ok(SOURCES.length > 10 && SOURCES.some((s) => s.file === 'store.mjs') && !SOURCES.some((s) => /\.test/.test(s.file)), 'every non-test file, and no test');
   assert.deepEqual(unlisted(keys), [], 'every key read is listed');
   for (const k of LIST) assert.ok(readsListed(keys, k), `required-keys.mjs lists ${k}, which the Record doesn't read`);
   // The template key over the states, the typed reads, and goFreeOn's computed key over every go-free kind (L123).
   for (const k of ['product_state_rules.light.start', 'caps.rounds', 'claims.stuck_min', 'proposals.heartbeat_stale_min',
     ...Object.keys(GO_FREE).map((kind) => `${GO_FREE_KEY}.${kind}`)]) assert.ok(keys.has(k), k);
+});
+
+test('L165 plants, on copies: a read in a file the old test skipped, in a new file, or with a key it can\'t name; a stale UNNAMED entry', () => {
+  const swapped = (file, fn) => SOURCES.map((s) => (s.file === file ? { ...s, text: fn(s.text) } : s));
+  const atStore = (line) => swapped('store.mjs', (t) => `${t}\n${line}\n`);
+  assert.deepEqual(unlisted(scan(atStore("export const a = (rules) => rules.num('caps.in_store');")).keys), ['caps.in_store']);
+  assert.match(scan(atStore('export const a = (rules, k) => rules.get(k);')).problems.join(), /store\.mjs: 1 rules read/);
+  assert.deepEqual(unlisted(scan([...SOURCES, { file: 'new.mjs', text: "export const a = (ctx) => ctx.rules.flag('caps.in_new');\n" }]).keys), ['caps.in_new']);
+  assert.match(scan(SOURCES, {}).problems.join(), /required-keys\.mjs: 3 rules read/);
+  assert.match(scan(SOURCES, { 'required-keys.mjs': { ...UNNAMED['required-keys.mjs'], count: 4 } }).problems.join(), /4 allowed/, 'an allowance larger than the reads is stale');
+  assert.match(scan(SOURCES, { ...UNNAMED, 'gone.mjs': { count: 0, why: 'x'.repeat(30) } }).problems.join(), /gone\.mjs is listed/);
 });
 
 test('the drift reader catches a new read in readyCheck in every form, and a key it can\'t name (the P9, P10, O5 and L123 plants, on copies)', () => {
