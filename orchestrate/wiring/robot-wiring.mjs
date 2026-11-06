@@ -29,7 +29,7 @@
 //   keyDir         the robot key folder (setup: orchestrate's, 0700). The job starts only when this process's user owns it.
 
 import { lstatSync } from 'node:fs';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing } from './dispatcher-wiring.mjs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, REVIEW_CONFIG_KEYS, checkConfig, privateFolder, recordAndRules, refusing } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
@@ -38,8 +38,9 @@ import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 
-// approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), so the robot config refuses it.
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir'), 'keyDir']);
+// approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
+// (L639), so the robot config refuses them.
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k)), 'keyDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir']);
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.

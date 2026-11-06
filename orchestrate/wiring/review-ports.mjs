@@ -10,14 +10,29 @@
 //   wait(ms)              → a plain timer, for intake's settle wait.
 // A product other than this Dispatcher's is refused: one Dispatcher runs one product (M9), and reading another
 // product's repository would answer for the wrong one.
+//
+// WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
+// request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
+//   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
+// The stamp check (is the reviewers' installed copy at main?) compares the copy's stamp with root's own record beside
+// that copy (install-check.mjs mainSeenFile), which root's updater writes each time it fetches main. Not with mainSha:
+// the copy is the orchestrate code, fetched from the repository updater.json names, not the product's (L639). A record
+// that can't be read, or whose last check is older than MAIN_SEEN_STALE_MS, can't say whether the copy is behind, so
+// the stamp hold is kept and the owner is told, at once and then daily (statusAlerts' "main can't be read").
+// NOT HERE: `gateAlive` asks whether the Merge Gate is running, and it runs in the robot job's gate pass, which is not
+// wired; it has no sign of life to read yet. It moves to whoever wires that pass, which writes a "gate last ran at"
+// mark for it (L639).
 // NOT HERE: `filesOf` answers at once (undo.mjs calls it without waiting), from the local mirror, so it is not a GitHub
 // read; it stays listed until the mirror is wired.
 
 import { makeGitView, notRead } from '../modules/M10-rules/git-view.mjs';
 import { BRANCH } from '../modules/M10-rules/reader.mjs';
+import { mainSeenHead, reviewPorts as runnerPorts } from '../modules/M11-dispatcher/review-requests.mjs';
+import { mainSeenFile, readMainSeen } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
+import { pastTime } from '../shared/still-waiting.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['hasReviewer', 'requestReview', 'reviewAlerts', 'startPlanReview', 'planReviewAnswer',
-  'planRows', 'filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'planRows', 'filesOf', 'gateAlive', 'healthy', 'resume']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -45,7 +60,39 @@ export function githubReads({ gh, entry }) {
 /** A plain timer. A wait that can't be read waits no time at all, rather than for ever. */
 export const wait = (ms) => new Promise((ok) => { setTimeout(ok, Number.isFinite(ms) && ms > 0 ? ms : 0); });
 
+// Root's updater fetches main every UPDATE_EVERY_S (M4 review-daemons.mjs, its LaunchDaemon's interval). A record whose
+// last check is older than two of those has missed a turn, so the updater may have stopped, and a copy left behind
+// would never be told (L639).
+export const MAIN_SEEN_STALE_MS = 2 * UPDATE_EVERY_S * 1000;
+
+/**
+ * Main's commit as root's updater last saw it, from its record beside the review copy; throws when the record can't be
+ * read or is stale, so statusAlerts keeps the stamp hold and tells it. `owner` and `top` stand in for root and `/` in a
+ * test.
+ */
+export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
+  return () => {
+    const s = readMainSeen(mainSeenFile(installRoot), { owner, top });
+    if (!s) throw new Error("root's record of main beside the review copy is missing or can't be trusted");
+    // In ms in root's record (readMainSeen checks it is a whole number); read through pastTime as every stored time is (L321).
+    const t = pastTime(new Date(s.checked_at).toISOString(), now());
+    const min = t === null ? null : Math.round((now() - t) / 60_000);
+    if (t === null || now() - t > MAIN_SEEN_STALE_MS) {
+      throw new Error(`root's updater last checked main ${min === null ? 'at a time that can\'t be read' : `${min} min ago`}; it checks every ${UPDATE_EVERY_S / 60} min`);
+    }
+    return s.commit;
+  };
+}
+
+/** The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). */
+export function reviewRunner({ config: c, now, owner = 0, top = '/' }) {
+  if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');
+  const main = mainSeen({ installRoot: c.reviewInstallRoot, now, owner, top });
+  return runnerPorts({ requests: c.reviewRequestsDir, status: c.reviewStatusFile, reviewUid: c.reviewUid, runnerLog: c.reviewRunnerLog, now,
+    mainHead: mainSeenHead({ installRoot: c.reviewInstallRoot, main, owner, top }) });
+}
+
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function reviewPorts(ctx) {
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), wait };
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now }) };
 }

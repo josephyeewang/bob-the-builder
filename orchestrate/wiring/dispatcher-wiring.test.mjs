@@ -10,8 +10,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
@@ -25,6 +26,7 @@ import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER, cleanupProblem, wor
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
+import { reviewConfig } from './review-ports.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
@@ -36,12 +38,12 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // PINNED HERE, not imported from the wiring (audit #127 M-1): a port the wiring quietly answers, or a step the tick
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
-const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
+const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
+  'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
-const PORTS_WIRED = Object.freeze(['approvals', 'mainSha', 'planView', 'wait']);
+const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -67,7 +69,7 @@ function world({ extra = {}, omit = [], products = [ENTRY] } = {}) {
   writeFileSync(token, 'x'.repeat(40), { mode: 0o600 });
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: P, recordRoot: f('record'), ownerUid: process.getuid(),
-    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...extra };
+    productsFile: f('products.json'), rulesStateDir, tokenFile: token, approvalsStateDir: f('approvals-state'), ...reviewConfig(dir), ...extra };
   for (const k of omit) delete config[k];
   const configFile = L.write('dispatcher.json', config);
   const main = L.path('modules/M11-dispatcher/main.mjs');
@@ -162,7 +164,9 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
   assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
   assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
-  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY })).sort(), ['mainSha', 'planView', 'wait']);
+  const config = reviewConfig(mkdtempSync(join(tmpdir(), 'orch-review-keys-')));
+  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, config, now: Date.now })).sort(),
+    ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
 
   const w = world();

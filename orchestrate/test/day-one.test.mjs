@@ -86,6 +86,7 @@ import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
+import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -299,7 +300,7 @@ function macBoot() {
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
     recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
-    approvalsStateDir: f('approvals-state') };
+    approvalsStateDir: f('approvals-state'), ...reviewConfig(dir) };
   const configFile = L.write('dispatcher.json', config);
   writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
   const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {

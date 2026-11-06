@@ -6,7 +6,11 @@ import assert from 'node:assert/strict';
 import { readOnlyClient } from '../modules/M6-merge-gate/watch-only.mjs';
 import { ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { fakeGitHubFetch } from './fake-github.test-helper.mjs';
-import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW } from './review-ports.mjs';
+import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW, reviewRunner, MAIN_SEEN_STALE_MS } from './review-ports.mjs';
+import { reviewConfig, writeSeen, writeStatus } from './review-ports.test-helper.mjs';
+import { mkdtempSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const COMMIT = 'c'.repeat(40);
 const TOKEN = 't'.repeat(40);
@@ -81,8 +85,84 @@ test('A1: wait waits, and a wait it can\'t read waits no time', async () => {
   }
 });
 
-test('A1: the port file answers exactly what it took off its list', () => {
-  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY }));
-  assert.deepEqual(answered.sort(), ['mainSha', 'planView', 'wait']);
+test('A1, A2: the port file answers exactly what it took off its list', () => {
+  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, config: reviewConfig(temp()), now: Date.now }));
+  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   for (const k of answered) assert.ok(!NOT_WIRED_REVIEW.includes(k), k);
+});
+
+// ---- A2 (L615, L639): the review runner's ports, against a throwaway runner folder of this user's.
+const temp = () => mkdtempSync(join(tmpdir(), 'orch-review-ports-'));
+const T0 = Date.parse('2026-11-05T12:00:00Z');
+const MIN = 60_000;
+const D = 'd'.repeat(40);
+function runner({ status = {}, seen = {}, at = T0 } = {}) {
+  const dir = temp();
+  const config = reviewConfig(dir, { now: T0, status, seen });
+  let t = at;
+  const ports = reviewRunner({ config, now: () => t, owner: process.getuid(), top: dir });
+  return { config, ports, dir, setNow: (v) => { t = v; } };
+}
+const stamp = (list) => list.find((a) => a.id === 'stamp');
+
+test('A2: requestReview writes one whole request into the runner\'s requests folder, and starts nothing', () => {
+  const w = runner();
+  const r = w.ports.requestReview({ card: 'c-1', head: 'a'.repeat(40), role: 'reviewer' });
+  assert.equal(r.ok, true, r.reason);
+  const files = readdirSync(w.config.reviewRequestsDir);
+  assert.equal(files.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(w.config.reviewRequestsDir, files[0]), 'utf8')).card, 'c-1');
+});
+
+test('A2: hasReviewer reads what the runner says runs, and a status it can\'t trust is an error, never a no', () => {
+  const head = 'a'.repeat(40);
+  const w = runner({ status: { running: [{ card: 'c-1', role: 'reviewer', head }] } });
+  assert.equal(w.ports.hasReviewer('c-1', 'reviewer', head), true);
+  assert.equal(w.ports.hasReviewer('c-1', 'auditor', head), false);
+  w.setNow(T0 + 4 * MIN);
+  assert.throws(() => w.ports.hasReviewer('c-1', 'reviewer', head), /4 minutes old/);
+  const gone = runner({ status: null });
+  assert.throws(() => gone.ports.hasReviewer('c-1', 'reviewer', head), /status is missing/);
+  const open = runner();
+  chmodSync(open.config.reviewStatusFile, 0o666);
+  assert.throws(() => open.ports.hasReviewer('c-1', 'reviewer', head), /written by others/);
+});
+
+test('A2: reviewAlerts carries the runner\'s alerts and holds, and a copy at main says nothing about its stamp', () => {
+  const w = runner({ status: { alerts: [{ id: 'a1', at: 'x', text: 'hello' }], holds: [{ id: 'h1', since: 's', text: 'held' }] } });
+  const list = w.ports.reviewAlerts();
+  assert.deepEqual(list.map((a) => a.id), ['a1', 'h1']);
+  assert.equal(list[1].hold, true);
+});
+
+test('A2: a copy behind root\'s record of main is told once past the grace, by the installed commit', () => {
+  const w = runner({ status: { installed_commit: 'c'.repeat(40) }, seen: { commit: D, installed: 'c'.repeat(40), since: T0 - 40 * MIN, checked_at: T0 - 2 * MIN } });
+  assert.match(stamp(w.ports.reviewAlerts()).text, /installed copy is at ccccccc, but main is at ddddddd/);
+});
+
+test('A2: a stale record of main, or none, keeps the stamp hold and says why, never "at main"', () => {
+  const stale = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS - MIN } });
+  const s = stamp(stale.ports.reviewAlerts());
+  assert.equal(s.keep, true);
+  assert.match(s.text, /can't be checked\. The read said: root's updater last checked main 21 min ago; it checks every 10 min/);
+  const fine = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS + MIN } });
+  assert.equal(stamp(fine.ports.reviewAlerts()), undefined, 'inside two updater turns: fine');
+  const ahead = runner({ seen: { checked_at: T0 + 60 * MIN } });
+  assert.match(stamp(ahead.ports.reviewAlerts()).text, /at a time that can't be read/);
+  const none = runner({ seen: null });
+  assert.match(stamp(none.ports.reviewAlerts()).text, /record of main beside the review copy is missing or can't be trusted/);
+  const open = runner();
+  chmodSync(`${open.config.reviewInstallRoot}.main-seen.json`, 0o666);
+  assert.equal(stamp(open.ports.reviewAlerts()).keep, true, 'a record others could write is not trusted');
+});
+
+test('A2: the stale limit is two of the updater\'s turns, read from its LaunchDaemon interval', () => {
+  assert.equal(MAIN_SEEN_STALE_MS, 20 * MIN);
+});
+
+test('A2: a review uid that is not a Mac user id stops the start', () => {
+  for (const reviewUid of [undefined, -1, 1.5, '501']) {
+    const config = { ...reviewConfig(temp()), reviewUid };
+    assert.throws(() => reviewRunner({ config, now: Date.now }), /config: reviewUid must be a Mac user id/, String(reviewUid));
+  }
 });
