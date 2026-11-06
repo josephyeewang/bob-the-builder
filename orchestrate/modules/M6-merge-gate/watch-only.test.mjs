@@ -1519,3 +1519,20 @@ test('L631 Minor 3: the App\'s client asks for nothing but this repo\'s check ru
   await c.get(`/repos/${OWNER}/${REPO}/commits/${sha}/check-runs?per_page=100`).catch(() => {});
   assert.equal(sent.length, 1);
 });
+
+test('L632: the App client\'s allow-list takes the owner and repo literally (a "." in a name is not "any character")', async () => {
+  const signer = join(tempDir('m6-watch-signer-'), 'app-signing-key');
+  writeFileSync(signer, generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const fetchFn = async (url, init) => {
+    const path = url.replace('https://api.github.com', '');
+    if (init.method === 'POST' && path === '/app/installations/42/access_tokens') return { status: 201, json: async () => ({ token: 'ghs_madeUpInstallationToken000000', expires_at: '2026-11-05T13:00:00Z' }) };
+    return { status: 200, json: async () => ({ total_count: 0, check_runs: [] }) };
+  };
+  const { watchChecksClientForTest } = await import('./watch-run.mjs');
+  const c = await watchChecksClientForTest({ appId: '353123', appInstallation: '42', appKeyFile: signer }, { owner: 'some.owner', repo: 'a.b+c', fetchFn, err: () => {}, uid: UID });
+  const at = (o, r) => `/repos/${o}/${r}/commits/${'a'.repeat(40)}/check-runs?per_page=100`;
+  assert.equal((await c.get(at('some.owner', 'a.b+c'))).status, 200);
+  for (const [o, r] of [['someXowner', 'a.b+c'], ['some.owner', 'aXb+c'], ['some.owner', 'a.bbc'], ['some.owner', 'a.b+c/x']]) {
+    await assert.rejects(() => c.get(at(o, r)), /reads only this repo's check runs/, `${o}/${r}`);
+  }
+});

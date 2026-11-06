@@ -15,7 +15,8 @@
 //
 // CHECK RUNS (L624). The fine-grained token can't read check runs (GitHub has no Checks permission for it), so each
 // `once` mints the robot App's installation token through token.mjs, as the scripts' own Mac user, from the --app-*
-// arguments, and reads check runs with it in a read-only client (GETs on /repos only). The token lives in memory for the
+// arguments, and reads check runs with it in a client that takes only GET /repos/<owner>/<repo>/commits/<sha>/check-runs
+// (L631 Minor 3); anything else is refused before it reaches GitHub. The token lives in memory for the
 // pass. With no App arguments, or a mint that fails, the check runs are not known: the pass says so and exits 1, and
 // that pass is not clean, so the week cannot count. Never a classic token, and never the fine-grained one for checks.
 
