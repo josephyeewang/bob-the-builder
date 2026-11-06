@@ -152,15 +152,20 @@ test('L620: on a real full RAM disk the damage reaches the owner and the round i
   const { execFileSync } = await import('node:child_process');
   const { appendFileSync, cpSync, rmSync } = await import('node:fs');
   const dev = execFileSync('hdiutil', ['attach', '-nomount', 'ram://4096'], { encoding: 'utf8' }).trim().split(/\s+/)[0];
-  assert.match(dev, /^\/dev\/disk[0-9]+$/, `hdiutil gave ${dev}`);
   const name = `orch-l620-${process.pid}`;
   try {
+    assert.match(dev, /^\/dev\/disk[0-9]+$/, `hdiutil gave ${dev}`);   // inside the try, so a bad name is still detached (#260 r1 c2)
     execFileSync('diskutil', ['erasevolume', 'HFS+', name, dev], { stdio: 'ignore' });
     const mounted = join('/', 'Volumes', name);
     const env = logOnly();
     brokenMiddle(env);
     const root = join(mounted, 'store');
     cpSync(env.root, root, { recursive: true });
+    // An unsent file with history, ending part-way into a block, as any store that has run a while has: on a full disk
+    // a write into that block's room lands only part of a line (#260 r1 M1). An empty file owns no block to land in.
+    let seeded = '';
+    for (let i = 0; seeded.length < 3800; i += 1) seeded += `${JSON.stringify({ id: `seed${String(i).padStart(4, '0')}`, outcome: 'sent', at: '2026-11-01T00:00:00Z' })}\n`;
+    writeFileSync(join(root, 'unsent-alerts.jsonl'), seeded);
     const filler = join(mounted, 'filler');
     const chunk = Buffer.alloc(4096, 120);
     try { for (;;) appendFileSync(filler, chunk); } catch { /* full */ }
@@ -175,7 +180,15 @@ test('L620: on a real full RAM disk the damage reaches the owner and the round i
     console.log(`L620 real full disk: held ${JSON.stringify(held.held.map((x) => x.event.type))} dropped ${held.dropped}; on file ${readUnsent(root).length}; pass ${JSON.stringify(r)}; issues ${[...gh.issues.values()].map((x) => x.title).join(' | ')}`);
     assert.equal(told(gh).length, 1, 'told on a full disk');
     assert.match(r.refused ?? '', heldRefusal);
+    assert.match(r.refused ?? '', /the store's disk can't take a write/);
+    const text = readFileSync(join(root, 'unsent-alerts.jsonl'), 'utf8');
+    assert.ok(text.startsWith(seeded) && text.endsWith('\n'), 'no part line was left on the file');
+    // The disk frees: the held line goes back to the file, is sent from there, and the round is clean.
     rmSync(filler, { force: true });
+    const r2 = await deliver(env2, o, gh);
+    console.log(`L620 real full disk, freed: pass ${JSON.stringify(r2)}; held ${o.record.heldHere().held.length}`);
+    assert.equal(o.record.heldHere().held.length, 0);
+    assert.equal(r2.refused, undefined);
   } finally {
     try { execFileSync('hdiutil', ['detach', dev, '-force'], { stdio: 'ignore' }); } catch { /* detached already */ }
   }

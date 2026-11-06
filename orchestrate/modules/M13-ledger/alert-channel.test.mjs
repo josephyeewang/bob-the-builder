@@ -1065,3 +1065,30 @@ test('L620: a heldHere that throws is a refusal; one that answers null or none a
   const w3 = world();
   assert.equal((await w3.run()).refused, undefined, 'a Record with no heldHere at all');
 });
+
+// ---- #260 r1: a store disk that can't take a write, a store answer that can't be read, and a held line flushed ----
+test('#260 r1 M2: a store disk that can\'t take a write makes the round not clean, with nothing held here', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 0, disk: 'a write failed (ENOSPC)' }) });
+  assert.equal(r.sent, 0);
+  assert.match(r.refused, /the store's disk can't take a write \(a write failed \(ENOSPC\)\): a warning any process on this store raises now \(the Dispatcher too\) may be held in that process's memory only/);
+  assert.doesNotMatch(r.refused, /held in this process only/);
+  const ok = world();
+  assert.equal((await ok.run({ rec: withHeld(ok.rec, { held: [], dropped: 0, disk: null }) })).refused, undefined, 'a disk that takes writes adds nothing');
+});
+
+test('#260 r1 m1: a store answer that can\'t be read ({ error }, as makeRecord gives for a throw or a bad shape) is a refusal', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { error: 'the store\'s answer has a shape this does not know' }) });
+  assert.match(r.refused, /what the store holds in memory could not be read: the store's answer has a shape this does not know/);
+});
+
+test('#260 r1 m2: the store is asked before its file is read, so a held line it puts back on file goes out this round', async () => {
+  const w = world();
+  const line = { id: 'back0001', outcome: 'unsent', event: { at: '2026-11-03T08:00:00Z', type: 'diary_damaged', reason: 'put back on file' } };
+  const r = await w.run({ rec: withHeld(w.rec, () => { appendFileSync(join(w.root, 'unsent-alerts.jsonl'), `${JSON.stringify(line)}\n`); return { held: [], dropped: 0, disk: null }; }) });
+  assert.equal(r.sent, 1);
+  assert.equal(r.refused, undefined);
+  assert.match(w.gh.openIssues()[0].body, /put back on file/);
+  assert.equal(readUnsent(w.root).length, 0, 'and marked delivered');
+});

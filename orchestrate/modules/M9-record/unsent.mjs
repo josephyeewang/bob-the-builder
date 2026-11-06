@@ -6,7 +6,7 @@
 // is dead, so the queue's reader and its one mark live here, where loading them reaches no write of a document.
 // store.mjs uses the same helpers, so there is one way to open a side file.
 
-import { closeSync, fchmodSync, fstatSync, openSync, readFileSync, writeSync, constants } from 'node:fs';
+import { closeSync, fchmodSync, fstatSync, ftruncateSync, openSync, readFileSync, readSync, writeSync, constants } from 'node:fs';
 import { join } from 'node:path';
 
 // The store's own side files are opened without following a link or waiting on a FIFO, and only a plain file is
@@ -16,9 +16,30 @@ export function plainFd(path, flags) {
   try { const st = fstatSync(fd); if (!st.isFile() || st.nlink !== 1) throw Object.assign(new Error(`${path} is not a plain file with one name`), { store: true }); } catch (e) { closeSync(fd); throw e; }
   return fd;
 }
-export function appendPlain(path, text) {
-  const fd = plainFd(path, constants.O_WRONLY | constants.O_APPEND);
-  try { fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
+// One whole line or nothing (#260 r1 M1). On a full disk write() can land part of a line and return a short count with
+// no error. A short write is cut back off the file's end and thrown, so the caller holds what it meant to write (the
+// store keeps the warning in memory) and no half line is left for the next one to run into. A file whose last line
+// has no newline (a cut left by an older version, or a crash) gets one first, so the new line parses on its own.
+// The cut-back only removes bytes that are still the file's last ones and match ours: another process's line
+// appended after ours is never cut. `write` is a test seam.
+export function appendPlain(path, text, { write = writeSync } = {}) {
+  const fd = plainFd(path, constants.O_RDWR | constants.O_APPEND);
+  try {
+    fchmodSync(fd, 0o644);
+    const end = fstatSync(fd).size;
+    const last = Buffer.alloc(1);
+    const open = end > 0 && readSync(fd, last, 0, 1, end - 1) === 1 && last[0] !== 0x0a;
+    const bytes = Buffer.from(open ? `\n${text}` : text, 'utf8');
+    const n = write(fd, bytes);
+    if (n !== bytes.length) {
+      const size = fstatSync(fd).size;
+      if (n > 0 && size >= n) {
+        const tail = Buffer.alloc(n);
+        if (readSync(fd, tail, 0, n, size - n) === n && tail.equals(bytes.subarray(0, n))) ftruncateSync(fd, size - n);
+      }
+      throw Object.assign(new Error(`${path}: only ${n} of ${bytes.length} bytes were written (is the disk full?)`), { code: 'ENOSPC' });
+    }
+  } finally { closeSync(fd); }
 }
 export function readPlain(path) { const fd = plainFd(path, constants.O_RDONLY); try { return readFileSync(fd, 'utf8'); } finally { closeSync(fd); } }
 

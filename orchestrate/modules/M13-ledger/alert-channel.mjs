@@ -353,6 +353,10 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     // and the store's lines, the way out of that very state, would never go (L558 M3). With any waiting, it gets half of
     // what can be started in a round. That stops the queue starting sends, not one already running, so the store's loop
     // below also always tries one line (L566 N1).
+    // What the store holds in this process only, on no disk (L620), asked first: a held line the disk now takes goes back
+    // to the store's file here, so the read below sends it from there (#260 r1 m2). Sent below either way.
+    let held;
+    try { held = rec?.heldHere?.() ?? null; } catch (e) { held = { error: msg(e) }; }
     let storeWaiting = false;
     try { storeWaiting = readUnsent(recordRoot).length > 0; } catch { /* the read below names it */ }
     const reserveMs = storeWaiting ? Math.max(0, (budgetMs - sendMs) / 2) : 0;
@@ -393,15 +397,16 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       try { markSent(recordRoot, x.id, when().toISOString()); } catch { /* raised again next round */ }
     }
     out.storeLeft = storeLeft;
-    // What the store holds in this process only, on no disk (L620): a warning whose unsent line could not be written,
-    // as on a full disk, is in no file this pass reads, and the store's own resend only logs. The robot process that
-    // found it runs this pass, so it is sent from here, on its own key (a repeat edits the same issue). Sent or not, the
-    // round is never clean while any is held: the disk that refused the line still refuses.
-    let held;
-    try { held = rec?.heldHere?.() ?? null; } catch (e) { held = { error: msg(e) }; }
+    // What the store still holds in this process only (L620): a warning whose unsent line could not be written, as on a
+    // full disk, is in no file this pass reads, and the store's own resend only logs. The robot process that found it
+    // runs this pass, so it is sent from here, on its own key (a repeat edits the same issue). Sent or not, the round is
+    // never clean while any is held: the disk that refused the line still refuses. Nor while the store's disk can't take
+    // a write (#260 r1 M2): a warning another process on this store raises (the Dispatcher's) is then held in that
+    // process's memory, where this pass can't see it. Not known what is held is not clean either (#260 r1 m1).
     const heldLines = [];
     if (held?.error) heldLines.push(`what the store holds in memory could not be read: ${held.error}`);
-    else if (held && (held.held.length || held.dropped)) {
+    if (typeof held?.disk === 'string') heldLines.push(`the store's disk can't take a write (${held.disk.slice(0, 200)}): a warning any process on this store raises now (the Dispatcher too) may be held in that process's memory only, where this round can't see it`);
+    if (held && !held.error && (held.held.length || held.dropped)) {
       let heldSent = 0; let heldTried = 0;
       for (const x of held.held) {
         if (clock() - start + sendMs > budgetMs && (storeTried > 0 || heldTried > 0)) break;

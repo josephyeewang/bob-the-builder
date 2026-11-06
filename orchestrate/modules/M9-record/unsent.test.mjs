@@ -4,10 +4,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { linkSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { UNSENT, markSent, readUnsent } from './unsent.mjs';
+import { UNSENT, appendPlain, markSent, readUnsent } from './unsent.mjs';
 
 const line = (x) => `${JSON.stringify(x)}\n`;
 
@@ -32,4 +32,46 @@ test('L288: a folder, a link, a second name or a pipe in its place is refused, n
     assert.throws(() => readUnsent(root), undefined, name);
     assert.throws(() => markSent(root, 'z', 'x'), undefined, `${name}: no mark lands through it`);
   }
+});
+
+// ---- #260 r1 M1: on a full disk write() can land part of a line with no error ----
+const half = (fd, bytes) => writeSync(fd, bytes.subarray(0, Math.floor(bytes.length / 2)));
+const started = () => {
+  const root = tempDir('m9-unsent-');
+  const f = join(root, UNSENT);
+  const before = line({ id: 'a', outcome: 'unsent', event: { type: 't' } }) + line({ id: 'a', outcome: 'sent', at: 'x' });
+  writeFileSync(f, before);
+  return { root, f, before };
+};
+
+test('#260 r1 M1: a short write on a file with lines in it is cut back and thrown, so the caller holds the line', () => {
+  const { root, f, before } = started();
+  const text = line({ id: 'b', outcome: 'unsent', event: { type: 'diary_damaged', reason: 'y'.repeat(400) } });
+  assert.throws(() => appendPlain(f, text, { write: half }), (e) => e.code === 'ENOSPC' && /only \d+ of \d+ bytes/.test(e.message));
+  assert.equal(readFileSync(f, 'utf8'), before, 'the half line is cut back off');
+  appendPlain(f, text);
+  assert.deepEqual(readUnsent(root).map((x) => x.id), ['b'], 'the next write is whole and parses');
+});
+
+test('#260 r1 M1: a file whose last line has no newline gets one first, so the new line parses on its own', () => {
+  const { root, f, before } = started();
+  writeFileSync(f, `${before}{"id":"torn","outc`);
+  appendPlain(f, line({ id: 'c', outcome: 'unsent', event: { type: 'u' } }));
+  assert.deepEqual(readUnsent(root).map((x) => x.id), ['c']);
+  markSent(root, 'c', 'x');
+  assert.deepEqual(readUnsent(root), []);
+});
+
+test('#260 r1 M1: the cut-back never takes another process\'s line appended after the short one', () => {
+  const { f, before } = started();
+  const other = line({ id: 'o', outcome: 'sent', at: 'x' });
+  const thenOther = (fd, bytes) => { const n = half(fd, bytes); appendFileSync(f, other); return n; };
+  assert.throws(() => appendPlain(f, line({ id: 'b', outcome: 'unsent', event: { type: 't' } }), { write: thenOther }));
+  assert.ok(readFileSync(f, 'utf8').startsWith(before) && readFileSync(f, 'utf8').endsWith(other), 'the other line is kept');
+});
+
+test('#260 r1 M1: a write that lands nothing is thrown too', () => {
+  const { f, before } = started();
+  assert.throws(() => appendPlain(f, line({ id: 'b', outcome: 'unsent', event: { type: 't' } }), { write: () => 0 }), (e) => e.code === 'ENOSPC');
+  assert.equal(readFileSync(f, 'utf8'), before);
 });

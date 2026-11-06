@@ -142,10 +142,38 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
   // Daily marks that are on no disk (#260 lane 1 m1): a good send whose mark could not be written, and a held line
   // delivered from memory. linesInDay counts them, so a full disk tells a fault once a day here too, not once per read.
   const markedHere = [];
+  // The test fault: a string is a disk that stays full; { step: 'unsent_fails', while } is full while `while()` is true.
+  const diskFull = () => faultAt === 'unsent_fails' || (faultAt?.step === 'unsent_fails' && (typeof faultAt.while !== 'function' || faultAt.while()));
   const appendUnsent = (text) => {
-    if (faultAt === 'unsent_fails') throw Object.assign(new Error('test: no space left on the device'), { code: 'ENOSPC' });
+    if (diskFull()) throw Object.assign(new Error('test: no space left on the device'), { code: 'ENOSPC' });
     appendPlain(P.unsent, text);
   };
+  // A held line goes back to the file as soon as the disk takes it, oldest first (#260 r1 m2): then it is resent from
+  // there like any other, and the delivery pass stops refusing. The first that still fails stops the rest.
+  function flushHeld() {
+    while (unsentHere.length) {
+      try { appendUnsent(`${JSON.stringify(unsentHere[0])}\n`); } catch { return; }
+      unsentHere.shift();
+    }
+  }
+  // Can the store's disk take a write now (#260 r1 M2)? One block, written and flushed in a temp file of this process's
+  // own (the start-up sweep removes it if the process dies first). null when it can, else why not. Another process on
+  // this store (the Dispatcher) holds its own warnings on a full disk where no other process can see them, so a full
+  // disk is told by itself.
+  function diskProblem() {
+    if (diskFull()) return 'test: no space left on the device';
+    const f = join(P.tmp, `${process.pid}-disk-probe-${randomBytes(4).toString('hex')}`);
+    try {
+      const fd = openSync(f, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try {
+        const b = Buffer.alloc(4096, 0x20);
+        const n = writeSync(fd, b);
+        if (n !== b.length) return `only ${n} of ${b.length} bytes could be written (is it full?)`;
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
+      return null;
+    } catch (e) { return `a write failed (${e?.code ?? e?.message ?? e})`; } finally { try { unlinkSync(f); } catch { /* not made */ } }
+  }
   const keep = (e, extra = {}) => {
     const x = { id: randomBytes(8).toString('hex'), outcome: 'unsent', event: e, ...extra };
     try { appendUnsent(`${JSON.stringify(x)}\n`); } catch { unsentHere.push(x); }
@@ -196,6 +224,7 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     if (!lines.some((x) => x.cap_key === `kept-back-${step}`)) keep(stamp({ type: 'alerts_kept_back', text: `at least ${step} more ${step === 1 ? 'alert' : 'alerts'} could not be queued in the last day and ${step === 1 ? 'was' : 'were'} kept back: the Record is refusing the alert queue, and each one's text is in unsent-alerts.jsonl in the store's folder, on the held-back lines` }), { cap_key: `kept-back-${step}`, at: mark.at });
   }
   function resend() {
+    flushHeld();
     let waiting = [];
     try { waiting = readUnsent(root); } catch { /* the layout check names a bad file; the ones held here are still tried */ }
     for (const x of waiting) {
@@ -553,8 +582,12 @@ export function openStore({ root, ownerUid, alert = () => {}, now = () => Date.n
     alertOrKeep: sayOrKeep,
     keepAlert,
     // What this process holds that is on no disk (L620): warnings whose unsent line could not be written (a full disk),
-    // still in memory, and the kept-back counts lost the same way. The delivery pass sends the held ones and refuses a
-    // clean round while any are held. Copies; it writes nothing.
-    heldHere() { return { held: unsentHere.map((x) => ({ id: x.id, event: structuredClone(x.event) })), dropped: droppedHere }; },
+    // still in memory, and the kept-back counts lost the same way; and whether the disk takes a write now (`disk`, null
+    // when it does). Held lines go back to the file first if the disk now takes them (#260 r1 m2). The delivery pass
+    // sends what is still held and refuses a clean round while any is held or the disk is full. Copies.
+    heldHere() {
+      flushHeld();
+      return { held: unsentHere.map((x) => ({ id: x.id, event: structuredClone(x.event) })), dropped: droppedHere, disk: diskProblem() };
+    },
   });
 }

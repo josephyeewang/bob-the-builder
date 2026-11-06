@@ -459,7 +459,7 @@ const viaWriter = (env, extra = {}) => { const o = openRecordWithStore({ root: e
 test('L620: the production Record, built through writer.mjs, answers heldHere with a real value, not null', () => {
   const env = setup({ prefix: 'm9-held-' });
   const o = viaWriter(env, { alert: lostAlert() });
-  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0, disk: null });
 });
 
 test('L620: on a full disk a damaged diary\'s warning is held in memory, and heldHere names it; nothing is on disk', () => {
@@ -481,11 +481,11 @@ test('L620: a kept-back count that cannot be written is counted as dropped, not 
   const env = setup({ prefix: 'm9-held-' });
   const ok = viaWriter(env, { alert: lostAlert() });
   for (let i = 0; i < KEEP_PER_WINDOW; i += 1) ok.record.keepAlert(`alert ${i}`, `key-${i}`);
-  assert.deepEqual(ok.record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(ok.record.heldHere(), { held: [], dropped: 0, disk: null });
   const full = viaWriter(env, { alert: lostAlert(), faultAt: 'unsent_fails' });
   full.record.keepAlert('one past the cap', 'key-past');
   full.record.keepAlert('two past the cap', 'key-past-2');
-  assert.deepEqual(full.record.heldHere(), { held: [], dropped: 2 });
+  assert.deepEqual(full.record.heldHere(), { held: [], dropped: 2, disk: 'test: no space left on the device' });
 });
 
 test('L620 m2: a warning delivered at once still writes its daily mark, so ten opens tell it once', () => {
@@ -500,7 +500,7 @@ test('L620 m2: a warning delivered at once still writes its daily mark, so ten o
   assert.match(marks[0].cap_key, /^diary_damaged:/);
   // Lane 1's check 1: a mark-only line is not waiting, not held and not dropped.
   assert.deepEqual(readUnsent(env.root).filter((x) => x.event.type === 'diary_damaged'), []);
-  assert.deepEqual(viaWriter(env, { alert: a }).record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(viaWriter(env, { alert: a }).record.heldHere(), { held: [], dropped: 0, disk: null });
   // A day on, it is told again.
   env.clock.t += 24 * 60 * 60_000;
   viaWriter(env, { alert: a });
@@ -514,7 +514,7 @@ test('L620 m2: a mark that cannot be written after a good send stays quiet: no t
   let o;
   assert.doesNotThrow(() => { o = viaWriter(env, { alert: a, faultAt: 'unsent_fails' }); });
   assert.equal(a.texts.filter((e) => e.type === 'diary_damaged').length, 1, 'the owner was told');
-  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0, disk: 'test: no space left on the device' });
   // With no mark the next open tells it again: told twice, never not told.
   viaWriter(env, { alert: a, faultAt: 'unsent_fails' });
   assert.equal(a.texts.filter((e) => e.type === 'diary_damaged').length, 2);
@@ -548,7 +548,7 @@ test('#260 m1: on a full disk with a working channel, a fault is told once a day
   const o = viaWriter(env, { alert: a, faultAt: 'unsent_fails' });
   for (let i = 0; i < 4; i += 1) { o.record.write({ actor: 'dispatcher', entity: 'fact', id: `f-${i}`, expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } }); o.store.damaged(); }
   assert.equal(a.texts.filter((e) => e.type === 'diary_damaged').length, 1);
-  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0, disk: 'test: no space left on the device' });
 });
 
 test('#260 m1: a held daily warning delivered from memory keeps its mark, so the same day it is not told again', () => {
@@ -563,5 +563,43 @@ test('#260 m1: a held daily warning delivered from memory keeps its mark, so the
   const dd = a.texts.filter((e) => e.type === 'diary_damaged');
   assert.equal(dd.filter((e) => e.resent).length, 1, 'resent once from memory');
   assert.equal(dd.filter((e) => !e.resent).length, 1, 'and no second new warning that day');
-  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0 });
+  assert.deepEqual(o.record.heldHere(), { held: [], dropped: 0, disk: 'test: no space left on the device' });
+});
+
+// ---- #260 r1: the disk can be asked, and a held line goes back to the file once the disk takes it ----
+test('#260 r1 M2: heldHere says whether the store\'s disk takes a write; the probe leaves nothing behind', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  assert.equal(viaWriter(env).record.heldHere().disk, null);
+  assert.deepEqual(readdirSync(join(env.root, 'tmp')), [], 'the probe file is gone');
+  assert.equal(viaWriter(env, { faultAt: 'unsent_fails' }).record.heldHere().disk, 'test: no space left on the device');
+});
+
+test('#260 r1 m2: once the disk takes writes again, a held line goes back to the file and is no longer held', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  let full = true;
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: { step: 'unsent_fails', while: () => full } });
+  const h = o.record.heldHere();
+  assert.equal(h.held.length, 1);
+  assert.equal(h.disk, 'test: no space left on the device');
+  assert.equal(o.record.heldHere().held.length, 1, 'still held while the disk is full');
+  full = false;
+  const after = o.record.heldHere();
+  assert.deepEqual(after, { held: [], dropped: 0, disk: null }, 'nothing held once the disk takes it');
+  const onFile = readUnsent(env.root);
+  assert.equal(onFile.length, 1);
+  assert.equal(onFile[0].id, h.held[0].id, 'the same warning, under its own id');
+  o.store.damaged();
+  assert.equal(readUnsent(env.root).length, 1, 'its daily mark came with it: a re-read keeps no second copy');
+});
+
+test('#260 r1 m2: a transaction moves a held line back to the file too, before it resends', () => {
+  const env = setup({ prefix: 'm9-held-' });
+  brokenMiddleDiary(env);
+  let full = true;
+  const o = viaWriter(env, { alert: lostAlert(), faultAt: { step: 'unsent_fails', while: () => full } });
+  full = false;
+  o.record.write({ actor: 'dispatcher', entity: 'fact', id: 'g-1', expectRev: 0, doc: { type: 'tab_heartbeat', claim_id: 'T-1' } });
+  assert.equal(readUnsent(env.root).filter((x) => x.event.type === 'diary_damaged').length, 1);
+  assert.equal(o.store.heldHere().held.length, 0);
 });
