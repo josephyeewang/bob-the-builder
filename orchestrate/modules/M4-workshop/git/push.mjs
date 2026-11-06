@@ -47,10 +47,14 @@ import { parseRawZ, refusedEntries } from './push-refusals.mjs';
 import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
+import { BRANCH, cardBranch } from './branch.mjs';
+import { workerOutboxProblem } from './session-outbox.mjs';
+import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
 import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
 
+export { BRANCH };
 export const BUNDLE_CAP = 200 * 1024 * 1024;
 // A file changed this recently may still be being written. One value: the proposals intake's too.
 export const SETTLE_MS = 2000;
@@ -58,7 +62,6 @@ export const SETTLE_MS = 2000;
 export const REPORT_CHANGED = 'the report\'s bytes are not the ones the intake recorded';
 // The bits a proposals folder may not have: anything looser than 750. One value: the intake's folder check too.
 export const FOLDER_LOOSE = 0o027;
-export const BRANCH = /^card\/[a-z0-9][a-z0-9-]{0,63}$/;
 // git's change letters (diff-tree --raw --no-renames) as M10 names them; a type change (T) is a modified file.
 const CHANGE_STATUS = Object.freeze({ A: 'added', M: 'modified', D: 'removed', T: 'modified' });
 const CARD = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
@@ -73,10 +76,13 @@ const NEVER = ['main', 'master', 'jobs-approved'];
 
 class Refusal extends Error {}
 const no = (reason) => { throw new Refusal(reason); };
-// A refusal that may pass by itself (GitHub, the mirror, the robot key, the start gate): the caller keeps the work and
-// tries again (`retry: true` on the answer), where every other refusal is the end of it (L325 m2).
+// A refusal that may pass by itself (GitHub, the mirror, the robot key, the start gate, a proposal's bundle changed since the
+// intake held it): the caller keeps the work and tries again (`retry: true` on the answer), where every other refusal is
+// the end of it (L325 m2, L597 (2)).
 const later = (reason) => { const e = new Refusal(reason); e.retry = true; throw e; };
 
+/** An error's text with its folder paths cut to <path>, at most 200 characters: one rule for every error a caller shows. */
+export const plainError = (m) => String(m).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200);
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
 export const bundleName = (card) => `bundle-${card}.bundle`;
 const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]];
@@ -121,7 +127,8 @@ function stageBundle(outbox, card, dir, cap, { uid, folderUid, sha256, fstat = f
       writeSync(out, buf, 0, n);
     }
     // The bytes checked are the bytes copied, from the one handle (L233 M-5): a swap after the intake read is refused.
-    if (sha256 !== undefined && hash.digest('hex') !== sha256) no('the bundle\'s bytes are not the ones the intake recorded');
+    // The file changed after the intake held it: the next pass judges the bytes there now, so this may pass (L597 (2)).
+    if (sha256 !== undefined && hash.digest('hex') !== sha256) later('the bundle\'s bytes are not the ones the intake recorded');
   } finally { closeSync(fd); if (out !== undefined) closeSync(out); }
   return copy;
 }
@@ -252,12 +259,13 @@ async function messages(mirror, shas, names) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
+ *   outboxRoot              the outboxes' root folder: a worker's outbox must really be <root>/worker/<session id>
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
  */
 export function createPushScript(deps) {
-  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, testFstat: fstat } = deps;
+  const { record, rules, privateDir, scanner, getRobotToken, readRun, workflowRule, issues, pullRequests, gateCache = {}, testRemote, afterStage, bundleCap = BUNDLE_CAP, now = () => Date.now(), uids, ownerUid, outboxRoot, testFstat: fstat } = deps;
   if (fstat !== undefined && !process.env.NODE_TEST_CONTEXT) throw new Error('createPushScript: testFstat is for tests only');
   // Checked once, here: a push script that can't tell a worker's bundle from Joe's is never made.
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
@@ -272,7 +280,8 @@ export function createPushScript(deps) {
     if (typeof product !== 'string' || !product) no('the launch record names no product');
     if (typeof card !== 'string' || !CARD.test(card)) no('the launch record has a bad card id');
     if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
-    if (typeof outbox !== 'string' || !isAbsolute(outbox)) no('the launch record has no outbox');
+    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot });
+    if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }
 
@@ -289,9 +298,9 @@ export function createPushScript(deps) {
   function proposalInputs({ product, card }, sha256) {
     // Fail closed here too, not only at the intake (L274 (2), L334): a proposal for a card the Record lacks is refused.
     if (!record.read('card', card)?.doc) no(`card ${card} is not in the Record`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
-    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
+    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
   }
 
   /** A research copy's attempt id: new bytes are a new attempt. Null for a card with no readable sha256. */
@@ -314,14 +323,14 @@ export function createPushScript(deps) {
     const { file, sha256, blob, size } = d.source ?? {};
     if (typeof ask !== 'string' || !RESEARCH_ID.test(ask) || file !== researchFileName(ask) || !Array.isArray(d.files) || d.files.length !== 1 || d.files[0] !== researchPath(ask)) no(`card ${card} does not name its ask's one file`);
     if (!SHA256.test(String(sha256)) || !SHA.test(String(blob)) || !Number.isSafeInteger(size) || size <= 0) no(`card ${card} has no proof of the report's bytes`);
-    const folder = rules.get('proposals.outbox', { product });
-    if (typeof folder !== 'string' || !isAbsolute(folder) || folder.split('/').includes('..')) no('the product has no proposals folder in the rules');
+    const folder = proposalFolder(rules, product);
+    if (!folder) no('the product has no proposals folder in the rules');
     const research = { ask, file, sha256, blob, size, path: d.files[0] };
-    return { product, card, branch: `card/${card.toLowerCase()}`, folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
+    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: researchAttempt(card), research };
   }
 
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
-    if (!BRANCH.test(String(branch)) || branch !== `card/${card.toLowerCase()}`) no(`the branch "${branch}" is not the card's branch`);
+    if (!BRANCH.test(String(branch)) || branch !== cardBranch(card)) no(`the branch "${branch}" is not the card's branch`);
 
     const repo = rules.get('product.repo', { product });
     const mirror = rules.get('product.mirror', { product });
@@ -468,7 +477,7 @@ export function createPushScript(deps) {
 
   async function settle(inputs, factParts, { look = false, from } = {}) {
     let res;
-    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${String(e.message).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200)}`, ...(e.retry ? { retry: true } : {}) }; }
+    try { res = await attempt(inputs(), { look }); } catch (e) { res = { ok: false, reason: e instanceof Refusal ? e.message : `the push script failed: ${plainError(e.message)}`, ...(e.retry ? { retry: true } : {}) }; }
     // Every reason is masked once, here, before the record: a secret used as a file name is cut to
     // its first four characters, and git's own error text loses its folder paths (round 3 MIN-3, COS-4).
     if (!res.ok) res = { ...res, reason: maskPath(res.reason) };

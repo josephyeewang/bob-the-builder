@@ -14,7 +14,8 @@
 import { lstatSync, writeFileSync, rmSync, readFileSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { gitOk } from './safe-git.mjs';
-import { BRANCH, bundleName } from './push.mjs';
+import { bundleName } from './push.mjs';
+import { BRANCH, cardBranch } from './branch.mjs';
 
 export const CLONE_CONFIG_TEMPLATE = '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n';
 export const REMOVED = Object.freeze(['config.worktree', 'hooks', 'info/attributes', 'info/grafts', 'commondir', 'shallow']);
@@ -53,7 +54,7 @@ export function createSaveWork({ runLocked }) {
   return async function saveWork({ clone, mirror, card, branch, outbox }) {
     if (typeof runLocked !== 'function') return refuse('save-work runs only inside the worker\'s lock-down');
     if (!CARD.test(String(card))) return refuse('bad card id');
-    if (branch !== `card/${String(card).toLowerCase()}` || !BRANCH.test(branch)) return refuse('bad card branch');
+    if (branch !== cardBranch(card) || !BRANCH.test(branch)) return refuse('bad card branch');
     try {
       return await runLocked(async () => {
         const gitDir = resetCloneGit({ clone, mirror });

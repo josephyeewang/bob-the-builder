@@ -28,25 +28,13 @@ import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
 import { fileURLToPath } from 'node:url';
+import { pushWorld, makeFakeScanner, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
 const tmp = (p = 'orch-push-') => tempDir(p);
-const WF = '.github/workflows/outside-check.yml';
-const PRODUCT = 'p1';
 // Tests can't chown, so every file here is the test user's. The worker door expects that user by default (the worker
 // bundles below are this user's), and the owner is another id; the proposal tests swap the two (R-0b-127).
 const ME = process.getuid();
-const here = dirname(fileURLToPath(import.meta.url));
-let engine;
 const pushAsked = [];
-function realEngine() {
-  if (engine) return engine;
-  const policy = parsePolicy(readFileSync(join(here, '../../M10-rules/fixtures/policy.yaml'), 'utf8'));
-  assert.ok(policy.ok, policy.reason);
-  engine = makeRules(makeEngine({ products: [PRODUCT], rulesState: () => ({ status: 'ok', policy: policy.policy, commit: 'c'.repeat(40), blob: 'b'.repeat(40) }),
-    productState: () => ({ state: 'active' }), running: () => 0, rolesDir: join(here, '../../M10-rules/roles'), clock: () => Date.now() }));
-  return engine;
-}
-const REPO = 'owner/test-repo';
 
 // A GitHub-token-shaped string made at run time, so no secret-shaped text is ever committed.
 const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -61,31 +49,6 @@ const realGitleaks = await (async () => {
   }
   return null;
 })();
-
-// ---- a fake gitleaks: checks it got the Do-plane's config and flags, and does as its mode file says ----
-function makeFakeScanner(dir) {
-  const bin = join(dir, 'gitleaks');
-  const mode = join(dir, 'mode');
-  writeFileSync(mode, 'clean');
-  writeFileSync(bin, `#!${process.execPath}
-const fs = require('fs'); const a = process.argv.slice(2);
-const mode = fs.readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
-if (a[0] === 'version') { console.log(mode === 'wrongversion' ? '1.0.0' : '8.30.1'); process.exit(0); }
-const at = (f) => a[a.indexOf(f) + 1];
-if (at('--config') !== ${JSON.stringify(join(dir, 'do-plane.toml'))} || at('--gitleaks-ignore-path') !== ${JSON.stringify(join(dir, 'empty-ignore'))} || !a.includes('--ignore-gitleaks-allow')) process.exit(7);
-if (Object.keys(process.env).some((k) => k.startsWith('GITLEAKS'))) process.exit(8);
-fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, a[0] + '\\n');
-if (mode === 'crash') process.exit(2);
-if (mode === 'noreport') process.exit(0);
-if (mode === 'stdinquit' && a[0] === 'stdin') process.exit(3);
-fs.writeFileSync(at('--report-path'), mode === 'leak' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'x.txt' }]) : mode === 'leakname' ? JSON.stringify([{ RuleID: 'fake-rule', File: 'docs/ghp_' + 'A1'.repeat(18) + '.txt' }]) : mode === 'badreport' ? 'not json' : '[]');
-process.exit(mode === 'leak' || mode === 'leakname' ? 1 : 0);
-`);
-  chmodSync(bin, 0o755);
-  writeFileSync(join(dir, 'do-plane.toml'), DO_PLANE_TOML);
-  writeFileSync(join(dir, 'empty-ignore'), '');
-  return { setup: { bin, version: '8.30.1', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
-}
 
 // Positive control for the bypass cases: real gitleaks run the careless way (the branch's own
 // config, ignore file, inline comments or environment), to show each bypass does hide the secret
@@ -102,95 +65,44 @@ async function realScanner(dir) {
   return { bin: realGitleaks, version: /(\d+\.\d+\.\d+)/.exec(out)[1], config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') };
 }
 
-// ---- the world: "GitHub", the mirror, a worker clone, the record, rules and the gate's ports ----
-async function world({ scanner: scannerOverride, gate = {} } = {}) {
-  const root = tmp();
-  const gh = join(root, 'gh.git');
-  await gitOk(['init', '--bare', '-q', gh], { gitDir: gh });
-  const seed = join(root, 'seed');
-  mkdirSync(seed);
-  const sg = { gitDir: join(seed, '.git'), workTree: seed, cwd: seed };
-  await gitOk(['init', '-q', seed], sg);
-  mkdirSync(join(seed, '.github/workflows'), { recursive: true });
-  writeFileSync(join(seed, '.github/workflows/ci.yml'), 'name: ci\n');
-  writeFileSync(join(seed, 'README.md'), 'hello\n');
-  writeFileSync(join(seed, 'app.txt'), 'app\n');
-  await gitOk(['add', '-A'], sg);
-  await gitOk(['commit', '-q', '-m', 'first'], sg);
-  await gitOk(['push', '-q', gh, 'HEAD:refs/heads/main'], sg);
-
-  const mirror = join(root, 'mirror.git');
-  await initMirror(mirror);
-  await gitOk(['fetch', '-q', gh, '+refs/heads/main:refs/heads/main'], { gitDir: mirror });
-
-  const clone = join(root, 'clone');
-  mkdirSync(clone);
-  const cg = { gitDir: join(clone, '.git'), workTree: clone, cwd: clone };
-  await gitOk(['init', '-q', clone], cg);
-  await gitOk(['fetch', '-q', '--update-head-ok', gh, 'refs/heads/main:refs/heads/main'], cg);
-  await gitOk(['checkout', '-q', '-b', 'card/c-1', 'main'], cg);
-
-  const outbox = join(root, 'outbox');
-  mkdirSync(outbox, { mode: 0o700 });
-  const proposals = join(root, 'proposals'); // the product's proposals folder (rules proposals.outbox), Joe's own
-  mkdirSync(proposals, { mode: 0o750 });
-  const privateDir = join(root, 'private');
-  mkdirSync(privateDir, { mode: 0o700 });
-
-  const record = memoryRecord();
-  // Seeded as the real Record takes them (L72): a session starts in preparing; a card names its state and module,
-  // and its PR title is the card's `what`.
-  assert.equal(record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: 0, doc: { state: 'preparing', product: PRODUCT, card: 'C-1', branch: 'card/c-1', outbox, attempt: 'a1' } }).ok, true);
-  assert.equal(record.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 0, doc: { state: 'draft', module: 'M-test', product: PRODUCT, lane: 'product', what: 'Card one' } }).ok, true);
-  const writeFact = (kind, doc) => { const cur = record.read('fact', factId(kind, PRODUCT)); return record.write({ actor: 'sensors', entity: 'fact', id: factId(kind, PRODUCT), expectRev: cur?.rev ?? 0, doc }); };
-  const fresh = () => new Date().toISOString();
-  writeFact('vercel_skip', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
-  writeFact('vercel_env', { product: PRODUCT, vercel_project: 'prj_1', read_at: fresh(), result: true });
-
-  const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
-  const issues = []; const prs = [];
-  const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF, 'proposals.outbox': proposals };
-  // push_branch is M10's real engine on its sample policy (L81 sweep): the push is asked what the engine reads.
-  const answers = { push_branch: (s) => { pushAsked.push(s); return realEngine().may('push_branch', s); } };
-  const run = { workflow_path: WF, event: 'schedule', head_branch: 'main', run_at: fresh(), steps: [{ product: PRODUCT, conclusion: 'success' }] };
-  const ports = {
-    record,
-    rules: fakeRules({ answers, values }),
-    privateDir,
-    scanner: scannerOverride ?? fake.setup,
-    getRobotToken: async () => 'robot-key-for-test',
-    readRun: async () => (gate.readRun ? gate.readRun() : run),
-    workflowRule: gate.workflowRule ?? (async () => ({ ok: true })),
-    issues: { upsert: async (i) => { issues.push(i); } },
-    pullRequests: { upsert: async (p) => { prs.push(p); return { number: 1 }; } },
-    testRemote: () => gh,
-    uids: { worker: ME },
-    ownerUid: ME + 1,
-  };
-  const commit = async (msg, fn) => { fn?.(clone); await gitOk(['add', '-A'], cg); await gitOk(['commit', '-q', '--allow-empty', '-m', msg], cg); };
-  const bundle = async (args = ['refs/heads/card/c-1', '^refs/heads/main']) => { rmSync(join(outbox, 'bundle-C-1.bundle'), { force: true }); await gitOk(['bundle', 'create', '-q', join(outbox, 'bundle-C-1.bundle'), ...args], cg); };
-  const ghRefs = async () => (await gitOk(['for-each-ref', '--format=%(refname) %(objectname)'], { gitDir: gh })).trim();
-  const push = (over = {}) => createPushScript({ ...ports, ...over })('S-1');
-  // What the intake records for a bundle it took in; the push script reads this fact, and no caller names a hash.
-  const hold = (sha256, card = 'C-1', product = PRODUCT, state = 'held') => {
-    const id = intakeFactId(product, `bundle-${card}.bundle`);
-    const put = record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: record.read('fact', id)?.rev ?? 0, doc: { sha256, state, at: new Date().toISOString() }, kind: 'proposal_bundle' });
-    assert.equal(put.ok, true, put.reason);
-    return sha256;
-  };
-  // A bundle Joe's tab drops in the proposals folder; answers the sha256 the intake would record for it.
-  const propose = async (args = ['refs/heads/card/c-1', '^refs/heads/main']) => {
-    const p = join(proposals, 'bundle-C-1.bundle');
-    rmSync(p, { force: true });
-    await gitOk(['bundle', 'create', '-q', p, ...args], cg);
-    return hold(createHash('sha256').update(readFileSync(p)).digest('hex'));
-  };
-  // The proposal door, with the owner as the test user (and the worker as someone else) unless `over` says otherwise.
-  const pushP = (input, { look = false, ...over } = {}) => createPushScript({ ...ports, uids: { worker: ME + 1 }, ownerUid: ME, ...over }).pushProposal(input, { look });
-  return { root, gh, mirror, clone, cg, outbox, proposals, record, values, answers, run, fake, issues, prs, commit, bundle, propose, hold, ghRefs, push, pushP, ports, writeFact };
-}
+// ---- the world: "GitHub", the mirror, a worker clone, the record, rules and the gate's ports (push-world.test-helper) ----
+const world = ({ scanner, gate } = {}) => pushWorld({ root: tmp(), scanner, gate, onPushAsked: (x) => pushAsked.push(x) });
 
 // L81 sweep: the push asks M10's push_branch what it reads, and the real engine answers it.
+// #219 audit M-1: the session record's outbox is checked as the Dispatcher checked the launcher's answer, so an older
+// attempt's bundle can never go out under this one.
+test('#219 M-1: a worker push reads only the session\'s own outbox', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const outboxes = join(w.root, 'outboxes');
+  const older = join(outboxes, 'worker', 'S-old');
+  mkdirSync(older, { mode: 0o700 });
+  await w.bundle(undefined, older);
+  const setOutbox = (outbox) => { const cur = w.record.read('session', 'S-1'); assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, outbox } }).ok, true); };
+  const before = await w.ghRefs();
+  for (const [outbox, re] of [[older, /own folder/], [`${w.outbox}/../S-1`, /plain path/], ['/', /plain path/], [join(outboxes, 'reviewer', 'S-1'), /worker outbox/], ['outbox/worker/S-1', /full path/], [undefined, /not named/]]) {
+    setOutbox(outbox);
+    const r = await w.push();
+    assert.equal(r.ok, false, String(outbox));
+    assert.match(r.reason, re);
+    assert.equal(await w.ghRefs(), before, 'nothing reached GitHub');
+  }
+  // With the root known, a link in the session's own place is refused too; the real folder is pushed.
+  const link = `${w.outbox}-moved`;
+  renameSync(w.outbox, link);
+  symlinkSync(older, w.outbox);
+  setOutbox(w.outbox);
+  const linked = await w.push({ outboxRoot: outboxes });
+  assert.equal(linked.ok, false);
+  assert.match(linked.reason, /not inside the outbox root/);
+  assert.equal(await w.ghRefs(), before);
+  rmSync(w.outbox);
+  renameSync(link, w.outbox);
+  const good = await w.push({ outboxRoot: outboxes });
+  assert.equal(good.ok, true, good.reason);
+});
+
 test('L81: push_branch is asked the card as { id, rows, doc: { lane } } and each file as { path, status }; the old subject is refused', async () => {
   const w = await world();
   await w.commit('work', (c) => { writeFileSync(join(c, 'app.txt'), 'changed\n'); writeFileSync(join(c, 'new.txt'), 'new\n'); });
@@ -1332,6 +1244,12 @@ test('L325 m1: the push script reads which bytes from the intake\'s fact: nothin
   // A hash that isn't one, however the fact came to say so.
   w.hold('x'.repeat(64));
   assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' })).reason, 'the intake holds no bundle for this card');
+  // A held fact that reads back corrupt holds nothing, though its hash is the right one (L597 minor).
+  w.hold(sha256);
+  const heldId = intakeFactId(PRODUCT, 'bundle-C-1.bundle');
+  const corruptView = { ...w.record, read: (e, i) => { const r = w.record.read(e, i); return e === 'fact' && i === heldId ? { ...r, corrupt: true } : r; } };
+  assert.equal((await w.pushP({ product: PRODUCT, card: 'C-1' }, { record: corruptView })).reason, 'the intake holds no bundle for this card');
+  w.hold('x'.repeat(64));
   assert.equal(await w.ghRefs(), before);
   assert.deepEqual(w.record.list('fact').filter((f) => f.id.startsWith('push.')), [], 'a refusal with no attempt files no fact');
   // Held: a caller's other hash changes nothing, and the fact is what is checked.
@@ -1514,8 +1432,8 @@ test('R-0b-128: the docs check asks M10 with the list the push script read', asy
   const w = await world();
   const sha256 = await added(w, 'docs/notes.md');
   const asked = [];
-  const answer = await check(w, sha256, { may: (a, s) => { asked.push([a, s]); return { decision: 'deny', reason: 'not this lane\'s' }; } });
-  assert.equal(answer, 'not this lane\'s');
+  const answer = await check(w, sha256, { may: (a, s) => { asked.push([a, s]); return { decision: 'deny', reason: 'not this lane\'s change' }; } });
+  assert.equal(answer, 'not this lane\'s change');
   assert.equal(asked.length, 1);
   assert.equal(asked[0][0], 'merge');
   assert.deepEqual(asked[0][1].files, [{ path: 'docs/notes.md', status: 'added', mode: '100644' }]);
@@ -1523,13 +1441,38 @@ test('R-0b-128: the docs check asks M10 with the list the push script read', asy
   assert.equal(asked[0][1].truncated, false);
 });
 
-test('R-0b-128: a look that could not finish is a wait, a final refusal is a reason, and other bytes than the pass checked are refused', async () => {
+test('R-0b-128, L597 (2): a look that could not finish is a wait, and so are bytes moved since the pass checked them; a final look refusal is a refusal', async () => {
   const w = await world();
   const sha256 = await added(w, 'docs/notes.md');
   assert.deepEqual(await check(w, sha256, undefined, { getRobotToken: async () => '' }), { retry: 'no robot key for this product' });
-  assert.equal(await check(w, 'a'.repeat(64)), 'the bundle held is not the one this pass checked');
+  assert.deepEqual(await check(w, 'a'.repeat(64)), { retry: 'the bundle held changed while it was checked' });
   w.hold('b'.repeat(64));
-  assert.equal(await check(w, sha256), 'the bundle\'s bytes are not the ones the intake recorded');
+  assert.deepEqual(await check(w, sha256), { retry: 'the bundle\'s bytes are not the ones the intake recorded' });
+  w.hold(sha256);
+  await w.commit('ci', (c) => writeFileSync(join(c, '.github/workflows/ci.yml'), 'name: other\n'));
+  const code = await w.propose();
+  assert.match((await check(w, code)).refuse, /touches files no card may/);
+});
+
+test('L597 (2): M10 saying no for a reason that is not the change (a pause, its own error) is a wait; its answer about the change is final', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const said = (decision, reason) => ({ may: () => ({ decision, reason }) });
+  assert.deepEqual(await check(w, sha256, said('deny', 'product is paused: only an exact reverse may merge')), { retry: 'the rules said no for now: product is paused: only an exact reverse may merge' });
+  assert.deepEqual(await check(w, sha256, makeRules({ may: () => { throw new Error('rules unreadable for p1'); } })), { retry: 'the rules said no for now: rules error: rules unreadable for p1' });
+  assert.equal(await check(w, sha256, said('deny', 'not this lane\'s change; MAIN merges it as today: x')), 'not this lane\'s change; MAIN merges it as today: x');
+  assert.equal(await check(w, sha256, said('ask', 'Tier 1')), 'Tier 1');
+});
+
+test('L597 (4): the docs check sends the card\'s own tier: a Tier 1 card\'s docs change is not the docs lane\'s', async () => {
+  const w = await world();
+  const sha256 = await added(w, 'docs/notes.md');
+  const tier = (t) => ({ ...w.record, read: (e, i) => { const r = w.record.read(e, i); return e === 'card' && r ? { ...r, doc: { ...r.doc, tier: t } } : r; } });
+  const pushProposal = createPushScript({ ...w.ports, uids: { worker: ME + 1 }, ownerUid: ME }).pushProposal;
+  const rules = { may: (a, s) => realEngine().may(a, s) };
+  const bundle = { path: join(w.proposals, 'bundle-C-1.bundle'), sha256 };
+  assert.equal(await createDocsCheck({ record: tier(2), rules, pushProposal })({ product: PRODUCT, card: 'C-1', bundle }), null);
+  for (const t of [1, undefined]) assert.match(await createDocsCheck({ record: tier(t), rules, pushProposal })({ product: PRODUCT, card: 'C-1', bundle }), /not declared Tier 2/, String(t));
 });
 
 test('R-0b-127: the proposal door\'s own inputs: no product, a bad card, no or a bad sha256, no proposals folder, a folder not the owner\'s', async () => {
