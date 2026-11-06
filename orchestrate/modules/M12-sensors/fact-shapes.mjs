@@ -50,7 +50,7 @@ export const SHAPES = Object.freeze({
     diff_summary: { files: 'count', added: 'count', removed: 'count' }, checks_at_head: [check],
     unresolved_threads: [{ author: 'text', body: 'text', path: 'text' }], behind_main: 'count' },
   'fact.prod-watch': { product: 'id', stage: 'id', live: 'id', newest_supported: 'id', env: { map: { key: 'text', print: 'id' } },
-    settings: { map: 'id' }, seen: ['id'], baseline: 'bool' },
+    settings: { map: 'id' }, unclear: ['id'], seen: ['id'], baseline: 'bool' },
   'fact.push-request': { idempotency_key: 'id', state: 'id', product: 'id', text: 'text' },
   'fact.signed-out': { product: 'id', signed_out: 'bool', since: 'time' },
   'fact.start-gate-env': { product: 'id', vercel_project: 'id', read_at: 'time', result: 'bool', reason: 'text', both: ['text'] },
