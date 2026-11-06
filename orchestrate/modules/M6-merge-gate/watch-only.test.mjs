@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { blobSha } from '../M10-rules/reader.mjs';
+import { RULES_PATH, blobSha } from '../M10-rules/reader.mjs';
 import { fakeGateGitHub } from './fixtures/fake-gate-github.mjs';
 import { CHECKS_NOT_KNOWN, DRAFT_FILE, NOT_JUDGED, REASONS_KEPT, REASON_CHARS, VERDICTS, WATCH_READS, asksApprove, draftRules, githubRules, judgeMerged, readExplanations, readLog, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { explain, main, parseArgs } from './watch-run.mjs';
@@ -25,9 +25,10 @@ const PIN_AT = '2026-11-03T00:00:00Z';
 const UID = process.getuid();
 
 /** A fake product on a stand-in GitHub. Every call a pass makes goes through readOnlyClient and a fetch that answers from it. */
-function world({ policy = POLICY, mode = 'draft' } = {}) {
+function world({ policy = POLICY, mode = 'draft', rulesOnMain = false } = {}) {
   const g = fakeGateGitHub();
-  const root = g.commit([], { 'docs/a.md': 'one', 'src/a.mjs': 'one' });
+  // rulesOnMain: main has a rules file, so in github mode M10's reader goes on to find the pull request that approved it (L707 m1).
+  const root = g.commit([], { 'docs/a.md': 'one', 'src/a.mjs': 'one', ...(rulesOnMain ? { [RULES_PATH]: policy } : {}) });
   g.main = root;
   const dates = new Map([[root, '2026-10-01T00:00:00Z']]);
   const state = { graphql: null }; const mergedAt = new Map(); const prBase = new Map(); const threadsOf = new Map();
@@ -124,12 +125,54 @@ test('a docs-only change with green checks and no open threads would merge; what
 
 test('PLANT L591 every read the job makes is a kind on WATCH_READS, the list setup proves, in both rules modes', async () => {
   for (const mode of ['draft', 'github']) {
-    const w = world({ mode });
+    const w = world({ mode, rulesOnMain: mode === 'github' });
     await w.pass(PIN_AT); w.land({ 'docs/a.md': 'two' }); await w.pass();
     const notOnList = [...new Set(w.asked.map(([, p]) => p))].filter((p) => !WATCH_READS.some((k) => k.shape.test(p)));
     assert.deepEqual(notOnList, [], `${mode}: reads the job makes that setup would not prove`);
     assert.ok(w.asked.length > 5, 'the pass really read');
+    // L707 m1: in github mode the rules file is there, so M10's reader really runs (findApprovingPull) and its list-commits read is made.
+    if (mode === 'github') assert.ok(w.asked.some(([, p]) => /\/commits\?sha=[0-9a-f]{40}&path=/.test(p)), 'github mode reached findApprovingPull');
   }
+});
+
+// ───────────────────────────── `checks`: setup's proof of the App's read (L707 M1)
+
+test('L707 M1 watch-run checks: the job\'s own mint and read of the check runs, one JSON line of fixed words, never the token', async () => {
+  const signer = join(tempDir('m6-watch-signer-'), 'app-signing-key');
+  writeFileSync(signer, generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const appToken = 'ghs_madeUpInstallationToken000000';
+  const SHA1 = 'd'.repeat(40);
+  const run = async ({ mint = 201, checks = { status: 200, json: { total_count: 0, check_runs: [] } }, uid = UID } = {}) => {
+    const seen = [];
+    const fetchFn = async (url, init) => {
+      const path = url.replace('https://api.github.com', '');
+      seen.push([init.method, path, init.headers.authorization ?? init.headers.Authorization]);
+      if (init.method === 'POST' && path === '/app/installations/42/access_tokens') return { status: mint, json: async () => (mint === 201 ? { token: appToken, expires_at: '2026-11-05T13:00:00Z' } : { message: 'no' }) };
+      if (path === '/app') return { status: 200, json: async () => ({ slug: 'sample-watcher' }) };
+      if (/\/check-runs\?/.test(path)) return { status: checks.status, headers: { get: (h) => (h === 'x-ratelimit-remaining' ? checks.rate ?? null : null) }, json: async () => { if (checks.json === undefined) throw new SyntaxError('Unexpected end of JSON input'); return checks.json; } };
+      return { status: 404, json: async () => null };
+    };
+    const lines = [];
+    const code = await main(['checks', '--repo', `${OWNER}/${REPO}`, '--sha', SHA1, '--app-id', '353123', '--app-installation', '42', '--app-key-file', signer], { out: (x) => lines.push(x), err: (x) => lines.push(`ERR ${x}`), fetchFn, uid });
+    return { code, lines, json: JSON.parse(lines.at(-1)), seen };
+  };
+  const ok = await run();
+  assert.equal(ok.code, 0); assert.deepEqual(ok.json, { ok: true, stage: 'read' }); assert.equal(ok.lines.length, 1, 'one line only');
+  assert.deepEqual(ok.seen.filter(([, p]) => p.startsWith('/repos/')), [['GET', `${BASE}/commits/${SHA1}/check-runs?per_page=100`, `Bearer ${appToken}`]]);
+  const refused = await run({ checks: { status: 403 } });
+  assert.equal(refused.code, 1); assert.deepEqual(refused.json, { ok: false, stage: 'read', kind: 'permission', status: 403, said: 'GitHub answered 403' });
+  assert.equal((await run({ checks: { status: 403, rate: '0' } })).json.kind, 'trouble', 'a rate-limit 403 is trouble, not a permission');
+  assert.equal((await run({ checks: { status: 503 } })).json.kind, 'trouble');
+  assert.equal((await run({ checks: { status: 200 } })).json.kind, 'trouble', 'a 200 with an unreadable body is not a working read');
+  assert.equal((await run({ checks: { status: 200, json: { total_count: 2, check_runs: [{}] } } })).json.ok, true, 'a list cut off is an answer: the App could read it');
+  const noMint = await run({ mint: 401 });
+  assert.equal(noMint.code, 1); assert.equal(noMint.json.stage, 'mint'); assert.match(noMint.json.reason, /GitHub refused the token request \(401\)/);
+  assert.ok(!noMint.seen.some(([, p]) => /check-runs/.test(p)));
+  assert.equal((await run({ uid: 0 })).json.stage, 'mint', 'never as root');
+  for (const r of [ok, refused, noMint]) assert.ok(!r.lines.join('\n').includes(appToken));
+  assert.throws(() => parseArgs(['checks', '--repo', `${OWNER}/${REPO}`, '--sha', 'abc', '--app-id', '1', '--app-installation', '2', '--app-key-file', '/k']), /--sha must be/);
+  assert.throws(() => parseArgs(['checks', '--repo', `${OWNER}/${REPO}`, '--sha', SHA1]), /--app-id is required/);
+  assert.throws(() => parseArgs(['checks', '--repo', `${OWNER}/${REPO}`, '--sha', SHA1, '--app-id', '1', '--app-installation', '2', '--app-key-file', '/k', '--dir', '/d']), /checks takes only/);
 });
 
 test('PLANT a source change → would refuse, out of lane (caught by: the lane rule, refusal 9)', async () => {

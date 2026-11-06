@@ -82,7 +82,8 @@ export function readOnlyClient({ token, fetchFn = globalThis.fetch, timeoutMs = 
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return { status: res.status, json: res.status === 200 ? await res.json() : null };
+    // How many reads are left this hour, so a 403 that is a rate limit is told from one that is a missing permission (L707 m3).
+    return { status: res.status, json: res.status === 200 ? await res.json() : null, rateRemaining: res.headers?.get?.('x-ratelimit-remaining') ?? null };
   };
   return Object.freeze({
     get: async (path) => { if (!path.startsWith('/repos/') || /\/\.\.(\/|$|\?)/.test(path)) throw new Error('only repository reads are allowed'); return call('GET', path); },
@@ -93,9 +94,13 @@ export function readOnlyClient({ token, fetchFn = globalThis.fetch, timeoutMs = 
 // ---- the reads ---------------------------------------------------------------------------------------------------------
 
 /**
- * Every kind of read the job makes of GitHub, the one list (L591): the job makes its reads through it, and setup's prove-token
- * walks it, so a token that passes setup can do what the job does. `shape` is a request path the kind covers (the job's own
- * test fails on a read no shape covers). `read(r, on)` makes the read for `on`, the facts of one merged commit.
+ * Every kind of read the job makes of GitHub, the one list (L591), and setup's prove-token walks it, so a key that passes setup
+ * can do what the job does. `shape` is a request path the kind covers: the job's own test runs a pass in both rules modes and
+ * fails on any read no shape covers. `read(r, on)` makes the read for `on`, the facts of one merged commit. Most of the job's
+ * reads go through these `read`s; the walk and the file reads call the same git view directly, and `commitsByPath` is made by
+ * M10's reader (findApprovingPull, reader.mjs) with its own client: those are covered by their shape, not by this code
+ * (L707 c4, m1). `byApp`: the job reads it with the watcher App's token (L624), so setup proves it with that token, never
+ * with the fine-grained one.
  */
 export const WATCH_READS = Object.freeze([
   { key: 'head', what: 'main\'s latest commit', shape: /\/commits\/main$/, read: (r) => r.get(`${r.base}/commits/main`) },
@@ -103,7 +108,10 @@ export const WATCH_READS = Object.freeze([
   { key: 'gitCommit', what: 'a commit\'s parents', shape: /\/git\/commits\/[0-9a-f]{40}$/, read: (r, on) => r.view.commit(on.sha) },
   { key: 'gitTree', what: 'a commit\'s file modes', shape: /\/git\/trees\/[0-9a-f]{40}\?recursive=1$/, read: (r, on) => r.view.entry(on.sha, 'a-path-for-the-read') },
   { key: 'compare', what: 'the change between two commits', shape: /\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}/, read: (r, on) => r.get(`${r.base}/compare/${on.from}...${on.sha}`) },
+  // A 404 here is "no rules file at that commit", an answer (a repository on draft rules has none yet). That is safe only
+  // because `commit`, read before it in this list, has already proven the key reads Contents: keep this row after it (L707 c3).
   { key: 'rules', what: 'the rules file at a commit', shape: /\/contents\/.+\?ref=[0-9a-f]{40}$/, read: (r, on) => r.get(`${r.base}/contents/${RULES_PATH}?ref=${on.from}`), absentIsAnAnswer: true },
+  { key: 'commitsByPath', what: 'the latest commit that changed the rules file', shape: /\/commits\?sha=[0-9a-f]{40}&path=/, read: (r, on) => r.get(`${r.base}/commits?sha=${on.sha}&path=${encodeURIComponent(RULES_PATH)}&per_page=1`) },
   { key: 'commitPulls', what: 'the pull requests of a commit', shape: /\/commits\/[0-9a-f]{40}\/pulls\?/, read: (r, on) => r.get(`${r.base}/commits/${on.sha}/pulls?per_page=${MAX_LIST}`) },
   { key: 'pull', what: 'a pull request', shape: /\/pulls\/\d+$/, read: (r, on) => r.get(`${r.base}/pulls/${on.pr}`) },
   { key: 'checks', what: 'the check runs', shape: /\/commits\/[0-9a-f]{40}\/check-runs\?/, read: (r, on) => checksAt(r.gh, r.base, on.head), byApp: true },   // read with the watcher App's client (L624)
@@ -112,6 +120,13 @@ export const WATCH_READS = Object.freeze([
 ]);
 const READ = Object.fromEntries(WATCH_READS.map((x) => [x.key, x]));
 const readsOf = ({ gh, owner, repo }) => ({ gh, owner, repo, base: `/repos/${owner}/${repo}`, get: (path) => gh.get(path), view: makeGitView({ gh, owner, repo }) });
+
+/** A client that remembers its last answer, so a failed read's words can tell a rate limit from a missing permission (L707 m3). */
+function remembering(gh) {
+  const seen = { last: null };
+  const keep = (x) => { seen.last = x; return x; };
+  return { seen, gh: { get: async (...a) => keep(await gh.get(...a)), post: async (...a) => keep(await gh.post(...a)) } };
+}
 
 const WALK_FOR_A_PULL = 50;
 /** main's latest commit that a merged pull request made → { sha, from, head, pr }, or null. Throws what the read threw. */
@@ -123,11 +138,12 @@ async function latestPulled(r) {
     const c = await READ.gitCommit.read(r, { sha });
     const from = c?.parents?.[0] ?? null;
     const list = await READ.commitPulls.read(r, { sha });
-    if (list?.status !== 200) throw Object.assign(new Error('pulls'), { status: list?.status });
-    const found = Array.isArray(list.json) ? (list.json.find((p) => p?.merge_commit_sha === sha) ?? list.json[0]) : null;
+    // A 200 with nothing readable is a failed read, as in the job (L707 c2): it must not walk on as "no pull request here".
+    if (list?.status !== 200 || !Array.isArray(list.json)) throw Object.assign(new Error('pulls'), { status: list?.status });
+    const found = list.json.find((p) => p?.merge_commit_sha === sha) ?? list.json[0];
     if (Number.isInteger(found?.number) && from) {
       const pr = await READ.pull.read(r, { pr: found.number });
-      if (pr?.status !== 200) throw Object.assign(new Error('pull'), { status: pr?.status });
+      if (pr?.status !== 200 || pr.json == null) throw Object.assign(new Error('pull'), { status: pr?.status });
       if (pr.json?.merged === true && SHA.test(pr.json?.head?.sha ?? '')) return { sha, from, head: pr.json.head.sha, pr: found.number };
     }
     sha = from;
@@ -138,39 +154,83 @@ async function latestPulled(r) {
 /** The status a read's error carries, or null. */
 const statusIn = (e) => (Number.isInteger(e?.status) ? e.status : Number(/(?:answered|HTTP) (\d{3})/.exec(String(e?.message))?.[1] ?? NaN) || null);
 
+/** What to say when GitHub didn't answer properly: busy, down or a rate limit. Nothing about the key is known (L707 m3). */
+export const READ_TROUBLE = 'GitHub didn\'t answer properly, run setup again';
+
 /**
- * Why a read failed, in fixed words and a status number, or null when GitHub answered it. Stricter than failedRead: there a 403 is
- * an answer, since it says something about the change; here it is the very thing being tested. A list too long or cut off is a
- * fact about the list, so the token could read it. Never GitHub's own text.
+ * Why a read failed, or null when GitHub answered it: { kind, status, said }, `said` in fixed words and a status number, never
+ * GitHub's own text. Stricter than failedRead: there a 403 is an answer, since it says something about the change; here it is
+ * the very thing being tested. A list too long or cut off is a fact about the list, so the key could read it.
+ *  - kind 'permission': a 403 that is not a rate limit, or a 404; the key (or App) lacks a permission or the repository.
+ *  - kind 'trouble': a 429, a rate-limit 403, a 5xx, no answer, or a 200 with nothing readable in it (the job counts that
+ *    as a failed read too); nothing is known about the key.
+ *  - kind 'other': any other status.
+ * `last` is the client's last answer: its rate limit tells a 403 apart.
  */
-function readFault(x, e) {
+export function readFault(x, e, last = null) {
+  let status;
   if (e) {
-    const status = statusIn(e);
-    if (status) return `GitHub answered ${status}`;
-    return e.tooLong || /cut off/.test(String(e.message)) ? null : 'no usable answer came back';
+    status = statusIn(e);
+    if (!status) return e.tooLong || /cut off/.test(String(e.message)) ? null : { kind: 'trouble', status: null, said: 'no usable answer came back from GitHub' };
+  } else {
+    if (x?.status === undefined) return null;   // a git-view read: it throws on anything but a good answer
+    status = x.status;
+    if (status === 200 && x.json != null) return null;
   }
-  return x?.status === undefined || x.status === 200 ? null : `GitHub answered ${x.status}`;
+  // A 200 that carries an error (GraphQL's way to refuse) may be a missing permission or not: said as it is.
+  if (status === 200 && /with an error/.test(String(e?.message))) return { kind: 'other', status, said: 'GitHub answered 200 but with an error' };
+  if (status === 200) return { kind: 'trouble', status, said: 'GitHub answered 200 with nothing readable in it' };
+  const src = x?.status === status ? x : last?.status === status ? last : null;
+  const limited = status === 429 || (status === 403 && (src?.rateLimited === true || src?.rateRemaining === '0'));
+  if (limited) return { kind: 'trouble', status, said: `GitHub answered ${status} (a rate limit)` };
+  if (status >= 500) return { kind: 'trouble', status, said: `GitHub answered ${status}` };
+  if (status === 403 || status === 404) return { kind: 'permission', status, said: `GitHub answered ${status}` };
+  return { kind: 'other', status, said: `GitHub answered ${status}` };
+}
+
+/** A fault in words: the permission advice only for a permission fault (L707 m3). Every fault is still a FAIL. */
+export const faultWords = (f, advice) => (f.kind === 'permission' ? `${f.said}; ${advice}` : f.kind === 'trouble' ? `${f.said}; ${READ_TROUBLE}`
+  : `${f.said}, an answer the job cannot use; run setup again, and if it says this again, look at the key's settings at GitHub`);
+
+/**
+ * One real read of each kind in WATCH_READS that the fine-grained token makes, on main's latest commit with a pull request
+ * (L591). → { rows: [{ ok, what, why? }], on }: `on` is that commit ({ sha, from, head, pr }), or null when none was found, for
+ * the reads made with the watcher App's token (`byApp`), which this never makes. No such commit is said, and does not pass:
+ * nothing would have been proven.
+ */
+export async function proveWatchReads({ gh, owner, repo }) {
+  const { seen, gh: rgh } = remembering(gh);
+  const r = readsOf({ gh: rgh, owner, repo });
+  let on;
+  try { on = await latestPulled(r); } catch (e) {
+    const f = readFault(null, e, seen.last) ?? { kind: 'trouble', status: null, said: 'no usable answer came back from GitHub' };
+    return { on: null, rows: [{ ok: false, what: 'the key can walk main to its latest pull request', why: faultWords(f, 'give the key the permissions the job needs at GitHub') }] };
+  }
+  if (!on) return { on: null, rows: [{ ok: false, what: `a commit on main with a pull request, in the latest ${WALK_FOR_A_PULL}`, why: 'there is none, so the reads the job makes could not be tried; merge one pull request, then run this again' }] };
+  const rows = [];
+  for (const k of WATCH_READS) {
+    if (k.byApp) continue;
+    let x; let e = null;
+    seen.last = null;
+    try { x = await k.read(r, on); } catch (err) { e = err; }
+    if (k.absentIsAnAnswer && !e && x?.status === 404) { rows.push({ ok: true, what: `the job's read of ${k.what} works (there is none there)` }); continue; }
+    const f = readFault(x, e, seen.last);
+    rows.push({ ok: !f, what: `the job's read of ${k.what} works`, ...(f ? { why: faultWords(f, 'give the key this permission at GitHub') } : {}) });
+  }
+  return { on, rows };
 }
 
 /**
- * One real read of each kind in WATCH_READS, on main's latest commit with a pull request (L591). → [{ ok, what, why? }]. No such
- * commit is said, and does not pass: nothing would have been proven.
+ * The one read the job makes with the watcher App's token (L624), made the job's way: `checksGh` is the client the job's own
+ * mint gives (watch-run.mjs), and the read is READ.checks, the job's. On the pull request's head `sha`. → { ok } or
+ * { ok: false, kind, status, said } (readFault's). A list too long or cut off is an answer.
  */
-export async function proveWatchReads({ gh, owner, repo }) {
-  const r = readsOf({ gh, owner, repo });
-  let on;
-  try { on = await latestPulled(r); } catch (e) { return [{ ok: false, what: 'the key can walk main to its latest pull request', why: `${readFault(null, e) ?? 'no usable answer came back'}; give the key the permissions the job needs at GitHub` }]; }
-  if (!on) return [{ ok: false, what: `a commit on main with a pull request, in the latest ${WALK_FOR_A_PULL}`, why: 'there is none, so the reads the job makes could not be tried; merge one pull request, then run this again' }];
-  const out = [];
-  for (const k of WATCH_READS) {
-    if (k.byApp) { out.push({ ok: true, skip: true, what: `not tried with this token: the job reads ${k.what} with the watcher App's token (check-watch-rules checks its key)` }); continue; }
-    let x; let e = null;
-    try { x = await k.read(r, on); } catch (err) { e = err; }
-    if (k.absentIsAnAnswer && (x?.status === 404)) { out.push({ ok: true, what: `the job's read of ${k.what} works (there is none there)` }); continue; }
-    const why = readFault(x, e);
-    out.push({ ok: !why, what: `the job's read of ${k.what} works`, ...(why ? { why: `${why}; give the key this permission at GitHub` } : {}) });
-  }
-  return out;
+export async function proveChecksRead({ checksGh, owner, repo, sha }) {
+  const { seen, gh } = remembering(checksGh);
+  let e = null;
+  try { await READ.checks.read(readsOf({ gh, owner, repo }), { head: sha }); } catch (err) { e = err; }
+  const f = e ? readFault(null, e, seen.last) : null;
+  return f ? { ok: false, ...f } : { ok: true };
 }
 
 // ---- the rules ---------------------------------------------------------------------------------------------------------

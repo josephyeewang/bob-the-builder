@@ -15,7 +15,7 @@
 
 import { dirname, join } from 'node:path';
 import { chainProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { proveWatchReads } from '../modules/M6-merge-gate/watch-only.mjs';
+import { WATCH_READS, proveWatchReads } from '../modules/M6-merge-gate/watch-only.mjs';
 import { mirrorPath, proposalRows, proposalsParentOf } from './layout.mjs';
 import { aclEntries, folderChecks, planFolders, readUser } from './users-folders.mjs';
 
@@ -201,12 +201,17 @@ const API = 'https://api.github.com';
  *    may not" one, not a rate limit or anything else that also says 403.
  * What a PASS proves is only that this token cannot WRITE PULL REQUESTS. It does not prove the token cannot write code (Contents), or
  * that it covers only one repository: the closing note in setup.mjs tells the person to look at GitHub's token page by eye.
- *  - (4) one real read of each kind the watch job makes (WATCH_READS), on main's latest commit with a pull request, so a token
- *    that passes can do the job's work (L591); no such commit does not pass. A failed read doesn't skip (3): a token that can write is told.
+ *  - (4) one real read of each kind the watch job makes with this token (WATCH_READS), on main's latest commit with a pull
+ *    request, so a token that passes can do the job's work (L591); no such commit does not pass. A failed read doesn't skip
+ *    (3): a token that can write is told.
+ *  - (5) the reads the job makes with the watcher App's token instead (`byApp`: the check runs, L624) are proven by
+ *    `proveApp(on)` (setup.mjs passes watch-setup's proveWatchAppChecks: as orchestrate, a real mint and a real read on the
+ *    same commit, L707 M1). Never with this token. With no `proveApp`, or no commit to try them on, each is NOT TRIED, which
+ *    is not a pass.
  * Only status numbers and fixed sentences are ever printed: never the token, never what GitHub sent back. → [{ ok, what, why? }]
  */
-export async function proveToken(io, cfg) {
-  const out = []; const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
+export async function proveToken(io, cfg, { proveApp = null } = {}) {
+  const out = []; const item = (ok, what, why, flags = {}) => out.push({ ok, what, ...(ok ? {} : { why }), ...flags });
   const repo = cfg.watch?.repo;
   if (!repo) { item(false, 'the watch repository is named in the config', 'add "watch": { "repo": "owner/name" } to the config (the repository the token is meant to watch), then run this again'); return out; }
   if (io.euid() !== 0) { item(false, 'run with sudo', 'the token is read as the orchestrate user, which only root can arrange'); return out; }
@@ -227,7 +232,7 @@ export async function proveToken(io, cfg) {
   const call = async (path, init = {}) => {
     try {
       const x = await io.fetch(`${API}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'orchestrate-setup', ...(init.body ? { 'Content-Type': 'application/json' } : {}) } });
-      return { status: x.status, text: x.text, rateRemaining: x.rateRemaining };
+      return { status: x.status, text: x.text ?? '', rateRemaining: x.rateRemaining };
     } catch (e) { return { status: 0, text: '', error: String(e?.code ?? e?.name ?? 'network error') }; }
   };
   const meta = await call(`/repos/${repo}`);
@@ -237,9 +242,21 @@ export async function proveToken(io, cfg) {
   item(info.archived !== true, `${repo} is not archived`, 'an archived repository refuses every write, so a refused write would prove nothing');
   if (out.some((x) => !x.ok)) return out;
   // One real read of each kind the job makes (L591). What's said is status numbers and fixed sentences, as everywhere here.
-  const toRead = async (path, init) => { const x = await call(path, init); if (x.status === 0) throw Object.assign(new Error('no answer'), { name: 'NoAnswer' }); let json = null; try { json = JSON.parse(x.text); } catch { /* none */ } return { status: x.status, json }; };
+  // A 403 that is a rate limit says nothing about the key, so it is told apart (L707 m3); GitHub's text is only looked at, never shown.
+  const toRead = async (path, init) => {
+    const x = await call(path, init); if (x.status === 0) throw Object.assign(new Error('no answer'), { name: 'NoAnswer' });
+    let json = null; try { json = JSON.parse(x.text); } catch { /* none */ }
+    return { status: x.status, json, rateLimited: x.status === 429 || (x.status === 403 && (x.rateRemaining === '0' || /rate limit/i.test(x.text))) };
+  };
   const [owner, name] = repo.split('/');
-  for (const row of await proveWatchReads({ gh: { get: (p) => toRead(p), post: (p, body) => toRead(p, { method: 'POST', body: JSON.stringify(body) }) }, owner, repo: name })) item(row.ok, row.what, row.why);
+  const proved = await proveWatchReads({ gh: { get: (p) => toRead(p), post: (p, body) => toRead(p, { method: 'POST', body: JSON.stringify(body) }) }, owner, repo: name });
+  for (const row of proved.rows) item(row.ok, row.what, row.why);
+  for (const k of WATCH_READS.filter((x) => x.byApp)) {
+    const what = `the job's read of ${k.what}, with the watcher App's token`;
+    if (!proved.on) { item(false, what, 'there was no commit to try it on (see above)', { notTried: true }); continue; }
+    if (k.key !== 'checks' || !proveApp) { item(false, what, 'setup has no way to make this read with the App\'s token', { notTried: true }); continue; }
+    const row = proveApp(proved.on); item(row.ok, row.what, row.why);
+  }
   const list = await call(`/repos/${repo}/pulls?state=open&per_page=1`);
   item(list.status === 200, `reading ${repo}'s open pull requests works`, list.status === 0 ? `no answer (${list.error})` : `GitHub answered ${list.status}${list.rateRemaining === '0' ? ' (a rate limit; wait and run it again)' : ''}`);
   if (list.status !== 200) return out;
