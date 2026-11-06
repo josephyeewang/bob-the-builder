@@ -83,15 +83,23 @@ test('A1: the read-only client refuses anything but a repository read, so these 
   assert.throws(() => githubReads({ gh: null, entry: ENTRY }), /need the read-only client/);
 });
 
-test('A1: wait waits, and a wait it can\'t read waits no time', { timeout: 5000 }, async () => {
+test('A1: wait waits', { timeout: 5000 }, async () => {
   const t = Date.now();
   await wait(30);
   assert.ok(Date.now() - t >= 25);
-  // Text and a BigInt too: the timer itself would wait '1500' out, and throw on 5n (audit #256 r1 m2).
+});
+
+// On fake timers, so a wait that would run for days fails the test and leaves no real timer behind to hold the run
+// open (audit #256 r2 m1). Text and a BigInt too: the timer itself would wait '1500' out, and throw on 5n (r1 m2).
+test('A1: a wait it can\'t read waits no time', { timeout: 5000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   for (const ms of [-5, NaN, undefined, 'x', Infinity, '1500', 5n]) {
-    const s = Date.now();
-    await wait(ms);
-    assert.ok(Date.now() - s < 1000, String(ms));
+    let done = false;
+    const p = wait(ms).then(() => { done = true; });
+    t.mock.timers.tick(0);
+    await new Promise((r) => setImmediate(r));
+    assert.ok(done, String(ms));
+    await p;
   }
 });
 
