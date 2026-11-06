@@ -375,14 +375,17 @@ test('prove-token: private repo from the config, the read works, the no-op write
 test('PLANT L591 prove-token makes one real read of each kind on the job\'s list, on the latest commit with a pull request', async () => {
   const w = withToken(); github(w); const r = await prove(w);
   assert.equal(r.code, 0, r.text);
-  for (const k of WATCH_READS) assert.match(r.text, new RegExp(`PASS .*the job's read of ${k.what.replace(/'/g, '.')} works`), k.key);
+  for (const k of WATCH_READS.filter((x) => !x.byApp)) assert.match(r.text, new RegExp(`PASS .*the job's read of ${k.what.replace(/'/g, '.')} works`), k.key);
+  // L624: the check runs are read with the watcher App's token, so this token is not asked for them, and says so.
+  assert.match(r.text, /not tried with this token: the job reads the check runs with the watcher App's token/);
   const asked = w.mac.fetchLog.map((x) => new URL(x.url).pathname);
-  for (const k of WATCH_READS) assert.ok(asked.some((p, i) => k.shape.test(p + (new URL(w.mac.fetchLog[i].url).search))), `no read of ${k.key}`);
-  assert.ok(asked.some((p) => p === `/repos/org/repo/commits/${PRHEAD}/check-runs`), 'the checks are read on the pull request\'s head, as the job reads them');
+  for (const k of WATCH_READS.filter((x) => !x.byApp)) assert.ok(asked.some((p, i) => k.shape.test(p + (new URL(w.mac.fetchLog[i].url).search))), `no read of ${k.key}`);
+  assert.ok(asked.some((p) => p === `/repos/org/repo/commits/${PRHEAD}/status`), 'the statuses are read on the pull request\'s head, as the job reads them');
+  assert.ok(!asked.some((p) => /\/check-runs$/.test(p)), 'the check runs are not asked for with this token (L624)');
   assert.ok(asked.some((p) => p === `/repos/org/repo/compare/${BEFORE}...${MERGED}`), 'on the commit with the pull request, not on main\'s top');
 });
 
-for (const k of WATCH_READS.filter((x) => !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key))) {
+for (const k of WATCH_READS.filter((x) => !x.byApp && !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key))) {
   test(`PLANT L591 a key that can't make the read of ${k.what} fails prove-token, names it, and the write is still tried`, async () => {
     const w = withToken(); github(w, { reads: { [k.key]: 403 } }); const r = await prove(w);
     assert.equal(r.code, 1, r.text);
@@ -412,7 +415,7 @@ test('L591 no rules file at the commit is an answer: the key could ask, and a re
   assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*the rules file at a commit works \(there is none there\)/);
 });
 
-const JOB_ONLY = WATCH_READS.filter((x) => !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key));
+const JOB_ONLY = WATCH_READS.filter((x) => !x.byApp && !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key));
 for (const k of JOB_ONLY) {
   test(`L591 no answer at all from GitHub on the read of ${k.what} fails, and is not taken for a pass`, async () => {
     const w = withToken(); github(w); const real = w.mac.github;

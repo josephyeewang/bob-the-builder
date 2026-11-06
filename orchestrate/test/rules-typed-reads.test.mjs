@@ -144,9 +144,7 @@ test('L104, L123: the files still handed old values are named, exist, name an ow
   // L134 m-A: the exact set, not just the count, so a swap (one off, another on) is caught too. A PR that takes a file
   // off edits this set; nothing is ever added to it.
   assert.deepEqual([...names].sort(), [
-    'modules/M11-dispatcher/account-ports.test.mjs',
     'modules/M11-dispatcher/fixtures.test-helper.mjs',
-    'modules/M11-dispatcher/lead-restart.test.mjs',
     'modules/M11-dispatcher/merges.test.mjs',
     'modules/M11-dispatcher/pass.test.mjs',
     'modules/M11-dispatcher/tick.test.mjs',
