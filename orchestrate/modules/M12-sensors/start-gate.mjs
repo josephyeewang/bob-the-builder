@@ -36,14 +36,14 @@ export function envInBoth(envs) {
 }
 
 // vercel: makeVercelReader(...); writer: makeFactWriter(rec); pinnedSkip: the command skipCommand computes (L571, not
-// a rules value); vercelProject: the rules entry's value. The reason text below still says "rules entry" (a code change).
+// a rules value); vercelProject: the rules entry's value.
 export async function readStartGate({ product, vercel, writer, pinnedSkip, vercelProject, now = () => new Date() }) {
   const at = now().toISOString();
   let skip;
   try {
     const s = await vercel.settings();
     const cmd = s?.commandForIgnoringBuildStep;
-    if (typeof pinnedSkip !== 'string' || !pinnedSkip) skip = { ok: false, reason: 'no pinned skip command in the rules entry' };
+    if (typeof pinnedSkip !== 'string' || !pinnedSkip) skip = { ok: false, reason: 'no pinned skip command was given' };
     else if (typeof cmd !== 'string' || !cmd) skip = { ok: false, reason: 'Vercel has no skip command set' };
     else skip = { ok: cmd === pinnedSkip, reason: cmd === pinnedSkip ? 'matches pinned' : 'differs from pinned' };
     skip.command_sha256 = sha(cmd);
