@@ -62,8 +62,10 @@ export function appendPlain(path, text, { write = writeSync } = {}) {
 // file), and a set comes from keep() and keepAlert(), which also run outside it (store.mjs alertOrKeep, keepAlert and
 // the diary read in refresh). So a clear compares what it told, reads the flag again just before it writes, and keeps
 // one that changed. A write can still land in the moment between another's read and its write, and be overwritten,
-// so a setter reads the flag again HELD_FLAG_SETTLE_MS later and merges itself back in if its entry is gone. What is
-// left is told twice, never lost, except for a writer stalled longer than that between two of its system calls.
+// so a setter reads the flag again HELD_FLAG_SETTLE_MS later and merges itself back in unless its CURRENT entry is
+// there: its held and dropped counts, and its first warning's id when it is the top holder. Presence alone is not
+// enough, as a merge built from a read taken just before this write puts back this writer's older entry (#260 r4 m1).
+// The only gap known to be left is a writer stalled longer than HELD_FLAG_SETTLE_MS between two of its system calls.
 export const HELD_FLAG = 'held-flag';
 export const HELD_FLAG_BYTES = 4096;
 export const HELD_FLAG_SETTLE_MS = 10;
@@ -152,10 +154,13 @@ function merged(cur, x) {
   return { gen, ...top, id: f.id ?? null, event: f.event ?? null, also, ...keep };
 }
 const holds = (flag, x) => heldHolders(flag).some((h) => sameHolder(h, x));
+// The writer's own entry as it last wrote it, not an older copy another merge put back (#260 r4 m1).
+const current = (flag, x) => { const me = entryOf(x); return heldHolders(flag).some((h) => sameHolder(h, x) && count(h.held) === me.held && count(h.dropped) === me.dropped && (!h.first || (flag.id ?? null) === (x.id ?? null))); };
 /**
  * Merges this holder into the flag: x = { pid, token, at, held, dropped, id, event }, its own first held warning's id
- * and event. Then, `settleMs` later, checks the entry is still there, and merges it back if a rewrite elsewhere took it
- * (at most `tries` times). Throws when it can't write. `afterWrite` is a test seam: another writer landing then.
+ * and event. Then, `settleMs` later, checks its current entry is still there, and merges it back if a rewrite
+ * elsewhere took it or put an older copy back (at most `tries` times). Throws when it can't write. `afterWrite` is a
+ * test seam: another writer landing then.
  */
 export function setHeldFlag(root, x, { settleMs = HELD_FLAG_SETTLE_MS, tries = 3, afterWrite } = {}) {
   for (let i = 0; i < tries; i += 1) {
@@ -165,7 +170,7 @@ export function setHeldFlag(root, x, { settleMs = HELD_FLAG_SETTLE_MS, tries = 3
     if (!(settleMs > 0)) return;
     Atomics.wait(SLEEP, 0, 0, settleMs);
     const after = readHeldFlag(root);
-    if (after?.flag && holds(after.flag, x)) return;
+    if (after?.flag && current(after.flag, x)) return;
   }
 }
 /** null when clear or missing; { raw, flag } when set (`flag` is null when its text can't be read, as a torn write). */

@@ -1201,3 +1201,34 @@ test('#260 r3 M1: holders folded out of a full flag are counted in the round, ne
   assert.match(r.refused, /121 processes on this store held 122 warning\(s\) in all/);
   assert.match(r.refused, new RegExp(`${f.cut.holders} more not named, as the flag is full, ${f.cut.held}`));
 });
+
+test('#260 r4 m2 (P1): a flag holding only folded counts (no named holder) is told and cleared', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  const f = { gen: 9, pid: null, token: null, at: null, held: 0, dropped: 0, id: null, event: null, also: [], cut: { holders: 3, held: 4, dropped: 1 }, total: { holders: 3, held: 4, dropped: 1 } };
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify(f).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.match(r.refused ?? '', /3 processes on this store held 4 warning\(s\) in all in their memory only, as the store's disk could not take them, and lost 1 count\(s\) of alerts \(3 more not named, as the flag is full, 4 and 1 lost\): none can be told from here/);
+  assert.equal(readHeldFlag(w.root), null, 'cleared once told');
+});
+
+test('#260 r4 m2 (P1): folded counts behind this process\'s own entry are still told, and only its own entry is kept', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  const mine = newHeldToken();
+  const f = { gen: 9, pid: process.pid, token: mine, at: 'T', held: 1, dropped: 0, id: 'w-own', event: { type: 'x' }, also: [], cut: { holders: 2, held: 2, dropped: 0 }, total: { holders: 3, held: 3, dropped: 0 } };
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify(f).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.match(r.refused ?? '', /2 processes on this store held 2 warning\(s\) in all/);
+  assert.deepEqual(heldHolders(readHeldFlag(w.root).flag).map((h) => h.token), [mine]);
+});
+
+test('#260 r4 m2 (P3): a flag that replaced a torn one says an earlier flag could not be read', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  writeFileSync(join(w.root, 'held-flag'), '{"pid":4'.padEnd(4096, ' '));
+  setHeldFlag(w.root, { pid: OTHER, token: 'x1', at: '2026-11-05T08:00:00Z', held: 1, dropped: 0, id: 'abcd0013', event: { type: 'diary_damaged', reason: 'after a torn flag' } });
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused ?? '', /: it is told this round; an earlier flag could not be read, so a process before these may have held more/);
+});

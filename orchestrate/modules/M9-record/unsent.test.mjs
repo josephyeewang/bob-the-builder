@@ -185,6 +185,7 @@ test('#260 r3 m1: the same pid with another token is another holder (a reused pi
   assert.deepEqual(heldHolders(f).map((x) => [x.pid, x.token ?? null]), [[process.pid, null], [process.pid, mine]]);
   assert.deepEqual(heldHolders(f).map(isOwnHolder), [false, true]);
   assert.equal(isOwnHolder({ pid: process.pid + 1, token: mine }), false, 'the token alone is not enough');
+  assert.equal(dropHeldHolder(root, { pid: process.pid, token: 'never-made' }), false, 'the same pid with a token not in the flag drops nothing');
   assert.equal(dropHeldHolder(root, { pid: process.pid, token: mine }), true);
   assert.deepEqual(heldHolders(readHeldFlag(root).flag).map((x) => x.token ?? null), [null], 'the dead process\'s entry stays');
 });
@@ -263,4 +264,17 @@ test('#260 r3 M1: a clear with keep leaves only the holders it accepts (the robo
   const r2 = readHeldFlag(root);
   assert.equal(clearHeldFlag(root, r2.raw, { keep: (h) => h.pid === 42 }), true);
   assert.equal(readHeldFlag(root).flag.pid, 42, 'kept again');
+});
+
+test('#260 r4 m2 (P2): folded counts survive the last named holder leaving', () => {
+  const root = flagged();
+  const f = { gen: 5, pid: 41, token: 'a', at: 'T41', held: 1, dropped: 0, id: 'w41', event: { type: 't' }, also: [{ pid: 42, token: 'b', at: 'T42', held: 1, dropped: 0 }], cut: { holders: 2, held: 3, dropped: 1 }, total: { holders: 4, held: 5, dropped: 1 } };
+  writeFileSync(join(root, HELD_FLAG), JSON.stringify(f).padEnd(HELD_FLAG_BYTES, ' '));
+  assert.equal(dropHeldHolder(root, { pid: 41, token: 'a' }), true);
+  assert.equal(dropHeldHolder(root, { pid: 42, token: 'b' }), true);
+  const r = readHeldFlag(root);
+  assert.ok(r?.flag, 'not cleared: the folded holders are still counted');
+  assert.deepEqual(heldHolders(r.flag), [], 'no named holder left');
+  assert.deepEqual(heldCut(r.flag), { holders: 2, held: 3, dropped: 1 });
+  assert.deepEqual(r.flag.total, { holders: 2, held: 3, dropped: 1 });
 });

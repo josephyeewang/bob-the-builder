@@ -13,7 +13,8 @@ import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { deliverAlertsPass } from '../modules/M13-ledger/alert-channel.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
-import { heldHolders, readHeldFlag, readUnsent } from '../modules/M9-record/unsent.mjs';
+import { HELD_FLAG, heldHolders, makeHeldFlag, readHeldFlag, readUnsent, setHeldFlag } from '../modules/M9-record/unsent.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { PRODUCT, UID, seed, setup } from '../modules/M9-record/fixtures.test-helper.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -265,6 +266,27 @@ test('#260 r3 M1 (S2): a robot process that holds its own warning does not wipe 
   assert.match(bodiesOf(gh), /S2-A/, 'the Dispatcher\'s is told');
   assert.match(r.refused ?? '', new RegExp(`process ${pidA} on this store held 1 warning\\(s\\) in its memory only`), 'the round is not clean');
   assert.equal(readHeldFlag(env.root), null);
+});
+
+// R1b (audit #260 r4 m1): another writer's merge, built from a read taken just before this writer's update, lands just
+// after it and puts this writer's older entry back. The settle re-read must see the stale copy and merge again.
+test('#260 r4 m1 (R1b): a stale merge that undoes a holder\'s new count is caught by the settle re-read, so no warning is left uncounted', async () => {
+  const env = logOnly();
+  opened(env).store.damaged();
+  const ev = (text) => ({ type: 'alert_not_queued', text });
+  const A1 = { pid: 41, token: 'tA', at: 'T1', held: 1, dropped: 0, id: 'W1', event: ev('R1b-W1') };
+  setHeldFlag(env.root, A1);
+  const v1 = readHeldFlag(env.root).raw;
+  const side = tempDir('orch-r4side-'); makeHeldFlag(side); writeFileSync(join(side, HELD_FLAG), v1);
+  setHeldFlag(side, { pid: 42, token: 'tB', at: 'T2', held: 1, dropped: 0, id: 'WB', event: ev('R1b-WB') }, { settleMs: 0 });
+  const bWrites = readFileSync(join(side, HELD_FLAG));
+  setHeldFlag(env.root, { ...A1, held: 2 }, { afterWrite: (i) => { if (i === 0) writeFileSync(join(env.root, HELD_FLAG), bWrites); } });
+  const f = readHeldFlag(env.root).flag;
+  assert.equal(f.held, 2, 'A holds 2, not the stale 1');
+  assert.deepEqual(f.total, { holders: 2, held: 3, dropped: 0 });
+  const gh = fakeIssues();
+  const r = await deliver(env, opened(env), gh);
+  assert.match(r.refused ?? '', /2 processes on this store held 3 warning\(s\) in all/);
 });
 
 // The same on a real full disk (audit #242 r1 P15). It mounts its own 2 MB RAM disk as the user (no sudo, nothing
