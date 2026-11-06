@@ -33,7 +33,10 @@
 //
 // The wall is `main` itself: only the Merge Gate or Joe changes it. A branch, a tag or the remote's HEAD is never read.
 // Two updaters never run at once: launchd starts a job only when its last run has ended, and the install step runs
-// before the job is loaded.
+// before the job is loaded. `setup add-to-install` is not an updater, but it does write into the current copy while the
+// job may be loaded: it changes only items in `keep`, puts review.json in last, and a run that is cut off or overtaken
+// by an update is finished by running it again (setup/install.mjs, planAddToInstall). Refusing it while an update is
+// running is on the roadmap (#243 r1).
 //
 // updater.json (root's, inside the copy, one of `keep`):
 //   { "installRoot": "/abs", "clone": "/abs", "address": "https://github.com/<owner>/<repo>.git",
