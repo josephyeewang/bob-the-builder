@@ -39,11 +39,11 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
-  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
   'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
-const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -213,8 +213,8 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
   assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
   const config = reviewConfig(tempDir('orch-review-keys-'));
-  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
-    ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
+    ['hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
 
   const w = world();

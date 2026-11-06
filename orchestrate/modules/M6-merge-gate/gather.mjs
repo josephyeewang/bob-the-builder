@@ -191,7 +191,9 @@ export async function threads(gh, owner, repo, pr) {
 
 // A row file at the change's head. 404: the row isn't there (null, a reason for the go check). Any other status but
 // 200 is a read that went wrong, thrown for the go check's attempt to class (L205), never read as "no row".
-async function defaultReadRow(gh, base, id, head) {
+// Also the Dispatcher's planRows port (wiring/review-ports.mjs, A3a): one reader of a row file, so the go asked and the
+// go checked read a row the same way. → the parsed row, or null when it is missing or can't be parsed; a failed read throws.
+export async function readRowAt(gh, base, id, head) {
   let j;
   try { j = await json(gh, `${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
   if (j?.encoding !== 'base64') return null;
@@ -375,7 +377,7 @@ export async function gatherFacts(ctx, merge) {
     if (!go) return { ok: false, reasons: [`no go for ${rootId}`] };
     const ids = new Set(Object.keys(go.doc.rows ?? {}));
     for (const x of f.files) for (const p of [x.path, x.previous_path]) { const m = typeof p === 'string' ? ROW_FILE.exec(p) : null; if (m) ids.add(m[1]); }
-    const readRow = ctx.readRow ?? ((id, h) => defaultReadRow(gh, base, id, h));
+    const readRow = ctx.readRow ?? ((id, h) => readRowAt(gh, base, id, h));
     const headRows = {};
     for (const id of [...ids].sort()) headRows[id] = await readRow(id, head);
     // M2 marks a check that could not read GitHub `unreadable` (L205): thrown here, so the go is unknown (f.go null,
