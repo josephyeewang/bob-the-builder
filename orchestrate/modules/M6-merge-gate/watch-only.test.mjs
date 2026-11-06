@@ -1611,3 +1611,24 @@ test('L644: a push with no pull request logs no reasons, as it has no risky clas
   await w.pass();
   assert.deepEqual(w.judged()[0].risky_reasons, {});
 });
+
+test('#259 r2 M1: text-scan hits in ordinary code ("Create your user profile", createTable) never push a migration past the cap', async () => {
+  const rs = await draftRulesFor();
+  const f = (path, added, removed = []) => ({ path, status: removed.length ? 'modified' : 'added', added_lines: added, removed_lines: removed });
+  const judged = (files, labels = []) => judgeMerged({ direct: false, sha: 'a'.repeat(40), headSha: 'b'.repeat(40), pr: 5, prBase: 'main', labels, checks: [], statuses: [], threads: { ok: true, unresolved: 0 }, files }, rs).risky_reasons;
+  const r = judged([
+    f('app/signup.tsx', ['<h1>Create your user profile</h1>'], ['<h1>Create a user profile</h1>']),
+    f('components/form.tsx', ['// create a function for the form'], ['// create the function']),
+    f('lib/c.ts', ['await knex.schema.createTable("x")'], ['await knex.schema.createTable("y")']),
+    f('db/migrations/001_x.sql', ['alter table t add c int;']),
+  ]).schema;
+  assert.equal(r[0], 'db/migrations/001_x.sql', JSON.stringify(r));
+  // Then the scan hits, in the order classify gave them, ahead of every line-check hit.
+  assert.ok(r.slice(1, 5).every((x) => / \(table change in (added|removed) lines\)$/.test(x)), JSON.stringify(r));
+  assert.deepEqual(r.slice(1, 3), ['app/signup.tsx (table change in added lines)', 'app/signup.tsx (table change in removed lines)']);
+  assert.match(r.at(-1), /^and \d+ more$/);
+  // The same sort keeps a label ahead of the one-per-file scan_not_built lines (#259 r2 Minor).
+  const u = judged(['a', 'b', 'c', 'd', 'e'].map((x) => f(`src/${x}.mjs`, ['x()'])), ['needs-joe']).unclassifiable;
+  assert.equal(u[0], 'needs-joe label', JSON.stringify(u));
+  assert.ok(u.slice(1, 5).every((x) => x.startsWith('scan_not_built: ')), JSON.stringify(u));
+});

@@ -167,15 +167,21 @@ export const asksApprove = (r) => r?.n === 8 && /needs the owner's Approve|the r
 
 export const REASONS_KEPT = 5;
 export const REASON_CHARS = 200;
-// The line check's own reason (M10 classify.mjs): "<path> (added lines: line N may change the database: <why>)".
+// Reasons in three ranks before the cap (#259 r1 M1, r2 M1), each kept in its own order:
+//   0: a plain path match (a migration, a secret-settings file), a label, a bad entry: what L644 keeps the log for;
+//   1: a text scan's hit on a file's lines (M10 classify.mjs "<path> (table change in added lines)"), which ordinary
+//      code also trips ("Create your user profile", createTable in a helper);
+//   2: the line check's own hit, "<path> (added lines: line N may change the database: <why>)", one or two per code
+//      file, and "scan_not_built: <path>", one per code file.
+// Cut in file order, ranks 1 and 2 would push the one reason that matters past the cap.
 const LINE_CHECK_HIT = /: line \d+ may change the database: /;
+const SCAN_HIT = / in (added|removed) lines\)$/;
+const rankOf = (x) => (LINE_CHECK_HIT.test(x) || x.startsWith('scan_not_built: ') ? 2 : SCAN_HIT.test(x) ? 1 : 0);
 function keptReasons(reasons) {
   const out = {};
   for (const [cls, list] of Object.entries(reasons ?? {})) {
     const given = Array.isArray(list) ? list.map((x) => String(x)) : [String(list)];
-    // A path or pattern hit (a migration, a secret-settings file) goes before the line check's hits, which come one or
-    // two per code file in file order: cut first, they would hide the one reason L644 keeps (#259 r1 M1). Stable.
-    const all = [...given.filter((x) => !LINE_CHECK_HIT.test(x)), ...given.filter((x) => LINE_CHECK_HIT.test(x))];
+    const all = [0, 1, 2].flatMap((k) => given.filter((x) => rankOf(x) === k));   // stable within each rank
     out[cls] = all.slice(0, REASONS_KEPT).map((x) => (x.length > REASON_CHARS ? `${x.slice(0, REASON_CHARS - 1)}…` : x));
     if (all.length > REASONS_KEPT) out[cls].push(`and ${all.length - REASONS_KEPT} more`);
   }
