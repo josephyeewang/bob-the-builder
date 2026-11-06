@@ -75,12 +75,12 @@ function configAlert(ctx, reason) {
 // then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
 // pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
 // Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
-// the alert's type and reason with its numbers out; its mark is stillWaiting's, kept only once the sink took it
+// the alert's type and reason (or its text, when it has no reason) with its numbers out; its mark is stillWaiting's, kept only once the sink took it
 // (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
 // ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
 // stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
 const ASK_ALERTS = 'ask-alerts.json';
-const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
+const causeOf = (e) => `${e.type}:${String(e.reason ?? e.text ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
   const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
   let marks = {};
@@ -143,8 +143,11 @@ const onDraft = (record, doc) => { const c = record.read('card', doc.card); retu
 const goCardLost = (record, doc) => {
   if (!activeKind(doc.kind).go) return null;
   const c = record.read('card', doc.card);
-  return !c ? 'its card is missing from the record, so this go cannot go ahead' : c.corrupt ? 'its card cannot be read, so this go cannot go ahead' : null;
+  return !c ? 'the Record has no such card, so someone needs to find out what became of it' : c.corrupt ? 'the card cannot be read and needs repairing by hand' : null;
 };
+const stillAsking = (doc) => doc.state === 'open' || doc.state === 'pushed';
+// The cards the loop below tells about when lost, so the Dispatcher's check for every other card does not tell them twice.
+export const goToldCards = (record) => new Set(askStore(record).asks().filter((a) => activeKind(a.doc.kind)?.go && stillAsking(a.doc)).map((a) => a.doc.card));
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -307,9 +310,10 @@ export async function schedulePass(ctx) {
   const once = askOnce(ctx);
   for (const a of asks) {
     const doc = a.doc;
-    if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    if (!stillAsking(doc)) continue;
     const lost = goCardLost(ctx.record, doc);
-    if (lost) once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, reason: lost });
+    // No push either: it could not be acted on, and a first push would wipe this tell's mark (#225 r2 Minor 1).
+    if (lost) { once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, text: `The go for card ${doc.card} [ask ${a.id}] can't go ahead: ${lost}.` }); continue; }
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }

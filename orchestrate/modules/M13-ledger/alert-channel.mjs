@@ -45,7 +45,7 @@ import { createHash } from 'node:crypto';
 import { alertKey, lastLine, lineIs, makeAlerts, wasTold } from './alerts.mjs';
 import { TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { DISPATCHER_LATE_MIN } from './heartbeat.mjs';
-import { ALERT_BUDGET_MS, ALERT_SEND_MS, sendAlerts } from '../M11-dispatcher/alerts.mjs';
+import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, holdsDelivered, sendAlerts } from '../M11-dispatcher/alerts.mjs';
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { markSent, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
@@ -349,11 +349,27 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       if (why !== null) failedOn(text, why);
       return why === null;
     };
-    const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs, clock });
+    // A queue the Record won't let shrink is sent again every round, so with no share of the time it would use all of it
+    // and the store's lines, the way out of that very state, would never go (L558 M3). With any waiting, it gets half of
+    // what can be started in a round. That stops the queue starting sends, not one already running, so the store's loop
+    // below also always tries one line (L566 N1).
+    let storeWaiting = false;
+    try { storeWaiting = readUnsent(recordRoot).length > 0; } catch { /* the read below names it */ }
+    const reserveMs = storeWaiting ? Math.max(0, (budgetMs - sendMs) / 2) : 0;
+    // A delivered alert held for its mark (L527) stays on the queue by design, and was sent: it isn't waiting (L593).
+    const unsentQueued = () => {
+      try {
+        const q = rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries;
+        return Array.isArray(q) ? q.filter((e) => !holdsDelivered(e, nowMs())).length : 0;
+      } catch { return 0; }   // as sendAlerts' own read: an unreadable queue counts as empty here
+    };
+    const queuedAtStart = unsentQueued();
+    const r = await sendAlerts(rec, port, nowMs(), { sendMs, budgetMs: budgetMs - reserveMs, clock });
     out.sent += r.sent; out.failed += r.failed; out.left = r.left;
     // A send that hung past sendMs never came back to the port: it is named by that.
     if (r.failed && !first) first = { title: 'a Record alert', why: `no answer within ${sendMs} ms` };
-    // A failed Record send does not skip the store's alerts (L288 MAT-2 c): they are a separate queue.
+    // A failed or hung Record send does not skip the store's alerts (L288 MAT-2 c): they are a separate queue, so a round
+    // always tries at least one, past the budget by that one send if it must. The pass deadline, 120 s, has room (L566 N1).
 
     // The store's own unsent alerts (L239, L240), to this product's repo, naming the product (L288 MAT-3).
     let waiting;
@@ -362,8 +378,10 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
       else return { ...out, refused: `the store's unsent alerts could not be read: ${msg(e)}` };
     }
     let storeLeft = waiting.length;
+    let storeTried = 0;
     for (const x of waiting) {
-      if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
+      if (clock() - start + sendMs > budgetMs && storeTried > 0) break;
+      storeTried += 1;
       const text = storeText(x.event, target);
       let why;
       try { why = await within(sendMs, () => raiseWhy(alerts, gh, alertKey(target, 'store', x.id), text, x.id)); } catch (e) { why = msg(e); }
@@ -385,6 +403,15 @@ export async function deliverAlertsPass({ rec, now = Date.now, recordRoot, produ
     }
     // Things the round did not lose but the owner should hear of, added to whatever went wrong above.
     const plus = [];
+    // The queue is sent from its head, so while it can't shrink the entries past a round's reach are not sent at all. A
+    // queue that didn't shrink is named, so that can't wait unheard; a backlog that is clearing fails no pass (L566 N2,
+    // L579). The one that failed is named above, so it is taken off the count. Arrivals during a round can over-tell.
+    // Arrivals between rounds can under-tell, as they count in the start size: a queue held steady by them looks as if
+    // it shrank (L582). That delays this line and no alert is lost; past the queue's cap the oldest go, and the count
+    // is told (L593).
+    const unsentLeft = unsentQueued();
+    if (unsentLeft >= queuedAtStart && unsentLeft > r.failed) plus.push(`${unsentLeft - r.failed} alert(s) are still in the Record's queue after this round, which did not shrink it`);
+    if (storeTried < waiting.length) plus.push(`${waiting.length - storeTried} of the store's unsent alerts had no time this round and wait for the next`);
     try {
       if (await within(sendMs, () => alerts.reportTrouble(target, TROUBLE_SOURCES.CHANNEL)) === false) plus.push(`the alert about the Record refusing writes did not go out: ${gh?.lastAnswer ?? 'GitHub refused it'}`);
     } catch (e) { plus.push(`the alert about the Record refusing writes did not go out: ${msg(e)}`); }

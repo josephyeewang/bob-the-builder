@@ -53,19 +53,29 @@ import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
+import { notWiredText, refusing } from './not-wired.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
+import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 
-// The ports PRs C and D wire (M11 README, "The tick's ports"). Each throws when called: never a stand-in answer.
-export const NOT_WIRED = Object.freeze(['board', 'healthy', 'resume', 'outboxSessions', 'wait', 'startReadonly', 'replyToLead', 'leads',
-  'sessions', 'probe', 'launch', 'stopGroup', 'saveWork', 'hostLock', 'pauseLead', 'gateAlive', 'stopSession', 'hasReviewer',
-  'requestReview', 'reviewAlerts', 'filesOf', 'sendFrontDoor', 'restartFrontDoor', 'startMinibase', 'frontDoorAlive',
-  'strayFrontDoor', 'frontDoorHandoff', 'reviewEnded',
-  'startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha']);
-export const NOT_WIRED_CLEANUP = Object.freeze(['mirrorFor', 'git', 'saveWork']);
-export const notWiredText = (port) => `not wired yet: ${port} (R-0b-162)`;
-export const refusing = (port) => () => { throw new Error(notWiredText(port)); };
+// The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
+// on a list throws when called: never a stand-in answer. To wire one, change its port file; this file doesn't change.
+export const PORT_GROUPS = Object.freeze([
+  Object.freeze({ notWired: NOT_WIRED_WORKER, build: workerPorts }),
+  Object.freeze({ notWired: NOT_WIRED_REVIEW, build: reviewPorts }),
+  Object.freeze({ notWired: NOT_WIRED_PHONE, build: phonePorts }),
+]);
+export { notWiredText, refusing };
+// Every port the tick needs from the wiring. A port's wiring moves between the port files; this list changes only when the
+// tick starts reading a new port. Options with defaults are not ports. `alert` and `approvals` are answered here.
+const WIRED_HERE = Object.freeze(['alert', 'approvals']);
+export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview',
+  'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
+  'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 
 // `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
 export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
@@ -153,26 +163,50 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
     clock: now,
   });
   const rules = makeRules(engine);
-  // The store's own alerts (a refused write, a store fault) go to the log, "not delivered": the store keeps them in its
-  // own unsent file and tells them again. Never into the record's queue: the store alerts from inside its own writes.
+  // The store's own alerts go to the log, "not delivered". Those the store keeps (`alertOrKeep`: a step never redone) stay in
+  // its unsent file and are told again; a refused write (`say`) is the log only. Never into the record's queue: the store
+  // alerts from inside its own writes.
   const storeAlert = (e) => { log(`${who}: record alert not sent: ${JSON.stringify(e)}`); return false; };
   ({ record: rec } = openRecord({ root: c.recordRoot, product: c.product, ownerUid: c.ownerUid, rules, alert: storeAlert, now }));
   await reader.refresh();
   return { rec, rules, gh, entry };
 }
 
-export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now() } = {}) {
-  void limitedSync;   // the synchronous ports (PRs C, D) run their commands through it
+/**
+ * The tick's ports: refusing ones for every name on a group's list, then whatever each group's port file answers. Each port
+ * has one home, or the start stops: a port both answered and listed, on two lists, answered by two files, a port the tick
+ * doesn't read, one neither answered nor listed, or a file answering `alert` or `approvals`. The cleanup group follows
+ * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
+ * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now }; `gh` is the read-only
+ * GitHub client the rules reader uses (L615).
+ */
+export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
-  const { rec, rules, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   const ports = { alert: logOnlyAlert(log) };
-  for (const k of NOT_WIRED) ports[k] = refusing(k);
+  for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
-  // cleanupPass reads a missing copies folder as "nothing to clean" (cleanup.mjs), which would pass in silence. So the
-  // folder itself refuses: the tick spreads this object into the step, and the read throws inside the step.
-  ports.cleanup = Object.defineProperty(Object.fromEntries(NOT_WIRED_CLEANUP.map((k) => [k, refusing(`cleanup.${k}`)])), 'copiesRoot',
-    { enumerable: true, get: refusing('cleanup.copiesRoot') });
+  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now });
+  const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
+  const lists = groups.flatMap((g) => g.notWired);
+  const listed = new Set(lists);
+  stopOn('these ports are on two lists', lists.filter((k, i) => lists.indexOf(k) !== i));
+  stopOn('no tick step reads these ports', lists.filter((k) => !TICK_PORTS.includes(k)));
+  const answers = new Set();
+  for (const { build } of groups) {
+    const answered = build(ctx);
+    const names = Object.keys(answered);
+    stopOn('these ports are wired but still listed as not wired', names.filter((k) => listed.has(k)));
+    stopOn('only the wiring answers these ports', names.filter((k) => WIRED_HERE.includes(k)));
+    stopOn('two port files answer these ports', names.filter((k) => answers.has(k)));
+    stopOn('no tick step reads these ports', names.filter((k) => !TICK_PORTS.includes(k)));
+    for (const k of names) answers.add(k);
+    Object.assign(ports, answered);
+  }
+  stopOn('nothing answers or lists these ports, which the tick needs', TICK_PORTS.filter((k) => !WIRED_HERE.includes(k) && !listed.has(k) && !answers.has(k)));
+  const cleanup = cleanupProblem(ports.cleanup);
+  if (cleanup) throw new Error(cleanup);
   return { rec, rules, ports };
 }

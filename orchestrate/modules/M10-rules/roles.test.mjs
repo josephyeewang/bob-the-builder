@@ -8,6 +8,8 @@ import { cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoles, profileFor, TOOLS_CHECKED, NEVER_TOOLS, ROLE_FILES } from './roles.mjs';
+import { NEVER_TOOLS as M4_NEVER, DESIGN_PROFILES, checkProfile as m4Check } from '../M4-workshop/launcher/role-profiles.mjs';
+import { checkInit } from '../M4-workshop/launcher/readback.mjs';
 import { parsePolicy } from './policy.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -84,6 +86,8 @@ test('the tool list expires with the Claude Code version it was checked against 
   const fixturePin = parsePolicy(readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8')).policy.claude_code.pin;
   assert.equal(TOOLS_CHECKED.claude_code, fixturePin, 'move TOOLS_CHECKED after re-checking the tool list');
   assert.match(loadRoles(ROLES, { pin: '2.1.301' }).reason, /re-check the list/);
+  // A newer pin is refused too: Joe's own Claude Code updates itself past the checked version (L599 m-1).
+  assert.match(loadRoles(ROLES, { pin: '2.1.318' }).reason, /re-check the list/);
   assert.equal(loadRoles(ROLES, {}).ok, false);
 });
 
@@ -93,4 +97,16 @@ test('auditor maps to reviewer; learning is never started', () => {
   assert.equal(profileFor(r, 'learning'), null);
   assert.equal(profileFor(r, 'nobody'), null);
   assert.equal(profileFor({ ok: false }, 'worker'), null);
+});
+
+test('the subagent tool is refused under both its names, at the profile and at the read-back (L629)', () => {
+  for (const name of ['Agent', 'Task']) {
+    assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, name] })).reason, /never allowed/, name);
+    const w = DESIGN_PROFILES.worker;
+    assert.match(m4Check('worker', { ...w, tools: [...w.tools, name] }).reason, /never-list/, name);
+    const init = { tools: [...w.tools, name], mcp_servers: [], plugins: [], skills: [...(w.skills ?? [])], setting_sources: ['flag'], permissionMode: w.mode, claude_code_version: PIN };
+    assert.match(checkInit(init, { role: 'worker', profile: w }).reason, /never-list tools loaded/, name);
+  }
+  // One list in two homes: M4's is M10's plus Workflow, which only M10's script profile may hold.
+  assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
 });

@@ -69,6 +69,8 @@ import { WRITERS } from '../modules/M9-record/permissions.mjs';
 import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
 import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
+import { tick } from '../modules/M11-dispatcher/tick.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { usageFact, undoEntries, undoSha, filesOfCommits, UNDO_ASK, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -78,7 +80,9 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-import { fakeRules } from '../shared/rules.mjs';
+import { fakeRules, makeRules } from '../shared/rules.mjs';
+import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
+import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
@@ -116,6 +120,12 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
+// The day-one engine answers the push; the push world's values stay plain values, as M4's push still reads them
+// (shared/rules.mjs OLD_VALUES_UNTIL_STEP_2).
+function pushRules(w, world) {
+  return makeRules({ rev: 'fake-1', may: (a, x) => w.rules.may(a, x), get: (k, { product } = {}) => (product === world.product ? world.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+}
+
 const UNDO_ID = 'U1';
 function undoTapped(w) {
   const entries = undoEntries(UNDO_ID, {}, { product: P, files: [DOC], pr: 7 });
@@ -250,11 +260,81 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
   // The Mac's launcher (a port): it answers yes, in the shape M11's own tests use.
   const launched = [];
   const r = await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
   assert.deepEqual(r.refused, [], 'the undo card is refused a start');
   assert.deepEqual(r.started, [id]);
   assert.deepEqual(launched, [id]);
   assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+// L595: a paused product's undo, through one real tick: the real rules text, the real Record, M11's real steps. Only the
+// ports are stand-ins. The rules draft's paused state is start: none, which is what stopped this card at M9 alone.
+const pause = (w) => { const r = w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: w.rec.read('product', P).rev, doc: { state: 'paused', return_to: 'active' } }); assert.equal(r.ok, true, r.reason); };
+async function oneTick(w, { sessions = [] } = {}) {
+  const dir = tempDir('orch-day-one-tick-');
+  const launched = [];
+  const stops = [];
+  const alert = fakeAlert();
+  const ports = {
+    alert, board: () => [], healthy: () => true, resume: () => false, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    leads: () => [], sessions: () => [...sessions], probe: () => ({ size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } }),
+    launch: async ({ card, kind, product, sessionId }) => { launched.push(card.id); sessions.push({ id: sessionId, product, kind, card: card.id, pgid: 101 }); return { ok: true, sessionId, outbox: `/outbox-root/worker/${sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; },
+    stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: () => ({ ok: true, requestId: 'Q-1' }), filesOf: filesOfCommits,
+    sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
+    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
+  };
+  await tick({ rec: w.rec, rules: w.rules, now: T0, ports });
+  return { launched, alert, sessions, stops };
+}
+
+test('L595: the Undo tapped on a paused product starts in the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const { launched, alert } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+  assert.deepEqual(alert.texts.filter((t) => /can't start|is waiting/.test(t)), []);
+});
+
+// #252 r1 m3: this PR first lets an undo run on a paused product, so the next tick must leave it running.
+test('L595: a running undo on a paused product is not stopped or parked by the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const first = await oneTick(w);
+  assert.deepEqual(first.launched, [id]);
+  const second = await oneTick(w, { sessions: first.sessions });
+  assert.deepEqual(second.launched, []);
+  assert.deepEqual(second.stops, []);
+  // A stop is first only wanted (a pending stop fact) until the session reaches a safe point: none may be wanted.
+  const wanted = w.rec.list('fact').filter((f) => f.doc?.state === 'pending' && f.doc?.card === id);
+  assert.deepEqual(wanted.map((f) => f.id), []);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: an undo card already in ready when the product is paused stays on the list and starts', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  pause(w);
+  assert.deepEqual(w.rec.ready().map((c) => c.id), [id], 'off this list, no check ever sees the card, so no alert either');
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: on a paused product an ordinary ready card does not start beside the undo', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const d = { state: 'ready', kind: 'ordinary', product: P, module: 'M-test', tier: 2, round: 1, files: [DOC], done_when: 'x', what: 'y' };
+  seed(w.env, 'card', 'C-3', d);
+  pause(w);
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', 'C-3').doc.state, 'ready');
 });
 
 // The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
@@ -429,23 +509,35 @@ function readsAndWriters() {
 }
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
-const KNOWN_UNWRITTEN = Object.freeze({
-  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
-});
+const KNOWN_UNWRITTEN = Object.freeze({});
 
-test('a worker the real pass starts has the session record M4\'s push script reads', { todo: 'L204-a (lane 2, M11 + M4): the Dispatcher writes only a launch record; push.mjs reads the session record and stops at "no launch record for this session"' }, async () => {
+test('a worker the real pass starts has the session record M4\'s push script reads', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const root = tempDir('orch-day-one-push-');
+  const world = await pushWorld({ root, record: w.rec, seed: false, card: id, product: P });
   let sid = null;
   await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => {
+      sid = x.sessionId;
+      // The launcher makes the session's own outbox and says where it is (pass.mjs's launch port).
+      const box = join(root, 'outboxes', 'worker', x.sessionId);
+      mkdirSync(box, { recursive: true, mode: 0o700 });
+      return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID), outbox: box };
+    } });
   assert.ok(sid, `the undo card ${id} was not started`);
-  // The fields M4 push.mjs attempt() reads from the session record; switching this on, add a push through the real
-  // createPushScript (L204-a's proof).
   const s = w.rec.read('session', sid)?.doc;
   assert.ok(s, 'no session record');
   for (const k of ['product', 'card', 'branch', 'outbox', 'attempt']) assert.ok(s[k], `the session record has no ${k}`);
+
+  // The worker's work, handed in as a bundle in that outbox, and the real push script with nothing else in the Record.
+  await world.commit('the undo', (dir) => { mkdirSync(dirname(join(dir, DOC)), { recursive: true }); writeFileSync(join(dir, DOC), 'the undo\n'); });
+  await world.bundle(undefined, s.outbox);
+  const tip = (await gitOk(['rev-parse', 'HEAD'], world.cg)).trim();
+  const p = await world.push({ rules: pushRules(w, world) }, sid);
+  assert.equal(p.ok, true, p.reason);
+  assert.ok((await world.ghRefs()).split('\n').includes(`refs/heads/${s.branch} ${tip}`), 'GitHub has the card branch at the worker\'s tip');
 });
 
 // Not run here, logged (day-one audit Minor 4): M2's undo-flag, schedule and binding. The answered Undo ask is seeded;
@@ -459,7 +551,7 @@ test('L97, L129: every Record document production reads, today, has a production
     `documents read with no writer: ${unwritten.map((e) => `${e} (read in ${[...reads.get(e)].join(', ')})`).join('; ')}`);
 });
 
-test('L97: every Record document production reads has a production writer', { todo: `L129: ${Object.entries(KNOWN_UNWRITTEN).map(([e, why]) => `${e} (${why.replace(/^L129: /, '')})`).join('; ')}` }, () => {
+test('L97: every Record document production reads has a production writer', () => {
   const { reads, makers } = readsAndWriters();
   assert.deepEqual([...reads.keys()].filter((e) => !makers.has(e)), []);
 });
