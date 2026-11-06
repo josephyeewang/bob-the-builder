@@ -22,7 +22,7 @@ import { parseYaml } from '../../../scripts/blueprint/yaml-lite.mjs';
 import { parsePolicy, EFFECT_FIELDS } from './policy.mjs';
 import { checkProducts } from './reader.mjs';
 import { makeEngine } from './engine.mjs';
-import { ROLES_DIR } from './roles.mjs';
+import { ROLES_DIR, TOOLS_CHECKED } from './roles.mjs';
 import { isMacKey, keyMatches, makeRules, MAC_LIST_ALL } from '../../shared/rules.mjs';
 import * as M6 from '../M6-merge-gate/required-keys.mjs';
 import * as M2 from '../M2-approvals/required-keys.mjs';
@@ -116,6 +116,8 @@ export function firstCutoverProblems(text, entry, existing = []) {
   // The script role can write files and is not held by the editing cap, so it stays off at the first cutover.
   const script = p.roles_enabled?.script;
   if (script !== undefined && script !== 'none') out.push('roles_enabled.script must be none');
+  // A pin other than the checked one refuses every role at its first start (L599 m-6), so the fit check says so first.
+  if (p.claude_code.pin !== TOOLS_CHECKED.claude_code) out.push(`claude_code.pin is ${p.claude_code.pin}, but the tool list is checked against ${TOOLS_CHECKED.claude_code}: every role would be refused`);
   for (const [k, f] of PATH_ONLY_EFFECTS) {
     if (!Array.isArray(p.effect_paths[k][f]) || !p.effect_paths[k][f].length) out.push(`effect_paths.${k}.${f} must list at least one path`);
   }

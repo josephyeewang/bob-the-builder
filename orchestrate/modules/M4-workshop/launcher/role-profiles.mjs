@@ -8,7 +8,8 @@
 import { createHash } from 'node:crypto';
 import { OUTBOX_KINDS } from '../../../shared/record-names.mjs';
 
-export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'CronCreate',
+// Agent and Task are one subagent tool under two names (L629); M10's roles.mjs keeps the same list less Workflow.
+export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
   'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile', 'Workflow']);
 // Tolerated in every read-back (m2).
 export const ALWAYS_TOLERATED = Object.freeze(['EndConversation']);
