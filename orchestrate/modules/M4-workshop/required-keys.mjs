@@ -7,7 +7,8 @@
 //
 //   REQUIRED_KEYS   the keys a push can't work without
 //   OPTIONAL_KEYS   keys it reads but handles when missing (each says what happens)
-//   policyProblems(rules, product) → [] when a push can use these rules, else every reason it can't
+//   policyProblems(rules, product) → [] when a push can use these rules, else every reason it can't: today, a Vercel
+//                                    project that is not non-empty text, which the start gate refuses (L719 m4)
 
 export const REQUIRED_KEYS = Object.freeze([
   'product.vercel_project',   // the project the start gate's Vercel facts must name
@@ -22,6 +23,11 @@ export const OPTIONAL_KEYS = Object.freeze([
   'proposals.outbox',         // read only for a card that hands in a proposal; a missing one is refused there
 ]);
 
-export function policyProblems() {
-  return [];
+// L719 m4 (L612): the go/no-go check must agree with the start gate, which shuts for good unless the project is non-empty
+// text (start-gate.mjs vercelFact). Read as push.mjs reads it, so the two can't differ.
+export const VERCEL_PROJECT_LINE = 'M4: product.vercel_project must name the Vercel project';
+export function policyProblems(rules, product) {
+  let v;
+  try { v = rules.get('product.vercel_project', { product }); } catch { v = undefined; }
+  return typeof v === 'string' && v ? [] : [VERCEL_PROJECT_LINE];
 }

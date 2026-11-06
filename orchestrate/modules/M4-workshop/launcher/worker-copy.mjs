@@ -70,13 +70,15 @@ const isProtectedPath = (path) => path.split('/').some(isProtectedName);
 
 /**
  * Prepares one worker's copy.
- *   product      the rules' product entry: { repo: 'owner/name', mirror: '<folder>' }
+ *   product      the product's place from the wiring (products.json and this Mac's config, not the rules; L568):
+ *                { repo: 'owner/name', mirror: '<folder>' }
  *   card         { id, repo, commit, branch }   (from the record)
  *   dest         the new folder for this copy; must not exist
  *   lastBundle   on a restart, the card's last bundle file (else null)
  * Returns { ok: true, dest, head, removed, restored } or { ok: false, reason }.
  */
 export async function prepareWorkerCopy({ product, card, dest, lastBundle = null }) {
+  // The reason text predates L568 and a test pins it: the place comes from the wiring, not the rules (L719 c4).
   if (!product?.repo || !product?.mirror) return refuse('product has no repo or mirror in the rules');
   if (!card || card.repo !== product.repo) return refuse(`card repo "${card?.repo}" is not the product's repo "${product.repo}"`);
   if (!CARD.test(String(card.id))) return refuse('bad card id');

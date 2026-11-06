@@ -1339,6 +1339,9 @@ test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, th
     ['no repo on this Mac', (w) => ({ productPlace: () => ({ mirror: w.mirror }) }), /no valid GitHub repo on this Mac/],
     ['no mirror on this Mac', (w) => ({ productPlace: () => ({ repo: REPO }) }), /no mirror on this Mac/],
     ['no place on this Mac', () => ({ productPlace: () => null }), /no valid GitHub repo on this Mac/],
+    // L719 m2 (plant C1): a place lookup that throws (a products.json read error) is a wait, never a final no.
+    ['the place lookup throwing', (w) => ({ productPlace: () => { throw new Error(`EIO: ${w.root}/products.json`); } }), /^the push script failed: EIO: <path>/],
+    ['an async place lookup rejecting', (w) => ({ productPlace: async () => { throw new Error(`EIO: ${w.root}/products.json`); } }), /^the push script failed: EIO: <path>/],
   ];
   for (const [name, set, re] of cases) {
     const w = await world();
@@ -2186,6 +2189,35 @@ test('L568: a push script that does not know where a product lives is never made
   await refusedAndUntouched(w, /valid GitHub repo on this Mac/, { productPlace: () => null });
   await refusedAndUntouched(w, /no mirror on this Mac/, { productPlace: () => ({ repo: REPO, mirror: 'relative' }) });
   await refusedAndUntouched(w, /place broke/, { productPlace: () => { throw new Error('place broke'); } });
+});
+
+// L719 m1 (plant C2): the push asks for the place of the session's own product, and lands on that product's repo only.
+test('L719: the push asks for its own product\'s place, not another\'s, and pushes to that repo', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  const asked = []; const to = [];
+  const places = { [PRODUCT]: { repo: REPO, mirror: w.mirror }, other: { repo: 'owner/other-repo', mirror: join(w.root, 'other-mirror') } };
+  const productPlace = (p) => { asked.push(p); return places[p] ?? null; };
+  const testRemote = (repo) => { to.push(repo); return w.gh; };
+  const r = await createPushScript({ ...w.ports, productPlace, testRemote })('S-1');
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual([...new Set(asked)], [PRODUCT]);
+  assert.ok(to.length > 0 && to.every((x) => x === REPO), to.join(','));
+  // Asked with any other key, the default world's place port has none: the push waits and nothing is pushed.
+  const w2 = await world();
+  assert.equal(w2.ports.productPlace('C-1'), null);
+  assert.equal(w2.ports.productPlace('other'), null);
+});
+
+// L719 m3: the wiring may read products.json asynchronously; an async place is awaited, and the push goes on.
+test('L719: an async productPlace is awaited, and the push lands', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  const r = await createPushScript({ ...w.ports, productPlace: async (p) => w.ports.productPlace(p) })('S-1');
+  assert.equal(r.ok, true, r.reason);
+  assert.ok((await w.ghRefs()).includes('refs/heads/card/c-1'));
 });
 
 test('L568: the start gate is given the wiring\'s workflow, not a rules line', async () => {

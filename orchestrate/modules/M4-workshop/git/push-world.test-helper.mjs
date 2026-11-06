@@ -149,7 +149,8 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
   const ports = {
     record,
     rules: fakeRules({ answers, values }),
-    productPlace: () => place,
+    // The place for the product asked about, and none for any other: a push that asks with the wrong key waits (L719 m1).
+    productPlace: (p) => (p === product ? place : null),
     outsideWorkflow: WF,
     privateDir,
     scanner: scannerOverride ?? fake.setup,

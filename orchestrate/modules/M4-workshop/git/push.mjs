@@ -286,7 +286,10 @@ async function messages(mirror, shas, names, about) {
  *   getRobotToken(product)  M6's short-lived robot key (R-0b-86)
  *   readRun, workflowRule, issues, gateCache   the start gate's ports (start-gate.mjs)
  *   productPlace(product)   { repo: 'owner/name', mirror: '<folder>' }: the wiring builds it from the products.json entry
- *                           and this Mac's config. Neither is a rules line: one home each (L568).
+ *                           and this Mac's config. Neither is a rules line: one home each (L568). products.json keeps
+ *                           `repo` as the bare name with `owner` beside it, so the wiring joins them:
+ *                           repo: `${entry.owner}/${entry.repo}`. Passing entry.repo alone makes every push wait (L719 m5).
+ *                           It may be async; the push awaits it.
  *   outsideWorkflow         the outside check's pinned workflow path, from this Mac's config (L568)
  *   pullRequests.upsert({ repo, branch, base, title, body, token })   opens or updates the PR
  *   testRemote(repo)        tests only: a local bare repo standing in for GitHub. Production
@@ -376,7 +379,8 @@ export function createPushScript(deps) {
   async function attempt({ product, card, branch, folder, uid, folderUid, att, sha256, research }, { look = false } = {}) {
     if (!BRANCH.test(String(branch)) || branch !== cardBranch(card)) no(`the branch "${branch}" is not the card's branch`);
 
-    const { repo, mirror } = productPlace(product) ?? {};
+    // Awaited: the wiring may read products.json asynchronously (L719 m3). A throw here is a wait, via settle (L669 M1).
+    const { repo, mirror } = (await productPlace(product)) ?? {};
     const base = rules.get('product.default_branch', { product }) ?? 'main';
     // The one "on" switch, the same line M2 onboard.mjs reads (L204-b, L568); only the exact word active is on. The
     // product's setup is not about the bundle: once it is fixed on main or on this Mac, the same bytes go on (L669 M1).
