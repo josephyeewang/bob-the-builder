@@ -9,6 +9,8 @@ import { fakeGitHubFetch } from './fake-github.test-helper.mjs';
 import { githubReads, reviewPorts, wait, NOT_WIRED_REVIEW, reviewRunner, MAIN_SEEN_STALE_MS } from './review-ports.mjs';
 import { reviewConfig, writeSeen, writeStatus } from './review-ports.test-helper.mjs';
 import { mkdtempSync, readdirSync, readFileSync, chmodSync } from 'node:fs';
+import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
+import { GIT_MS } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,6 +23,9 @@ const table = (paths) => {
   return { asked, get: async (p) => { asked.push(p); const a = paths[p]; if (a instanceof Error) throw a; return a ?? { status: 404, json: null }; } };
 };
 const base = `/repos/${ENTRY.owner}/${ENTRY.repo}`;
+// Stands in for the Dispatcher's own user: a test's files are all this user's, so the review user here is this user,
+// and the Dispatcher's must be someone else (L674).
+const SELF = process.getuid() + 2;
 
 test('A1: mainSha reads the product\'s main branch through the read-only client', async () => {
   const r = githubReads({ gh: client(), entry: ENTRY });
@@ -104,7 +109,7 @@ test('A1: a wait it can\'t read waits no time', { timeout: 5000 }, async (t) => 
 });
 
 test('A1, A2: the port file answers exactly what it took off its list', () => {
-  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, config: reviewConfig(temp()), now: Date.now }));
+  const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, config: reviewConfig(temp()), now: Date.now, selfUid: SELF }));
   assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   for (const k of answered) assert.ok(!NOT_WIRED_REVIEW.includes(k), k);
 });
@@ -114,11 +119,11 @@ const temp = () => mkdtempSync(join(tmpdir(), 'orch-review-ports-'));
 const T0 = Date.parse('2026-11-05T12:00:00Z');
 const MIN = 60_000;
 const D = 'd'.repeat(40);
-function runner({ status = {}, seen = {}, at = T0 } = {}) {
+function runner({ status = {}, seen = {}, at = T0, reviewUid } = {}) {
   const dir = temp();
-  const config = reviewConfig(dir, { now: T0, status, seen });
+  const config = reviewConfig(dir, { now: T0, status, seen, reviewUid });
   let t = at;
-  const ports = reviewRunner({ config, now: () => t, owner: process.getuid(), top: dir });
+  const ports = reviewRunner({ config, now: () => t, owner: process.getuid(), top: dir, selfUid: SELF });
   return { config, ports, dir, setNow: (v) => { t = v; } };
 }
 const stamp = (list) => list.find((a) => a.id === 'stamp');
@@ -158,29 +163,79 @@ test('A2: a copy behind root\'s record of main is told once past the grace, by t
   assert.match(stamp(w.ports.reviewAlerts()).text, /installed copy is at ccccccc, but main is at ddddddd/);
 });
 
-test('A2: a stale record of main, or none, keeps the stamp hold and says why, never "at main"', () => {
+test('A2: a stale record of main, or none, keeps the stamp hold and leads with the updater, never "at main"', () => {
   const stale = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS - MIN } });
   const s = stamp(stale.ports.reviewAlerts());
   assert.equal(s.keep, true);
-  assert.match(s.text, /can't be checked\. The read said: root's updater last checked main 21 min ago; it checks every 10 min/);
+  assert.match(s.text, /^Root's updater may have stopped: it last checked main 26 min ago; it checks every 10 min\. Main can't be read, so whether its installed copy is behind can't be checked/);
   const fine = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS + MIN } });
-  assert.equal(stamp(fine.ports.reviewAlerts()), undefined, 'inside two updater turns: fine');
+  assert.equal(stamp(fine.ports.reviewAlerts()), undefined, 'inside the limit: fine');
   const ahead = runner({ seen: { checked_at: T0 + 60 * MIN } });
-  assert.match(stamp(ahead.ports.reviewAlerts()).text, /at a time that can't be read/);
+  assert.match(stamp(ahead.ports.reviewAlerts()).text, /^Root's updater may have stopped: its last check of main has a time that can't be read\. Main can't be read/);
   const none = runner({ seen: null });
-  assert.match(stamp(none.ports.reviewAlerts()).text, /record of main beside the review copy is missing or can't be trusted/);
+  assert.match(stamp(none.ports.reviewAlerts()).text, /^Root's updater may have stopped: its record of main is missing or can't be trusted\. Main can't be read/);
   const open = runner();
   chmodSync(`${open.config.reviewInstallRoot}.main-seen.json`, 0o666);
   assert.equal(stamp(open.ports.reviewAlerts()).keep, true, 'a record others could write is not trusted');
 });
 
-test('A2: the stale limit is two of the updater\'s turns, read from its LaunchDaemon interval', () => {
-  assert.equal(MAIN_SEEN_STALE_MS, 20 * MIN);
+// Audit #263 c1: a time beyond Date's range reads in words, never as a raw "Invalid time value".
+test('A2: a last check at a time beyond Date\'s range is a time that can\'t be read', () => {
+  const far = runner({ seen: { checked_at: 9e15 } });
+  const s = stamp(far.ports.reviewAlerts());
+  assert.equal(s.keep, true);
+  assert.match(s.text, /its last check of main has a time that can't be read/);
+  assert.doesNotMatch(s.text, /Invalid/);
+});
+
+// Audit #263 m3: exactly at the limit is fresh, and one ms past it is stale, told rounded up, never as the limit itself.
+test('A2: the stale limit is exact: at it is fresh, one ms past it is stale', () => {
+  const at = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS } });
+  assert.equal(stamp(at.ports.reviewAlerts()), undefined, 'exactly at the limit: fresh');
+  const past = runner({ seen: { checked_at: T0 - MAIN_SEEN_STALE_MS - 1 } });
+  const s = stamp(past.ports.reviewAlerts());
+  assert.equal(s.keep, true);
+  assert.match(s.text, new RegExp(`last checked main ${MAIN_SEEN_STALE_MS / MIN + 1} min ago`));
+});
+
+// Audit #263 m4 (L668): two of the updater's turns, plus the longest a run takes, since it stamps its record at a run's end.
+test('A2: the stale limit is two of the updater\'s turns plus its fetch limit: 25 min', () => {
+  assert.equal(MAIN_SEEN_STALE_MS, 2 * UPDATE_EVERY_S * 1000 + GIT_MS);
+  assert.equal(MAIN_SEEN_STALE_MS, 25 * MIN);
+});
+
+// Audit #263 m3: the ports the Dispatcher builds read root's record as root's. A fresh, well-formed record of this user's
+// is not trusted, so the stamp hold stays.
+test('A2: reviewPorts reads root\'s record only if root owns it, so a fresh record of this user\'s keeps the hold', () => {
+  const config = reviewConfig(temp());
+  const ports = reviewPorts({ gh: client(), entry: ENTRY, config, now: Date.now, selfUid: SELF });
+  const s = stamp(ports.reviewAlerts());
+  assert.equal(s?.keep, true);
+  assert.match(s.text, /its record of main is missing or can't be trusted/);
+});
+
+// Audit #263 m2a: a status the review user doesn't own is never read.
+test('A2: a status file not owned by the review user is an error, never a reviewer', () => {
+  const w = runner({ reviewUid: process.getuid() + 1, status: { running: [{ card: 'c-1', role: 'reviewer', head: 'a'.repeat(40) }] } });
+  assert.throws(() => w.ports.hasReviewer('c-1', 'reviewer', 'a'.repeat(40)), /not owned by the review user/);
+});
+
+// Audit #263 m2b (L674): the review user must be neither the Dispatcher's own nor the workers'; either could write the
+// status that says a reviewer runs.
+test('A2: a review uid that is the Dispatcher\'s own or the workers\' stops the start; another user\'s starts', () => {
+  const config = reviewConfig(temp());
+  const me = process.getuid();
+  assert.throws(() => reviewRunner({ config, now: Date.now, selfUid: me }), /config: reviewUid is the Dispatcher's own user/);
+  assert.throws(() => reviewRunner({ config: { ...config, ownerUid: me }, now: Date.now, selfUid: SELF }), /config: reviewUid is the workers' user \(ownerUid\)/);
+  assert.doesNotThrow(() => reviewRunner({ config: { ...config, ownerUid: me + 1 }, now: Date.now, selfUid: SELF }));
+  // With no stand-in, the Dispatcher's own user is this process's (main.mjs passes none).
+  assert.throws(() => reviewRunner({ config, now: Date.now }), /Dispatcher's own user/);
+  assert.throws(() => reviewPorts({ gh: client(), entry: ENTRY, config, now: Date.now }), /Dispatcher's own user/);
 });
 
 test('A2: a review uid that is not a Mac user id stops the start', () => {
   for (const reviewUid of [undefined, -1, 1.5, '501']) {
     const config = { ...reviewConfig(temp()), reviewUid };
-    assert.throws(() => reviewRunner({ config, now: Date.now }), /config: reviewUid must be a Mac user id/, String(reviewUid));
+    assert.throws(() => reviewRunner({ config, now: Date.now, selfUid: SELF }), /config: reviewUid must be a Mac user id/, String(reviewUid));
   }
 });

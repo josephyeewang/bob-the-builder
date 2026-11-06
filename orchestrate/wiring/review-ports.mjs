@@ -30,6 +30,7 @@ import { BRANCH } from '../modules/M10-rules/reader.mjs';
 import { mainSeenHead, reviewPorts as runnerPorts } from '../modules/M11-dispatcher/review-requests.mjs';
 import { mainSeenFile, readMainSeen } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { UPDATE_EVERY_S } from '../modules/M4-workshop/launcher/review-daemons.mjs';
+import { GIT_MS } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pastTime } from '../shared/still-waiting.mjs';
 
 export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'planRows', 'filesOf', 'gateAlive', 'healthy', 'resume']);
@@ -60,10 +61,11 @@ export function githubReads({ gh, entry }) {
 /** A plain timer. A wait that can't be read waits no time at all, rather than for ever. */
 export const wait = (ms) => new Promise((ok) => { setTimeout(ok, Number.isFinite(ms) && ms > 0 ? ms : 0); });
 
-// Root's updater fetches main every UPDATE_EVERY_S (M4 review-daemons.mjs, its LaunchDaemon's interval). A record whose
-// last check is older than two of those has missed a turn, so the updater may have stopped, and a copy left behind
-// would never be told (L639).
-export const MAIN_SEEN_STALE_MS = 2 * UPDATE_EVERY_S * 1000;
+// Root's updater fetches main every UPDATE_EVERY_S (M4 review-daemons.mjs, its LaunchDaemon's interval), and stamps its
+// record at the end of a run, which can take up to its fetch limit (GIT_MS). A record older than two turns plus that run
+// has missed a turn, so the updater may have stopped, and a copy left behind would never be told (L639, L668: 25 min).
+export const MAIN_SEEN_STALE_MS = 2 * UPDATE_EVERY_S * 1000 + GIT_MS;
+const stopped = (text) => Object.assign(new Error(`Root's updater may have stopped: ${text}.`), { lead: true });
 
 /**
  * Main's commit as root's updater last saw it, from its record beside the review copy; throws when the record can't be
@@ -73,20 +75,27 @@ export const MAIN_SEEN_STALE_MS = 2 * UPDATE_EVERY_S * 1000;
 export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
   return () => {
     const s = readMainSeen(mainSeenFile(installRoot), { owner, top });
-    if (!s) throw new Error("root's record of main beside the review copy is missing or can't be trusted");
-    // In ms in root's record (readMainSeen checks it is a whole number); read through pastTime as every stored time is (L321).
-    const t = pastTime(new Date(s.checked_at).toISOString(), now());
-    const min = t === null ? null : Math.round((now() - t) / 60_000);
-    if (t === null || now() - t > MAIN_SEEN_STALE_MS) {
-      throw new Error(`root's updater last checked main ${min === null ? 'at a time that can\'t be read' : `${min} min ago`}; it checks every ${UPDATE_EVERY_S / 60} min`);
-    }
+    if (!s) throw stopped("its record of main is missing or can't be trusted");
+    // In ms in root's record (readMainSeen checks it is a whole number); read through pastTime as every stored time is
+    // (L321). A time beyond Date's range can't be read either (audit #263 c1).
+    const at = new Date(s.checked_at);
+    const t = Number.isFinite(at.getTime()) ? pastTime(at.toISOString(), now()) : null;
+    if (t === null) throw stopped("its last check of main has a time that can't be read");
+    // Rounded up, so a record just past the limit never reads as the limit itself.
+    if (now() - t > MAIN_SEEN_STALE_MS) throw stopped(`it last checked main ${Math.ceil((now() - t) / 60_000)} min ago; it checks every ${UPDATE_EVERY_S / 60} min`);
     return s.commit;
   };
 }
 
-/** The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). */
-export function reviewRunner({ config: c, now, owner = 0, top = '/' }) {
+/**
+ * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
+ * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
+ * Dispatcher's nor the workers' (ownerUid): either could then write the status that says a reviewer runs (L668, L674).
+ */
+export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');
+  if (c.reviewUid === selfUid) throw new Error('config: reviewUid is the Dispatcher\'s own user; the review user must be its own');
+  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the workers\' user (ownerUid); the review user must be its own');
   const main = mainSeen({ installRoot: c.reviewInstallRoot, now, owner, top });
   return runnerPorts({ requests: c.reviewRequestsDir, status: c.reviewStatusFile, reviewUid: c.reviewUid, runnerLog: c.reviewRunnerLog, now,
     mainHead: mainSeenHead({ installRoot: c.reviewInstallRoot, main, owner, top }) });
@@ -94,5 +103,5 @@ export function reviewRunner({ config: c, now, owner = 0, top = '/' }) {
 
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function reviewPorts(ctx) {
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now }) };
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid }) };
 }

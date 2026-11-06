@@ -7,10 +7,10 @@ import { join } from 'node:path';
 const iso = (ms) => new Date(ms).toISOString();
 
 /** Review config keys under `dir`. `status` and `seen` are written as given (null: not written). */
-export function reviewConfig(dir, { now = Date.now(), status = {}, seen = {} } = {}) {
+export function reviewConfig(dir, { now = Date.now(), status = {}, seen = {}, reviewUid = process.getuid() } = {}) {
   const runner = join(dir, 'review-runner');
   mkdirSync(join(runner, 'requests'), { recursive: true, mode: 0o755 });
-  const keys = { reviewRequestsDir: join(runner, 'requests'), reviewStatusFile: join(runner, 'status.json'), reviewUid: process.getuid(),
+  const keys = { reviewRequestsDir: join(runner, 'requests'), reviewStatusFile: join(runner, 'status.json'), reviewUid,
     reviewRunnerLog: join(dir, 'logs', 'review-runner.err.log'), reviewInstallRoot: join(dir, 'review-copy', 'current') };
   mkdirSync(join(dir, 'review-copy'), { recursive: true, mode: 0o755 });
   writeStatus(keys, status === null ? null : { now, ...status });
