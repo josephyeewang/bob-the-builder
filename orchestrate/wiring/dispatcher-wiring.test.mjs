@@ -10,9 +10,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
@@ -27,6 +26,7 @@ import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 import { reviewConfig } from './review-ports.test-helper.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MAIN = join(here, '..', 'modules', 'M11-dispatcher', 'main.mjs');
@@ -188,7 +188,7 @@ test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or t
 // Dispatcher's own and the workers' users are stood in for; the review port file itself is the real one.
 test('A2 (L674): with a status of the review user\'s, the real review ports run the limits step clean', async () => {
   const me = process.getuid();
-  const w = world({ extra: reviewConfig(mkdtempSync(join(tmpdir(), 'orch-review-ok-'))) });
+  const w = world({ extra: reviewConfig(tempDir('orch-review-ok-')) });
   w.approve([blobOf(FIRST)]);
   const groups = PORT_GROUPS.map((g) => (g.build !== reviewPorts ? g
     : { ...g, build: (ctx) => reviewPorts({ ...ctx, config: { ...ctx.config, ownerUid: me + 3 } }) }));
@@ -212,7 +212,7 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
   assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
   assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
-  const config = reviewConfig(mkdtempSync(join(tmpdir(), 'orch-review-keys-')));
+  const config = reviewConfig(tempDir('orch-review-keys-'));
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
     ['hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);

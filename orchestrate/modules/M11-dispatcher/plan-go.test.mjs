@@ -1,7 +1,7 @@
 // plan-go.test.mjs — L440, L442, L443: the Dispatcher asks for a card's go and records the answer, on a real Record, with
 // real M2 asks and fake reviewer, repo and alert-delivery ports.
 
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -21,6 +21,7 @@ import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_
 import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { planRows } from '../../wiring/review-ports.mjs';
+import { sleepMs } from '../M9-record/lock.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -703,7 +704,7 @@ for (const [port, setup] of [
   ['planView', (w) => card(w, 'A')],
   ['mainSha', (w) => card(w, 'A')],
 ]) {
-  test(`L462 m5: a ${port} that hangs is told under its card, and the next card still runs`, async () => {
+  test(`L462 m5: a ${port} that hangs is told under its card, and the next card still runs`, () => ownClock(async () => {
     const w = world();
     setup(w);
     card(w, 'B');
@@ -713,10 +714,10 @@ for (const [port, setup] of [
     await pass(w, { portMs: 20, passMs: 2000, [port]: hangsOnce });
     assert.ok(w.sent.some((s) => new RegExp(`card A failed: ${port}: it did not answer within 20 ms`).test(s)), w.sent.join(' | '));
     assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
-  });
+  }));
 }
 
-test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit, and is told', async () => {
+test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit, and is told', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   await pass(w);
@@ -728,7 +729,7 @@ test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit
   answer(v, asks(v)[0].id, 'Not now', false);
   await pass(v, { portMs: 20, passMs: 2000, replyToLead: () => new Promise(() => {}) });
   assert.ok(v.sent.some((s) => /Lead could not be told .*replyToLead: it did not answer within 20 ms/.test(s)), v.sent.join(' | '));
-});
+}));
 
 test('L462: a port not wired yet is told once for the product, not once per card', async () => {
   const w = world();
@@ -811,13 +812,14 @@ test('a card past draft is not asked', async () => {
 });
 
 // ---- L467: a pass under a hang. Each tick is its own process: when the step ends, main exits, so a pass cut off by the
-// product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits; much further and
-// the Record's own writes would take up too much of a port's limit.
+// product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits. These tests run on
+// the test's own clock (ownClock), so only a hang costs time, never the Record's writes or a busy machine.
 const SCALED = { portMs: PLAN_PORT_MS / 20, productMs: APPROVALS_PRODUCT_MS / 20 };
 const ROOMY_MS = 60_000;
 const ids10 = Array.from({ length: 10 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`);
 
-// `wallMs`: the step's limit, which runs on real time. A test with nothing hung gives it room, so load can't trip it.
+// `wallMs`: the step's limit. Under ownClock it runs on the test's clock with the pass's budget, so `stepError` says whether
+// the pass stopped in time; under timeJumps it runs on real time, so those tests give it room.
 async function tickAsProcess(w, over, wallMs = SCALED.productMs) {
   const now = w.t.clock.t;
   let alive = true;
@@ -835,7 +837,7 @@ async function tickAsProcess(w, over, wallMs = SCALED.productMs) {
 
 const hangsFor = (w, who) => (x) => (who(x.card) ? new Promise(() => {}) : w.ports.planRows(x));
 
-test('L467: with every card hanging, the first tick names all of them and the step never fails', async () => {
+test('L467: with every card hanging, the first tick names all of them and the step never fails', () => ownClock(async () => {
   const w = world();
   ids10.forEach((id) => card(w, id));
   const planRows = hangsFor(w, () => true);
@@ -843,24 +845,32 @@ test('L467: with every card hanging, the first tick names all of them and the st
   assert.equal(w.stepError, null);
   assert.deepEqual(named, ids10, 'every card is named in the first tick');
   assert.ok(w.sent.some((s) => /card C10 was not reached/.test(s)), w.sent.join(' | '));
-});
+}));
 
-test('L467: with the first six hanging, all are named at once, the healthy four are asked next, and the turn is kept in a fact', async () => {
-  const w = world();
-  ids10.forEach((id) => card(w, id));
-  const planRows = hangsFor(w, (id) => Number(id.slice(1)) <= 6);
-  const first = await tickAsProcess(w, { planRows });
-  assert.deepEqual(first, ids10, 'all ten named in the first tick');
-  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at);
-  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('C10')), null);
-  for (let n = 0; n < 3 && asks(w).length < 4; n++) {
+// The second run makes each healthy call take a quarter of the product's deadline in real time, as a busy machine can: on
+// the real clock the four healthy cards would use up the pass, and on the test's own it costs nothing.
+for (const [busy, realMs] of [['', 0], [', on a busy machine too', SCALED.productMs / 4]]) {
+  test(`L467: with the first six hanging, all are named at once, the healthy four are asked next, and the turn is kept in a fact${busy}`, () => ownClock(async () => {
+    const w = world();
+    ids10.forEach((id) => card(w, id));
+    const planRows = (x) => {
+      if (Number(x.card.slice(1)) <= 6) return new Promise(() => {});
+      if (realMs) sleepMs(realMs);
+      return w.ports.planRows(x);
+    };
+    const first = await tickAsProcess(w, { planRows });
+    assert.equal(w.stepError, null);
+    assert.deepEqual(first, ids10, 'all ten named in the first tick');
+    assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at);
+    assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('C10')), null);
     later(w, HOUR);
     await tickAsProcess(w, { planRows });
-  }
-  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C07', 'C08', 'C09', 'C10']);
-});
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C07', 'C08', 'C09', 'C10'], w.sent.join(' | '));
+  }));
+}
 
-test('L467: a card that hung stops being slow once its calls answer, and a not-reached card is told only once a day', async () => {
+test('L467: a card that hung stops being slow once its calls answer, and a not-reached card is told only once a day', () => ownClock(async () => {
   const w = world();
   card(w, 'A');
   card(w, 'B');
@@ -877,7 +887,7 @@ test('L467: a card that hung stops being slow once its calls answer, and a not-r
   await pass(v, { portMs: 20, passMs: 1 });
   assert.equal(v.sent.filter((s) => /card A was not reached/.test(s)).length, 2);
   assert.deepEqual(asks(v), []);
-});
+}));
 
 test('L467: a card that needs no call still goes on once the time is up', async () => {
   const w = world();
@@ -899,7 +909,7 @@ test('L467: a card told as not reached while time is up has no start mark left b
   assert.ok(!w.sent.some((s) => /never confirmed/.test(s)), w.sent.join(' | '));
 });
 
-test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the next card still runs', async () => {
+test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the next card still runs', () => ownClock(async () => {
   const w = world();
   card(w, 'A');
   card(w, 'B');
@@ -909,7 +919,7 @@ test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the
   assert.ok(w.sent.some((s) => /card A could not be asked for a go: .*isDir: it did not answer within 20 ms/.test(s)), w.sent.join(' | '));
   assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
-});
+}));
 
 test('L467 m-a: time up before isDir counts as out of time, not as a failed read', async () => {
   const w = world();
@@ -932,6 +942,23 @@ async function timeJumps(f) {
   try { return await f((by = 60_000) => { extra = by; }, (ms) => { extra += ms; }); } finally { Date.now = real; }
 }
 
+// Runs f with timers and Date on a clock only the test moves. It moves 1 ms at a time, and only once nothing but a timer is
+// left to run, so a call that hangs costs exactly its limit, and the Record's writes, the machine's load and every call
+// that answers cost nothing. The pass's budget (Date.now), each call's limit and the step's deadline (setTimeout) all read it.
+async function ownClock(f) {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let done = false;
+  const run = Promise.resolve().then(f);
+  run.then(() => { done = true; }, () => { done = true; });
+  try {
+    while (!done) {
+      await new Promise((r) => setImmediate(r));
+      if (!done) mock.timers.tick(1);
+    }
+    return await run;
+  } finally { mock.timers.reset(); }
+}
+
 // A Tier-1 ask with a pull request, asked for plan A, and the plan moved on.
 async function askWithPr(w) {
   t1(w, 'A');
@@ -945,13 +972,13 @@ async function askWithPr(w) {
   return a.id;
 }
 
-test('L467 m-a: a close of an old pull request that hangs is limited, and the card is told and marked slow', async () => {
+test('L467 m-a: a close of an old pull request that hangs is limited, and the card is told and marked slow', () => ownClock(async () => {
   const w = world();
   await askWithPr(w);
   const gh = { ...w.t.ctx.gh, patch: () => new Promise(() => {}) };
   await pass(w, { portMs: 20, passMs: 1000 }, { gh });
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
-});
+}));
 
 test('L467 m-a: with no time left for the close, the old ask stays and the card is told it ran out', async () => {
   const w = world();
@@ -967,7 +994,7 @@ test('L467 m-a: with no time left for the close, the old ask stays and the card 
   assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
 });
 
-test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', async () => {
+test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
@@ -985,7 +1012,7 @@ test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, a
   later(w, HOUR);
   await pass(w);
   assert.equal(w.started.length, 2, 'after the hold the start is tried again');
-});
+}));
 
 test('L467 m-b: the mark is on the Record before the start is called, and a mark that can\'t be written starts nothing', async () => {
   const w = world();
@@ -1024,14 +1051,14 @@ test('L467 m-b: a start port not wired yet started nothing, so it leaves no mark
   assert.equal(w.started.length, 1);
 });
 
-test('L467 m-b: a new plan is not held by the old plan\'s mark', async () => {
+test('L467 m-b: a new plan is not held by the old plan\'s mark', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   await pass(w, { portMs: 20, passMs: 1000, startPlanReview: () => new Promise(() => {}) });
   replan(w, 'A');
   await pass(w);
   assert.equal(w.started.length, 1);
-});
+}));
 
 const OPEN_PR = (id) => new RegExp(`Ask ${id} was withdrawn; approving pull request 7 won't count`);
 function closingFails(w) {
@@ -1209,7 +1236,7 @@ test('L477 m2: a clear no clears the mark, so the next pass tries', async () => 
   assert.equal(w.started.length, 2);
 });
 
-test('L477 m5: a start that timed out is not started again two hours later', async () => {
+test('L477 m5: a start that timed out is not started again two hours later', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
@@ -1220,7 +1247,7 @@ test('L477 m5: a start that timed out is not started again two hours later', asy
   later(w, PLAN_START_HOLD_MS);
   await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
   assert.equal(w.started.length, 2);
-});
+}));
 
 test('L477 item (i): a go recorded on A withdraws B\'s live ask after A -> B -> A, and B coming back is asked', async () => {
   const w = world();

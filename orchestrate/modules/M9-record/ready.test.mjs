@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GO_FREE, goFreeKinds, goFreeOn, goNeeded, readyCheck, rootOf } from './ready.mjs';
 import { PRODUCT, fingerprintFor, must, plan, product, put, readyCard, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
-import { STATES } from '../../shared/record-names.mjs';
+import { STATES, CARD_KINDS } from '../../shared/record-names.mjs';
 
 // An in-memory view: cards by id, gos, the product state, and who created each card.
 function view({ cards = {}, gos = [], productState = 'active', creators = {} } = {}) {
@@ -131,6 +131,33 @@ test('L490: every card state is one of the three things to a card that depends o
   };
   const table = Object.fromEntries(STATES.card.map((s) => [s, says(s)]));
   assert.deepEqual(table, { draft: 'waits', ready: 'waits', claimed: 'waits', running: 'waits', in_review: 'waits', verified: 'waits', approved: 'waits', merging: 'waits', merged: 'done', closed: 'done', waiting: 'waits', failed: 'told', cancelled: 'told', closed_no_answer: 'told', reverted: 'told' });
+});
+
+test('L595: an undo card is ready on a paused product; nothing else is, and an unreadable product still refuses', () => {
+  const er = card({ kind: 'exact_reverse' });
+  const creators = { 'C-1': 'dispatcher' };
+  const at = (productState, who = creators) => check('C-1', er, view({ cards: { 'C-1': er }, creators: who, productState }));
+  assert.deepEqual(at('paused'), { ok: true });
+  const none = at(null);
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /no product record/);
+  assert.match(at('paused', { 'C-1': 'lead:L-1' }).reason, /made by lead:L-1 needs the owner's go/, 'the wrong creator still needs a go');
+  // A record that is there but can't be read refuses too (#252 r1 m1): the exception needs it readable, not just present.
+  const withProduct = (doc) => { const v = view({ cards: { 'C-1': er }, creators, productState: 'paused' }); return { ...v, get: (e, id) => (e === 'product' ? doc : v.get(e, id)) }; };
+  for (const doc of [{ id: PRODUCT, corrupt: true }, { id: PRODUCT, doc: {} }, { id: PRODUCT, doc: { state: 7 } }]) {
+    const r = check('C-1', er, withProduct(doc));
+    assert.equal(r.ok, false, JSON.stringify(doc));
+  }
+  assert.match(check('C-1', er, withProduct({ id: PRODUCT, corrupt: true })).reason, /its record can't be read/);
+  // Every other card kind stays held on a paused product (#252 r1 m2).
+  for (const kind of CARD_KINDS.filter((k) => k !== 'exact_reverse')) {
+    const c = card({ kind });
+    assert.match(check('C-1', c, withGo(c, {}, { productState: 'paused' })).reason, /is paused; no work starts/, kind);
+  }
+  const script = card({ kind: 'script' });
+  assert.match(check('C-1', script, withGo(script, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
+  const norule = check('C-1', er, view({ cards: { 'C-1': er }, creators, productState: 'paused' }), rulesFor({ 'product_state_rules.paused.start': undefined }));
+  assert.match(norule.reason, /the rules say nothing about starting work in a paused product/);
 });
 
 test('L490 m7: a product that can only be read as paused is not an ordinary wait; a paused one is', () => {
