@@ -90,7 +90,7 @@ function world({ policy = POLICY, mode = 'draft' } = {}) {
   const pass = (at = '2026-11-03T12:00:00Z', rules = rulesOf(), { checksGh = checksClient } = {}) => watchPass({ gh: client, checksGh, owner: OWNER, repo: REPO, dir, rules, now: () => at });
   const lines = () => readLog(dir);
   const judged = () => lines().filter((l) => l.sha && !l.pin && !l.pass && !l.not_judged_reason);
-  return { labelsOf, state, g, client, checksClient, land, push, dir, pass, lines, judged, hooks, asked, dates, root, rulesOf, mergedAt };
+  return { labelsOf, state, g, client, checksClient, fetchFn, land, push, dir, pass, lines, judged, hooks, asked, dates, root, rulesOf, mergedAt };
 }
 
 /** A week: the pin pass at 3 Nov 00:00Z, a pass at noon each day to the 9th, and the last pass just after the 9th ends. */
@@ -1429,4 +1429,93 @@ test('L624: the mint client can only ask for an installation token and GET /app'
   await assert.rejects(() => c.post('/app/installations/0/access_tokens', {}, {}), /only the token request/);
   await assert.rejects(() => c.get('/repos/a/b', {}), /only GET \/app/);
   assert.equal((await c.post('/app/installations/7/access_tokens', {}, {})).status, 200);
+});
+
+// ───────────────────────────── L631 (the L624 r1 audit)
+
+for (const status of [401, 403, 404, 410, 422, 429, 500]) {
+  test(`L631 M1: check runs answered ${status} is a failed read — not judged, never a "cut off" verdict, and the pass is not clean`, async () => {
+    const w = world(); await w.pass(PIN_AT);
+    w.land({ 'docs/a.md': 'two' });
+    const r = await w.pass(undefined, undefined, { checksGh: { get: async (p) => (/check-runs/.test(p) ? { status, json: null } : w.checksClient.get(p)) } });
+    assert.equal(r.judged, 0, JSON.stringify(r));
+    assert.equal(w.judged().length, 0, 'no verdict is logged');
+    assert.ok(r.problems.some((x) => x.includes(`HTTP ${status}: the check runs`)), JSON.stringify(r.problems));
+  });
+}
+
+test('L631 M1: the statuses answered 404 is a failed read too', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  w.hooks.push([/\/commits\/[0-9a-f]{40}\/status\?/, 404]);
+  const r = await w.pass();
+  assert.equal(r.judged, 0, JSON.stringify(r));
+  assert.ok(r.problems.some((x) => x.includes('HTTP 404: the statuses')), JSON.stringify(r.problems));
+});
+
+test('L631 M1: a list GitHub answered whole but cut off (count ≠ list) is still the gate\'s verdict, not a failed read', async () => {
+  const w = world(); await w.pass(PIN_AT);
+  w.land({ 'docs/a.md': 'two' });
+  const cut = { get: async (p) => { const r = await w.checksClient.get(p); if (/check-runs/.test(p) && r.status === 200) return { status: 200, json: { ...r.json, total_count: r.json.check_runs.length + 1 } }; return r; } };
+  const r = await w.pass(undefined, undefined, { checksGh: cut });
+  assert.equal(r.judged, 1, JSON.stringify(r));
+});
+
+test('L631 Minor 1: through main(), every check-runs read carries the App\'s token, nothing else does, and after a failed mint no check runs are asked for', async () => {
+  const signer = join(tempDir('m6-watch-signer-'), 'app-signing-key');
+  writeFileSync(signer, generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const tf = join(tempDir('m6-watch-'), 'token'); writeFileSync(tf, 'a-fine-grained-token-value', { mode: 0o600 });
+  const appToken = 'ghs_madeUpInstallationToken000000';
+  const round = async () => {
+    const w = world(); await w.pass(PIN_AT);
+    w.land({ 'docs/a.md': 'two' });
+    const seen = [];
+    const fetchFn = async (url, init) => {
+      const path = url.replace('https://api.github.com', '');
+      seen.push([init.method, path, init.headers.authorization]);
+      if (init.method === 'POST' && path === '/app/installations/42/access_tokens') return { status: 201, json: async () => ({ token: appToken, expires_at: '2026-11-05T13:00:00Z' }) };
+      return w.fetchFn(url, init);
+    };
+    const lines = [];
+    const code = await main(['once', '--repo', `${OWNER}/${REPO}`, '--dir', w.dir, '--token-file', tf, '--rules', 'draft', '--rules-sha256', H(POLICY),
+      '--app-id', '353123', '--app-installation', '42', '--app-key-file', signer], { out: (x) => lines.push(x), err: (x) => lines.push(x), fetchFn, uid: UID });
+    const repoReads = seen.filter(([, p]) => p.startsWith('/repos/'));
+    return { code, text: lines.join('\n'), checks: repoReads.filter(([, p]) => /\/check-runs/.test(p)), rest: repoReads.filter(([, p]) => !/\/check-runs/.test(p)) };
+  };
+
+  const ok = await round();
+  assert.match(ok.text, /judged 1 new commit/, ok.text);
+  assert.ok(ok.checks.length >= 1, 'check runs were read through main()');
+  assert.ok(ok.checks.every(([, , a]) => a === `Bearer ${appToken}`), 'every check-runs read carries the App\'s token');
+  assert.ok(ok.rest.length >= 1 && ok.rest.every(([, , a]) => a === 'Bearer a-fine-grained-token-value'), 'every other read carries the fine-grained token');
+
+  chmodSync(signer, 0o644);
+  const failed = await round();
+  assert.equal(failed.code, 1);
+  assert.match(failed.text, /could not be minted/);
+  assert.deepEqual(failed.checks, [], 'after a failed mint, nobody asks for check runs');
+});
+
+test('L631 Minor 3: the App\'s client asks for nothing but this repo\'s check runs at one commit', async () => {
+  const signer = join(tempDir('m6-watch-signer-'), 'app-signing-key');
+  writeFileSync(signer, generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  const tf = join(tempDir('m6-watch-'), 'token'); writeFileSync(tf, 'a-fine-grained-token-value', { mode: 0o600 });
+  const w = world();
+  const sent = [];
+  const fetchFn = async (url, init) => {
+    const path = url.replace('https://api.github.com', '');
+    if (init.method === 'POST' && path === '/app/installations/42/access_tokens') return { status: 201, json: async () => ({ token: 'ghs_madeUpInstallationToken000000', expires_at: '2026-11-05T13:00:00Z' }) };
+    if (init.headers.authorization === 'Bearer ghs_madeUpInstallationToken000000') sent.push(path);
+    return w.fetchFn(url, init);
+  };
+  const { watchChecksClientForTest } = await import('./watch-run.mjs');
+  const c = await watchChecksClientForTest({ appId: '353123', appInstallation: '42', appKeyFile: signer }, { owner: OWNER, repo: REPO, fetchFn, err: () => {}, uid: UID });
+  const sha = 'a'.repeat(40);
+  for (const p of [`/repos/${OWNER}/${REPO}/pulls/1`, `/repos/${OWNER}/${REPO}/commits/${sha}/statuses?per_page=100`, `/repos/${OWNER}/other/commits/${sha}/check-runs?per_page=100`,
+    `/repos/${OWNER}/${REPO}/commits/${sha}/check-runs?per_page=100&x=1`, `/repos/${OWNER}/${REPO}/commits/main/check-runs?per_page=100`]) {
+    await assert.rejects(() => c.get(p), (e) => /reads only this repo's check runs/.test(e.message) && e.unreadable === true, p);
+  }
+  assert.deepEqual(sent, [], 'nothing refused reached GitHub');
+  await c.get(`/repos/${OWNER}/${REPO}/commits/${sha}/check-runs?per_page=100`).catch(() => {});
+  assert.equal(sent.length, 1);
 });

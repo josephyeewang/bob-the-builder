@@ -249,11 +249,15 @@ export async function gatherMerged({ gh, checksGh = null, owner, repo, policy, s
     let checksTooLong;
     let checksCutOff;
     // A list GitHub answered but cut off (its count doesn't match it) is not a failed read (L190 minor a): the gate waits
-    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict.
+    // on it and refuses it at the cap (refusal 1), so for a commit already on main that is the gate's verdict. Only that
+    // count mismatch, which checksAt and statusesAt throw themselves with no HTTP status, is "cut off". Any answer with a
+    // status that isn't 200 (a 404 or 422 too: an App not installed on this repo, a token not covering it) is a read
+    // that failed, so the commit is not judged (L631 M1). Treating a 404 as "cut off" gave a final "would refuse" for a
+    // made-up reason and a clean pass.
     const list = async (read, what, client = gh) => {
       try { return await read(client, base, headSha); } catch (e) {
         if (e?.tooLong) { checksTooLong = String(e.message); return null; }
-        if (!failedRead(e)) { checksCutOff = failText(e); return null; }
+        if (!failedRead(e) && !Number.isInteger(e?.status)) { checksCutOff = failText(e); return null; }
         return fail(what, Number.isInteger(e?.status) ? `HTTP ${e.status}` : e);
       }
     };
