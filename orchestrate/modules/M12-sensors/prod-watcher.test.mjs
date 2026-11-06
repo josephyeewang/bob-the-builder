@@ -117,6 +117,53 @@ test('M4: a project setting changed (the build-skip command) → alert names the
   assert.deepEqual(await t.pass(), [], 'a branch domain is not a production domain');
 });
 
+test('L592 a: the reader passes on the system-variables setting; a missing one reads as null, like the other fields', async () => {
+  const v = fakeVercel();
+  v.s.project.autoExposeSystemEnvs = true;
+  assert.equal((await v.reader.settings()).autoExposeSystemEnvs, true);
+  v.s.project.autoExposeSystemEnvs = false;
+  assert.equal((await v.reader.settings()).autoExposeSystemEnvs, false);
+  delete v.s.project.autoExposeSystemEnvs;
+  const s = await v.reader.settings();
+  assert.ok(Object.hasOwn(s, 'autoExposeSystemEnvs'));
+  assert.equal(s.autoExposeSystemEnvs, null);
+  assert.equal(s.buildCommand, null, 'the same as another absent setting');
+});
+
+test('L592 a: turning system-variable access off is a told setting change, and so is turning it back on', async () => {
+  const t = setup();
+  t.v.s.project.autoExposeSystemEnvs = true;
+  assert.deepEqual(await t.pass(), []);
+  t.v.s.project.autoExposeSystemEnvs = false;
+  const out = await t.pass();
+  assert.deepEqual(kinds(out), ['setting-changed']);
+  assert.match(out[0].subject, /^project:autoExposeSystemEnvs:/);
+  assert.match(t.gh.issues.get(1).title, /project setting autoExposeSystemEnvs changed/);
+  assert.deepEqual(await t.pass(), [], 'told once, not every pass');
+  t.v.s.project.autoExposeSystemEnvs = true;
+  const back = await t.pass();
+  assert.deepEqual(kinds(back), ['setting-changed']);
+  assert.match(back[0].subject, /^project:autoExposeSystemEnvs:/);
+});
+
+test('L592 a: the field going missing is told as a change, not "cannot read"; missing from the start raises nothing', async () => {
+  const t = setup();
+  t.v.s.project.autoExposeSystemEnvs = true;
+  await t.pass();
+  delete t.v.s.project.autoExposeSystemEnvs;
+  const out = await t.pass();
+  assert.deepEqual(kinds(out), ['setting-changed']);
+  assert.match(out[0].subject, /^project:autoExposeSystemEnvs:/);
+  const u = setup();
+  assert.deepEqual(await u.pass(), []);
+  assert.deepEqual(await u.pass(), [], 'absent at baseline and still absent: nothing changed');
+  // Off at the first pass is the baseline, as for every watched setting: nothing is told (runbook B2 checks the box).
+  const w = setup();
+  w.v.s.project.autoExposeSystemEnvs = false;
+  assert.deepEqual(await w.pass(), []);
+  assert.deepEqual(await w.pass(), []);
+});
+
 test('case 5: a cancelled build (build-skip refused it) or a failed one raises nothing', async () => {
   const t = setup();
   await t.pass();

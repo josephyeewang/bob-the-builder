@@ -58,9 +58,10 @@ port is missing.
   Pinning the allowed `who` values in shared/record.mjs is the lead's call.
 - Lead call L25: any lane that writes a fact through `facts.mjs` adds its kind to `fact-shapes.mjs` (ask lane 3);
   without a shape every field but `kind` and `ts` is masked.
-- Lead call L3 (lane 2's contract): the Sensors' loop runs `readStartGate` for each product at least every
-  `START_GATE_READ_EVERY_MIN` (5) minutes, passing the rules entry's skip command and Vercel project. M4's startGate
-  treats a fact older than 10 minutes as shut. Checked end to end against lane 2's `vercelFact` on 29 Oct 2026.
+- Lead call L3 (lane 2's contract): the Sensors' loop must run `readStartGate` for each product at least every
+  `START_GATE_READ_EVERY_MIN` (5) minutes, passing the skip command `skipCommand({ mode: 'first' })` computes (L571)
+  and the rules entry's Vercel project. Not wired yet: nothing calls it outside tests, so M4's gate stays shut (see
+  start-gate.mjs). M4's startGate treats a fact older than 10 minutes as shut. Checked end to end against lane 2's `vercelFact` on 29 Oct 2026.
 - Push requests (`push-request-<key>` facts, written by M13) are delivered by the Front Door (lane 2's restart path).
 - Lead call L24: lane 2's Mini loop calls `checkNoPush` every pass with each token the Mini holds (the GitHub ones the
   Front Door and the robots use), and the probe from `outside-check.mjs`'s `writeProbe`. With no tokens passed it

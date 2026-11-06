@@ -11,7 +11,8 @@
 //   3. setting-changed     a production env variable added, removed or updated (id, key, target, type, update time;
 //                          never a value), or a project setting changed (build-skip command, build/install/output
 //                          commands, root directory, framework, Node version, production branch, linked repo, domain
-//                          auto-assign, production domains). The alert names the setting, never its value;
+//                          auto-assign, system-variable access, production domains). The alert names the setting,
+//                          never its value;
 //   4. no-stage            the product's rules entry has no stage, so the strict rule is in use (supported.mjs).
 // A cancelled build (the build-skip refused it) or a failed one is never READY and raises nothing.
 //
