@@ -717,7 +717,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         const since = store.meta(entity, d.id)?.stateSince;
         if (lim === undefined) { out.push({ entity, id: d.id, state: d.doc.state, since, limit: null, corrupt: true, reason: `the rules have no time limit for ${entity} ${d.doc.state}` }); continue; }
         if (lim.minutes) {
-          if (nowMs > Date.parse(since) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
+          if (nowMs > (pastTime(since, nowMs) ?? -Infinity) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
         } else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {
           out.push({ entity, id: d.id, state: d.doc.state, since, limit: 'next_check', next_check: d.doc.wait.next_check });
         }
@@ -733,6 +733,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     // The Record's own times (L72): the Dispatcher's limits read these, never a field a script stamps.
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
+    keepAlert: (text, key) => { store.keepAlert(text, key); },
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }

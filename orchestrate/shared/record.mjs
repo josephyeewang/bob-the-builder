@@ -195,6 +195,8 @@ export function makeRecord(impl) {
     read(entity, id) { if (!ENTITIES.includes(entity)) return null; try { return impl.read(entity, id); } catch (e) { return corrupt(entity, id, e); } },
     list(entity) { if (!ENTITIES.includes(entity)) return []; try { return impl.list(entity); } catch (e) { return [corrupt(entity, null, e)]; } },
     diary(opts = {}) { return impl.diary(opts); },
+    // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
+    keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {

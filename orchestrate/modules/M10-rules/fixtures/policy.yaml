@@ -22,9 +22,9 @@ tiers:
       tier: 1
 
 # Added to M10's own floor (paths.mjs PROTECTED_FLOOR), which this file cannot shrink.
-# Claude Code's protected paths: code.claude.com/docs/en/permission-modes "Protected paths", read 29 Oct 2026
-# from the docs for Claude Code 2.1.293. Sample only: a real product re-checks this list against its own
-# claude_code.pin (2.1.300 below) when it sets the pin, and again on every pin change.
+# Claude Code's protected paths: re-checked 5 Nov 2026 against the list inside Claude Code 2.1.316 (L572).
+# Sample only: a real product re-checks this list against its own claude_code.pin (2.1.316 below) when it
+# sets the pin, and again on every pin change.
 protected_files:
   - .git/
   - .config/git/
@@ -266,7 +266,7 @@ product:
   cutover_stage: first
 
 claude_code:
-  pin: 2.1.300
+  pin: 2.1.316
   required_minimum: 2.1.295
 
 accounts:

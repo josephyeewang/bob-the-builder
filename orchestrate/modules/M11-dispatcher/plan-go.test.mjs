@@ -777,16 +777,18 @@ test('a card past draft is not asked', async () => {
 // product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits; much further and
 // the Record's own writes would take up too much of a port's limit.
 const SCALED = { portMs: PLAN_PORT_MS / 20, productMs: APPROVALS_PRODUCT_MS / 20 };
+const ROOMY_MS = 60_000;
 const ids10 = Array.from({ length: 10 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`);
 
-async function tickAsProcess(w, over) {
+// `wallMs`: the step's limit, which runs on real time. A test with nothing hung gives it room, so load can't trip it.
+async function tickAsProcess(w, over, wallMs = SCALED.productMs) {
   const now = w.t.clock.t;
   let alive = true;
   const base = w.t.record;
   const rec = Object.create(base, { write: { value: (x) => (alive ? base.write(x) : { ok: false, reason: 'process gone' }) } });
   const before = w.sent.length;
   w.stepError = null;
-  await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: SCALED.productMs,
+  await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: wallMs,
     pass: (ctx) => planGoPass(ctx, { ...w.ports, alert: outbox(rec, now), portMs: SCALED.portMs, passMs: SCALED.productMs, ...over }) }).catch((e) => { w.stepError = e.message; });
   alive = false;
   await sendAlerts(base, async (text) => { w.sent.push(text); return true; }, now);
@@ -883,12 +885,14 @@ test('L467 m-a: time up before isDir counts as out of time, not as a failed read
   assert.ok(!w.sent.some((s) => /could not be asked/.test(s)), w.sent.join(' | '));
 });
 
-// Runs f with a jump in the clock the budget reads, so which call runs out of time doesn't depend on how fast the test runs.
+// Runs f on a clock the budget reads and only the test moves, so which call runs out of time doesn't depend on how fast the
+// test runs or how busy the machine is. `jump(by)` sets it to that far past the start; `spend(ms)` adds a call's cost.
 async function timeJumps(f) {
   const real = Date.now;
+  const start = real();
   let extra = 0;
-  Date.now = () => real() + extra;
-  try { return await f((by = 60_000) => { extra = by; }); } finally { Date.now = real; }
+  Date.now = () => start + extra;
+  try { return await f((by = 60_000) => { extra = by; }, (ms) => { extra += ms; }); } finally { Date.now = real; }
 }
 
 // A Tier-1 ask with a pull request, asked for plan A, and the plan moved on.
@@ -1109,28 +1113,33 @@ test('L477 m1: a card whose own calls use up the pass goes behind the rest, each
   ids.slice(1).forEach((id) => card(w, id));
   let cur = null;
   const planRows = (x) => { cur = x.card; return w.ports.planRows(x); };
-  const planView = async (x) => {
-    const v = await w.ports.planView(x);
-    return { isDir: (sha, f) => (cur === 'C01' ? new Promise((r) => { setTimeout(() => r(false), SCALED.portMs * 0.9); }) : v.isDir(sha, f)) };
-  };
-  await tickAsProcess(w, { planRows, planView });
-  assert.equal(w.stepError, null);
-  assert.deepEqual(asks(w), []);
-  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at, 'it never hung, and it is still marked');
-  assert.ok(w.sent.some((s) => /card C01 was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
-  assert.ok(w.sent.some((s) => /card C02 was not reached: slow calls on C01 used up/.test(s)), w.sent.join(' | '));
-  later(w, 25 * HOUR);
-  await tickAsProcess(w, { planRows, planView });
-  assert.equal(w.stepError, null);
-  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C02', 'C03', 'C04']);
+  await timeJumps(async (jump, spend) => {
+    // Each of C01's calls costs 0.9 of a port limit on the test's clock: under the limit, and enough to use up the pass.
+    const planView = async (x) => {
+      const v = await w.ports.planView(x);
+      return { isDir: (sha, f) => { if (cur !== 'C01') return v.isDir(sha, f); spend(SCALED.portMs * 0.9); return false; } };
+    };
+    await tickAsProcess(w, { planRows, planView }, ROOMY_MS);
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w), []);
+    assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at, 'it never hung, and it is still marked');
+    assert.ok(w.sent.some((s) => /card C01 was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
+    assert.ok(w.sent.some((s) => /card C02 was not reached: slow calls on C01 used up/.test(s)), w.sent.join(' | '));
+    later(w, 25 * HOUR);
+    await tickAsProcess(w, { planRows, planView }, ROOMY_MS);
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C02', 'C03', 'C04']);
+  });
 });
 
 test('L477 m1: calls that took more than a port limit between them mark a card that finished', async () => {
   const w = world();
   card(w, 'A', { files: ['src/a.mjs', 'src/b.mjs'] });
   card(w, 'B');
-  const planView = async () => ({ isDir: () => new Promise((r) => { setTimeout(() => r(false), 60); }) });
-  await pass(w, { portMs: 100, passMs: 1000, planView: async (x) => (x.product ? planView() : null) });
+  await timeJumps((jump, spend) => {
+    const planView = async () => ({ isDir: () => { spend(60); return false; } });
+    return pass(w, { portMs: 100, passMs: 1000, planView: async (x) => (x.product ? planView() : null) });
+  });
   assert.equal(asks(w).length, 2, 'both asked');
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
 });
@@ -1313,18 +1322,15 @@ test('L480 R2: at the real limits, moderate cards that never finish take turns, 
   const reached = [];
   // Each call costs 0.6 of a port limit on a clock that moves for nothing else: the ninth call goes out with exactly the
   // last-call margin left, so real time must not count or the machine's load decides this test.
-  const real = Date.now;
-  let clock = real();
-  Date.now = () => clock;
-  try {
-    const costs = (f) => (x) => { reached.at(-1).push(x.card); clock += PLAN_PORT_MS * 0.6; return f(x); };
+  await timeJumps(async (jump, spend) => {
+    const costs = (f) => (x) => { reached.at(-1).push(x.card); spend(PLAN_PORT_MS * 0.6); return f(x); };
     const ports = { portMs: PLAN_PORT_MS, passMs: APPROVALS_PRODUCT_MS, startPlanReview: costs(w.ports.startPlanReview), planReviewAnswer: costs(w.ports.planReviewAnswer) };
     for (let i = 0; i < 3; i += 1) {
       reached.push([]);
       await pass(w, ports);
       later(w, HOUR);
     }
-  } finally { Date.now = real; }
+  });
   assert.deepEqual(reached[0], ids10.slice(0, 9));
   assert.deepEqual(reached[1], [ids10[9], ...ids10.slice(0, 8)]);
   // The test's clock stands still within a pass, so cards reached in one pass tie and keep their list order.

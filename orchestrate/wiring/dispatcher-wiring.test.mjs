@@ -37,11 +37,11 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
-  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planRows', 'probe', 'replyToLead', 'requestReview', 'restartFrontDoor', 'resume',
+  'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
-const PORTS_WIRED = Object.freeze(['approvals']);
+const PORTS_WIRED = Object.freeze(['approvals', 'mainSha', 'planView', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -50,7 +50,7 @@ const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', '
 const NW = (port) => notWiredText(port);
 const EXPECTED_STEPS = Object.freeze({
   stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
-  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
+  pass: NW('sessions'), limits: `no review was asked for: ${NW('reviewAlerts')}`, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
@@ -161,7 +161,8 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(lists.flat().sort(), [...PORTS_NOT_WIRED].sort(), 'every refusing port is on exactly one port file\'s list');
   assert.deepEqual(PORT_GROUPS.map((g) => g.notWired), lists);
   assert.deepEqual(PORT_GROUPS.map((g) => g.build), [workerPorts, reviewPorts, phonePorts]);
-  for (const build of [reviewPorts, phonePorts]) assert.deepEqual(build({}), {}, 'nothing answered yet');
+  assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
+  assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY })).sort(), ['mainSha', 'planView', 'wait']);
   assert.deepEqual(Object.keys(workerPorts({})), ['cleanup']);
 
   const w = world();
@@ -172,8 +173,13 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
     { notWired: ['board'], build: () => ({ hostLock: 'another' }) }) });
   assert.deepEqual([filled.ports.sessions, filled.ports.hostLock], ['a real port', 'another']);
   for (const k of ['launch', 'probe', 'board']) assert.throws(() => filled.ports[k](), { message: notWiredText(k) });
-  assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'limitedSync', 'log', 'now', 'rec', 'rules', 'stateDir']);
+  assert.deepEqual(Object.keys(seen[0]).sort(), ['config', 'entry', 'fetchFn', 'gh', 'limitedSync', 'log', 'now', 'rec', 'rules', 'stateDir']);
   assert.ok(Object.isFrozen(seen[0]));
+  // The client in ctx is the rules reader's read-only one: frozen, and its one write-shaped call refuses (audit #256 r1 m1).
+  assert.ok(Object.isFrozen(seen[0].gh));
+  assert.deepEqual(Object.keys(seen[0].gh).sort(), ['get', 'post']);
+  await assert.rejects(seen[0].gh.post('/repos/o/r/pulls', {}), /only write-shaped/);
+  await assert.rejects(seen[0].gh.get('/user'), /only repository reads/);
   assert.equal(seen[0].limitedSync, 'the sync');
   assert.equal(seen[0].rec, filled.rec);
   assert.equal(seen[0].rules, filled.rules);
@@ -350,4 +356,12 @@ test('L295 Minor 2: a second boot does not queue "is now on" again (the entry an
   assert.equal(first.length, 1);
   assert.equal(boot(w).code, 0);
   assert.deepEqual(on(readRecord(w)), first);
+});
+
+test('A1 (L615): through the real wiring, mainSha reads main with the rules reader\'s own client, and other products are refused', async () => {
+  const w = world();
+  const { ports } = await wire(w.config, { log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
+  assert.equal(await ports.mainSha({ product: P }), w.fake.commit);
+  await assert.rejects(ports.mainSha({ product: 'other' }), /can't read product other/);
+  assert.equal(typeof (await ports.planView({ product: P })).isDir, 'function');
 });
