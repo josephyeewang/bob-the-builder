@@ -107,7 +107,7 @@ export function queueOrder(merges, { cardOf, freshnessAlarm = false } = {}) {
 
 export async function gatePass(ctx) {
   const { record, product, gh, owner, repo, now } = ctx;
-  const alert = ctx.alert ?? (() => {});
+  const alert = ctx.alert ?? (() => false);   // none wired: not delivered, so nothing is marked told (L583 5)
   const iso = () => new Date(now()).toISOString();
   const did = [];
   const base = `/repos/${owner}/${repo}`;

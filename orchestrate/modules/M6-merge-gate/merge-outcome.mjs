@@ -98,7 +98,7 @@ const ACTOR = 'merge_gate';
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
 
-export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, reason, openTooLong = false, fields = {} } = {}) {
+export function settleMerge({ record, alert = () => false, now }, id, { pr = null, reason, openTooLong = false, fields = {} } = {}) {
   const iso = () => new Date(typeof now === 'function' ? now() : now).toISOString();
   const m = record.read('merge', id);
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };
@@ -127,7 +127,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   return { ok: true, outcome: 'refused', card: putBack(record, m.doc.card, why, told) };
 }
 
-export function reconcileMerge({ record, alert = () => {}, now }, id, { pr, factId } = {}) {
+export function reconcileMerge({ record, alert = () => false, now }, id, { pr, factId } = {}) {
   const iso = () => new Date(typeof now === 'function' ? now() : now).toISOString();
   const m = record.read('merge', id);
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };

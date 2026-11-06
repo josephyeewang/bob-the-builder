@@ -352,7 +352,7 @@ export async function gatherFacts(ctx, merge) {
   if (skipped.length) f.reviewsSkipped = skipped.map((x) => `${x.name}: ${x.reason}`);
 
   // The owner's Approve (refusals 8, 13, 14): needed per M2, and standing on GitHub now.
-  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };
+  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => false), gh, owner, repo };
   const need = approveNeeded({ risky, needsJoe: card.doc.needs_joe === true || card.doc.approval_required === true, tier: f.tier, module: card.doc.module }, rules, product);
   const ask = askStore(record).asks().filter((a) => a.doc.card === card.id && activeKind(a.doc.kind)?.merge_approve && a.doc.state === 'answered').sort((a, b) => String(b.doc.raised_at).localeCompare(String(a.doc.raised_at)))[0];
   // A check that could not read GitHub (M2's `unreadable`, or a watched read that failed inside M10's carry-over) or
