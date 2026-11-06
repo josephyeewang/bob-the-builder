@@ -177,17 +177,18 @@ export async function recordAndRules(c, { who, log, fetchFn, now }) {
  * has one home, or the start stops: a port both answered and listed, on two lists, answered by two files, a port the tick
  * doesn't read, one neither answered nor listed, or a file answering `alert` or `approvals`. The cleanup group follows
  * the same rules (cleanupProblem). So no port can look wired while it isn't, and none can be replaced or lost in silence.
- * A port file gets `ctx`: { config, rec, rules, entry, stateDir, log, limitedSync, fetchFn, now }.
+ * A port file gets `ctx`: { config, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now }; `gh` is the read-only
+ * GitHub client the rules reader uses (L615).
  */
 export async function wire(config, { limitedSync, log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(), groups = PORT_GROUPS } = {}) {
   const c = checkConfig(config);
   // Before the Record opens: a state folder M2 can't use stops the start, so no product is turned on untold (L295 MAT-1).
   const stateDir = approvalsDir(c);
-  const { rec, rules, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
+  const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'dispatcher', log, fetchFn, now });
   const ports = { alert: logOnlyAlert(log) };
   for (const { notWired } of groups) for (const k of notWired) ports[k] = refusing(k);
   ports.approvals = () => [approvalsFor(c, entry, stateDir)];
-  const ctx = Object.freeze({ config: c, rec, rules, entry, stateDir, log, limitedSync, fetchFn, now });
+  const ctx = Object.freeze({ config: c, rec, rules, gh, entry, stateDir, log, limitedSync, fetchFn, now });
   const stopOn = (why, names) => { if (names.length) throw new Error(`${why}: ${names.join(', ')}`); };
   const lists = groups.flatMap((g) => g.notWired);
   const listed = new Set(lists);
