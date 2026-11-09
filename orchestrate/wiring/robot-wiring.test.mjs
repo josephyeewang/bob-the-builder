@@ -503,9 +503,11 @@ test('L600 PR 1: with the robot App named, the real deliver pass sends the round
   assert.equal(code, 0, logs.join('\n'));
   assert.doesNotMatch(logs.join('\n'), /robot: deliver (failed|ran, and)/);
   const sent = [...gh.issues.values()].map((i) => `${i.title}\n${i.body}`).join('\n---\n');
-  // The passes before it that are not wired, and the Dispatcher that never ran, all reached the alert repository.
-  assert.match(sent, /the Dispatcher has no full pass on record/);
-  for (const p of ['gate', 'heartbeat', 'watch']) assert.match(sent, new RegExp(`the robot job's ${p} pass failed`), p);
+  // The passes before it that are not wired reached the alert repository; the Dispatcher that never ran, through the
+  // heartbeat's own alert (L600 PR 2).
+  assert.match(sent, /heartbeat red: dispatcher/);
+  for (const p of ['gate', 'watch']) assert.match(sent, new RegExp(`the robot job's ${p} pass failed`), p);
+  assert.doesNotMatch(sent, /the robot job's heartbeat pass failed/);
   assert.ok([...gh.issues.values()].every((i) => i.assignees?.[0] === APP.alertOwner), 'assigned to alertOwner');
   assert.equal(gh.mints(), 1, 'one mint for the whole round');
   assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
@@ -597,4 +599,66 @@ test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints onl
   assert.equal(gh.issues.size, 1);
   assert.match(gh.issues.get(1).body, /store_layout/);
   assert.deepEqual(gh.issues.get(1).assignees, [APP.alertOwner]);
+});
+
+// ── L600 PR 2: the heartbeat pass, through the robot App, reading the Sensors' facts from the Record (L604) ─────────────
+
+const pinnedOf = (gh) => [...gh.issues.values()].find((i) => /mini_alive_at:/.test(i.body ?? ''));
+const isoAt = (ms) => new Date(ms).toISOString();
+
+test('L600 PR 2: with the robot App the heartbeat runs: its pinned issue in the alert repository; with no Sensors, not known, never signed out', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const logs = [];
+  assert.equal(await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn: gh.fetchFn } }), 0, logs.join('\n'));
+  assert.doesNotMatch(logs.join('\n'), /robot: heartbeat failed/);
+  const pinned = pinnedOf(gh);
+  assert.ok(pinned, 'the pinned heartbeat issue is in the alert repository');
+  assert.match(pinned.body, /Front Door reachable from the phone: unknown/);
+  assert.match(pinned.body, /signed-in account: unknown/);
+  assert.match(pinned.body, /M10 Rules readable: yes/);
+  const rec = readRecord(w);
+  assert.ok(!rec.list('fact').some((x) => x.id.startsWith('signed-out-') && x.doc?.signed_out === true), 'not known is never signed out');
+  assert.equal(gh.mints(), 1, 'the heartbeat and deliver share the round\'s one mint');
+  assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
+});
+
+test('L604 PR 2: the heartbeat tells a current Sensors reading, a current nobody as signed out, and an old one as not known', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  const sense = (id, doc) => { const r = rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }); assert.ok(r.ok, `${id}: ${r.reason}`); };
+  const dispatcherPass = () => assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: isoAt(t), started_at: isoAt(t), steps: {} }, kind: 'full_pass' }).ok);
+  dispatcherPass();
+  sense('signed-in-account', { account: 'b', observed_at: isoAt(t) });
+  sense('frontdoor-reachable', { value: true, observed_at: isoAt(t) });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /signed-in account: b/);
+  assert.match(pinnedOf(gh).body, /Front Door reachable from the phone: yes/);
+  // A current reading of nobody signed in: the signed-out fact, and its alert.
+  t += MIN; dispatcherPass();
+  sense('signed-in-account', { account: null, observed_at: isoAt(t) });
+  await passes.heartbeat();
+  assert.equal(rec.read('fact', `signed-out-${P.replace(/[^A-Za-z0-9_-]/g, '-')}`)?.doc?.signed_out, true);
+  assert.ok([...gh.issues.values()].some((i) => /heartbeat red: signed-out/.test(i.title)), 'the signed-out alert is raised');
+  // An hour on, both readings are past their age limits: not known, and the signed-out fact is not moved.
+  t += 60 * MIN; dispatcherPass();
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /signed-in account: unknown/);
+  assert.match(pinnedOf(gh).body, /Front Door reachable from the phone: unknown/);
+  assert.equal(rec.read('fact', `signed-out-${P.replace(/[^A-Za-z0-9_-]/g, '-')}`)?.doc?.signed_out, true);
+  assert.equal(gh.mints(), 1, 'one mint for the process');
+});
+
+test('L600 PR 2 (L239): with the robot App a late Dispatcher is told by the heartbeat\'s own alert, and not queued a second time', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const logs = [];
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, log: (l) => logs.push(l) });
+  await passes.heartbeat();
+  assert.ok([...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)), 'the heartbeat raised the Dispatcher alert');
+  assert.match(logs.join('\n'), /robot: alert: the Dispatcher has no full pass on record/);
+  assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), queued(rec).join(' | '));
 });

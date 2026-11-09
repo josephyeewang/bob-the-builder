@@ -33,7 +33,8 @@ export const DISPATCHER_LATE_MIN = 15;
 export const USAGE_STEPS = Object.freeze([50, 75, 90, 95]);
 const ISSUE = (n) => Number.isSafeInteger(n) && n > 0;
 const NOT_SAVED = 'alert-not-saved';
-const NOT_TOLD = 'alert-not-told';
+/** In `red` when an alert GitHub lost was not told this pass (the robot job then also queues its late alert). */
+export const NOT_TOLD = 'alert-not-told';
 const LOGIN_UNKNOWN = 'robot-login-unknown';
 /** The pinned issue's marker: found again by it when the Record never kept its number. */
 export const heartbeatMarker = (product) => `<!-- orch:heartbeat ${product} -->`;

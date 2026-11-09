@@ -10,12 +10,15 @@
 // THE PASSES, in order (ROBOT_PASSES):
 //   gate        M6 gatePass. Needs the robot's GitHub client (a token minted from the robot App's key, M6 token.mjs).
 //               No robot App exists yet (R-0b-02): not wired, refuses.
-//   heartbeat   M13 heartbeatOnce. Needs a GitHub client that edits issues (M13 alerts.mjs), from lane 3's delivery
-//               adapter (L235) and the robot token: not wired, refuses. One part is real now (L239): when the Dispatcher's
-//               last full pass is older than M13's DISPATCHER_LATE_MIN, or missing, Joe is told (dispatcherLate(), below).
-//               heartbeatOnce itself is not called yet: its account probe is not wired, and a probe that throws makes it
-//               write a signed-out fact the Dispatcher would act on.
-//               It goes to the job's log and the Record's alert queue; `deliver`, below, sends it in the same round.
+//   heartbeat   M13 heartbeatOnce, through the robot App: the same token (one mint a round) and alert repository as
+//               deliver (L600). The pinned heartbeat issue and an alert for each red fact go there. What it says about
+//               the Mini comes from the Sensors' facts in the Record (heartbeat-probes.mjs, L604), never a probe of its
+//               own: a fact with no current reading is "not known", never a pass and never signed out. Without the App
+//               keys it is not wired and refuses. The late part runs first either way (L239): when the Dispatcher's last
+//               full pass is older than M13's DISPATCHER_LATE_MIN, or missing, Joe is told. Without the App that alert
+//               goes to the job's log and the Record's alert queue, and `deliver`, below, sends it in the same round;
+//               with the App, heartbeatOnce's own Dispatcher alert tells it, so it is logged but not queued again,
+//               unless the heartbeat failed or lost an alert on GitHub: then it is queued as well.
 //   caught-up   M13 caughtUpOnce. REAL: the idea issues are read with the read-only client, the ideas and the push
 //               request are written as the Ledger. See lastReturn() for what "the Mini came back" means here.
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
@@ -51,7 +54,9 @@ import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/a
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
+import { DISPATCHER_LATE_MIN, NOT_TOLD, heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
+import { makeAlerts } from '../modules/M13-ledger/alerts.mjs';
+import { heartbeatProbes } from './heartbeat-probes.mjs';
 import { deliverWith, githubIssues, repoProblem } from '../modules/M13-ledger/alert-channel.mjs';
 import { mintInstallationToken } from '../modules/M6-merge-gate/token.mjs';
 import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
@@ -70,7 +75,7 @@ export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
-export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: 'robot.issues (L235)', watch: 'robot.vercel',
+export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: `robot.heartbeat: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, watch: 'robot.vercel',
   deliver: `robot.deliver: the config names no robot App (${APP_KEYS.join(', ')}; L600)` });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_IDEAS = 100;
@@ -241,29 +246,47 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   // Its own live pid in that file would read as a running Dispatcher, every round, for ever (audit #150 Minor 3).
   if (resolve(c.dispatcherLockFile) === resolve(c.lockFile)) throw new Error('dispatcherLockFile is this job\'s own lockFile: it must be the Dispatcher\'s');
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
-  const { rec, gh, entry } = await recordAndRules(c, { who: 'robot', log, fetchFn, now });
+  const { rec, rules, gh, entry } = await recordAndRules(c, { who: 'robot', log, fetchFn, now });
 
   const ledger = makeFactWriter(rec, { actor: 'ledger', now: () => new Date(now()) });
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
+  // The robot's token, minted on its first use and shared by every pass that writes, so at most one mint a round.
+  const token = c.appId !== undefined ? robotToken(c, { fetchFn, uid, now, mint }) : null;
   if (deliver) passes.deliver = () => deliver({ rec, now });
-  else if (c.appId !== undefined) {
+  else if (token) {
     // One alert repository, for this Record's one product (L298: a Record tells only its own product's repository).
     const send = deliverWith({ recordRoot: c.recordRoot, product: c.product, products: [c.product], repos: { [c.product]: c.alertRepo },
-      owner: c.alertOwner, token: robotToken(c, { fetchFn, uid, now, mint }), fetchFn });
+      owner: c.alertOwner, token, fetchFn });
     passes.deliver = () => send({ rec, now });
+  }
+  let beat = null;
+  if (token) {
+    const issues = githubIssues({ repo: c.alertRepo, token, fetchFn });
+    const when = () => new Date(now());
+    // "Rules readable": the product's rules were read and adopted (M10's `rules.adopted`, the engine's usable rules).
+    const probes = { ...heartbeatProbes({ rec, rules, now }), rulesReadable: async () => rules.get('rules.adopted', { product: c.product }) !== undefined };
+    beat = () => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when }),
+      owner: c.alertOwner, probes, now: when });
   }
   passes.heartbeat = async () => {
     const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
+    if (late) log(`robot: alert: ${late.text}`);
+    // With the App, the heartbeat's own Dispatcher alert tells it. When the heartbeat failed, or lost an alert on GitHub,
+    // the late alert goes to the queue as well, so a broken App never leaves a stopped Dispatcher untold (L239).
+    let beaten = null; let failed = null;
+    if (beat) { try { beaten = await beat(); } catch (e) { failed = e; } }
+    const toldByBeat = Array.isArray(beaten?.red) && !beaten.red.includes(NOT_TOLD);
     let tell = null;
-    if (late) {
-      log(`robot: alert: ${late.text}`);
+    if (late && !toldByBeat) {
       // A refused alert is logged and kept with the pass's failure (audit #137 M1; L130 m12).
       if (hold({ rec, cause: LATE_CAUSE(late.since), text: late.text, alert: outbox(rec, now()), now: now() }) === false) {
         tell = 'the Dispatcher-late alert could not be queued';
         log(`robot: ${tell}`);
       }
-    } else if (!dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
-    throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
+    } else if (!late && !dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
+    if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
+    return { red: beaten.red };
   };
   passes['caught-up'] = async () => {
     const ret = lastReturn(rec, { nowMs: now() });
