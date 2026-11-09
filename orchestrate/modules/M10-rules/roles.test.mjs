@@ -8,6 +8,8 @@ import { cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoles, profileFor, TOOLS_CHECKED, NEVER_TOOLS, ROLE_FILES } from './roles.mjs';
+import { NEVER_TOOLS as M4_NEVER, DESIGN_PROFILES, checkProfile as m4Check } from '../M4-workshop/launcher/role-profiles.mjs';
+import { checkInit } from '../M4-workshop/launcher/readback.mjs';
 import { parsePolicy } from './policy.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +27,7 @@ const TABLE = {
   front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
   thinking: { model: 'main', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['report-', 'idea-'], auto_resume: false },
   script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write', 'Workflow'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
+  plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false, context: 'context.plan_reviewer' },
   explore: { model: 'per_task', effort: 'as_asked', tools: [], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false },
 };
 
@@ -84,6 +87,8 @@ test('the tool list expires with the Claude Code version it was checked against 
   const fixturePin = parsePolicy(readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8')).policy.claude_code.pin;
   assert.equal(TOOLS_CHECKED.claude_code, fixturePin, 'move TOOLS_CHECKED after re-checking the tool list');
   assert.match(loadRoles(ROLES, { pin: '2.1.301' }).reason, /re-check the list/);
+  // A newer pin is refused too: Joe's own Claude Code updates itself past the checked version (L599 m-1).
+  assert.match(loadRoles(ROLES, { pin: '2.1.318' }).reason, /re-check the list/);
   assert.equal(loadRoles(ROLES, {}).ok, false);
 });
 
@@ -93,4 +98,35 @@ test('auditor maps to reviewer; learning is never started', () => {
   assert.equal(profileFor(r, 'learning'), null);
   assert.equal(profileFor(r, 'nobody'), null);
   assert.equal(profileFor({ ok: false }, 'worker'), null);
+});
+
+test('the subagent tool is refused under both its names, at the profile and at the read-back (L629)', () => {
+  for (const name of ['Agent', 'Task']) {
+    assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, name] })).reason, /never allowed/, name);
+    const w = DESIGN_PROFILES.worker;
+    assert.match(m4Check('worker', { ...w, tools: [...w.tools, name] }).reason, /never-list/, name);
+    const init = { tools: [...w.tools, name], mcp_servers: [], plugins: [], skills: [...(w.skills ?? [])], setting_sources: ['flag'], permissionMode: w.mode, claude_code_version: PIN };
+    assert.match(checkInit(init, { role: 'worker', profile: w }).reason, /never-list tools loaded/, name);
+  }
+  // One list in two homes: M4's is M10's plus Workflow, which only M10's script profile may hold.
+  assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
+});
+
+test('L683, L687: the plan reviewer reads and cannot write or hand anything in; a widened file is refused at load', () => {
+  const ok = loadRoles(ROLES, { pin: PIN });
+  assert.ok(ok.ok, ok.reason);
+  assert.deepEqual(ok.profiles.plan_reviewer.tools, ['Read', 'Glob', 'Grep']);
+  assert.deepEqual(ok.profiles.plan_reviewer.outbox_kinds, []);
+  for (const t of ['Bash', 'Write', 'Edit', 'AskUserQuestion', 'PushNotification']) {
+    const r = withEdit('plan_reviewer', (p) => ({ ...p, tools: [...p.tools, t] }));
+    assert.equal(r.ok, false, t);
+    assert.match(r.reason, new RegExp(`plan_reviewer: a read-only role may not hold ${t}`), t);
+  }
+  // A kind the shared table lists for it would still be refused: a read-only role hands in nothing.
+  for (const k of ['verdict-', 'report-']) assert.equal(withEdit('plan_reviewer', (p) => ({ ...p, outbox_kinds: [k] })).ok, false, k);
+  assert.ok(ROLE_FILES.includes('plan_reviewer'), 'its file is one ROLE_FILES names');
+  // Its file without its ROLE_FILES line is an extra file, so loading refuses.
+  const dir = copyRoles();
+  rmSync(join(dir, 'plan_reviewer.json'));
+  assert.match(loadRoles(dir, { pin: PIN }).reason, /role files must be exactly/);
 });

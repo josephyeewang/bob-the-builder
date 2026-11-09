@@ -69,6 +69,8 @@ import { WRITERS } from '../modules/M9-record/permissions.mjs';
 import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
 import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
+import { tick } from '../modules/M11-dispatcher/tick.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { usageFact, undoEntries, undoSha, filesOfCommits, UNDO_ASK, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -78,14 +80,15 @@ import { judge } from '../modules/M6-merge-gate/refusals.mjs';
 import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-github.mjs';
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
-import { fakeRules, makeRules } from '../shared/rules.mjs';
+import { fakeRules } from '../shared/rules.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
-import { tempDir } from '../shared/test-tmp.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { LAST_PASS_FACT, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
+import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -119,10 +122,9 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
-// The day-one engine answers the push; the push world's values stay plain values, as M4's push still reads them
-// (shared/rules.mjs OLD_VALUES_UNTIL_STEP_2).
+// The day-one engine answers the push; the push world's values reach it as the rules reader gives them, as text.
 function pushRules(w, world) {
-  return makeRules({ rev: 'fake-1', may: (a, x) => w.rules.may(a, x), get: (k, { product } = {}) => (product === world.product ? world.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
+  return fakeRules({ answers: { push_branch: (x) => w.rules.may('push_branch', x) }, values: world.values });
 }
 
 const UNDO_ID = 'U1';
@@ -266,6 +268,76 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
   assert.equal(w.rec.read('card', id).doc.state, 'running');
 });
 
+// L595: a paused product's undo, through one real tick: the real rules text, the real Record, M11's real steps. Only the
+// ports are stand-ins. The rules draft's paused state is start: none, which is what stopped this card at M9 alone.
+const pause = (w) => { const r = w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: w.rec.read('product', P).rev, doc: { state: 'paused', return_to: 'active' } }); assert.equal(r.ok, true, r.reason); };
+async function oneTick(w, { sessions = [] } = {}) {
+  const dir = tempDir('orch-day-one-tick-');
+  const launched = [];
+  const stops = [];
+  const alert = fakeAlert();
+  const ports = {
+    alert, board: () => [], healthy: () => true, resume: () => false, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    leads: () => [], sessions: () => [...sessions], probe: () => ({ size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } }),
+    launch: async ({ card, kind, product, sessionId }) => { launched.push(card.id); sessions.push({ id: sessionId, product, kind, card: card.id, pgid: 101 }); return { ok: true, sessionId, outbox: `/outbox-root/worker/${sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; },
+    stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: () => ({ ok: true, requestId: 'Q-1' }), filesOf: filesOfCommits,
+    sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
+    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
+  };
+  await tick({ rec: w.rec, rules: w.rules, now: T0, ports });
+  return { launched, alert, sessions, stops };
+}
+
+test('L595: the Undo tapped on a paused product starts in the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const { launched, alert } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+  assert.deepEqual(alert.texts.filter((t) => /can't start|is waiting/.test(t)), []);
+});
+
+// #252 r1 m3: this PR first lets an undo run on a paused product, so the next tick must leave it running.
+test('L595: a running undo on a paused product is not stopped or parked by the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const first = await oneTick(w);
+  assert.deepEqual(first.launched, [id]);
+  const second = await oneTick(w, { sessions: first.sessions });
+  assert.deepEqual(second.launched, []);
+  assert.deepEqual(second.stops, []);
+  // A stop is first only wanted (a pending stop fact) until the session reaches a safe point: none may be wanted.
+  const wanted = w.rec.list('fact').filter((f) => f.doc?.state === 'pending' && f.doc?.card === id);
+  assert.deepEqual(wanted.map((f) => f.id), []);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: an undo card already in ready when the product is paused stays on the list and starts', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  pause(w);
+  assert.deepEqual(w.rec.ready().map((c) => c.id), [id], 'off this list, no check ever sees the card, so no alert either');
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: on a paused product an ordinary ready card does not start beside the undo', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const d = { state: 'ready', kind: 'ordinary', product: P, module: 'M-test', tier: 2, round: 1, files: [DOC], done_when: 'x', what: 'y' };
+  seed(w.env, 'card', 'C-3', d);
+  pause(w);
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', 'C-3').doc.state, 'ready');
+});
+
 // The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
 // gather.mjs's to work out from GitHub). The same card through M6's real gatherFacts, asserting on f.lane, is
 // modules/M11-dispatcher/undo-lane.test.mjs (L199-D; day-one audit Minor 2).
@@ -299,7 +371,7 @@ function macBoot() {
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
     recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
-    approvalsStateDir: f('approvals-state') };
+    approvalsStateDir: f('approvals-state'), ...reviewConfig(dir, { reviewUid: process.getuid() + 1 }) };
   const configFile = L.write('dispatcher.json', config);
   writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
   const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
@@ -312,6 +384,10 @@ test('with only production writers, the product reads active and the docs lane i
   const { code, err, rec } = macBoot();
   assert.equal(code, 0, err);
   const p = ENTRY.product;
+  // The review user is another user (the Dispatcher's own may not be it, L674), so this boot's status is not theirs and
+  // the limits step says exactly that (L674 re-rules L652 for this boot).
+  assert.equal(rec.read('fact', LAST_PASS_FACT)?.doc?.steps?.limits, 'failed');
+  assert.equal(rec.read('fact', STEP_ERROR_FACT('limits'))?.doc?.error, "no review was asked for: the review runner's folder is not owned by the review user");
   // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
   assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
   assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);

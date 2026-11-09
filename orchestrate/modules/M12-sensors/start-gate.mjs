@@ -8,9 +8,14 @@
 // for a read that didn't happen. The shape is lane 2's contract (M4-workshop/git/start-gate.mjs factId): id
 // `start_gate.vercel_skip.<product>` / `start_gate.vercel_env.<product>`, doc { product, vercel_project, read_at, result }
 // plus our extra fields, which M4 ignores. vercel_project must equal the product's rules value. M4's startGate is the
-// one place the gate is decided, and it treats a fact older than 10 minutes as shut, so the Sensors re-read these at
-// least every 5 minutes (START_GATE_READ_EVERY_MIN). startGateOpen below is a test helper that mirrors M4's reading;
-// nothing gates on it. The pinned command comes from the product's rules entry (lane 1); only hashes are stored.
+// one place the gate is decided, and it treats a fact older than 10 minutes as shut, so the Sensors must re-read these
+// at least every 5 minutes (START_GATE_READ_EVERY_MIN). startGateOpen below is a test helper that mirrors M4's reading;
+// nothing gates on it. Only hashes of the commands are stored.
+// NOT WIRED YET (#241 r1 Minor 3, 6 Nov 2026): nothing outside tests calls readStartGate, so no fact is written and
+// M4's gate stays shut for every product (fails shut). Missing: (1) a caller in the Sensors' loop that runs it every
+// 5 minutes per product; (2) that caller passes pinnedSkip = M6 build-skip.mjs skipCommand({ mode: 'first' }), which
+// L571 says is computed by code with no rules line (that form of skipCommand lands with #241; on main first mode still
+// asks for a checker URL and hash), and vercelProject from the product's rules entry.
 
 import { createHash } from 'node:crypto';
 
@@ -30,14 +35,15 @@ export function envInBoth(envs) {
   return [...targets].filter(([, t]) => t.has('preview') && t.has('production')).map(([k]) => k).sort();
 }
 
-// vercel: makeVercelReader(...); writer: makeFactWriter(rec); pinnedSkip and vercelProject: the rules entry's values.
+// vercel: makeVercelReader(...); writer: makeFactWriter(rec); pinnedSkip: the command skipCommand computes (L571, not
+// a rules value); vercelProject: the rules entry's value.
 export async function readStartGate({ product, vercel, writer, pinnedSkip, vercelProject, now = () => new Date() }) {
   const at = now().toISOString();
   let skip;
   try {
     const s = await vercel.settings();
     const cmd = s?.commandForIgnoringBuildStep;
-    if (typeof pinnedSkip !== 'string' || !pinnedSkip) skip = { ok: false, reason: 'no pinned skip command in the rules entry' };
+    if (typeof pinnedSkip !== 'string' || !pinnedSkip) skip = { ok: false, reason: 'no pinned skip command was given' };
     else if (typeof cmd !== 'string' || !cmd) skip = { ok: false, reason: 'Vercel has no skip command set' };
     else skip = { ok: cmd === pinnedSkip, reason: cmd === pinnedSkip ? 'matches pinned' : 'differs from pinned' };
     skip.command_sha256 = sha(cmd);

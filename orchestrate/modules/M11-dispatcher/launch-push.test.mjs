@@ -9,7 +9,6 @@ import { dispatcherPass } from './pass.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { rulesWith, recWith, usageFact, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { makeRules } from '../../shared/rules.mjs';
 import { gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { pushWorld, PRODUCT } from '../M4-workshop/git/push-world.test-helper.mjs';
 
@@ -49,10 +48,9 @@ test('L204-a: a card the real pass starts is pushed by the real push script from
   await w.bundle(undefined, s.outbox);
   const tip = (await gitOk(['rev-parse', 'HEAD'], w.cg)).trim();
 
-  // M4's push still reads its values as plain values, not the reader's text, until its typed reads land (L96 step 2,
-  // shared/rules.mjs OLD_VALUES_UNTIL_STEP_2 lists push.test.mjs for it); the same values, handed over that way.
-  const rules = makeRules({ rev: 'fake-1', may: (a, x) => w.answers[a](x), get: (k, { product } = {}) => (product === PRODUCT ? w.values[k] : undefined), classify: () => ({ tier: 2, risky: [], reasons: {} }) });
-  const p = await w.push({ rules }, sessionId);
+  // The world's rules hand every value back as the rules file's reader does (true as "true"), so this push reads its
+  // rules as it will on the Mac.
+  const p = await w.push({}, sessionId);
   assert.equal(p.ok, true, p.reason);
   assert.ok((await w.ghRefs()).split('\n').includes(`refs/heads/card/c-1 ${tip}`), 'GitHub has the card branch at the worker\'s tip');
   const f = rec.read('fact', 'push.C-1.a1')?.doc;

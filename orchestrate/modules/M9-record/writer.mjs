@@ -45,7 +45,7 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
-export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
+export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
@@ -734,6 +734,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
     keepAlert: (text, key) => { store.keepAlert(text, key); },
+    heldHere: () => store.heldHere(),
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }

@@ -90,9 +90,11 @@ export function statusAlerts(s, mainHead, now = Date.now(), { runnerLog } = {}) 
   }
   let head = null;
   let readError = '';
-  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch (e) { head = null; readError = String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 100); }
+  let leads = false;
+  // An error marked `lead` names the real trouble (root's updater may have stopped), so it comes first (audit #263 c1).
+  try { head = mainHead ? mainHead(s?.installed_commit ?? null) : null; } catch (e) { head = null; leads = e?.lead === true; readError = String(e?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 100); }
   const main = typeof head === 'string' ? head : head?.commit;
-  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: readError ? `${MAIN_UNREAD} The read said: ${readError}` : MAIN_UNREAD }];
+  if (mainHead && !(typeof main === 'string' && HEX40.test(main))) return [...out, { id: 'stamp', hold: true, keep: true, since: MAIN_UNREAD_SINCE, text: !readError ? MAIN_UNREAD : leads ? `${readError} ${MAIN_UNREAD}` : `${MAIN_UNREAD} The read said: ${readError}` }];
   if (main && s?.installed_commit !== main) {
     const at = s?.installed_commit ?? null;
     const since = Number.isFinite(head?.since) && head.since <= now + AHEAD_MS ? head.since : null;
