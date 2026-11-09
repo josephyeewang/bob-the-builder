@@ -116,7 +116,9 @@ test('A3a: the wired planRows reads rows M2 asks a go on; a drifted, missing or 
   card(w2, 'A', { files });
   await pass(w2, { planRows: githubRows(w2, { 'R-1': yaml('R-1', 'a different test') }) });
   assert.equal(asks(w2).length, 0);
-  assert.ok(w2.sent.some((s) => /card A could not be asked for a go: the card's done_when is not its rows' pass tests/.test(s)), w2.sent.join(' | '));
+  // L698: the Dispatcher sets the card's pass test from its rows; until M9 lets it (lane 1's updateInDraft line) the
+  // Record refuses that write, and it is told, never asked on the Lead's free text.
+  assert.ok(w2.sent.some((s) => /card A could not be asked for a go: its pass test could not be set from its rows/.test(s)), w2.sent.join(' | '));
   const w3 = world();
   card(w3, 'A', { files });
   await pass(w3, { planRows: githubRows(w3, {}) });
@@ -1752,4 +1754,93 @@ test('L486: each ask is its own cause, and only the refused write is held', asyn
   say({ type: 'approvals_config', reason: 'bad' });
   await send();
   assert.equal(w.sent.filter((s) => s.includes('approvals config')).length, 2, 'only the write refusal is held here');
+});
+
+// L698 design b (L699): the Dispatcher sets a draft card's done_when to doneBar(rows) before the Tier-1 review and the
+// ask. Lane 1's grant, `dispatcher.updateInDraft: ['done_when']` in M9 permissions.mjs, is not on main yet. Until it is,
+// `withDoneWhenGrant` stands in for it, for exactly that write: the Dispatcher's, on a draft card, done_when the only
+// field changed, the rev it read still current. It is stored as the Record would store it; every other write is the real
+// Record's, and the refusal without the grant is pinned below on the real Record. When the line lands, drop the stand-in
+// and pass w.t.record: these tests must still pass unchanged.
+function withDoneWhenGrant(w) {
+  const rec = w.t.record;
+  return { ...rec, write: (x) => {
+    const cur = x?.entity === 'card' ? rec.read('card', x.id) : null;
+    const changed = cur?.doc && x.doc ? [...new Set([...Object.keys(cur.doc), ...Object.keys(x.doc)])].filter((f) => JSON.stringify(cur.doc[f]) !== JSON.stringify(x.doc[f])) : [];
+    if (x?.actor === 'dispatcher' && cur?.doc?.state === 'draft' && cur.rev === x.expectRev && changed.length === 1 && changed[0] === 'done_when') {
+      seed(w.t, 'card', x.id, x.doc);
+      return { ok: true };
+    }
+    return rec.write(x);
+  } };
+}
+const ROWS2 = { 'R-1': row('R-1'), 'R-2': row('R-2', { done_when: 'the second row passes' }) };
+
+test('L698: a draft card\'s pass test is set from its rows, the Lead\'s words stay in its brief, and the go is asked on the rows\' test', async () => {
+  const w = world();
+  const rec = withDoneWhenGrant(w);
+  card(w, 'A', { done_when: 'the Lead\'s own words', brief: { goal: 'g', done_when: 'the Lead\'s own words' } });
+  const r1 = await pass(w, { planRows: async () => ROWS2 }, { record: rec });
+  assert.ok(r1.events.includes('done_when A'), `${JSON.stringify(r1.events)} ${w.sent.join(' | ')}`);
+  assert.equal(asks(w).length, 0, 'the pass that sets it stops there: nothing asked on the old text');
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.done_when, doneBar(ROWS2));
+  assert.equal(doc.brief.done_when, 'the Lead\'s own words', 'the Lead\'s wording is kept where the task brief reads it');
+  assert.equal(doc.state, 'draft');
+  await pass(w, { planRows: async () => ROWS2 }, { record: rec });
+  assert.equal(asks(w).length, 1, w.sent.join(' | '));
+  assert.deepEqual(asks(w)[0].doc.fingerprint_inputs.done_bar, [doneBar(ROWS2)], 'Joe\'s go shows the rows\' pass tests');
+  // Nothing more is written once it agrees.
+  const rev = w.t.record.read('card', 'A').rev;
+  const r3 = await pass(w, { planRows: async () => ROWS2 }, { record: rec });
+  assert.ok(!r3.events.some((e) => e.startsWith('done_when')));
+  assert.equal(w.t.record.read('card', 'A').rev, rev);
+});
+
+test('L698: a Tier-1 card\'s plan reviewer sees the card with the rows\' pass test, never the Lead\'s free text', async () => {
+  const w = world();
+  const rec = withDoneWhenGrant(w);
+  t1(w, 'A', { done_when: 'free text' });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.equal(w.started.length, 0, 'no reviewer before the pass test is set');
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.equal(w.started.length, 1);
+  assert.equal(w.started[0].inputs.done_bar[0], doneBar(ROWS), 'the reviewer reads the rows\' pass test, then the Tier-1 audit bar');
+  assert.ok(!w.started[0].inputs.done_bar.includes('free text'));
+});
+
+test('L698: a card waiting on its ask reads no rows: each pass costs it no call', async () => {
+  const w = world();
+  const rec = withDoneWhenGrant(w);
+  card(w, 'A');
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.equal(asks(w).length, 1);
+  let called = 0;
+  await pass(w, { planRows: async () => { called += 1; return ROWS2; } }, { record: rec });
+  assert.equal(called, 0);
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+});
+
+test('L698: with no rows, nothing is written and the go\'s own refusal is told', async () => {
+  const w = world();
+  const rec = withDoneWhenGrant(w);
+  card(w, 'A', { done_when: 'free text' });
+  const r = await pass(w, { planRows: async () => ({}) }, { record: rec });
+  assert.ok(!r.events.some((e) => e.startsWith('done_when')));
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'free text');
+  assert.ok(w.sent.some((s) => /card A could not be asked for a go: a go names at least one row/.test(s)), w.sent.join(' | '));
+});
+
+test('L698: without M9\'s grant the Dispatcher\'s write fails loudly: told once a day, nothing asked, the card stays in draft', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  await pass(w, { planRows: async () => ROWS });
+  await pass(w, { planRows: async () => ROWS });
+  const told = w.sent.filter((s) => /card A could not be asked for a go: its pass test could not be set from its rows \(.+\)/.test(s));
+  assert.equal(told.length, 1, w.sent.join(' | '));
+  assert.equal(asks(w).length, 0);
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.done_when, 'free text');
+  assert.equal(doc.state, 'draft');
 });

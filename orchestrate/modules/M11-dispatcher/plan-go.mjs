@@ -49,7 +49,7 @@
 import { goNeeded, readyCheck } from '../M9-record/ready.mjs';
 import { PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
-import { goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
+import { doneBar, goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
 import { PLAN_REVIEW_WORDING, readPlanReview } from '../M3-lead/lead-wording.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { planPass } from '../../shared/plan-review.mjs';
@@ -237,6 +237,21 @@ function goReady(ctx, tell, view, c, events) {
   else tell(c.id, 'ready', `card ${c.id} has its go but can't start: ${short(r.reason)}`);
 }
 
+// A draft card's done_when becomes doneBar(rows), the one form M2 checkRows takes (L698 design b, L699). True when it
+// already is, or when there are no rows to set it from (raiseGo then refuses with its own reason, told as ever). A write
+// stops the card for this pass: the next pass fingerprints the card as it now is. A write the Record refuses (no
+// `dispatcher.updateInDraft: ['done_when']` in M9's permissions, a card that moved on) is told under the card's own cause,
+// never skipped: the card stays in draft and is never asked for a go on the Lead's free text.
+function doneFromRows(ctx, tell, c, rows, events) {
+  if (!rows || typeof rows !== 'object' || Array.isArray(rows) || !Object.keys(rows).length) return true;
+  const bar = doneBar(rows);
+  if (c.doc.done_when === bar) return true;
+  const w = move(ctx.record, 'card', c.id, { done_when: bar }, { kind: 'done_when_from_rows' });
+  if (w.ok) events.push(`done_when ${c.id}`);
+  else tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (${short(w.reason)})`);
+  return false;
+}
+
 async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const { product, rules } = ctx;
   const n = goNeeded(c, view, rules, product);
@@ -248,12 +263,16 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const fp = goFingerprint(ctx, c.id);
   if (!fp.ok) { tell(c.id, 'plan', `card ${c.id} can't be asked for a go: ${short(fp.reason)}`); return; }
   if (!await mayAsk(ctx, ports, tell, st, c, fp)) return;
+  // The rows before the Tier-1 review and the ask (L698, L699): a go's pass test is its rows' (M2 checkRows), so it is
+  // set from them here, and the next pass fingerprints, reviews and asks on the card as it then is. The Lead's own words
+  // stay in brief.done_when. A card waiting on an ask makes no call: no ask is ever made on a text this did not set.
+  const rows = await ports.planRows({ product, card: c.id });
+  if (!doneFromRows(ctx, tell, c, rows, events)) return;
   let planCheck;
   if (d.tier === 1) {
     planCheck = await reviewed(ctx, ports, tell, c, fp);
     if (!planCheck) return;
   }
-  const rows = await ports.planRows({ product, card: c.id });
   const repo = await ports.planView({ product });
   const mainSha = await ports.mainSha({ product });
   const r = await raiseGo(limitedCtx(ctx, ports), { cardId: c.id, rows, view: repo && { isDir: (sha, f) => ports.timed('isDir', () => repo.isDir(sha, f)) }, mainSha, planCheck });
