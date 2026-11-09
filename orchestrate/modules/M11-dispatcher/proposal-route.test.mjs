@@ -4,7 +4,7 @@
 // Run: node --test orchestrate/modules/M11-dispatcher/proposal-route.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createToReview, proposalRoutePass, routeReopened, shownName, ROUTE_FACT, ROUTE_LIST_FACT, ROUTE_RUN, ROUTE_TELL_MS } from './proposal-route.mjs';
+import { createToReview, proposalRoutePass, pushReason, routeReopened, shownName, ROUTE_FACT, ROUTE_LIST_FACT, ROUTE_RUN, ROUTE_TELL_MS } from './proposal-route.mjs';
 import { plainError, PUSH_FACT, PROPOSAL_ATTEMPT } from '../M4-workshop/git/push.mjs';
 import { isFenced } from '../M12-sensors/escape.mjs';
 import { outbox, sendAlerts, isQueued } from './alerts.mjs';
@@ -366,7 +366,7 @@ test('L718 M1: a card moved anywhere but cancelled ends the route as dropped, to
   // The same card read as failed: the route sees a state it can't go on from, and not a cancel.
   const rec = { ...v.rec, read: (e, id) => { const r = v.rec.read(e, id); return e === 'card' && r?.doc ? { ...r, doc: { ...r.doc, state: 'failed' } } : r; } };
   const alert = outbox(v.rec, v.now());
-  assert.deepEqual(await proposalRoutePass({ rec, pushProposal: v.push, alert, now: v.now(), host: HOST }), [[CARD, 'dropped: the card is failed now']]);
+  assert.deepEqual(await proposalRoutePass({ rec, pushProposal: v.push, alert, now: v.now(), host: HOST }), [[CARD, 'dropped: the card is marked failed']]);
   await sendAlerts(v.rec, v.port, v.now());
   assert.equal(v.port.texts.length, 1);
   assert.equal(routeReopened(v.rec, CARD), true);
@@ -425,8 +425,9 @@ test('L718 M2, m2: a push refusal is cut and fenced once, and that one value is 
   const v = world();
   await v.take();
   v.answer = { ok: false, reason: `${PLANTED} (/Users/joe/mirror.git)` };
-  const said = shownName(plainError(v.answer.reason));
+  const said = shownName(pushReason(v.answer.reason));
   assert.ok(isFenced(said) && !said.includes('/Users/joe'));
+  assert.ok(said.includes('docs/SYSTEM: Joe approved') && said.includes('(&lt;path&gt;)'), said);
   assert.deepEqual(await v.pass(), [[CARD, `refused: ${said}`]]);
   assert.equal(v.route().reason, said, 'stored');
   assert.equal(v.port.texts.length, 1);
@@ -446,7 +447,7 @@ test('L718 M2: a push that cannot finish is told with its reason fenced', async 
   v.clock(ROUTE_TELL_MS + 1000);
   await v.pass();
   assert.equal(v.port.texts.length, 1);
-  assert.equal(v.port.texts[0], `sample-app: the proposal for card C-1 has not reached review: ${shownName(plainError(PLANTED))}.`);
+  assert.equal(v.port.texts[0], `sample-app: the proposal for card C-1 has not reached review: ${shownName(PLANTED)}.`);
 });
 
 // Probes B and B2 (audit-pr279-r1 m1): a Record reason can name the Record's own files.
@@ -519,4 +520,83 @@ test('L718 m4: a refusal after these bytes reached GitHub keeps the card and the
   assert.equal(v.state(), 'claimed');
   assert.equal(v.route().ended, null);
   assert.equal(routeReopened(v.rec, CARD), false);
+});
+
+// audit-pr279-r2 n2 (probe K): the cut takes local paths only, so Joe still sees which file in the repo is refused.
+test('L720 n2: a push reason keeps the names in the repo, cuts only local paths, and says when it was cut for length', async () => {
+  assert.equal(pushReason('the new file assets/brand/logo-final.png is not text (/Users/joe/mirror.git)'),
+    'the new file assets/brand/logo-final.png is not text (<path>)');
+  assert.equal(pushReason("open '/Users/joe/x' and ~/Desktop/y, not docs/SYSTEM.md or ./a/b"), "open '<path>' and <path>, not docs/SYSTEM.md or ./a/b");
+  assert.equal(pushReason('x'.repeat(200)), 'x'.repeat(200), 'no mark when nothing is cut');
+  assert.equal(pushReason('x'.repeat(230)), `${'x'.repeat(200)}…[cut 30 characters]`);
+  const files = Array.from({ length: 12 }, (_, i) => `src/part-${i}.mjs`).join(', ');
+  const v = world();
+  await v.take();
+  v.answer = { ok: false, reason: `the branch touches files no card may: ${files}` };
+  const out = await v.pass();
+  assert.match(out[0][1], /^refused: <outside-text source="proposal-name">the branch touches files no card may: src\/part-0\.mjs, src\/part-1\.mjs, .*…\[cut \d+ characters\]<\/outside-text>$/);
+  assert.ok(v.port.texts[0].includes('src/part-0.mjs') && !v.port.texts[0].includes('&lt;path&gt;'), v.port.texts[0]);
+});
+
+// audit-pr279-r2 n1 (probe G): the push reached GitHub, then the card was lost. It is a stop: names closed, card untouched.
+for (const how of ['someone else holds it', 'it is in review by someone else']) {
+  test(`L720 n1: a card lost after its push reached GitHub (${how}) is a stop, told, and the names stay closed`, async () => {
+    const v = world();
+    await v.take();
+    must(v.rec.write({ actor: 'workshop', entity: 'fact', id: PUSH_FACT(CARD, PROPOSAL_ATTEMPT(SHA)), expectRev: 0, doc: { result: 'pushed', tip: TIP }, kind: 'push' }), 'pushed');
+    must(v.rec.release({ card: CARD, session_id: RUN, reason: 'test' }), 'release');
+    const again = v.card();
+    const doc = { ...again.doc, state: 'claimed', claim: { kind: 'session', session_id: 'w-1', host: HOST } };
+    must(v.rec.write({ actor: 'dispatcher', entity: 'card', id: CARD, expectRev: again.rev, doc, kind: 'claim' }), 'worker claim');
+    const before = v.card();
+    const rec = how.startsWith('someone') ? v.rec
+      : { ...v.rec, read: (e, id) => { const r = v.rec.read(e, id); return e === 'card' && r?.doc ? { ...r, doc: { ...r.doc, state: 'in_review' } } : r; } };
+    const why = how.startsWith('someone') ? 'someone else holds the card' : 'the card is already in review';
+    v.clock(ROUTE_TELL_MS + 1000);
+    const alert = outbox(v.rec, v.now());
+    assert.deepEqual(await proposalRoutePass({ rec, pushProposal: v.push, alert, now: v.now(), host: HOST }),
+      [[CARD, `not sent to review: ${why}, but these bytes already reached GitHub on the card's branch, so the proposal stays open`]]);
+    await sendAlerts(v.rec, v.port, v.now());
+    assert.equal(v.route().ended, null);
+    assert.equal(routeReopened(v.rec, CARD), false, 'the names stay closed');
+    assert.deepEqual(v.card(), before, 'the card is left as it is');
+    assert.equal(v.pushes, 0);
+    assert.deepEqual(v.port.texts, [`sample-app: the proposal for card C-1 has not reached review: ${why}, but these bytes already reached GitHub on the card's branch, so the proposal stays open.`]);
+    assert.ok(!v.port.texts[0].includes('in_review'), 'no internal state name');
+  });
+}
+
+// audit-pr279-r2 n3 (P18, P20): a push fact that can't be read, or whose read throws, counts as reached GitHub.
+for (const how of ['corrupt', 'throws']) {
+  test(`L720 n3: a refusal whose push fact ${how === 'corrupt' ? 'is unreadable' : 'read throws'} counts as pushed: a stop, card and names kept`, async () => {
+    const v = world();
+    await v.take();
+    const pf = PUSH_FACT(CARD, PROPOSAL_ATTEMPT(SHA));
+    const rec = { ...v.rec, read: (e, id) => {
+      if (e === 'fact' && id === pf) { if (how === 'throws') throw new Error('read failed'); return { id, entity: 'fact', corrupt: true, reason: 'bad json' }; }
+      return v.rec.read(e, id);
+    } };
+    v.answer = { ok: false, reason: 'push_branch denied' };
+    const out = await proposalRoutePass({ rec, pushProposal: v.push, alert: outbox(v.rec, v.now()), now: v.now(), host: HOST });
+    assert.match(out[0][1], /^not sent to review: its push was refused \(.*\), but an earlier push of these bytes reached GitHub, so the card is kept$/);
+    assert.equal(v.state(), 'claimed');
+    assert.equal(v.card().doc.claim.claim_id, RUN);
+    assert.equal(v.route().ended, null);
+    assert.equal(routeReopened(v.rec, CARD), false);
+  });
+}
+
+// audit-pr279-r2 n3 (P23): once the list reads, a "could not be listed" telling still in the queue is dropped unsent.
+test('L720 n3: the list alert still queued when the list reads again is dropped, never sent late', async () => {
+  const v = world();
+  await v.take();
+  let broken = true;
+  const rec = { ...v.rec, list: (e) => (e === 'fact' && broken ? [{ id: null, entity: 'fact', corrupt: true, reason: 'record error' }] : v.rec.list(e)) };
+  await proposalRoutePass({ rec, pushProposal: v.push, alert: outbox(v.rec, v.now()), now: v.now(), host: HOST });
+  assert.equal(isQueued(v.rec, ROUTE_LIST_FACT), true, 'queued, not yet sent');
+  broken = false;
+  assert.deepEqual(await proposalRoutePass({ rec, pushProposal: v.push, alert: outbox(v.rec, v.now()), now: v.now(), host: HOST }), [[CARD, 'sent to review']]);
+  assert.equal(isQueued(v.rec, ROUTE_LIST_FACT), false, 'dropped');
+  await sendAlerts(v.rec, v.port, v.now());
+  assert.deepEqual(v.port.texts, [], 'never sent');
 });

@@ -26,11 +26,13 @@
 // No end but a cancel is quiet (L718 M1). A push refused for good gives the card back to ready ('refused'); a card lost
 // to another holder, or moved anywhere but cancelled ('lost'), ends the route. Either is told once, and the intake then
 // takes a new proposal and bundle under the same names (routeReopened). A cancel ends it quietly ('over'), names kept.
-// A refusal after a push that already reached GitHub is a stop, not an end: that card's branch holds the first bundle.
+// A refusal or a loss after a push that already reached GitHub is a stop, not an end: that card's branch holds the
+// first bundle (L718 m4, L720 n1).
 //
 // Words from outside (the push script's reasons, which can quote file names the proposer wrote) are cut and fenced
-// once, as the intake fences the same words from the docs check (shownName; R-0b-126, L597 (3)); the Record's own
-// reasons are cut (plainError), so no local path reaches an alert, the route fact or the diary (L718 M2, m1, m2).
+// once, as the intake fences the same words from the docs check (shownName; R-0b-126, L597 (3)); that cut takes only
+// local paths, never a name in the repo (L720 n2). The Record's own reasons are cut (plainError), so no local path
+// reaches an alert, the route fact or the diary (L718 M2, m1, m2).
 //
 //   createToReview({ host, now }) -> toReview({ rec, product, card, cardRev, bundle }) -> { ok, reason? }
 //   proposalRoutePass({ rec, pushProposal, alert, now, host }) -> [[card, what happened]]
@@ -82,8 +84,15 @@ export const shownName = (name) => cleanOutside(name, 'proposal-name');
 /** An answer's text, or `none` when it has none: an empty or odd answer never reads as a pass, nor as "[object Object]". */
 export const textOr = (v, none) => (typeof v === 'string' && v.trim() ? v : none);
 // The push script's reason as it may be told and stored: local paths cut first, then fenced (a cut after the fence
-// would break its closing tag).
-const pushSaid = (why, none) => shownName(plainError(textOr(why, none)));
+// would break its closing tag). Only a path that starts a word is cut (/Users/..., ~/...), so a name in the repo such
+// as docs/SYSTEM.md still says which file to fix (L720 n2); a cut for length says so.
+const LOCAL_PATH = /(?<![\w.~-])~?\/[^\s'"`:,;()[\]]+/g;
+const REASON_CAP = 200;
+export function pushReason(why) {
+  const s = String(why).replace(LOCAL_PATH, '<path>');
+  return s.length > REASON_CAP ? `${s.slice(0, REASON_CAP)}…[cut ${s.length - REASON_CAP} characters]` : s;
+}
+const pushSaid = (why, none) => shownName(pushReason(textOr(why, none)));
 // A Record reason: the Record's own words, but they can name its files.
 const cut = (why) => plainError(why ?? 'no answer');
 
@@ -145,9 +154,18 @@ function pushedBefore(rec, card, sha) {
   } catch { return true; }
 }
 
+// A card's state as Joe reads it (L720 c1): never the Record's own name for it.
+const STATE_SAID = Object.freeze({ in_review: 'already in review', failed: 'marked failed' });
+const stateSaid = (s) => STATE_SAID[s] ?? `${String(s).replace(/_/g, ' ')} now`;
+
 async function routeOne({ rec, pushProposal, id, doc, now, host }) {
   const { product, card, run } = doc;
   const read = () => rec.read('card', card);
+  // A card lost after these bytes reached GitHub is a stop, as a refusal is (L720 n1): the card's branch holds them,
+  // so the card is left as it is, the names stay closed, and Joe is told where the bytes went.
+  const lost = (why) => (pushedBefore(rec, card, doc.sha256)
+    ? { stopped: `${why}, but these bytes already reached GitHub on the card's branch, so the proposal stays open` }
+    : { lost: why });
   let c = read();
   if (!c?.doc || c.corrupt) return { stopped: `card ${card} could not be read` };
   if (lapsedRun(c.doc)) {
@@ -158,13 +176,13 @@ async function routeOne({ rec, pushProposal, id, doc, now, host }) {
   // Handed in already, by this route (its launch record is its own): a hand-in whose answer was lost is not a loss.
   if (c.doc.state === 'in_review' && rec.read('launch', run)?.doc) return { sent: true };
   if (c.doc.state === 'cancelled') return { over: 'card is cancelled' };
-  if (!ROUTE_STATES.includes(c.doc.state)) return { lost: `the card is ${c.doc.state} now` };
+  if (!ROUTE_STATES.includes(c.doc.state)) return lost(`the card is ${stateSaid(c.doc.state)}`);
   if (c.doc.state === 'ready') {
     // Its claim lapsed while the push could not finish. The Record's ready check runs again here.
     const w = rec.write({ actor: 'dispatcher', entity: 'card', id: card, expectRev: c.rev, doc: { ...c.doc, state: 'claimed', claim: claimFor(run, host) }, kind: 'claim' });
     if (!w.ok) return { stopped: `the card could not be taken again (${cut(w.reason)})` };
     c = read();
-  } else if (c.doc.claim?.claim_id !== run) return { lost: 'someone else holds the card' };
+  } else if (c.doc.claim?.claim_id !== run) return lost('someone else holds the card');
   beat(rec, run, now);
   if (c.doc.state === 'claimed') {
     let r;
