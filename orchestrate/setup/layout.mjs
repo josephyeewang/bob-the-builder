@@ -101,6 +101,14 @@ export function proposalRows(cfg) {
   ];
 }
 
+/** Folders the table below makes that the review runner's config also names (review-config.mjs): one definition each. */
+export const keysPath = (cfg) => join(cfg.base, 'keys');
+export const privatePath = (cfg) => join(cfg.base, 'private');
+export const bobPath = (cfg) => join(cfg.base, 'bob');
+export const reviewCopiesPath = (cfg) => join(cfg.base, 'review-copies');
+export const workerCopiesPath = (cfg) => join(cfg.base, 'worker-copies');
+export const outboxRootPath = (cfg) => join(cfg.base, 'outboxes');
+
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
@@ -133,8 +141,8 @@ export function folderTable(cfg) {
     [cfg.base, 'root', 0o755, 'the base: root\'s, so the folders under it cannot be renamed away'],
     [p('home'), 'root', 0o755, 'the three users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
-    [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
-    [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
+    [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
+    [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
     [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
     [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
@@ -144,17 +152,17 @@ export function folderTable(cfg) {
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
-    [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
+    [bobPath(cfg), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
     [p('review'), 'review', 0o755, 'the review runner\'s folder (its subfolders are made by the runner)'],
-    [p('review-copies'), 'review', 0o755, 'the review sessions\' copies of the code under review'],
-    [p('worker-copies'), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies)'],
+    [reviewCopiesPath(cfg), 'review', 0o755, 'the review sessions\' copies of the code under review'],
+    [workerCopiesPath(cfg), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies)'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
-    [p('outboxes'), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
-    ...REVIEW_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
-    ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
+    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
+    ...REVIEW_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
+    ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
