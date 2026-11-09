@@ -59,7 +59,10 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes? }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, ownerTaps? }
+ * ownerTaps: the owner's "review again" taps folder (the runner's `ownerTaps`). Needed by the Front Door, refused without
+ * (L724 (4), R-0b-164): it runs as the owner, who can write that folder, and only the owner's own tap handler may; so
+ * its tools get Edit and Write denied there, and its shell a write-deny.
  * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
  * `<compactKind>-compact-` kind (all but the worker and the Front Door), refused without: their note never goes in the outbox.
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
@@ -115,6 +118,13 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
   if (paths.bobFolder) deny.push(`Edit(/${abs(paths.bobFolder)}/**)`, `Write(/${abs(paths.bobFolder)}/**)`);
   const walls = [];
+  if (role === 'front_door') {
+    const t = paths.ownerTaps;
+    if (typeof t !== 'string' || !t.startsWith('/') || /[^A-Za-z0-9._/-]/.test(t) || t.split('/').includes('..') || !t.replace(/\/+$/, '')) return refuse('the Front Door\'s settings need the owner\'s taps folder (ownerTaps) as a plain absolute path');
+    const tt = t.replace(/\/+$/, '');
+    deny.push(`Edit(/${abs(tt)}/**)`, `Write(/${abs(tt)}/**)`);
+    walls.push(tt, `${tt}/**`);
+  }
   if (REVIEW_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
     for (const k of REVIEW_WALLS) {

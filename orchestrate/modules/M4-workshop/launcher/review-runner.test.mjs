@@ -1083,6 +1083,8 @@ test('L71 C1 planted: a tap is read once, with no cap on keys, and the status li
   let r = await runnerPass(w.ctx);
   assert.deepEqual(r.setAside.map((x) => x.session_id), ['S-1']);
   assert.deepEqual(w.status().taps_read, ['k-S-1']);
+  // L724 (4): the read the Front Door's tap handler uses passes the list on, as strings.
+  assert.deepEqual(readReviewStatus({ file: join(w.root, 'status.json'), now: T0, uid: ME }).taps_read, ['k-S-1']);
   r = await runnerPass(w.ctx);
   assert.deepEqual(r.refused, [], 'read once: the same tap says nothing again');
   // 600 taps at once (more than the old cap of 500): each is read once, and none again.
@@ -1096,6 +1098,22 @@ test('L71 C1 planted: a tap is read once, with no cap on keys, and the status li
   listing = [];
   await runnerPass(w.ctx);
   assert.deepEqual(w.status().taps_read, []);
+  assert.deepEqual(readReviewStatus({ file: join(w.root, 'status.json'), now: T0, uid: ME }).taps_read, []);
+});
+
+test('L724 (4) planted: readReviewStatus gives taps_read as a list of strings, whatever the file holds', async () => {
+  const w = await ready();
+  const file = join(w.root, 'status.json');
+  const base = JSON.parse(readFileSync(file, 'utf8'));
+  const read = (taps) => {
+    const s = { ...base, written_at: new Date(T0).toISOString() };
+    if (taps === undefined) delete s.taps_read; else s.taps_read = taps;
+    writeFileSync(file, JSON.stringify(s));
+    return readReviewStatus({ file, now: T0, uid: ME }).taps_read;
+  };
+  assert.deepEqual(read(['a:1:x', 'b:2:y']), ['a:1:x', 'b:2:y']);
+  assert.deepEqual(read(['a:1:x', 7, null, { k: 1 }, ['b'], 'c:3:z']), ['a:1:x', 'c:3:z'], 'a non-string entry is left out');
+  for (const bad of [undefined, null, 'a:1:x', 5, { a: 1 }]) assert.deepEqual(read(bad), [], `no list: ${JSON.stringify(bad)}`);
 });
 
 // C3: every kind of line break starts a quoted line.

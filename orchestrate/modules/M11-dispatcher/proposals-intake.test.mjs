@@ -1470,7 +1470,7 @@ test('plant L279: the bytes check failing closed: not readable or not recorded, 
 // ---- the read-deny wall (render-settings.mjs, L78 n5) ----
 
 const PATHS = (proposals) => ({
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', notes: '/w/notes',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals },
   bobFolder: '/w/bob', mirror: '/w/mirror.git', reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 });

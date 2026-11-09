@@ -920,7 +920,9 @@ const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card
 /**
  * The Dispatcher's read of status.json (for `hasReviewer`): the list of review sessions running, or a throw when the
  * status is missing, unreadable, not the runner's shape or older than 3 minutes (L63: never read as "none").
- * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error }
+ * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, installed_commit, taps_read }
+ * taps_read: the keys of the owner's taps the runner has read, as a list of strings, for the Front Door's tap handler to
+ * remove (L724 (4)); an entry that is not a string is left out, and a status with no list gives [] (nothing removed).
  */
 export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   // The owner check is never skipped: a status anyone could write would say what runs.
@@ -943,5 +945,6 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
   return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
-    installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null };
+    installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null,
+    taps_read: Array.isArray(s.taps_read) ? s.taps_read.filter((k) => typeof k === 'string') : [] };
 }
