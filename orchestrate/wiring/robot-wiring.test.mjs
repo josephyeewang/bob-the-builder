@@ -550,12 +550,18 @@ test('L600 PR 1: without the App keys deliver is not wired; some but not all, or
 
 test('L600 PR 1: robotToken mints on the first ask only, keeps that one answer, and never rejects', async () => {
   const c = { keyDir: '/k', ownerUid: 501, ...APP };
-  let n = 0;
-  const t = robotToken(c, { mint: async (o) => { n += 1; assert.equal(o.scriptsUid, 501); assert.equal(o.installationId, 678); return { ok: true, token: 'x' }; } });
+  // What the mint is asked is kept and checked out here: an assert inside the mint would be swallowed, since robotToken
+  // never rejects. The process runs as a uid that is not the owner's, so the two cannot be swapped unseen (plant P8).
+  let n = 0; let asked = null;
+  const t = robotToken(c, { uid: 7001, mint: async (o) => { n += 1; asked = o; return { ok: true, token: 'x' }; } });
   assert.equal(n, 0, 'nothing is minted before it is asked for');
   const [a, b] = await Promise.all([t(), t()]);
   assert.equal(await t(), a); assert.equal(a, b);
+  assert.deepEqual(a, { ok: true, token: 'x' });
   assert.equal(n, 1);
+  assert.equal(asked.uid, 7001, 'the mint is asked as this process');
+  assert.equal(asked.scriptsUid, 501, 'with the config\'s owner as the one who owns the key folder');
+  assert.equal(asked.installationId, 678);
   let m = 0;
   const bad = robotToken(c, { mint: () => { m += 1; throw new Error('boom'); } });
   assert.deepEqual(await bad(), { ok: false, reason: 'token mint failed: boom' });
@@ -590,6 +596,12 @@ test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints onl
   const ch = robotChannel(w.config, { log, fetchFn: gh.fetchFn });
   assert.equal(ch.owner, APP.alertOwner);
   assert.equal(gh.calls.length, 0, 'made no call');
+  // Plant P6: a mint started at once runs a tick later, so the call count above cannot see it. A spy mint and one
+  // turn of the event loop (every pending promise step has run by then) show it was never asked.
+  let asked = 0;
+  assert.ok(robotChannel(w.config, { log, fetchFn: gh.fetchFn, mint: async () => { asked += 1; return { ok: false, reason: 'spy' }; } }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(asked, 0, 'building the channel asks for no mint');
   // What M13 store-stopped.mjs (lane 1, #250) does with it: look for the open issue, then open one.
   const marker = '<!-- orch:store_stopped x -->';
   assert.equal(await ch.gh.findOpen((l) => l === marker), null);
