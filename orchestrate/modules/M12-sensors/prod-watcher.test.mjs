@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from './facts.mjs';
 import { makeAlerts, fakeIssues } from '../M13-ledger/alerts.mjs';
@@ -191,6 +192,44 @@ test('L716 M1: a lost clear does not hold the baseline, and is tried again next 
   assert.equal(t.gh.issues.get(1).closed, true);
   assert.deepEqual(t.writer.get(stateFactId('product 1')).unclear, []);
 });
+
+// #277 r2 m1 (L717): the old value's clear lost two passes running, with a return to that value in between. The return
+// is told once the clear goes through, and the retry never closes the issue of a value that stands.
+for (const closeBetween of [true, false]) {
+  test(`L717 m1: a return to a value whose clear is still lost is told after the clear lands (${closeBetween ? 'Joe closes each issue' : 'nobody closes anything'})`, async () => {
+    const t = setup();
+    const F = 'commandForIgnoringBuildStep';
+    const h = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex').slice(0, 16);   // the watcher's print
+    const ONE = `project:${F}:${h('exit 1')}`;
+    await t.pass();
+    t.v.s.project[F] = 'exit 1';
+    assert.ok(TOLD.includes(raisedFor(await t.pass(), F)[0]?.result));
+    if (closeBetween) ownerClosesAll(t.gh);
+    const realClear = t.alerts.clear; let lose = true;
+    t.alerts.clear = async (a) => (lose && a.key.endsWith(`|${ONE}`) ? false : realClear(a));
+    // Put back: the clear of "exit 1" is lost.
+    t.v.s.project[F] = 'node scripts/skip.mjs';
+    await t.pass();
+    if (closeBetween) ownerClosesAll(t.gh);
+    // Changed to "exit 1" again, and the retried clear is lost again: nothing can be told yet, and the baseline holds.
+    t.v.s.project[F] = 'exit 1';
+    await t.pass();
+    const fact = t.writer.get(stateFactId('product 1'));
+    assert.equal(fact.unclear.length, 1);
+    assert.equal(fact.settings[F], h('node scripts/skip.mjs'), 'the old print is kept while the clear is lost');
+    // The clear goes through: the same pass tells the return as new, and the issue that stands is open.
+    lose = false;
+    const out = await t.pass();
+    const one = out.filter((o) => o.subject === ONE).map((o) => o.result);
+    assert.equal(one.length, 2, JSON.stringify(out));
+    assert.equal(one[0], 'cleared');
+    assert.ok(TOLD.includes(one[1]), `the return is told: ${one[1]}`);
+    assert.deepEqual(t.writer.get(stateFactId('product 1')).unclear, []);
+    assert.equal(t.writer.get(stateFactId('product 1')).settings[F], h('exit 1'));
+    const next = await t.pass();
+    assert.deepEqual(next.filter((o) => o.subject === ONE), [], 'told once, and never closed while it stands');
+  });
+}
 
 const sysOff = (out) => out.filter((o) => o.kind === 'system-vars-off');
 test('L716 Minor 1, 2: the box off, not reported, or "false" at the first pass is told, with its own words', async () => {
