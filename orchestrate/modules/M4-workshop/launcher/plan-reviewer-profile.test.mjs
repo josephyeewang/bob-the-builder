@@ -4,10 +4,9 @@
 // outbox, which the review runner reads when the session ends (review-runner.mjs endPlan). It has no outbox kinds, so
 // it can hand in no verdict, report or any other file M9 takes in. The plain-files hook, with the arguments exactly as
 // renderRoleSettings gives them, is what refuses every other write.
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES, PLAN_ANSWER_NAME, OUTBOX_FILE, checkProfile, hasShell } from './role-profiles.mjs';
 import { PLAN_ANSWER_NAME as RUNNER_ANSWER } from './review-runner.mjs';
@@ -16,11 +15,14 @@ import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-na
 import { decide, OUTBOX_ONLY_ROLES } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
 import { PLAN_REVIEW_ROLE } from '../../../shared/review-roles.mjs';
+import { removeAll, tempDir } from '../../../shared/test-tmp.mjs';
+
+after(removeAll);
 
 const ROLE = PLAN_REVIEW_ROLE;
 
 function place() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'plan-rev-')));
+  const root = realpathSync(tempDir('m4-plan-rev-'));
   const outboxRoot = join(root, 'outbox');
   const outbox = join(outboxRoot, ROLE, 'S-1');
   const runnerRoot = join(root, 'review');
