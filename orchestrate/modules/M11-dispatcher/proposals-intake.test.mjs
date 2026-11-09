@@ -16,7 +16,7 @@ import { FAKE } from '../M12-sensors/fakes.mjs';
 import { recWith, seed, writeLog, queueFor } from './fixtures.test-helper.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
-import { createDocsCheck } from './proposal-route.mjs';
+import { createDocsCheck, createToReview, proposalRoutePass, ROUTE_FACT } from './proposal-route.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { renderRoleSettings } from '../M4-workshop/launcher/render-settings.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
@@ -749,12 +749,86 @@ test('L702 minor 4: a record write the Record refuses with a local path reaches 
   }
 });
 
+test('L549: a refusal from toReview is looked at again once the card changes, and not before', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'p');
+  writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b');
+  let answers = 0;
+  const toReview = () => { answers += 1; return answers === 1 ? { ok: false, reason: 'the card needs a go' } : { ok: true }; };
+  const rules = rulesFor(w.dirs, { a: 'second' });
+  assert.match(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').refused, /needs a go/);
+  await w.pass({ rules, toReview });
+  assert.equal(answers, 1, 'the same card: not asked again');
+  const c = w.rec.read('card', 'C-1');
+  assert.equal(w.rec.write({ actor: 'workshop', entity: 'card', id: 'C-1', expectRev: c.rev, doc: { ...c.doc, head: 'a'.repeat(40) } }).ok, true);
+  assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+  assert.equal(answers, 2);
+});
+
+test('L549: new bytes under a used proposal name are taken only once the push refused that proposal for good', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'p');
+  writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b');
+  const sent = [];
+  const toReview = (x) => { sent.push(x.bundle.sha256); return { ok: true }; };
+  const rules = rulesFor(w.dirs, { a: 'second' });
+  assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+  writeFileSync(join(w.dirs.a, 'proposal-C-1.md'), 'p2');
+  writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b2');
+  assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').refused, 'the same name with new content');
+  assert.equal(sent.length, 1);
+  seed(w.rec, 'fact', ROUTE_FACT('C-1'), { ended: 'refused', reason: 'no' });
+  assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+  assert.equal(sent.length, 2);
+  assert.notEqual(sent[0], sent[1], 'the new bundle, not the old one');
+});
+
+// L718 M1: a route that lost its card ends 'lost', told; its bytes went nowhere, so its names take new bytes. A cancel
+// ('over') and one sent to review keep them.
+for (const [ended, takes] of [['lost', true], ['over', false], ['sent', false]]) {
+  test(`L718 M1: new bytes under a used proposal name after a route ended ${ended} are ${takes ? 'taken' : 'refused'}`, async () => {
+    const w = world();
+    put(w, 'proposal-C-1.md', 'p');
+    writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b');
+    const sent = [];
+    const toReview = (x) => { sent.push(x.bundle.sha256); return { ok: true }; };
+    const rules = rulesFor(w.dirs, { a: 'second' });
+    assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+    writeFileSync(join(w.dirs.a, 'proposal-C-1.md'), 'p2');
+    writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b2');
+    seed(w.rec, 'fact', ROUTE_FACT('C-1'), { ended, reason: 'someone else holds the card' });
+    const row = one(await w.pass({ rules, toReview }), 'proposal-C-1.md');
+    if (takes) { assert.equal(row.applied, true); assert.equal(sent.length, 2); } else { assert.equal(row.refused, 'the same name with new content'); assert.equal(sent.length, 1); }
+  });
+}
+
+test('L549: end to end, the intake takes the card at the revision it checked and the route pass hands it to review', async () => {
+  const w = world();
+  put(w, 'proposal-C-1.md', 'p');
+  writeFileSync(join(w.dirs.a, 'bundle-C-1.bundle'), 'b');
+  const toReview = createToReview({ host: 'mac-a', now: () => NOW });
+  const rules = rulesFor(w.dirs, { a: 'second' });
+  assert.equal(one(await w.pass({ rules, toReview }), 'proposal-C-1.md').applied, true);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'claimed');
+  const tip = 'b'.repeat(40);
+  const pushProposal = async ({ card }) => {
+    const c = w.rec.read('card', card);
+    const r = w.rec.write({ actor: 'workshop', entity: 'card', id: card, expectRev: c.rev, doc: { ...c.doc, head: tip }, kind: 'push_head' });
+    assert.equal(r.ok, true);
+    return { ok: true, tip };
+  };
+  const out = await proposalRoutePass({ rec: w.rec, pushProposal, alert: w.base.alert, now: NOW, host: 'mac-a' });
+  assert.deepEqual(out, [['C-1', 'sent to review']]);
+  assert.equal(w.rec.read('card', 'C-1').doc.state, 'in_review');
+  assert.equal(w.rec.read('card', 'C-1').doc.head, tip);
+});
+
 test('at the second cutover a proposal goes to review once; with no route to review it is refused', async () => {
   const w = world();
   put(w, 'proposal-C-1.md', 'change');
   put(w, 'bundle-C-1.bundle', 'bytes');
   const rules = rulesFor(w.dirs, { a: 'second' });
-  assert.match(one(await w.pass({ rules }), 'proposal-C-1.md').refused, /route to review is not built yet/);
+  assert.match(one(await w.pass({ rules }), 'proposal-C-1.md').refused, /route to review is not wired in yet/);
   const w2 = world();
   put(w2, 'proposal-C-1.md', 'change');
   put(w2, 'bundle-C-1.bundle', 'bytes');
