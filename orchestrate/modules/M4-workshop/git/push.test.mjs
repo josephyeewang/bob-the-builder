@@ -20,13 +20,15 @@ import { refusedPath } from './push-refusals.mjs';
 import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
-import { startGate, factId } from './start-gate.mjs';
+import { startGate, factId, vercelFact } from './start-gate.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { timeLimits } from '../../M11-dispatcher/merges.mjs';
 import { rulesWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeRules, makeRules, allow, deny } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
 import { parsePolicy } from '../../M10-rules/policy.mjs';
+import { rulesFromText } from '../../M10-rules/from-text.mjs';
+import { FIRST } from '../../M10-rules/first-cutover.test-helper.mjs';
 import { fileURLToPath } from 'node:url';
 import { pushWorld, makeFakeScanner, makeFakeGit, realEngine, WF, PRODUCT, REPO } from './push-world.test-helper.mjs';
 
@@ -565,12 +567,13 @@ test('inputs come from the record only; the branch, product and rules are checke
   await w.commit('work', (c) => writeFileSync(join(c, 'a.txt'), 'a\n'));
   await w.bundle();
   await refusedAndUntouched(w, /not allow/, { rules: fakeRules({ answers: { push_branch: deny('frozen') }, values: w.values }) });
-  await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) });
-  // The rules hand the flag back as the file's text; anything but an exact true is not onboarded, a missing key too.
-  for (const onboarded of ['yes', 'TRUE', 1]) await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': onboarded } }) });
-  { const { 'product.onboarded': _, ...unset } = w.values; await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: unset }) }); }
+  // L568: the one "on" switch is onboarding.state, word for word; anything else is not onboarded, a missing key too, and
+  // the old product.onboarded line turns nothing on.
+  for (const state of ['paused', 'Active', 'active ', true, 'yes']) await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'onboarding.state': state } }) });
+  { const { 'onboarding.state': _, ...unset } = w.values; await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: unset }) }); }
+  await refusedAndUntouched(w, /not onboarded/, { rules: fakeRules({ answers: w.answers, values: { ...w.values, 'onboarding.state': undefined, 'product.onboarded': true } }) });
   for (const repo of ['../x', 'a/b/c', 'evil.com:x/y', 'a b/c', 'owner/..']) {
-    const r = await createPushScript({ ...w.ports, testRemote: undefined, rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.repo': repo } }) })('S-1');
+    const r = await createPushScript({ ...w.ports, testRemote: undefined, productPlace: () => ({ repo, mirror: w.mirror }) })('S-1');
     assert.equal(r.ok, false, repo); assert.match(r.reason, /valid GitHub repo/);
   }
   assert.equal(githubUrl(REPO), `https://github.com/${REPO}.git`);
@@ -1296,7 +1299,7 @@ test('L325 m2: a refusal that may pass by itself says retry: true and files that
     ['a robot key that throws', async () => ({ getRobotToken: async () => { throw new Error('no'); } }), /^no robot key/],
     ['GitHub unreadable', async (w) => ({ testRemote: () => join(w.root, 'nowhere.git') }), /^could not read GitHub$/],
     ['fetch failed', async (w) => { await gitOk(['update-ref', '-d', 'refs/heads/main'], { gitDir: w.gh }); return {}; }, /^could not fetch main from GitHub$/],
-    ['the mirror', async (w) => { w.values['product.mirror'] = join(w.root, 'no-mirror'); return {}; }, /^mirror: /],
+    ['the mirror', async (w) => { return { productPlace: () => ({ repo: REPO, mirror: join(w.root, 'no-mirror') }) }; }, /^mirror: /],
     ['a mirror that fails its own check', async (w) => { mkdirSync(join(w.mirror, 'hooks'), { recursive: true }); writeFileSync(join(w.mirror, 'hooks', 'post-update'), '#!/bin/sh\n'); return {}; }, /^mirror: mirror has hooks: post-update$/],
     ['the start gate', async () => ({ workflowRule: async () => ({ ok: false, reason: 'no rule' }) }), /^the start gate is shut: /],
     ['GitHub refused', async (w) => { const h = join(w.gh, 'hooks', 'pre-receive'); writeFileSync(h, '#!/bin/sh\nexit 1\n'); chmodSync(h, 0o755); return {}; }, /^GitHub refused the push$/],
@@ -1329,12 +1332,16 @@ test('L669 M1: a fault outside the bundle (the Record, the rules, the folder, th
   const cases = [
     ['the Record throwing', (w) => ({ record: view(w, (e, i) => { if (e === 'fact') throw new Error(`EIO: ${w.root}/record/x.json`); return w.record.read(e, i); }) }), /^the push script failed: EIO: <path>/],
     ['the card not there this once', (w) => ({ record: view(w, (e, i) => (e === 'card' ? null : w.record.read(e, i))) }), /^card C-1 is not in the Record$/],
-    ['not onboarded yet', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.onboarded': false } }) }), /not onboarded/],
+    ['not onboarded yet', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'onboarding.state': 'paused' } }) }), /not onboarded/],
     ['no proposals folder in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'proposals.outbox': undefined } }) }), /no proposals folder in the rules/],
     ['the outbox gone', (w) => { rmSync(w.proposals, { recursive: true, force: true }); return {}; }, /^the outbox is missing$/],
-    // L680 (plants R5, R6): the product's setup is fixed in the rules, and the same bytes go on.
-    ['no repo in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.repo': undefined } }) }), /no valid GitHub repo in the rules/],
-    ['no mirror in the rules', (w) => ({ rules: fakeRules({ answers: w.answers, values: { ...w.values, 'product.mirror': undefined } }) }), /no mirror in the rules/],
+    // L680 (plants R5, R6): the product's setup is fixed on this Mac (L568), and the same bytes go on.
+    ['no repo on this Mac', (w) => ({ productPlace: () => ({ mirror: w.mirror }) }), /no valid GitHub repo on this Mac/],
+    ['no mirror on this Mac', (w) => ({ productPlace: () => ({ repo: REPO }) }), /no mirror on this Mac/],
+    ['no place on this Mac', () => ({ productPlace: () => null }), /no valid GitHub repo on this Mac/],
+    // L719 m2 (plant C1): a place lookup that throws (a products.json read error) is a wait, never a final no.
+    ['the place lookup throwing', (w) => ({ productPlace: () => { throw new Error(`EIO: ${w.root}/products.json`); } }), /^the push script failed: EIO: <path>/],
+    ['an async place lookup rejecting', (w) => ({ productPlace: async () => { throw new Error(`EIO: ${w.root}/products.json`); } }), /^the push script failed: EIO: <path>/],
   ];
   for (const [name, set, re] of cases) {
     const w = await world();
@@ -2160,4 +2167,83 @@ test('L387: a refused head write leaves the push pushed and says so in its fact;
   assert.equal(again.ok, true, again.reason);
   assert.equal(t.read('card', 'C-1').doc.head, again.tip);
   assert.equal(t.read('fact', 'push.C-1.a1').doc.head_refused, undefined, 'a later good write clears the note');
+});
+
+// L568: a product's place and the outside check's workflow come from the wiring; onboarded is the one "on" switch.
+test('L568: the first-cutover rules file alone says onboarded, as text the push reads', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  const real = rulesFromText({ [PRODUCT]: FIRST });
+  const rules = { ...w.ports.rules, get: (k, o) => (k === 'onboarding.state' ? real.get(k, o) : w.ports.rules.get(k, o)) };
+  const r = await createPushScript({ ...w.ports, rules })('S-1');
+  assert.equal(r.ok, true, r.reason);
+});
+
+test('L568: a push script that does not know where a product lives is never made, and a Mac with no place for it refuses', async () => {
+  const w = await world();
+  const { productPlace, outsideWorkflow, ...rest } = w.ports;
+  assert.throws(() => createPushScript(rest), /productPlace must be a function/);
+  assert.throws(() => createPushScript({ ...rest, productPlace }), /outsideWorkflow must name/);
+  assert.throws(() => createPushScript({ ...rest, productPlace, outsideWorkflow: '' }), /outsideWorkflow must name/);
+  await refusedAndUntouched(w, /valid GitHub repo on this Mac/, { productPlace: () => null });
+  await refusedAndUntouched(w, /no mirror on this Mac/, { productPlace: () => ({ repo: REPO, mirror: 'relative' }) });
+  await refusedAndUntouched(w, /place broke/, { productPlace: () => { throw new Error('place broke'); } });
+});
+
+// L719 m1 (plant C2): the push asks for the place of the session's own product, and lands on that product's repo only.
+test('L719: the push asks for its own product\'s place, not another\'s, and pushes to that repo', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  const asked = []; const to = [];
+  const places = { [PRODUCT]: { repo: REPO, mirror: w.mirror }, other: { repo: 'owner/other-repo', mirror: join(w.root, 'other-mirror') } };
+  const productPlace = (p) => { asked.push(p); return places[p] ?? null; };
+  const testRemote = (repo) => { to.push(repo); return w.gh; };
+  const r = await createPushScript({ ...w.ports, productPlace, testRemote })('S-1');
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual([...new Set(asked)], [PRODUCT]);
+  assert.ok(to.length > 0 && to.every((x) => x === REPO), to.join(','));
+  // Asked with any other key, the default world's place port has none: the push waits and nothing is pushed.
+  const w2 = await world();
+  assert.equal(w2.ports.productPlace('C-1'), null);
+  assert.equal(w2.ports.productPlace('other'), null);
+});
+
+// L719 m3: the wiring may read products.json asynchronously; an async place is awaited, and the push goes on.
+test('L719: an async productPlace is awaited, and the push lands', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  const r = await createPushScript({ ...w.ports, productPlace: async (p) => w.ports.productPlace(p) })('S-1');
+  assert.equal(r.ok, true, r.reason);
+  assert.ok((await w.ghRefs()).includes('refs/heads/card/c-1'));
+});
+
+test('L568: the start gate is given the wiring\'s workflow, not a rules line', async () => {
+  const w = await world();
+  await w.commit('two', (c) => writeFileSync(join(c, 'a.txt'), '2\n'));
+  await w.bundle();
+  await refusedAndUntouched(w, /pinned workflow/, { outsideWorkflow: '.github/workflows/another.yml' });
+  w.values['outside_check.workflow'] = '.github/workflows/another.yml';
+  const r = await createPushScript(w.ports)('S-1');
+  assert.equal(r.ok, true, r.reason);
+});
+
+test('L570: no Vercel project in the rules is said as that, for a fact naming none too; a real mismatch keeps its reason', () => {
+  const now = Date.parse('2026-11-05T12:00:00Z');
+  const doc = (vercel_project, result) => ({ product: PRODUCT, vercel_project, read_at: new Date(now - 1000).toISOString(), result });
+  const at = (d) => ({ read: () => ({ doc: d }) });
+  const call = (record, vercelProject) => vercelFact({ record, kind: 'vercel_skip', product: PRODUCT, vercelProject, now });
+  for (const missing of [undefined, null, '', 7]) {
+    for (const d of [doc(null, false), doc(null, true), doc(undefined, true)]) {
+      const r = call(at(d), missing);
+      assert.equal(r.ok, false, String(missing));
+      assert.match(r.reason, /rules name no Vercel project/);
+    }
+    assert.match(call({ read: () => null }, missing).reason, /rules name no Vercel project/);
+  }
+  assert.match(call(at(doc('prj_2', true)), 'prj_1').reason, /for another project/);
+  assert.match(call(at(doc(null, false)), 'prj_1').reason, /for another project/);
+  assert.equal(call(at(doc('prj_1', true)), 'prj_1').ok, true);
 });
