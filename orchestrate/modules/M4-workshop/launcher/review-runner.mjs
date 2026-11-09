@@ -63,6 +63,7 @@ import { SESSION_ID } from '../../../shared/record.mjs';
 import { pastTime, STILL_WAITING_MS } from '../../../shared/still-waiting.mjs';
 import { ASIDE_FOLDER, ENDED_FOLDER, MAX_OUTBOX_BYTES, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
+import { PLAN_ANSWER_NAME } from './role-profiles.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 import { DIFF_NAME } from '../../M5-review-audit/review-package.mjs';
 
@@ -107,7 +108,8 @@ const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
 const PLAN_REQUEST_KEYS = ['card', 'fingerprint', 'request_id', 'role'];
 // In a plan reviewer's package: the plan file as intake checked it. In its outbox: its one-line answer.
 export const PLAN_FILE_NAME = 'plan.txt';
-export const PLAN_ANSWER_NAME = 'answer.txt';
+// The answer's name is the plan reviewer's profile's one outbox file (role-profiles.mjs), so the hook and the runner agree.
+export { PLAN_ANSWER_NAME };
 export const MAX_PLAN_ANSWER_BYTES = 4096;
 // The plan file is an outbox file intake took, so it is never bigger than intake reads.
 export const MAX_PLAN_BYTES = MAX_OUTBOX_BYTES;
