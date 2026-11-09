@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
@@ -138,13 +138,17 @@ test('R-0b-164 planted: one real tap starts exactly one new review; the tap is r
 test('R-0b-164: a tap written again is a new tap, and a tap the runner has not read is never cleared', async () => {
   const w = await silentS1();
   assert.equal(writeTap({ dir: w.taps, ownerUid: ME, sessionId: 'S-1', offers: offersOf(w) }).ok, true);
+  const SAME = 1_800_000_000;   // both taps get this file time (whole seconds), so only their bytes can differ
+  utimesSync(join(w.taps, 'S-1.json'), SAME, SAME);
   const k1 = readJoeTaps({ dir: w.taps, ownerUid: ME })[0].key;
   assert.deepEqual(clearReadTaps({ dir: w.taps, ownerUid: ME, tapsRead: [] }), { removed: [] });
   assert.deepEqual(clearReadTaps({ dir: w.taps, ownerUid: ME, tapsRead: undefined }), { removed: [], error: 'the status gives no list of taps read' });
   assert.ok(existsSync(join(w.taps, 'S-1.json')));
-  // Written again in the same millisecond: new bytes, so a new key, and the old read key does not remove it.
+  // Written again with the same file time: new bytes, so a new key, and the old read key does not remove it.
   const r = writeTap({ dir: w.taps, ownerUid: ME, sessionId: 'S-1', offers: offersOf(w), now: () => T0, rand: () => 'second' });
   assert.equal(r.ok, true, r.reason);
+  utimesSync(r.file, SAME, SAME);
+  assert.equal(statSync(r.file).mtimeMs, SAME * 1000);
   const k2 = readJoeTaps({ dir: w.taps, ownerUid: ME })[0].key;
   assert.notEqual(k2, k1);
   assert.deepEqual(clearReadTaps({ dir: w.taps, ownerUid: ME, tapsRead: [k1] }), { removed: [] });
