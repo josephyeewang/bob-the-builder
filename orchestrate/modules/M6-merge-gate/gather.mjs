@@ -191,7 +191,9 @@ export async function threads(gh, owner, repo, pr) {
 
 // A row file at the change's head. 404: the row isn't there (null, a reason for the go check). Any other status but
 // 200 is a read that went wrong, thrown for the go check's attempt to class (L205), never read as "no row".
-async function defaultReadRow(gh, base, id, head) {
+// Also the Dispatcher's planRows port (wiring/review-ports.mjs, A3a): one reader of a row file, so the go asked and the
+// go checked read a row the same way. → the parsed row, or null when it is missing or can't be parsed; a failed read throws.
+export async function readRowAt(gh, base, id, head) {
   let j;
   try { j = await json(gh, `${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
   if (j?.encoding !== 'base64') return null;
@@ -361,7 +363,7 @@ export async function gatherFacts(ctx, merge) {
   if (skipped.length) f.reviewsSkipped = skipped.map((x) => `${x.name}: ${x.reason}`);
 
   // The owner's Approve (refusals 8, 13, 14): needed per M2, and standing on GitHub now.
-  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };
+  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => false), gh, owner, repo };
   const need = approveNeeded({ risky, needsJoe: card.doc.needs_joe === true || card.doc.approval_required === true, tier: f.tier, module: card.doc.module }, rules, product);
   const ask = askStore(record).asks().filter((a) => a.doc.card === card.id && activeKind(a.doc.kind)?.merge_approve && a.doc.state === 'answered').sort((a, b) => String(b.doc.raised_at).localeCompare(String(a.doc.raised_at)))[0];
   // A check that could not read GitHub (M2's `unreadable`, or a watched read that failed inside M10's carry-over) or
@@ -384,7 +386,7 @@ export async function gatherFacts(ctx, merge) {
     if (!go) return { ok: false, reasons: [`no go for ${rootId}`] };
     const ids = new Set(Object.keys(go.doc.rows ?? {}));
     for (const x of f.files) for (const p of [x.path, x.previous_path]) { const m = typeof p === 'string' ? ROW_FILE.exec(p) : null; if (m) ids.add(m[1]); }
-    const readRow = ctx.readRow ?? ((id, h) => defaultReadRow(gh, base, id, h));
+    const readRow = ctx.readRow ?? ((id, h) => readRowAt(gh, base, id, h));
     const headRows = {};
     for (const id of [...ids].sort()) headRows[id] = await readRow(id, head);
     // M2 marks a check that could not read GitHub `unreadable` (L205): thrown here, so the go is unknown (f.go null,

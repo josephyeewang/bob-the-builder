@@ -36,7 +36,9 @@ The launch check (audit m3): the tracker's half is built (`ActivityTracker.begin
 
 ## The push script and git safety (0b-4: R-0b-45, 46, 47)
 
-Files: `git/push.mjs` (the push script), `git/mirror-refresh.mjs` (the gate's fetch of main and a caught-up card branch into the mirror before a short re-audit: the runner's user only reads the mirror and holds no robot key; L513, L521), `git/binary-files.mjs` (which files may be pushed without being read as text), `git/push-refusals.mjs` (the one list of refused paths; M10 imports it, review m4), `git/gitleaks.mjs` (the secret scan with the scripts' own settings), `git/start-gate.mjs`, `git/save-work.mjs`, `git/safe-git.mjs` (the only file that starts git), and `launcher/worker-copy.mjs` (fresh copy and restart from the mirror).
+`required-keys.mjs` lists the rules keys the module reads, for M10's first-cutover fit check (L601, L612: only `product.vercel_project` is required of the rules file); its test scans every non-test file here.
+
+Files: `git/push.mjs` (the push script), `git/mirror-refresh.mjs` (the gate's fetch of main and a caught-up card branch into the mirror before a short re-audit: the runner's user only reads the mirror and holds no robot key; L513, L521), `launcher/proposal-wall.mjs` (every product's proposals folder, for the read-deny wall), `git/binary-files.mjs` (which files may be pushed without being read as text), `git/push-refusals.mjs` (the one list of refused paths; M10 imports it, review m4), `git/gitleaks.mjs` (the secret scan with the scripts' own settings), `git/start-gate.mjs`, `git/save-work.mjs`, `git/safe-git.mjs` (the only file that starts git), and `launcher/worker-copy.mjs` (fresh copy and restart from the mirror).
 
 | Item | Kind | What could go wrong | Who decides or checks | When |
 |---|---|---|---|---|

@@ -15,7 +15,8 @@ import { researchHandler, RESEARCH_CARD } from '../M11-dispatcher/research-intak
 import { fenceFor } from '../M11-dispatcher/proposals-intake.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
-import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine } from './research-ask.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine, safeAlert } from './research-ask.mjs';
 
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
 const FAKE_KEY = ['sk', '_live_', 'A1b2C3d4E5f6G7h8I9j0K1l2'].join(''); // planted fake, never a real key
@@ -199,3 +200,11 @@ test('audit r1 M-1: a research ask handed in on the real path (hook, intake) rea
     assert.equal(r.opened.length, 1, JSON.stringify(r.refused));
     assert.ok(waitingLines(waitingItems(t.record)).some((l) => l.includes('find out what the rivals charge')));
   });
+
+test('L163: a promise is no answer yet, so safeAlert counts it as lost and it is told again; no answer at all is still a delivery (L133 c3)', () => {
+  const late = { n: 0 };
+  assert.equal(safeAlert({ alert: fakeAlert({ answer: () => undefined }) }, late)({ type: 't' }), true, 'no answer: true');
+  assert.equal(safeAlert({ alert: fakeAlert({ rejects: 'down later', delay: 1 }) }, late)({ type: 't' }), false, 'a promise that will reject');
+  assert.equal(safeAlert({ alert: fakeAlert({ answer: () => Promise.resolve(true) }) }, late)({ type: 't' }), false, 'a promise, even a good one, is not an answer yet');
+  assert.equal(late.n, 2);
+});

@@ -41,7 +41,10 @@ import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
 import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
 import { KEYS, minutes, MissingKey } from '../M11-dispatcher/keys.mjs';
-import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
+import { stillWaiting, pastTime, dueToTell, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
+
+// Failed reads of a merge commit before the owner is told its parent could not be checked (L172).
+const PARENT_READ_TRIES = 3;
 
 export const ACTOR = 'merge_gate';
 export const NOT_GREEN_LINE = 'outside check not green in 2 h';
@@ -112,7 +115,7 @@ export function queueOrder(merges, { cardOf, freshnessAlarm = false } = {}) {
 
 export async function gatePass(ctx) {
   const { record, product, gh, owner, repo, now } = ctx;
-  const alert = ctx.alert ?? (() => {});
+  const alert = ctx.alert ?? (() => false);   // none wired: not delivered, so nothing is marked told (L583 5)
   const iso = () => new Date(now()).toISOString();
   const did = [];
   const base = `/repos/${owner}/${repo}`;
@@ -140,6 +143,9 @@ export async function gatePass(ctx) {
   // not telling. These two only send an alert and write their own told mark: no GitHub call, no other state change.
   for (const m of merges().filter((x) => x.doc.state === 'refused' && x.doc.tell_owner === true && !x.doc.told_at)) tellRefused(m);
   for (const m of merges().filter((x) => x.doc.state === 'refused' && typeof x.doc.interrupted_note === 'string' && !x.doc.interrupted_told_at)) tellInterrupted(m);
+  // A parent check whose read failed or whose alert was lost is done again (L168 M-4), gate open or shut (L358, L601): it
+  // is one GitHub read and its own marks, and complete() stays below the start check, since that posts to GitHub.
+  for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? '') && !x.doc.parent_checked_at)) await parentCheck(m, m.doc.merge_commit);
 
   const start = robotMergesGreen({ read: readFact, product, now });
   if (!start.open) return { ran: false, reason: NOT_GREEN_LINE, problems: start.problems, did };
@@ -170,9 +176,6 @@ export async function gatePass(ctx) {
   for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? ''))) {
     const card = fresh('card', m.doc.card);
     if (card?.doc?.state === 'merging' || !m.doc.marked_at || m.doc.late_mark_alert === 'owed' || revertUnsettled(m, card)) await complete(m, m.doc.merge_commit);
-    // A parent check whose alert was lost is done again (L168 M-4).
-    const latest = fresh('merge', m.id);
-    if (latest && !latest.doc.parent_checked_at) await parentCheck(latest, latest.doc.merge_commit);
   }
 
   // 3. Audit results (R-0b-93): only a Sensors audit_run fact for the merge commit moves a merged merge. An audit_run
@@ -507,18 +510,35 @@ export async function gatePass(ctx) {
   // The merge must sit right on the main that was judged; if main moved in between, say so (the merge stands).
   // parent_checked_at on the merge records that the parent matched or the owner was told; an alert that answers false
   // or throws leaves it unmarked, and the next pass checks again until it is delivered (L168 M-4, the site G pattern).
+  // A read that fails says nothing about the parent, so it is not told as a moved main and nothing is marked (L172).
   async function parentCheck(m, sha) {
-    let done;
-    try {
-      const k = await ctx.view.commit(sha);
-      done = k?.parents?.[0] === m.doc.judged_main
-        || alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
-    } catch { done = alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: null }); }
+    let k;
+    try { k = await ctx.view.commit(sha); } catch { parentUnread(m, sha); return; }
+    const done = k?.parents?.[0] === m.doc.judged_main
+      || alertTaken(alert, { type: 'merge_parent_moved', merge: m.id, commit: sha, judged_main: m.doc.judged_main, parent: k?.parents?.[0] ?? null, ask_owner: 'Undo?' });
     if (!done) return;
     const cur = fresh('merge', m.id);
     if (!cur || cur.doc?.parent_checked_at) return;
     const r = write('merge', cur, { parent_checked_at: iso() });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'parent_checked', reason: r.reason });
+  }
+
+  // Failed reads are counted on the merge. From the third on, the owner is told, then again each day the read still
+  // fails (L601, in place of L172's once): retried until delivered. Every pass keeps reading, so a read that works later
+  // still asks Undo? if main moved. A count that can't be saved can never reach three, so the owner is told then too.
+  function parentUnread(m, sha) {
+    const cur = fresh('merge', m.id);
+    if (!cur || cur.doc?.parent_checked_at) return;
+    const toldAt = cur.doc.parent_unread_told_at;
+    if (toldAt && !dueToTell({ told_at: toldAt }, now())) return;
+    const failures = (cur.doc.parent_read_failures ?? 0) + 1;
+    const say = (why) => alertTaken(alert, { type: 'merge_gate_unsure', merge: m.id, note: `could not check the parent of ${short(sha)}: ${why}. Still trying; if main moved under this merge, you will be asked Undo?` });
+    const due = failures >= PARENT_READ_TRIES;
+    const told = due && say(toldAt ? 'reads are still failing' : `${failures} reads failed`);
+    const r = write('merge', cur, { parent_read_failures: failures, ...(told ? { parent_unread_told_at: iso() } : {}) });
+    if (r.ok) return;
+    alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'parent_read_failures', reason: r.reason });
+    if (!due) say('a read failed and the count could not be saved');
   }
 
   // An undo card that merged marks the card it undid reverted. That is tried again on later passes until it holds or the
