@@ -66,11 +66,17 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     'context.handoff_cap.role is missing (M11 reads it)',
     'context.worker.split_after_compactions is missing (M11 reads it)',
     'proposals.outbox is missing (M11 reads it)',
+    'product.vercel_project is missing (M4 reads it)',
   ]);
 });
 
 test('each missing or wrong piece is named', () => {
   const cases = [
+    // The Workshop's one key from the rules file (L601, L612): with it gone, the start gate shuts every push.
+    [swap(FIRST, '  vercel_project: sample-app\n', ''), 'product.vercel_project is missing (M4 reads it)'],
+    // L719 m4 (L612): an empty project is not missing, but the start gate shuts on it for good, so the fit check says no.
+    [swap(FIRST, '  vercel_project: sample-app\n', "  vercel_project: ''\n"), 'M4: product.vercel_project must name the Vercel project'],
+    [swap(FIRST, '  vercel_project: sample-app\n', '  vercel_project: []\n'), 'M4: product.vercel_project must name the Vercel project'],
     [swap(FIRST, 'product:\n  cutover_stage: first\n', ''), 'product.cutover_stage must say first'],
     [swap(FIRST, 'cutover_stage: first', 'cutover_stage: second'), 'product.cutover_stage must say first'],
     // The one "on" switch (L204-b, L209): missing, another word, another case, a trailing space or another type is off.
@@ -89,7 +95,8 @@ test('each missing or wrong piece is named', () => {
     [swap(FIRST, 'required_checks: [build, test]', "required_checks: [build, '']"), 'M6: product_profile.required_checks must be a list of check names'],
     [swap(FIRST, '  editing_per_product: 0\n', ''), 'caps.editing_per_product must be 0'],
     [swap(FIRST, '    - docs/research/**\n', '    - app/**\n'), 'lanes.research: "app/**" is outside docs/domains/, docs/research/ and docs/*.md'],
-    [swap(FIRST, 'script: none', 'script: 2.1.300'), 'roles_enabled.script must be none'],
+    [swap(FIRST, 'script: none', 'script: 2.1.316'), 'roles_enabled.script must be none'],
+    [swap(FIRST, 'pin: 2.1.316', 'pin: 2.1.318'), 'claude_code.pin is 2.1.318, but the tool list is checked against 2.1.316: every role would be refused'],
   ];
   for (const [text, want] of cases) assert.ok(fit(text).includes(want), want);
   // A corrupt file is one reason, not a list of follow-on ones.

@@ -202,6 +202,7 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
 // steps run one after another, each up to STEP_DEADLINE_MS, and the Store Writer refuses a wait whose since is more
 // than 60 s off its clock). Left out, it is the tick's fixed `now`.
 export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
+  const startedAt = now;   // `now` moves on before each step (L321); a gap between passes is measured from here (audit #150 M1)
   // Every refused write of a watched kind is noted, and told at the end of the pass (refused-writes.mjs, L323).
   const base = rec;
   const watched = watchWrites(rec);
@@ -372,7 +373,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: p.frontDoorHandoff, alert }));
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
-  putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
+  putFact(rec, LAST_PASS_FACT, { at: iso(now), started_at: iso(startedAt), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
   // Refused writes (L323): told after every step, before this pass's own alerts go out.
   // watchWrites' whole answer, its refusals and the writes it saw taken, so neither can be left out alone.
   let refused = [];

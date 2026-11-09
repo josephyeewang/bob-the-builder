@@ -14,7 +14,7 @@ const d = rules.may('push_branch', { product, card, files });  // { decision: 'a
 rules.get('caps.editing_per_mac', { product });               // a value as the rules hold it (Mac-wide ones: strictest across products)
 rules.num('claims.stuck_min', { product });                   // a whole number or undefined: every number is read this way (L96)
 rules.dec('usage.pace_min_share', { product });               // a number ≥ 0 with an optional fraction, or undefined (L104)
-rules.flag('product.onboarded', { product });                 // exactly true or false, or undefined: every flag is read this way (L96)
+rules.flag('caps.shakedown', { product });                    // exactly true or false, or undefined: every flag is read this way (L96)
 rules.classify(change);                                       // { tier: 1|2, risky: [...RISKY_CLASSES], reasons, protected }
 rules.rev;                                                    // the rules version, stamped on diary lines
 ```
@@ -28,7 +28,7 @@ rules.rev;                                                    // the rules versi
   | Action | Subject |
   |---|---|
   | `start_session` | `{ product, role, tier, editing, card?, usage? }`. A Tier-1 start needs `usage.read_at` (an ISO time) that is fresh. |
-  | `push_branch` | `{ product, card: { id, rows, kind?, doc: { lane } }, files }`. An exact reverse also passes `card.kind: 'exact_reverse'` and `reverses_files` (the reversed commit's paths). |
+  | `push_branch` | `{ product, card: { id, rows, kind?, doc: { lane, files } }, files }`. An exact reverse also passes `card.kind: 'exact_reverse'` and `reverses_files` (the reversed commit's paths). |
   | `merge` | `{ product, card, files, declared_tier, labels, truncated? }`. At the first cutover only a docs-lane change passes (`M10-rules/README.md`, L34); anything else is denied for MAIN to merge as today. An exact reverse also passes `kind: 'exact_reverse'`, `reverses` (the commit id), `exact_reverse_ok` (from M10's `checkExactReverse`) and `reversed_audit` (`failure`, `success` or `none`). |
   | `count_approval` | `{ product, ask_kind, risky, tier, channel }`. `channel` is where M2 read the answer (`github_review` or `tap`). The owner's own GitHub Approve (tier 1) is needed for a kind answered on GitHub, any risky class, or a Tier-1 go; a tap (tier 2) otherwise. "ask" at that tier when the channel matches, else deny. M2 counts an answer only on "ask" and its own binding check. |
   | `delete_copy`, `write_production`, `flip_switch` | denied in 0b |

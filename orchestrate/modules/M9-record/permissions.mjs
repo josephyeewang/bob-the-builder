@@ -51,6 +51,7 @@ export const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   ledger: ['air-health', 'alert-', 'idea-issue-', 'push-request-', 'heartbeat-', 'signed-out-'],
   workshop: ['push.'],
   merge_gate: ['reverse-', 'merge-limit-told-'],
+  approvals: ['state-told-'],
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'wait-tell-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
@@ -147,7 +148,7 @@ export const WRITERS = Object.freeze({
   // and every row here is used by a write site or says why not (L112).
   // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
   // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
-  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
+  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, approvals: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
   report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),

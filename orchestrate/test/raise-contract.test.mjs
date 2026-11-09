@@ -38,7 +38,7 @@ const m13 = (over = {}) => { const gh = Object.assign(fakeIssues(), over); const
 
 function watcher(raise) {
   const s = { envs: [{ id: 'env_1', key: 'API_URL', target: ['production'], type: 'plain', updatedAt: 1 }] };
-  const project = { commandForIgnoringBuildStep: 'x', buildCommand: null, framework: 'nextjs', nodeVersion: '22.x', link: { type: 'github', org: 'o', repo: 'r', productionBranch: 'main' } };
+  const project = { commandForIgnoringBuildStep: 'x', buildCommand: null, framework: 'nextjs', nodeVersion: '22.x', autoExposeSystemEnvs: true, link: { type: 'github', org: 'o', repo: 'r', productionBranch: 'main' } };
   const fetchJson = async (path) => {
     if (path.startsWith('/v6/deployments')) return { deployments: [] };
     if (/\/env\?/.test(path)) return { envs: s.envs };

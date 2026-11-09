@@ -14,7 +14,7 @@
 //   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
 //   rules.num('claims.stuck_min', { product })                      // → a whole number ≥ 0, or undefined (L96)
 //   rules.dec('usage.pace_min_share', { product })                  // → a number ≥ 0 that may have a fraction, or undefined (L104)
-//   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
+//   rules.flag('caps.shakedown', { product })                       // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
 //                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
@@ -193,7 +193,6 @@ export function asReaderText(v) {
 // back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
 export const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
-  'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
   // M11 reads typed (L123); these were here because their modules read per-product keys with no product. Lane 2 passes
   // the product (L104 O-1, L131): lead-restart.test came off with L564, account-ports.test with L584.
   // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
