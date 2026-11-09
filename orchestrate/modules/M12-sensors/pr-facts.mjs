@@ -16,7 +16,7 @@
 // read as never closed).
 //   files(number)    → [{ filename, status, additions, deletions, previous_filename? }]
 //   checks(sha)      → [{ name, status, conclusion, output_summary? }]; a throw here alone gives checks_at_head: null
-//                      (not known) and keeps the rest (L619: check runs need the robot App's client, L617)
+//                      (not known) and keeps the rest (L619: check runs need an App's client, L617, L627)
 //   threads(number)  → [{ resolved, author, body, path? }]
 //   behindBy(number) → integer commits behind base
 
@@ -47,7 +47,7 @@ async function readPr(gh, number, observed_at, prepare) {
   const [pr, files, threads, behind] = await Promise.all([gh.pr(number), gh.files(number), gh.threads(number), gh.behindBy(number)]);
   if (!pr || typeof pr !== 'object' || !Array.isArray(files) || !Array.isArray(threads)) throw new Error('a GitHub answer of the wrong shape');
   // checks_at_head: null means NOT KNOWN (the check runs could not be read), never "no checks"; [] means GitHub listed
-  // none. Only this read is kept apart (L619): without the robot App every check read fails, and blanking the whole fact
+  // none. Only this read is kept apart (L619): without an App's client every check read fails, and blanking the whole fact
   // for it would hide every merge from M11. Any other failed read still makes the whole reading unknown.
   let checks = null;
   try {

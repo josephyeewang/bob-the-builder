@@ -50,7 +50,7 @@ function recordedGh({ over = {}, fail = false, open } = {}) {
   };
 }
 const usage = (now) => ({ source: 'test', h5: { used_pct: 20, resets_at: iso(now + 60 * MIN) }, week: { used_pct: 30, resets_at: iso(now + 3 * 24 * 60 * MIN) } });
-// The robot App's client for check runs (L617): a separate client over the same recorded answers.
+// An App's client for check runs (L617; the watcher App on a product, L627): a separate client over the same recorded answers.
 const appGh = (gh) => ({ calls: [], get(path) { this.calls.push(['GET', path]); return gh.get(path); } });
 const ports = (now, { gh = recordedGh({ open: [] }), checksGh = appGh(gh) } = {}) => ({
   whoIsSignedIn: async () => ACCT, readUsage: async () => usage(now),
@@ -99,7 +99,7 @@ test('the recorded open pull request reads as open, merged false and no merge co
   assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha], ['open', false, null]);
 });
 
-test('L617/L619: with no robot App client yet, a merged PR still reads as merged; its checks are not known (null), not none', async () => {
+test('L617/L619: with no App client yet, a merged PR still reads as merged; its checks are not known (null), not none', async () => {
   const { rec } = world();
   const gh = recordedGh({ open: [{ number: REC.merged }] });
   await sensorsPass({ rec, ports: ports(T0, { gh, checksGh: null }), now: () => new Date(T0) });
@@ -238,11 +238,11 @@ test('the PR reader: any answer but 200 throws (so the reading is unknown), and 
   assert.throws(() => prReader({ gh: recordedGh(), owner: 'sample-org/../x', repo: 'sample-app' }));
 });
 
-test('L617: check runs are read only with the robot App\'s client; without it they are not known, never "none"', async () => {
+test('L617: check runs are read only with an App\'s client; without it they are not known, never "none"', async () => {
   const gh = recordedGh();
   const sha = REC.answers[`/pulls/${REC.merged}`].head.sha;
   const noApp = prReader({ gh, owner: 'sample-org', repo: 'sample-app' });
-  await assert.rejects(noApp.checks(sha), /not known: they need the robot App/);
+  await assert.rejects(noApp.checks(sha), /not known: they need an App's client \(the watcher App, L627\)/);
   assert.equal(gh.calls.length, 0, 'the fine-grained client is never asked for check runs');
   const app = appGh(recordedGh());
   const withApp = prReader({ gh, checksGh: app, owner: 'sample-org', repo: 'sample-app' });
@@ -252,7 +252,7 @@ test('L617: check runs are read only with the robot App\'s client; without it th
   assert.equal(gh.calls.length, 0);
   const forbidden = prReader({ gh, checksGh: { get: async () => ({ status: 403, json: { message: 'Resource not accessible by personal access token' } }) }, owner: 'sample-org', repo: 'sample-app' });
   await assert.rejects(forbidden.checks(sha), /check runs answered 403/);
-  assert.throws(() => prReader({ gh, checksGh: gh, owner: 'sample-org', repo: 'sample-app' }), /robot App's client/);
+  assert.throws(() => prReader({ gh, checksGh: gh, owner: 'sample-org', repo: 'sample-app' }), /an App's client, not the one for the rest/);
   assert.throws(() => prReader({ gh, checksGh: {}, owner: 'sample-org', repo: 'sample-app' }), /no get\(\)/);
 });
 

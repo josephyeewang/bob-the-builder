@@ -6,9 +6,10 @@
 // and one POST to /graphql that only runs the review-threads QUERY (GitHub's API has no GET for it; M6's gather does
 // the same). Any answer other than 200 throws, so pr-facts writes the reading as unknown with its time.
 //
-// CHECK RUNS NEED THE ROBOT APP (L617). GitHub offers no Checks permission on fine-grained tokens, only to GitHub Apps,
-// so `checks` reads with `checksGh`: a client holding the robot App's installation token (read-only use, the same App as
-// the Merge Gate). `gh` keeps everything else. Until the App exists `checksGh` is absent and `checks` throws, so the
+// CHECK RUNS NEED A GITHUB APP (L617, L627). GitHub offers no Checks permission on fine-grained tokens, only to GitHub
+// Apps, so `checks` reads with `checksGh`: a client holding an App's installation token. On a product that is the
+// read-only watcher App (Checks and Metadata, read), the same one the watch job uses (L627): the robot stays off a
+// product until B7, so it never holds write there during the watch week. `gh` keeps everything else. Until the App exists `checksGh` is absent and `checks` throws, so the
 // reading is unknown, never "no checks"; a 403 from a token that can't see check runs throws the same way. Never pass
 // the fine-grained client as `checksGh`, and no classic token.
 //
@@ -32,11 +33,11 @@ const okJson = (r, what) => {
   return r.json;
 };
 
-/** The pr-facts port for one pass, over M6's client (and the robot App's for check runs). pr(n) is read once per pass (behindBy needs its base and head). */
+/** The pr-facts port for one pass, over M6's client (and an App's for check runs, L627). pr(n) is read once per pass (behindBy needs its base and head). */
 export function prReader({ gh, checksGh, owner, repo }) {
   if (!gh || typeof gh.get !== 'function') throw new Error('the PR reader needs a GitHub client with get()');
   if (checksGh !== undefined && checksGh !== null && typeof checksGh.get !== 'function') throw new Error('the check-runs client has no get()');
-  if (checksGh && checksGh === gh) throw new Error('check runs are read with the robot App\'s client, not the one for the rest (L617)');
+  if (checksGh && checksGh === gh) throw new Error('check runs are read with an App\'s client, not the one for the rest (L617, L627)');
   if (!NAME.test(String(owner)) || !NAME.test(String(repo))) throw new Error('the PR reader needs the owner and repo names');
   const base = `/repos/${owner}/${repo}`;
   const prs = new Map();
@@ -60,7 +61,7 @@ export function prReader({ gh, checksGh, owner, repo }) {
         ...(f.previous_filename ? { previous_filename: f.previous_filename } : {}) }));
     },
     async checks(sha) {
-      if (!checksGh) throw new Error('check runs are not known: they need the robot App\'s client, which is not set up (L617)');
+      if (!checksGh) throw new Error('check runs are not known: they need an App\'s client (the watcher App, L627), which is not set up (L617)');
       if (!SHA.test(String(sha))) throw new Error('no head commit to read the checks of');
       const j = okJson(await checksGh.get(`${base}/commits/${sha}/check-runs?per_page=${PER_PAGE}`), 'check runs');
       if (!Array.isArray(j.check_runs)) throw new Error('the check list is not a list');
