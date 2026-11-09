@@ -56,7 +56,7 @@ export const VARIABLE_SITES = Object.freeze([
     calls: { helper: 'write', local: 'modules/M6-merge-gate/gate.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
   { file: 'modules/M6-merge-gate/merge-outcome.mjs', count: 1, reason: "settleMerge's own write(entity, cur, …) helper rewrites a merge or card it just read (#68)",
     calls: { helper: 'write', local: 'modules/M6-merge-gate/merge-outcome.mjs', entityArg: 0, actor: 'merge_gate', modes: ['update'] } },
-  { file: 'modules/M2-approvals/ask-store.mjs', count: 1, reason: 'writeDoc(record, entity, cur, doc), M2\'s one writer of asks and gos (cur = null creates)',
+  { file: 'modules/M2-approvals/ask-store.mjs', count: 1, reason: 'writeDoc(record, entity, cur, doc), M2\'s one writer of asks, gos, the product and its told marks (cur = null creates)',
     calls: { helper: 'writeDoc', module: 'modules/M2-approvals/ask-store.mjs', entityArg: 1, actor: 'approvals', modes: ['create', 'update'] } },
   { file: 'modules/M11-dispatcher/moves.mjs', count: 1, reason: 'move(rec, entity, id, patch) re-reads the document and writes it as the dispatcher',
     calls: { helper: 'move', module: 'modules/M11-dispatcher/moves.mjs', entityArg: 1, actor: 'dispatcher', modes: ['update'] } },
@@ -92,9 +92,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'lesson learning create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'lesson learning update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call; learning is Phase 1, so no learning session starts in 0b' },
   { grant: 'card approvals update', reason: 'no module writes this yet (M2 sets or clears needs_joe, approval_required and cancel_reason); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
-  { grant: 'session dispatcher create', reason: 'no module writes this yet (M11 records a session it starts); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'session workshop update', reason: 'no module writes this yet (M4 updates the session it runs), but moves.mjs gives every session move to the Workshop (preparing → running, running → waiting, reporting, stuck, recycling, ended), so dropping it would forbid every session move; kept, and flagged to the lead (L129)' },
-  { grant: 'product approvals update', reason: 'no module writes this yet (M2 changes a product); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'fact live_check create', reason: 'no module writes this yet (M7 live check has only its README); kept as the design\'s row, listed to the lead as a candidate to drop until it is built' },
   { grant: 'fact live_check update', reason: 'no module writes this yet (M7 live check has only its README); #68 gave live_check OWN_FACTS but no family, so it can create nothing and so update nothing' },
 ]);

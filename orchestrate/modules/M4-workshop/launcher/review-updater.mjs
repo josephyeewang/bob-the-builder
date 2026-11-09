@@ -57,7 +57,7 @@ const HEX40 = /^[0-9a-f]{40}$/;
 const NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 const HTTPS = /^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^\s]+$/;
 const FILE_MODES = { 100644: 0o644, 100755: 0o755 };
-const GIT_MS = 300_000;
+export const GIT_MS = 300_000;
 // The runner's config keys that name something in the copy (L75 m-4), each checked in the new copy before the flip.
 // The claude program and the hooks may be copy items, which `keep` must carry over or the first update would drop them;
 // the wiring and the budget module must be the copy's own code files from main (L132 M-1, install-check RUNNER_MODULES).

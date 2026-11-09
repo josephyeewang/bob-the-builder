@@ -45,7 +45,7 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
-export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
+export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
@@ -717,7 +717,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         const since = store.meta(entity, d.id)?.stateSince;
         if (lim === undefined) { out.push({ entity, id: d.id, state: d.doc.state, since, limit: null, corrupt: true, reason: `the rules have no time limit for ${entity} ${d.doc.state}` }); continue; }
         if (lim.minutes) {
-          if (nowMs > Date.parse(since) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
+          if (nowMs > (pastTime(since, nowMs) ?? -Infinity) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
         } else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {
           out.push({ entity, id: d.id, state: d.doc.state, since, limit: 'next_check', next_check: d.doc.wait.next_check });
         }
@@ -734,6 +734,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
     keepAlert: (text, key) => { store.keepAlert(text, key); },
+    heldHere: () => store.heldHere(),
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }

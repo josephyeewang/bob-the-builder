@@ -962,7 +962,17 @@ function check(raw) {
   if (u.pace_min_share !== undefined && u.pace_min_share !== null) p.usage.pace_min_share = share(u.pace_min_share, 'usage.pace_min_share');
 
   const psr = mapOf(raw.product_state_rules, 'product_state_rules');
-  for (const s of PRODUCT_STATES) mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+  for (const s of PRODUCT_STATES) {
+    const rules = mapOf(need(psr, s, 'product_state_rules'), `product_state_rules.${s}`);
+    // A value no rule knows is refused here, with the whole file (S4, L220): the engine refuses it too, but only at the
+    // doors that read it, so a typo could hold one door and pass another. `tier1_merge` must be there: with it missing
+    // or blank every undo start is denied, and no other check names the key (L562). A missing or blank `start` passes
+    // here; the fit check names it through M9's keys, and on a later rules change a start is refused and told per card.
+    for (const [key, known, must] of [['start', START_RULES, false], ['tier1_merge', TIER1_MERGE_RULES, true]]) {
+      const v = rules[key];
+      if ((must || (v !== undefined && v !== null)) && !known.includes(v)) bad(`product_state_rules.${s}.${key} must be one of ${known.join(', ')}`);
+    }
+  }
 
   for (const [cls, action] of Object.entries(mapOf(raw.failure_classes, 'failure_classes'))) {
     if (!FAILURE_ACTIONS.includes(action)) bad(`failure_classes.${cls} must be one of ${FAILURE_ACTIONS.join(', ')}`);
@@ -1487,19 +1497,22 @@ Object.defineProperties(__bob_e, {
 //
 // WHY. GitHub's free plan can't stop a hand push to main, and Vercel builds whatever lands on a branch it watches. So
 // the deploy itself asks the question: Vercel runs one pasted command before each build, and its exit code decides
-// (exit 0 = SKIP the build, exit 1 = BUILD). That command downloads this checker at a pinned commit, checks its sha256
-// and runs it. Every failure (a failed download, a wrong hash, a crash, an unreadable GitHub answer) leaves the commit
-// undeployed: the command only builds when the checker prints BUILD_TOKEN, so a crash that exits 1 still skips.
-// Two modes, pinned in the command string:
-//   first — skip every build that is not production on main; a main commit then builds with no mark check.
-//   full  — a main commit builds only if it carries the robot's mark (mark.mjs; an undo is a marked merge too, its
+// (exit 0 = SKIP the build, exit 1 = BUILD). Two modes, pinned in the command string:
+//   first — skip every build that is not production on main; a main commit then builds with no mark check. The answer
+//           needs only Vercel's own env, so the command is a self-contained shell check that downloads nothing (L571):
+//           a hosted checker nobody hosts would fail, and a failed download skips, so nothing would ever deploy and
+//           nothing would say so. first-mode shell text and decideBuild 'first' must agree; a test runs both.
+//   full  — the command downloads this checker at a pinned commit, checks its sha256 and runs it. Every failure (a
+//           failed download, a wrong hash, a crash, an unreadable GitHub answer) leaves the commit undeployed: the
+//           command only builds when the checker prints BUILD_TOKEN, so a crash that exits 1 still skips.
+//           A main commit builds only if it carries the robot's mark (mark.mjs; an undo is a marked merge too, its
 //           exact reverse recomputed by the checker), or the owner's override label: added to the merged pull request
 //           by the owner's numeric GitHub id, as a person (type User, not via an app), and not removed since.
 // A branch push (the robot's included) is never production on main, so it builds nothing.
 //
 //   decideBuild({ mode, env }) → { build, reason, needsMarkCheck? }      the env-only part (full mode stops here with needsMarkCheck)
 //   await decideBuildFull({ env, gh, robotBotId, ownerId, overrideLabel = 'owner-deploy' }) → { build, reason }
-//   skipCommand({ mode, checkerUrl, sha256 }) → the one-line shell command pasted into Vercel
+//   skipCommand({ mode, checkerUrl, sha256 }) → the one-line shell command pasted into Vercel; first mode takes neither checkerUrl nor sha256
 //   makeFetchGh({ token, fetchImpl }) → a read-only GitHub client ({ get(path) } → { status, json }) on api.github.com
 //   await main(argv, env, { gh, out }?) → 0 (skip) | 1 (build); never throws; prints BUILD_TOKEN before returning 1
 // Vercel's env: VERCEL_ENV, VERCEL_GIT_COMMIT_REF, VERCEL_GIT_COMMIT_SHA, VERCEL_GIT_REPO_OWNER, VERCEL_GIT_REPO_SLUG.
@@ -1572,8 +1585,16 @@ async function ownerOverride({ gh, owner, repo, sha, ownerId, overrideLabel }) {
   return no('no merged pull request carries the owner\'s label');
 }
 
+// Production, then main, then a full commit id, in that order and joined by bars: a bar in any value leaves a bar in the
+// last part, which the first pattern skips. The digits are spelled out because a range like a-f follows the locale.
+// The fixed part is in single quotes, not backslashes: a backslash lost or doubled on the way into Vercel's field would
+// make the bars split the pattern, and one alternative matches anything (L592). A skip prints one fixed line for the
+// build log, naming no value, and every skip reaches it. Pasted into a field limited to 256 characters: a test holds this under.
+const FIRST_COMMAND = `case "\${VERCEL_ENV-}|\${VERCEL_GIT_COMMIT_REF-}|\${VERCEL_GIT_COMMIT_SHA-}" in 'production|main|'*[!0123456789abcdef]*);; 'production|main|'${'?'.repeat(40)}) exit 1;; esac; echo build-skip: skip: not prod/main/full id>&2; exit 0`;
+
 function skipCommand({ mode, checkerUrl, sha256 } = {}) {
   if (!MODES.includes(mode)) throw new Error('mode must be first or full');
+  if (mode === 'first') return FIRST_COMMAND;
   if (typeof checkerUrl !== 'string' || !PINNED_URL.test(checkerUrl)) throw new Error('the checker URL must be https and pinned to a 40-hex commit (no branch, tag or short id)');
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) throw new Error('sha256 must be 64 lowercase hex characters');
   // Each step must succeed for the next to run; any failure falls through to `exit 0` (skip). Only the exact token
@@ -2308,6 +2329,7 @@ const FACT_FAMILIES = Object.freeze(Object.fromEntries(Object.entries({
   ledger: ['air-health', 'alert-', 'idea-issue-', 'push-request-', 'heartbeat-', 'signed-out-'],
   workshop: ['push.'],
   merge_gate: ['reverse-', 'merge-limit-told-'],
+  approvals: ['state-told-'],
   dispatcher: ['unsent-alerts', 'outage', 'rules-missing-alert', 'compactions-', 'stop-', 'host-lock-', 'pause-',
     'undo-held-', 'undo-note-', 'wait-tell-', 'step-error-', 'last-full-pass', 'band-usage', 'unknown-usage-alert', 'lead-restart-',
     'phone-link', 'phone-link-', 'intake-applied-', 'intake-note', 'hold-', 'review-alert-', 'reconciled-', 'cleanup-',
@@ -2404,7 +2426,7 @@ const WRITERS = Object.freeze({
   // and every row here is used by a write site or says why not (L112).
   // Each under its own families (FACT_FAMILIES), changing only facts it created (L74). The workshop is worker-side:
   // nothing that gates takes a workshop fact as proof (factFrom names the one role a proof must come from).
-  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, live_check: OWN_FACTS }),
+  fact: Object.freeze({ sensors: OWN_FACTS, ledger: OWN_FACTS, workshop: OWN_FACTS, dispatcher: OWN_FACTS, merge_gate: OWN_FACTS, approvals: OWN_FACTS, live_check: OWN_FACTS }),
   product: Object.freeze({ approvals: ANY }),
   handoff: Object.freeze({ lead: createOnly(), learning: createOnly() }),
   report: Object.freeze({ ...Object.fromEntries(reportRoles.map((r) => [r, createOnly()])) }),
@@ -2931,6 +2953,19 @@ function makeRecord(impl) {
     diary(opts = {}) { return impl.diary(opts); },
     // An alert the queue would not take, kept by the store outside the Record (L545). A text and a key in, nothing back.
     keepAlert(text, key) { try { optional('keepAlert', () => {})(String(text), String(key)); } catch { /* the log is what is left */ } },
+    // What the store holds in this process only, on no disk (L620): { held: [{ id, event }], dropped: n }. null is not
+    // known: an implementation without it, one that throws, or an answer not of that shape. Never a guess of none.
+    heldHere() {
+      // null only when the implementation has none (no store). A store whose answer throws or has a shape this doesn't
+      // know answers { error }: what it holds is not known, and the delivery pass refuses a clean round (#260 r1 m1).
+      if (typeof impl.heldHere !== 'function') return null;
+      try {
+        const h = impl.heldHere();
+        const ok = h && Array.isArray(h.held) && Number.isSafeInteger(h.dropped) && h.dropped >= 0 && (h.disk === null || typeof h.disk === 'string')
+          && h.held.every((x) => x && typeof x.id === 'string' && x.event && typeof x.event === 'object' && !Array.isArray(x.event));
+        return ok ? { held: h.held, dropped: h.dropped, disk: h.disk } : { error: 'the store\'s answer has a shape this does not know' };
+      } catch (e) { return { error: String(e?.message ?? e).slice(0, 200) }; }
+    },
     // Times come from the Record, never from a field a script stamps (L72): no script may set changed_at. A caller
     // that can't read them gets null and treats the age as unknown.
     meta(entity, id) {
@@ -3147,7 +3182,7 @@ Object.defineProperties(__bob_e, {
 //   rules.get('caps.editing_per_mac', { product })                  // → the value as the rules hold it, or undefined
 //   rules.num('claims.stuck_min', { product })                      // → a whole number ≥ 0, or undefined (L96)
 //   rules.dec('usage.pace_min_share', { product })                  // → a number ≥ 0 that may have a fraction, or undefined (L104)
-//   rules.flag('product.onboarded', { product })                    // → true or false, or undefined (L96)
+//   rules.flag('caps.shakedown', { product })                       // → true or false, or undefined (L96)
 //   rules.classify(change)                                          // → { tier, risky: [...], reasons, protected } (D7)
 //     change = { product, files: [{ path, previous_path?, status: added|modified|removed|renamed|copied, mode?,
 //                added_lines?, removed_lines? }], truncated?, declared_tier?, labels? }
@@ -3326,11 +3361,10 @@ function asReaderText(v) {
 // back as given. This list only shrinks (L123): orchestrate/test/rules-typed-reads.test.mjs fails on a file named here
 // that is gone, on an entry with no owner or no PR, and on a list longer than its pinned count.
 const OLD_VALUES_UNTIL_STEP_2 = Object.freeze({
-  'modules/M4-workshop/git/push.test.mjs': { owner: 'lane 2', pr: 'M4 push.mjs typed reads (L96 step 2)' },
-  // M11 reads typed (L123); these five stay red only because their modules read per-product keys with no product
-  // (merges.mjs time limits, pass.mjs:149-151, lead-restart.mjs context.*). Lane 2 passes the product (L104 O-1, L131).
+  // M11 reads typed (L123); these were here because their modules read per-product keys with no product. Lane 2 passes
+  // the product (L104 O-1, L131): lead-restart.test came off with L564, account-ports.test with L584.
   // The helper is for tick.test's child `node main.mjs`, which runs a whole pass on the helper's rules.
-  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'lead-restart.test', 'account-ports.test', 'fixtures.test-helper']
+  ...Object.fromEntries(['pass.test', 'tick.test', 'merges.test', 'fixtures.test-helper']
     .map((n) => [`modules/M11-dispatcher/${n}.mjs`, { owner: 'lane 2', pr: 'M11 per-product reads pass the product (L104 O-1 step 2, L131)' }])),
 });
 // Whether a fake is being made from one of those files: read once, from where fakeRules was called. A listed test

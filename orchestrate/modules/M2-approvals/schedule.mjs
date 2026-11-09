@@ -12,7 +12,8 @@
 // now, and Joe is told why, before anything else happens to it (reaskUnreadable, L362).
 //
 //   await schedulePass(ctx) → { ok, events } | { ok: false, reason, events }    one pass; the dispatcher runs it often
-//     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs)
+//     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs),
+//     then applies the owner's pause and trip requests (state-request.mjs)
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 //     + unreadable: true, cause when a GitHub read threw (L205); the Merge Gate classes `cause`
@@ -36,6 +37,7 @@ import { releaseBoxes, releaseSessions } from './binding.mjs';
 import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mjs';
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
+import { stateRequestStep } from './state-request.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { GO_REPUSH_MS, MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
@@ -73,12 +75,12 @@ function configAlert(ctx, reason) {
 // then again each day while the ask still waits (L295 Minor 1, re-ruled L309 MAT-2: the holdAlert pattern, M11
 // pass.mjs). An urgent undo is re-tried every pass and a window ask four or five times, and each would otherwise reach
 // Joe as a message; an ask never pushed has no time limit, so a once-ever message would be a silent hold. The cause is
-// the alert's type and reason with its numbers out; its mark is stillWaiting's, kept only once the sink took it
+// the alert's type and reason (or its text, when it has no reason) with its numbers out; its mark is stillWaiting's, kept only once the sink took it
 // (answered true). An ask's marks go once it is pushed or stops waiting, so a later failure is told at once. Kept in
 // ctx.stateDir (ask-alerts.json): a file that can't be read or parsed counts as nothing told, so it tells; with no
 // stateDir, told every pass. A file that can't be saved throws: the step fails and the tick tells that once per day.
 const ASK_ALERTS = 'ask-alerts.json';
-const causeOf = (e) => `${e.type}:${String(e.reason ?? '').replace(/\d+/g, 'N')}`;
+const causeOf = (e) => `${e.type}:${String(e.reason ?? e.text ?? '').replace(/\d+/g, 'N')}`;
 function askOnce(ctx) {
   const file = ctx.stateDir ? join(ctx.stateDir, ASK_ALERTS) : null;
   let marks = {};
@@ -141,8 +143,11 @@ const onDraft = (record, doc) => { const c = record.read('card', doc.card); retu
 const goCardLost = (record, doc) => {
   if (!activeKind(doc.kind).go) return null;
   const c = record.read('card', doc.card);
-  return !c ? 'its card is missing from the record, so this go cannot go ahead' : c.corrupt ? 'its card cannot be read, so this go cannot go ahead' : null;
+  return !c ? 'the Record has no such card, so someone needs to find out what became of it' : c.corrupt ? 'the card cannot be read and needs repairing by hand' : null;
 };
+const stillAsking = (doc) => doc.state === 'open' || doc.state === 'pushed';
+// The cards the loop below tells about when lost, so the Dispatcher's check for every other card does not tell them twice.
+export const goToldCards = (record) => new Set(askStore(record).asks().filter((a) => activeKind(a.doc.kind)?.go && stillAsking(a.doc)).map((a) => a.doc.card));
 
 function write(ctx, cur, doc, events, event) {
   const w = writeDoc(ctx.record, 'ask', cur, doc);
@@ -273,7 +278,8 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
 export async function schedulePass(ctx) {
   const events = [];
   const cfg = readConfig(ctx.rules, ctx.product);
-  if (!cfg.ok) { configAlert(ctx, cfg.reason); return fail(cfg.reason, { events }); }
+  // A bad config holds the asks, not the owner's pause: the state step still runs and answers (L606 N4).
+  if (!cfg.ok) { configAlert(ctx, cfg.reason); events.push(...stateRequestStep(ctx)); return fail(cfg.reason, { events }); }
   configAlert(ctx, null);
   // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
   // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the
@@ -281,6 +287,9 @@ export async function schedulePass(ctx) {
   const made = onboard(ctx);
   if (made) events.push(made);
   onboardNotices(ctx, made);
+  // The owner's pause and trip requests (M1 join item 13), before the product read below: the window it picks follows
+  // the state just written.
+  events.push(...stateRequestStep(ctx));
   const nowMs = ctx.now();
   const p = ctx.record.read('product', ctx.product);
   const win = dueWindow(nowMs, zoneFor(cfg, p && !p.corrupt ? p.doc : null), cfg.windows);
@@ -301,9 +310,10 @@ export async function schedulePass(ctx) {
   const once = askOnce(ctx);
   for (const a of asks) {
     const doc = a.doc;
-    if (doc.state !== 'open' && doc.state !== 'pushed') continue;
+    if (!stillAsking(doc)) continue;
     const lost = goCardLost(ctx.record, doc);
-    if (lost) once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, reason: lost });
+    // No push either: it could not be acted on, and a first push would wipe this tell's mark (#225 r2 Minor 1).
+    if (lost) { once.alert(a.id, { type: 'go_card_unreadable', ask: a.id, card: doc.card, text: `The go for card ${doc.card} [ask ${a.id}] can't go ahead: ${lost}.` }); continue; }
     if (liveBox(doc)) continue;
     const held = heldBy(ctx.record, doc);
     if (held) { events.push({ type: 'held', ask: a.id, reason: held }); continue; }

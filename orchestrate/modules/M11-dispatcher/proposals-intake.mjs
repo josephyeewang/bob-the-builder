@@ -42,24 +42,34 @@
 //   - research-, claim- and heartbeat- files go to their handlers (R-0b-135, R-0b-130, R-0b-131);
 //   - idea- files are refused: idea filing stays off until #95-b lands (L212, L215 2);
 //   - a proposal goes to the docs-lane check, run on the push script's real changed files for its bundle's net change
-//     (L77 m1). That check is part 2, after R-0b-127; until it is passed in as `docsCheck`, every proposal is refused
+//     (L77 m1): `docsCheck`, built by proposal-route.mjs. Until it is passed in, every proposal is refused
 //     with FIRST_CUTOVER before any review starts, which fails closed. A bundle is taken in only with its proposal.
-// At the second cutover a proposal goes to review (`toReview`, M5), also part 2; until it is passed in, refused.
+// A proposal that passes goes to review (`toReview`, built by proposal-route.mjs, at either cutover); until it is
+// passed in, refused. Its way to review after that is proposalRoutePass's, not this file's.
+// A docs check that could not finish, or met a cause that may pass by itself (a pause, one read or rules error, the
+// bundle moving during the check), answers { retry }: the file waits for the next pass, its cause on a wait fact, and
+// Joe is told at once, then daily while it waits (L325 m2, L597). Only a real answer about the change is final; the
+// refusal names it (MAIN merges code by hand, or the push script refused the bundle). A proposal refused over its
+// bundle is looked at again once the bundle held is other bytes, and a held bundle never handed on may be replaced.
+// A proposal whose route ended refused at the push, or lost its card to another holder (routeReopened), gives its
+// names back, so they take new bytes (L549, L718 M1). A cancelled one keeps them.
 // A kind whose handler is not passed in is left untouched and unrecorded, so it is taken in once the handler lands.
 //
 //   proposalsPass({ rec, rules, products, ownerUid, wait, alert, note, handlers, docsCheck, toReview, now }) → [result]
 //   proposalsReadBack({ dir, ownerUid, canRead, canWrite, settings }) → [] | every problem (Joe's setup batch)
 
 import { createHash } from 'node:crypto';
+import { routeReopened, shownName, textOr } from './proposal-route.mjs';
 import { readdirSync, lstatSync, openSync, fstatSync, readSync, closeSync, constants as C } from 'node:fs';
 import { join } from 'node:path';
 import { KEYS, need } from './keys.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
-import { pastTime } from '../../shared/still-waiting.mjs';
-import { sha256 } from './outbox-intake.mjs';
+import { pastTime, stillWaiting, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 // Git's blob id for a file's bytes, the id refusal 10 compares at merge (M6 gather `blob`; L290 M-1).
 import { blobSha } from '../M10-rules/reader.mjs';
-import { BUNDLE_CAP, SETTLE_MS } from '../M4-workshop/git/push.mjs';
+import { BUNDLE_CAP, SETTLE_MS, FOLDER_LOOSE, plainError } from '../M4-workshop/git/push.mjs';
+import { idHash, intakeFactId } from './intake-facts.mjs';
+import { plainFolder } from '../M4-workshop/launcher/proposal-wall.mjs';
 import { cleanOutside, SOURCES } from '../M12-sensors/escape.mjs';
 
 export const FIRST_CUTOVER = 'First cutover: MAIN merges code by hand.';
@@ -76,11 +86,11 @@ export function proposalCardKey(rec, card) {
  */
 export function proposalCardProblem(rec, product, card) {
   let o;
-  try { o = rec.read('card', card); } catch (e) { return { broke: `card ${card} could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
+  try { o = rec.read('card', card); } catch (e) { return { broke: `card ${card} could not be read (${plainError(e?.message ?? e)})` }; }
   if (!o) return { refuse: `no card ${card} in the record: a proposal must name a ready card`, key: `${card}@0` };
   // A card with no product is one the record's writer can't make (it sets `product` at create): read as can't be read.
   if (o.corrupt || !o.doc || typeof o.doc !== 'object' || typeof o.doc.product !== 'string' || !o.doc.product || !Number.isSafeInteger(o.rev)) {
-    return { broke: `card ${card} could not be read (${String(o.reason ?? (o.doc && typeof o.doc === 'object' && Number.isSafeInteger(o.rev) ? 'no product named' : 'no document')).slice(0, 200)})` };
+    return { broke: `card ${card} could not be read (${plainError(String(o.reason ?? (o.doc && typeof o.doc === 'object' && Number.isSafeInteger(o.rev) ? 'no product named' : 'no document'))).slice(0, 200)})` };
   }
   const key = `${card}@${o.rev}`;
   if (o.doc.product !== product) return { refuse: `card ${card} is ${o.doc.product.slice(0, 100)}'s, not ${product}'s`, key };
@@ -114,8 +124,9 @@ export const BYTES = 'bytes';
 export const SOURCE_OF = Object.freeze({
   proposal: 'proposal-file', bundle: BYTES, research: 'research-file', idea: 'idea-file', claim: 'proposal-file', heartbeat: 'proposal-file',
 });
-/** A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). */
-export const shownName = (name) => cleanOutside(name, 'proposal-name');
+// A file name as alert text shows it: one line, stripped, masked and fenced (R-0b-126, probe P7). Defined in the route,
+// which fences the push script's reasons the same way (L718 M2), and named here as before.
+export { shownName };
 /** The fenced copy of a file's text, with its kind's own source; throws for a kind with none, or one that is bytes. */
 export function fenceFor(kind, text) {
   const source = Object.hasOwn(SOURCE_OF, kind) ? SOURCE_OF[kind] : null;
@@ -124,7 +135,6 @@ export function fenceFor(kind, text) {
   if (!source || source === BYTES || !SOURCES.includes(source)) throw new Error(`no outside-text source for a ${kind} file`);
   return { source, fenced: cleanOutside(text, source) };
 }
-const PLAIN_DIR = /^\/[A-Za-z0-9._/-]+$/;
 
 /** The kind and id a name stands for, or null. */
 export function proposalName(name) {
@@ -133,12 +143,7 @@ export function proposalName(name) {
 }
 
 export const sourceOf = (product) => `proposals-${product}`;
-// Fact ids (L233 M-4): a product name may hold a hyphen, so `a` + `b-x.md` and `a-b` + `x.md` must not share one. Each
-// id is its role plus a hash of its parts, each part length-prefixed, so no two different pairs, and no file and
-// folder, can meet.
-const idHash = (...parts) => sha256(parts.map((p) => `${String(p).length}:${p}`).join('|')).slice(0, 32);
-/** The fact a file's intake is kept in. */
-export const intakeFactId = (product, name) => `intake-applied-proposals-file-${idHash(product, name)}`;
+export { intakeFactId };
 /** The fact a product's folder problem is kept in. */
 export const folderFactId = (product) => `intake-applied-proposals-folder-${idHash(product)}`;
 /** The fact that says files of `kind` sit in a product's folder with nothing to take them in yet. */
@@ -147,6 +152,8 @@ export const waitingFactId = (product, kind) => `intake-applied-proposals-waitin
 export const ownerFactId = (ino) => `intake-applied-proposals-owner-${idHash(ino)}`;
 /** The product that first handed these bytes in, for good, across every product (L279). */
 export const bytesFactId = (sha256) => `intake-applied-proposals-bytes-${idHash(sha256)}`;
+/** The fact a file waiting on a cause that may pass by itself is kept and told on, once then daily (L325 m2, L597 (1)). */
+export const retryFactId = (product, name) => `intake-applied-proposals-retry-${idHash(product, name)}`;
 /** The fact a tell is marked on when the record refused the file's own fact (told once, not every pass). */
 export const toldFactId = (product, name) => `intake-applied-proposals-told-${idHash(product, name)}`;
 // The row that will take each handed-on kind in (L233 M-2: until then, told once per product and kind).
@@ -156,11 +163,11 @@ const ORDER = (name) => (name.startsWith('bundle-') ? 0 : 1);
 
 /** The folder's own problem, or null. `look` is lstat. */
 export function folderProblem(dir, ownerUid, look = lstatSync) {
-  if (typeof dir !== 'string' || !PLAIN_DIR.test(dir) || dir.split('/').includes('..')) return 'proposals.outbox is not a plain absolute folder path';
+  if (!plainFolder(dir)) return 'proposals.outbox is not a plain absolute folder path';
   let st; try { st = look(dir); } catch { return 'the proposals folder is missing'; }
   if (st.isSymbolicLink() || !st.isDirectory()) return 'the proposals folder is not a plain folder';
   if (st.uid !== ownerUid) return `the proposals folder is owned by user ${st.uid}, not the owner's user`;
-  if ((st.mode & 0o027) !== 0) return `the proposals folder's mode ${(st.mode & 0o777).toString(8)} is looser than 750`;
+  if ((st.mode & FOLDER_LOOSE) !== 0) return `the proposals folder's mode ${(st.mode & 0o777).toString(8)} is looser than 750`;
   return null;
 }
 
@@ -220,10 +227,10 @@ export function stageOf(rules, product) {
  * A proposal must name a ready card of its own product (R-0b-129, proposalCardProblem), checked before the docs check
  *   and again just before the claim; a card refusal is keyed on the card's revision, so it is looked at again once the
  *   card changes. A card that can't be read keeps the file unused, told once.
- * `docsCheck({ product, card, bundle })` → null | reason, and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
- *   `cardRev` is the card's revision at the last check: part 2's card move must expect it, so a card changed since is refused.
- *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so part 2 checks the bytes it merges.
- *   part 2's; not passed in, every proposal is refused.
+ * `docsCheck({ product, card, bundle })` → null | reason | { refuse: reason } | { retry: reason } (proposal-route.mjs), and `toReview({ rec, product, card, cardRev, proposal, bundle })` → { ok, reason? } (`proposal` fenced too):
+ *   `cardRev` is the card's revision at the last check: the card move expects it, so a card changed since is refused.
+ *   `bundle` is { path, sha256 }: the bytes this pass checked and recorded (L233 M-5), so the push takes the bytes that were checked.
+ *   Not passed in, every proposal is refused. Its refusal is keyed on the card, so it is looked at again once the card changes.
  * Returns what happened to each file.
  */
 export async function proposalsPass({ rec, rules, products, ownerUid, wait, alert, note = () => {}, handlers = {}, docsCheck, toReview,
@@ -279,12 +286,14 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     if (first != null && o.doc.birth !== f.at.birth) { f.why = `the proposals folder has ${first}'s file number but a different creation time (re-dated or replaced), so it may be ${first}'s; give ${f.product} a new folder`; continue; }
     if (first != null) { f.why = `the proposals folder was ${first}'s first, so the files ${first} took in from it would be taken in again; give ${f.product} a new folder`; continue; }
     const w = rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: o?.rev ?? 0, doc: { product: f.product, ino: f.at.ino, birth: f.at.birth, at: new Date(now).toISOString() }, kind: 'proposal_folder_owner' });
-    if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${w.reason})`;
+    if (!w.ok) f.why = `the proposals folder's first product could not be recorded (${plainError(String(w.reason))})`;
   }
-  for (const { product, dir, why: cause } of folders) {
-    let why = cause;
+  for (const f of folders) {
+    const { product, dir } = f;
+    let why = f.why;
     let names = null;
-    if (!why) { try { names = list(dir); } catch { why = 'the proposals folder could not be read'; } }
+    // Kept on the folder too, so endWaits doesn't read one failed listing as every wait in it ended (L669 minor).
+    if (!why) { try { names = list(dir); } catch { why = f.why = 'the proposals folder could not be read'; } }
     tellCause(rec, folderFactId(product), { product, folder: true }, why, `${product}'s proposals folder is not taken in: ${why}`, alert, now);
     if (why) { out.push({ product, skipped: why }); continue; }
     names = names.filter((n) => !n.startsWith('.')).sort((x, y) => ORDER(x) - ORDER(y));
@@ -293,6 +302,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
   if (seen.length) await wait(SETTLE_MS);
   const waiting = new Map(products.map((p) => [p, new Set()]));
   const rows = new Map();
+  // The files that wait this pass on a cause that may pass by itself (waitOn): every other wait fact is ended below.
+  const waitingOn = new Set();
   for (const { product, dir, name, names, first } of seen) {
     const r = { product, name };
     out.push(r);
@@ -312,11 +323,14 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       return w;
     };
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
-    // cause, not every pass (L233 M-3, m4).
-    const tellUnrecorded = (said, key) => {
+    // cause, not every pass (L233 M-3, m4). `daily`: told again once its told time is 24 h old, as stillWaiting does
+    // (L702 minor 5), for a wait that goes on.
+    const tellUnrecorded = (said, key, { daily = false } = {}) => {
       note(`proposals ${product}: ${shown}: ${said}`);
-      if (rec.read('fact', toldFactId(product, name))?.doc?.told === key || isQueued(rec, toldFactId(product, name))) return undefined;
-      return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key }, kind: 'proposal_told' });
+      const mark = rec.read('fact', toldFactId(product, name))?.doc;
+      const at = daily ? pastTime(mark?.told_at, now) : null;
+      if ((mark?.told === key && (!daily || (at !== null && now - at < STILL_WAITING_MS))) || isQueued(rec, toldFactId(product, name))) return undefined;
+      return tellThen(alert, said, { fact: toldFactId(product, name), fields: { told: key, ...(daily ? { told_at: new Date(now).toISOString() } : {}) }, kind: 'proposal_told' });
     };
     // A refusal is recorded once per reason and bytes, and told once (not every pass while the file sits there).
     // A refusal with no bytes to name (a bad name, too big, a link, another owner) never erases a recorded state (L254):
@@ -340,6 +354,53 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (w.ok) tellThen(alert, said, { fact: intakeFactId(product, name), fields: { told_key: told }, kind: 'proposal_told' });
       else tellUnrecorded(said, `refused ${told}`);
     };
+    // A wait that may pass by itself (L325 m2): the file stays unused, the cause is kept on its wait fact, and Joe is told
+    // at once, then each day while it waits (the shared stillWaiting). `why` is already fenced where it quotes outside text
+    // (a check's own words, as a broken card or bytes record's, need none).
+    const waitOn = (why, hash) => {
+      r.waiting = why;
+      waitingOn.add(`${product}/${name}`);
+      const fid = retryFactId(product, name);
+      let cur; try { cur = rec.read('fact', fid); } catch { cur = null; }
+      const old = cur?.corrupt ? null : cur?.doc;
+      // The start, from the wait fact, else from the delivered mark (which carries it): a wait fact the Record refused
+      // must not restart the wait each pass, told and noted every pass (L669 M2).
+      const markSince = typeof old?.since === 'string' ? old.since.split(WAIT_KEY_SEP)[0] : undefined;
+      const since = typeof old?.waiting_since === 'string' ? old.waiting_since : pastTime(markSince, now) !== null ? markSince : new Date(now).toISOString();
+      // The causes told in this wait, each with when (L680 M2): a cause told within the day is not told again when it
+      // comes back, so two causes that take turns are told at most once each a day, never every pass.
+      const cause = idHash(why).slice(0, 8);
+      const markCause = typeof old?.since === 'string' ? old.since.split(WAIT_KEY_SEP)[1] : undefined;
+      const toldCauses = plainObject(old?.told_causes);
+      const toldLately = (h) => { const t = pastTime(toldCauses[h], now); return t !== null && now - t < STILL_WAITING_MS; };
+      const fresh = cause !== markCause && !toldLately(cause);
+      if (old?.waiting_since !== since || old?.why !== why) {
+        const w = putWait(rec, fid, cur?.rev ?? 0, { ...(old ?? {}), product, name, waiting_since: since, why });
+        // Noted when the wait begins or its cause is new to Joe today; a cause that comes back is not noted each pass.
+        if (w?.ok && (old?.waiting_since !== since || fresh)) note(`proposals ${product}: ${shown} waits: ${why}`);
+        else if (!w?.ok && old?.waiting_since === undefined && markSince === undefined) {
+          // Nothing kept says when it began: told once a day for these bytes, never once a pass (the L233 M-3 rule;
+          // L680 minor: once a day, as any wait is).
+          tellUnrecorded(`${shown} in ${product}'s proposals folder waits and was not used: ${why}. Its wait could not be recorded (${plainError(w?.reason ?? 'no answer')})`, `wait ${hash}`, { daily: true });
+          return;
+        }
+      }
+      // Keyed on the start and the cause told: a new cause is told at once (L669 minor); one told within the day keeps
+      // the mark's key, so stillWaiting tells it only at the daily repeat.
+      const key = fresh || markCause === undefined ? cause : markCause;
+      const kept = Object.fromEntries(Object.entries(toldCauses).filter(([h]) => toldLately(h)).slice(-8));
+      stillWaiting({
+        waiting: true, now, since: `${since}${WAIT_KEY_SEP}${key}`,
+        read: () => rec.read('fact', fid)?.doc ?? null,
+        tell: (fields) => tellThen(alert, `${shown} in ${product}'s proposals folder has waited since ${since} and was not used: ${why}. It is checked again each pass; told again each day while it waits`, { fact: retryFactId(product, name), fields: { ...fields, told_causes: { ...kept, [cause]: new Date(now).toISOString() } }, kind: 'proposal_told' }),
+        clear: () => {},
+      });
+    };
+    // The bytes this product's bundle for `pk` is held or refused with now, or null: what a proposal's refusal is keyed on.
+    const bundleKeyOf = (pk) => { try { const s = rec.read('fact', intakeFactId(product, `bundle-${pk}.bundle`))?.doc?.sha256; return typeof s === 'string' ? s : null; } catch { return null; } };
+    // Whether a held bundle's bytes may have gone on with a proposal: their bytes record is written just before the claim
+    // (bytesSeen below), so with none they never did. One that can't be read counts as gone, so nothing is replaced.
+    const mayHaveGone = (sha) => { if (typeof sha !== 'string') return true; try { return rec.read('fact', bytesFactId(sha)) != null; } catch { return true; } };
     const parsed = proposalName(name);
     if (!parsed) { refuse(name.startsWith('verdict-') ? 'a verdict comes only from a review session\'s own outbox' : 'it is not a proposals file name'); continue; }
     r.kind = parsed.kind;
@@ -356,7 +417,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       const key = String(prev.doc.sha256);
       const text = old.interrupted_text ? `${old.interrupted_text}; ${said}` : said;
       const w = put({ ...prev.doc, state: 'interrupted', at: new Date(now).toISOString(), interrupted_text: text, interrupted_key: key }, 'proposal_interrupted');
-      if (!w.ok) { r.refused = `could not record the interruption: ${w.reason}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
+      if (!w.ok) { r.refused = `could not record the interruption: ${plainError(String(w.reason))}`; tellUnrecorded(said, `interrupted ${prev.doc.sha256}`); continue; }
       tellThen(alert, text, { fact: intakeFactId(product, name), fields: { told_interrupted: key }, kind: 'proposal_told' });
     }
     // Bytes this name used, or may have, before: never again, whatever the fact says now (L254). A heartbeat is a poll.
@@ -366,9 +427,16 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (prev.doc.sha256 === hash && ['applied', 'interrupted'].includes(was)) { r.already = true; continue; }
       // Refused for good, except a card refusal, looked at again once its card has changed (#159 audit Minor 2).
       const cardKey = typeof prev.doc.card_key === 'string' && parsed.kind === 'proposal' ? proposalCardKey(rec, parsed.id) : null;
-      if (prev.doc.sha256 === hash && was === 'refused' && !(cardKey !== null && cardKey !== prev.doc.card_key)) { r.refused = prev.doc.why; continue; }
-      // L78 n2: a heartbeat's new bytes are a new poll. Every other kind: new bytes on a used name are refused.
-      if (prev.doc.sha256 !== hash && parsed.kind !== 'heartbeat' && !['refused', 'interrupted'].includes(was)) {
+      // Likewise a refusal that came from its bundle, once the bundle held is other bytes (L597 (2)).
+      const bundleMoved = parsed.kind === 'proposal' && Object.hasOwn(prev.doc, 'bundle_key') && bundleKeyOf(parsed.id) !== prev.doc.bundle_key;
+      if (prev.doc.sha256 === hash && was === 'refused' && !(cardKey !== null && cardKey !== prev.doc.card_key) && !bundleMoved) { r.refused = prev.doc.why; continue; }
+      // L78 n2: a heartbeat's new bytes are a new poll. Every other kind: new bytes on a used name are refused, and so
+      // is a held bundle's, once its bytes may have gone on with a proposal. A bundle held but never handed on is not
+      // used, so a corrected one replaces it (the header's rule; L597 (2)). A proposal whose route ended refused or lost:
+      // its bytes went nowhere, so its two names take new bytes (L549, L718 M1).
+      const refiled = ['proposal', 'bundle'].includes(parsed.kind) && routeReopened(rec, parsed.id);
+      const replaceable = ['refused', 'interrupted'].includes(was) || (parsed.kind === 'bundle' && was === 'held' && !mayHaveGone(prev.doc.sha256)) || refiled;
+      if (prev.doc.sha256 !== hash && parsed.kind !== 'heartbeat' && !replaceable) {
         r.refused = 'the same name with new content';
         // Told once for these bytes: the mark lands when the alert is sent, and one still waiting is not queued again.
         if (prev.doc.told_new !== hash && !isQueued(rec, intakeFactId(product, name))) {
@@ -386,12 +454,12 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     const bytesSeen = (hashes, record) => {
       for (const h of hashes) {
         let o;
-        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { return { broke: `the check that no other product handed these bytes in could not be read (${String(e?.message ?? e).slice(0, 200)})` }; }
-        if (o && (o.corrupt || typeof o.doc?.product !== 'string' || !o.doc.product)) return { broke: `the check that no other product handed these bytes in could not be read (${o.corrupt ? String(o.reason).slice(0, 200) : 'no product named'})` };
+        try { o = rec.read('fact', bytesFactId(h)); } catch (e) { return { broke: `the check that no other product handed these bytes in could not be read (${plainError(e?.message ?? e)})` }; }
+        if (o && (o.corrupt || typeof o.doc?.product !== 'string' || !o.doc.product)) return { broke: `the check that no other product handed these bytes in could not be read (${o.corrupt ? plainError(String(o.reason)).slice(0, 200) : 'no product named'})` };
         if (o && o.doc.product !== product) return { other: o.doc };
         if (o || !record) continue;
         const w = rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: 0, doc: { product, name, sha256: h, at: new Date(now).toISOString() }, kind: 'proposal_bytes' });
-        if (!w.ok) return { broke: `which product handed these bytes in could not be recorded (${w.reason})` };
+        if (!w.ok) return { broke: `which product handed these bytes in could not be recorded (${plainError(String(w.reason))})` };
       }
       return {};
     };
@@ -402,12 +470,15 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
         refuse(`these bytes were already handed in by ${other.product}${as} on ${String(other.at ?? '').slice(0, 10) || 'an unknown date'}`, hash);
         return true;
       }
-      if (broke) { r.refused = broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${broke}`, `bytes ${hash}`); return true; }
+      // A check that could not be read is no outcome: the file waits, told daily, its wait kept (L680 minor).
+      if (broke) { waitOn(broke, hash); return true; }
       return false;
     };
     if (parsed.kind === 'idea') { refuse(IDEAS_OFF, hash); continue; }
     if (parsed.kind === 'bundle') {
       const pair = `proposal-${parsed.id}.md`;
+      // Held already, with these bytes: its proposal taken out for a while doesn't end it (L669 minor).
+      if (!names.includes(pair) && prev?.doc?.state === 'held' && prev.doc.sha256 === hash) { r.held = `held; ${pair} is not in the folder`; continue; }
       if (!names.includes(pair)) {
         // Its proposal may still be on the way (lane 2's #124 review, m3): wait, unrecorded, while the bundle is young.
         // Its file time through the shared pastTime (L329): one that can't be read, or lies ahead (a clock that went back,
@@ -420,7 +491,7 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // Recorded, so new bytes under its name are refused and told like any other kind's (L233 M-5).
       if (!(prev?.doc?.state === 'held' && prev.doc.sha256 === hash)) {
         const w = put({ sha256: hash, state: 'held', at: new Date(now).toISOString() }, 'proposal_bundle');
-        if (!w.ok) { r.refused = `could not record the bundle: ${w.reason}`; tellUnrecorded(`${shown} in ${product}'s proposals folder could not be recorded (${w.reason}); its proposal waits`, `bundle ${hash}`); continue; }
+        if (!w.ok) { r.refused = `could not record the bundle: ${plainError(String(w.reason))}`; tellUnrecorded(`${shown} in ${product}'s proposals folder could not be recorded (${plainError(String(w.reason))}); its proposal waits`, `bundle ${hash}`); continue; }
       }
       r.held = `taken in with ${pair}`;
       continue;
@@ -434,7 +505,8 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (names.includes(pair)) {
         const b = rec.read('fact', intakeFactId(product, pair))?.doc;
         const bundleRow = rows.get(`${product}/${pair}`);
-        if (bundleRow?.refused || ['refused', 'interrupted'].includes(b?.state)) { refuse(`its ${pair} was refused`, hash); continue; }
+        // Keyed on the bundle's bytes, so a corrected bundle has this proposal looked at again (L597 (2)).
+        if (bundleRow?.refused || ['refused', 'interrupted'].includes(b?.state)) { refuse(`its ${pair} was refused`, hash, { bundle_key: bundleKeyOf(card) }); continue; }
         if (!bundleRow?.held || b?.state !== 'held') { r.waiting = `waiting for ${pair} to be taken in`; continue; }
         bundle = { path: join(dir, pair), sha256: b.sha256 };
       }
@@ -443,15 +515,27 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // bytes another product handed in are told as that first.
       const named = proposalCardProblem(rec, product, card);
       if (named?.refuse) { refuse(named.refuse, hash, { card_key: named.key }); continue; }
-      if (named?.broke) { r.refused = named.broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${named.broke}`, `card ${hash}`); continue; }
+      if (named?.broke) { waitOn(named.broke, hash); continue; }
       if (stageOf(rules, product) !== 'second') {
         if (typeof docsCheck !== 'function') { refuse(`${FIRST_CUTOVER} (A docs proposal is taken in once the docs check on the push script's changed files is wired: R-0b-128 part 2.)`, hash); continue; }
-        if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash); continue; }
+        if (!bundle) { refuse(`no ${pair} carries this proposal's change`, hash, { bundle_key: null }); continue; }
         let docs;
-        try { docs = await docsCheck({ product, card, bundle }); } catch (e) { docs = `the docs check failed: ${e.message}`; }
-        if (docs) { refuse(`${FIRST_CUTOVER} (${docs})`, hash); continue; }
+        // A check that throws has said nothing about the change: the file waits, never passes, never ends (L597 (2)).
+        try { docs = await docsCheck({ product, card, bundle }); } catch (e) { docs = { retry: `the docs check failed: ${plainError(e?.message ?? e)}` }; }
+        // Only null passes. The reasons quote names from inside the bundle, which its proposer wrote: they reach the
+        // alert, the diary and the record only fenced, masked, on one line (R-0b-126; L597 (3)).
+        if (docs !== null) {
+          const extra = { bundle_key: bundle.sha256 };
+          // A look that couldn't finish, or any cause that may pass by itself: the file waits, and Joe is told (L325 m2).
+          if (typeof docs === 'object' && docs && Object.hasOwn(docs, 'retry')) { waitOn(shownName(textOr(docs.retry, 'the docs check could not finish')), hash); continue; }
+          if (typeof docs === 'object' && docs && Object.hasOwn(docs, 'refuse')) { refuse(`its ${pair} was refused by the push script's check: ${shownName(textOr(docs.refuse, 'no reason given'))}`, hash, extra); continue; }
+          // An answer that is no reason says nothing about the change: never a pass, never final (L669 minor).
+          if (typeof docs !== 'string' || !docs) { waitOn(shownName('the docs check gave no answer'), hash); continue; }
+          // Not the docs lane's: the reason may come from the card (its tier, a label), so a changed card is looked at again.
+          refuse(`${FIRST_CUTOVER} (${shownName(docs)})`, hash, { ...extra, card_key: proposalCardKey(rec, card) }); continue;
+        }
       }
-      if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not built yet (R-0b-128 part 2)', hash); continue; }
+      if (typeof toReview !== 'function') { refuse('a proposal\'s route to review is not wired in yet (R-0b-162)', hash); continue; }
       useBundle = bundle?.sha256 ?? null;
       use = () => toReview({ rec, product, card, cardRev, proposal: fenceFor('proposal', file.text).fenced, bundle });
     } else {
@@ -467,19 +551,19 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       // The card again, after the docs check's wait (#159 audit Minor 1): it may have changed meanwhile.
       const again = proposalCardProblem(rec, product, parsed.id);
       if (again.refuse) { refuse(again.refuse, hash, { card_key: again.key }); continue; }
-      if (again.broke) { r.refused = again.broke; tellUnrecorded(`${shown} in ${product}'s proposals folder was not used: ${again.broke}`, `card ${hash}`); continue; }
+      if (again.broke) { waitOn(again.broke, hash); continue; }
       cardRev = again.rev;
     }
     if (parsed.kind !== 'heartbeat' && bytesStop(bytesSeen([hash, ...(useBundle ? [useBundle] : [])], true))) continue;
     // Claim first, so a crash after the hand-over cannot use the file twice.
     const claim = put({ sha256: hash, state: 'applying', at: new Date(now).toISOString() }, 'proposal_claim');
-    if (!claim.ok) { r.refused = `could not record the intake: ${claim.reason}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${claim.reason}); it was not used`, `claim ${hash}`); continue; }
+    if (!claim.ok) { r.refused = `could not record the intake: ${plainError(String(claim.reason))}`; tellUnrecorded(`the intake of ${shown} from ${product}'s proposals folder could not be recorded (${plainError(String(claim.reason))}); it was not used`, `claim ${hash}`); continue; }
     let done;
     try { done = await use(); } catch (e) { done = { ok: false, reason: e.message }; }
     if (done?.ok) {
       put({ sha256: hash, state: 'applied', applied_at: new Date(now).toISOString() }, 'proposal_applied');
       r.applied = true;
-    } else refuse(done?.reason ?? 'no answer', hash);
+    } else refuse(done?.reason ?? 'no answer', hash, parsed.kind === 'proposal' ? { card_key: proposalCardKey(rec, parsed.id) } : null);
   }
   // Files of a kind nothing takes in yet sit in the folder: told once per product and kind, and cleared when none wait.
   for (const [product, kinds] of waiting) {
@@ -489,7 +573,37 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       tellCause(rec, waitingFactId(product, kind), { product, kind }, why, `${product}'s proposals folder: ${why}`, alert, now);
     }
   }
+  endWaits(rec, folders, rows, waitingOn, now);
   return out;
+}
+
+// A wait (waitOn) ends when its file has gone from a folder this pass read, or had any outcome but a wait: its queued
+// tell is dropped and its start and told mark go, so a wait that comes back is told afresh (stillWaiting's rule).
+// A file still waiting for another reason (being written, its bundle not taken in yet) keeps its wait as it is.
+const RETRY_PREFIX = 'intake-applied-proposals-retry-';
+// Between a wait's start and its cause's short hash in the key stillWaiting compares (ISO time text holds no '|').
+const WAIT_KEY_SEP = '|';
+function endWaits(rec, folders, rows, waitingOn, now) {
+  const read = new Set(folders.filter((f) => !f.why).map((f) => f.product));
+  let facts;
+  try { facts = rec.list('fact'); } catch { return; }
+  for (const f of facts) {
+    const d = f.doc;
+    if (typeof f?.id !== 'string' || !f.id.startsWith(RETRY_PREFIX) || !d || !read.has(d.product) || typeof d.name !== 'string' || f.id !== retryFactId(d.product, d.name)) continue;
+    const key = `${d.product}/${d.name}`;
+    if (waitingOn.has(key) || rows.get(key)?.waiting || d.waiting_since === undefined) continue;
+    // Its told mark's cause goes with the wait, so a late mark can't outlive it (the r7 M2 sweep).
+    if (!dropCause(rec, retryFactId(d.product, d.name))) continue;
+    putWait(rec, f.id, f.rev ?? 0, { product: d.product, name: d.name, why: null, ended_at: new Date(now).toISOString() });
+  }
+}
+
+// An object as read from the Record, or {} for anything else (an array, text, null).
+const plainObject = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? x : {});
+
+// A proposal's wait fact (retryFactId): its cause and since while it waits, or its end. One write site for both.
+function putWait(rec, id, expectRev, doc) {
+  return rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev, doc, kind: 'proposal_wait' });
 }
 
 // The bytes a fact says were used, or may have been (applied, interrupted), with those it carried. A claim still out
@@ -535,7 +649,7 @@ function retellFiles(rec, alert, products) {
   try { facts = rec.list('fact'); } catch { return; }
   for (const f of facts) {
     const d = f.doc;
-    if (!f.id.startsWith(FILE_PREFIX) || !d || !products.includes(d.product) || f.id !== intakeFactId(d.product, d.name)) continue;
+    if (typeof f?.id !== 'string' || !f.id.startsWith(FILE_PREFIX) || !d || !products.includes(d.product) || f.id !== intakeFactId(d.product, d.name)) continue;
     if (isQueued(rec, f.id)) continue;
     const u = untoldOf(d);
     if (u.interrupted_key) tellThen(alert, u.interrupted_text, { fact: intakeFactId(d.product, d.name), fields: { told_interrupted: u.interrupted_key }, kind: 'proposal_told' });

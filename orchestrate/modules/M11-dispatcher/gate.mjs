@@ -12,9 +12,9 @@ import { wholeNumber } from '../../shared/rules.mjs';
 import { mayStart } from './usage.mjs';
 import { foldKey, matchForm } from '../../shared/plan-fingerprint.mjs';
 import { STATES } from '../../shared/record-names.mjs';
+import { ROW_FILE } from '../M2-approvals/go.mjs';   // the one row-file pattern; the go and this gate read rows alike (L696)
 
 const refuse = (reason) => ({ ok: false, reason });
-const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/;
 
 /** A repo path, normalised and folded by the one shared fold (shared/plan-fingerprint.mjs foldKey; L105 M-3), as the
  * Mac's disk compares names. Null for a path outside the repo or one that is not well formed. */
@@ -46,7 +46,7 @@ export function fileSet(card, { dailyPatterns }) {
     const n = normPath(f);
     if (!n) return refuse(`the card names a path outside the repo (${f})`);
     const row = ROW_FILE.exec(n);
-    if (row && !named.has(row[1])) return refuse(`the card touches row ${row[1]} without naming it`);
+    if (row) named.add(row[1]);   // a row file among the card's files names its row (L684, L696); n is folded, so the id is too
     out.add(n);
   }
   for (const id of named) out.add(`docs/blueprint/rows/${id}.yaml`);

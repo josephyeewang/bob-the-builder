@@ -12,7 +12,11 @@
 const q = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== undefined && v !== null)).toString();
 
 // The project settings whose change could switch a guard off (M4). The build-skip ("ignored build step") command is
-// the guard E4 relies on.
+// the guard E4 relies on. autoExposeSystemEnvs is the dashboard's "Enable access to System Environment Variables" box
+// (Settings, Environment Variables): with it off the build-skip line reads an empty VERCEL_ENV and branch and skips
+// every production build, and a skipped build raises nothing in the watcher (#241 r1 M1, L592 a). Field name and place
+// (top level of the project, an optional boolean) from Vercel's REST API reference for GET /v9/projects/{idOrName},
+// read 6 Nov 2026, not tried live; void on a Vercel API change (Principle 9). Missing reads as null, like every field here.
 export const SETTING_FIELDS = Object.freeze([
   ['commandForIgnoringBuildStep', (p) => p.commandForIgnoringBuildStep],
   ['buildCommand', (p) => p.buildCommand],
@@ -25,6 +29,7 @@ export const SETTING_FIELDS = Object.freeze([
   ['productionBranch', (p) => p.link?.productionBranch],
   ['linkedRepo', (p) => (p.link ? `${p.link.type ?? ''}:${p.link.org ?? ''}/${p.link.repo ?? ''}` : null)],
   ['autoAssignCustomDomains', (p) => p.autoAssignCustomDomains],
+  ['autoExposeSystemEnvs', (p) => p.autoExposeSystemEnvs],
 ]);
 
 // A list field that is missing or not a list is an unreadable answer, never "none" (round 3 M-C): the watcher's
