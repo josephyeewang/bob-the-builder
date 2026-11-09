@@ -363,6 +363,7 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
 
 const noPorts = () => { const noop = () => [];
   return { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hasSession: () => true, gateAlive: () => true,
     hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop, sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }),
     startMinibase: async () => ({ ok: true }), cleanup: { copiesRoot: '/none', sealRoot: '/none', mirrorFor: () => null }, approvals: () => [] }; };

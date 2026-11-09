@@ -29,6 +29,11 @@
 // NOT HERE: `gateAlive` asks whether the Merge Gate is running, and it runs in the robot job's gate pass, which is not
 // wired; it has no sign of life to read yet. It moves to whoever wires that pass, which writes a "gate last ran at"
 // mark for it (L639).
+// NOT YET (A4, L615 grant 3): `proposals()` → { products, ownerUid }, for the tick's proposals step (proposals-intake.mjs).
+// The products are this Dispatcher's one; ownerUid must be the owner's own Mac uid, whose proposals folders are (setup
+// layout.mjs makes them the owner's), and it is never read from the folder itself (L78 n6). The Dispatcher config's
+// ownerUid is the workers' user, who owns the Record, not the owner (L674), and the config has no key for the owner's
+// uid. So the port stays listed, and refuses, until that key is in the config (CONFIG_KEYS and root's config write).
 // NOT HERE: `filesOf` answers at once (undo.mjs calls it without waiting), from the local mirror, so it is not a GitHub
 // read; it stays listed until the mirror is wired.
 
@@ -42,7 +47,7 @@ import { pastTime } from '../shared/still-waiting.mjs';
 import { readRowAt } from '../modules/M6-merge-gate/gather.mjs';
 import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'filesOf', 'gateAlive', 'healthy', 'resume', 'proposals']);
 
 const SHA = /^[0-9a-f]{40}$/;
 

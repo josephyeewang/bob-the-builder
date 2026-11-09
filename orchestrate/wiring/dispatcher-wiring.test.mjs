@@ -39,7 +39,7 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
-  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
+  'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'probe', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
   'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
@@ -47,7 +47,7 @@ const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planR
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
-const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'outboxRoot', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'outboxRoot', 'proposalsFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 // LEAD-RULED (L652, re-ruled by L674 for the separate-process boots): the boot's review user is another user (this one's
@@ -55,7 +55,7 @@ const NW = (port) => notWiredText(port);
 // step fails with exactly that. The in-process test below pins limits 'ok' on the healthy path. The lead checks this line.
 const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
 const EXPECTED_STEPS = Object.freeze({
-  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
+  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
   pass: NW('sessions'), limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
 });
 

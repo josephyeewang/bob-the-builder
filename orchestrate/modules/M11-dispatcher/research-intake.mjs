@@ -11,10 +11,12 @@
 // proposals file, the sha256 checked again first (M4 push.mjs pushResearch, L286). The start loop never hands a
 // research_copy card to a worker (pass.mjs starts), so researchCopyPass is what stops one sitting in ready untold (L313).
 //
-//   researchHandler({ rules }) → the proposals intake's `research` handler:
+//   researchHandler({ rules, alert }) → the proposals intake's `research` handler:
 //     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` is read only to see that it is not blank; `now` is the pass's clock, required; an empty or blank report is refused)
-//   researchPass({ rec, now })  (now required) → [[card, what]]   each pass: a research_copy card left in draft is moved to ready, and
-//                                                  an ask whose card exists leaves the waiting list (restart-safe)
+//   researchPass({ rec, now, alert })  (now and alert required) → [[card, what]]   each pass: a research_copy card left in draft is moved to
+//                                                  ready, and an ask whose card exists leaves the waiting list (restart-safe)
+//   Either move refused, from the handler or the pass, is told to the owner (L303): at once, then daily while it lasts, one
+//   cause per card and move (settleCause), cleared once the move is made, so a return is told afresh (pass.mjs holdAlert)
 //   researchCopyPass({ rec, rules, pushResearch, alert, now, host })  (now required) → [[card, what]]   each pass, for each
 //                                                  ready card: not yet pushed, it is pushed, at most every RETRY_MS while
 //                                                  refused and never while the rules have copies off. A report whose bytes
@@ -39,7 +41,7 @@ import { researchBrief, researchFileName, researchPath, landResearch, RESEARCH_I
 import { goFreeOn, GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { tellThen, dropCause, isQueued } from './alerts.mjs';
-import { HOLD_FACT, putFact, writeLaunch } from './pass.mjs';
+import { HOLD_FACT, putFact, writeLaunch, holdAlert, clearHold } from './pass.mjs';
 import { hostname } from 'node:os';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
@@ -74,7 +76,9 @@ export function researchCardDoc({ askId, product, name, sha256, blob, size }) {
     files: [researchPath(askId)], source: { file: name, sha256, blob, size }, what: `copy research ask ${askId}'s report to ${researchPath(askId)}` };
 }
 
-export function researchHandler({ rules }) {
+export function researchHandler({ rules, alert }) {
+  // Fail closed: a handler that could not tell a refused move would leave a draft card or an open ask in silence (L303).
+  if (typeof alert !== 'function') throw new Error('researchHandler needs the alert, to tell a card that can\'t go ready or land');
   return function research({ rec, product, id, name, fenced, sha256, blob, size, now }) {
     // The pass's own clock, handed on by the intake, never this machine's at call time (#154 audit, cosmetic).
     if (!Number.isFinite(now)) return { ok: false, reason: 'the intake did not hand on its clock, so the report was not used' };
@@ -87,45 +91,77 @@ export function researchHandler({ rules }) {
     const blank = fencedBlank(fenced);
     if (blank === null) return { ok: false, reason: 'the intake did not hand on the report\'s fenced text, so it could not be checked' };
     if (size === 0 || sha256 === EMPTY_SHA256 || blob === EMPTY_BLOB || blank) return { ok: false, reason: `the research report for ${id} is empty or only blank space, so there is nothing to copy; the ask stays open` };
+    // The card first, then the ask (L303): once the card has landed, the ask no longer waits, so a report sent again
+    // would otherwise be refused as "not open", with nothing said of the card or what to do.
+    const cardId = RESEARCH_CARD(id);
+    const have = rec.read('card', cardId);
+    const otherBytes = have && (have.corrupt || have.doc?.source?.sha256 !== sha256 || have.doc?.source?.blob !== blob);
+    if (otherBytes && !have.corrupt && have.doc?.product !== product) return { ok: false, reason: `research ask ${id} is for product ${have.doc?.product}, not this one` };
+    // A pass that wrote the card and stopped before landing it: the same bytes go on; any other bytes are refused, with
+    // what to do. The intake records and tells it once (proposals-intake.mjs refuse). Most often the report was sent
+    // again, changed, after an intake that was cut off had already made the card from the first bytes.
+    if (otherBytes && have.corrupt) return { ok: false, reason: `research ask ${id} already has its research_copy card, and it can't be read, so this report was not used; ask again with a new research ask` };
+    if (otherBytes) return { ok: false, reason: alreadyCarded(id, have.doc?.source?.sha256) };
     const brief = researchBrief(rec, id);
     if (!brief.ok) return { ok: false, reason: brief.reason };
     if (brief.product !== product) return { ok: false, reason: `research ask ${id} is for product ${brief.product}, not this one` };
-    const cardId = RESEARCH_CARD(id);
-    const have = rec.read('card', cardId);
-    if (have) {
-      // A pass that wrote the card and stopped before landing it: the same bytes go on; any other bytes are refused.
-      if (have.corrupt || have.doc?.source?.sha256 !== sha256 || have.doc?.source?.blob !== blob) return { ok: false, reason: `research ask ${id} already has its research_copy card` };
-    } else {
+    if (!have) {
       const w = rec.write({ actor: 'dispatcher', entity: 'card', id: cardId, expectRev: 0, kind: 'research_card',
         doc: researchCardDoc({ askId: id, product, name, sha256, blob, size }) });
       if (!w.ok) return { ok: false, reason: `the research_copy card could not be recorded: ${w.reason}` };
     }
-    // Ready and landed now if it can be; researchPass tries again on later passes, so the file still counts as used.
-    settle(rec, cardId, id, now);
+    // Ready and landed now if it can be; what can't be done now is told (settle), and researchPass tries again on later
+    // passes, so the file still counts as used.
+    settle(rec, cardId, id, now, alert);
     return { ok: true, card: cardId };
   };
 }
 
-function settle(rec, cardId, askId, now) {
+/** The refusal of a second report for an ask that has its card, with what to do. */
+export function alreadyCarded(id, sha) {
+  const first = typeof sha === 'string' ? ` (version ${sha.slice(0, 12)})` : '';
+  return `research ask ${id} already has its research_copy card, made from the report first taken in${first}, so this one was not used. `
+    + 'To have the first one copied, put it back unchanged; to have this one copied, ask again with a new research ask';
+}
+
+/** The hold cause of a research_copy card's refused move: `ready` (draft to ready) or `land` (the ask leaves the waiting list). */
+export const settleCause = (which, cardId) => `research-${which}-${cardId}`;
+
+// A refused move is told, at once and then daily while it lasts (holdAlert); a move made, or one not needed any more,
+// clears its cause, so a refusal that comes back is told afresh. A clear that can't drop its queued alert says so in
+// the pass's own lines and waits for the next pass (clearHold).
+function settleTell(rec, alert, now, out, cardId, which, why, text) {
+  const cause = settleCause(which, cardId);
+  if (why === null) { clearHold(rec, HOLD_FACT(cause), now, (line) => out.push(line)); return; }
+  holdAlert({ rec, cause, text, alert, now });
+}
+
+function settle(rec, cardId, askId, now, alert) {
   const out = [];
   const c = rec.read('card', cardId);
+  const product = c?.doc?.product ?? 'a product';
   if (c?.doc?.state === 'draft') {
     const r = move(rec, 'card', cardId, { state: 'ready' }, { kind: 'research_ready' });
     out.push(r.ok ? 'ready' : `not ready: ${r.reason}`);
-  }
+    settleTell(rec, alert, now, out, cardId, 'ready', r.ok ? null : r.reason,
+      `${product}: the report for research ask ${askId} was taken in, but its card ${cardId} could not go to ready (${r.reason}), so it is not copied yet; it is tried again each pass`);
+  } else if (c && !c.corrupt) settleTell(rec, alert, now, out, cardId, 'ready', null);
   const l = landResearch({ record: rec, now: () => now }, askId);
   if (l.ok && !l.already) out.push('landed');
   else if (!l.ok) out.push(`not landed: ${l.reason}`);
+  settleTell(rec, alert, now, out, cardId, 'land', l.ok ? null : l.reason,
+    `${product}: the report for research ask ${askId} is on its card ${cardId}, but the ask could not be marked as answered (${l.reason}); it is tried again each pass`);
   return out;
 }
 
-export function researchPass({ rec, now }) {
+export function researchPass({ rec, now, alert }) {
   if (!Number.isFinite(now)) throw new Error('researchPass needs the pass\'s clock (now)');
+  if (typeof alert !== 'function') throw new Error('researchPass needs the alert, to tell a card that can\'t go ready or land');
   const out = [];
   for (const c of rec.list('card')) {
     if (c.doc?.kind !== 'research_copy' || typeof c.doc.research_ask !== 'string') continue;
     if (c.doc.state !== 'draft' && !researchBrief(rec, c.doc.research_ask).ok) continue;
-    for (const what of settle(rec, c.id, c.doc.research_ask, now)) out.push([c.id, what]);
+    for (const what of settle(rec, c.id, c.doc.research_ask, now, alert)) out.push([c.id, what]);
   }
   return out;
 }

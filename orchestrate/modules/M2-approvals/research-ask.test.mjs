@@ -38,7 +38,7 @@ function handIn(t, name, text, { fenced = true } = {}) {
   const m = /^research-(.*)\.md$/.exec(name);
   // What the intake hands it (L290 M-1): the fenced copy, from the real intake's own fenceFor (so this stand-in is never
   // looser than the intake), and the raw bytes' sha256, blob id and size, never the text.
-  return researchHandler({ rules: t.ctx.rules })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name,
+  return researchHandler({ rules: t.ctx.rules, alert: fakeAlert() })({ rec: t.record, product: PRODUCT, kind: 'research', id: m ? m[1] : name, name,
     ...(fenced ? fenceFor('research', text) : {}),
     sha256: createHash('sha256').update(text).digest('hex'), blob: blobSha(Buffer.from(text)), size: Buffer.byteLength(text), now: t.clock.t });
 }

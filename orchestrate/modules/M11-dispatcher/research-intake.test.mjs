@@ -8,11 +8,11 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
+import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, settleCause, alreadyCarded, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { isQueued } from './alerts.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
-import { NEVER_STARTED } from './pass.mjs';
+import { NEVER_STARTED, HOLD_FACT } from './pass.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { setup, must, PRODUCT, UID } from '../M9-record/fixtures.test-helper.mjs';
@@ -47,11 +47,12 @@ function world({ values = ON, state = 'active', asks = 1 } = {}) {
     must(t.record.applyOutbox({ role: 'front_door', sessionId: `F-${i}` }, m9file(t, 'front_door', `F-${i}`, f.name, f.text)), 'ask request');
   }
   assert.equal(openResearchAsks(ctx).opened.length, asks);
-  const research = researchHandler({ rules: t.rules });
+  const alert = fakeAlert();
+  const research = researchHandler({ rules: t.rules, alert });
   // What the intake hands a handler (L290 M-1): the fenced text and the raw bytes' sha256, blob id and size; never the text.
   const hand = (id, text, over = {}) => research({ rec: t.record, product: PRODUCT, kind: 'research', id, name: `research-${id}.md`, source: 'research-file', fenced: cleanOutside(text, 'research-file'),
     sha256: sha(text), blob: blobSha(Buffer.from(text)), size: Buffer.byteLength(text), now: t.clock.t, ...over });
-  return { t, rec: t.record, research, hand };
+  return { t, rec: t.record, research, hand, alert };
 }
 
 test('a report for an open ask goes onto one ready research_copy card with its bytes as proof, and the ask leaves the waiting list', () => {
@@ -110,12 +111,16 @@ test('refused: no open ask by that number, an odd name, another product, no proo
     assert.match(w.hand('R-1', REPORT, { fenced }).reason, /did not hand on the report's fenced text/, String(fenced));
   }
   assert.match(w.hand('R-1', REPORT, { now: undefined }).reason, /did not hand on its clock/);
-  assert.throws(() => researchPass({ rec: w.rec }), /needs the pass's clock/);
+  assert.throws(() => researchPass({ rec: w.rec, alert: w.alert }), /needs the pass's clock/);
+  // Fail closed (L303): with no alert, a refused move would be silent, so neither runs without one.
+  assert.throws(() => researchPass({ rec: w.rec, now: w.t.clock.t }), /needs the alert/);
+  assert.throws(() => researchHandler({ rules: w.t.rules }), /needs the alert/);
   assert.equal(researchBrief(w.rec, 'R-1').ok, true, 'the ask is still open');
   assert.equal(w.rec.list('card').length, 0);
-  // Taken in once; the ask has landed, so a second report for it is refused.
+  // Taken in once; the ask has landed, so a second report for it is refused, naming its card and what to do (L303),
+  // never only "not open".
   assert.equal(w.hand('R-2', REPORT).ok, true);
-  assert.match(w.hand('R-2', 'a second take').reason, /research ask R-2 is not open/);
+  assert.equal(w.hand('R-2', 'a second take').reason, alreadyCarded('R-2', sha(REPORT)));
   assert.equal(w.rec.list('card').length, 1);
 });
 
@@ -125,6 +130,9 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   must(w.rec.write({ actor: 'dispatcher', entity: 'card', id: RESEARCH_CARD('R-1'), expectRev: 0, kind: 'research_card',
     doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
   assert.match(w.hand('R-1', 'other bytes').reason, /R-1 already has its research_copy card/);
+  // With what to do (L303): which version the card holds, and the two ways on.
+  assert.equal(w.hand('R-1', 'other bytes').reason, alreadyCarded('R-1', sha(REPORT)));
+  assert.match(alreadyCarded('R-1', sha(REPORT)), new RegExp(`version ${sha(REPORT).slice(0, 12)}\\).*put it back unchanged.*ask again with a new research ask`));
   assert.match(w.hand('R-1', REPORT, { blob: 'b'.repeat(40) }).reason, /R-1 already has its research_copy card/, 'same sha256, another blob');
   assert.equal(w.hand('R-1', REPORT).ok, true);
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
@@ -134,10 +142,54 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   assert.equal(w.hand('R-2', REPORT).ok, true, 'the file is used; the card waits in draft');
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-2')).doc.state, 'draft');
   assert.ok(w.rec.read('ask', 'R-2').doc.landed, 'the owner\'s part is done: the ask leaves the waiting list');
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t }).map(([, x]) => x.replace(/:.*/, '')), ['not ready']);
+  // The refused move is told from the handler (L303), on the card's own ready cause, never in silence.
+  const readyMark = HOLD_FACT(settleCause('ready', RESEARCH_CARD('R-2')));
+  const toldReady = () => w.alert.calls.filter(([, o]) => o?.mark?.fact === readyMark);
+  assert.equal(toldReady().length, 1, 'the handler told it');
+  assert.match(toldReady()[0][0], /research ask R-2 was taken in, but its card research-R-2 could not go to ready \(.+\), so it is not copied yet/);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }).map(([, x]) => x.replace(/:.*/, '')), ['not ready']);
+  // This stand-in never marks a tell delivered, so holdAlert asks again: the pass's refusal reaches Joe too.
+  assert.equal(toldReady().length, 2, 'researchPass told it');
   must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t }), [[RESEARCH_CARD('R-2'), 'ready']]);
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t }), [], 'nothing left to do');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[RESEARCH_CARD('R-2'), 'ready']]);
+  assert.equal(toldReady().length, 2, 'a move made is not told');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [], 'nothing left to do');
+  assert.equal(w.alert.calls.filter(([, o]) => o?.mark?.fact === HOLD_FACT(settleCause('land', RESEARCH_CARD('R-2')))).length, 0, 'both asks landed: no land tell');
+});
+
+test('L303: a card whose ask can\'t be marked answered is told from researchPass, and not again once it lands', () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  // A pass wrote the card and stopped; the ask then moved out of open, so it can't be marked answered.
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  const ask = w.rec.read('ask', 'R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state: 'pushed' } }), 'move out of open');
+  const landMark = HOLD_FACT(settleCause('land', id));
+  const toldLand = () => w.alert.calls.filter(([, o]) => o?.mark?.fact === landMark);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[id, 'ready'], [id, 'not landed: no open research ask R-1']]);
+  assert.equal(toldLand().length, 1, 'told, never silent');
+  assert.match(toldLand()[0][0], /research ask R-1 is on its card research-R-1, but the ask could not be marked as answered \(no open research ask R-1\)/);
+  // Open again and still waiting: the next pass lands it, and a landing is not told.
+  const closed = w.rec.read('ask', 'R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: closed.rev, doc: { ...closed.doc, state: 'open' } }), 'reopen');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[id, 'landed']]);
+  assert.equal(toldLand().length, 1);
+});
+
+test('L303: a tell still queued when the move is made leaves the queue, so a stale "could not go to ready" is never sent', () => {
+  const w = world();
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  const mark = HOLD_FACT(settleCause('ready', id));
+  const queue = outbox(w.rec, w.t.clock.t);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }).map(([, x]) => x.replace(/:.*/, '')), ['not ready', 'landed']);
+  assert.equal(isQueued(w.rec, mark), true, 'queued, not sent yet');
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }), [[id, 'ready']]);
+  assert.equal(isQueued(w.rec, mark), false, 'the move was made, so its tell is dropped');
 });
 
 test('through the real proposals intake: taken in once, and a refusal is told to the owner once', async () => {
@@ -264,7 +316,7 @@ test('refusal 10 end to end: the real handler, gather and judge refuse a copy wh
   const f = outboxFile('ask-request', '20261103-0915-ra', { ask: 'research', product: PRODUCT, brief: 'find out x' });
   must(env.record.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(env, 'front_door', 'F-1', f.name, f.text)), 'ask');
   openResearchAsks({ record: env.record, rules, product: PRODUCT, now: () => env.clock.t, alert: fakeAlert() });
-  must(researchHandler({ rules })({ rec: env.record, product: PRODUCT, kind: 'research', id: 'R-1', name: 'research-R-1.md',
+  must(researchHandler({ rules, alert: fakeAlert() })({ rec: env.record, product: PRODUCT, kind: 'research', id: 'R-1', name: 'research-R-1.md',
     source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'), sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now: env.clock.t }), 'handed in');
   const ctx = { record: env.record, rules, product: PRODUCT, gh: g.gh, owner: 'sample-org', repo: 'sample-app',
     view: makeGitView({ gh: g.gh, owner: 'sample-org', repo: 'sample-app' }), now: () => env.clock.t, alert: fakeAlert(), readFact: () => null };

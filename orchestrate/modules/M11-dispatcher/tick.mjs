@@ -12,6 +12,14 @@
 //                  pick it up); any other waits on Joe. Then the Record lapses claims whose session never
 //                  started (lapseClaims, claims.unlaunched_min), once that session id is stopped (L72).
 //   2. intake    — outbox files, so the record is current before anything is decided on it (R-0b-56, 58).
+//      proposals — the owner's proposals folders (proposals-intake.mjs), with the research handler only (L615 grant 3,
+//                  R-0b-162): a research report goes onto its research_copy card. Claim and heartbeat files have no
+//                  handler yet, so they wait, told once; a proposal is refused, since no docs check is passed in (the
+//                  first cutover's fail-closed answer). The port `proposals` answers the products and the owner's uid.
+//      research  — research_copy cards a stopped pass or a paused product left in draft, and asks not yet marked
+//                  answered (researchPass); a move refused here or in the handler is told, then daily (L303).
+//                  researchCopyPass is not called: it waits for gap 2, a step for a failed research-copy review
+//                  (LEAD-CALLS:3348), so a ready research card is not copied by the tick yet.
 //   3. leads     — the Lead restart from its handoff (R-0b-63), after the intake applied the handoff.
 //      approvals — M2's schedule pass per product (L221 MAT-1): run-outs, pushes, and a product record made when its
 //                  rules file turns it on, before the pass so that product can start this tick. Outage or not.
@@ -56,8 +64,10 @@ import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass } from './plan-go.mjs';
+import { proposalsPass } from './proposals-intake.mjs';
+import { researchHandler, researchPass } from './research-intake.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -302,6 +312,14 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   let intaken = [];
   await run('intake', async () => (intaken = await intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
     startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) })));
+  // Each its own step: a proposals folder that can't be read never keeps research cards from being settled. Both run
+  // during an outage: neither starts a session.
+  await run('proposals', async () => {
+    const { products, ownerUid } = p.proposals();
+    return proposalsPass({ rec, rules, products, ownerUid, wait: p.wait, alert, now, note: (text) => note(rec, 'proposals-note', text, { now }),
+      handlers: { research: researchHandler({ rules, alert }) }, ...(p.proposalsFs ?? {}) });
+  });
+  await run('research', () => researchPass({ rec, now, alert }));
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
     if (outageOpen) return 'outage: the Lead step waits';

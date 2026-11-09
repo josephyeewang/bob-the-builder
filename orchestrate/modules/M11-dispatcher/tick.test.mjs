@@ -53,7 +53,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
   const ports = {
     alert: (t) => calls.alerts.push(typeof t === 'string' ? t : t.text),
     board: () => [], healthy: () => true, resume: () => false,
-    outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle,
     // The launcher starts the session the claim names (L72), as M4's does.
@@ -81,7 +81,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -250,7 +250,7 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   const thrower = (what) => () => { throw new Error(`${what} broke`); };
   // The limits step reads the reviewer port for a card in review past its time (a claim with no session is M9's lapse now).
   const w = world([account(), usage(), card('C-9', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], {
-    over: { board: thrower('board'), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
+    over: { board: thrower('board'), proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
   mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
@@ -420,6 +420,7 @@ export async function wire(config) {
   seen.push(config);
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: (t) => seen.push(t), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -483,6 +484,7 @@ process.on('exit', () => writeFileSync(${JSON.stringify(out)}, JSON.stringify(re
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -508,7 +510,7 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
   const root = tempDir('m11-ro-');
   const run = async (name, entries, over = {}, signedIn = true) => {
     const started = [];
-    const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
+    const w = world([...(signedIn ? [account()] : []), ...entries], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
     const r = await w.pass();
     return { started, fact: w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc, r };
   };
@@ -631,7 +633,7 @@ const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FA
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
-    outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -720,7 +722,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
       sessions: () => running,
       stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
       mainSha: async () => 'a'.repeat(40),
-      outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
+      proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
       leads: () => [{ lead, outboxNames: readdirSync(outbox), questionOpen: false,
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
         send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
@@ -1058,6 +1060,7 @@ export async function wire() {
   // The session list blocks the thread for a minute: no promise or timer can cut it short.
   const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1094,6 +1097,7 @@ const rec = recWith();
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1140,6 +1144,7 @@ export async function wire() {
   const noop = () => [];
   const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
   return { rec, rules: rulesWith(), ports: { alert: async (t) => { appendFileSync(${JSON.stringify(sent)}, t + '\\n'); return true; }, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1263,7 +1268,7 @@ test('L172 follow-up: an outage step that throws right after writing the open ou
   const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
   { over: { board: () => board, healthy: () => false,
-    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
     startReadonly: async (x) => { started.push(x.kind); return { ok: true }; } } });
   // The test Record is frozen: the pass gets a copy of it whose write throws once, after the outage is written.
   let armed = true;
@@ -1401,6 +1406,7 @@ queueFor(real, fact, 'told_at', 'x', T0);
 export async function wire() {
   const noop = () => [];
   return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1432,7 +1438,7 @@ test('L424: the tick asks the reviewEnded port before a review session\'s verdic
   writeFileSync(join(dir, name), 'not read past the ended check\n');
   const asked = [];
   const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
-  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+  const w = world([account(), usage()], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [session],
     reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
     intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
   await w.pass();
@@ -1445,7 +1451,7 @@ test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, o
   const name = 'verdict-R-1.md';
   writeFileSync(join(dir, name), 'waits\n');
   const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
-  const w = world([account(), usage()], { over: { outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
+  const w = world([account(), usage()], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
     intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
   const lines = () => w.rec.diary().filter((d) => d.kind === 'note' && /outbox|intake/.test(d.id ?? '')).map((d) => d.id);
   for (let min = 0; min < 50; min++) await w.pass(min);
@@ -1464,7 +1470,7 @@ function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000,
     send: async (t) => { to.push(t); return { outcome: 'sent' }; }, stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-9' }) });
   const w = world([account(), usage()], { over: {
     mainSha: async () => 'a'.repeat(40),
-    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
     leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
       entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
   }, ...(rules ? { rules } : {}) });
