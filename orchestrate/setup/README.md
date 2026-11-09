@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 44 FAILs of 48 items for one product (about 5 more for each extra product), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 45 FAILs of 49 items for one product (about 5 more for each extra product), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -50,8 +50,9 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   run stops it before anything is done. Each folder is then changed through an open handle (a link, or a folder swapped
   since the plan, is refused), all folders are made first, and children are handed over before their parents. A folder
   whose children belong to different users (`products/<product>`) is root's, so none of them can rename another's away.
-- **One outbox root.** `outboxes/` is root's 0755; under it `reviewer/` and `auditor/` belong to `review` (0755) and each
-  worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
+- **One outbox root.** `outboxes/` is root's 0755; under it one folder for each role the review runner starts
+  (`reviewer/`, `auditor/` and `plan_reviewer/`, `RUNNER_ROLES`) belongs to `review` (0755), so no worker can write their
+  answers (L722), and each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
   list, read and clear (`delete_child`), with inheritance. The worker seals its own hand-in file 0440. `check` compares the
   access list and the group exactly: a missing or an extra entry FAILs.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in

@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
@@ -82,9 +82,11 @@ test('the folder table: parents first, exact modes and owners, one outbox root w
   // L71 / L90 M1: the outbox root is root's 0755; reviewer/ and auditor/ are review's; every other role's is the workers' user's
   assert.deepEqual([by('outboxes').owner, by('outboxes').mode], ['root', 0o755]);
   assert.equal(by('review-outbox'), undefined);
-  for (const r of REVIEW_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['review', 0o755, []]);
-  assert.deepEqual([...WORKER_ROLES].sort(), AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)).sort());
+  // L722: every role the review runner starts (the plan reviewer too, named here, not read from the list) is review's.
+  for (const r of new Set([...RUNNER_ROLES, 'reviewer', 'auditor', 'plan_reviewer'])) assert.deepEqual([by(`outboxes/${r}`)?.owner, by(`outboxes/${r}`)?.mode, by(`outboxes/${r}`)?.acl], ['review', 0o755, []], r);
+  assert.deepEqual([...WORKER_ROLES].sort(), AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)).sort());
   assert.ok(WORKER_ROLES.includes('worker') && WORKER_ROLES.includes('lead'));
+  for (const r of ['reviewer', 'auditor', 'plan_reviewer']) assert.ok(!WORKER_ROLES.includes(r), `${r} is not a worker role`);
   for (const r of WORKER_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['owner', 0o750, [ORCHESTRATE_READ_ACL]]);
 });
 
@@ -388,6 +390,16 @@ test('PLANT a folder with the wrong GROUP → caught ("group is"); the plan\'s s
 test('PLANT worker-copies owned by root instead of the owner → caught by the owner column', () => {
   const mac = applied(); mac.owners.set(P('worker-copies'), { uid: mac.rootUid, gid: 0 });
   assert.match(fails(mac)[0].why, /want 65001/);
+});
+
+test('PLANT L722: the plan reviewer\'s outbox made the workers\' user\'s (as a worker role\'s is) → caught by the owner and mode; apply refuses to take it over and changes nothing', () => {
+  const mac = applied(); const d = P('outboxes/plan_reviewer');
+  mac.owners.set(d, { uid: uidOf(mac, 'sam'), gid: 0 }); chmodSync(mac.at(d), 0o750);
+  const f = fails(mac).filter((x) => x.what.includes(d)); assert.ok(f.length >= 1, JSON.stringify(fails(mac)));
+  assert.match(f.map((x) => x.why).join('\n'), /owner is uid \d+, want 602|mode is 750, want 755/);
+  // A folder the workers' user owns is never taken over (a worker could have put files in it): root must look first.
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 1, r.text); assert.match(r.text, /plan_reviewer is owned by uid \d+, who is neither root nor review; it was not made by this setup/);
+  assert.deepEqual(mac.owners.get(d), { uid: uidOf(mac, 'sam'), gid: 0 }); assert.ok(fails(mac).some((x) => x.what.includes(d)));
 });
 
 test('PLANT mode 777 on outboxes/reviewer → caught by the exact mode; apply puts it right', () => {

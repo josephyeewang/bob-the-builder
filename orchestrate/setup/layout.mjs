@@ -11,7 +11,7 @@
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
@@ -104,8 +104,12 @@ export function proposalRows(cfg) {
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
-/** The roles whose outbox folders the workers' Mac user owns: every AI role except the review roles (read from the shared lists). */
-export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)));
+/**
+ * The roles whose outbox folders the workers' Mac user owns: every AI role except the roles the review runner starts
+ * (RUNNER_ROLES: the review roles and the plan reviewer, L722). A role the runner starts writes as `review`, so its
+ * outbox is review's; were it the workers' user's, a worker could write that role's answer.
+ */
+export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
@@ -153,7 +157,7 @@ export function folderTable(cfg) {
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
     [p('outboxes'), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
-    ...REVIEW_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
+    ...RUNNER_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [
