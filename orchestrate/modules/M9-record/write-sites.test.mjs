@@ -154,7 +154,7 @@ test('comments are blanked without eating code after a regex or a string that lo
 const SNAPSHOT = {
   card: {
     lead: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe'], update: ['brief', 'desired', 'merge_requested', 'needs_joe'], updateInDraft: ['files', 'done_when', 'tier', 'plan_sha256', 'main_commit'], kinds: ['ordinary', 'lead_daily_card'] },
-    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
+    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], updateInDraft: ['done_when'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
     worker: { update: ['summary', 'report_ref'] },
     workshop: { update: ['head'] },
     approvals: { update: ['needs_joe', 'approval_required', 'cancel_reason'] },
