@@ -11,6 +11,7 @@
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
+//                                       (the robot job, `robot`, is one of them only when the config says "robot": true; robot-setup.mjs)
 //   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes  (read only)
 //   daemons reload-account [--dry-run]  reload the account job; exits 1 ("Run: daemons load") when it is not loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)

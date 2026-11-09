@@ -1,7 +1,8 @@
 // Setup part 2b (PR 2): the three background jobs (LaunchDaemons). The plist texts come from review-daemons.mjs (the one
 // place that builds them); this file puts them where launchd looks, and loads, lists and unloads them.
 //
-//   place    write the three plists (four with the hourly watch-only job, when the config's `watch` entry has `rulesSha256`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
+//   place    write the three plists (plus the hourly watch-only job, when the config's `watch` entry has `rulesSha256`, and the robot
+//            job, when the config says `"robot": true`) into /Library/LaunchDaemons, root:wheel 0644 (launchd refuses any other owner or mode)
 //            and make each log file launchd opens for a job with a UserName, owned by that user (jobLogs)
 //            in the log folder, which it repairs, or refuses if the job's user could change it
 //   load     launchctl bootstrap system <plist>, for each job not loaded yet; a job loaded from an OLDER file is reloaded (bootout, then
@@ -24,17 +25,24 @@ import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
+import { ROBOT_JOB, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
 export const JOBS = Object.freeze(['review-updater', 'review-account', 'review-runner']);   // load order: the updater first
 // The hourly watch-only job (watch-setup.mjs) is a fourth job only when the config's `watch` entry has the rules fingerprint (R6 M-1):
 // a repo-only entry (all prove-token needs) leaves the three review jobs exactly as before.
-export const jobsFor = (cfg) => (cfg.watch?.rulesSha256 ? [...JOBS, 'watch-only'] : [...JOBS]);
+// The robot job (robot-setup.mjs) is one more only when the config says `"robot": true`, so a config without it places exactly what it did.
+export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-only'] : []), ...(cfg.robot ? [ROBOT_JOB] : [])];
+/** The jobs a config may turn on or leave off. One left off must not be placed or loaded either (a full check says so). */
+export const OPTIONAL_JOBS = Object.freeze(['watch-only', ROBOT_JOB]);
+export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
+const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch` entry has the rules fingerprint). */
 export function onlyJobs(cfg, name) {
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
+  if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
   if (!all.includes(name)) throw new Error(`--only names no job of this config: ${JSON.stringify(String(name).slice(0, 60))}; the jobs are ${all.join(', ')}`);
   return [name];
 }
@@ -63,6 +71,7 @@ export function plistTexts(io, cfg) {
     const two = reviewDaemonPlists({ ...common, config: join(P.installRoot, RUNNER_CONFIG), reviewRoot: P.reviewRoot, reviewHome: homeOf(cfg, 'review'), accountCopy: P.accountCopy, ownerHome: owner.home, ownerUid: owner.uid });
     const plists = { 'review-runner': two.runner, 'review-account': two.accountCopy, 'review-updater': updaterPlist(common) };
     if (cfg.watch?.rulesSha256) plists['watch-only'] = watchPlist(io, cfg);
+    if (cfg.robot) plists[ROBOT_JOB] = robotPlist(cfg);
     return { plists, problems };
   } catch (e) { return { plists: {}, problems: [`the job files cannot be built from the owner's Mac user ${cfg.owner} (${e.message}); is its home folder set?`] }; }
 }
@@ -187,6 +196,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
     if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
+  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`); }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const text = fileText(io, cfg, job);
@@ -206,7 +216,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
-export function planUnload(io, cfg, jobs = [...JOBS, 'watch-only']) {
+export function planUnload(io, cfg, jobs = ALL_JOBS) {
   const ops = []; const problems = [];
   for (const job of [...jobs].reverse()) {
     const s = jobState(io, cfg, job);
@@ -253,7 +263,8 @@ export function planReloadAccount(io, cfg) {
 }
 
 export function list(io, cfg, jobs = null) {
-  if (jobs === null) jobs = jobsFor(cfg).includes('watch-only') || !jobState(io, cfg, 'watch-only').loaded ? jobsFor(cfg) : [...JOBS, 'watch-only'];
+  // A job the config leaves off is listed too while launchd still has it loaded, so nothing loaded goes unseen.
+  if (jobs === null) jobs = ALL_JOBS.filter((j) => jobsFor(cfg).includes(j) || jobState(io, cfg, j).loaded);
   return jobs.map((job) => ({ job, label: labelOf(cfg, job), ...jobState(io, cfg, job) }));
 }
 
@@ -276,12 +287,16 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
   const subset = jobs.length < jobsFor(cfg).length;
-  const stray = subset ? [] : names.filter((n) => { const m = /^(.+)\.(review-updater|review-account|review-runner|watch-only)\.plist$/.exec(n); return m && m[1] !== cfg.label; });
+  const strayRe = new RegExp(`^(.+)\\.(${ALL_JOBS.join('|')})\\.plist$`);
+  const stray = subset ? [] : names.filter((n) => { const m = strayRe.exec(n); return m && m[1] !== cfg.label; });
   item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
-  if (!subset && !jobsFor(cfg).includes('watch-only')) {
-    const s = jobState(io, cfg, 'watch-only'); let placed = false; try { io.lstat(plistPath(cfg, 'watch-only')); placed = true; } catch { /* none */ }
-    item(!s.loaded && !placed, `no ${labelOf(cfg, 'watch-only')} job is placed or loaded (the config names no rules fingerprint)`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, 'watch-only')}`, !s.loaded && !placed);   // listed only when there is one
+  // Each job the config leaves off: none placed or loaded (listed only when there is one).
+  const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on' };
+  for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {
+    const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
+    item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
   }
+  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

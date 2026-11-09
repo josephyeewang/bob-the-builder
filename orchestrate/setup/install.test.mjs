@@ -16,7 +16,8 @@ import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
-import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
+import { JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts } from './daemons.mjs';
+import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
 import { checkInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
@@ -55,7 +56,7 @@ async function origin(root) {
 }
 
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
-async function world({ euid = 0, rules = null } = {}) {
+async function world({ euid = 0, rules = null, robot = null } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
@@ -75,6 +76,9 @@ async function world({ euid = 0, rules = null } = {}) {
   // `rules` (a text): the config also names the watch-only week, with the fingerprint of that text, and the file is at ext/rules.yaml.
   const rulesSrc = join(ext, 'rules.yaml');
   if (rules !== null) { writeFileSync(rulesSrc, rules); raw.watch = { repo: 'example-org/example-repo', rulesSha256: createHash('sha256').update(rules).digest('hex') }; }
+  // `robot` (a function of the folders made → the robot's config object, or text): the config turns the robot job on, and its
+  // robot.json is one of the extras. The file is written once the users exist (its ownerUid is orchestrate's).
+  if (robot !== null) { raw.robot = true; raw.extras.push(join(ext, 'robot.json')); writeFileSync(join(ext, 'robot.json'), '{}'); }
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
   const cfg = parseInstallConfig(raw);
   // The updater's first run, for real, in a child: the setup's own seed and bootstrap copy, GitHub's address swapped for the
@@ -103,6 +107,7 @@ async function world({ euid = 0, rules = null } = {}) {
   const run = (args, extra = {}) => { const s = sink(); const code = main(argvFor(args), { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
+  if (robot !== null) { const c = robot({ mac, root, uid: Number(mac.users.get('orchestrate').UniqueID) }); writeFileSync(join(ext, 'robot.json'), typeof c === 'string' ? c : JSON.stringify(c)); }
   mac.as = euid;
   return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root, rulesSrc };
 }
@@ -969,4 +974,108 @@ test('L203 reload-account refuses on a missing install (the not-there branch of 
   rmSync(w.mac.at(`${BASE}/install/orchestrate`)); const n = w.mac.log.length;
   const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /install is not there yet/);
   assert.ok(!w.mac.log.slice(n).some((l) => /^launchctl (bootout|bootstrap)/.test(l)));
+});
+
+// ───────────────────────────── the robot job (robot-setup.mjs; L236, L238, L610) ─────────────────────────────
+
+const ROBOT_LABEL = `${LABEL}.robot`;
+/** A robot.json as setup lays it out: the copy's wiring, orchestrate as the Record's owner, the keys folder, two locks of its own. */
+const goodRobot = ({ mac, root, uid }) => ({
+  installRoot: root, wiring: `${root}/wiring/robot-wiring.mjs`, product: 'alpha', ownerUid: uid,
+  lockFile: mac.at(`${BASE}/home/orchestrate/robot.lock`), dispatcherLockFile: mac.at(`${BASE}/home/orchestrate/dispatcher.lock`),
+  recordRoot: mac.at(`${BASE}/record`), productsFile: mac.at(`${BASE}/home/orchestrate/products.json`), rulesStateDir: mac.at(`${BASE}/home/orchestrate/rules`),
+  tokenFile: mac.at(`${BASE}/keys/watch-only-token`), keyDir: mac.at(`${BASE}/keys`),
+});
+const robotWorld = async (edit = (c) => c) => { const w = await world({ robot: (x) => edit(goodRobot(x), x) }); const r = w.run(['install']); assert.equal(r.code, 0, r.text); return w; };
+
+test('robot job: off unless the config says so; on, its file is the Dispatcher-shaped job as orchestrate, every 60 s, robot-main.mjs with the copy\'s robot.json, its own logs', async () => {
+  const off = await world();
+  assert.deepEqual(jobsFor(off.cfg), ['review-updater', 'review-account', 'review-runner'], 'a config without "robot" places exactly what it did');
+  assert.equal(plistTexts(off.mac, off.cfg).plists.robot, undefined);
+  const w = await world({ robot: goodRobot });
+  assert.deepEqual(jobsFor(w.cfg), ['review-updater', 'review-account', 'review-runner', 'robot']);
+  const t = robotPlist(w.cfg); const R = `${BASE}/install/orchestrate`;
+  assert.equal(plistTexts(w.mac, w.cfg).plists.robot, t);
+  assert.ok(t.includes(`<key>Label</key><string>${ROBOT_LABEL}</string>`), t);
+  assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>${R}/wiring/robot-main.mjs</string><string>${R}/robot.json</string></array>`), t);
+  assert.ok(t.includes('<key>StartInterval</key><integer>60</integer>'), t);
+  assert.ok(t.includes(`<key>WorkingDirectory</key><string>${BASE}/home/orchestrate</string>`), t);
+  assert.deepEqual(jobLogs(t), { user: 'orchestrate', files: [`${BASE}/logs/robot.out.log`, `${BASE}/logs/robot.err.log`] });
+  if (process.platform === 'darwin') {
+    const f = join(w.ext, 'robot.plist'); writeFileSync(f, t);
+    const lint = spawnSync('/usr/bin/plutil', ['-lint', f], { encoding: 'utf8' }); assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+  }
+});
+
+test('robot job: "robot": true needs its robot.json among the extras; anything but true or false is refused', async () => {
+  const w = await world();
+  assert.throws(() => parseInstallConfig({ ...w.raw, robot: true }), new RegExp(ROBOT_NO_CONFIG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const bad of ['yes', 1, {}]) assert.throws(() => parseInstallConfig({ ...w.raw, robot: bad }), /config: robot must be true or false/, String(bad));
+  assert.equal(parseInstallConfig({ ...w.raw, robot: false }).robot, undefined);
+  for (const sub of ['place', 'load', 'check']) { const r = w.run(['daemons', sub, '--only', 'robot']); assert.equal(r.code, 2, r.text); assert.match(r.text, /does not turn the robot job on/); }
+});
+
+test('robot job: install carries robot.json into the copy; place, load and check take it with the other jobs; its logs are orchestrate\'s; twice does nothing', async () => {
+  const w = await robotWorld();
+  assert.ok(existsSync(join(w.root, 'robot.json')), 'the copy holds robot.json');
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  assert.equal(readFileSync(plistFile(w, 'robot'), 'utf8'), robotPlist(w.cfg));
+  for (const f of ['robot.out.log', 'robot.err.log']) assert.equal(w.mac.lstat(`${BASE}/logs/${f}`).uid, Number(w.mac.users.get('orchestrate').UniqueID), f);
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text);
+  assert.ok(w.mac.loaded.has(ROBOT_LABEL), 'the robot job is loaded');
+  const ck = w.run(['daemons', 'check']); assert.equal(ck.code, 0, ck.text);
+  assert.match(ck.text, /robot job's config in the copy \(robot\.json\) matches this setup/);
+  assert.equal(planPlace(w.mac, w.cfg).ops.length, 0); assert.equal(planLoad(w.mac, w.cfg).ops.length, 0);
+  assert.ok(list(w.mac, w.cfg).some((j) => j.label === ROBOT_LABEL && j.loaded));
+  const un = w.run(['daemons', 'unload', '--only', 'robot']); assert.equal(un.code, 0, un.text); assert.equal(w.mac.loaded.has(ROBOT_LABEL), false);
+});
+
+// Each clause of robotConfigProblem, planted one at a time in the copy's robot.json: load refuses and names it, check FAILs on it.
+const ROBOT_PLANTS = [
+  ['the wiring is not the copy\'s robot-wiring.mjs', (c) => ({ ...c, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
+  ['the Record\'s owner is not orchestrate', (c) => ({ ...c, ownerUid: c.ownerUid + 1 }), /ownerUid must be/],
+  ['the key folder is another one', (c) => ({ ...c, keyDir: `${c.keyDir}-other` }), /keyDir must be/],
+  ['another install named', (c) => ({ ...c, installRoot: `${c.installRoot}-other` }), /installRoot must be/],
+  ['its lock is the Dispatcher\'s', (c) => ({ ...c, lockFile: c.dispatcherLockFile }), /a lock of its own/],
+  ['a lock inside the install', (c) => ({ ...c, lockFile: `${c.installRoot}/robot.lock` }), /lockFile is inside the install/],
+  ['a lock that is not a full path', (c) => ({ ...c, dispatcherLockFile: 'dispatcher.lock' }), /dispatcherLockFile must be a full path/],
+  ['a key the robot does not take', (c) => ({ ...c, approvalsStateDir: '/x' }), /keys the robot job does not take: approvalsStateDir/],
+  ['a bad run deadline', (c) => ({ ...c, runDeadlineMs: -1 }), /runDeadlineMs must be a positive number/],
+  ['not JSON', () => '{ not json', /is not JSON/],
+  ['not an object', () => '[]', /is not a JSON object/],
+];
+for (const [what, edit, re] of ROBOT_PLANTS) {
+  test(`PLANT robot.json: ${what} → load refuses, check FAILs`, async () => {
+    const w = await robotWorld(edit);
+    assert.equal(w.run(['daemons', 'place']).code, 0);
+    const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.match(ld.text, /so the robot job would not start/);
+    assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+    const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+  });
+}
+
+test('PLANT robot.json: missing from the copy, or not root\'s alone → load refuses, check FAILs', async () => {
+  const w = await robotWorld();
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  chmodSync(join(w.root, 'robot.json'), 0o666);
+  let ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /robot\.json in the copy is not root's alone/);
+  rmSync(join(w.root, 'robot.json'));
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /robot\.json is not in the copy/);
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /robot\.json is not in the copy/);
+});
+
+test('robot job: a robot job file or loaded job the config leaves off, or one under an old label, fails a full check (each optional job, not only the watch job)', async () => {
+  const w = await installed();
+  assert.equal(w.run(['daemons', 'place']).code, 0); assert.equal(w.run(['daemons', 'load']).code, 0);
+  assert.equal(w.run(['daemons', 'check']).code, 0);
+  writeFileSync(plistFile(w, 'robot'), 'x');
+  let r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no com\.example\.orch-test\.robot job is placed or loaded \(the config does not turn the robot job on\)/);
+  rmSync(plistFile(w, 'robot'));
+  w.mac.loaded.set(ROBOT_LABEL, { lastExit: '0', ageS: 5 });
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /it is loaded: take it out with daemons unload/);
+  assert.ok(list(w.mac, w.cfg).some((j) => j.label === ROBOT_LABEL), 'list shows a loaded job the config leaves off');
+  assert.equal(w.run(['daemons', 'unload']).code, 0); assert.equal(w.mac.loaded.has(ROBOT_LABEL), false, 'a plain unload takes it out too');
+  assert.equal(w.run(['daemons', 'load']).code, 0);
+  writeFileSync(w.mac.at('/Library/LaunchDaemons/com.example.oldlabel.robot.plist'), 'x');
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /oldlabel\.robot\.plist/);
 });

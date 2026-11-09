@@ -146,3 +146,16 @@ The fingerprint is of the UTF-8 text of the file, so it is the same as `shasum`'
 
 The runner re-checks the hash on every pass and judges nothing if the file differs. The job's file is built with the
 launcher's one plist builder and label rule (`review-daemons.mjs` exports them), so there is one of each.
+
+## Part 5 — the robot job (R-0b-162 B; LEAD-CALLS L236, L238, L610)
+
+`robot-setup.mjs`. Off unless the setup config says `"robot": true`; then the config's `extras` must carry the robot's
+prepared config as a file named `robot.json`, which the install puts in the copy and every update keeps (as it keeps
+`review.json`). A config without `"robot"` places exactly the jobs it did before.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo node setup.mjs daemons place` / `load` / `check` (also `--only robot`) | a job `<label>.robot`: runs as `orchestrate` (the Record's owner and the key folder's), from the installed copy, `wiring/robot-main.mjs <copy>/robot.json`, every 60 s and once at load, logs `robot.out.log` / `robot.err.log` in the log folder (orchestrate's, as every job with a user). Built by M11's `loginJobPlist`, the Dispatcher's builder. `load` refuses, and `check` FAILs, unless the copy's `robot.json` is root's alone and holds the values setup knows: `wiring` = the copy's `wiring/robot-wiring.mjs`, `ownerUid` = orchestrate's, `keyDir` = `<base>/keys`, `installRoot` (if given) = the copy, `lockFile` and `dispatcherLockFile` full paths, different, and outside the install, no key the robot job does not take. The rest is the job's own start check; a refused start shows as a last exit that is not 0, which `check` fails on. A robot job placed or loaded while the config leaves it off fails a full `check`, as does one under an old label | yes |
+
+Loading it on the always-on Mac is an owner-run step. It waits for the robot's config (the Dispatcher's keys, C) and
+for the passes it runs to be wired.
