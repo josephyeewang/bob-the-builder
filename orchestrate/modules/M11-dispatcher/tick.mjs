@@ -39,7 +39,7 @@ import { KEYS, minutes, need, MissingKey, missingFor } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { intakePass } from './outbox-intake.mjs';
-import { leadRestartStep, leadInFlight, handoffVet } from './lead-restart.mjs';
+import { leadRestartStep, leadInFlight, handoffVet, tellLeadSkipped, HANDOFF_NAME } from './lead-restart.mjs';
 import { dispatcherPass, stopPass, undoStarts, rulesMissingAlert, holdAlert, refusalReport, HELD_BANDS, HOLD_REPEAT_MS, TOLD_BANDS } from './pass.mjs';
 import { startGate } from './gate.mjs';
 import { currentBands } from './usage.mjs';
@@ -50,13 +50,14 @@ import { cleanupPass } from './cleanup.mjs';
 import { move, note } from './moves.mjs';
 import { waitOnJoe, retellWaits } from './joe-waits.mjs';
 import { tellLostCards } from './lost-cards.mjs';
+import { tellStuckCards } from './stuck-cards.mjs';
 import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, listed, plain } from './alerts.mjs';
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { planGoPass } from './plan-go.mjs';
 
-export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'phone', 'cleanup']);
+export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
 // next product still runs (L221, lane 2's ask 2). The step's own deadline still bounds them all.
 export const APPROVALS_PRODUCT_MS = 30_000;
@@ -201,6 +202,7 @@ export function actOnDead({ rec, rules, now, restart, asks, cards = {}, alert = 
 // steps run one after another, each up to STEP_DEADLINE_MS, and the Store Writer refuses a wait whose since is more
 // than 60 s off its clock). Left out, it is the tick's fixed `now`.
 export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
+  const startedAt = now;   // `now` moves on before each step (L321); a gap between passes is measured from here (audit #150 M1)
   // Every refused write of a watched kind is noted, and told at the end of the pass (refused-writes.mjs, L323).
   const base = rec;
   const watched = watchWrites(rec);
@@ -297,16 +299,30 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     return g.ok ? start(x) : { ok: false, reason: g.reason };
   };
   const startReadonly = gatedReadonly((x) => p.startReadonly(x));
-  await run('intake', () => intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
-    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) }));
+  let intaken = [];
+  await run('intake', async () => (intaken = await intakePass({ rec, now, sessions: p.outboxSessions(), wait: p.wait, alert, note: (text, id = 'intake-note') => note(rec, id, text, { now }),
+    startReadonly, replyToLead: p.replyToLead, vet: handoffVet(rules), reviewEnded: p.reviewEnded, failureLog: failed('intake'), ...(p.intakeFs ?? {}) })));
   // During an outage no WRAP is sent and no new Lead starts (audit 0b-6 r2 MIN-6).
   await run('leads', async () => {
     if (outageOpen) return 'outage: the Lead step waits';
     const out = [];
+    const untold = [];
     for (const l of p.leads()) {
-      const inFlight = leadInFlight({ rec, sessionId: l.lead.sessionId, outboxNames: l.outboxNames, questionOpen: l.questionOpen });
-      out.push([l.lead.sessionId, await leadRestartStep({ rec, rules, now, lead: l.lead, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
+      const sid = l.lead?.sessionId;
+      // Each Lead on its own: one that can't be read holds no other, and the owner hears which it was (L584 M2).
+      try {
+        const handoff = intaken.find((r) => r.session === sid && r.name === HANDOFF_NAME(sid));
+        const handoffRefused = handoff?.refused;
+        // A handoff the Lead can rewrite holds nothing: the WRAP that goes out tells the Lead the cap (L596 m-b).
+        const outboxNames = handoff?.rewrite ? l.outboxNames.filter((n) => n !== handoff.name) : l.outboxNames;
+        const inFlight = leadInFlight({ rec, sessionId: sid, outboxNames, questionOpen: l.questionOpen });
+        out.push([sid, await leadRestartStep({ rec, rules, now, lead: l.lead, handoffRefused, size: l.size, inFlight, send: l.send, stopSession: l.stopSession, startLead: l.startLead, mainSha: (x) => p.mainSha(x), alert })]);
+      } catch (e) {
+        out.push([sid, `skipped: ${e?.message ?? e}`]);
+        try { tellLeadSkipped({ rec, lead: l.lead, error: e, alert, now }); } catch (t) { untold.push(`${sid}: ${t?.message ?? t}`); }
+      }
     }
+    if (untold.length) throw new Error(`a skipped Lead could not be told (${untold.join('; ')})`);
     return out;
   });
   // Approvals (M2's schedule pass), per product (L221 MAT-1). Before the main pass, so a product its rules file just
@@ -339,6 +355,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // A card put on Joe whose alert was not delivered is told again (L130).
   await run('waits', () => retellWaits({ rec, alert, now }));
   await run('lost-cards', () => tellLostCards({ rec, alert, now, report: failed('lost-cards') }));
+  await run('stuck-cards', () => tellStuckCards({ rec, alert, now, report: failed('stuck-cards') }));
   // A step that failed did not report what it lacked, so nothing already told is dropped this tick.
   const complete = ['stops', 'undo-starts', 'pass', 'limits', 'merges'].every((s) => res[s]?.ok);
   try { await rulesMissingAlert({ rec, keys: missing, alert, now, complete }); } catch (e) { alert(`the Dispatcher could not record missing rules values: ${e?.message ?? e}`); }
@@ -356,7 +373,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     frontDoorAlive: p.frontDoorAlive, strayFrontDoor: p.strayFrontDoor, lastHandoff: p.frontDoorHandoff, alert }));
   await run('cleanup', () => cleanupPass({ rec, rules, now, ...p.cleanup, alert }));
 
-  putFact(rec, LAST_PASS_FACT, { at: iso(now), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
+  putFact(rec, LAST_PASS_FACT, { at: iso(now), started_at: iso(startedAt), steps: Object.fromEntries(STEPS.map((s) => [s, res[s]?.ok ? 'ok' : 'failed'])) }, 'full_pass', rec.read('fact', LAST_PASS_FACT)?.doc);
   // Refused writes (L323): told after every step, before this pass's own alerts go out.
   // watchWrites' whole answer, its refusals and the writes it saw taken, so neither can be left out alone.
   let refused = [];

@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
@@ -762,16 +762,35 @@ test('REAL dseditgroup: a service user is not an admin; the answer is "no"', { s
   assert.notEqual(adminAnswer(realIo(), 'root'), 'no');   // root is in admin: the check never reports root as safe
 });
 
-test('REAL check on this Mac with a real throwaway prefix: reads only, FAILs for the users that do not exist, changes nothing', { skip: !isDarwin }, () => {
+// What this Mac really has, read with dscl directly, not through the code under test: a Mac the setup ran on has the three users, a
+// clean one (CI) has none. Their real base stands in for the config's on the first; the config's is the wrong one to set up against.
+const realUsers = () => Object.fromEntries(USERS.map((name) => {
+  const r = spawnSync('/usr/bin/dscl', ['.', '-read', `/Users/${name}`, 'UniqueID', 'NFSHomeDirectory'], { encoding: 'utf8' });
+  return [name, r.status === 0 ? { uid: Number(/^UniqueID: (\d+)$/m.exec(r.stdout)[1]), home: /^NFSHomeDirectory: (.+)$/m.exec(r.stdout)[1] } : null];
+}));
+const realBase = (users) => { const homes = Object.values(users).filter(Boolean).map((u) => dirname(dirname(u.home))); return homes[0] ?? cfg.base; };
+
+test('REAL check on this Mac with a real throwaway prefix: reads only, says what dscl says of each user, FAILs a user set up elsewhere, changes nothing', { skip: !isDarwin }, () => {
   const prefix = realpathOf(tempDir('orch-setup-real-'));
   mkdirSync(join(prefix, 'Library'));
   const io = realIo({ prefix });
   io.rootUid = process.getuid();
-  const res = check(io, { ...cfg, owner: 'root' });
-  assert.ok(res.some((r) => !r.ok && r.what === 'user review exists'), 'users are not on this Mac');
+  const users = realUsers(); const base = realBase(users);
+  const res = check(io, { ...cfg, base, owner: 'root' });
+  const row = (what) => res.find((r) => r.what === what);
+  for (const [name, u] of Object.entries(users)) {
+    assert.equal(row(`user ${name} exists`)?.ok, u !== null, `the check and dscl differ on ${name}`);
+    assert.equal(row(`user ${name} is not root`)?.ok, u === null ? undefined : true, name);
+    if (u !== null) assert.equal(row(`user ${name}'s home is ${u.home}`)?.ok, true, name);
+    else assert.ok(!res.some((r) => r.what === `user ${name} has no sudo rule`), 'sudo is not asked about a user that is not there');
+  }
   assert.ok(res.some((r) => !r.ok && /missing/.test(r.why ?? '')), 'folders are not there');
   assert.ok(res.some((r) => r.ok && /owner root exists/.test(r.what)), 'real dscl read worked');
-  assert.ok(!res.some((r) => /has no sudo rule/.test(r.what)), 'sudo is not asked about users that are not there');
+  // A user who is here but set up under another folder is the wrong user: the check must say so.
+  const wrong = check(io, { ...cfg, base: '/Library/orch-other', owner: 'root' });
+  for (const [name, u] of Object.entries(users)) {
+    if (u !== null) assert.equal(wrong.find((r) => r.what === `user ${name}'s home is /Library/orch-other/home/${name}`)?.ok, false, name);
+  }
   // stat and ls -led on a real folder, the same reads the check's folder rows use.
   const st = spawnSync('/usr/bin/stat', ['-f', '%u %Lp', prefix], { encoding: 'utf8' });
   assert.equal(st.stdout.trim().split(' ')[0], String(process.getuid()));
@@ -779,17 +798,22 @@ test('REAL check on this Mac with a real throwaway prefix: reads only, FAILs for
   assert.equal(ls.status, 0); assert.ok(!/^ \d+: /m.test(ls.stdout));
 });
 
-test('REAL plan with a real throwaway prefix on this Mac: reads only; the real dscl lists give three different ids in 600-699 and nothing is made', { skip: !isDarwin }, () => {
+test('REAL plan with a real throwaway prefix on this Mac: reads only; a user that is here keeps its real id, one that is not gets a free id in 600-699, a user set up elsewhere is refused, nothing is made', { skip: !isDarwin }, () => {
   const prefix = realpathOf(tempDir('orch-setup-real-'));
   mkdirSync(join(prefix, 'Library'));
   const io = realIo({ prefix }); io.rootUid = process.getuid();
-  const p = plan(io, { ...cfg, owner: 'root' });
+  const users = realUsers(); const base = realBase(users);
+  const p = plan(io, { ...cfg, base, owner: 'root' });
   // the throwaway prefix is owned by the person running the test, standing in for root: the chain check passes, so the plan lists its steps
   assert.deepEqual(p.problems, []);
-  const ids = p.ops.map((o) => /dscl \. -create \/Users\/(\w+) UniqueID (\d+)/.exec(o.text)).filter(Boolean).map((m) => Number(m[2]));
-  assert.equal(ids.length, 3); assert.equal(new Set(ids).size, 3);
+  const made = p.ops.map((o) => /dscl \. -create \/Users\/(\w+) UniqueID (\d+)/.exec(o.text)).filter(Boolean).map((m) => [m[1], Number(m[2])]);
+  assert.deepEqual(made.map(([n]) => n).sort(), USERS.filter((n) => users[n] === null).sort(), 'only a missing user is made');
+  const ids = USERS.map((n) => users[n]?.uid ?? Object.fromEntries(made)[n]);
+  assert.equal(new Set(ids).size, 3);
   assert.ok(ids.every((n) => n >= 600 && n <= 699), ids.join(','));
-  assert.equal(existsSync(join(prefix, 'Library', 'orch-test')), false, 'a plan makes nothing');
+  assert.equal(existsSync(join(prefix, base.slice(1))), false, 'a plan makes nothing');
+  const wrong = plan(io, { ...cfg, base: '/Library/orch-other', owner: 'root' });
+  for (const [name, u] of Object.entries(users)) assert.equal(wrong.problems.some((x) => x.startsWith(`${name} exists but is not as needed: its home is`)), u !== null, name);
 });
 
 test('the CLI file runs: --help-less call with no args prints usage and exits 2', () => {

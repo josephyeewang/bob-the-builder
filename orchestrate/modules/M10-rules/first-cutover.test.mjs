@@ -23,7 +23,7 @@ import { startGate } from '../M11-dispatcher/gate.mjs';
 import { bands } from '../M11-dispatcher/usage.mjs';
 import { handoffVet } from '../M11-dispatcher/lead-restart.mjs';
 import { KNOWN, SCOPE_OWNERS, scopeLabel } from './known-gaps.mjs';
-import { DAILY_CARD_RULE, m11Scope } from './first-cutover.mjs';
+import { DAILY_CARD_RULE, HANDOFF_CAP_FLOOR, m11Scope } from './first-cutover.mjs';
 // The first-cutover fixture has one home (first-cutover.test-helper.mjs); the day-one test reads the same one.
 import { SAMPLE, swap, ENTRY, PENDING, fit, FIRST } from './first-cutover.test-helper.mjs';
 
@@ -31,7 +31,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 // The keys the pending reasons are about, by gap.
 const keyOf = (x) => x.match(/^M(?:9|11): (\S+) /)[1];
-const PENDING_SCOPE = PENDING.filter((x) => x.endsWith(KNOWN.scopeContext) || x.endsWith(KNOWN.scopeNew)).map(keyOf);
+const PENDING_SCOPE = PENDING.map(keyOf);
 
 test('the entry is fit, with its products.json line, and needs no import list', () => {
   assert.deepEqual(fit(FIRST, ENTRY), []);
@@ -66,11 +66,17 @@ test('the sample as it stands is refused, for each first-cutover reason', () => 
     'context.handoff_cap.role is missing (M11 reads it)',
     'context.worker.split_after_compactions is missing (M11 reads it)',
     'proposals.outbox is missing (M11 reads it)',
+    'product.vercel_project is missing (M4 reads it)',
   ]);
 });
 
 test('each missing or wrong piece is named', () => {
   const cases = [
+    // The Workshop's one key from the rules file (L601, L612): with it gone, the start gate shuts every push.
+    [swap(FIRST, '  vercel_project: sample-app\n', ''), 'product.vercel_project is missing (M4 reads it)'],
+    // L719 m4 (L612): an empty project is not missing, but the start gate shuts on it for good, so the fit check says no.
+    [swap(FIRST, '  vercel_project: sample-app\n', "  vercel_project: ''\n"), 'M4: product.vercel_project must name the Vercel project'],
+    [swap(FIRST, '  vercel_project: sample-app\n', '  vercel_project: []\n'), 'M4: product.vercel_project must name the Vercel project'],
     [swap(FIRST, 'product:\n  cutover_stage: first\n', ''), 'product.cutover_stage must say first'],
     [swap(FIRST, 'cutover_stage: first', 'cutover_stage: second'), 'product.cutover_stage must say first'],
     // The one "on" switch (L204-b, L209): missing, another word, another case, a trailing space or another type is off.
@@ -89,7 +95,8 @@ test('each missing or wrong piece is named', () => {
     [swap(FIRST, 'required_checks: [build, test]', "required_checks: [build, '']"), 'M6: product_profile.required_checks must be a list of check names'],
     [swap(FIRST, '  editing_per_product: 0\n', ''), 'caps.editing_per_product must be 0'],
     [swap(FIRST, '    - docs/research/**\n', '    - app/**\n'), 'lanes.research: "app/**" is outside docs/domains/, docs/research/ and docs/*.md'],
-    [swap(FIRST, 'script: none', 'script: 2.1.300'), 'roles_enabled.script must be none'],
+    [swap(FIRST, 'script: none', 'script: 2.1.316'), 'roles_enabled.script must be none'],
+    [swap(FIRST, 'pin: 2.1.316', 'pin: 2.1.318'), 'claude_code.pin is 2.1.318, but the tool list is checked against 2.1.316: every role would be refused'],
   ];
   for (const [text, want] of cases) assert.ok(fit(text).includes(want), want);
   // A corrupt file is one reason, not a list of follow-on ones.
@@ -216,6 +223,7 @@ const START_KINDS = ['editing', 'undo', 'overnight', 'script', 'readonly', 'revi
 
 const RESEARCH_OFF_FIT = 'M11: approvals.plan_go.go_free.research_copy must be true at the first cutover';
 const RESEARCH_ON = 'research copies are on at the first cutover (L549)';
+const HANDOFF_FITS = 'a handoff fits under the cap (L565)';
 const GO_FREE_BLOCK = '    go_free:\n      exact_reverse: true\n      research_copy: true\n      lead_daily_card: []\n';
 // The fixture's daily-card list, [] (L96), made into a list of the patterns given.
 const DAILY = (...pats) => (t) => swap(t, '      lead_daily_card: []\n', `      lead_daily_card:\n${pats.map((p) => `        - ${p}\n`).join('')}`);
@@ -232,6 +240,8 @@ const VARIANTS = [
   ['go_free without exact_reverse', (t) => swap(t, '      exact_reverse: true\n', '')],
   ['go_free without research_copy', (t) => swap(t, '      research_copy: true\n', ''), RESEARCH_ON],
   ['research_copy: false', (t) => swap(t, 'research_copy: true', 'research_copy: false'), RESEARCH_ON],
+  ['a handoff cap of 3', (t) => swap(t, '    role: 8000\n', '    role: 3\n'), HANDOFF_FITS],
+  ['a handoff cap of 999', (t) => swap(t, '    role: 8000\n', '    role: 999\n'), HANDOFF_FITS],
   ['no lead_daily_card', (t) => swap(t, '      lead_daily_card: []\n', '')],
   ['one daily-card pattern', DAILY('docs/blueprint/daily/**'), L120],
   ['a null bot id', (t) => swap(t, 'bot_user_id: 1000099', 'bot_user_id: null')],
@@ -269,12 +279,11 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
   // Each label is real text a reader sees, naming its ruling (an empty label would match every reason).
   for (const [name, k] of Object.entries(KNOWN)) assert.match(k, /^ \(known: .+, L\d+; waits on .+\)$/, name);
   // L120 c-2: each label's ruling, and the owner it waits on.
-  assert.deepEqual(Object.fromEntries(Object.entries(KNOWN).map(([n, k]) => [n, k.match(/, (L\d+); waits on (.+)\)$/).slice(1)])), {
-    scopeContext: ['L115', 'lane 2\'s L104 sweep'],
-  });
+  assert.deepEqual(Object.keys(KNOWN), [], 'no gap is left (L564)');
   // usage.red_runs's gap went with #79 (L131): it is Mac-wide in the rules, and M11 reads it so.
   assert.equal(scopeLabel('usage.red_runs'), '');
-  assert.equal(scopeLabel('context.lead.soft'), KNOWN.scopeContext);
+  // L564: the context.* reads are for their product, so they are no gap either.
+  for (const k of ['context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role']) assert.equal(scopeLabel(k), '', k);
   // L125 c-1: owners are named key by key; any other key gets no label, so it can't pass as known.
   // #68: the time limits are read for their product, so they are no gap (L144).
   for (const k of ['timeouts.cancel_grace_min', 'timeouts.checking_max_min', 'context.worker.split_after_compactions']) assert.equal(scopeLabel(k), '', k);
@@ -283,7 +292,7 @@ test('the pending reasons are exactly these, on the fixture as given, and each s
     'outage.share', 'anything.at.all', 'context.other', 'constructor']) assert.equal(scopeLabel(k), '', k);
   assert.deepEqual(Object.keys(SCOPE_OWNERS), PENDING_SCOPE, 'the map names exactly the pending scope gaps');
   for (const x of PENDING) assert.match(x, / \(known: /, x);
-  assert.deepEqual(PENDING_SCOPE, ['context.lead.soft', 'context.lead.hard', 'context.handoff_cap.role']);
+  assert.deepEqual(PENDING_SCOPE, []);
 });
 
 // L131: the fit check reads each key at the rules' own scope (shared/rules.mjs isMacKey), and M11's sources must read it
@@ -337,7 +346,15 @@ test('the real startGate refuses no start on the fixture: not editing, overnight
   assert.deepEqual(got, Object.fromEntries(START_KINDS.map((kind) => [kind, null])));
 });
 
-test.todo('the fixture is fit with no pending reasons (after the L96 step-2 sweeps)', () => {
+test('L565: a handoff cap under the floor is refused, naming the key; the floor itself is fit', () => {
+  const cap = (n) => firstCutoverProblems(swap(FIRST, '    role: 8000\n', `    role: ${n}\n`), ENTRY);
+  assert.deepEqual(cap(3), [`M11: context.handoff_cap.role must be at least ${HANDOFF_CAP_FLOOR} tokens, not 3: no handoff fits under it, so no Lead can restart`]);
+  assert.equal(cap(HANDOFF_CAP_FLOOR - 1).length, 1);
+  assert.deepEqual(cap(0), [`M11: context.handoff_cap.role must be at least ${HANDOFF_CAP_FLOOR} tokens, not 0: no handoff fits under it, so no Lead can restart`]);
+  assert.deepEqual(cap(HANDOFF_CAP_FLOOR), []);
+});
+
+test('the fixture is fit with no pending reasons (L96 step 2, L564)', () => {
   assert.deepEqual(firstCutoverProblems(FIRST, ENTRY), []);
 });
 
@@ -400,7 +417,7 @@ test('a value parsePolicy accepts but the Dispatcher refuses is refused, naming 
   const cases = [
     ['    soft: 120000\n', '    soft: abc\n', 'context.lead.soft'],
     ['    hard: 160000\n', '    hard: 1.5\n', 'context.lead.hard'],
-    ['    role: 3\n', '    role: three\n', 'context.handoff_cap.role'],
+    ['    role: 8000\n', '    role: three\n', 'context.handoff_cap.role'],
     ['    split_after_compactions: 2\n', '    split_after_compactions: "2x"\n', 'context.worker.split_after_compactions'],
     ['      editing_per_product: 1\n', '      editing_per_product: 1.5\n', 'usage.bands.amber.editing_per_product'],
     ['      editing_per_mac: 2\n', '      editing_per_mac: 1.5\n', 'usage.bands.amber.editing_per_mac'],
