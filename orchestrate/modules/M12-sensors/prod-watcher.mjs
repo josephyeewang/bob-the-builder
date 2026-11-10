@@ -163,6 +163,11 @@ async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, al
       // The alert's key holds the new value's print, so the old value's alert is cleared first: a later return to that
       // value is then told again, even if Joe closed its issue (L716, #277 r1 M1; M13 reopens a cleared condition, L371).
       // A lost raise keeps the old print, so the next pass raises again (L143); a lost clear is kept in `unclear`.
+      // A return to a value whose own clear GitHub has still lost (#277 r2 m1): its old issue is open, so a raise now would
+      // land on it and tell nothing, and the retry would later close it while the value stands. Keep the old print: the
+      // pass whose retry clears it then sees the change again and raises it as new. This comes before the old value's
+      // clear (#285 r1 n1): the old value is still the baseline, so its issue stays open while the field waits.
+      if (unclear.has(`project:${k}:${sp[k] ?? 'gone'}`)) { keepOld(keepSp, k, was); continue; }
       if (was !== undefined) await clearOld(`project:${k}:${was}`, `The project setting ${k} changed again.`);
       if (!(await raise('setting-changed', `project:${k}:${sp[k] ?? 'gone'}`, `project setting ${k} changed`, `The project setting ${k} changed in Vercel. If nobody meant to, check it on the dashboard.`))) keepOld(keepSp, k, was);
     }

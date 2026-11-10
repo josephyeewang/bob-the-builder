@@ -6,11 +6,11 @@
 // prefix rule or a shell joiner is refused outright, never rendered. There are no "ask" rules:
 // anything not allowed is refused, never put to the owner.
 
-import { writeFileSync, readFileSync, renameSync } from 'node:fs';
+import { writeFileSync, readFileSync, renameSync, realpathSync } from 'node:fs';
 import { join, dirname, basename, posix } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
-import { hasShell, DESIGN_PROFILES, shadowKindsFor } from './role-profiles.mjs';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
 
@@ -64,10 +64,57 @@ const wallPath = (p) => {
   return t !== '/' && posix.resolve(t) === t ? t : null;
 };
 const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
+/** The rules that keep the Bob folder read-only. The one source for both the renderer and launch check 13 (L750), so
+ *  the form check 13 looks for is the form written. */
+export const bobFolderDeny = (folder) => [`Edit(/${abs(folder)}/**)`, `Write(/${abs(folder)}/**)`];
+/** The shell sandbox's write wall on the Bob folder (L763): the folder and everything in it. */
+export const bobFolderShell = (folder) => [folder, `${folder}/**`];
+
+/** The worker runner's folders (L751): its requests folder and its status file's folder, or a refusal. */
+export function runnerWallDirs(workerRunner) {
+  const wr = workerRunner ?? {};
+  for (const k of ['requestsDir', 'statusFile']) {
+    const v = wr[k];
+    if (typeof v !== 'string' || !v.startsWith('/') || /[^A-Za-z0-9._/-]/.test(v) || v.split('/').includes('..')) return refuse(`the worker runner's ${k} is not a plain absolute path`);
+  }
+  const dirs = [];
+  for (const dir of [wr.requestsDir, dirname(wr.statusFile)].map((x) => x.replace(/\/+$/, ''))) {
+    if (!dir || dir.split('/').length < 3) return refuse('the worker runner\'s folders must sit below a folder of their own, not at the top');
+    if (!dirs.includes(dir)) dirs.push(dir);
+  }
+  return { ok: true, dirs };
+}
+/** The one source for the runner wall's rules (L751), for the renderer and for checkRunnerWall alike. */
+export const runnerWallDeny = (dir) => [`Read(/${abs(dir)}/**)`, `Edit(/${abs(dir)}/**)`, `Write(/${abs(dir)}/**)`];
+export const runnerWallShell = (dir) => [dir, `${dir}/**`];
+
+/**
+ * The launch-time check of the runner wall (L751, review of #320 M1, M2): the role file denies each runner folder to the
+ * tools and the shell, and each folder is spelled as its real path. A deny through a link is one macOS's sandbox ignores.
+ * The launcher calls it for every role the runner starts (all but the Lead and the review roles), before the start.
+ */
+export function checkRunnerWall({ settings, workerRunner, realpath = (p) => realpathSync.native(p) }) {
+  const w = runnerWallDirs(workerRunner);
+  if (!w.ok) return w;
+  const deny = settings?.[S.permissions]?.[S.deny] ?? [];
+  const fs = settings?.[S.sandbox]?.[S.filesystem] ?? {};
+  for (const dir of w.dirs) {
+    let real; try { real = realpath(dir); } catch { return refuse(`the worker runner's folder ${dir} is missing`); }
+    if (real !== dir) return refuse(`the worker runner's folder ${dir} is not its real path (${real}); a deny through a link is not kept`);
+    if (!runnerWallDeny(dir).every((r) => deny.includes(r))) return refuse(`the role file does not deny the tools the worker runner's folder ${dir}`);
+    if (!(fs[S.denyRead] ?? []).includes(dir) || !runnerWallShell(dir).every((r) => (fs[S.denyWrite] ?? []).includes(r))) return refuse(`the role file does not deny the shell the worker runner's folder ${dir}`);
+  }
+  return { ok: true };
+}
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, ownerTaps? }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner?, ownerTaps? }
+ * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
+ * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
+ * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
+ * read, edit and write, for the tools and the shell alike. Malformed is refused. Optional here (the launcher fixtures are
+ * another lane's); checkRunnerWall is the launch-time check that it is there, as real paths.
  * ownerTaps: the owner's "review again" taps folder (the runner's `ownerTaps`). Needed by the Front Door, refused without
  * (L724 (4), R-0b-164): it runs as Joe's Mac user, who can write that folder, and only the owner's own tap handler may; so
  * its tools get Edit and Write denied there, and its shell a write-deny. It must be the folder the runner reads, in the
@@ -85,7 +132,7 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
  * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session but the
- * review roles runs as Joe's Mac user (L238), which can read Joe's proposals folders, so the settings are the wall. Required for every role but a
+ * review roles runs as Joe's Mac user (L238), which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for every role but a
  * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
 export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
@@ -110,6 +157,16 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
 
   const d = paths.deny ?? {};
+  // The worker runner's folders (L751), walled off from every role the runner starts: all but the Lead (whose launch
+  // requests the Dispatcher writes there; whether its own tools get a write wall is the lead's call) and the review roles.
+  let runnerDirs = [];
+  if (paths.workerRunner !== undefined && role !== 'lead' && !REVIEW_ROLES.includes(role)) {
+    const w = runnerWallDirs(paths.workerRunner);
+    if (!w.ok) return w;
+    const own = [paths.outbox, paths.copy, paths.notes, paths.hooksDir, paths.snapshot, paths.node, paths.bobFolder].filter((x) => typeof x === 'string');
+    if (w.dirs.some((dir) => own.some((x) => inside(x, dir) || inside(dir, x)))) return refuse('the worker runner\'s folders must be apart from the session\'s own folders (outbox, copy, notes, hooks, rules, node, Bob)');
+    runnerDirs = w.dirs;
+  }
   const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? [])].filter(Boolean);
   if (paths.mirror && denyPaths.includes(paths.mirror)) return refuse('the mirror must not be on the read-deny list');
   if (!Array.isArray(productionFiles)) return refuse('the rules\' production file list was not given');
@@ -119,6 +176,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
   if (proposalOutboxes === undefined && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders were not given');
   if (proposalOutboxes !== undefined && !Array.isArray(proposalOutboxes)) return refuse('the rules\' proposals folders are not a list');
+  // An empty list would leave the role with no proposals wall at all (audit R-0b-148 slice 1, m1; L746).
+  if (Array.isArray(proposalOutboxes) && !proposalOutboxes.length && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders are an empty list, so nothing would deny them');
   const open = (proposalOutboxes ?? []).filter((f) => !denied(f));
   if (open.length) return refuse(`the rules' proposals folders are not all on the read-deny list: ${open.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
@@ -128,7 +187,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
   }
-  if (paths.bobFolder) deny.push(`Edit(/${abs(paths.bobFolder)}/**)`, `Write(/${abs(paths.bobFolder)}/**)`);
+  if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
+  for (const dir of runnerDirs) deny.push(...runnerWallDeny(dir));
   const walls = [];
   if (role === 'front_door') {
     const tt = wallPath(paths.ownerTaps);
@@ -141,7 +201,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     deny.push(`Edit(/${abs(hc)})`, `Write(/${abs(hc)})`);
     walls.push(hc);
   }
-  if (REVIEW_ROLES.includes(role)) {
+  // Every role the review runner starts sits behind the review walls, the plan reviewer too (L710).
+  if (RUNNER_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
     for (const k of REVIEW_WALLS) {
       // The same spelling rule as every wall path (L736 m1, the class).
@@ -172,8 +233,13 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // matching; this list also covers a longer kind added later that is not a compaction kind.
   const shadow = shadowKindsFor(role, profile.outbox);
   const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
+  // A role with no kinds (the plan reviewer) gets no --kinds word, and its exact outbox files (L710) go as --files.
+  const files = profile.files ?? [];
+  if (files.some((f) => !OUTBOX_FILE.test(f))) return refuse(`a ${role}'s outbox file names are not plain names`);
+  const kindsArg = profile.outbox.length ? ` --kinds ${profile.outbox.join(',')}` : '';
+  const filesArg = files.length ? ` --files ${files.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
@@ -195,7 +261,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : []), ...walls] },
+      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },

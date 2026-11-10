@@ -13,10 +13,10 @@ const TAPS = '/o/owner-taps';
 const HANDLER = '/o/review-again.json';
 const PATHS = (ownerTaps, reviewAgainConfig = HANDLER, reviewWalls = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' }) => ({
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', ownerTaps, reviewAgainConfig,
-  deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals: [] },
+  deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals: ['/w/proposals'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git', reviewWalls,
 });
-const render = (role, ownerTaps, handler, reviewWalls) => renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], paths: PATHS(ownerTaps, handler, reviewWalls),
+const render = (role, ownerTaps, handler, reviewWalls) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: PATHS(ownerTaps, handler, reviewWalls),
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [] });
 const walls = (r) => ({ deny: r.settings[S.permissions][S.deny], denyWrite: r.settings[S.sandbox][S.filesystem][S.denyWrite] });
 
