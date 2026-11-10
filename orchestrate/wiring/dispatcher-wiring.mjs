@@ -67,7 +67,8 @@
 import { privateFolder } from './private-folder.mjs';
 import { isAbsolute, join } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
-import { makeReader, readProducts, PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { makeReader, readProducts } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { makeEngine } from '../modules/M10-rules/engine.mjs';
 import { ROLES_DIR } from '../modules/M10-rules/roles.mjs';
 import { makeRules } from '../shared/rules.mjs';
@@ -108,7 +109,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = pr
   // A misspelt key would be ignored and its default used instead, so an unknown key stops the start.
   const extra = Object.keys(c).filter((k) => !keys.includes(k));
   if (extra.length) throw new Error(`config: unknown key ${extra.join(', ')}`);
-  if (typeof c.product !== 'string' || !PRODUCT_NAME.test(c.product)) throw new Error('config: product must be a product name (a letter or digit, then letters, digits, . _ -)');
+  // Setup's product rule (shared/product-paths.mjs PRODUCT, #378 r1 m3): the name its folders are made under.
+  if (typeof c.product !== 'string' || !PRODUCT.test(c.product)) throw new Error('config: product must be a product name (lower case letters, digits and -, a letter or digit first)');
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The

@@ -13,7 +13,7 @@
 //   head name stand in.
 //   record is shared/record.mjs's interface (makeRecord), so callers never see this file.
 //
-// Options only tests pass: `now` (a fake clock), `host`, `probe` (fake process checks), `faultAt` (crash at a step),
+// Options only tests pass: `now` (a fake clock), `host`, `machine` (this Mac's id, L845), `probe` (fake process checks), `faultAt` (crash at a step),
 // `testNoLock` + `testNoRevCheck` (the mutation race, M-6: the race must be able to fail), `lockTimeoutMs`.
 
 import { createHash } from 'node:crypto';
@@ -25,7 +25,7 @@ import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, dra
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
 import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
-import { processDead, realProbe } from './lock.mjs';
+import { machineId, onThisMachine, processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
@@ -64,7 +64,7 @@ export function grantedDoneWhenProblem(doc) {
 }
 
 export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
-  probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
+  machine = machineId(), probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
@@ -618,7 +618,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         if (c.doc.state !== 'claimed' && c.doc.state !== 'running') return no(`card ${card} is ${c.doc.state}; only a claimed or running card's claim is broken`);
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
-        if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
+        // This Mac's claim when its host name or its machine id matches (L845, as for locks); an older claim with no id: host only.
+        if (!onThisMachine(claim, { host, machine })) return no(`claim is from another Mac (host ${claim.host}${claim.machine ? `, machine ${claim.machine}` : ''}); never broken from here`);
         if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
         const stuckMin = num('claims.stuck_min');
         if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');

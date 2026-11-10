@@ -24,3 +24,8 @@ test('L848: a card, role or session id that is not one plain folder name is refu
   for (const role of ['../worker', '.w', 'w/x', '']) assert.throws(() => runnerOutbox({ outboxRoot: '/o', product: 'p1', role, sessionId: 'S-1' }), /not a role that names one plain folder/, role);
   for (const sessionId of ['../S', '.S', 'S/1', '', undefined]) assert.throws(() => runnerOutbox({ outboxRoot: '/o', product: 'p1', role: 'worker', sessionId }), /not a session id that names one plain folder/, String(sessionId));
 });
+
+test('#378 r1 c1: a plain folder name is the card and session id characters only, so the helper is safe by itself', () => {
+  for (const card of ['a b', 'a\nb', 'a\tb', 'é', 'a:b', 'a\\b', 'x'.repeat(201)]) assert.throws(() => runnerCopy({ copiesRoot: '/c', product: 'p1', card }), /not a card that names one plain folder/, JSON.stringify(card));
+  for (const card of ['C-1', 'c_1', 'a.b', '-x', 'x'.repeat(200)]) assert.equal(runnerCopy({ copiesRoot: '/c', product: 'p1', card }), `/c/p1/${card}`);
+});

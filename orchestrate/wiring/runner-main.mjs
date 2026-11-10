@@ -18,16 +18,18 @@
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
 // lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
 // Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
-// read back, or a start the loop must refuse).
+// read back, or a start the loop must refuse). It does not start when a copies or outbox root is missing or reached
+// through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
+// carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
-import { mkdirSync, realpathSync } from 'node:fs';
+import { mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
-import { PRODUCT } from '../shared/product-paths.mjs';
-import { processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
+import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
+import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 
@@ -64,6 +66,36 @@ export function checkRunnerConfig(c) {
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
 
+/**
+ * Why the runner must not start (#378 r1 M1), or null: a session it carries over (listed and not shown gone, or a start
+ * still waiting) whose settings do not deny some other product of this config whole, a product added after it started.
+ * groupGone(s) is the process-group port; a group it can't tell about counts as live.
+ */
+export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), listSettings = () => readdirSync(c.settingsDir) } = {}) {
+  // No memory (a first run, or one lost) while settings files of earlier sessions are there (#378 self-review M3): a
+  // session started with one may still run, and the runner knows nothing of it, so it can't be told about.
+  // A memory with no sessions and no requests is no memory either (#378 r2 n4: one restored or edited to empty lists).
+  const none = (v) => v === undefined || (Array.isArray(v) ? v.length === 0 : (v && typeof v === 'object' && Object.keys(v).length === 0));
+  if (memory && typeof memory === 'object' && none(memory.sessions) && none(memory.requests)) {
+    let files; try { files = listSettings().filter((n) => n.endsWith('.json')); } catch (e) { return `its settings folder can't be listed (${e?.code ?? e?.message})`; }
+    if (files.length) return `it has no memory, but its settings folder holds ${files.length} earlier session${files.length === 1 ? '\'s' : 's\''} settings (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''}); a session started with one may still run. Once none does, remove them from ${c.settingsDir}`;
+    return null;
+  }
+  const live = [];
+  for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
+    if (!(s?.alive === true || (s?.alive !== false && s?.ended !== true))) continue;
+    let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
+    if (!gone) live.push({ id: s.id, product: s.product });
+  }
+  // Waiting rows are not counted here (#378 self-review M2): no group of theirs can be shown gone, and they are never
+  // dropped, so the runner would stay down, serving no stop. Each start still checks them (worker-runner.mjs `live`).
+  for (const q of Object.keys(c.products)) {
+    const why = liveWallProblem(live, q, { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror }, readSettings);
+    if (why) return why;
+  }
+  return null;
+}
+
 /** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
@@ -81,13 +113,21 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false } = {}) {
 }
 
 /**
- * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for).
+ * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
+ * memory (the memory reader).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
-  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop } = {}) {
+  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop,
+  realpath = (p) => realpathSync.native(p), memory = loadMemory } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
+  // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
+  // through a link (render-settings.mjs), so a root behind one would leave every product's folders open.
+  for (const k of ['copiesRoot', 'outboxRoot']) {
+    let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
+    if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
+  }
   let l; let held;
   // The runner's own folder is setup's, with the access the Dispatcher's reads need: only settings/ is made here (#364 m6).
   try { try { mkdirSync(c.settingsDir, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; } l = lock(c.ownDir); held = l.acquire(); } catch (e) {
@@ -96,9 +136,15 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
+  let P;
   try {
+    P = realRunnerPorts(c, ports, { stopped: () => stopping });
+    // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
+    let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
+    const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
+    if (why) { log(`the worker runner did not start: ${why}`); return 1; }
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping }), note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally { try { l.release(held.nonce); } catch { /* gone */ } }
 }

@@ -142,6 +142,8 @@ export const WRITERS = Object.freeze({
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
+    // L838: a script hands in as a worker does, its own claimed card only (writer.mjs's hand-in checks), and nothing else.
+    script: Object.freeze({ update: f('summary', 'report_ref') }),
     workshop: Object.freeze({ update: f('head') }),
     approvals: Object.freeze({ update: f('needs_joe', 'approval_required', 'cancel_reason') }),
     merge_gate: Object.freeze({ update: f('needs_joe', 'merge_commit', 'attempts') }),

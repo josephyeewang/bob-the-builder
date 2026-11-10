@@ -304,6 +304,25 @@ export function readCardFile({ recordRoot, recordUid, card }) {
 }
 
 /**
+ * A fact from the Record, read only (L852): docs/fact/<id>.json, with its revision (`rev`), as readCardFile reads a
+ * card. Nothing is written, moved or created: a missing or odd folder or file is an answer, never fixed here.
+ * → { ok: true, doc, rev } | { ok: false, missing?, reason }
+ */
+export function readFactFile({ recordRoot, recordUid, fact }) {
+  if (typeof fact !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(fact) || fact.startsWith('.')) return { ok: false, missing: true, reason: 'not a fact id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'fact')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  // The exact name, before anything opens it, as for a card: on a disk that ignores case, one spelling opens another's.
+  const dir = join(recordRoot, 'docs', 'fact');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the fact folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${fact}.json`)) return { ok: false, missing: true, reason: 'no such fact' };
+  return readRecordFile(join(dir, `${fact}.json`), recordUid, 'fact', fact, 'no such fact');
+}
+
+/**
  * Where a plan reviewer's plan is (L703): the Lead outbox file intake applied with this sha256, from the Record's own
  * note of it (docs/fact/intake-applied-<session>-<name>.json, state `applied`). The path only says where to look: the
  * runner reads that file once and refuses it unless its bytes hash to the card's plan_sha256 (review-runner.mjs
