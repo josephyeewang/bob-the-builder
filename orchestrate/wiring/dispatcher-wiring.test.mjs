@@ -154,6 +154,8 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
     [{ product: '..' }, /config: product must be a product name/],
     [{ product: '.' }, /config: product must be a product name/],
     [{ product: '.sample-app' }, /config: product must be a product name/],
+    // #378 r1 m3: setup's rule, the runner's: no capitals, dots or underscores.
+    [{ product: 'Sample-app' }, /config: product must be a product name/], [{ product: 'sample.app' }, /config: product must be a product name/], [{ product: 'sample_app' }, /config: product must be a product name/],
   ];
   for (const [extra, why] of cases) {
     const r = boot(world({ extra }));
