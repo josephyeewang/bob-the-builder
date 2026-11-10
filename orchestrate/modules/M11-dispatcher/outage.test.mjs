@@ -213,8 +213,36 @@ test('L43(a): a two-session Mac with both sessions dead handles each card on its
   assert.equal(r.outage, false);
   assert.deepEqual([r.restart, r.asks], [[], ['C-1', 'C-2']]);
   assert.equal(alerts.length, 0, 'no outage alert');
-  assert.equal(rec.read('fact', OUTAGE_FACT), null);
+  assert.notEqual(rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open', 'no outage (the fact holds only the ids counted, L759)');
 });
 
 // (b) for the lead (L72): M9's card has no rerun_safe field, so outageStep's restart branch is unreachable.
 test.todo('M10: a dead card marked safe to re-run is restarted (needs M9 rerun_safe)');
+
+// L759 (lane 4's #324 r3 m3): a dead session the Record would not take off the board stays on it, dead, every pass. It
+// is counted once, so two such sessions plus one real death on a small board are no outage; each is still decided.
+test('L759: a dead session left on the board is counted once toward an outage, and still decided every pass', () => {
+  const rec = recWith(cards());
+  const step = (board, now) => outageStep({ rec, rules: R, board, now, healthy: true, alert: () => {} });
+  const six = (deadIds) => [1, 2, 3, 4, 5, 6].map((n) => (deadIds.includes(n) ? gone(`S${n}`, `C-${Math.min(n, 4)}`) : live(`S${n}`, `C-${Math.min(n, 4)}`)));
+  // Pass 1: two die; their asks are refused, so they stay on the board.
+  const r1 = step(six([1, 2]), T0);
+  assert.equal(r1.outage, false);
+  assert.deepEqual(r1.asks.sort(), ['C-1', 'C-2']);
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.counted_dead, ['S1', 'S2']);
+  // Pass 2: one more dies. 3 dead on a board of 6 would trip an outage, but only one is new.
+  const r2 = step(six([1, 2, 3]), T0 + MIN);
+  assert.equal(r2.outage, false, 'one new death is no outage');
+  assert.deepEqual(r2.asks.sort(), ['C-1', 'C-2', 'C-3'], 'the still-dead ones are decided again');
+  assert.equal(rec.read('fact', OUTAGE_FACT).doc.state, 'none');
+  // Pass 3: once they have left, three dying together is an outage, as before; and it counts only the new three.
+  step(six([]), T0 + 2 * MIN);
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.counted_dead, []);
+  const alerts = [];
+  const r4 = outageStep({ rec, rules: R, board: six([4, 5, 6]), now: T0 + 3 * MIN, healthy: false, alert: (t) => { alerts.push(t); return true; } });
+  assert.equal(r4.outage, true);
+  // After the outage, sessions still on the board and dead are counted already.
+  outageStep({ rec, rules: R, board: six([4]), now: T0 + 4 * MIN, healthy: false, resume: true, alert: () => {} });
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.counted_dead, ['S4']);
+  assert.equal(step(six([4, 5, 6]), T0 + 5 * MIN).outage, false, 'two new deaths are below the floor of 3');
+});
