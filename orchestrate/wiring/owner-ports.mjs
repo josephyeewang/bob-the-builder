@@ -11,7 +11,8 @@
 //     something starts one);
 //   - review and audit to the review runner;
 //   - lead, readonly, front_door, merge and undo_merge each to the runner that starts that kind.
-// A kind no runner owns is never a silent ok: probe throws and stopGroup answers { ok: false, reason }.
+// A kind no runner owns is never a silent ok: probe throws and stopGroup answers { ok: false, reason }. stopSession takes
+// only an id: the wiring routes it by the claim's session id to the runner that received its launch request.
 //
 // Two kinds of port:
 // - A sync port reads status files only (stopSession may also write a stop request) and never waits on the runner. If a file it needs is older than STATUS_STALE_MS,
@@ -52,9 +53,9 @@ export const OWNER_PORTS = Object.freeze({
   launch: ask('({ card, kind, product, sessionId })',
     '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; outbox is <outboxRoot>/worker/<sessionId> and copy <copiesRoot>/<card>',
     '{ ok: false, reason }: nothing was started (the claim is given back); a throw reads the same, so throw only before the request is written. Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
-  stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid, kind } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone',
+  stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid, kind } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone, and the runner has set stop_requested for it in a status written before it answers',
     '{ ok: false, reason }: it may still run', PORT_DEADLINE_MS),
-  saveWork: ask('(session): any session sessions() lists, routed by kind', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down), or the session has no work copy to save: any kind but editing, undo or script (by kind, never by role: M11 records role worker for a script card too), so a stop never reads as unsaved work. A worker kind whose copy is missing or unreadable is { ok: false, reason }', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
+  saveWork: ask('(session): any session sessions() lists, routed by kind', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down), or the session has no work copy to save: only the kinds named here, review, audit, readonly, lead and front_door (by kind, never by role: M11 records role worker for a script card too), so a stop never reads as unsaved work. Every other kind is saved or told: editing, undo, script and overnight save, a worker kind whose copy is missing or unreadable is { ok: false, reason }, and any kind not named (merge and undo_merge included, until it is settled that they have no copy) is { ok: false, reason: no runner saves that kind }', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
   pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow). An unknown outcome is answered by the tick\'s limit and asked again next pass, so asking twice must be harmless',
     'throws (rejects): a failed pause whether or not the pass reads the answer (pass.mjs now also reads a resolved { ok: false } as failed, so either holds there; the port throws)', PORT_DEADLINE_MS),
 });

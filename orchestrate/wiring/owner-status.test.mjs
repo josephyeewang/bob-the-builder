@@ -16,12 +16,12 @@ const session = (id, more = {}) => ({ id, product: 'p', kind: 'editing', card: `
   outbox: `${ROOT}/worker/${id}`, uid: OWNER, alive: true, ended: false, last_write_at: NOW - 1000, size: SIZE, activity: { state: 'active' }, outbox_open: true, stop_requested: false, ...more });
 const doc = (more = {}) => ({ written_at: new Date(NOW - 10_000).toISOString(), sessions: [session('s1')], requests: { s1: { state: 'started' } }, ...more });
 
-function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644 }), holds = () => true } = {}) {
+function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644 }), holds = () => true, text: forced, realpath = (p) => p } = {}) {
   const writes = [];
   const text = typeof d === 'string' ? d : JSON.stringify(d);
   const stat = (p) => { if (p === '/runner') return dirSt; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
-  const open = (p) => { assert.equal(p, FILE); return { st: fileSt, text }; };
-  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, realpath: (p) => p, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]), holds });
+  const open = (p) => { assert.equal(p, FILE); return { st: fileSt, text: forced === undefined ? text : forced }; };
+  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, realpath, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]), holds });
   return { ports, writes };
 }
 
@@ -53,7 +53,7 @@ test('step 1 M1: the board holds the sessions meant to run; one stopped on reque
   assert.ok(!asked.some((q) => q.sessionId === 'b2'), 'a running session is on the board without asking');
   held = new Set(['a1', 'b2']);   // the outage step handled c1: its card waits on Joe
   assert.deepEqual(ports.board().map((r) => r.id), ['b2'], 'a handled death is not counted again on the next pass');
-  assert.deepEqual(world(d, { holds: () => 'yes' }).ports.board().map((r) => r.id), ['b2'], 'only a true from the Record keeps it');
+  for (const h of ['yes', undefined, { corrupt: true }]) assert.throws(() => world(d, { holds: () => h }).ports.board(), /the Record can't tell whether card/, `holds answering ${JSON.stringify(h)} is "not known", never a dropped row`);
   assert.deepEqual(ports.outboxSessions().map((x) => x.sessionId), ['a1', 'b1', 'b2', 'c1', 'w1'], 'the outboxes are read whatever the board says');
   assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, writeRequest: () => {} }), /holds/);
 });
@@ -80,12 +80,17 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
     [world(s1({ config_dir: '' })), /config_dir that is not a name/],
     [world(s1({ lead: 3 })), /lead that is not a name/],
     [world(s1({ pgid: '77' })), /no process group/],
-    [world(s1({ card: 5 })), /card that is not a card id/],
+    [world(s1({ card: 5 })), /has no card/],
+    [world(s1({ card: null })), /has no card/],
+    [world(s1({ card: '' })), /has no card/],
+    [world(doc({ sessions: [session('s1'), session('s2', { outbox_open: false, outbox: '/other/worker/s2' })] })), /s2 .*outbox that is not inside the outbox root/],
+    [world(doc(), { fileSt: { ...st({ mode: 0o644 }), size: STATUS_MAX_BYTES + 1 }, text: null }), /bytes, more than the runner writes/],
     [world(s1({ bundle_files: 'a' })), /bundle_files that are not a list/],
     [world(s1({ uid: 0 })), /Mac user other than the owner's/],
     [world(s1({ outbox: '/elsewhere/worker/x' })), /outbox that is not this session's own folder/],
     [world(s1({ outbox: '/elsewhere/worker/s1' })), /outbox that is not inside the outbox root/],
     [world(s1({ outbox: undefined })), /outbox that was not named/],
+    [world(doc(), { realpath: (p) => (p === `${ROOT}/worker/s1` ? '/elsewhere/worker/s1' : p) }), /outbox that is not inside the outbox root/],
     [world(s1({ request: 'think-1' })), /read-only request/],
     [world(s1({ outbox_open: undefined })), /has no outbox_open/],
     [world(s1({ stop_requested: 'no' })), /has no stop_requested/],
