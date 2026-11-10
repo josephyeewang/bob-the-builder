@@ -306,8 +306,8 @@ function doneFromRows(ctx, tell, c, rows, events) {
   return false;
 }
 function doneFromRowsOnce(ctx, tell, c, rows, events) {
-  // No rows is refused here, with raiseGo's own words, so a Tier-1 card's plan is never reviewed for a go that can't be
-  // raised (#295 r1 c5, r2 c3).
+  // No rows is refused here, with raiseGo's own words, so a Tier-1 card's plan is never reviewed for a go with no rows
+  // (#295 r1 c5, r2 c3). Rows that break raiseGo's other checks are still refused by raiseGo, after the review.
   if (!rows || typeof rows !== 'object' || Array.isArray(rows)) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: the rows the card names are missing`); return false; }
   if (!Object.keys(rows).length) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: a go names at least one row`); return false; }
   for (const id of Object.keys(rows).sort()) {
