@@ -37,7 +37,7 @@ import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
-import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
@@ -160,7 +160,9 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
     start: startPort(c, startDeps(c, { stopped, log, productHeld })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
-    outboxDrained: drainedPort(),
+    // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
+    // The session reader (L899) gives the attempt whose push took the card's bundle (L898).
+    outboxDrained: drainedPort({ readFact: (fact) => readFactFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, fact }), readSession: (session) => readSessionFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, session }) }),
     size: sizePort(),
     ...over,
   };

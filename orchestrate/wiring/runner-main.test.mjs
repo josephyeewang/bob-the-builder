@@ -1,7 +1,8 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
@@ -315,5 +316,39 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     const all = [...most, join(d, 'mirror2')];
     writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
     assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L852: main\'s drain reads the Record\'s own fact file (M4 readFactFile): a file intake took is drained, one it has not is not', () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    const fdir = join(d, 'record', 'docs', 'fact'); mkdirSync(fdir, { recursive: true, mode: 0o755 });
+    for (const f of [join(d, 'record'), join(d, 'record', 'docs'), fdir]) chmodSync(f, 0o755);
+    const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    const o = join(d, 'outboxes', 'p1', 'worker', SID); mkdirSync(o, { recursive: true });
+    writeFileSync(join(o, 'report-C-1.md'), '{"a":1}');
+    const p = realRunnerPorts(checkRunnerConfig(config(d, { recordUid: process.getuid(), orchestrateUid: process.getuid() + 1 })));
+    const s = { id: SID, role: 'worker', card: 'C-1', outbox: o };
+    assert.equal(p.outboxDrained(s), false, 'no fact yet');
+    const id = `intake-applied-${SID}-report-C-1.md`;
+    const doc = { session: SID, name: 'report-C-1.md', state: 'applied', sha256: createHash('sha256').update('{"a":1}').digest('hex') };
+    writeFileSync(join(fdir, `${id}.json`), JSON.stringify({ entity: 'fact', id, rev: 1, doc }), { mode: 0o644 });
+    assert.equal(p.outboxDrained(s), true, 'taken by the Record');
+    writeFileSync(join(fdir, `${id}.json`), JSON.stringify({ entity: 'fact', id, rev: 2, doc: { ...doc, state: 'applying' } }), { mode: 0o644 });
+    assert.equal(p.outboxDrained(s), false, 'still in flight');
+    // L898, L899: the card's bundle, taken by its push, read through the Record's own session and fact files.
+    writeFileSync(join(fdir, `${id}.json`), JSON.stringify({ entity: 'fact', id, rev: 3, doc }), { mode: 0o644 });
+    const bytes = Buffer.from([0x00, 0xff, 0x10]);
+    writeFileSync(join(o, 'bundle-C-1.bundle'), bytes);
+    assert.equal(p.outboxDrained(s), false, 'a bundle with no session doc or push');
+    const sdir = join(d, 'record', 'docs', 'session'); mkdirSync(sdir, { mode: 0o755 }); chmodSync(sdir, 0o755);
+    writeFileSync(join(sdir, `${SID}.json`), JSON.stringify({ entity: 'session', id: SID, rev: 1, doc: { card: 'C-1', attempt: 'a1' } }), { mode: 0o644 });
+    assert.equal(p.outboxDrained(s), false, 'no push fact yet');
+    const push = { result: 'pushed', branch: 'card/c-1', tip: 'f'.repeat(40), bundle_sha256: createHash('sha256').update(bytes).digest('hex') };
+    writeFileSync(join(fdir, 'push.C-1.a1.json'), JSON.stringify({ entity: 'fact', id: 'push.C-1.a1', rev: 1, doc: push }), { mode: 0o644 });
+    assert.equal(p.outboxDrained(s), true, 'the bundle its push took, and the report intake took');
+    chmodSync(sdir, 0o777);
+    assert.equal(p.outboxDrained(s), false, 'a session folder others can write is not read');
+    chmodSync(sdir, 0o755);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

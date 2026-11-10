@@ -337,12 +337,18 @@ test('a bundle swapped right after the private copy is taken, before any check: 
   await w.commit('evil', (c) => writeFileSync(join(c, '.mcp.json'), '{}'));
   const evil = join(w.root, 'evil.bundle');
   await gitOk(['bundle', 'create', '-q', evil, 'refs/heads/card/c-1', '^refs/heads/main'], w.cg);
+  const staged = createHash('sha256').update(readFileSync(join(w.outbox, 'bundle-C-1.bundle'))).digest('hex');
   let swapped = false;
   const r = await w.push({ afterStage: () => { copyFileSync(evil, join(w.outbox, 'bundle-C-1.bundle')); swapped = true; } });
   assert.equal(swapped, true, 'the seam ran');
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.tip, good);
   assert.match(await w.ghRefs(), new RegExp(`refs/heads/card/c-1 ${good}`));
+  // L898: the pushed fact keeps the sha256 of the bytes staged and pushed, never the file swapped in after.
+  const f = w.record.read('fact', 'push.C-1.a1').doc;
+  assert.equal(f.result, 'pushed');
+  assert.equal(f.bundle_sha256, staged);
+  assert.notEqual(f.bundle_sha256, createHash('sha256').update(readFileSync(join(w.outbox, 'bundle-C-1.bundle'))).digest('hex'));
 });
 
 test('scanner problems refuse: a finding, a crash (exit 2), the wrong version, a missing binary, a changed config', async () => {

@@ -138,7 +138,8 @@ function checkFolder(folder, folderUid) {
 }
 
 /**
- * Copies the bundle, never following a link, into `dir`; returns the copy's path. The bundle must be owned by `uid`
+ * Copies the bundle, never following a link, into `dir`; returns { copy, sha256 }: the copy's path and the sha256 of the
+ * bytes copied (#388 r1 m1, L898: a worker's pushed fact keeps it, so the drain can tell this bundle taken). The bundle must be owned by `uid`
  * (the caller's: the worker's for an outbox, Joe's for a proposals folder; L77 m2), checked on the handle it is read
  * through. With `folderUid`, the folder must be owned by that user too, and be no looser than 750. With `sha256`, the copy's bytes must hash to it.
  */
@@ -170,9 +171,10 @@ function stageBundle(outbox, card, dir, cap, { uid, folderUid, sha256, fstat = f
     }
     // The bytes checked are the bytes copied, from the one handle (L233 M-5): a swap after the intake read is refused.
     // The file changed after the intake held it: the next pass judges the bytes there now, so this may pass (L597 (2)).
-    if (sha256 !== undefined && hash.digest('hex') !== sha256) later('the bundle\'s bytes are not the ones the intake recorded');
+    const got = hash.digest('hex');
+    if (sha256 !== undefined && got !== sha256) later('the bundle\'s bytes are not the ones the intake recorded');
+    return { copy, sha256: got };
   } finally { closeSync(fd); if (out !== undefined) closeSync(out); }
-  return copy;
 }
 
 /**
@@ -426,7 +428,8 @@ export function createPushScript(deps) {
       // 2. The private copy, its header and its check against the mirror.
       // (A research copy has no bundle: its report is read here, and its commit made once main is fresh.)
       const report = research ? readReport(folder, research, { uid, folderUid, fstat, now: now() }) : null;
-      const copy = research ? null : stageBundle(folder, card, work, bundleCap, { uid, folderUid, sha256, fstat });
+      const staged = research ? null : stageBundle(folder, card, work, bundleCap, { uid, folderUid, sha256, fstat });
+      const copy = staged?.copy ?? null;
       await afterStage?.();
       let tip = research ? null : readBundleHeader(copy, branch);
 
@@ -531,7 +534,7 @@ export function createPushScript(deps) {
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
       await gitDo(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' }, PLACE, 'pushed, but the mirror\'s copy of the branch could not be moved');
-      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries };
+      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries, ...(staged ? { bundle_sha256: staged.sha256 } : {}) };
     } finally {
       await run(['update-ref', '-d', holding], { gitDir: mirror, purpose: 'push-cleanup' });
       rmSync(work, { recursive: true, force: true });
@@ -576,6 +579,8 @@ export function createPushScript(deps) {
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
     if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
     if (headRefused) doc.head_refused = headRefused;
+    // A worker's pushed bundle, by the bytes staged and pushed (L898): the runner's drain counts the bundle taken by it.
+    if (res.ok && !from && typeof res.bundle_sha256 === 'string') doc.bundle_sha256 = res.bundle_sha256;
     if (from) doc.from = from;
     // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
     if (res.ok && from) doc.product = res.product;
