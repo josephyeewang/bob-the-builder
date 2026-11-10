@@ -29,7 +29,7 @@ import { createHash } from 'node:crypto';
 import { lineIs } from './alerts.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { ALERT_SEND_MS } from '../M11-dispatcher/alerts.mjs';
-import { pushReason } from '../M11-dispatcher/proposal-route.mjs';
+import { pushReason } from '../../shared/push-reason.mjs';
 
 export const STORE_KEEPS = Object.freeze(['recovery_stopped']);
 export const stopMarker = (product, type, key) => `<!-- orch:store_stopped ${product} ${createHash('sha256').update(`${type}\n${key}`).digest('hex').slice(0, 16)} -->`;

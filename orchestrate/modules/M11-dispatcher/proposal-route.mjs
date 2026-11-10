@@ -47,6 +47,7 @@ import { TAB_HEARTBEAT_FAMILY } from '../M9-record/permissions.mjs';
 import { HOLD_FACT, putFact, writeLaunch } from './pass.mjs';
 import { lapsedRun } from './research-intake.mjs';
 import { stillWaiting } from '../../shared/still-waiting.mjs';
+import { pushReason } from '../../shared/push-reason.mjs';
 
 // The start of M10's one answer that is about the change itself (engine.mjs mergeDocsLane). Any other deny is about the
 // product or the rules at this moment, and passes by itself.
@@ -83,15 +84,7 @@ export const routeReopened = (rec, card) => REOPENS.includes(rec.read('fact', RO
 export const shownName = (name) => cleanOutside(name, 'proposal-name');
 /** An answer's text, or `none` when it has none: an empty or odd answer never reads as a pass, nor as "[object Object]". */
 export const textOr = (v, none) => (typeof v === 'string' && v.trim() ? v : none);
-// The push script's reason as it may be told and stored: local paths cut first, then fenced (a cut after the fence
-// would break its closing tag). Only a path that starts a word is cut (/Users/..., ~/...), so a name in the repo such
-// as docs/SYSTEM.md still says which file to fix (L720 n2); a cut for length says so.
-const LOCAL_PATH = /(?<![\w.~-])~?\/[^\s'"`:,;()[\]]+/g;
-const REASON_CAP = 200;
-export function pushReason(why) {
-  const s = String(why).replace(LOCAL_PATH, '<path>');
-  return s.length > REASON_CAP ? `${s.slice(0, REASON_CAP)}…[cut ${s.length - REASON_CAP} characters]` : s;
-}
+// The push script's reason as it may be told and stored: shared/push-reason.mjs (local paths cut, then fenced here).
 const pushSaid = (why, none) => shownName(pushReason(textOr(why, none)));
 // A Record reason: the Record's own words, but they can name its files.
 const cut = (why) => plainError(why ?? 'no answer');
