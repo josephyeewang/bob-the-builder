@@ -4,11 +4,11 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, strayCause, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
-import { rulesWith, recWith, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -511,11 +511,21 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   // has its own Record), so it is kept and not told (self-review M1); p4 is a file, which is no copy.
   const told = alerts.filter((a) => /can be no product's copies folder/.test(String(a?.text ?? a)));
   assert.equal(told.length, 1, JSON.stringify(alerts));
-  assert.match(String(told[0]?.text ?? told[0]), /holds 3 folders that can be no product's copies folder, kept as they are and never looked inside: C-7, p3, worker \(a card folder from before/);
-  assert.doesNotMatch(String(told[0]), /c-8|p2/);
-  // Through holdAlert (once a day per cause, marked told only once delivered): the mark names its own cause.
+  const text = String(told[0]?.text ?? told[0]);
+  // r2 m1: named by the Dispatcher's own product (every product's Dispatcher tells it, on purpose, L908).
+  assert.match(text, /^product p1, p2, p3's Dispatcher: the worker copies folder .* holds 3 folders that can be no product's copies folder, kept as they are and never looked inside: C-7, p3, worker\. Each is a card folder from before/);
+  assert.doesNotMatch(text.replace(/^product [^:]*: /, ''), /c-8|p2/);
+  // r2 M1: no folder's product is confirmed and a link's target is never looked at, so no move or delete is advised:
+  // the notice says not to, and the only move it names is the lead's, once the card's product is confirmed.
+  assert.match(text, /may hold a card's unpushed work, so do not move or delete them: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted/);
+  assert.equal(text.match(/delet|mov/gi).length, 4, 'no other move or delete words: ' + text);
+  assert.doesNotMatch(text, /by hand|check what is in|you (may|can)/i);
+  // Through holdAlert (marked told only once delivered), once per set of names (r2 m2): the mark names its own cause.
   const call = alert.calls.find(([t]) => told[0] === t);
-  assert.equal(call[1].mark.fact, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
+  assert.equal(call[1].mark.fact, `hold-${strayCause(['C-7', 'p3', 'worker'])}`);
+  assert.ok(call[1].mark.fact.startsWith(`hold-${COPIES_NOT_PRODUCT_CAUSE}-`));
+  assert.equal(strayCause(['worker', 'C-7', 'p3']), strayCause(['C-7', 'p3', 'worker']), 'the order of the names is not a new set');
+  assert.notEqual(strayCause(['C-7', 'p3']), strayCause(['C-7', 'p3', 'worker']));
   assert.equal(call[1].mark.kind, 'hold_alert');
   assert.ok(existsSync(join(w.copiesRoot, 'C-7')) && existsSync(join(w.copiesRoot, 'c-8', 'x')), 'never moved');
   // A product folder that can't be read fails the step, as the copies folder does (L744 3).
@@ -551,6 +561,27 @@ test('#403 r1 A5, A6: a product read that throws, or a damaged product record, k
     assert.equal(alert.calls.find(([t]) => t === told[0])[1].mark.fact, `hold-${COPIES_UNREAD_CAUSE}`, name);
     assert.ok(!alert.texts.some((t) => /can be no product's/.test(String(t))), `${name}: never told as no product's`);
   }
+});
+
+test('#403 r2 m2: the folders that can be no product\'s are told once per set of names, not daily', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  const rec = recFor(w);
+  // Told three days ago for this same set: a told mark (the real outbox writes it on delivery; fakeAlert does not).
+  seed(rec, 'fact', `hold-${strayCause(['C-7'])}`, { text: 'earlier', told_at: iso(T0) });
+  const run = async (alert) => cleanupPass({ rec, rules: R, now: T0 + 3 * 24 * 60 * MIN, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot,
+    mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const strays = (alert) => alert.texts.filter((t) => /can be no product's copies folder/.test(String(t)));
+  const same = fakeAlert();
+  await run(same);
+  assert.deepEqual(strays(same), [], 'the same set, days later, is not told again');
+  // A new set is news: told, under its own cause.
+  mkdirSync(join(w.copiesRoot, 'worker'));
+  const more = fakeAlert();
+  await run(more);
+  assert.equal(strays(more).length, 1, JSON.stringify(more.texts));
+  assert.match(String(strays(more)[0]), /never looked inside: C-7, worker\./);
+  assert.equal(more.calls.find(([t]) => t === strays(more)[0])[1].mark.fact, `hold-${strayCause(['C-7', 'worker'])}`);
 });
 
 test('L836: cleanupCopy refuses a card or product that names no plain place, and a card of another product', async () => {

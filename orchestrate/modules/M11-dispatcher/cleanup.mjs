@@ -305,16 +305,24 @@ export function sweepStaging(sealRoot, now) {
  * `mirrorFor(cardDoc)` names the product's mirror. A folder at the top that is no product's (a name the runner's
  * folders can't hold, no product the Record holds, a link or a file) is listed as kept and never looked inside; a
  * product folder that can't be read fails the step, as the copies folder does (L744 3). Nothing kept is ever moved.
- * Told to Joe, each in one notice once a day (#403 r1 m4, self-review M1):
+ * Told to Joe, each in one notice (#403 r1 m4, self-review M1, r2 M1):
  * - a folder or link whose name can be no product's (an old flat-layout card folder such as C-7, a role's name), or a
- *   product's folder that is a link: no product's work can be in it;
+ *   product's folder that is a link. Nothing proves what is in one: an old card folder was shared by every product's
+ *   worker and may hold any product's unpushed work, and a link's target is never looked at. So the notice says to
+ *   move or delete none of them: the lead moves an old card folder into its card's product folder once that card's
+ *   product is confirmed, and what a link points to is never deleted. Told once per set of names (r2 m2: the cause
+ *   carries a hash of the sorted names), not daily: it asks nothing of Joe, so a new set is news and the same set is not;
  * - a product folder whose product record can't be read or is damaged: its copies are kept, and may be that product's
- *   unpushed work, so the notice says never to delete them.
+ *   unpushed work, so the notice says never to delete them. Once a day: fixing the record is Joe's to do.
  * A product-shaped name the Record holds no product for is kept, in no notice: each product's Dispatcher has its own
  * Record, so that is most often another product's own folder.
  */
 export const COPIES_NOT_PRODUCT_CAUSE = 'copies-not-a-product';
 export const COPIES_UNREAD_CAUSE = 'copies-product-unread';
+/** The stray notice's cause: one per set of names, so the same set is told once and a changed set again (#403 r2 m2). */
+export const strayCause = (names) => `${COPIES_NOT_PRODUCT_CAUSE}-${createHash('sha256').update([...names].sort().join('\n')).digest('hex').slice(0, 16)}`;
+// Told once per set: holdAlert's repeat, set past any Dispatcher's life (a finite number, as repeatOf requires).
+const ONCE_MS = 100 * 365 * 24 * 60 * 60_000;
 export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert }) {
   const out = [];
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
@@ -354,10 +362,17 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     }
   }
   const many = (n, one, more) => (n === 1 ? one : more);
-  const tell = async (cause, text) => {
-    try { await holdAlert({ rec, cause, text, alert, now }); } catch (e) { alert(`the Dispatcher could not tell a kept copies folder: ${e?.message ?? e}`); }
+  const tell = async (cause, text, every) => {
+    try { await holdAlert({ rec, cause, text, alert, now, every }); } catch (e) { alert(`the Dispatcher could not tell a kept copies folder: ${e?.message ?? e}`); }
   };
-  if (stray.length && alert) await tell(COPIES_NOT_PRODUCT_CAUSE, `the worker copies folder ${copiesRoot} holds ${many(stray.length, 'a folder', `${stray.length} folders`)} that can be no product's copies folder, kept as ${many(stray.length, 'it is', 'they are')} and never looked inside: ${stray.join(', ')} (a card folder from before copies were kept in each product's folder, L836, or a link; check what is in one before moving or deleting it by hand)`);
+  // Every product's Dispatcher reads the same top folder, so each tells this, naming its own product: the duplicates
+  // are accepted on purpose (#403 r2 m1, L908), and with one tell per set of names they come once per change, not daily.
+  if (stray.length && alert) {
+    let mine = [];
+    try { mine = rec.list('product').map((x) => x?.id).filter((x) => typeof x === 'string').sort(); } catch { /* named as "a Dispatcher" */ }
+    const by = mine.length ? `product ${mine.join(', ')}'s Dispatcher` : 'a Dispatcher';
+    await tell(strayCause(stray), `${by}: the worker copies folder ${copiesRoot} holds ${many(stray.length, 'a folder', `${stray.length} folders`)} that can be no product's copies folder, kept as ${many(stray.length, 'it is', 'they are')} and never looked inside: ${stray.join(', ')}. ${many(stray.length, 'It', 'Each')} is a card folder from before copies were kept in each product's folder (L836), a role's name, or a link. ${many(stray.length, 'It', 'They')} may hold a card's unpushed work, so do not move or delete ${many(stray.length, 'it', 'them')}: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted. Told once for this set of folders`, ONCE_MS);
+  }
   if (unread.length && alert) await tell(COPIES_UNREAD_CAUSE, `the worker copies of ${many(unread.length, 'product', 'products')} ${unread.join(', ')} were not looked at this pass: ${many(unread.length, 'its', 'their')} product record could not be read or is damaged. The copies are kept and may hold unpushed work: do not delete them; fix the record and the next pass looks again`);
   return out;
 }
