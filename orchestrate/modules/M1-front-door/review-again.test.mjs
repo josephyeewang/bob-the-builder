@@ -5,11 +5,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
-import { readConfig, readJoeTaps } from '../M4-workshop/launcher/review-runner-main.mjs';
+import { installProblem, readConfig, readJoeTaps } from '../M4-workshop/launcher/review-runner-main.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { REVIEW_AGAIN, REVIEW_AGAIN_BUTTON, OFFER_NOTE, reviewAgainOffers, reviewAgainCard, writeTap, clearReadTaps, handlerSetup, main } from './review-again.mjs';
 
@@ -89,13 +89,28 @@ const offersOf = (w) => reviewAgainOffers(w.status());
 // root's, so the reader's wall check gets M4's own test port (review-runner-main.test.mjs OPEN_WALLS).
 const OPEN_WALLS = { lstat: () => ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 0, mode: 0o40755 }), acl: () => null };
 const readRunner = (f) => readConfig(f, OPEN_WALLS);
-function runnerConfig(w, over = {}) {
-  const c = { installRoot: '/i', root: w.root, outboxRoot: w.outboxRoot, reviewHome: '/h', uids: UIDS, recordRoot: '/x', recordUid: OTHER, mirror: '/m',
+// The runner's owner-and-place check (#284 r2 m1), the REAL installProblem, with root stood in for: the test's base folder
+// and its installed copy (w.base/install) read as root's, everything else as the test user's, as on the Mac.
+const installOf = (w) => join(w.base, 'install');
+const placeIn = (w) => (c, f) => installProblem(c.installRoot, [f], {
+  top: w.base, acl: () => null,
+  lstat: (p) => {
+    const s = lstatSync(p); const r = relative(installOf(w), p);
+    const roots = p === w.base || r === '' || (!r.startsWith('..') && !r.startsWith('/'));
+    return { isSymbolicLink: () => s.isSymbolicLink(), isDirectory: () => s.isDirectory(), uid: roots ? 0 : s.uid, mode: s.mode };
+  },
+});
+const ports = (w) => ({ readRunner, place: placeIn(w) });
+// `at` is where the runner config is written: by default inside the installed copy, where the installer puts it.
+function runnerConfig(w, over = {}, at = installOf(w)) {
+  mkdirSync(installOf(w), { recursive: true, mode: 0o755 }); chmodSync(installOf(w), 0o755);
+  mkdirSync(at, { recursive: true, mode: 0o755 }); chmodSync(at, 0o755);
+  const c = { installRoot: installOf(w), root: w.root, outboxRoot: w.outboxRoot, reviewHome: '/h', uids: UIDS, recordRoot: '/x', recordUid: OTHER, mirror: '/m',
     claudeBin: CLAUDE, hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: ME, ownerTaps: w.taps, wiring: '/i/w.mjs',
     snapshot: join(w.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json',
     rules: { production: { env_files: [], programs: [], hosts: [] } }, ...over };
   for (const k of Object.keys(over)) if (over[k] === undefined) delete c[k];
-  const file = join(w.base, 'runner-config.json');
+  const file = join(at, 'runner-config.json');
   writeFileSync(file, JSON.stringify(c), { mode: 0o644 }); chmodSync(file, 0o644);
   const cfg = join(w.base, 'review-again.json');
   writeFileSync(cfg, JSON.stringify({ runnerConfig: file }));
@@ -234,13 +249,13 @@ test('R-0b-164 planted (#284 r1 m1): once the runner has set a session aside, it
   const w = await silentS1();
   const cfg = runnerConfig(w);
   const said = [];
-  assert.equal(await main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => w.clock.t, readRunner }), 0, said.at(-1));
+  assert.equal(await main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => w.clock.t, ...ports(w) }), 0, said.at(-1));
   w.ask();
   const r = await runnerPass(w.ctx);
   assert.deepEqual(r.setAside.map((x) => x.session_id), ['S-1']);
   // The alert is still in the runner's recent alerts, but its set-aside record now stands.
   assert.ok(w.status().alerts.some((a) => a.action === REVIEW_AGAIN && a.session_id === 'S-1'));
-  assert.equal(await main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => w.clock.t, readRunner }), 1);
+  assert.equal(await main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => w.clock.t, ...ports(w) }), 1);
   assert.match(said.at(-1), /do not offer it for that session .*Nothing was asked\.$/);
 });
 
@@ -294,7 +309,7 @@ test('R-0b-164: the handler as a command, with the runner\'s real config and sta
   const cfg = runnerConfig(w);
   const said = [];
   const say = (s) => said.push(s);
-  const run = (argv, t = T0) => main(argv, { say, now: () => t, readRunner });
+  const run = (argv, t = T0) => main(argv, { say, now: () => t, ...ports(w) });
   assert.equal(await run(['tap', cfg, 'S-404']), 1);
   assert.equal(await run(['tap', cfg, 'S-1']), 0);
   assert.match(said.at(-1), /Review again asked for S-1/);
@@ -313,7 +328,7 @@ test('R-0b-164: the handler as a command, with the runner\'s real config and sta
 test('R-0b-164 planted (#284 r1 M2): the taps folder is the runner\'s own; with none set, or a second copy named, nothing is asked', async () => {
   const w = await silentS1();
   const said = [];
-  const run = (cfg) => main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => T0, readRunner });
+  const run = (cfg) => main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => T0, ...ports(w) });
   // The runner has no taps folder: it would never read a tap, so the handler refuses and says so.
   assert.equal(await run(runnerConfig(w, { ownerTaps: undefined })), 1);
   assert.match(said.at(-1), /the review runner has no taps folder set \(ownerTaps in its config\).*Nothing was asked\.$/);
@@ -330,10 +345,31 @@ test('R-0b-164 planted (#284 r1 M2): the taps folder is the runner\'s own; with 
   assert.deepEqual(readdirSync(w.taps), [], 'no tap was written');
   // With the runner's folder, the tap lands where the runner reads it, and the runner sets the session aside.
   const good = runnerConfig(w);
-  assert.equal(handlerSetup(good, { readRunner }).taps, w.taps);
+  assert.equal(handlerSetup(good, ports(w)).taps, w.taps);
   assert.equal(await run(good), 0);
   w.ask();
   assert.deepEqual((await runnerPass(w.ctx)).setAside.map((x) => x.session_id), ['S-1']);
+});
+
+test('R-0b-164 planted (#284 r2 m1): an owner-written copy of the runner config naming another taps folder is refused and told', async () => {
+  const w = await silentS1();
+  const twin = join(w.base, 'twin-taps'); mkdirSync(twin, { mode: 0o755 }); chmodSync(twin, 0o755);
+  const said = [];
+  const run = (cfg) => main(['tap', cfg, 'S-1'], { say: (s) => said.push(s), now: () => T0, ...ports(w) });
+  // A valid-shaped copy in the owner's own folder, naming the real installed copy: not inside it, so not the runner's.
+  const copy = runnerConfig(w, { ownerTaps: twin }, join(w.base, 'owner-copy'));
+  assert.equal(await run(copy), 1);
+  assert.match(said.at(-1), /the review runner's config is not the runner's own \(it must be root's alone, inside the installed copy\): .*owner-copy\/runner-config\.json is not inside the installed copy .*Nothing was asked\.$/);
+  // The same copy naming its own folder as the installed copy: that folder is the owner's, not root's.
+  const self = runnerConfig(w, { ownerTaps: twin, installRoot: join(w.base, 'owner-copy') }, join(w.base, 'owner-copy'));
+  assert.equal(await run(self), 1);
+  assert.match(said.at(-1), /is not the runner's own .*not owned by root.*Nothing was asked\.$/);
+  assert.deepEqual(readdirSync(twin), [], 'no tap in the twin folder');
+  assert.deepEqual(readdirSync(w.taps), [], 'and none in the runner\'s');
+  w.ask();
+  assert.deepEqual((await runnerPass(w.ctx)).setAside, [], 'nothing was asked, so nothing is set aside');
+  // Without the test's port the check is the runner's own, against real root: this test's installed copy is not root's.
+  assert.throws(() => handlerSetup(runnerConfig(w), { readRunner }), /is not the runner's own \(it must be root's alone, inside the installed copy\)/);
 });
 
 // The wall itself is lane 2's (L77 m8): render-settings denies the Front Door Edit and Write on the taps folder, with its

@@ -39,7 +39,7 @@ import { closeSync, constants, fstatSync, linkSync, mkdtempSync, openSync, readF
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readConfig as readRunnerConfig, readJoeTaps } from '../M4-workshop/launcher/review-runner-main.mjs';
+import { installProblem, readConfig as readRunnerConfig, readJoeTaps } from '../M4-workshop/launcher/review-runner-main.mjs';
 import { FOLDERS, readReviewStatus } from '../M4-workshop/launcher/review-runner.mjs';
 import { reviewUid } from '../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../shared/record.mjs';
@@ -142,16 +142,22 @@ export function clearReadTaps({ dir, ownerUid, tapsRead, unlink = unlinkSync, be
 }
 
 /**
- * The handler's config → what the runner's own config says (#284 r1 M2). `readRunner` is the runner's reader (a port for
- * a test, whose folders can't be root's). → { taps, ownerUid, statusFile, asideDir, reviewUid } or a throw saying why.
+ * The handler's config → what the runner's own config says (#284 r1 M2). `readRunner` is the runner's reader and
+ * `place` the runner's own owner-and-place check (#284 r2 m1): the config must be root's alone and inside the installed
+ * copy, as the runner's main checks it (programsProblem), so an owner-written copy naming another taps folder is refused
+ * rather than "asked". Both are ports for a test, whose folders can't be root's.
+ * → { taps, ownerUid, statusFile, asideDir, reviewUid } or a throw saying why.
  */
-export function handlerSetup(file, { readRunner = readRunnerConfig } = {}) {
+export const runnerConfigPlace = (c, file) => installProblem(c.installRoot, [file]);
+export function handlerSetup(file, { readRunner = readRunnerConfig, place = runnerConfigPlace } = {}) {
   const h = JSON.parse(readFileSync(file, 'utf8'));
   const keys = Object.keys(h ?? {});
   if (keys.some((k) => k !== 'runnerConfig')) throw new Error(`config: only "runnerConfig" belongs here; the taps folder and the rest come from the review runner's own config (${clip(keys.filter((k) => k !== 'runnerConfig').join(', '), 80)})`);
   if (typeof h.runnerConfig !== 'string' || !isAbsolute(h.runnerConfig)) throw new Error('config: runnerConfig must be the absolute path of the review runner\'s config');
   let c;
   try { c = readRunner(h.runnerConfig); } catch (e) { throw new Error(`the review runner's config can't be used: ${clip(e?.message ?? e, 200)}`); }
+  const where = place(c, h.runnerConfig);
+  if (where) throw new Error(`the review runner's config is not the runner's own (it must be root's alone, inside the installed copy): ${clip(where, 400)}`);
   if (c.ownerTaps === undefined) throw new Error('the review runner has no taps folder set (ownerTaps in its config), so it would never read a tap');
   const u = reviewUid(c.uids);
   if (!u.ok) throw new Error(`the review runner's config: ${u.reason}`);
@@ -167,10 +173,10 @@ function asideIdsOf(dir) {
 }
 
 /** → exit code: 0 done, 1 refused or could not run. Says why on `say`. */
-export async function main(argv, { say = (s) => process.stdout.write(`${s}\n`), now = () => Date.now(), readRunner } = {}) {
+export async function main(argv, { say = (s) => process.stdout.write(`${s}\n`), now = () => Date.now(), readRunner, place } = {}) {
   const [verb, cfgFile, sessionId] = argv;
   let c;
-  try { c = handlerSetup(cfgFile, { readRunner }); } catch (e) { say(`review again: not run: ${clip(e?.message ?? e, 300)}. Nothing was asked.`); return 1; }
+  try { c = handlerSetup(cfgFile, { readRunner, place }); } catch (e) { say(`review again: not run: ${clip(e?.message ?? e, 600)}. Nothing was asked.`); return 1; }
   let status;
   try { status = readReviewStatus({ file: c.statusFile, now: now(), uid: c.reviewUid }); } catch (e) { say(`review again: the review runner's status can't be used: ${clip(e?.message ?? e, 200)}. Nothing was asked.`); return 1; }
   if (verb === 'tap') {
