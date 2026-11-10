@@ -127,7 +127,7 @@ test('#317 audit r1 M1: stop and save take any session sessions() lists, routed 
   assert.match(OWNER_PORTS.saveWork.out, /editing, undo, script and overnight save/);
   assert.match(OWNER_PORTS.saveWork.out, /any kind not named \(merge and undo_merge included, until it is settled that they have no copy\) is \{ ok: false, reason: no runner saves that kind \}/);
   assert.match(OWNER_PORTS.stopGroup.out, /the runner has set stop_requested for it in a status written before it answers/);
-  assert.match(OWNER_PORTS.stopGroup.fails, /it may still run; stop_requested stays set even though the stop failed or timed out/, 'L764 m1');
+  assert.match(OWNER_PORTS.stopGroup.fails, /it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out/, 'L764 m1, #328 r1 c3');
   assert.match(OWNER_PORTS.saveWork.out, /a worker kind whose copy is missing or unreadable is \{ ok: false, reason \}/);
   assert.match(OWNER_PORTS.stopGroup.in, /it needs only \{ id, pgid, kind \}/);
   // r2 n1: the routing map names every kind gate.mjs knows, once, with its runner; a kind no runner owns is never a silent ok.

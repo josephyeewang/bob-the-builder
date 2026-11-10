@@ -2,12 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, linkSync, mkdtempSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, closeSync, linkSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { REQUEST_MAX_BYTES, readRequest, writeStatus } from './runner-files.mjs';
 
-const dir = () => realpathSync(mkdtempSync(join(tmpdir(), 'orch-rf-')));
+const dir = () => realpathSync(tempDir('orch-rf-'));
 const ME = process.getuid();
 
 test('L763: the status is written as a new file renamed over the old one, so a hard link to the old one never gets the next status', () => {
@@ -61,6 +61,11 @@ test('L763: a request is read only when it is a plain file with one name, the or
     // A file too big by its size is never read at all.
     const stBig = { isFile: () => true, nlink: 1, uid: ME, size: REQUEST_MAX_BYTES + 1 };
     assert.match(readRequest(f, { orchestrateUid: ME, fstat: () => stBig, read: () => { throw new Error('must not read'); } }).refused, /larger than any/);
+    // One that grew between the check and the read is refused by what was read (#328 r1 c2, P9): a well-formed object.
+    const stSmall = { isFile: () => true, nlink: 1, uid: ME, mode: 0o644, size: 2 };
+    const grown = JSON.stringify({ launch: { sessionId: 'S-1' }, pad: 'x'.repeat(REQUEST_MAX_BYTES) });
+    assert.match(readRequest(f, { orchestrateUid: ME, fstat: () => stSmall, read: () => grown }).refused, /larger than any/);
+    assert.deepEqual(readRequest(f, { orchestrateUid: ME, fstat: () => stSmall, read: () => '{"a":1}' }), { a: 1 }, 'control');
     const open = join(d, 'open.json'); writeFileSync(open, '{}'); chmodSync(open, 0o666);
     assert.match(readRequest(open, { orchestrateUid: ME }).refused, /written by others/);
     chmodSync(open, 0o664); assert.match(readRequest(open, { orchestrateUid: ME }).refused, /written by others/);

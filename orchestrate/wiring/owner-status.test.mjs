@@ -2,12 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
@@ -130,7 +130,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
 });
 
 test('step 1 m6: the status is opened once, never through a link, and that open file is what is checked and read', () => {
-  const d = mkdtempSync(join(tmpdir(), 'owner-status-'));
+  const d = tempDir('orch-owner-status-');
   try {
     writeFileSync(join(d, 'real.json'), 'hello'); symlinkSync(join(d, 'real.json'), join(d, 'link.json'));
     const { st: s, text } = openRead(join(d, 'real.json'));
@@ -218,4 +218,9 @@ test('#324 r2 M1: a stop the Dispatcher asked for is never a death: the flag is 
   assert.match(head, /stop_requested: true once the runner acts on a stop it was asked for \(a stop request or stopGroup\), written before it acts, and at the latest in the same write that first shows the session not live; it stays true even if the stop fails or times out/);
   assert.doesNotMatch(head, /confirmed a stop|A stop that failed leaves it false/);
   assert.match(head, /marks a session that ends on its own 'stopped' once it is no longer live/);
+});
+
+test('#328 r2 n1 (L769): the runner rewrites its status every 15 s, well inside the age at which the Dispatcher calls it stale', () => {
+  assert.equal(RUNNER_STATUS_EVERY_MS, 15_000);
+  assert.ok(RUNNER_STATUS_EVERY_MS * 10 <= STATUS_STALE_MS, `${RUNNER_STATUS_EVERY_MS} ms is not well under ${STATUS_STALE_MS} ms`);
 });

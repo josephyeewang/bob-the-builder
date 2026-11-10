@@ -7,6 +7,10 @@
 //     read. A request must also be owned by the orchestrate user (the Dispatcher writes them, never the owner's user),
 //     writable by no one else, and a JSON object.
 // The Dispatcher's own read of the status (owner-status.mjs openRead) refuses a second name the same way.
+// The bound (L769, #328 r1 M1): a forged status needs an unsandboxed process running as the owner; that is outside the wall's job. A process that made such a link could hold the file open, remove the link
+// and write through the open file with one name again; only the runner's next rename ends that, so the runner rewrites
+// its status at least every RUNNER_STATUS_EVERY_MS (owner-status.mjs). A sandboxed shell can't make the link at all:
+// runner-launch.test.mjs pins that under macOS's own sandbox. The lasting fix is L751's: workers off the runner's user.
 
 import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
