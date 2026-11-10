@@ -2632,6 +2632,7 @@ let AI_ROLES;
 __bob_i('orchestrate/shared/record.mjs', (m) => { AI_ROLES = m.AI_ROLES; });
 Object.defineProperties(__bob_e, {
   PRODUCT: { get: () => PRODUCT, enumerable: true },
+  PRODUCT_OUTBOX_ROLES: { get: () => PRODUCT_OUTBOX_ROLES, enumerable: true },
   productRoleClash: { get: () => productRoleClash, enumerable: true },
   runnerPlaces: { get: () => runnerPlaces, enumerable: true },
   runnerCopy: { get: () => runnerCopy, enumerable: true },
@@ -2649,6 +2650,10 @@ Object.defineProperties(__bob_e, {
 
 /** A product name setup makes a folder for (setup/layout.mjs parseConfig checks the products against it). */
 const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** The roles the worker runner starts, whose outboxes sit in a folder per product (L836): the one list. setup makes their
+ * product folders, and intake names the product only for them; every other role's outbox keeps the layout with no
+ * product (a Lead's included, #406 land). wiring/owner-status.mjs RUNNER_ROLE_OF maps onto exactly these (setup.test). */
+const PRODUCT_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
 /** True when a product name is an AI role's, in any letter case. */
 const productRoleClash = (product) => typeof product === 'string' && AI_ROLES.some((r) => r.toLowerCase() === product.toLowerCase());
 // The card and session id characters (CARD_ID, SESSION_ID), with no leading `.` (#378 r1 c1): safe by itself.
