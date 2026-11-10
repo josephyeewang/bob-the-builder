@@ -304,7 +304,7 @@ export function startPort(c, deps = {}) {
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
     // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
-    try { for (const n of fs.list(mine.copies)) if (n === `${card}~baseline` || n.startsWith(`${card}~baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
+    try { for (const n of fs.list(mine.copies)) if (n.startsWith(`${card}..baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
     let others; try { others = fs.list(mine.copies).filter((n) => n !== card).map((n) => join(mine.copies, n)); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other folder under the copies root and the outbox root, whole (#378 m1): a product setup made but this config
     // leaves out, and anything left in the old flat layout, as well as the config's other products.
@@ -319,10 +319,11 @@ export function startPort(c, deps = {}) {
       others.push(theirs.copies, theirs.outboxes);
       if (typeof o?.mirror === 'string') others.push(o.mirror);
     }
-    // The baseline's throwaway place (#369 r1 M1), in the product's own copies folder (L836): `~` is in no card id
-    // (CARD_ID), so no card's copy is named so. Its name is this session's (#369 r2 m1), so one left behind never refuses
-    // a later start of the card.
-    const spare = join(mine.copies, `${card}~baseline-${sessionId}`);
+    // The baseline's throwaway place (#369 r1 M1), in the product's own copies folder (L836). `..` is in no card id
+    // (CARD_ID refuses it), so no card's copy is named so, and the name keeps to the plain path letters the settings
+    // renderer takes ([A-Za-z0-9._-], L889: a `~` was refused there). Its name is this session's (#369 r2 m1), so one
+    // left behind never refuses a later start of the card.
+    const spare = join(mine.copies, `${card}..baseline-${sessionId}`);
     others.push(spare);
     others = [...new Set(others)];
     const r = p.render;
@@ -335,7 +336,7 @@ export function startPort(c, deps = {}) {
     // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {
-      const spareSettings = join(c.settingsDir, `${sessionId}~baseline.json`);
+      const spareSettings = join(c.settingsDir, `${sessionId}..baseline.json`);
       const done = async () => { removeAll(fs, spare, log); try { fs.rm(spareSettings, { force: true }); } catch (e) { log(`the baseline's settings file ${spareSettings} can't be removed (${e?.code ?? e?.message})`); } };
       const no = async (reason) => { await done(); return refuse(`the baseline's throwaway copy ${reason}`); };
       try { fs.mkdir(spare, { mode: 0o700 }); } catch (e) { return refuse(`the baseline's throwaway copy can't be made (${e?.code ?? e?.message})`); }

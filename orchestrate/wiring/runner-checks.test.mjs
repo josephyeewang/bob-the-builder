@@ -265,11 +265,18 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
     chmodSync(f.copy, 0o700);
     const outbox = join(f.root, 'outbox'); mkdirSync(outbox, { mode: 0o700 });
     const x = { product: 'p1', sessionId: SID, copy: f.copy, head: f.head, outbox, ownUid: () => process.getuid() };
-    const again = startDeps(c).beforeStart;
+    // What holds the outbox is read with /usr/sbin/lsof, the Mac's (the runner's machine). Off a Mac, where that file is
+    // not there, the test stands in for it; on a Mac the real one runs. The real check fails closed without it (below).
+    const busy = process.platform === 'darwin' ? undefined : () => [];
+    const checksOf = (y) => workerChecks({ ...workerCheckInputs(c, y), ...(busy ? { busy } : {}) });
+    const again = startDeps(c, { checksOf }).beforeStart;
     assert.equal(await again(x), null);
+    // No way to tell what holds the outbox (lsof missing or failing): the start is refused, never passed on a guess.
+    const blind = (y) => workerChecks({ ...workerCheckInputs(c, y), busy: () => { throw new Error('lsof failed (ENOENT)'); } });
+    assert.equal(await startDeps(c, { checksOf: blind }).beforeStart(x), 'check 3: could not check what holds the outbox');
     // A check with no port refuses the start, never passes on a guess: here a product with no rules snapshot (check 8).
     const noSnap = { ...c, products: { p1: { ...c.products.p1, render: { paths: { ...c.products.p1.render.paths, snapshot: undefined } } } } };
-    assert.equal(await startDeps(noSnap).beforeStart(x), 'check 8 has no port');
+    assert.equal(await startDeps(noSnap, { checksOf: (y) => workerChecks({ ...workerCheckInputs(noSnap, y), ...(busy ? { busy } : {}) }) }).beforeStart(x), 'check 8 has no port');
     // Check 8: the snapshot is written afresh.
     rmSync(join(own, 'rules.json'));
     assert.equal(await again(x), null); assert.equal(existsSync(join(own, 'rules.json')), true, 'the snapshot is written again');
