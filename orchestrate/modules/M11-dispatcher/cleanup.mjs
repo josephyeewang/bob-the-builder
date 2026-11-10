@@ -284,7 +284,12 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
   const out = [];
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
   let names = [];
-  try { names = readdirSync(copiesRoot).filter((n) => !n.startsWith('.')); } catch { return out; }
+  // A missing copies folder is nothing to do; any other error (EACCES and the rest) fails the step, so the tick tells it,
+  // and is never read as "no copies" (L744 3).
+  try { names = readdirSync(copiesRoot).filter((n) => !n.startsWith('.')); } catch (e) {
+    if (e?.code === 'ENOENT') return out;
+    throw new Error(`the copies folder could not be read (${e?.code ?? e?.message ?? e})`);
+  }
   for (const card of names.sort()) {
     const doc = rec.read('card', card)?.doc;
     const mirror = doc ? mirrorFor(doc) : null;

@@ -122,6 +122,9 @@ const gitText = async (args, opts, about, final) => (await gitDo(args, opts, abo
 
 /** An error's text with its folder paths cut to <path>, at most 200 characters: one rule for every error a caller shows. */
 export const plainError = (m) => String(m).replace(/\/[^\s'":]+/g, '<path>').slice(0, 200);
+/** The fact a push is recorded in, per card and attempt; a proposal's attempt is named by its bundle's bytes. */
+export const PUSH_FACT = (card, att) => `push.${card}.${att}`;
+export const PROPOSAL_ATTEMPT = (sha) => `p-${sha.slice(0, 12)}`;
 export const githubUrl = (repo) => `https://github.com/${repo}.git`;
 export const bundleName = (card) => `bundle-${card}.bundle`;
 const tokenConfig = (token) => [['http.https://github.com/.extraHeader', `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`]];
@@ -347,7 +350,7 @@ export function createPushScript(deps) {
     if (!record.read('card', card)?.doc) later(`card ${card} is not in the Record`);
     const folder = proposalFolder(rules, product);
     if (!folder) later('the product has no proposals folder in the rules');
-    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: `p-${sha256.slice(0, 12)}`, sha256 };
+    return { product, card, branch: cardBranch(card), folder, uid: ownerUid, folderUid: ownerUid, att: PROPOSAL_ATTEMPT(sha256), sha256 };
   }
 
   /** A research copy's attempt id: new bytes are a new attempt. Null for a card with no readable sha256. */
@@ -559,7 +562,7 @@ export function createPushScript(deps) {
     // Only a real card and attempt name a fact, so two refusals can't share one (L325 m3). String(undefined) or
     // String(null) would pass the id patterns as "undefined" / "null". With neither there is only the answer.
     if (typeof card !== 'string' || !CARD.test(card) || typeof att !== 'string' || !ATTEMPT.test(att)) return res;
-    const id = `push.${card}.${att}`;
+    const id = PUSH_FACT(card, att);
     // Before the fact: a stop between the two leaves no fact, so the retry finds the branch and comes back here.
     const headRefused = res.ok ? writeHead(card, res.tip) : null;
     const cur = record.read('fact', id);
@@ -597,12 +600,12 @@ export function createPushScript(deps) {
       let done = null;
       try {
         got = inputs();
-        const f = record.read('fact', `push.${got.card}.${got.att}`);
+        const f = record.read('fact', PUSH_FACT(got.card, got.att));
         done = f?.doc && !f.corrupt ? f.doc : null;
       } catch { done = null; }
       if (done?.result === 'pushed' && done.product === got.product && !done.head_refused) return { ok: true, already: true, product: got.product, card: got.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
     }
-    return settle(inputs, () => [p?.card, sha ? `p-${sha.slice(0, 12)}` : null], { look, from: 'proposal' });
+    return settle(inputs, () => [p?.card, sha ? PROPOSAL_ATTEMPT(sha) : null], { look, from: 'proposal' });
   }
 
   /** Makes and pushes a ready research_copy card's one commit ({ product, card }). Bytes already pushed answer that push. */
@@ -612,7 +615,7 @@ export function createPushScript(deps) {
     // Any throw here falls through to settle, which meets the same error and records it, masked (as pushProposal).
     try {
       inputs = researchInputs(p);
-      const f = record.read('fact', `push.${inputs.card}.${inputs.att}`);
+      const f = record.read('fact', PUSH_FACT(inputs.card, inputs.att));
       done = f?.doc && !f.corrupt ? f.doc : null;
     } catch { done = null; }
     if (done?.result === 'pushed' && done.product === inputs.product && !done.head_refused) return { ok: true, already: true, product: inputs.product, card: inputs.card, branch: done.branch, tip: done.tip, binaries: done.binaries ?? [] };
