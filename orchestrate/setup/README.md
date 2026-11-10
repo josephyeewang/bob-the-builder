@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 46 FAILs of 50 items for one product (about 5 more for each extra product), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 47 FAILs of 51 items for one product (about 5 more for each extra product), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -59,6 +59,15 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and
   is refused when running as root.
+- **The workers' copies (L747, L751).** `worker-copies/` is the owner's 0755, group wheel, with one access-list entry letting
+  `orchestrate` list, read and delete (`list`, `search`, the read-attribute rights and `delete_child`, inherited by every
+  file and folder made under it), so cleanup can check a card's copy and remove it. It can't add or write anything. The
+  entry has no `read` (a folder shows it as `list`, so the exact check would never pass; a file made under it shows `read`)
+  and no `delete` (with it, `orchestrate` could remove the empty copies folder itself). The entry reaches only what is made
+  after it is set: copies that were already there need it added by hand. Cleanup's git runs only on the mirror
+  (orchestrate's own), never inside a copy, so no `safe.directory` is needed for it.
+- **The seal folder.** `seals/` is orchestrate's 0700: where cleanup seals a copy's bundle it could not prove saved (the
+  Dispatcher config's `sealRoot`).
 - It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
 - Not in this part: the install and the background jobs (part 2, below); the ownerTaps and proposals folders, the account job
   reload and the watch-only token file (part 3).
@@ -80,10 +89,31 @@ Every name, path and layout rule comes from the launcher's own modules (`install
 |---|---|---|
 | `/usr/local/bin/node setup.mjs install --config <file> --dry-run` | prints every step (and every refusal, before any step) | no |
 | `sudo /usr/local/bin/node setup.mjs install` | makes the root-owned `install` folder, a root-owned copy of the updater's three files and of node, the seed (`updater.json`, `review.json`, the extras), then runs the updater's `--first` run, which builds the `.v-<commit>` copy and flips the link; then checks | yes |
-| `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists | no |
+| `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists. Once the config names `hostLockPath`, a last line points to `check-dispatcher` | no |
+| `/usr/local/bin/node setup.mjs check-dispatcher --config <file>`, or with sudo | read only: the Dispatcher's lines (below). Its own command, so a host.lock problem never stops `daemons load` or the watch cutover, which wait on check-install | no; sudo for the host.lock read |
+| `/usr/local/bin/node setup.mjs dispatcher-keys --config <file>` | read only: prints the Dispatcher config's five worker and cleanup keys as JSON, from this config: `reviewRoot` (`<base>/review`), `mirror` (`<base>/mirror`), `sealRoot` (`<base>/seals`), `hostLockPath`, and `hostLockUid` (the owner's Mac user id, read on this Mac: the Dispatcher reads host.lock only when the file it opened is that user's). Without `hostLockPath`, or with no such owner on this Mac, it says so and exits 1 | no |
 | `sudo /usr/local/bin/node setup.mjs daemons place` | writes the three job files into `/Library/LaunchDaemons` (root:wheel 0644, exactly what `review-daemons.mjs` builds) | yes |
 | `sudo /usr/local/bin/node setup.mjs daemons load` / `unload` | `launchctl bootstrap` / `bootout` for each job not yet loaded / loaded; load refuses unless the install check passes and the job files are there; a job loaded from an older file is taken out and loaded again (`load` records each file's fingerprint in `<base>/install/loaded-jobs.json`, root's); unload with nothing loaded is not an error | yes |
 | `/usr/local/bin/node setup.mjs daemons list` / `check` | read only: `list` shows loaded or not, state and last exit. `check` FAILs on: a job file wrong or missing; a leftover job file under another label; a job not loaded; a job loaded from an older file than the one on disk; a job whose last run did not end with exit 0; a job whose current run has been going over 30 minutes (a hung run keeps the last exit green); `ps` answering with something unreadable counts as a FAIL, `ps` printing nothing (the run ended meanwhile) does not. It cannot see a job loaded under an old label whose file is gone: `daemons unload` under the old label first. Changing the label, `review.json` or the owner's home folder needs `daemons unload`, the change, `place`, `load` | no |
+
+**The Dispatcher's lines: check-dispatcher (L748).** The config's `hostLockPath` is the full path of the owner's `host.lock`,
+in the owner's home (`/Users/<owner>/...`; spaces are fine). check-dispatcher says:
+- the review runner's folder holds its `launches` folder (the runner makes it on its first run; the Dispatcher won't start without it);
+- host.lock is the owner's (not orchestrate's), one plain file with one name, no bigger than the Dispatcher reads
+  (`HOST_LOCK_MAX` in `wiring/worker-ports.mjs`), and `orchestrate` can read it. As root it reads it as `orchestrate`;
+  without sudo that line is NEEDS ROOT. When the read fails it says why, in plain words: a folder above it `orchestrate`
+  can't go into (it names the folder; the folders of the path as written and of its real place, through links), the file's
+  own permissions (naming the file's mode, for example 600), macOS privacy protection (when macOS answered "Operation not permitted" and the permissions allow the
+  read), or else the read's own error. A missing host.lock passes when `orchestrate` can reach its folder: the Dispatcher
+  reads that as no host claimed. A folder that is not there is a wrong path, and fails.
+- whether the Dispatcher's background job can read it. macOS judges a read by the app it runs from, so a read from the
+  Terminal proves nothing for the job when host.lock is in a folder macOS guards (a synced cloud folder under
+  `~/Library/CloudStorage` or `~/Library/Mobile Documents`, Desktop, Documents, Downloads, or another disk under
+  `/Volumes`). There this line is NOT TRIED, which counts as a FAIL: keep host.lock outside those folders, or prove the read
+  from the job itself. That holds when host.lock is missing too: the job would be refused the read, not told the file is
+  missing, so it would say "not known" on every pass. The place is judged on its real path, as the disk spells it (a
+  config spelling `library/cloudStorage` is still the guarded folder), after any links.
+The mirror and `seals/` are rows of the folder table, so `check` compares their owner and mode.
 
 Root never runs code a user can write: the updater runs from a root-owned `install-work/bootstrap` copy with a root-owned
 copy of node. A plain folder where the copy's link belongs is refused, not replaced.
@@ -98,7 +128,7 @@ run the real updater in a child process against a local folder standing in for G
 root folder prefix, an in-memory `dscl`/`dseditgroup`, owners kept in a table) and never as root. The stand-in refuses what
 the real tool refuses (a `dscl` write without root, a bad path, a missing record, the password hash for anyone but root).
 The last tests run the real read-only tools on this Mac (`dscl -read`, `dseditgroup -o checkmember`, `stat`, `ls -led`).
-Each `PLANT` test breaks one clause and names the check that catches it.
+Each `PLANT` test breaks one clause and names the check that catches it. `dispatcher-check.test.mjs` covers the Dispatcher's keys: the seal folder, the copies' access list on the real `chmod` and `ls`, `hostLockPath`, `dispatcher-keys` and each reason check-dispatcher gives for a host.lock orchestrate can't read.
 
 ## Part 3 — taps, proposals, git trust, the account job reload, the watch-only token
 
