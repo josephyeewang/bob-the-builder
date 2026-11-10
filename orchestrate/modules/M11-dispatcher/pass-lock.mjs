@@ -4,9 +4,10 @@
 // only when that pid is provably dead; anything else (an unreadable lock, a live pid, a pid we may
 // not signal) means "another pass runs" and this pass exits.
 //
-// Known limit: a pid can be reused after a crash. The lock also holds its start time, so a lock
-// whose pid is alive is still respected (fail closed); a reboot clears it because the folder is
-// emptied at login (live proof with R-0b-65).
+// Known limit: a pid can be reused after a crash. The lock holds only the pid and the time it was
+// taken, not the process's start time, so a lock whose pid is alive is respected (fail closed) even
+// if that pid now belongs to another process; a reboot clears it because the folder is emptied at
+// login (live proof with R-0b-65).
 //
 // The lock appears whole (L754, #312 Minor): it is written to a file of this pid's own, then linked into place, which fails
 // when a lock is there. So no reader ever finds it empty half-way through being taken, which read as "unreadable".

@@ -40,6 +40,7 @@ export const NOT_OBJECT_SITES = Object.freeze([
 export const OTHER_FORMS = Object.freeze([
   { file: 'modules/M9-record/writer.mjs', count: 1, reason: 'the Store Writer itself: its checked writes carry a `write` field that it commits' },
   { file: 'modules/M4-workshop/launcher/review-runner-main.mjs', count: 1, reason: "the runner's ports: write is its snapshot file writer, not the Record" },
+  { file: 'wiring/runner-loop.mjs', count: 1, reason: "the worker runner's files port: write is its status and memory file writer, not the Record (L849)" },
 ]);
 
 // Writes whose actor or entity comes from a variable. `count` is how many such sites the file has; each entry says
