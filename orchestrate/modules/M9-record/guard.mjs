@@ -110,10 +110,11 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
 // ---------- the claim (L72) ----------
 // The claim has two steps: ready → claimed names the session before it starts (the Dispatcher makes the id and the
 // launcher starts claude with it), so no second start can take the card; claimed → running adds the process once the
-// start reports it. The claim is stamped claimed_at here. rules_rev is the rules the claim was made under (L74).
+// start reports it. The claim is stamped claimed_at here. rules_rev is the rules the claim was made under (L74). A session
+// claim may name its Mac's hardware id (`machine`, L845), so a host name change does not make it foreign (M9 lock.mjs onThisMachine).
 // Otherwise a write never changes a claim (R2-M6, R3-M4); a claimed or running card has one, any other card none.
 // Both the Store Writer and the stand-in call this, so neither takes a claim the other refuses.
-const CLAIM_FIELDS = Object.freeze({ session: ['kind', 'session_id', 'host', 'claimed_at', 'rules_rev'], tab: ['kind', 'claim_id', 'host', 'claimed_at', 'rules_rev'] });
+const CLAIM_FIELDS = Object.freeze({ session: ['kind', 'session_id', 'host', 'machine', 'claimed_at', 'rules_rev'], tab: ['kind', 'claim_id', 'host', 'claimed_at', 'rules_rev'] });
 function checkClaim(claim, nowMs) {
   if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return no('a claim needs its owner');
   if (claim.kind === 'session') {
@@ -125,6 +126,7 @@ function checkClaim(claim, nowMs) {
   const extra = Object.keys(claim).filter((k) => !CLAIM_FIELDS[claim.kind].includes(k));
   if (extra.length) return no(`a ${claim.kind} claim has no ${extra.join(', ')}`);
   if (typeof claim.host !== 'string' || !claim.host) return no('a claim needs the host');
+  if (claim.machine !== undefined && !(typeof claim.machine === 'string' && claim.machine)) return no('claim.machine names the Mac the claim was made on (its hardware id)');
   if (claim.rules_rev !== undefined && !(typeof claim.rules_rev === 'string' && claim.rules_rev) && !Number.isInteger(claim.rules_rev)) return no('claim.rules_rev names the rules it was made under');
   return { ok: true, claim: { ...claim, claimed_at: new Date(nowMs).toISOString() } };
 }

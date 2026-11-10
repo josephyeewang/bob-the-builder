@@ -207,9 +207,23 @@ export function disjoint({ rules, card, product, others, rec }) {
 }
 
 /**
- * M4's launch check 12, as a port: the same answer the pass got. M4 launches only reviewers and auditors
- * (review-launch.mjs GATE_KIND), so no undo comes this way and `exactReverse` is never needed here.
+ * M4's launch check 12, as a port: the same answer the pass got (L852, #369 m3). Reviewers and auditors
+ * (review-launch.mjs GATE_KIND) never start an undo, but the worker runner (wiring/runner-checks.mjs) asks it for editing,
+ * undo and script sessions. For an undo the pass asks undo.mjs exactReverse first and hands its answer to startGate, so
+ * this port asks the same check, with the same `filesOf` (the files a merge commit changed), and refuses as the pass
+ * does an undo that is not an exact reverse: given no `filesOf`, every undo is refused (the caller must pass the pass's
+ * own). undo.mjs is loaded only when an undo asks: it imports the pass, which imports this file.
  */
-export function check12({ rules, rec, bandsNow, runningNow }) {
-  return (ctx) => startGate({ rules, rec, card: ctx.card, kind: ctx.kind, product: ctx.product, b: bandsNow(), running: runningNow(), lead: ctx.lead });
+export function check12({ rules, rec, bandsNow, runningNow, filesOf }) {
+  return async (ctx) => {
+    let exact = false;
+    if (ctx.kind === 'undo') {
+      let e;
+      try { e = ctx.card ? (await import('./undo.mjs')).exactReverse({ rec, card: ctx.card, filesOf }) : { ok: false, reason: 'it has no card' }; }
+      catch (err) { e = { ok: false, reason: `the check could not be made (${err?.message ?? err})` }; }
+      if (e?.ok !== true) return refuse(`it is not an exact reverse: ${e?.reason ?? 'no answer'}`);
+      exact = true;
+    }
+    return startGate({ rules, rec, card: ctx.card, kind: ctx.kind, product: ctx.product, b: bandsNow(), running: runningNow(), lead: ctx.lead, exactReverse: exact });
+  };
 }

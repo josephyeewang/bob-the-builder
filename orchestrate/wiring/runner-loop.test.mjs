@@ -2,7 +2,7 @@
 // real process group; what the loop writes is read back through the Dispatcher's own reader (owner-status.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { writeStatus } from './runner-files.mjs';
 import { join } from 'node:path';
@@ -14,6 +14,8 @@ import { RUNNER_KILL_WAIT_MS, RUNNER_PS_MS, RUNNER_TERM_WAIT_MS, RUNNER_TICK_MS,
 const UID = process.getuid();
 const T0 = Date.parse('2026-11-10T12:00:00Z');
 
+const S0 = '2026-11-10T10:00:00Z'; const S1 = '2026-11-10T11:00:00Z';
+
 function world() {
   const d = tempDir('orch-rloop-');
   const w = { d, requestsDir: join(d, 'requests'), statusFile: join(d, 'state', 'status.json'), memoryFile: join(d, 'memory', 'memory.json'), outboxRoot: join(d, 'outboxes'), now: T0, notes: [], n: 0 };
@@ -21,7 +23,7 @@ function world() {
   w.gone = new Set();
   w.ports = {
     start: async (x) => { w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 7000 + w.n, pidStart: '2026-11-10T12:00:01Z', pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
+      return { ok: true, pid: 7000 + w.n, pidStart: S0, pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid), stopGroup: async (s) => { w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => true,
   };
@@ -108,8 +110,8 @@ test('step 4: the process-group ports on a real group: live, stopped with SIGTER
     // The same number under another start time: the runner's group is gone, and a stop sends nothing.
     const sent = [];
     const q = processGroupPorts({ kill: (g, sig) => { sent.push(sig); return process.kill(-g, sig); } });
-    assert.equal(q.groupGone({ ...s, pid_start: 'Mon Jan  1 00:00:00 2001' }), true);
-    assert.deepEqual(await q.stopGroup({ ...s, pid_start: 'Mon Jan  1 00:00:00 2001' }), { ok: true, how: 'already gone' });
+    assert.equal(q.groupGone({ ...s, pid_start: '2001-01-01T00:00:00Z' }), true);
+    assert.deepEqual(await q.stopGroup({ ...s, pid_start: '2001-01-01T00:00:00Z' }), { ok: true, how: 'already gone' });
     assert.deepEqual(sent, [], 'a reused number is never signalled');
     const r = await p.stopGroup(s);
     assert.deepEqual(r, { ok: true, how: 'SIGTERM' });
@@ -121,17 +123,17 @@ test('step 4: the process-group ports on a real group: live, stopped with SIGTER
   }
   // A group that won't go on SIGTERM gets SIGKILL; a signal that fails otherwise is an answer, and a group the port
   // can't tell about throws (so the pass keeps no alive field).
-  const G = { pgid: 4242, pid: 4242, pid_start: 'x' };
+  const G = { pgid: 4242, pid: 4242, pid_start: S0 };
   let alive = true; const sigs = [];
   const z = processGroupPorts({ kill: (g, sig) => { if (sig === 0) { if (!alive) throw Object.assign(new Error('x'), { code: 'ESRCH' }); return; } sigs.push(sig); if (sig === 'SIGKILL') alive = false; },
-    probe: { kill: () => {}, pidStart: () => 'x' }, sleep: async () => {}, waitMs: 1000 });
+    probe: { kill: () => {}, pidStart: () => S0 }, sleep: async () => {}, waitMs: 1000 });
   assert.deepEqual(await z.stopGroup(G), { ok: true, how: 'SIGKILL' });
   assert.deepEqual(sigs, ['SIGTERM', 'SIGKILL']);
-  const e = processGroupPorts({ kill: (g, sig) => { if (sig === 0) return; throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  const e = processGroupPorts({ kill: (g, sig) => { if (sig === 0) return; throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => S0 } });
   assert.deepEqual(await e.stopGroup(G), { ok: false, reason: 'EPERM' });
-  const g = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  const g = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => S0 } });
   assert.equal(g.groupGone(G), false, 'EPERM: the group is there');
-  const f = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EINVAL' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  const f = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EINVAL' }); }, probe: { kill: () => {}, pidStart: () => S0 } });
   assert.throws(() => f.groupGone(G), /x/);
   assert.throws(() => f.groupGone({ pgid: 1 }), /no process group/);
 });
@@ -145,15 +147,15 @@ test('step 4: a start still on at the end of a tick is settled by a later tick o
 });
 
 test('step-4 review M2, M3, m2: a group whose leader start can\'t be read, or that has no leader start, is "can\'t tell" and never signalled; after SIGKILL the stop waits for the group to go', async () => {
-  const G = { pgid: 4242, pid: 4242, pid_start: 'x' }; const sent = [];
+  const G = { pgid: 4242, pid: 4242, pid_start: S0 }; const sent = [];
   const kill = (g, sig) => { sent.push(sig); };
   const noPs = processGroupPorts({ kill, probe: { kill: () => {}, pidStart: () => null } });
   assert.throws(() => noPs.groupGone(G), /start time can't be read/);
   await assert.rejects(noPs.stopGroup(G), /start time can't be read/);
   assert.deepEqual(sent.filter((x) => x !== 0), [], 'no stop signal sent');
-  const noStart = processGroupPorts({ kill, probe: { kill: () => {}, pidStart: () => 'x' } });
+  const noStart = processGroupPorts({ kill, probe: { kill: () => {}, pidStart: () => S0 } });
   sent.length = 0;
-  for (const s of [{ pgid: 4242, pid: 4242 }, { pgid: 4242, pid: 4243, pid_start: 'x' }]) assert.throws(() => noStart.groupGone(s), /no group leader start time/);
+  for (const s of [{ pgid: 4242, pid: 4242 }, { pgid: 4242, pid: 4243, pid_start: S0 }]) assert.throws(() => noStart.groupGone(s), /no group leader start time/);
   assert.deepEqual(sent, [], 'nothing sent, not even signal 0');
   // The leader gone (ESRCH) with the rest of its group still there: live.
   const members = processGroupPorts({ kill: () => {}, probe: { kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, pidStart: () => null } });
@@ -161,7 +163,7 @@ test('step-4 review M2, M3, m2: a group whose leader start can\'t be read, or th
   // After SIGKILL the group takes a moment to go: the stop waits (up to RUNNER_KILL_WAIT_MS), so its answer is not a false failure.
   let zero = 0; let killed = false; const slept = [];
   const slow = processGroupPorts({ kill: (g, sig) => { if (sig === 'SIGKILL') killed = true; if (sig === 0 && killed && (zero += 1) > 3) throw Object.assign(new Error('x'), { code: 'ESRCH' }); },
-    probe: { kill: () => {}, pidStart: () => 'x' }, sleep: async (ms) => { slept.push(ms); }, waitMs: 500 });
+    probe: { kill: () => {}, pidStart: () => S0 }, sleep: async (ms) => { slept.push(ms); }, waitMs: 500 });
   assert.deepEqual(await slow.stopGroup(G), { ok: true, how: 'SIGKILL' });
   assert.equal(slow.groupGone(G), true);
   const waits = slept.filter((x) => x === 100).length;
@@ -214,16 +216,64 @@ test('#362 r1 M2: the leader\'s start time is read in UTC, so a time zone change
     assert.ok(s.pid_start);
     process.env.TZ = 'America/Los_Angeles';
     assert.equal(leaderStart(child.pid), s.pid_start, 'the same string whatever the zone');
+    // A start recorded before L850 X1, as real ps printed it in UTC: the same live group.
+    const raw = execFileSync('ps', ['-o', 'lstart=', '-p', String(child.pid)], { encoding: 'utf8', env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } }).trim();
+    assert.equal(processGroupPorts().groupGone({ ...s, pid_start: raw }), false, 'an old raw value of a live group');
     const sent = [];
     const p = processGroupPorts({ kill: (g, sig) => { sent.push(sig); return process.kill(-g, sig); } });
     assert.equal(p.groupGone(s), false, 'a live group the runner started is not gone');
     assert.deepEqual(sent, [0]);
   } finally { if (old === undefined) delete process.env.TZ; else process.env.TZ = old; child.kill('SIGKILL'); }
   // ps is given the UTC zone, the C locale and RUNNER_PS_MS; a failing ps is null, never a guess.
-  let got; assert.equal(leaderStart(4242, { run: (bin, args, o) => { got = { bin, args, o }; return 'Tue Nov 10 10:00:00 2026\n'; } }), 'Tue Nov 10 10:00:00 2026');
+  let got; assert.equal(leaderStart(4242, { run: (bin, args, o) => { got = { bin, args, o }; return 'Tue Nov 10 10:00:00 2026\n'; } }), '2026-11-10T10:00:00Z', 'M9 startTime: UTC ISO (L850)');
   assert.deepEqual([got.bin, got.args, got.o.env.TZ, got.o.env.LC_ALL, got.o.timeout], ['ps', ['-o', 'lstart=', '-p', '4242'], 'UTC0', 'C', RUNNER_PS_MS]);
   assert.equal(leaderStart(4242, { run: () => { throw new Error('ETIMEDOUT'); } }), null);
   assert.equal(leaderStart(1), null);
+  assert.equal(leaderStart(4242, { run: () => 'not a time\n' }), null, 'text in no shape is null');
+});
+
+test('#394 r1 m1: the leader is checked again just before SIGKILL: one reused in the SIGTERM wait gets nothing, one that can\'t be told about is not signalled', async () => {
+  const G = { pgid: 4242, pid: 4242, pid_start: S0 };
+  const run = async (laterStart) => {
+    const sent = []; let reads = 0;
+    const p = processGroupPorts({ kill: (g, sig) => { if (sig !== 0) sent.push(sig); }, probe: { kill: () => {}, pidStart: () => (reads++ === 0 ? S0 : laterStart) }, sleep: async () => {}, waitMs: 1000 });
+    let r; try { r = await p.stopGroup(G); } catch (e) { r = { threw: e.message }; }
+    return { r, sent };
+  };
+  assert.deepEqual(await run(S1), { r: { ok: true, how: 'already gone' }, sent: ['SIGTERM'] }, 'a new leader on the number: no SIGKILL');
+  const t = await run(null);
+  assert.deepEqual(t.sent, ['SIGTERM'], 'can\'t tell: no SIGKILL');
+  assert.equal(t.r.ok, false); assert.match(t.r.reason, /start time can't be read/);
+  const same = await run(S0);
+  assert.deepEqual(same.sent, ['SIGTERM', 'SIGKILL'], 'the same leader still there: SIGKILL');
+});
+
+test('L850 X1: groupGone compares start times with M9 startDiffers: an old raw value, a new one, a different one, a null read', () => {
+  const sent = [];
+  const at = (now, there = true) => processGroupPorts({ kill: (g, sig) => { sent.push(sig); if (!there) throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, probe: { kill: () => {}, pidStart: () => now } });
+  const G = { pgid: 4242, pid: 4242, pid_start: S0 };
+  // The same start: the runner's group, alive.
+  assert.equal(at(S0).groupGone(G), false, 'a new value, the same');
+  // A start recorded before L850 X1 (ps's UTC lstart text) is the same instant, not another start: alive.
+  assert.equal(at(S0).groupGone({ ...G, pid_start: 'Tue Nov 10 10:00:00 2026' }), false, 'an old raw value of the same start');
+  assert.equal(at(S0).groupGone({ ...G, pid_start: 'Tue Nov 10 09:00:00 2026' }), true, 'an old raw value of another start: reused');
+  // Another start: the number was used again, the runner's group is gone.
+  assert.equal(at(S1).groupGone(G), true, 'a different new value');
+  // A read that fails is not another start: there, it can't be told (never signalled); gone by signal 0, gone.
+  sent.length = 0;
+  assert.throws(() => at(null).groupGone(G), /start time can't be read/);
+  assert.deepEqual(sent, [0], 'only signal 0');
+  assert.equal(at(null, false).groupGone(G), true);
+  assert.throws(() => at('Tue Nov 10 10:00:00 2026').groupGone(G), /start time can't be read/, 'a read in the old shape is not compared');
+  // An old raw value of a single-digit day (ps pads it with a space), and one whose leader has gone with the rest still there.
+  assert.equal(at('2026-11-03T10:00:00Z').groupGone({ ...G, pid_start: 'Tue Nov  3 10:00:00 2026' }), false, 'a padded day');
+  const leaderGone = processGroupPorts({ kill: () => {}, probe: { kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, pidStart: () => null } });
+  assert.equal(leaderGone.groupGone({ ...G, pid_start: 'Tue Nov 10 10:00:00 2026' }), false, 'an old raw value, the leader gone, members there');
+  // A recorded value in no shape can't be compared: only signal 0 is sent; there, can't tell; gone, gone.
+  sent.length = 0;
+  assert.throws(() => at(S0).groupGone({ ...G, pid_start: 'x' }), /no shape it can be compared in/);
+  assert.deepEqual(sent, [0], 'only signal 0');
+  assert.equal(at(S0, false).groupGone({ ...G, pid_start: 'x' }), true, 'no shape, the group gone');
 });
 
 test('#362 r1 m1, m4, c2: the stop\'s ps fits its budget; a leader another user holds is still checked by its start time; a cadence past the bound is refused', async () => {
@@ -231,9 +281,9 @@ test('#362 r1 m1, m4, c2: the stop\'s ps fits its budget; a leader another user 
   // The leader answers "not yours to signal": it is there, so its start time decides.
   const notOurs = () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); };
   const sent = [];
-  const p = processGroupPorts({ kill: (g, sig) => { sent.push(sig); }, probe: { kill: notOurs, pidStart: () => 'someone else' } });
-  assert.equal(p.groupGone({ pgid: 4242, pid: 4242, pid_start: 'x' }), true, 'a reused number held by another user');
-  assert.deepEqual(await p.stopGroup({ pgid: 4242, pid: 4242, pid_start: 'x' }), { ok: true, how: 'already gone' });
+  const p = processGroupPorts({ kill: (g, sig) => { sent.push(sig); }, probe: { kill: notOurs, pidStart: () => S1 } });
+  assert.equal(p.groupGone({ pgid: 4242, pid: 4242, pid_start: S0 }), true, 'a reused number held by another user');
+  assert.deepEqual(await p.stopGroup({ pgid: 4242, pid: 4242, pid_start: S0 }), { ok: true, how: 'already gone' });
   assert.deepEqual(sent, [], 'and it is never signalled');
   const w = world();
   await assert.rejects(runRunner({ ...w.ctx(), everyMs: RUNNER_STATUS_EVERY_MS - RUNNER_PORT_MS, stopWhen: () => true }), /tick must leave a port wait/);

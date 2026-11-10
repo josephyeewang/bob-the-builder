@@ -146,6 +146,18 @@ test('M-3 check 1: the copy must be a plain folder of this user\'s alone, holdin
   const link = join(w.root, 'link'); symlinkSync(w.x.copy, link);
   assert.match((await port({ ...w.x, copy: link }, 1)).reason, /not a plain folder/);
   assert.match((await port({ ...w.x, copy: join(w.root, 'gone') }, 1)).reason, /missing/);
+  // L852 (#369 c3): a review role's refusals name the review copy; the worker runner's reuse names the card's copy.
+  for (const role of ['reviewer', 'auditor']) {
+    assert.equal((await port({ ...w.x, role, copy: join(w.root, 'gone') }, 1)).reason, 'the review copy is missing', role);
+    assert.match((await port({ ...w.x, role, head: 'b'.repeat(40) }, 1)).reason, /^the review copy holds /, role);
+  }
+  for (const role of ['worker', 'undo', 'script']) {
+    const gone = (await port({ ...w.x, role, copy: join(w.root, 'gone') }, 1)).reason;
+    assert.equal(gone, 'the card\'s copy is missing', role);
+    assert.match((await port({ ...w.x, role, head: 'b'.repeat(40) }, 1)).reason, /^the card's copy holds /, role);
+    assert.match((await port({ ...w.x, role, copy: link }, 1)).reason, /^the card's copy is not a plain folder/, role);
+    assert.match((await port({ ...w.x, role, ownUid: () => ME + 1 }, 1)).reason, /^the card's copy is not this user's alone/, role);
+  }
 });
 
 test('M-3 check 3: the outbox is emptied, and refused while something holds it', async () => {
