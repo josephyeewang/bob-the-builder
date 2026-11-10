@@ -23,13 +23,19 @@
 //     number was reused, so the group the runner started is gone: self-review M1's class). A leader that is there but
 //     whose start time can't be read, or a session with no leader start time, is "can't tell" (a throw), never live:
 //     the pass then keeps no alive field and sends no stop (review M2, M3);
-//   - a stop is sent only to a group shown to be the runner's by that rule, so a reused number is never signalled;
+//   - a stop's SIGTERM is sent only to a group shown to be the runner's by that rule. Between SIGTERM and SIGKILL the
+//     group is checked with signal 0 alone (#362 r1 m1): a live group's number is not reused while it is there, so the
+//     SIGKILL reaches a reused number only if the whole group went and its number was taken within that wait;
 //   - the stop waits RUNNER_TERM_WAIT_MS for SIGTERM (signal 0 alone between, so the wait is not spent on ps), then
-//     sends SIGKILL and waits up to RUNNER_KILL_WAIT_MS for the group to go (review m2), all inside RUNNER_PORT_MS.
+//     sends SIGKILL and waits up to RUNNER_KILL_WAIT_MS for the group to go (review m2). With the leader check's ps
+//     (at most RUNNER_PS_MS) all of it fits inside RUNNER_PORT_MS.
+// The leader's start time is read by leaderStart, the runner's one reader of it: ps in UTC and the C locale (#362 r1
+// M2), so a time zone change on the Mac never makes a live group read as reused. The start port records it the same way.
 // The start, save, pause, drain and size ports come in a later step; a loop without them is refused.
 
+import { execFileSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { realProbe } from '../modules/M9-record/lock.mjs';
 import { stopProcessGroup } from '../modules/M11-dispatcher/pass.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
@@ -41,17 +47,35 @@ export const RUNNER_TICK_MS = 4_000;
 /** How long a stop waits for SIGTERM before SIGKILL, and then for the group to go: inside one port's limit. */
 export const RUNNER_TERM_WAIT_MS = 6_000;
 export const RUNNER_KILL_WAIT_MS = 1_000;
+/** The longest the leader check's ps may take (#362 r1 m1: it is counted in the stop's budget). */
+export const RUNNER_PS_MS = 1_000;
 if (RUNNER_TICK_MS + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_TICK_MS + RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
-if (RUNNER_TERM_WAIT_MS + RUNNER_KILL_WAIT_MS + 1_000 >= RUNNER_PORT_MS) throw new Error('the stop\'s waits must leave room inside RUNNER_PORT_MS');
+if (RUNNER_PS_MS + RUNNER_TERM_WAIT_MS + RUNNER_KILL_WAIT_MS + 1_000 >= RUNNER_PORT_MS) throw new Error('the stop\'s ps and waits must leave room inside RUNNER_PORT_MS');
+
+/**
+ * A process's start time as ps prints it in UTC and the C locale, or null (#362 r1 M2): the one reader the runner records
+ * and compares with, so the Mac's time zone or language never changes the string for the same process.
+ */
+export function leaderStart(pid, { run = execFileSync } = {}) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  try {
+    const out = run('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: RUNNER_PS_MS,
+      env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } });
+    const t = String(out).trim();
+    return t || null;
+  } catch { return null; }
+}
+const runnerProbe = Object.freeze({ kill: realProbe.kill, pidStart: leaderStart });
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const groupKill = (pgid, sig) => process.kill(-pgid, sig);
 
 /**
- * The process-group ports. `kill(pgid, signal)` signals a group; `probe` is M9's ({ kill(pid), pidStart(pid) }).
+ * The process-group ports. `kill(pgid, signal)` signals a group; `probe` is { kill(pid), pidStart(pid) }: M9's kill and
+ * leaderStart by default.
  * → { groupGone(session) → true | false (throws when it can't tell), stopGroup(session) → { ok, how | reason } }
  */
-export function processGroupPorts({ kill = groupKill, probe = realProbe, sleep = sleepFor, waitMs = RUNNER_TERM_WAIT_MS, killWaitMs = RUNNER_KILL_WAIT_MS } = {}) {
+export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep = sleepFor, waitMs = RUNNER_TERM_WAIT_MS, killWaitMs = RUNNER_KILL_WAIT_MS } = {}) {
   // Signal 0 to the group: true when it is gone, false when it is there, a throw when that can't be told.
   const signalGone = (pgid) => {
     try { kill(pgid, 0); return false; } catch (e) {
@@ -86,6 +110,8 @@ export function processGroupPorts({ kill = groupKill, probe = realProbe, sleep =
  * The runner's memory, read once at start. → {} on a first run (no file), the memory, or a throw (never a guess).
  */
 export function loadMemory(file, { uid, note = () => {}, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
+  // A relative path would be refused at the first keep (writeStatus): said here instead (#362 r1 c3).
+  if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the worker runner\'s memory is not a full path');
   // Opened once, never through a link, and that open file checked and read (review m3: never check one file, read another).
   let fd;
   try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
@@ -103,7 +129,10 @@ export function loadMemory(file, { uid, note = () => {}, open = openSync, fstat 
   } finally { close(fd); }
   const plain = (x) => x === undefined || (!!x && typeof x === 'object' && !Array.isArray(x));
   // The shape a pass needs (review m4): one that would make every pass throw is refused here, before any tick.
-  if (!m || typeof m !== 'object' || Array.isArray(m) || !(m.sessions === undefined || Array.isArray(m.sessions)) || !plain(m.requests) || !plain(m.answers) || !plain(m.seen)) {
+  const obj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+  // Each session and request entry an object too (#362 r1 c1): one null would make every pass throw.
+  if (!m || typeof m !== 'object' || Array.isArray(m) || !(m.sessions === undefined || (Array.isArray(m.sessions) && m.sessions.every(obj))) || !plain(m.requests)
+    || !Object.values(m.requests ?? {}).every(obj) || !plain(m.answers) || !plain(m.seen)) {
     throw new Error('the worker runner\'s memory is not what the runner writes');
   }
   return m;
@@ -130,7 +159,8 @@ export async function runnerTick(ctx) {
   let names = [];
   try { names = listRequests(requestsDir, files); } catch (e) { note(`the worker runner's requests can't be listed (${e?.code ?? e?.message}); this pass reads none`); }
   const requests = names.map((name) => ({ name, body: read(join(requestsDir, name)) }));
-  const r = await workerRunnerPass({ ...ctx, requests, now: clock(), note,
+  // The pass's one time for its age rules, and the clock for each write's written_at (#358 r1 M1, #362 r1 m7).
+  const r = await workerRunnerPass({ ...ctx, requests, now: clock(), clock, note,
     keep: (m) => write(memoryFile, JSON.stringify(m), 0o600),
     write: (doc) => write(statusFile, JSON.stringify(doc), 0o644),
     remove: files.remove ?? ((name) => unlinkSync(join(requestsDir, name))) });
@@ -143,6 +173,8 @@ export async function runnerTick(ctx) {
  */
 export async function runRunner(ctx) {
   const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory } = ctx;
+  // A cadence given in place of RUNNER_TICK_MS is held to the same bound (#362 r1 c2).
+  if (!(everyMs > 0) || everyMs + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('the worker runner\'s tick must leave a port wait under the status cadence');
   let state = load(memoryFile, { uid, note });
   const pending = new Map();
   while (!stopWhen()) {
