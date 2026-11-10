@@ -266,6 +266,23 @@ test('a reviewer that can\'t start is told, is tried again, and nothing is raise
   assert.equal(asks(w).length, 0);
 });
 
+// #294 r3 m1: a plan the runner holds at the cap has no reviewer yet, so it is told as waiting for a slot, after the
+// same hour, and never as a reviewer that has not answered.
+test('a plan waiting at the plan reviewers\' cap is told as waiting for a slot, not as a silent reviewer', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  const slot = { planReviewAnswer: async () => ({ ok: true, waiting: 'slot' }) };
+  later(w, PLAN_REVIEW_SLOW_MS - 1);
+  await pass(w, slot);
+  assert.equal(w.sent.filter((s) => /waiting for a reviewer slot/.test(s)).length, 0, 'not before the hour');
+  later(w, 1);
+  await pass(w, slot);
+  assert.equal(w.sent.filter((s) => /card A's plan is waiting for a reviewer slot/.test(s)).length, 1);
+  assert.equal(w.sent.filter((s) => /has not answered yet/.test(s)).length, 0);
+  assert.equal(asks(w).length, 0);
+});
+
 test('a reviewer silent for over an hour is told; before that it is not', async () => {
   const w = world();
   t1(w, 'A');

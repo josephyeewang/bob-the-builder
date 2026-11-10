@@ -9,7 +9,8 @@
 //     ctx: one product's Approvals context (tick.mjs approvalsStep). The ports take { product, card, ... }:
 //     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording, key }) → { ok: true, session } | { ok: false, reason }
 //       key is the same for a card's plan: a port that can use it gives a repeated start the same session
-//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works | { ok: false, reason }
+//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works |
+//       { ok: true, waiting: 'slot' } while it waits at the plan reviewers' cap, none started yet | { ok: false, reason }
 //     planRows({ product, card }) → { <row id>: row }      planView({ product }) → a repo view      mainSha({ product }) → sha
 //     replyToLead({ lead, text }) → { ok: true } | { ok: false, reason }      leaves a note for the Lead whose session wrote the plan
 //   Each port call has a time limit (PLAN_PORT_MS), and so has each call raiseGo makes: the repo view's isDir and the close
@@ -188,7 +189,10 @@ async function reviewed(ctx, ports, tell, c, fp) {
   if (a?.ok !== true) { tell(c.id, 'answer', `the plan reviewer's answer on card ${c.id} could not be read: ${short(a?.reason)}`); return null; }
   if (a.answer === undefined || a.answer === null) {
     const since = pastTime(f.started_at, ctx.now());
-    if (since === null || ctx.now() - since >= PLAN_REVIEW_SLOW_MS) tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
+    if (since !== null && ctx.now() - since < PLAN_REVIEW_SLOW_MS) return null;
+    // At the cap no reviewer has started, so "has not answered" would point at one that isn't there (#294 r3 m1).
+    if (a.waiting === 'slot') tell(c.id, 'slot', `card ${c.id}'s plan is waiting for a reviewer slot: as many plan reviewers as the cap allows already run, and it starts once one ends`);
+    else tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
     return null;
   }
   const review = readPlanReview(a.answer);

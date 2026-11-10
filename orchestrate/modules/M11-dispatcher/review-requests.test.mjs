@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { writeReviewRequest, reviewPorts, statusAlerts, MAIN_UNREAD, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
@@ -29,11 +29,20 @@ test('L65: a request is written whole under its final name, never over another, 
   assert.equal(again.ok, false);
   assert.match(again.reason, /could not be written \(EEXIST\)/);
   assert.equal(JSON.parse(readFileSync(join(dir, 'q-1.json'), 'utf8')).card, 'C-1');
-  // A link planted at the temporary name is not followed.
+  // A link planted at the temporary name is not followed, and, being someone else's, is not taken away (#294 r3 m2).
   const elsewhere = tempDir('m11-req-x-');
-  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.tmp'));
-  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9' }).ok, false);
+  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.t1.tmp'));
+  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9', tmpId: () => 't1' }).ok, false);
   assert.deepEqual(readdirSync(elsewhere), []);
+  assert.ok(lstatSync(join(dir, '.q-9.t1.tmp')).isSymbolicLink(), 'the planted name is left where it was');
+  unlinkSync(join(dir, '.q-9.t1.tmp'));
+  // The hidden name is new each call: one planted at the old fixed name is never met, and the request is written.
+  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.tmp'));
+  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9' }).ok, true);
+  assert.deepEqual(readdirSync(elsewhere), []);
+  assert.ok(lstatSync(join(dir, '.q-9.tmp')).isSymbolicLink());
+  unlinkSync(join(dir, '.q-9.tmp'));
+  unlinkSync(join(dir, 'q-9.json'));
   const bad = [
     [{ card: '../C-1' }, /not a card id/], [{ card: 7 }, /not a card id/],
     [{ head: HEAD.slice(1) }, /names no head/], [{ head: HEAD.toUpperCase() }, /names no head/], [{ head: undefined }, /names no head/],

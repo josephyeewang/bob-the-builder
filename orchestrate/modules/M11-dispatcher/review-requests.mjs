@@ -50,13 +50,13 @@ const HEX64 = /^[0-9a-f]{64}$/;
  * One request file, given its name only once it is whole (the runner wakes on the folder and must never read half of
  * one), and never written over. → { ok, requestId } | { ok: false, reason }
  */
-export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }) {
+export function writeReviewRequest({ dir, card, head, role, newId = randomUUID, tmpId = randomUUID }) {
   if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
   if (typeof head !== 'string' || !HEX40.test(head)) return { ok: false, reason: 'the card names no head (40 hex)' };
   if (!REVIEW_ROLES.includes(role)) return { ok: false, reason: `"${role}" is not a review role` };
   const id = newId();
   if (typeof id !== 'string' || !REQUEST_ID.test(id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
-  const w = writeRequestFile(dir, id, { card, head, role, request_id: id });
+  const w = writeRequestFile(dir, id, { card, head, role, request_id: id }, { tmpId });
   return w.ok ? { ok: true, requestId: id } : w;
 }
 
@@ -64,12 +64,16 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
 // already under that name may be this very request (a plan's id is its key's hash), and counts as written only when it
 // is (L735 m1-r2): a plain file of the Dispatcher's own, holding these very bytes. Anyone may write the requests folder
 // and work the name out, so any other file there is said, never taken as asked. → { ok, exists? } | { ok: false, reason }
-function writeRequestFile(dir, id, body, { same = false, uid = process.getuid() } = {}) {
-  const tmp = join(dir, `.${id}.tmp`);
+// The hidden name is new each call (#294 r3 m2): two writers of one plan's id never share it, and only the call that
+// made it takes it away, so a file someone else put there is never removed. `tmpId` lets a test name it.
+function writeRequestFile(dir, id, body, { same = false, uid = process.getuid(), tmpId = randomUUID } = {}) {
+  const tmp = join(dir, `.${id}.${tmpId()}.tmp`);
+  let made = false;
   const final = join(dir, `${id}.json`);
   const text = JSON.stringify(body);
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+    made = true;
     try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, text); } finally { closeSync(fd); }
     // A file the runner takes away between the link and the read is no intruder: the link is tried once more (#294
     // self-review m2).
@@ -83,7 +87,7 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid() 
     }
   } catch (e) {
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
-  } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
+  } finally { if (made) try { unlinkSync(tmp); } catch { /* gone */ } }
   return { ok: true };
 }
 
@@ -113,14 +117,14 @@ function ownRequest(file, text, uid) {
  * by it. The runner checks the request against the Record (a Tier-1 draft whose plan has this fingerprint) and starts
  * the reviewer itself, retrying its own failed starts. → { ok: true, session } | { ok: false, reason }
  */
-export function writePlanReviewRequest({ dir, card, fingerprint, key, uid = process.getuid() }) {
+export function writePlanReviewRequest({ dir, card, fingerprint, key, uid = process.getuid(), tmpId = randomUUID }) {
   if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
   if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) return { ok: false, reason: 'the plan names no fingerprint (64 hex)' };
   if (typeof key !== 'string' || !key) return { ok: false, reason: 'the start names no key' };
   // The one id the runner takes for this plan (L726 m1): the key plan-go gives must be the card and plan it names.
   const id = PLAN_REQUEST_ID(card, fingerprint);
   if (key !== `${card}-${fingerprint}`) return { ok: false, reason: 'the start\'s key is not its card and plan' };
-  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true, uid });
+  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true, uid, tmpId });
   return w.ok ? { ok: true, session: id } : w;
 }
 
@@ -200,7 +204,14 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
     // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
     startPlanReview: ({ card, fingerprint, key }) => writePlanReviewRequest({ dir: requests, card, fingerprint, key }),
-    planReviewAnswer: ({ card, fingerprint, session }) => planAnswerFor({ root: dirname(status), uid: reviewUid, card, fingerprint, session }),
+    // A plan with no answer yet that the runner holds at the cap is said to wait for a slot (#294 r3 m1). That is wording
+    // only: a status that can't be read leaves the plain "still working", never a refusal.
+    planReviewAnswer: ({ card, fingerprint, session }) => {
+      const a = planAnswerFor({ root: dirname(status), uid: reviewUid, card, fingerprint, session });
+      if (a.ok !== true || a.answer !== undefined) return a;
+      let s; try { s = read(); } catch { return a; }
+      return s.plans_waiting.some((p) => p.request_id === session && p.card === card && p.fingerprint === fingerprint) ? { ok: true, waiting: 'slot' } : a;
+    },
   };
 }
 

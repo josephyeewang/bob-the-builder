@@ -484,7 +484,11 @@ export async function runnerPass(ctx) {
       running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
-      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
+      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [],
+      // The plan reviews waiting at the cap (#294 r3 m1): the Dispatcher tells such a plan as waiting for a slot, not as
+      // a reviewer that has not answered. A try that failed since carries no waiting_since, so it is not listed.
+      plans_waiting: Object.values(isObject(state.plan_tries) ? state.plan_tries : {}).filter((t) => isObject(t) && stamp(t.waiting_since))
+        .map(({ card, fingerprint, request_id, waiting_since }) => ({ card, fingerprint, request_id, waiting_since })) };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
     if (st.ok) writeWhole(P.state, state, 0o600);
@@ -1296,6 +1300,7 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (!Number.isFinite(at) || !Array.isArray(s.running)) throw new Error('the review runner\'s status is not what the runner writes');
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
-  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
+  const plansWaiting = (Array.isArray(s.plans_waiting) ? s.plans_waiting : []).filter((p) => isObject(p) && typeof p.card === 'string' && typeof p.fingerprint === 'string' && typeof p.request_id === 'string');
+  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null, plans_waiting: plansWaiting,
     installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null };
 }

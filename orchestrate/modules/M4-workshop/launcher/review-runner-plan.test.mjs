@@ -519,13 +519,18 @@ test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 
   const bp = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
   const fa = two('C-3', 'app');
   const fb = two('C-4', 'p2');
-  assert.equal(a.startPlanReview({ card: 'C-3', fingerprint: fa, key: `C-3-${fa}` }).ok, true);
-  assert.equal(bp.startPlanReview({ card: 'C-4', fingerprint: fb, key: `C-4-${fb}` }).ok, true);
+  const sa = a.startPlanReview({ card: 'C-3', fingerprint: fa, key: `C-3-${fa}` });
+  const sb = bp.startPlanReview({ card: 'C-4', fingerprint: fb, key: `C-4-${fb}` });
+  assert.equal(sa.ok && sb.ok, true);
   const r = await runnerPass(w.ctx);
   assert.equal(w.starts.length, 4, 'exactly one more starts');
   assert.equal(r.started.length, 1);
   const waiting = r.started[0].card === 'C-3' ? 'C-4' : 'C-3';
   refusedFor(r, new RegExp(`4 plan reviewers already run \\(cap 4\\); card ${waiting}'s waits`));
+  // #294 r3 m1: the waiting plan's Dispatcher reads it as waiting for a slot; the started one's as plainly working.
+  const [wp, wf, ws, sp, sf, ss] = waiting === 'C-3' ? [a, fa, sa, bp, fb, sb] : [bp, fb, sb, a, fa, sa];
+  assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true, waiting: 'slot' });
+  assert.deepEqual(sp.planReviewAnswer({ card: r.started[0].card, fingerprint: sf, session: ss.session }), { ok: true });
   assert.ok(caps.includes('app') && caps.includes('p2'), 'the cap is the card\'s own product\'s');
   // It waits, pass after pass, never told and never given up on.
   for (let i = 0; i < MAX_FAILED_STARTS + 2; i++) {
@@ -542,6 +547,7 @@ test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 
   w.end('P-1');
   const y = await runnerPass(w.ctx);
   assert.deepEqual(y.started.map((s) => s.card), [waiting]);
+  assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true }, 'started: no longer waiting for a slot');
   assert.equal(w.starts.length, 5);
 });
 
