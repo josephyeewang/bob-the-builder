@@ -3,11 +3,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, readFactFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -278,6 +278,54 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   assert.match(read('C-6').reason, /ELOOP/);
   linkSync(join(root, 'docs', 'card', 'C-1.json'), join(root, 'docs', 'card', 'C-7.json'));
   assert.match(read('C-7').reason, /not the Record's own plain file/);
+});
+
+test('L852: a fact is read from the Record read only, as a card is; reading changes nothing, whatever it finds', () => {
+  const root = tempDir('m4-factread-');
+  const read = (fact, uid = ME) => readFactFile({ recordRoot: root, recordUid: uid, fact });
+  const tree = () => {
+    const out = [];
+    const walk = (d) => { for (const n of readdirSync(d).sort()) { const p = join(d, n); const st = lstatSync(p); out.push([p, st.mode, st.mtimeMs, st.isFile() ? readFileSync(p, 'utf8') : null]); if (st.isDirectory()) walk(p); } };
+    walk(root);
+    return JSON.stringify(out);
+  };
+  // No folders yet: an answer, and nothing is made.
+  chmodSync(root, 0o755);
+  let before = tree();
+  assert.match(read('F-1').reason, /docs is missing/);
+  assert.equal(tree(), before, 'a missing folder is not made');
+  mkdirSync(join(root, 'docs', 'fact'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'fact')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'fact', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('intake-applied-S-1-plan-a.md', { entity: 'fact', id: 'intake-applied-S-1-plan-a.md', rev: 2, doc: { state: 'applied', sha256: 'b'.repeat(64) } });
+  put('F-2', { entity: 'card', id: 'F-2', doc: {} });
+  put('F-3', '{');
+  put('F-4', { entity: 'fact', id: 'F-4', doc: {} }, 0o666);
+  before = tree();
+  assert.deepEqual(read('intake-applied-S-1-plan-a.md'), { ok: true, doc: { state: 'applied', sha256: 'b'.repeat(64) }, rev: 2 });
+  assert.equal(read('F-9').missing, true);
+  assert.match(read('F-9').reason, /no such fact/);
+  for (const id of ['../x', '.F-1', '', 'a/b', 7, null]) assert.equal(read(id).missing, true, String(id));
+  assert.match(read('F-2').reason, /not a fact document/);
+  assert.match(read('F-3').reason, /not JSON/);
+  assert.match(read('F-4').reason, /not the Record's own plain file/);
+  assert.match(read('intake-applied-S-1-plan-a.md', ME + 1).reason, /not the Record owner's alone/);
+  assert.equal(read('INTAKE-applied-S-1-plan-a.md').missing, true, 'only the exact name');
+  assert.equal(read('f-3').missing, true, 'only the exact name is that fact, even when its file is ruined');
+  assert.equal(tree(), before, 'no read writes, moves or makes anything');
+});
+
+test('L852: one list of the intake states that mean an outbox file is used, and the Lead restart reads it', async () => {
+  const { USED_STATES } = await import('../../M11-dispatcher/intake-facts.mjs');
+  assert.deepEqual([...USED_STATES].sort(), ['applied', 'interrupted', 'refused', 'waiting']);
+  assert.ok(Object.isFrozen(USED_STATES));
+  assert.throws(() => USED_STATES.add('x'), /read only/);
+  assert.throws(() => USED_STATES.delete('applied'), /read only/);
+  assert.equal(USED_STATES.size, 4);
+  const src = readFileSync(new URL('../../M11-dispatcher/lead-restart.mjs', import.meta.url), 'utf8');
+  assert.match(src, /import \{ USED_STATES \} from '\.\/intake-facts\.mjs';/);
+  assert.match(src, /USED_STATES\.has\(used\)/);
+  assert.doesNotMatch(src, /\[[^\]]*'(applied|refused|interrupted|waiting)'[^\]]*'(applied|refused|interrupted|waiting)'/, 'lead-restart keeps no list of its own');
 });
 
 test('L65 m-3: the admin answer is yes, no, or an error (which the runner counts as an admin)', () => {
