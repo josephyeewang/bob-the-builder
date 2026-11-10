@@ -15,7 +15,7 @@ import { REVIEW_AGAIN, REVIEW_AGAIN_BUTTON, OFFER_NOTE, reviewAgainOffers, revie
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME };
 const HEAD = 'a'.repeat(40);
 const HEAD2 = 'b'.repeat(40);
 const T0 = Date.parse('2026-11-09T12:00:00Z');
@@ -317,10 +317,13 @@ test('R-0b-164: the handler as a command, with the runner\'s real config and sta
   // An old status refuses the tap: the runner may be stopped.
   assert.equal(await run(['tap', cfg, 'S-1'], T0 + 3 * 3600_000), 1);
   assert.match(said.at(-1), /status can't be used: .*minutes old/);
-  // Clear, today: M4's readReviewStatus does not pass `taps_read` on (lane 2, asked 9 Nov), so it removes nothing and says
-  // why. Lane 2's change turns this into one removal; that PR updates these two lines.
-  assert.equal(await run(['clear', cfg]), 1);
-  assert.match(said.at(-1), /taps not cleared: the status gives no list of taps read/);
+  // Clear: M4's readReviewStatus passes `taps_read` on (lane 2, #306), so once the runner has read the tap, clear removes it.
+  assert.equal(await run(['clear', cfg]), 0);
+  assert.match(said.at(-1), /0 tap\(s\) the runner has read removed/, 'not read yet: kept');
+  await runnerPass(w.ctx);
+  assert.equal(await run(['clear', cfg]), 0);
+  assert.match(said.at(-1), /1 tap\(s\) the runner has read removed/);
+  assert.deepEqual(readdirSync(w.taps), []);
   assert.equal(await run(['what', cfg]), 1);
   assert.equal(await run(['tap', join(w.base, 'missing.json'), 'S-1']), 1);
 });

@@ -1282,6 +1282,26 @@ test('L494: a read-only start that hangs is left claimed, told as interrupted, a
   assert.deepEqual(p.told.map((x) => x.text), ['Your think request think-q1.md may not have started; hand it in again under a new name if no report comes.'], 'L497 m6: the Lead is told too, once');
 });
 
+// L755 (audit #311/314/315 r1 m1): late is known by `timedOut`, not only by guarded's wording. A port that says in its own
+// words that it ran out of time (it may have started the session) is left claimed and never started a second time.
+test('L755: a read-only start that answers timedOut in its own words is left claimed and never started twice', async () => {
+  const p = planWorld();
+  p.hand('think-q1.md', 'a question');
+  let starts = 0;
+  const startReadonly = async () => { starts += 1; return { ok: false, timedOut: true, reason: 'the launcher gave up waiting for the session' }; };
+  const [r] = await p.run({ startReadonly, startMs: 2000 });
+  assert.equal(r.refused, 'the start the launcher gave up waiting for the session');
+  assert.equal(r.waiting, undefined, 'not put back to wait');
+  assert.equal(p.rec.read('fact', 'intake-applied-L-1-think-q1.md').doc.state, 'starting');
+  await passes(p, 3, { startReadonly, startMs: 2000 });
+  assert.equal(starts, 1, 'never started a second time');
+  assert.equal(p.owner.filter((t) => /think-q1\.md .*was interrupted; its read-only session may or may not have started/.test(t)).length, 1, p.owner.join(' | '));
+  // A plain refusal in the same words, with no timedOut, is still a wait (only the flag or guarded's own words mean late).
+  const q = planWorld(); q.hand('think-q2.md', 'a question');
+  const [w] = await q.run({ startReadonly: async () => ({ ok: false, reason: 'the launcher gave up waiting for the session' }), startMs: 2000 });
+  assert.equal(w.waiting, 'the launcher gave up waiting for the session');
+});
+
 test('L497 m6: a Lead that can\'t be told of a start that may not have run leaves the owner a line meant for the owner', async () => {
   const p = planWorld();
   p.hand('think-q1.md', 'a question');

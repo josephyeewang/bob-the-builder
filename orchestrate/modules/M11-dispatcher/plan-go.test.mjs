@@ -266,6 +266,57 @@ test('a reviewer that can\'t start is told, is tried again, and nothing is raise
   assert.equal(asks(w).length, 0);
 });
 
+// #294 r3 m1: a plan the runner holds at the cap has no reviewer yet, so it is told as waiting for a slot, after the
+// same hour, and never as a reviewer that has not answered.
+test('a plan waiting at the plan reviewers\' cap is told as waiting for a slot, not as a silent reviewer', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  const told = w.t.clock.t + PLAN_REVIEW_SLOW_MS; // when the slot message goes out
+  const startedAt = (ago) => new Date(told - ago).toISOString();
+  const slot = { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', started_at: startedAt(0), holders: [{ card: 'A', started_at: startedAt(3 * 3600_000), older_plan: true }, { card: 'C-8', started_at: startedAt(20 * 60_000) }, { card: 'C-9' }, { card: 'C-10', started_at: '2999-01-01T00:00:00.000Z' }] }) };
+  later(w, PLAN_REVIEW_SLOW_MS - 1);
+  await pass(w, slot);
+  assert.equal(w.sent.filter((s) => /plan review hasn't started/.test(s)).length, 0, 'not before the hour');
+  later(w, 1);
+  await pass(w, slot);
+  // #335 r1 M1: the holders are named, with since when, and no "it starts once one ends".
+  assert.deepEqual(w.sent.filter((s) => /plan review hasn't started/.test(s)), ["card A's plan review hasn't started: the most plan reviews allowed at once are already running (card A, on an older plan, running for 3 hours; card C-8 running for 20 minutes; card C-9; card C-10). Until one finishes, card A can't be asked for a go"]);
+  assert.equal(w.sent.filter((s) => /has not answered yet|starts once one ends/.test(s)).length, 0);
+  assert.equal(asks(w).length, 0);
+  // A status that lists no holders still says so plainly.
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2);
+  later(w2, PLAN_REVIEW_SLOW_MS);
+  await pass(w2, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot' }) });
+  assert.equal(w2.sent.filter((s) => /already running \(the runner's status names none of them\)\. Until one finishes, card B/.test(s)).length, 1);
+});
+
+// #335 r1 m1: once a long wait for a slot ends, the hour runs from the reviewer's own start, not from the request.
+test('after a long wait for a slot, "slow" is counted from when the reviewer started', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  later(w, 3 * PLAN_REVIEW_SLOW_MS);
+  await pass(w, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot' }) });
+  const startedAt = new Date(w.t.clock.t).toISOString();
+  const running = { planReviewAnswer: async () => ({ ok: true, started_at: startedAt }) };
+  later(w, PLAN_REVIEW_SLOW_MS - 1);
+  await pass(w, running);
+  assert.equal(w.sent.filter((s) => /has not answered yet/.test(s)).length, 0, 'not an hour after its reviewer started');
+  later(w, 1);
+  await pass(w, running);
+  assert.equal(w.sent.filter((s) => /the plan reviewer on card A has not answered yet/.test(s)).length, 1);
+  // A start time that can't be used (later than now) falls back to the request's time.
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2);
+  later(w2, PLAN_REVIEW_SLOW_MS);
+  await pass(w2, { planReviewAnswer: async () => ({ ok: true, started_at: '2999-01-01T00:00:00.000Z' }) });
+  assert.equal(w2.sent.filter((s) => /the plan reviewer on card B has not answered yet/.test(s)).length, 1);
+});
+
 test('a reviewer silent for over an hour is told; before that it is not', async () => {
   const w = world();
   t1(w, 'A');

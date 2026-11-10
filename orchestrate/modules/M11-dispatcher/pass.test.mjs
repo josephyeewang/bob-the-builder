@@ -1957,3 +1957,31 @@ test('L354 item 3: a mark landing as a clear is written does not outlive the cle
   await u.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }), alert: () => false });
   await check(u, UNDO_HELD_FACT('U-1'), 'undo_started', 1);
 });
+
+// L744 1: a launch answer marked timed out, in any words, is late: the card stays claimed and is never given back.
+test('L744 1: a launch that answers timed out in its own words keeps the card claimed, never back to ready', { timeout: 10_000 }, async () => {
+  const w = world([card('C-A')]);
+  const alert = fakeAlert();
+  const r = await dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
+    launch: async () => ({ ok: false, timedOut: true, reason: 'the launcher gave up waiting for claude' }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000 });
+  assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
+  assert.equal(w.rec.diary().filter((l) => l.kind === 'claim_release' && l.id === 'C-A').length, 0, 'not given back');
+  assert.ok(r.refused.some(([id, why]) => id === 'C-A' && /launcher: the launcher gave up waiting/.test(why)), JSON.stringify(r.refused));
+  assert.equal(alert.texts.filter((a) => /card C-A: the launcher the launcher gave up waiting for claude; the card stays claimed/.test(a)).length, 1, alert.texts.join(' | '));
+});
+
+// L744 2: what pauseLead answers is read: ok:false is a failure, told once like a throw, and not counted as asked.
+test('L744 2: a pauseLead that answers ok:false is told once and not counted as asked; a later plain answer is', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  const no = () => ({ ok: false, reason: 'the Lead session is gone' });
+  await w.pass(0, { pauseLead: no });
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed');
+  await w.pass(1, { pauseLead: no });
+  assert.equal(w.calls.alerts.filter((a) => /the Lead of p1 could not be asked to hand off: the Lead session is gone/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  await w.pass(2, { pauseLead: async () => ({ ok: false }) });
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'ok:false with no reason is a failure too');
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+});

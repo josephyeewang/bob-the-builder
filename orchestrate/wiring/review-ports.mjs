@@ -11,16 +11,20 @@
 // A product other than this Dispatcher's is refused: one Dispatcher runs one product (M9), and reading another
 // product's repository would answer for the wrong one.
 //
-// WIRED (A3a): planRows({ product, card }) → { <row id>: row }, the rows the card names (its `rows` in the Record),
-// each read from docs/blueprint/rows/<id>.yaml at main's current commit with the Merge Gate's own row reader (M6
-// gather.mjs readRowAt), so the go asked and the go checked read a row the same way. A card the Record doesn't have,
-// one naming no rows, and a row that is missing or can't be parsed at that commit throw: plan-go tells it under the
-// card, and no go is asked on a row that wasn't read. M2 raiseGo then checks the rows against the card (plain ids, each
-// row's done_when, the card's done_when is their pass tests). The read-only client refuses any `..` in a path, so a
-// row id can't reach outside the rows folder.
+// WIRED (A3a): planRows({ product, card }) → { <row id>: row }, the rows the card names: the row files among its files
+// (M2's ROW_FILE; cards have no rows field, L684), each read from docs/blueprint/rows/<id>.yaml at main's current
+// commit with the Merge Gate's own row reader (M6 gather.mjs readRowAt), so the go asked and the go checked read a row
+// the same way. A card the Record doesn't have, one with no row file among its files, and a row that is missing or
+// can't be parsed at that commit throw: plan-go tells it under the card, and no go is asked on a row that wasn't read.
+// M2 raiseGo then checks the rows against the card (plain ids, each row's done_when, the card's done_when is their
+// pass tests). The read-only client refuses any `..` in a path, so a row id can't reach outside the rows folder.
 // WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
 // request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
 //   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
+// WIRED (A3b, L703): the plan reviewer's two ports, from the same file. startPlanReview writes a plan request (the card
+// and its plan's fingerprint) into the same requests folder; the runner checks it against the Record and starts the
+// reviewer. planReviewAnswer reads the answer from the runner's own ended record beside its status file. Another
+// product's card is refused, as the GitHub reads refuse it.
 // The stamp check (is the reviewers' installed copy at main?) compares the copy's stamp with root's own record beside
 // that copy (install-check.mjs mainSeenFile), which root's updater writes each time it fetches main. Not with mainSha:
 // the copy is the orchestrate code, fetched from the repository updater.json names, not the product's (L639). A record
@@ -33,6 +37,12 @@
 // answers at once (undo.mjs calls it without waiting), so its git runs through limitedSync with safe-git's own pieces:
 // the repository check (every config file on the safe list) and the environment, under `env -i`. Anything it can't read,
 // and a commit that changes no file, throws: undo holds the tap and tells it, never "no files".
+// NOT YET (A4, L615 grant 3): `proposals()` → { products, ownerUid }, for the tick's proposals step (proposals-intake.mjs).
+// The products are this Dispatcher's one; the intake's ownerUid must be Joe's own Mac uid, whose proposals folders are
+// (setup layout.mjs makes them his), and it is never read from the folder itself (L78 n6). The Dispatcher config's
+// ownerUid is orchestrate's uid, the Record's owner; Joe's uid (the workers' user, L238) has no config key yet. It gets
+// its own, `proposalsUid`, filled from setup's `owner` (L736): until then the port stays listed, and refuses (CONFIG_KEYS
+// and root's config write, lane 4's setup).
 
 import { makeGitView, notRead } from '../modules/M10-rules/git-view.mjs';
 import { BRANCH } from '../modules/M10-rules/reader.mjs';
@@ -46,7 +56,7 @@ import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
 import { inertSetting, repoConfigFiles, safeGitEnv, withNoPrograms } from '../modules/M4-workshop/git/safe-git.mjs';
 import { mirrorProblem } from './worker-ports.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['startPlanReview', 'planReviewAnswer', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['gateAlive', 'healthy', 'resume', 'proposals']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -170,12 +180,13 @@ export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
 /**
  * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
  * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
- * Dispatcher's nor the workers' (ownerUid): either could then write the status that says a reviewer runs (L668, L674).
+ * Dispatcher's nor the Record owner's (ownerUid, orchestrate's uid; Joe's uid, the workers' user, L238, has no config key
+ * yet): either could then write the status that says a reviewer runs (L668, L674).
  */
 export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');
   if (c.reviewUid === selfUid) throw new Error('config: reviewUid is the Dispatcher\'s own user; the review user must be its own');
-  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the workers\' user (ownerUid); the review user must be its own');
+  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the Record owner\'s (ownerUid); the review user must be its own');
   const main = mainSeen({ installRoot: c.reviewInstallRoot, now, owner, top });
   return runnerPorts({ requests: c.reviewRequestsDir, status: c.reviewStatusFile, reviewUid: c.reviewUid, runnerLog: c.reviewRunnerLog, now,
     mainHead: mainSeenHead({ installRoot: c.reviewInstallRoot, main, owner, top }) });
@@ -183,5 +194,11 @@ export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = p
 
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function reviewPorts(ctx) {
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), filesOf: mirrorFilesOf({ mirror: ctx.config.mirror, uid: ctx.selfUid, run: ctx.limitedSync }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid }) };
+  const runner = reviewRunner({ config: ctx.config, now: ctx.now, selfUid: ctx.selfUid });
+  const own = (product) => {
+    if (product !== ctx.entry.product) throw new Error(`this Dispatcher runs product ${ctx.entry.product}, so it can't ask about product ${product}'s plans`);
+  };
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), filesOf: mirrorFilesOf({ mirror: ctx.config.mirror, uid: ctx.selfUid, run: ctx.limitedSync }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...runner,
+    startPlanReview: (x) => { own(x?.product); return runner.startPlanReview(x); },
+    planReviewAnswer: (x) => { own(x?.product); return runner.planReviewAnswer(x); } };
 }

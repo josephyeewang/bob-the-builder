@@ -10,7 +10,10 @@ import { moduleReads, moduleSources } from '../M10-rules/rules-reads.test-helper
 const LIST = [...REQUIRED_KEYS, ...OPTIONAL_KEYS];
 const SOURCES = moduleSources(new URL('./', import.meta.url));
 const UNNAMED = {
-  'launcher/review-runner-main.mjs': { count: 1, why: 'minutes(budget.rules, KEYS.inReviewNoReviewerMin): the Dispatcher\'s own key, passed in budget, on M11\'s list' },
+  // Both are the Dispatcher's own keys, read through M11's KEYS from the rules handed in budget, and on M11's list:
+  // minutes(budget.rules, KEYS.inReviewNoReviewerMin) and, for the plan-review cap (L735), need(budget.rules,
+  // KEYS.readonlyPerSession), the same cap the Dispatcher's start gate reads (gate.mjs).
+  'launcher/review-runner-main.mjs': { count: 2, why: 'KEYS.inReviewNoReviewerMin and KEYS.readonlyPerSession: the Dispatcher\'s own keys, passed in budget, on M11\'s list' },
 };
 
 test('every rules key any file in the Workshop reads is on its list, and every listed key is read (L601)', () => {

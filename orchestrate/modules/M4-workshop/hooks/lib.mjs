@@ -16,7 +16,11 @@ export const BLOCK = 2;
 export const block = (reason) => ({ block: true, reason });
 export const pass = () => ({ block: false });
 
-/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--kind K] [--event E] */
+// An exact outbox file name a role may write besides its kinds (`--files`, role-profiles `files`): a plain lower-case
+// name with no dash, so it can never be read as a kind's file (`<kind>-<id>.<ext>`) and stays one shell word.
+export const OUTBOX_FILE = /^[a-z]+\.(md|json|txt)$/;
+
+/** --role R --outbox O --snapshot S [--copy C] [--kinds a,b] [--files f.txt] [--kind K] [--event E] */
 export function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 2) {
@@ -29,6 +33,10 @@ export function parseArgs(argv) {
   if (!isAbsolute(out.outbox) || (out.copy && !isAbsolute(out.copy)) || (out.notes && !isAbsolute(out.notes))) throw new Error('paths must be absolute');
   out.kinds = out.kinds ? out.kinds.split(',').filter(Boolean) : [];
   out.notKinds = out['not-kinds'] ? out['not-kinds'].split(',').filter(Boolean) : [];
+  // Exact outbox file names the role may write besides its kinds (the plan reviewer's answer.txt, L710): a plain
+  // lower-case name with no dash, so it can never be a kind's file, and never a path.
+  out.files = out.files ? out.files.split(',').filter(Boolean) : [];
+  for (const f of out.files) if (!OUTBOX_FILE.test(f)) throw new Error(`bad outbox file name ${f}`);
   return out;
 }
 
