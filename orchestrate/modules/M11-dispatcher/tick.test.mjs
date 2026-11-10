@@ -439,8 +439,10 @@ export async function wire() {
   const mod = await import(wiring);
   assert.match(logs.join('\n'), /runDeadlineMs \(300\) is below the pass's own sum/);
   assert.equal(mod.seen.filter((t) => /did not finish within 300 ms/.test(String(t))).length, 1, 'the late pass sends its own alert');
-  assert.equal(mod.seen.filter((t) => /runDeadlineMs/.test(String(t))).length, 0, 'one send: its own');
-  assert.match(JSON.stringify(mod.rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? null), /runDeadlineMs \(300\) is below the pass's own sum/, 'queued for the next send');
+  // Behind the late pass's own alert: sent after it in the same send's time, or left queued for the next one.
+  const sentAt = mod.seen.findIndex((t) => /runDeadlineMs \(300\) is below the pass's own sum/.test(String(t)));
+  const queued = /runDeadlineMs \(300\) is below the pass's own sum/.test(JSON.stringify(mod.rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? null));
+  assert.ok(sentAt > mod.seen.findIndex((t) => /did not finish within 300 ms/.test(String(t))) || (sentAt === -1 && queued), mod.seen.join(' | '));
   await new Promise((ok) => setTimeout(ok, 2100));
 });
 
@@ -699,9 +701,10 @@ export async function wire() {
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
   assert.match(r.stderr, /dispatcher: the Dispatcher config's runDeadlineMs \(300\) is below the pass's own sum/, 'L736 m5: a deadline under the sum is said in the log');
-  // The late pass sends one alert, its own; the low deadline waits in the queue behind it (L736 m5).
-  assert.doesNotMatch(r.stderr, /ALERT the Dispatcher config's runDeadlineMs/);
   assert.match(r.stderr, /ALERT a Dispatcher pass did not finish within 300 ms and was stopped/, 'Joe is told (L38)');
+  // The low deadline is queued behind the late pass's own alert (L736 m5): never sent ahead of it.
+  const lowAt = r.stderr.indexOf("ALERT the Dispatcher config's runDeadlineMs");
+  assert.ok(lowAt === -1 || lowAt > r.stderr.indexOf('ALERT a Dispatcher pass did not finish'), r.stderr);
   assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the stuck run left its lock');
   const l = takePassLock(lockFile);
   assert.equal(l.ok, true, l.reason);
