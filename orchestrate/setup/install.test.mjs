@@ -1001,6 +1001,8 @@ test('robot job: off unless the config says so; on, its file is the Dispatcher-s
   assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>${R}/wiring/robot-main.mjs</string><string>${R}/robot.json</string></array>`), t);
   assert.ok(t.includes('<key>StartInterval</key><integer>60</integer>'), t);
   assert.ok(t.includes(`<key>WorkingDirectory</key><string>${BASE}/home/orchestrate</string>`), t);
+  assert.ok(t.includes(`<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>${BASE}/home/orchestrate</string></dict>`), t);
+  assert.ok(t.includes('<key>Umask</key><integer>63</integer>'), t);
   assert.deepEqual(jobLogs(t), { user: 'orchestrate', files: [`${BASE}/logs/robot.out.log`, `${BASE}/logs/robot.err.log`] });
   if (process.platform === 'darwin') {
     const f = join(w.ext, 'robot.plist'); writeFileSync(f, t);
@@ -1042,6 +1044,12 @@ const ROBOT_PLANTS = [
   ['its lock is the Dispatcher\'s', (c) => ({ ...c, lockFile: c.dispatcherLockFile }), /a lock of its own/],
   ['a lock inside the install', (c) => ({ ...c, lockFile: `${c.installRoot}/robot.lock` }), /lockFile is inside the install/],
   ['a lock that is not a full path', (c) => ({ ...c, dispatcherLockFile: 'dispatcher.lock' }), /dispatcherLockFile must be a full path/],
+  // L740, audit #292 M1 (A1–A3): a lock path the robot could never take, or one a worker could plant, is refused here, not at 03:00.
+  ['A1 a lock in a folder that does not exist', (c) => ({ ...c, lockFile: '/no-such-folder-audit/robot.lock' }), /lockFile must be .*home\/orchestrate\/robot\.lock, in orchestrate's home/],
+  ['A1 the Dispatcher\'s lock in a folder that does not exist', (c, { mac }) => ({ ...c, dispatcherLockFile: mac.at(`${BASE}/no-such-folder/dispatcher.lock`) }), /dispatcherLockFile: its folder \S*no-such-folder is missing/],
+  ['A2 both locks in /tmp, which anyone can write', (c) => ({ ...c, lockFile: '/tmp/robot.lock', dispatcherLockFile: '/tmp/dispatcher.lock' }), /lockFile must be .*orchestrate's home.*dispatcherLockFile: it is not under/],
+  ['A3 a lock that reaches the install through ..', (c) => ({ ...c, lockFile: `/tmp/..${c.installRoot}/robot.lock` }), /lockFile must be written plainly/],
+  ['A3 the Dispatcher\'s lock written with .. or a doubled /', (c) => ({ ...c, dispatcherLockFile: c.dispatcherLockFile.replace('/orchestrate/', '/orchestrate/../orchestrate//') }), /dispatcherLockFile must be written plainly/],
   ['a key the robot does not take', (c) => ({ ...c, approvalsStateDir: '/x' }), /keys the robot job does not take: approvalsStateDir/],
   ['a bad run deadline', (c) => ({ ...c, runDeadlineMs: -1 }), /runDeadlineMs must be a positive number/],
   ['not JSON', () => '{ not json', /is not JSON/],
@@ -1109,6 +1117,23 @@ test('L727: with none of the four App keys no key is asked for (the deliver pass
   assert.ok(!('keyFile' in asked[0]), `robot-wiring passes its own keyFile (${asked[0].keyFile}): setup would check a file the job never reads`);
 });
 
+// L740, audit #292 M1 (A2): the lock folders themselves. Each planted on its own, after install: load refuses and names it, check FAILs.
+const LOCK_FOLDER_PLANTS = [
+  ['orchestrate\'s home written by others', (w) => chmodSync(w.mac.at(`${BASE}/home/orchestrate`), 0o777), /lockFile: its folder \S*home\/orchestrate can be written by its group or others/],
+  ['orchestrate\'s home owned by a worker', (w) => w.mac.owners.set(`${BASE}/home/orchestrate`, { uid: Number(w.mac.users.get('orchestrate').UniqueID) + 1, gid: 0 }), /lockFile: its folder \S*home\/orchestrate is owned by uid \d+, which may not hold this lock/],
+  ['orchestrate\'s home replaced by a link', (w) => { const h = w.mac.at(`${BASE}/home/orchestrate`); renameSync(h, `${h}-real`); symlinkSync(`${h}-real`, h); }, /lockFile: its folder \S*home\/orchestrate is a link/],
+  ['a folder above the locks that others can write', (w) => chmodSync(w.mac.at(`${BASE}/home`), 0o777), /lockFile: a folder above it: \S*home can be written by others than root/],
+];
+for (const [what, plant, re] of LOCK_FOLDER_PLANTS) {
+  test(`PLANT robot locks: ${what} → load refuses, check FAILs`, async () => {
+    const w = await robotWorld();
+    assert.equal(w.run(['daemons', 'place']).code, 0);
+    plant(w);
+    const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+    const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+  });
+}
+
 test('PLANT robot.json: missing from the copy, or not root\'s alone → load refuses, check FAILs', async () => {
   const w = await robotWorld();
   assert.equal(w.run(['daemons', 'place']).code, 0);
@@ -1127,8 +1152,15 @@ test('robot job: a robot job file or loaded job the config leaves off, or one un
   let r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no com\.example\.orch-test\.robot job is placed or loaded \(the config does not turn the robot job on\)/);
   rmSync(plistFile(w, 'robot'));
   w.mac.loaded.set(ROBOT_LABEL, { lastExit: '0', ageS: 5 });
-  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /it is loaded: take it out with daemons unload/);
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /it is loaded: take it out with sudo node setup\.mjs daemons unload --only robot, then delete /);
   assert.ok(list(w.mac, w.cfg).some((j) => j.label === ROBOT_LABEL), 'list shows a loaded job the config leaves off');
+  // audit #292 m3 (A4): the command check names works while the config leaves the robot off, and takes out that job alone.
+  for (const sub of ['place', 'load', 'check']) { const x = w.run(['daemons', sub, '--only', 'robot']); assert.equal(x.code, 2, `${sub}: ${x.text}`); assert.match(x.text, /does not turn the robot job on/); }
+  const ls = w.run(['daemons', 'list', '--only', 'robot']); assert.equal(ls.code, 0, ls.text); assert.match(ls.text, new RegExp(`${ROBOT_LABEL.replace(/\./g, '\\.')}: loaded`));
+  const before = [...w.mac.loaded.keys()].filter((k) => k !== ROBOT_LABEL);
+  const one = w.run(['daemons', 'unload', '--only', 'robot']); assert.equal(one.code, 0, one.text);
+  assert.equal(w.mac.loaded.has(ROBOT_LABEL), false); assert.deepEqual([...w.mac.loaded.keys()], before, 'the other jobs stay loaded');
+  w.mac.loaded.set(ROBOT_LABEL, { lastExit: '0', ageS: 5 });
   assert.equal(w.run(['daemons', 'unload']).code, 0); assert.equal(w.mac.loaded.has(ROBOT_LABEL), false, 'a plain unload takes it out too');
   assert.equal(w.run(['daemons', 'load']).code, 0);
   writeFileSync(w.mac.at('/Library/LaunchDaemons/com.example.oldlabel.robot.plist'), 'x');

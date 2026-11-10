@@ -38,8 +38,14 @@ export const jobsFor = (cfg) => [...JOBS, ...(cfg.watch?.rulesSha256 ? ['watch-o
 export const OPTIONAL_JOBS = Object.freeze(['watch-only', ROBOT_JOB]);
 export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
-/** `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch` entry has the rules fingerprint). */
-export function onlyJobs(cfg, name) {
+/**
+ * `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch`
+ * entry has the rules fingerprint). `anyKnown` (unload and list): the robot job is taken whatever the config says, so a robot
+ * job the config has since turned off can still be taken out alone (audit #292 m3). The watch job keeps its refusal here: its
+ * tests pin it, and changing it is outside this change (raised with the lead).
+ */
+export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
+  if (anyKnown && name === ROBOT_JOB) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
@@ -298,7 +304,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
-    item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
+    item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
   }
   if (jobs.includes(ROBOT_JOB)) {
     const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why);
