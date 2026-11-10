@@ -5,7 +5,7 @@
 //   { "installRoot": "/abs/install", "wiring": "/abs/install/<code file>.mjs", "lockFile": "/abs/path/dispatcher.lock" }
 // It is read through shared/job-config.mjs (L253): the config and the wiring must be the installed copy's own, root's
 // or this job's user's alone, never links, or nothing starts.
-// and, optionally, "runDeadlineMs" (a positive number; RUN_DEADLINE_MS when absent).
+// and, optionally, "runDeadlineMs" (a positive number, at most RUN_DEADLINE_MS; RUN_DEADLINE_MS when absent).
 // The wiring module (built with the module that joins the real ports, not in this folder) exports
 // `async function wire(config, { limitedSync })` returning exactly { rec, rules, ports } — see README, "The tick's ports".
 // Any other key is refused (audit #127 r2 m-B): a wiring answering `lock` or `now` must not replace the lock or the clock.
@@ -61,10 +61,15 @@ export function flushHeld(rec, log) {
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
 const SELF = realOf(fileURLToPath(import.meta.url));
 
-export function readConfig(file, opts = {}) {
+// `maxRunDeadlineMs` (L802): the longest runDeadlineMs taken, by default the Dispatcher pass's own sum. The robot judges
+// the Dispatcher by that sum (robot-wiring.mjs LIVE_PASS_MAX_MS), so a longer limit would make a healthy pass read as
+// stuck; setup refuses one too (dispatcher-setup.mjs), and this reader holds the line for a config written by hand.
+// Another job that reads its config here (robot-main.mjs) passes its own limit.
+export function readConfig(file, { maxRunDeadlineMs = RUN_DEADLINE_MS, ...opts } = {}) {
   const c = readJobConfig(file, { code: ['wiring'], ...opts });
   for (const k of ['wiring', 'lockFile']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.runDeadlineMs !== undefined && !(Number.isFinite(c.runDeadlineMs) && c.runDeadlineMs > 0)) throw new Error('config: runDeadlineMs must be a positive number');
+  if (c.runDeadlineMs > maxRunDeadlineMs) throw new Error(`config: runDeadlineMs may be at most ${maxRunDeadlineMs} (this job's own limit)`);
   return c;
 }
 

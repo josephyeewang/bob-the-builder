@@ -83,7 +83,7 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   await w.bundle(undefined, older);
   const setOutbox = (outbox) => { const cur = w.record.read('session', 'S-1'); assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, outbox } }).ok, true); };
   const before = await w.ghRefs();
-  for (const [outbox, re] of [[older, /own folder/], [`${w.outbox}/../S-1`, /plain path/], ['/', /plain path/], [join(outboxes, 'reviewer', 'S-1'), /worker outbox/], ['outbox/worker/S-1', /full path/], [undefined, /not named/]]) {
+  for (const [outbox, re] of [[older, /own folder/], [`${w.outbox}/../S-1`, /plain path/], ['/', /plain path/], [join(outboxes, 'reviewer', 'S-1'), /not a worker or script outbox/], ['outbox/worker/S-1', /full path/], [undefined, /not named/]]) {
     setOutbox(outbox);
     const r = await w.push();
     assert.equal(r.ok, false, String(outbox));

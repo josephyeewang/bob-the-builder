@@ -177,6 +177,13 @@ test('step 2 review c4: nothing after the request is written throws; a failing c
   assert.equal(r.timedOut, true); assert.deepEqual(writes, ['launch-S-1.json']);
 });
 
+test('L767: a script launch\'s answer names <root>/script/<id>; the worker folder is not trusted for it', async () => {
+  const SCRIPT = { ...LAUNCH, kind: 'script' };
+  const at = (box) => (i, x) => { x.doc = { sessions: [session('S-1', { kind: 'script', role: 'script', lead: null, pgid: 4242, outbox: box })], requests: { 'S-1': { state: 'started' } }, answers: { 'launch-S-1': { ...LAUNCHED, outbox: box } } }; };
+  assert.equal((await world(at(`${ROOT}/script/S-1`)).ports.launch(SCRIPT)).outbox, `${ROOT}/script/S-1`);
+  assert.equal((await world(at(`${ROOT}/worker/S-1`), { giveUpMs: 2_000 }).ports.launch(SCRIPT)).timedOut, true);
+});
+
 test('#328 r1 c2 (P11): the ask stops at its limit by the clock too, not only by counting its reads', async () => {
   let t = T0; let reads = 0;
   const p = ownerAsyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, clock: () => t, pollMs: 1, giveUpMs: 60_000,

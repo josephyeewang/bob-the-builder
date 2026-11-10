@@ -909,7 +909,7 @@ test('L399, L402 githubIssues.read: the state, whose issue it is, and only a per
   const { answers, gh } = realClient();
   const closedByOwner = async (a) => { answers.push(a); return (await gh.read(7)).closedByOwner; };
   answers.push([200, { state: 'open', body: 'b', user: ROBOT, closed_by: null }]);
-  assert.deepEqual(await gh.read(7), { open: true, body: 'b', ours: true, closedByOwner: false });
+  assert.deepEqual(await gh.read(7), { open: true, body: 'b', ours: true, closedByOwner: false, created_at: null });
   answers.push([200, { state: 'open', body: null, user: ROBOT }]);
   assert.equal((await gh.read(7)).body, '');
   assert.equal(await closedByOwner(closedBy({ login: 'owner-login', type: 'User' })), true, 'the owner');
@@ -1243,4 +1243,18 @@ test('L732: storeText cuts local paths and long values and fences each value', (
   assert.match(t, /^long: <outside-text source="log-line">z{200}…\[cut 250 characters\]<\/outside-text>$/m);
   // The fence is never closed early (pushReason reads "/outside-text>b" as a path and cuts it; either way it is escaped).
   assert.match(t, /^bad: <outside-text source="log-line">a&lt;[^<]*<\/outside-text>$/m);
+});
+
+test('L768 githubIssues: GitHub\'s own time comes from its Date header, and read gives the issue\'s created_at', async () => {
+  const answers = [];
+  const fetchFn = async () => { const [status, json, date] = answers.shift(); return { status, json: async () => json, headers: { get: (k) => (k === 'date' ? date ?? null : null) } }; };
+  const gh = githubIssues({ repo: 'acme/product-1', token: async () => ({ ok: true, token: 'not-a-real-token', login: 'robot[bot]' }), fetchFn });
+  assert.equal(gh.lastServerTime, null);
+  answers.push([200, { state: 'open', body: 'b', user: ROBOT, created_at: '2026-11-01T00:00:00Z' }, 'Mon, 09 Nov 2026 18:00:00 GMT']);
+  const r = await gh.read(7);
+  assert.equal(r.created_at, '2026-11-01T00:00:00Z');
+  assert.equal(gh.lastServerTime, Date.parse('2026-11-09T18:00:00Z'));
+  answers.push([200, { state: 'open', body: 'b', user: ROBOT, created_at: 'soon' }, 'not a date']);
+  assert.equal((await gh.read(7)).created_at, null);
+  assert.equal(gh.lastServerTime, null, 'an answer without a good Date header is not known');
 });
