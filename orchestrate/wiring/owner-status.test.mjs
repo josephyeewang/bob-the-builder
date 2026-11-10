@@ -1,11 +1,12 @@
 // Part C, runner step 1: the Dispatcher's read of the worker runner's status, and the sync ports on it (owner-ports.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
@@ -15,12 +16,12 @@ const session = (id, more = {}) => ({ id, product: 'p', kind: 'editing', card: `
   outbox: `${ROOT}/worker/${id}`, uid: OWNER, alive: true, ended: false, last_write_at: NOW - 1000, size: SIZE, activity: { state: 'active' }, outbox_open: true, stop_requested: false, ...more });
 const doc = (more = {}) => ({ written_at: new Date(NOW - 10_000).toISOString(), sessions: [session('s1')], requests: { s1: { state: 'started' } }, ...more });
 
-function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644 }) } = {}) {
+function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644 }), holds = () => true } = {}) {
   const writes = [];
   const text = typeof d === 'string' ? d : JSON.stringify(d);
   const stat = (p) => { if (p === '/runner') return dirSt; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
   const open = (p) => { assert.equal(p, FILE); return { st: fileSt, text }; };
-  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, realpath: (p) => p, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]) });
+  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, realpath: (p) => p, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]), holds });
   return { ports, writes };
 }
 
@@ -34,16 +35,27 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   assert.deepEqual(ports.outboxSessions()[0], { sessionId: 's1', role: 'worker', outbox: `${ROOT}/worker/s1`, uid: OWNER, card: 'c-s1', product: 'p' });
   assert.deepEqual(ports.probe({ id: 's1' }), { size: SIZE, activity: { state: 'active' } });
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
-  assert.ok(!RUNNER_ROLES.includes('lead') && !RUNNER_ROLES.includes('reviewer') && RUNNER_ROLES.includes('worker'));
-  assert.ok(RUNNER_KINDS.includes('editing') && !RUNNER_KINDS.includes('readonly') && !RUNNER_KINDS.includes('lead'));
+  assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
+  assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
+  assert.deepEqual(world(doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null })] })).ports.sessions().map((x) => x.kind), ['script']);
+  assert.deepEqual(world(doc({ sessions: [session('s1', { size: { ...SIZE, tokens: null } })] })).ports.probe({ id: 's1' }).size.tokens, null, 'readSize\'s "none yet" is a full size');
 });
 
-test('step 1 M1: the board holds the sessions meant to run; one stopped on request, or replaced by a newer session of its card, has left it', () => {
+test('step 1 M1: the board holds the sessions meant to run; one stopped on request, or whose card the Record has moved on, has left it', () => {
   const ended = { alive: false, ended: true, last_write_at: NOW - 3_600_000 };
-  const { ports } = world(doc({ sessions: [session('a1', { ...ended, stop_requested: true }), session('b1', { ...ended, card: 'B' }), session('b2', { card: 'B' }), session('c1', ended), session('w1')],
-    requests: { a1: { state: 'stopped' }, b1: { state: 'stopped' }, b2: { state: 'started' }, c1: { state: 'stopped' }, w1: { state: 'waiting' } } }));
-  assert.deepEqual(ports.board().map((r) => r.id), ['b2', 'c1'], 'a1 stopped on request; b1 replaced by b2; c1 crashed and stays for the outage step; w1 not started');
-  assert.deepEqual(ports.outboxSessions().map((s) => s.sessionId), ['a1', 'b1', 'b2', 'c1', 'w1'], 'the outboxes are read whatever the board says');
+  const d = doc({ sessions: [session('a1', { ...ended, stop_requested: true }), session('b1', { ...ended, card: 'B' }), session('b2', { card: 'B' }), session('c1', ended), session('w1')],
+    requests: { a1: { state: 'stopped' }, b1: { state: 'stopped' }, b2: { state: 'started' }, c1: { state: 'stopped' }, w1: { state: 'waiting' } } });
+  const asked = [];
+  let held = new Set(['b2', 'c1']);   // the Record: B is now b2's; c-c1 still c1's (it died, not yet handled)
+  const { ports } = world(d, { holds: (q) => { asked.push(q); return held.has(q.sessionId); } });
+  assert.deepEqual(ports.board().map((r) => r.id), ['b2', 'c1'], 'a1 stopped on request; b1 replaced by b2; c1 died and is seen once; w1 not started');
+  assert.ok(asked.some((q) => q.card === 'c-c1' && q.sessionId === 'c1'), 'the Record is asked by card and session');
+  assert.ok(!asked.some((q) => q.sessionId === 'b2'), 'a running session is on the board without asking');
+  held = new Set(['b2']);   // the outage step handled c1: its card waits on Joe
+  assert.deepEqual(ports.board().map((r) => r.id), ['b2'], 'a handled death is not counted again on the next pass');
+  assert.deepEqual(world(d, { holds: () => 'yes' }).ports.board().map((r) => r.id), ['b2'], 'only a true from the Record keeps it');
+  assert.deepEqual(ports.outboxSessions().map((x) => x.sessionId), ['a1', 'b1', 'b2', 'c1', 'w1'], 'the outboxes are read whatever the board says');
+  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, writeRequest: () => {} }), /holds/);
 });
 
 test('step 1: a status that can\'t be trusted is "not known", a throw, never an empty or partial answer', () => {
@@ -57,8 +69,16 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
     [world(doc({ sessions: [session('s1'), session('s1')] })), /listed twice/],
     [world(s1({ product: undefined })), /has no product/],
     [world(s1({ kind: 'worker' })), /kind "worker", which the runner does not start/],
-    [world(s1({ role: 'lead' })), /role "lead"/],
-    [world(s1({ role: 'reviewer' })), /role "reviewer"/],
+    [world(s1({ kind: 'audit' })), /kind "audit", which the runner does not start/],
+    [world(s1({ kind: 'constructor' })), /kind "constructor", which the runner does not start/],
+    [world(s1({ role: 'lead' })), /role "lead", which is not the role a editing session runs/],
+    [world(s1({ role: 'front_door' })), /role "front_door"/],
+    [world(s1({ role: 'script' })), /role "script"/],
+    [world(s1({ kind: 'script' })), /role "worker", which is not the role a script session runs/],
+    [world(s1({ product: '' })), /product that is not a name/],
+    [world(s1({ signin: 5 })), /signin that is not a name/],
+    [world(s1({ config_dir: '' })), /config_dir that is not a name/],
+    [world(s1({ lead: 3 })), /lead that is not a name/],
     [world(s1({ pgid: '77' })), /no process group/],
     [world(s1({ card: 5 })), /card that is not a card id/],
     [world(s1({ bundle_files: 'a' })), /bundle_files that are not a list/],
@@ -78,6 +98,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
     [world(doc(), { fileSt: st({ mode: 0o644, nlink: 2 }) }), /not a plain file of its own/],
     [world(doc(), { dirSt: st({ dir: true, mode: 0o777 }) }), /folder can be written by others/],
     [world(doc(), { fileSt: st({ link: true }) }), /status is a link/],
+    [world(doc(), { fileSt: { ...st({ mode: 0o644 }), isFile: () => false } }), /not a plain file of its own/],
   ];
   for (const [{ ports }, why] of bad) for (const k of ['sessions', 'board', 'outboxSessions']) assert.throws(() => ports[k](), why, `${k} ${why}`);
   assert.doesNotThrow(() => world(doc({ written_at: new Date(NOW + CLOCK_SKEW_MS - 1).toISOString() })).ports.sessions(), 'a small clock difference is fine');
@@ -85,7 +106,13 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
   for (const size of partial) assert.throws(() => world(doc({ sessions: [session('s1', { size })] })).ports.probe({ id: 's1' }), /no full size/, JSON.stringify(size));
   assert.throws(() => world(doc({ sessions: [session('s1', { activity: {} })] })).ports.probe({ id: 's1' }), /no activity/);
   assert.throws(() => world().ports.probe({ id: 'nope' }), /not in the worker runner's status/);
-  assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: undefined }), /uid is not known/);
+  assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: undefined, outboxRoot: ROOT }), /uid is not known/);
+  for (const outboxRoot of [undefined, '', 'out']) assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: OWNER, outboxRoot }), /outbox root is not known/, String(outboxRoot));
+  // m2: a closed outbox's folder is not looked up, so one cleared folder can't take every port down; its shape still is checked
+  const gone = (p) => { if (p !== ROOT) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return p; };
+  const closed = doc({ sessions: [session('s1'), session('s2', { alive: false, ended: true, outbox_open: false })], requests: {} });
+  assert.deepEqual(ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NOW, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(closed) }), realpath: (p) => (p === `${ROOT}/worker/s1` ? p : gone(p)), writeRequest: () => {}, holds: () => true }).sessions().map((x) => x.id), ['s1']);
+  assert.throws(() => world(doc({ sessions: [session('s1'), session('s2', { outbox_open: false, outbox: '/x/y' })] })).ports.sessions(), /outbox that is not this session's own folder/);
 });
 
 test('step 1 m6: the status is opened once, never through a link, and that open file is what is checked and read', () => {
@@ -96,6 +123,11 @@ test('step 1 m6: the status is opened once, never through a link, and that open 
     assert.equal(text, 'hello'); assert.ok(s.isFile()); assert.equal(s.nlink, 1);
     assert.throws(() => openRead(join(d, 'link.json')), /status is a link/);
     assert.throws(() => openRead(join(d, 'none.json')), /status is missing/);
+    execFileSync('mkfifo', [join(d, 'pipe.json')]);
+    const p = openRead(join(d, 'pipe.json'));   // m4: a pipe returns at once, unread, instead of hanging the pass
+    assert.equal(p.text, null); assert.ok(!p.st.isFile());
+    writeFileSync(join(d, 'big.json'), 'x'.repeat(STATUS_MAX_BYTES + 1));
+    assert.equal(openRead(join(d, 'big.json')).text, null, 'a file bigger than the runner writes is not read');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -111,6 +143,7 @@ test('step 1: stopSession is true only for a used-up launch request with nothing
     ['started and running', doc({ sessions: [session('s9')], requests: { s9: { state: 'started' } } })],
     ['used up, but something still runs under the id', doc({ sessions: [session('s9')], requests: { s9: { state: 'stopped' } } })],
     ['used up, ended, but its process group is still there', doc({ sessions: [session('s9', { alive: true, ended: true })], requests: { s9: { state: 'stopped' } } })],
+    ['used up, ended, process group not known', doc({ sessions: [session('s9', { alive: undefined, ended: true })], requests: { s9: { state: 'stopped' } } })],
   ];
   for (const [what, d] of cases) {
     const w = world(d);
@@ -118,6 +151,7 @@ test('step 1: stopSession is true only for a used-up launch request with nothing
     assert.deepEqual(w.writes, [['stop-s9.json', '{"stop":"s9"}\n']], `${what}: one stop request`);
   }
   assert.equal(world().ports.stopSession('../x'), false, 'an id that is not a request id stops nothing');
+  assert.equal(world(doc({ sessions: [session('s9', { alive: false, ended: true })], requests: { s9: { state: 'stopped' } } })).ports.stopSession('s9'), true, 'listed but known gone');
   assert.throws(() => world('{').ports.stopSession('s9'), /can't be read/, 'a status that can\'t be read is a throw: the claim stays');
   assert.match(OWNER_PORTS.stopSession.out, /a request the runner has not yet seen is never true/);
 });
