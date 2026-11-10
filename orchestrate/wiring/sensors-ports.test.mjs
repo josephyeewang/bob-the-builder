@@ -340,3 +340,20 @@ test('L746 r3: stored is required; a reset beyond one window is refused; the sto
     assert.equal(rec.read('fact', USAGE_FACT('a'))?.doc?.h5?.resets_at, '2026-11-05T15:00:00.000Z', 'each run moved 59 s earlier; the stored window keeps its first reset time');
   } finally { w.done(); }
 });
+
+// L754 (lead's answer to lane 5's Q1): a usage reading held after a refusal is told once with its cause, then daily, once
+// M3 is wired. No clear command. Pinned here as a todo until M3's loop tells it.
+test('L754 todo: a usage reading held after a refusal is told once with its cause, then daily', { todo: 'waits on M3 being wired (L754)' }, async () => {
+  const { ALERT_QUEUE_FACT } = await import('../modules/M11-dispatcher/alerts.mjs');
+  const w = place();
+  const rec = memoryRecord();
+  const at = (n) => new Date(T0 + n).toISOString();
+  const put = (pct, n) => assert.equal(writeAnswer({ to: w.file, answer: answer({ observed_at: at(n), usage: { h5: { used_pct: pct, resets_at: '2026-11-05T15:00:00.000Z' }, week: { used_pct: 60, resets_at: '2026-11-07T22:59:59.000Z' }, week_from: 'weekly_all' } }) }).ok, true);
+  const pass = (n) => sensorsPass({ rec, ports: (() => { const q = sensorsPorts({ file: w.file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) }); return { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }; })(), now: () => new Date(T0 + n) });
+  try {
+    put(90, 0); await pass(0);
+    put(5, 60_000); await pass(60_000);
+    const told = (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /usage/.test(e.text) && /went down within one window/.test(e.text));
+    assert.equal(told.length, 1, 'the held reading is told once, with its cause');
+  } finally { w.done(); }
+});
