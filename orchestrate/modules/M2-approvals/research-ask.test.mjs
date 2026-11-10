@@ -315,6 +315,25 @@ test('join 10 (review of #313): a mark the Record refuses is told once, not ever
   await s.pass();
   t.ctx.record = Object.create(t.record, { write: { value: (w) => (w.entity === 'ask' && w.doc?.push_sent_at ? { ok: false, reason: 'planted refusal' } : t.record.write(w)) } });
   fileAsk(t, 'find out what the second rival charges', '20261103-0916-rb');
-  await s.pass(); await s.pass();
+  await s.pass(); await s.pass(); await s.pass();
   assert.equal(t.alerts.filter((a) => a.type === 'approvals_write_refused').length, 1, JSON.stringify(t.alerts));
+  // r1 audit of #313, m-2: the phone took it once, so it is held, not pushed again each pass, while the mark is retried.
+  assert.equal(s.pushes.filter((e) => e.ask === 'R-2').length, 1, 'pushed once, then held');
+  t.ctx.record = t.record;
+  const r = await s.pass();
+  assert.ok(r.events.some((e) => e.type === 'push_marked' && e.ask === 'R-2'), JSON.stringify(r.events));
+  assert.ok(askStore(t.record).ask('R-2').doc.push_sent_at, 'marked once the Record takes it');
+  assert.equal(s.pushes.filter((e) => e.ask === 'R-2').length, 1, 'still one push');
+});
+
+// r1 audit of #313, m-3: research runs in its own guard ahead of the rest, so a failure later in the pass holds nothing.
+test('join 10 (r1 audit of #313): a failure later in the pass does not hold the research push', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.record = Object.create(t.record, { read: { value: (e, ...x) => { if (e === 'product') throw new Error('planted product read failure'); return t.record.read(e, ...x); } } });
+  await assert.rejects(s.pass(), /planted product read failure/);
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], 'pushed before the failure');
+  t.ctx.record = t.record;
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at, 'and marked');
 });

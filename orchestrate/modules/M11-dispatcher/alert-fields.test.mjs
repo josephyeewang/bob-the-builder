@@ -171,7 +171,7 @@ test('L373: the source read holds every M2 alert kind, so the checks below are n
   assert.deepEqual([...new Set(alertSites().map((x) => x.kind))].sort(), [
     'approval_not_counted', 'approvals_config', 'approvals_no_pull_request', 'approvals_no_push', 'approvals_untrusted', 'approvals_write_refused',
     'ask_request_refused', 'ask_time_unreadable', 'decision_pr_not_closed', 'decision_pr_not_opened', 'go_card_unreadable', 'go_not_shown', 'notSaved', 'onboard_near_miss', 'onboard_refused',
-    'product_on', 'push_not_sent', 'review_not_requested', 'state_answer', 'state_request_refused', 'transcript_tampered', 'undo_by_hand', 'undo_by_hand_mark_failed', 'undo_request_refused', 'untrusted_ask', 'withdrawn_pr_open',
+    'product_on', 'push_not_sent', 'research_push_failed', 'research_step_failed', 'review_not_requested', 'state_answer', 'state_request_refused', 'transcript_tampered', 'undo_by_hand', 'undo_by_hand_mark_failed', 'undo_request_refused', 'untrusted_ask', 'withdrawn_pr_open',
   ]);
   const undo = alertSites().find((x) => x.kind === 'undo_by_hand');
   assert.deepEqual(undo.keys, ['ask', 'card', 'pr', 'commit', 'files', 'files_known']);
