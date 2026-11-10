@@ -121,3 +121,26 @@ test('L890: a Record is opened only for a product name setup makes a folder for,
   }
   assert.doesNotThrow(() => setup({ prefix: 'm9-outbox-product-', extra: { product: 'my-app' } }));
 });
+
+test('#400 r1 m3: the file must be directly in the session\'s own folder: not S-10 under tag S-1, not a sub-folder', () => {
+  const env = world();
+  for (const product of [undefined, PRODUCT]) {
+    const base = product ? join(env.outRoot, PRODUCT, 'worker') : join(env.outRoot, 'worker');
+    mkdirSync(join(base, 'S-1'), { recursive: true });
+    const tag = { role: 'worker', sessionId: 'S-1', ...(product ? { product } : {}) };
+    for (const file of [drop(join(base, 'S-10')), drop(join(base, 'S-1', 'sub'))]) {
+      const r = outboxPlace({ outboxRoot: env.outRoot, tag, file });
+      assert.equal(r.ok, false, file); assert.match(r.reason, /not directly inside the worker outbox of session S-1/);
+    }
+  }
+});
+
+test('#400 r1 m3: an empty product is a bad tag, never the layout with no product', () => {
+  const env = world();
+  const flat = drop(join(env.outRoot, 'worker', 'S-1'));
+  const tag = { role: 'worker', sessionId: 'S-1', product: '' };
+  const w = outboxFolders({ outboxRoot: env.outRoot, tag });
+  assert.equal(w.ok, false); assert.match(w.reason, /bad outbox tag/);
+  assert.equal(outboxPlace({ outboxRoot: env.outRoot, tag, file: flat }).ok, false);
+  assert.equal(readOutboxFile({ outboxRoot: env.outRoot, uids, tag, file: flat }).ok, false);
+});
