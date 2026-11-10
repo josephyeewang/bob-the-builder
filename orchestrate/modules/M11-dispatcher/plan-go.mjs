@@ -280,7 +280,9 @@ function limited(ports) {
     counted.ms += Date.now() - from;
     if ('value' in r) return r.value;
     // Late is known by `timedOut` (guarded's own late answer), the wording only as a backstop (L755), so it is counted
-    // and told as a timeout whatever words it carries.
+    // and told as a timeout whatever words it carries. An untested backstop by ruling (L771 Q1): only guarded answers here
+    // (a port's own value comes back wrapped in `value`), and a timeout and a failure end the same way today (the same
+    // message; a timeout's time already marks the card slow), so no test can tell the two apart.
     if (r.timedOut !== true && !/^it did not answer within /.test(r.reason ?? '')) throw new Error(`${name}: ${r.reason}`);
     counted.timeouts += 1;
     throw new TimedOut(`${name}: ${r.reason}`);
