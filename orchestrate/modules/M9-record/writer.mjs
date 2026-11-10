@@ -21,7 +21,7 @@ import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
-import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, WRITERS, actorName, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, draftFields, factFrom, mayCreateKind } from './permissions.mjs';
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
 import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
@@ -45,12 +45,22 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
-// L722, L729: the draft-only plan grant, on its own so a test can reach it past the field gate, which refuses the same
-// writes first. True only when the card is a draft of a kind that always needs a go and EVERY changed plan input is on
-// the writer's updateInDraft list; one plan input off the list refuses the whole write.
+// L722, L729, L731: the draft-only plan grant, on its own so a test can reach it past the field gate, which refuses the
+// same writes first. True only when the card is a draft of a kind that always needs a go, the writer's grant covers that
+// kind (permissions draftFields, the one reading), and EVERY changed plan input is in it; one plan input off the list,
+// or none at all, refuses the whole write. GO_FREE is checked here too, so a grant table widened by mistake still can't
+// change the bar of a card that reaches ready with no go.
 export function draftPlanGrant(name, old, plan) {
-  return old?.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind)
-    && plan.every((f) => (WRITERS.card[name]?.updateInDraft ?? []).includes(f));
+  const granted = draftFields(name, old?.kind);
+  return old?.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind) && plan.length > 0 && plan.every((f) => granted.includes(f));
+}
+
+// L731 m1: a done_when set through the grant is what M2 derives from the rows (go.mjs doneBar): text, not empty. It is
+// never removed, since the go and the Tier-1 review would then carry no bar at all.
+export function grantedDoneWhenProblem(doc) {
+  if (!Object.hasOwn(doc, 'done_when')) return 'done_when may not be removed';
+  if (typeof doc.done_when !== 'string' || !doc.done_when.trim()) return 'done_when must be the rows\' pass tests as text (go.mjs doneBar)';
+  return null;
 }
 
 export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
@@ -241,7 +251,10 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     // One exception (L722): a draft-only grant (permissions updateInDraft, the Dispatcher's done_when) on a draft of a kind
     // that always needs a go. Its go is still asked on the plan as it then stands, so the hole MAT-1 closes stays closed.
     const plan = PLAN_INPUTS.filter((f) => changed.includes(f));
-    if (plan.length && !mayCreateKind(name, old.kind) && !draftPlanGrant(name, old, plan)) return no(`${name} may not change the plan of a ${old.kind} card`);
+    if (plan.length && !mayCreateKind(name, old.kind)) {
+      if (!draftPlanGrant(name, old, plan)) return no(`${name} may not change the plan of a ${old.kind} card`);
+      if (plan.includes('done_when')) { const p = grantedDoneWhenProblem(doc); if (p) return no(p); }
+    }
     // Nor its brief, desired outcome or merge request (round 2 m5); needs_joe is a flag any setter may raise on any card.
     if (['brief', 'desired', 'merge_requested'].some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change a ${old.kind} card's brief, desired or merge request`);
     if (changed.includes('needs_joe')) {
