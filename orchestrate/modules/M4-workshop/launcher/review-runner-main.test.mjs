@@ -7,7 +7,7 @@ import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, re
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -816,4 +816,34 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   assert.equal(existsSync(lost), false, 'a failed copy leaves nothing behind');
   assert.match((await prepareReviewCopy({ mirror: gd, card: 'C-1', head: 'HEAD', dest: lost })).reason, /not 40 hex/);
   assert.match((await prepareReviewCopy({ mirror: gd, card: '../x', head, dest: lost })).reason, /not a card id/);
+});
+
+test('L738 re-merge: the real ports hand the runner its finalize and handedIn (a missing one would skip the finding check unseen)', () => {
+  const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: process.getuid() }, recordRoot: '/x', recordUid: process.getuid(), mirror: '/m', claudeBin: '/c', ownerHome: '/h', ownerUid: process.getuid() };
+  const p = realPorts(c, {});
+  for (const k of ['finalize', 'handedIn']) assert.equal(typeof p[k], 'function', `${k} is wired`);
+});
+
+// L736 #306 m4: the Front Door's taps folder must be the runner's, compared on real paths.
+test('L736 m4 planted: the Front Door\'s taps folder is checked against the one the runner reads', () => {
+  const base = realpathSync.native(tempDir('m4-taps-match-'));
+  const taps = join(base, 'owner-taps');
+  mkdirSync(taps);
+  symlinkSync(taps, join(base, 'link'));
+  const read = (doc) => () => doc;
+  assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null);
+  assert.equal(tapsFolderProblem({ ownerTaps: `${taps}/`, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null, 'a trailing slash is the same folder');
+  // Another spelling of the same folder is refused: the rules name it as given (#306 self-review m1).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'link'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it/, 'a link to it');
+  assert.match(tapsFolderProblem({ ownerTaps: taps.toUpperCase(), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it|is not the one the review runner reads/, 'another case');
+  // Two spellings that differ only in case are never taken as one (a case-sensitive disk holds two folders).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'later-taps'), runnerConfig: '/x', read: read({ ownerTaps: join(base, 'Later-Taps') }) }), /is not the one the review runner reads/);
+  // The runner's own may be a link: it is compared on its real path.
+  assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: join(base, 'link') }) }), null);
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'other'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not the one the review runner reads .*so its wall guards the wrong folder/);
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({}) }), /names no taps folder \(ownerTaps\)/);
+  assert.match(tapsFolderProblem({ ownerTaps: 'owner-taps', runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /the Front Door names no taps folder/);
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: () => { throw new Error('config: not root\'s'); } }), /the review runner's config can't be read \(config: not root's\)/);
+  // The real reader by default: a config that is not there can't be read, and is refused.
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: join(base, 'nothing.json') }), /the review runner's config can't be read/);
 });

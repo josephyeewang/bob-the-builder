@@ -42,13 +42,14 @@
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS } from './dispatcher-wiring.mjs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS, WORKER_CONFIG_KEYS } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { readDoc } from '../shared/record-read.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -58,10 +59,10 @@ import { mintInstallationToken } from '../modules/M6-merge-gate/token.mjs';
 import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
 
 // approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
-// (L639), so the robot config refuses them.
+// (L639), and the worker and cleanup ports' (L739), so the robot config refuses them.
 // The robot App and where its alerts go (L600): all four or none.
 export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
   ...APP_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
@@ -212,19 +213,27 @@ export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, hold
 
 /**
  * The Dispatcher is on time: every late alert still queued leaves unsent (L130, audit 0b-6 r7 M2; audit #137 M5), so the owner
- * is not told of stops that have ended. → whether every drop was written.
+ * is not told of stops that have ended. → whether every drop was written. Why not is logged here, by its own line: an
+ * unreadable queue (with the Record's reason) or a drop that was not written (audit #346 m2).
  */
-export function dropLateAlerts(rec) {
+export function dropLateAlerts(rec, { log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const prefix = HOLD_FACT(LATE_CAUSE(''));
   // A hold fact is written only once its alert is delivered (pass.mjs holdAlert), so the causes are read from the queue
-  // itself: its waiting entries and its listed drops.
+  // itself: its waiting entries and its listed drops. A queue that can't be read answers false: it is not known that
+  // every drop was written (L797; the Record's read never throws, so a failure comes back as a corrupt row, not an error).
   const facts = new Set();
-  let d = null; try { d = rec.read('fact', ALERT_QUEUE_FACT)?.doc; } catch { return false; }
+  const q = readDoc(rec, 'fact', ALERT_QUEUE_FACT);
+  if (q.state === 'failed') {
+    log(`robot: the Dispatcher is on time, but the alert queue could not be read (${String(q.reason).slice(0, 200)}), so its old late alerts were not cleared`);
+    return false;
+  }
+  const d = q.state === 'found' ? q.doc : null;
   for (const m of [...(d?.entries ?? []).map((e) => e?.mark?.fact), ...(d?.dropped_causes ?? []).map((c) => c?.fact)]) {
     if (typeof m === 'string' && m.startsWith(prefix)) facts.add(m);
   }
   let ok = true;
   for (const f of facts) ok = dropCause(rec, f) && ok;
+  if (!ok) log('robot: the Dispatcher is on time, but its old late alerts could not all be cleared from the queue (a drop was not written)');
   return ok;
 }
 
@@ -265,7 +274,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
         tell = 'the Dispatcher-late alert could not be queued';
         log(`robot: ${tell}`);
       }
-    } else if (!dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    } else dropLateAlerts(rec, { log });   // logs why, when it answers false
     throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
   };
   passes['caught-up'] = async () => {
