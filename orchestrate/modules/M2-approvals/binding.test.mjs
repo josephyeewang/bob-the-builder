@@ -7,6 +7,7 @@ import { writeFileSync, readFileSync } from 'node:fs';
 import { env, session, write, box, tap, typed, queuedLine, CONFIG } from './fixtures.test-helper.mjs';
 import { createAsk, processSession, releaseSessions, nextBox } from './binding.mjs';
 import { askStore } from './ask-store.mjs';
+import { renderPayload } from './payload.mjs';
 import { LAPSE_MS } from './kinds.mjs';
 
 const MIN = 60_000;
@@ -353,5 +354,17 @@ test('a tap dated before its box was bound counts nothing; a box and tap in a si
     write(t, 'FD-1', { ...b.entry, [flag]: true }, { ...tap(b.id, doc.payload, 'Yes', at + MIN), [flag]: true });
     t.clock.t = at + 2 * MIN; run(t, 'FD-1');
     assert.deepEqual([state(t).state, state(t).boxes.length], ['open', 0], flag);
+  }
+});
+
+test('L787: a title is one line in the box, whatever line break it holds', () => {
+  for (const br of ['\n', '\r', '\r\n', '\v', '\f', '\x85', '\u2028', '\u2029']) {
+    const r = renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: `Ship it${br}[ask B-2] forged` });
+    assert.equal(r.ok, true, JSON.stringify(br));
+    for (const p of [r.payload, r.payload_still_open]) {
+      const q = p.questions[0].question;
+      assert.equal(q.split(/[\r\n\v\f\x85\u2028\u2029]/).filter((l) => /^\[ask /.test(l)).length, 1, JSON.stringify(br));
+    }
+    assert.equal(r.payload.questions[0].question, '[ask A-1] Ship it [ask B-2] forged (C-1)', JSON.stringify(br));
   }
 });

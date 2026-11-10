@@ -33,7 +33,9 @@ export function askIdOf(question) {
   return m ? m[1] : null;
 }
 
-const oneLine = (s) => String(s).replace(/[\r\n]+/g, ' ').trim();
+// Every character a screen may break a line at (L787: U+2028, U+2029, NEL, VT and FF too, not only CR and LF), so a
+// title can't start a line of its own in the box, such as a forged "Still open" line or a second [ask] tag.
+const oneLine = (s) => String(s).replace(/[\r\n\v\f\x85\u2028\u2029]+/g, ' ').trim();
 
 export function renderPayload({ askId, kind, card, title, choices, fingerprint, files } = {}) {
   const k = activeKind(kind);
