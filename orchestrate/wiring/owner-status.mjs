@@ -22,9 +22,11 @@
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/worker/<id>, which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
-//   - stop_requested: true once the runner has confirmed a stop it was asked for (a stop request or stopGroup): the
-//     session's process group is gone. It is written before the runner answers. A stop that failed leaves it false. Only a
-//     session that is stopped on request and no longer live leaves the board (a live one stays, whatever the flag says). One that
+//   - stop_requested: true once the runner acts on a stop it was asked for (a stop request or stopGroup), written before
+//     it acts, and at the latest in the same write that first shows the session not live; it stays true even if the stop
+//     fails or times out (r2 audit M1: the Dispatcher's own stop is never counted as a death). A live session stays on the
+//     board whatever the flag says (a stop that failed leaves it running: r1 audit m4); a session stopped on request
+//     leaves the board once it is no longer live. stopGroup's ok still needs the process group gone. One that
 //     ends without it stays on the board only while its card's claim is still its own (`holds`): the outage step sees it
 //     die once, and once the card has been handled (waiting on Joe, back in the queue, run again) it is off.
 //   - requests[id].state: 'waiting' (seen, not yet acted on), 'started', 'refused', 'stopped' (started and since stopped)
@@ -32,7 +34,7 @@
 //     session always has its entry, 'started' while it is live (and then its outbox is open) and 'started' or 'stopped'
 //     once it is not; anything else makes the whole status "not known" (r1 audit m1). The runner
 //     keeps a used-up entry for at least RUNNER_KEEP_USED_UP_MS (the longest claim timeout plus the stale window), and marks
-//     a session that ends on its own 'stopped'.
+//     a session that ends on its own 'stopped' once it is no longer live.
 //   - answers (step 2, owner-asks.mjs): the runner's answer to each ask request, keyed by the request file's name
 //     without .json (ANSWER_KEY). ANSWER: { ok: true|false, reason (a non-empty string when ok is false), ...the port's
 //     fields }. The asking port checks each answer against the rest of the same status before it trusts it. The runner
