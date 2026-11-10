@@ -130,6 +130,9 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
       if (script !== join(hooksDir, 'compact-note.mjs')) return refuse(`a ${event} hook runs a script outside the hook folder`);
       // L101: the note goes in the outbox only when the hook's own kinds hold `<kind>-compact-`; any other role's hook
       // names a notes folder apart from the outbox, so its note can never be taken in as one of its kinds.
+      // The hook's own parser keeps the last of a repeated flag and this check reads the first, so a repeat is refused (#420 r1 m1).
+      const repeated = ['notes', 'outbox', 'kind', 'kinds'].find((k) => words.filter((w) => w === `--${k}`).length > 1);
+      if (repeated) return refuse(`a ${event} hook gives --${repeated} more than once`);
       const arg = (k) => { const i = words.indexOf(`--${k}`); return i > 1 ? words[i + 1] : undefined; };
       if (!noteInOutbox(arg('kind'), (arg('kinds') ?? '').split(','))) {
         const notes = arg('notes'); const ob = arg('outbox');
