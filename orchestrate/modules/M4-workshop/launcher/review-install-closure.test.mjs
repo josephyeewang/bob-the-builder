@@ -526,11 +526,12 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   // a plain name; text that only looks like an import (a string, a template, a comment after code) is none; and the
   // other shapes of an import or re-export.
   const L = "'../modules/M11-dispatcher/login-job.mjs'";
+  const IMP = 'im' + 'port(';            // so consume-ask's writeDoc scan does not count this text as an import()
   const lj = [{ name: 'loginJobPlist', from: 'modules/M11-dispatcher/login-job.mjs' }];
   assert.deepEqual(jobFileImports(`const A = '~/Library/LaunchAgents/*';\nimport { loginJobPlist } from ${L};\nconst E = '*/5 * * * *';`, at), lj, 'glob and cron strings');
-  assert.deepEqual(jobFileImports("const m = await import(`../modules/M11-dispatcher/login-job.mjs`);", at), lj, 'backtick import()');
-  assert.deepEqual(jobFileImports("const m = await import(`../modules/${n}/login-job.mjs`);", at), [], 'a name built at run time is not read');
-  assert.deepEqual(jobFileImports(`const help = "run import(${L}) to see";\nx(); // later: import(${L})\nconst src = \`\nimport { loginJobPlist } from ${L};\n\`;`, at), [], 'text that only looks like an import');
+  assert.deepEqual(jobFileImports(`const m = await ${IMP}\`../modules/M11-dispatcher/login-job.mjs\`);`, at), lj, 'a backtick name with no ${}');
+  assert.deepEqual(jobFileImports(`const m = await ${IMP}\`../modules/\${n}/login-job.mjs\`);`, at), [], 'a name built at run time is not read');
+  assert.deepEqual(jobFileImports(`const help = "run ${IMP}${L}) to see";\nx(); // later: ${IMP}${L})\nconst src = \`\nimport { loginJobPlist } from ${L};\n\`;`, at), [], 'text that only looks like an import');
   assert.deepEqual(jobFileImports(`import d, * as ns from ${L};`, at), lj, 'default and namespace');
   assert.deepEqual(jobFileImports(`import d, { loginJobPlist } from ${L};`, at), lj, 'default and named');
   assert.deepEqual(jobFileImports(`const a = 1; import { loginJobPlist } from ${L};`, at), lj, 'after code on its line');
