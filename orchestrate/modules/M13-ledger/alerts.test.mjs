@@ -1121,6 +1121,12 @@ test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minute
   near.tick(23 * 60);
   assert.equal(await near.alerts.raise(standing), 'reminded');
   assert.equal(comments(near.gh), 1);
+  const edge = make(4);
+  await edge.alerts.raise(standing);
+  edge.tick(24 * 60 - 2);
+  assert.equal(await edge.alerts.raise(standing), 'updated', 'a day less 2 minutes by both clocks: the told stamp is the robot\'s own');
+  edge.tick(3);
+  assert.equal(await edge.alerts.raise(standing), 'reminded');
   assert.equal(clockAhead({ lastServerTime: null }, 5), null, 'no Date header: not known, and the old count stands');
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS + 1), true);
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS), false);

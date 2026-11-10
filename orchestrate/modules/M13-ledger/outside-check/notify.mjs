@@ -24,6 +24,7 @@ export const dueToTell = (told, nowMs) => {
 const CLEARED = 'Cleared: the check passes again.';
 const pastOr = (at, stamp) => (Date.parse(at) <= Date.parse(stamp) + FUTURE_SKEW_MS ? new Date(Date.parse(at)).toISOString() : stamp);
 // When the bot last commented, if under 24 h ago, read from GitHub, because the told line is what may have been lost.
+// The run's own clock is used here, not GitHub's Date header (L768): this runs on GitHub Actions, whose clock is GitHub's.
 // null if not. Only the bot's count: anyone can comment on a public repo. A time ahead of the run reads as the run's own.
 async function spokeLately(api, number, nowMs) {
   const since = encodeURIComponent(new Date(nowMs - RETELL_MS).toISOString());

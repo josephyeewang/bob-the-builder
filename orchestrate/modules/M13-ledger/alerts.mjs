@@ -36,7 +36,9 @@
 // Injected GitHub client for one product repo (a fake in tests):
 //   open({ title, body, assignee, labels }) → number      edit(number, body)      close(number, text), text null to say nothing
 //   comment(number, text) → { at } (GitHub's time for it, when it gives one)
-//   read(number) → { open, body, ours, closedByOwner }, null when the issue is gone, false when GitHub refused the read.
+//   read(number) → { open, body, ours, closedByOwner, created_at }, null when the issue is gone, false when GitHub refused
+//     the read. created_at: GitHub's time the issue was opened, or null.
+//   lastServerTime: GitHub's own time on its latest answer (its Date header), in ms, or null (L768)
 //     ours: the robot wrote it. closedByOwner: GitHub shows a person other than the robot closed it.
 //   findOpen(test) → the number of a robot's open issue whose last line passes test, null when there is none
 //   latestOwnComment(number, since) → the robot's latest comment since that time, as { at, body }, or null
@@ -212,6 +214,9 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
       // A clock too far ahead of GitHub's can't count the 24 h (L768): the issue is kept up to date, and not told again.
       if (clockTooFast(gh, Date.parse(t))) return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
+      // The robot's clock counts the day here: the footer's told time is mostly its own stamp, so the two agree, and the
+      // check above keeps it within CLOCK_AHEAD_MS of GitHub's. With no Date header from GitHub that check can't run, and
+      // the count is as before L768 (GitHub always sends one).
       const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
       if (told.did !== 'quiet') return told.answer;
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';

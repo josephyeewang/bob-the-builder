@@ -15,7 +15,9 @@
 // STILL THERE, TOLD AGAIN (L732 m3). An issue the owner left open after fixing the store would otherwise hide the same
 // fault coming back: every start would find it and say nothing. So a start that finds the issue open comments on it once
 // a day while the fault lasts: not when the robot commented in the last day, nor when the issue was opened in the last
-// day (its body says when). A comment that notifies is the point; the body is never edited.
+// day (GitHub's created_at says when; its body's "Opened at" line when GitHub gives none). The day is counted by GitHub's
+// clock, and a computer clock more than a few minutes ahead of it says nothing (L768). With no Date header from GitHub,
+// the computer's clock stands, as before. A comment that notifies is the point; the body is never edited.
 //
 // The reason is cut and fenced as a push reason is (L720 n2): local paths become <path>, a cut for length says so, and
 // the words are fenced as outside text. A look that fails opens nothing, as an unknown answer would otherwise flood the
