@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { START_ISO, START_PS_MS, holderDead, lstartIso, machineId, makeLock, onThisMachine, pidStart, processDead, readMachineId, realProbe, sleepMs, startTime } from './lock.mjs';
+import { START_ISO, START_PS_MS, holderDead, ownPidStart, lstartIso, makeLock, onThisMachine, pidStart, processDead, readMachineId, realProbe, sleepMs, startDiffers, startTime } from './lock.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const LOCK = fileURLToPath(new URL('./lock.mjs', import.meta.url));
@@ -27,7 +27,7 @@ async function deadPid() {
 }
 // Read a pid's start time, and whether processDead calls it dead, from a fresh node run under the given time zone and language.
 function readUnder(env, pid, recorded) {
-  const code = `import(${JSON.stringify(LOCK)}).then((m) => { process.stdout.write(JSON.stringify({ s: m.pidStart(${pid}), dead: m.processDead({ pid: ${pid}, pid_start: ${JSON.stringify(recorded)} }) })); });`;
+  const code = `import { pidStart, processDead } from ${JSON.stringify(LOCK)};\nprocess.stdout.write(JSON.stringify({ s: pidStart(${pid}), dead: processDead({ pid: ${pid}, pid_start: ${JSON.stringify(recorded)} }) }));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: '/', ...env } });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
@@ -76,6 +76,9 @@ test('L830: a lock or claim recorded the old way (local lstart) is never read as
     assert.equal(processDead({ pid: kid.pid, pid_start: local }), false, 'the old form, written in another time zone, is alive');
     assert.equal(processDead({ pid: kid.pid, pid_start: 'Thu Oct  1 11:00:00 2026' }), false, 'an old value that differs is "can\'t tell", so alive');
     assert.equal(processDead({ pid: kid.pid, pid_start: 'jeu.  1 oct. 11:00:00 2026' }), false, 'another language: alive');
+    let reads = 0;
+    assert.equal(processDead({ pid: kid.pid, pid_start: local }, { kill: () => {}, pidStart: () => { reads += 1; return '2020-01-01T00:00:00Z'; } }), false);
+    assert.equal(reads, 0, 'an old value is never compared, so no ps is run for it (a busy Mac is spared the call)');
     const dir = tempDir('m9-start-');
     writeFileSync(join(dir, 'lock'), JSON.stringify({ pid: kid.pid, pid_start: local, host: 'mac-a', nonce: 'n-old', at: 'x' }));
     assert.throws(() => makeLock({ dir, host: 'mac-a', machine: null, timeoutMs: 50 }).acquire(), /store busy/, 'an old-form lock of a live holder is kept');
@@ -84,7 +87,7 @@ test('L830: a lock or claim recorded the old way (local lstart) is never read as
   assert.equal(processDead({ pid: gone, pid_start: 'Thu Oct  1 11:00:00 2026' }), true, 'ESRCH needs no start time');
 });
 
-test('L830: the runner\'s UTC claim, read by the same reader, is alive to processDead and the claim check', () => {
+test('L830: a claim the runner records through this reader is alive to processDead; the runner\'s raw UTC ps text (until it imports startTime) is "can\'t tell"', () => {
   const kid = liveChild();
   try {
     // The runner records through this reader (lane 4's leaderStart imports startTime with its own cap).
@@ -93,8 +96,10 @@ test('L830: the runner\'s UTC claim, read by the same reader, is alive to proces
     assert.equal(processDead(claim), false);
     assert.equal(processDead(claim, realProbe), false);
     assert.equal(processDead({ ...claim, pid_start: '2026-01-01T00:00:00Z' }), true, 'its pid with another start time is reused');
-    // A reader that answers in any other shape (an old local reader, a stand-in) can't be compared with it: alive.
-    for (const other of ['Tue Nov 10 10:16:00 2026', 'start', ' ']) {
+    // A reader that answers in any other shape (the runner's raw UTC ps text today, a stand-in) can't be compared: alive.
+    const raw = spawnSync('ps', ['-o', 'lstart=', '-p', String(kid.pid)], { encoding: 'utf8', env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } }).stdout.trim();
+    assert.equal(processDead({ pid: kid.pid, pid_start: raw }), false, 'a claim holding the raw UTC text reads alive');
+    for (const other of [raw, 'start', ' ']) {
       assert.equal(processDead(claim, { kill: realProbe.kill, pidStart: () => other }), false, `a "${other}" answer is no comparison`);
     }
   } finally { kid.kill('SIGKILL'); }
@@ -128,7 +133,7 @@ test('L826: onThisMachine and holderDead: host or machine id; an empty or missin
   assert.equal(holderDead({ unreadable: true }, { host: 'new', machine: 'M' }), false);
 });
 
-test('L826: a lock records this machine\'s id, read once; the id comes from ioreg, else /etc/machine-id, else none', () => {
+test('L826: a lock records this machine\'s id; the id comes from ioreg only, else none', () => {
   const dir = tempDir('m9-start-');
   const l = makeLock({ dir, host: 'h', machine: 'M-9' });
   const got = l.acquire();
@@ -141,8 +146,36 @@ test('L826: a lock records this machine\'s id, read once; the id comes from iore
   l2.acquire();
   assert.equal('machine' in JSON.parse(spawnSync('cat', [join(dir, 'lock')], { encoding: 'utf8' }).stdout), false, 'no id read: none written');
   const uuid = '01234567-89AB-CDEF-0123-456789ABCDEF';
-  assert.equal(readMachineId({ run: () => `  "IOPlatformUUID" = "${uuid}"\n`, read: () => { throw new Error('no'); } }), uuid);
-  assert.equal(readMachineId({ run: () => { throw new Error('no ioreg'); }, read: () => '0123456789abcdef0123456789abcdef\n' }), '0123456789abcdef0123456789abcdef');
-  assert.equal(readMachineId({ run: () => 'nothing', read: () => 'not an id' }), null);
-  assert.equal(machineId(), machineId(), 'read once per process');
+  assert.equal(readMachineId({ run: () => `  "IOPlatformUUID" = "${uuid}"\n` }), uuid);
+  // Only the Mac's hardware id: no ioreg, no id (a Linux machine-id can be shared by clones), so the host name alone.
+  assert.equal(readMachineId({ run: () => { throw new Error('no ioreg'); } }), null);
+  assert.equal(readMachineId({ run: () => 'nothing' }), null);
+});
+
+test('L830: startDiffers is the one comparison: both in the one shape and different, else false', () => {
+  const a = '2026-11-10T10:16:00Z'; const b = '2026-11-10T10:16:01Z';
+  assert.equal(startDiffers(a, b), true);
+  assert.equal(startDiffers(a, a), false);
+  for (const [r, n] of [['Tue Nov 10 10:16:00 2026', a], [a, 'Tue Nov 10 10:16:00 2026'], [null, a], [a, null], ['', ''], ['x', 'y']]) assert.equal(startDiffers(r, n), false, `${r} / ${n}`);
+});
+
+test('L830: a lock whose live holder has another start time (a reused pid) is broken; with its own start time it is kept', () => {
+  const kid = liveChild();
+  try {
+    const dir = tempDir('m9-start-');
+    writeFileSync(join(dir, 'lock'), JSON.stringify({ pid: kid.pid, pid_start: '2020-01-01T00:00:00Z', host: 'mac-a', nonce: 'n-re', at: 'x' }));
+    assert.equal(makeLock({ dir, host: 'mac-a', machine: null, timeoutMs: 200 }).acquire().broke, true);
+    const dir2 = tempDir('m9-start-');
+    writeFileSync(join(dir2, 'lock'), JSON.stringify({ pid: kid.pid, pid_start: pidStart(kid.pid), host: 'mac-a', nonce: 'n-own', at: 'x' }));
+    assert.throws(() => makeLock({ dir: dir2, host: 'mac-a', machine: null, timeoutMs: 50 }).acquire(), /store busy/);
+  } finally { kid.kill('SIGKILL'); }
+});
+
+test('L830: a failed read of this process\'s own start time is tried again, never kept as null', () => {
+  // A fresh node, so this process's own cached value is not touched.
+  const code = `import { ownPidStart } from ${JSON.stringify(LOCK)};\nconst a = ownPidStart({ read: () => null });\nconst b = ownPidStart({ read: () => '2026-11-10T10:16:00Z' });\nconst c = ownPidStart({ read: () => 'other' });\nprocess.stdout.write(JSON.stringify([a, b, c]));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), [null, '2026-11-10T10:16:00Z', '2026-11-10T10:16:00Z'], 'read again after null, then kept');
+  assert.equal(typeof ownPidStart, 'function');
 });

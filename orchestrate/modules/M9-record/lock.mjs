@@ -7,6 +7,7 @@
 //   processDead({ pid, pid_start }, probe?)   → true only when the process is provably gone (check (a) of G1)
 //   startTime(pid, { run?, timeoutMs? })       → the process's start time in UTC as "2026-11-10T10:16:00Z", or null
 //   pidStart(pid)                              → startTime(pid): the one start-time reader every recorder and checker uses
+//   startDiffers(recorded, now)                → true only when both are ISO start times and differ (a reused pid)
 //   machineId()                                → this Mac's hardware id (IOPlatformUUID), read once, or null when it can't be read
 //   const lock = makeLock({ dir, host, machine, timeoutMs, onBroken })
 //   lock.acquire() → { nonce, broke }          // throws 'store busy' after timeoutMs
@@ -60,14 +61,14 @@ export function pidStart(pid) { return startTime(pid); }
 
 // This Mac's own id (L826, #364 r1 m5): a lock is "this machine's" when its host name or its machine id matches, so a
 // host name change after a crash (macOS renames on a name clash, or the owner renames the Mac) no longer leaves a dead
-// holder's lock unbreakable for ever. Read once per process; null (no id read) falls back to the host name alone.
-export function readMachineId({ run = execFileSync, read = (p) => readFileSync(p, 'utf8') } = {}) {
+// holder's lock unbreakable for ever. Only the Mac's hardware id (IOPlatformUUID) counts: a Linux machine-id is often
+// the same across containers and cloned machines, which would let one break a live holder's lock in another. Read once
+// per process (one ioreg, capped, the first time a lock or a holder check needs it); null falls back to the host name.
+export function readMachineId({ run = execFileSync } = {}) {
   try {
     const out = run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: START_PS_MS, env: { PATH: '/usr/sbin:/usr/bin:/bin', LC_ALL: 'C' } });
-    const id = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(String(out))?.[1];
-    if (id) return id;
-  } catch { /* not a Mac, or ioreg can't run: try the other place */ }
-  try { return /^[0-9a-f]{32}$/.exec(read('/etc/machine-id').trim())?.[0] ?? null; } catch { return null; }
+    return /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(String(out))?.[1] ?? null;
+  } catch { return null; }
 }
 let ownMachine;
 export function machineId() {
@@ -88,16 +89,23 @@ export function processDead({ pid, pid_start: recorded } = {}, probe = realProbe
     if (e?.code === 'ESRCH') return true;
     return false;
   }
-  // Only two start times in the one shape can show a reused pid (L830): an older recorded value can't be compared, so alive.
-  if (typeof recorded !== 'string' || !START_ISO.test(recorded)) return false;
+  if (!comparable(recorded)) return false;
   let now;
   try { now = probe.pidStart(pid); } catch { return false; }
-  return typeof now === 'string' && START_ISO.test(now) && now !== recorded;
+  return startDiffers(recorded, now);
 }
 
-let ownStart;
-export function ownPidStart() {
-  if (ownStart === undefined) ownStart = pidStart(process.pid);
+// The one comparison of two start times (L830): true only when both are in the one shape and differ, so the pid was
+// reused. A value in any other shape (the local lstart recorded before L830, an unread one) can't be compared: false.
+// Every check of a recorded start time uses it, the runner's own group check included, never a copy of `!==`.
+const comparable = (v) => typeof v === 'string' && START_ISO.test(v);
+export function startDiffers(recorded, now) { return comparable(recorded) && comparable(now) && now !== recorded; }
+
+// This process's own start time, read once it is read at all: a ps that failed (a busy Mac, the cap) is tried again next
+// time, never kept as null, which would leave this process's locks without a start time to compare.
+let ownStart = null;
+export function ownPidStart({ read = pidStart } = {}) {
+  if (ownStart === null) ownStart = read(process.pid);
   return ownStart;
 }
 
