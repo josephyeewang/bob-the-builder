@@ -462,3 +462,6 @@ test('L354 item 2: a clear the Record refuses is in the step\'s answer', async (
   const said = await stepOn(w, refusing, 0, { ports: { frontDoorAlive: () => true } });
   assert.ok(said.some((t) => t === `${FD_RESTART_FACT} could not be cleared (refused)`), said.join(' | '));
 });
+
+// L778: the caller hazards of the phone ports, written into the contract; each is a test owed once the ports are wired.
+test.todo('L778: a frontDoorAlive, send or startMinibase port that throws fails the phone step, and a throwing startMinibase is tried again with no 5-minute wait (the calls have no try)');
