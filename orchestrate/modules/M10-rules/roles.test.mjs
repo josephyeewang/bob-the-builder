@@ -56,7 +56,8 @@ test('every profile file matches the design table', () => {
 });
 
 test('never-list tools (Workflow among them, in script too: L787), unknown tools, unknown fields and bad outbox kinds are refused', () => {
-  for (const t of NEVER_TOOLS) assert.equal(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, t] })).ok, false, t);
+  // Every role, not just the worker: an exception for one role (the front_door, say) must fail here (L798 m2).
+  for (const role of ROLE_FILES) for (const t of NEVER_TOOLS) assert.match(withEdit(role, (p) => ({ ...p, tools: [...p.tools, t] })).reason ?? '', new RegExp(`tool ${t} is never allowed`), `${role}: ${t}`);
   assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, 'Workflow'] })).reason, /Workflow is never allowed/);
   assert.match(withEdit('script', (p) => ({ ...p, tools: [...p.tools, 'Workflow'] })).reason, /Workflow is never allowed/, 'L787: script may not hold it either');
   assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, 'bash'] })).reason, /unknown tool/);
@@ -109,6 +110,8 @@ test('the subagent tool is refused under both its names, at the profile and at t
     const init = { tools: [...w.tools, name], mcp_servers: [], plugins: [], skills: [...(w.skills ?? [])], setting_sources: ['flag'], permissionMode: w.mode, claude_code_version: PIN };
     assert.match(checkInit(init, { role: 'worker', profile: w }).reason, /never-list tools loaded/, name);
   }
+  // M4's check too, for every role it knows and every name on its never-list (L798 self-review m1).
+  for (const [role, p] of Object.entries(DESIGN_PROFILES)) for (const t of M4_NEVER) assert.match(m4Check(role, { ...p, tools: [...p.tools, t] }).reason ?? '', /never-list/, `${role}: ${t}`);
   // One list in two homes, the same in both (L787: Workflow too, which M4 never starts).
   assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS].sort());
 });
