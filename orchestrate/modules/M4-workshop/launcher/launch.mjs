@@ -15,7 +15,8 @@ import { REVIEW_ROLES, reviewUser } from './review-user.mjs';
 const refuse = (reason) => ({ ok: false, reason });
 
 // Which roles each check applies to. A check that does not apply is recorded as skipped.
-const WITH_COPY = ['worker', 'writer', 'reviewer', 'auditor'];
+// A script card's session writes its copy as a worker does (L760), so it starts on a fresh one with the setup files put back.
+const WITH_COPY = ['worker', 'writer', 'reviewer', 'auditor', 'script'];
 export const CHECKS = Object.freeze([
   { n: 1, name: 'fresh copy', applies: (r) => WITH_COPY.includes(r) },
   { n: 2, name: 'setup files put back', applies: (r) => WITH_COPY.includes(r) },

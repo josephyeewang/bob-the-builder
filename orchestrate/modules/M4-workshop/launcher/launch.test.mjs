@@ -86,6 +86,8 @@ test('launch: which checks apply to which role', async () => {
   assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('auditor'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('learning'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // L760: a script card's session, on a fresh copy with the Bob folder checked, as a worker's; no shell, no install.
+  assert.deepEqual(await ran('script'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
   // A shell added to a role that had none brings check 11 with it.
   const called = [];
   const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
