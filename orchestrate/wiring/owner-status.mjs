@@ -57,13 +57,16 @@ import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
 export const USED_UP = Object.freeze(['refused', 'stopped', 'cancelled']);
 /** The kinds the worker runner starts and the one role each runs (pass.mjs kindOf and startRole): nothing else. */
-export const RUNNER_ROLE_OF = Object.freeze({ editing: 'worker', undo: 'worker', script: 'script' });
+// Each role is one of shared PRODUCT_OUTBOX_ROLES, the one list of the roles whose outboxes sit in a product's folder
+// (L895 m2): a role not on it throws when this file loads, so the two can't drift.
+const productRole = (r) => { if (!PRODUCT_OUTBOX_ROLES.includes(r)) throw new Error(`RUNNER_ROLE_OF: ${r} is not one of PRODUCT_OUTBOX_ROLES`); return r; };
+export const RUNNER_ROLE_OF = Object.freeze({ editing: productRole('worker'), undo: productRole('worker'), script: productRole('script') });
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
 // The runner's places for one product (L836) live in shared/product-paths.mjs (L848), re-exported here for the callers.
 export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } from '../shared/product-paths.mjs';

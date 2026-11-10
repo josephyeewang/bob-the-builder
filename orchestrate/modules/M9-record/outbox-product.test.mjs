@@ -30,19 +30,27 @@ test('L850-2: a worker runner hand-in is read from <outboxRoot>/<product>/<role>
     [join(env.outRoot, PRODUCT), join(env.outRoot, PRODUCT, 'worker'), join(env.outRoot, PRODUCT, 'worker', 'S-1')]);
   const r = env.record.applyOutbox(tag, file);
   assert.equal(r.ok, true, JSON.stringify(r));
-  // The same file under a tag with no product is not in that session's folder.
+  // The same session's tag with no product is refused (L895 m1).
   const { product: _p, ...bare } = tag;
-  mkdirSync(join(env.outRoot, 'worker', 'S-1'), { recursive: true });
-  assert.match(outboxPlace({ outboxRoot: env.outRoot, tag: bare, file }).reason, /not directly inside the worker outbox/);
+  assert.match(outboxPlace({ outboxRoot: env.outRoot, tag: bare, file }).reason, /a worker outbox is in its product's folder, and the tag names no product/);
 });
 
-test('L850-2: a tag with no product still reads the layout from before L836 (read only, no move)', () => {
+test('L895 m1: a worker or script tag with no product is refused, even for a file in the flat folder; a Lead\'s is read flat and may name no product', () => {
   const env = world();
-  const file = outboxFile(env, 'worker', 'S-1', 'report-old.md', 'old place\n');
-  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, file);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  // ... and a product tag never finds a file left in the old place.
-  assert.equal(outboxPlace({ outboxRoot: env.outRoot, tag: { role: 'worker', sessionId: 'S-1', product: PRODUCT }, file }).ok, false);
+  for (const role of ['worker', 'script']) {
+    const flat = drop(join(env.outRoot, role, 'S-1'), 'report-old.md', 'old place\n');
+    const tag = { role, sessionId: 'S-1', card: 'C-1' };
+    const w = outboxFolders({ outboxRoot: env.outRoot, tag });
+    assert.equal(w.ok, false, role); assert.match(w.reason, new RegExp(`a ${role} outbox is in its product's folder, and the tag names no product`));
+    const r = env.record.applyOutbox(tag, flat);
+    assert.equal(r.ok, false, role); assert.match(r.reason, /tag names no product/);
+  }
+  const lead = outboxFile(env, 'lead', 'L-1', 'think-1.md', 'a thought\n');
+  assert.equal(outboxPlace({ outboxRoot: env.outRoot, tag: { role: 'lead', sessionId: 'L-1' }, file: lead }).ok, true);
+  for (const role of ['lead', 'incident', 'auditor']) {
+    const w = outboxFolders({ outboxRoot: env.outRoot, tag: { role, sessionId: 'L-1', product: PRODUCT } });
+    assert.equal(w.ok, false, role); assert.match(w.reason, new RegExp(`a ${role} outbox has no product folder`));
+  }
 });
 
 test('L850-2: another product\'s outbox is never read by this Record, nor through this product\'s tag', () => {
@@ -75,11 +83,11 @@ test('L850-2: a product name with .. or / never climbs out of the outbox root\'s
 
 test('L850-2: a role or session id with / is refused, with or without a product', () => {
   const env = world();
-  const file = drop(join(env.outRoot, 'worker', 'S-1'));
+  const file = drop(join(env.outRoot, 'lead', 'S-1'));
   const pFile = drop(join(env.outRoot, PRODUCT, 'worker', 'S-1'));
   for (const [tag, f] of [
-    [{ role: 'lead/../worker', sessionId: 'S-1' }, file],
-    [{ role: 'worker', sessionId: 'S-2/../S-1' }, file],
+    [{ role: 'worker/../lead', sessionId: 'S-1' }, file],
+    [{ role: 'lead', sessionId: 'S-2/../S-1' }, file],
     [{ role: 'lead/../worker', sessionId: 'S-1', product: PRODUCT }, pFile],
     [{ role: 'worker', sessionId: 'S-2/../S-1', product: PRODUCT }, pFile],
   ]) {
@@ -124,13 +132,13 @@ test('L890: a Record is opened only for a product name setup makes a folder for,
 
 test('#400 r1 m3: the file must be directly in the session\'s own folder: not S-10 under tag S-1, not a sub-folder', () => {
   const env = world();
-  for (const product of [undefined, PRODUCT]) {
-    const base = product ? join(env.outRoot, PRODUCT, 'worker') : join(env.outRoot, 'worker');
+  for (const [role, product] of [['lead', undefined], ['worker', PRODUCT]]) {
+    const base = product ? join(env.outRoot, PRODUCT, role) : join(env.outRoot, role);
     mkdirSync(join(base, 'S-1'), { recursive: true });
-    const tag = { role: 'worker', sessionId: 'S-1', ...(product ? { product } : {}) };
+    const tag = { role, sessionId: 'S-1', ...(product ? { product } : {}) };
     for (const file of [drop(join(base, 'S-10')), drop(join(base, 'S-1', 'sub'))]) {
       const r = outboxPlace({ outboxRoot: env.outRoot, tag, file });
-      assert.equal(r.ok, false, file); assert.match(r.reason, /not directly inside the worker outbox of session S-1/);
+      assert.equal(r.ok, false, file); assert.match(r.reason, new RegExp(`not directly inside the ${role} outbox of session S-1`));
     }
   }
 });
