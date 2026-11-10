@@ -15,7 +15,8 @@
 //     "pin": "<claude version>"?, "machineWide": "/abs"? }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
-// pinned Bob file list (check 13) have no config field yet, so check 12 refuses every start until they do.
+// pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
+// first at check 4 (no install port), a script session at check 12.
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -32,7 +33,7 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
-import { workerChecks } from './runner-checks.mjs';
+import { workerChecks, setupFilesProblem } from './runner-checks.mjs';
 import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn } from 'node:child_process';
@@ -59,6 +60,10 @@ export function checkRunnerConfig(c) {
     if (!fullPath(p.mirror)) fail(`product ${name}: mirror must be a full path in its simplest form`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
     if (p.rules !== undefined && (!p.rules || typeof p.rules !== 'object' || Array.isArray(p.rules))) fail(`product ${name}: rules must be the product's rules`);
+    // The rules' production lists, as review-runner-main.mjs readConfig requires them (#369 m4): check 8 must not pass on
+    // an empty snapshot.
+    const prod = p.rules?.production;
+    if (p.rules !== undefined && !(prod && ['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string')))) fail(`product ${name}: rules.production must list env_files, programs and hosts`);
     // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
     // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
     const d = p.render.paths.deny;
@@ -69,6 +74,16 @@ export function checkRunnerConfig(c) {
   if (c.machineWide !== undefined && !fullPath(c.machineWide)) fail('machineWide must be a full path in its simplest form');
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
+  // Each product's rules snapshot is the runner's own file, in its own folder outside every copy, one per product
+  // (#369 m4; as review-runner-main.mjs keeps its snapshot inside its root): the sessions' hooks read it.
+  const snaps = new Set();
+  for (const [name, p] of Object.entries(c.products)) {
+    const s = p.render.paths.snapshot;
+    if (s === undefined) continue;
+    if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
+    if (snaps.has(s.toLowerCase())) fail(`product ${name}: render.paths.snapshot is another product's`);
+    snaps.add(s.toLowerCase());
+  }
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
@@ -81,8 +96,11 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
     testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
 }
 
-/** The start port's ports from the config: the stop flag, check 0's pinned version, and the worker launch checks. */
-export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin }, checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })) });
+/** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and check 2
+ * once more just before claude starts (#369 M1). */
+export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin },
+  checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })),
+  beforeStart: (x) => setupFilesProblem(workerCheckInputs(c, x, { log })) });
 /** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 

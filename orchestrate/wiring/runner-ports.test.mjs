@@ -256,6 +256,21 @@ test('#364 self-review M1: a stop that comes while a start runs its checks spawn
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
+test('#369 M1: check 2 runs once more just before claude starts; setup files changed by the checks\' runs stop the start', async () => {
+  const seen = [];
+  const w = world({ beforeStart: async (x) => { seen.push([x.copy, x.product, x.sessionId]); return 'the copy holds .claude/settings.local.json, which main does not'; },
+    launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /setup files changed after check 2, so claude was not started: the copy holds \.claude\/settings\.local\.json/);
+    assert.equal(seen.length, 1); assert.equal(typeof seen[0][0], 'string');
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const ok = world({ beforeStart: async () => null, launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try { assert.equal((await ok.start()).ok, true); assert.equal(ok.calls.some((c) => c[0] === 'spawn'), true); } finally { rmSync(ok.d, { recursive: true, force: true }); }
+});
+
 test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {
   const C = 'c'.repeat(40); const M = 'd'.repeat(40);
   const main = async (m) => { assert.equal(m, '/m'); return M; };

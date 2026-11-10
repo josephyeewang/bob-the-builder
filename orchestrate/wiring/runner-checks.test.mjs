@@ -10,6 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
+import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
 import { checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
 
@@ -56,12 +57,15 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
 });
 
 // A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends.
-function standIn(calls) {
+function standIn(calls, { sandbox = false, baseline = true } = {}) {
   return (bin, args, opts) => {
     const cmd = args.at(-1).replace(/^Run exactly this shell command once and report its exit code: /, '');
     calls.push({ bin, args, cwd: opts.cwd, cmd });
     const c = new EventEmitter(); c.kill = () => {};
-    setImmediate(() => { spawnSync('/bin/sh', ['-c', cmd], { cwd: opts.cwd }); c.emit('close', 0); });
+    // Sandboxed: the smoke's first step (marking it ran, inside the copy) runs; its write outside and network reach do not.
+    const smoke = cmd.includes('.orch-smoke-');
+    const run = smoke && sandbox ? cmd.split(';')[0] : smoke || baseline ? cmd : null;
+    setImmediate(() => { if (run) spawnSync('/bin/sh', ['-c', run], { cwd: opts.cwd }); c.emit('close', 0); });
     return c;
   };
 }
@@ -83,7 +87,6 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     assert.deepEqual(Object.keys(workerChecks(x)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11], 'no install (4), budget (12) or Bob list (13) yet');
     const none = workerChecks({ ...x, mirror: undefined, busy: undefined, pin: undefined, rules: undefined, machineWide: undefined, testCommand: undefined });
     assert.deepEqual(Object.keys(none).map(Number), [1, 5, 9]);
-    assert.deepEqual(Object.keys(workerChecks({ ...x, role: 'script', profile: DESIGN_PROFILES.script, kind: 'script', testCommand: undefined })).map(Number).includes(11), true, 'a script session runs the smoke only');
     // Check 12 is M11's own gate, with this session's kind.
     let seen; let given;
     const budget = { rules: {} };
@@ -100,44 +103,89 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('step 6, check 11: a worker\'s baseline runs first and must exit 0; then the smoke runs', async () => {
-  const runs = [['exit 3', /baseline tests failed inside the lock-down \(exit 3\)/, 1], ['true', /wrote outside the copy/, 2]];
-  for (const [testCommand, re, n] of runs) {
+test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {
+  // A sandbox stand-in: the smoke's write outside the copy and its network reach are blocked, as the lock-down blocks them.
+  const runs = [['exit 3', /baseline tests failed inside the lock-down \(exit 3\)/, 2, true], ['true', null, 2, true], ['true', /wrote outside the copy/, 1, false]];
+  for (const [testCommand, re, n, sandbox] of runs) {
     const calls = [];
-    const { d, x } = inputs({ testCommand, spawn: standIn(calls) });
+    const { d, x } = inputs({ testCommand, spawn: standIn(calls, { sandbox }) });
     try {
       const r = await workerChecks(x)[11]();
-      assert.equal(r.ok, false); assert.match(r.reason, re, testCommand);
-      assert.equal(calls.length, n, testCommand);
-      assert.equal(calls[0].cwd, x.copy); assert.ok(calls[0].args.includes(x.settings.file), 'the role\'s own settings');
-      assert.equal(calls[0].cmd, baselineCommand(testCommand, baselineFile(x)));
+      if (re) { assert.equal(r.ok, false); assert.match(r.reason, re, testCommand); } else assert.deepEqual(r, { ok: true });
+      assert.equal(calls.length, n, `${testCommand}: the baseline runs only after the smoke passed`);
+      assert.ok(calls[0].cmd.includes(`'${x.home}/`), 'the smoke is first, and tries to write in the owner\'s home, outside the copy');
+      for (const c of calls) { assert.equal(c.cwd, x.copy); assert.ok(c.args.includes(x.settings.file), 'the role\'s own settings'); }
+      if (n === 2) assert.equal(calls[1].cmd, baselineCommand(testCommand, baselineFile(x)));
       assert.equal(existsSync(baselineFile(x)), false, 'the exit file is removed');
-      if (n === 2) assert.ok(calls[1].cmd.includes(`'${x.home}/`), 'the smoke tries to write in the owner\'s home, outside the copy');
     } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // A command that never writes its exit code can't say: refused.
-  const { d, x } = inputs({ spawn: (b, a, o) => { const c = new EventEmitter(); setImmediate(() => c.emit('close', 0)); return c; } });
-  try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); } finally { rmSync(d, { recursive: true, force: true }); }
+  {
+    const { d, x } = inputs({ spawn: standIn([], { sandbox: true, baseline: false }) });
+    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // A baseline past its time limit has its whole process group killed, not claude alone (#369 m2).
+  {
+    const killed = []; const spawned = [];
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { spawned.push(o.detached); if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4321; c.kill = () => { killed.push('child'); }; return c; };
+    const { d, x } = inputs({ spawn, baselineMs: 50, killGroup: (g) => killed.push(g) });
+    try {
+      assert.match((await workerChecks(x)[11]()).reason, /did not finish in time/);
+      assert.deepEqual(killed, [4321], 'the group, by its leader\'s pid'); assert.equal(spawned.at(-1), true, 'the baseline leads its own group');
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // A script session has no shell, so launch() skips check 11 for it (#369 m6): its port is never called.
+  assert.equal(CHECKS.find((c) => c.n === 11).applies('script', DESIGN_PROFILES.script), false);
+  assert.equal(CHECKS.find((c) => c.n === 11).applies('worker', DESIGN_PROFILES.worker), true);
   assert.throws(() => baselineCommand('a\nb', '/f'), /one-line test command/);
   assert.throws(() => baselineCommand('', '/f'), /one-line/);
   assert.throws(() => baselineCommand('t', "/f'x"), /quote/);
 });
 
-test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', () => {
+test('step 6, check 2 (#369 m7): names compared after folding letter case, a non-plain file of main\'s refused, a nested change found', async () => {
+  const root = tempDir('orch-rchecks-');
+  try {
+    const copy = join(root, 'copy'); mkdirSync(join(copy, '.claude'), { recursive: true }); mkdirSync(join(copy, 'pkg'));
+    writeFileSync(join(copy, '.claude', 'a'), 'A'); writeFileSync(join(copy, '.claude', 'b'), 'B'); writeFileSync(join(copy, 'pkg', 'CLAUDE.local.md'), 'n');
+    const blobs = { oa: 'A', ob: 'B', on: 'n' };
+    const tree = (rows) => async (args) => args[0] === 'ls-tree' ? { code: 0, stdout: Buffer.from(rows.map((r) => `${r}\0`).join('')) } : { code: 0, stdout: Buffer.from(blobs[args[2]]) };
+    const rows = ['100644 blob oa\t.claude/a', '100755 blob ob\t.CLAUDE/b', '100644 blob on\tpkg/CLAUDE.local.md', '100644 blob zz\tsrc.txt'];
+    assert.equal(await setupFilesProblem({ copy, mirror: '/m' }, { run: tree(rows) }), null, 'main\'s .CLAUDE/b is the copy\'s .claude/b on the Mac\'s disk');
+    assert.match(await setupFilesProblem({ copy, mirror: '/m' }, { run: tree([...rows, '120000 blob ol\t.mcp.json']) }), /main's \.mcp\.json is not a plain file \(mode 120000\)/);
+    assert.match(await setupFilesProblem({ copy, mirror: '/m' }, { run: tree([...rows, '160000 commit oc\t.claude/sub']) }), /main's \.claude\/sub is not a plain file/);
+    assert.match(await setupFilesProblem({ copy, mirror: '/m' }, { run: tree([...rows, '100644 blob om\t.mcp.json']) }), /main's \.mcp\.json is not put back/, 'the missing one by main\'s own name');
+    writeFileSync(join(copy, 'pkg', 'CLAUDE.local.md'), 'changed');
+    assert.match(await setupFilesProblem({ copy, mirror: '/m' }, { run: tree(rows) }), /the copy's pkg\/CLAUDE\.local\.md is not main's/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const RULES = { production: { env_files: ['.env'], programs: ['psql'], hosts: ['db.example.com'] } };
+test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/mw.json',
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: { k: 1 }, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/o/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
-    ['/m', '2.1.300', '/h', { k: 1 }, '/s.json', '/mw.json', '/home', 'npm test', '/b', null]);
+    ['/m', '2.1.300', '/h', RULES, '/o/s.json', '/mw.json', '/home', 'npm test', '/b', null]);
   for (const k of ['busy', 'writeSnapshot', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
   // The start port gets these checks and check 0's version.
   const sd = startDeps(c);
   assert.equal(sd.names.version, '2.1.300');
+  // Check 2 once more just before claude starts (#369 M1), on this product's mirror: here none, so it can't pass.
+  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1' }), /main's file list can't be read from the mirror/);
   assert.deepEqual(Object.keys(sd.checksFor({ role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
   for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w']) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), /machineWide must be a full path in its simplest form/, machineWide);   // the #364 r2 n4 class
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
+  // #369 m4: the rules' production lists, as the review runner requires; the snapshot in the runner's own folder, one per product.
+  for (const rules of [{}, { production: { env_files: [], programs: [] } }, { production: { env_files: [1], programs: [], hosts: [] } }]) {
+    assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules } } }), /rules\.production must list env_files, programs and hosts/, JSON.stringify(rules));
+  }
+  const withSnap = (p1, p2) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p1 } } }, p2: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p2 } } } } });
+  assert.doesNotThrow(() => checkRunnerConfig(withSnap('/o/s1.json', '/o/s2.json')));
+  for (const s of ['/x/s.json', '/o/sub/s.json', '/o/../o/s.json', 's.json', '/o']) assert.throws(() => checkRunnerConfig(withSnap(s, '/o/s2.json')), /p1: render\.paths\.snapshot must be a file in the runner's own folder \(\/o\)/, s);
+  assert.throws(() => checkRunnerConfig(withSnap('/o/s.json', '/o/S.json')), /p2: render\.paths\.snapshot is another product's/);
 });

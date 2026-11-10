@@ -23,7 +23,9 @@
 //        product's copy made after the start as well as this product's. A Mac user per session or per product would close
 //        it: a choice not taken ("we chose not to", no expiry);
 //     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
-//        by runner-main.mjs; none by default); a check that applies and has no port is refused there;
+//        by runner-main.mjs; none by default); a check that applies and has no port is refused there. Just before
+//        claude starts, `beforeStart` runs check 2 again (runner-main.mjs startDeps; #369 M1), since checks 4 and 11
+//        run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
 //        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
@@ -173,7 +175,7 @@ export function startPort(c, deps = {}) {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
-    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false,
+    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, ...(deps.fs ?? {}) };
   return async ({ card, kind, product, sessionId } = {}) => {
@@ -217,7 +219,11 @@ export function startPort(c, deps = {}) {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
       const args = sessionArgs({ profile, settingsFile, sessionId, prompt });
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
-        start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) }) });
+        start: async () => {
+          // Check 2 once more (#369 M1): checks 4 and 11 ran the branch's own code, which could write the copy's setup files.
+          if (beforeStart) { const p = await beforeStart(x); if (p) return refuse(`the copy's setup files changed after check 2, so claude was not started: ${p}`); }
+          return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
+        } });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.
     if (l?.started?.running === true) return { ok: false, running: true, pgid: l.started.pgid, reason: l.started.reason };

@@ -8,8 +8,11 @@
 //   1  fresh copy           reviewChecks' 1 on the card's copy: a plain folder of this user's alone (0700, which the
 //                           job's Umask 077 gives), holding the head prepareWorkerCopy checked out
 //   2  setup files put back setupFilesProblem below: every `.claude`, `.mcp.json` and `CLAUDE.local.md` in the copy (any
-//                           depth, any letter case; worker-copy.mjs isProtectedName) is a plain file byte for byte
-//                           main's in the mirror, no link, and each of main's is there
+//                           depth outside a linked folder, which is not followed, as worker-copy.mjs removeProtected;
+//                           any letter case, isProtectedName) is a plain file byte for byte main's in the mirror, no
+//                           link, and each of main's is there (names compared after folding letter case, as the Mac's
+//                           disk does). The start port runs it once more just before claude starts (#369 M1), since
+//                           checks 4 and 11 run the branch's own code, which could write them.
 //   3  outbox emptied       reviewChecks' 3 (emptyOutbox, with `busy` the "what holds this folder" port)
 //   4  dependencies         NO PORT: the install runs inside the lock-down (launch.mjs installStep), through the
 //                           lock-down runner (`runLocked`), which is not built (save-work waits on it too). Until it is,
@@ -22,10 +25,17 @@
 //   8  rules snapshot       reviewChecks' 8: written afresh from the product's rules, then checkSnapshot
 //   9  no stray keys        reviewChecks' 9 (checkRoleEnv on the environment claude gets)
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
-//   11 baseline and smoke   a worker's baseline first (the product's test command, run once by the role's own start
-//                           with its own settings through lockedRunCommand, must exit 0), then reviewChecks' smoke, with
-//                           the owner's home as the place outside the copy it must not write. A script session runs the
-//                           smoke only (launch.mjs: the baseline is the worker's).
+//   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
+//                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
+//                           worker's baseline (the product's test command, run once by the role's own start with its
+//                           own settings through lockedRunCommand, must exit 0). The baseline's exit code is written by
+//                           the command into the copy, where the branch's code could forge it: it is a sanity check
+//                           that the branch's tests pass, not a wall (#369 m1). Whether claude runs that one compound
+//                           command under dontAsk (its exact allow rules reject `;` and `>`, so it rests on sandboxed
+//                           shell commands being allowed) is not proven on the pinned version: a capability claim to
+//                           prove in the live start on the Mini, void on a pin move; until then a refusal says "exit
+//                           not written", which fails safe (#369 m5). A script session has no shell (role-profiles.mjs),
+//                           so launch.mjs skips check 11 for it (#369 m6).
 //   12 budget               M11's own check12 with this session's kind (gate.mjs counts editing, undo and script
 //                           sessions themselves); no budget source, no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
@@ -37,7 +47,7 @@ import { reviewChecks } from '../modules/M4-workshop/launcher/review-launch.mjs'
 import { lockedRunCommand, baselineTest } from '../modules/M4-workshop/launcher/launch.mjs';
 import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
-import { git, gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
+import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -54,10 +64,15 @@ export async function setupFilesProblem({ copy, mirror }, { run = git } = {}) {
     if (r?.code !== 0) throw new Error(String(r?.stderr ?? '').trim().slice(0, 200) || `exit ${r?.code}`);
     raw = r.stdout.toString();
   } catch (e) { return `main's file list can't be read from the mirror (${e?.message ?? e})`; }
+  // Keyed by the path with its letter case folded, as the Mac's disk stores it (#369 m7): main's `.claude/a` and
+  // `.CLAUDE/b` land in one folder of the copy.
   const want = new Map();
   for (const rec of raw.split('\0').filter(Boolean)) {
-    const tab = rec.indexOf('\t'); const [, type, oid] = rec.slice(0, tab).split(' '); const path = rec.slice(tab + 1);
-    if (path.split('/').some(isProtectedName)) want.set(path, { type, oid });
+    const tab = rec.indexOf('\t'); const [mode, type, oid] = rec.slice(0, tab).split(' '); const path = rec.slice(tab + 1);
+    if (!path.split('/').some(isProtectedName)) continue;
+    // Only a plain file of main's is put back (worker-copy.mjs restoreMainCopies refuses a link, 120000).
+    if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return `main's ${path} is not a plain file (mode ${mode})`;
+    want.set(path.toLowerCase(), { path, oid });
   }
   const found = [];
   const under = (dir, rel) => {
@@ -81,15 +96,15 @@ export async function setupFilesProblem({ copy, mirror }, { run = git } = {}) {
   };
   try { walk(copy, ''); } catch (e) { return `the copy's setup files: ${e?.message ?? e}`; }
   for (const r of found) {
-    const w = want.get(r);
-    if (!w || w.type !== 'blob') return `the copy holds ${r}, which main does not`;
+    const w = want.get(r.toLowerCase());
+    if (!w) return `the copy holds ${r}, which main does not`;
     const b = await run(['cat-file', 'blob', w.oid], { gitDir: mirror, purpose: 'runner-check-2-blob', timeoutMs: 60_000 });
     if (b?.code !== 0) return `main's ${r} can't be read from the mirror`;
     let mine; try { mine = readNoLink(join(copy, r)); } catch (e) { return `the copy's ${r} can't be read (${e?.code ?? e?.message})`; }
     if (!Buffer.from(b.stdout).equals(mine)) return `the copy's ${r} is not main's`;
   }
-  const have = new Set(found);
-  const missing = [...want.keys()].filter((k) => !have.has(k));
+  const have = new Set(found.map((r) => r.toLowerCase()));
+  const missing = [...want].filter(([k]) => !have.has(k)).map(([, w]) => w.path);
   return missing.length ? `main's ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not put back in the copy` : null;
 }
 
@@ -106,12 +121,16 @@ export function baselineCommand(test, file) {
   return `( ${test} ); /bin/echo $? > ${q(file)}`;
 }
 
-// Runs one claude to its end (or the time limit). → { exitCode }, or a throw.
-function runToEnd(spawn, bin, args, opts, timeoutMs) {
+// Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
+// time-out kills the tests it started too, not claude alone (#369 m2).
+function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL')) {
   return new Promise((resolve, reject) => {
     let child;
-    try { child = spawn(bin, args, { ...opts, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
-    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } reject(new Error('it did not finish in time')); }, timeoutMs);
+    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
+    const t = setTimeout(() => {
+      try { if (Number.isInteger(child.pid) && child.pid > 1) kill(child.pid); else child.kill('SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      reject(new Error('it did not finish in time'));
+    }, timeoutMs);
     child.on('error', (e) => { clearTimeout(t); reject(e); });
     child.on('close', (code) => { clearTimeout(t); resolve({ exitCode: code }); });
   });
@@ -134,7 +153,10 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
   if (has(x.machineWide)) ports[10] = r[10];
   if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || has(x.testCommand))) {
     ports[11] = async () => {
-      if (x.role === 'worker') {
+      // The smoke first (#369 M2): the branch's tests run only once the lock-down is shown on.
+      const smoke = await r[11]();
+      if (!smoke?.ok || x.role !== 'worker') return smoke;
+      {
         const f = baselineFile(x);
         let cmd; try { cmd = baselineCommand(x.testCommand, f); } catch (e) { return refuse(e.message); }
         const lr = lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: x.settings.file, command: cmd, roleArgs, profile: x.profile });
@@ -143,7 +165,7 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         let b;
         try {
           b = await baselineTest({ run: async () => {
-            await runToEnd(x.spawn, lr.bin, lr.args, { cwd: x.copy, env: x.env }, x.baselineMs ?? BASELINE_MS);
+            await runToEnd(x.spawn, lr.bin, lr.args, { cwd: x.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup);
             // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
             let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
             return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
@@ -151,7 +173,7 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         } finally { rmSync(f, { force: true }); }
         if (!b.ok) return b;
       }
-      return r[11]();
+      return smoke;
     };
   }
   if (x.budget) {
