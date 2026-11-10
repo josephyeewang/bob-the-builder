@@ -24,7 +24,15 @@
 //   rulesReads(text, { helpers, keyMaps }) → { keys: Set, nonLiteral }
 //   readsListed(keys, x) → is listed key x read (itself, or a key inside it: go_free.exact_reverse reads go_free)
 //   listed(list, k) → is read key k listed (itself; or, for the go-free map only, a kind inside it, #77 r5 m-1)
+//   moduleSources(dir) → [{ file, text }]   every non-test source file under a module, so a new file is scanned unasked
+//   moduleReads(sources, { files, unnamed, keyMaps }) → { keys, problems }   the reads of all of them (L165). `files` gives
+//     a file's own { helpers, prep }. `unnamed` lists, per file, how many reads can't be named and why each is fine:
+//     any other count, an entry for a file that is gone, or an entry with no reason is a problem, so the count is
+//     asserted at 0 unless a reason says otherwise.
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PRODUCT_STATES } from './policy.mjs';
 import { GO_FREE, GO_FREE_KEY } from '../M9-record/ready.mjs';
 
@@ -94,3 +102,29 @@ export const readsListed = (keys, x) => [...keys].some((k) => k === x || k.start
 /** A read key is on the list when it is listed, or is a go-free kind and the go-free map is listed (#77 r5 m-1: no other
  * map stands for the keys inside it, so a read of timeouts.<new> is not covered by a listed `timeouts`). */
 export const listed = (list, k) => list.some((x) => x === k || (x === GO_FREE_KEY && k.startsWith(`${x}.`)));
+
+const SOURCE = /(?<!\.test)(?<!\.test-helper)\.mjs$/;
+export function moduleSources(dir) {
+  const root = fileURLToPath(dir);
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile() && SOURCE.test(e.name))
+    .map((e) => relative(root, join(e.parentPath, e.name)))
+    .sort()
+    .map((file) => ({ file, text: readFileSync(join(root, file), 'utf8') }));
+}
+
+const MIN_REASON = 20;
+export function moduleReads(sources, { files = {}, unnamed = {}, keyMaps = {} } = {}) {
+  const keys = new Set();
+  const problems = [];
+  for (const { file, text } of sources) {
+    const own = files[file] ?? {};
+    const r = rulesReads(own.prep ? own.prep(text) : text, { helpers: own.helpers ?? [], keyMaps });
+    for (const k of r.keys) keys.add(k);
+    const allowed = unnamed[file];
+    if (allowed && String(allowed.why ?? '').length < MIN_REASON) problems.push(`${file}: its unnamed reads need a reason`);
+    if (r.nonLiteral !== (allowed?.count ?? 0)) problems.push(`${file}: ${r.nonLiteral} rules read(s) with a key that can't be named, ${allowed?.count ?? 0} allowed`);
+  }
+  for (const file of [...Object.keys(files), ...Object.keys(unnamed)]) if (!sources.some((s) => s.file === file)) problems.push(`${file} is listed but is not in the module`);
+  return { keys, problems };
+}

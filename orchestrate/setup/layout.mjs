@@ -62,12 +62,20 @@ export function parseConfig(raw) {
   // The watch-only week: `repo` is the repository the token is proven against (prove-token reads it from here, never from the command
   // line) and the one watch-rules prints; `rulesSha256` is the hash of the rules file root put in place (watch-rules), absent until then.
   if (watch !== undefined) {
-    const ok = watch && typeof watch === 'object' && !Array.isArray(watch) && Object.keys(watch).every((k) => ['repo', 'rulesSha256'].includes(k));
+    const ok = watch && typeof watch === 'object' && !Array.isArray(watch) && Object.keys(watch).every((k) => ['repo', 'rulesSha256', 'app'].includes(k));
     const r = ok ? watch.repo : undefined;
     if (!isRepoName(r)) throw new Error('config: watch.repo must look like owner/name');
+    // `app` (L627): the read-only watcher App the job mints its check-run token as. Its key is a file in the keys folder,
+    // named here by its bare name, so the config can't point the job at a file anywhere else.
+    if (watch.app !== undefined) {
+      const a = watch.app; const keys = a && typeof a === 'object' && !Array.isArray(a) ? Object.keys(a) : null;
+      if (!keys || keys.length !== 3 || !['id', 'installation', 'keyFile'].every((k) => keys.includes(k))) throw new Error('config: watch.app must have exactly id, installation and keyFile');
+      for (const k of ['id', 'installation']) if (typeof a[k] !== 'string' || !/^[1-9][0-9]{0,19}$/.test(a[k])) throw new Error(`config: watch.app.${k} must be the App's number, as a string of digits`);
+      if (typeof a.keyFile !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(a.keyFile)) throw new Error('config: watch.app.keyFile must be a bare file name in the keys folder');
+    }
     if (watch.rulesSha256 !== undefined && (typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) throw new Error('config: watch.rulesSha256 must be 64 hex characters');
   }
-  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}) } } : {}) };
+  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}), ...(watch.app !== undefined ? { app: { ...watch.app } } : {}) } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */

@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { memoryRecord } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
-import { ALERT_QUEUE_FACT, outbox } from '../M11-dispatcher/alerts.mjs';
-import { readUnsent } from '../M9-record/unsent.mjs';
+import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs';
+import { heldHolders, makeHeldFlag, newHeldToken, readHeldFlag, readUnsent, setHeldFlag } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
 import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
@@ -480,6 +480,157 @@ test('L288 plants: a store backlog bigger than one round goes out over later rou
   assert.deepEqual([...w.gh.issues.values()].map((x) => x.title), ['p1\'s Record store: kind-b1', 'p1\'s Record store: kind-b2', 'p1\'s Record store: kind-b3', 'p1\'s Record store: kind-b4', 'p1\'s Record store: kind-b5']);
 });
 
+// A queue that can't shrink: every entry went out, but the Record refuses to take it off.
+const stuckQueue = (w, n) => {
+  for (let i = 0; i < n; i += 1) outbox(w.rec, T0)(`stuck alert ${i}`);
+  return Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+};
+
+test('L558 M3: a stuck queue that fills the round leaves time for the store\'s lines', async () => {
+  for (const [stuck, ms] of [[20, 300], [50, 300], [50, 150], [10, 600]]) {
+    const w = world();
+    const rec = stuckQueue(w, stuck);
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('k1', 'alert_not_queued'));
+    const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * ms;
+    await w.run({ rec, probe: ALIVE, clock });
+    assert.deepEqual(readUnsent(w.root), [], `${stuck} stuck at ${ms} ms: the store's line went in the first round`);
+  }
+});
+
+test('L558 M3: with nothing from the store waiting, the queue has the whole round', async () => {
+  const w = world();
+  for (let i = 0; i < 12; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 6000 });
+  assert.equal(r.sent, 6);
+});
+
+test('L558 M3: store lines the round had no time for are named in `refused`', async () => {
+  const w = world();
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['b1', 'b2', 'b3', 'b4', 'b5'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  const r = await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 2500 });
+  assert.equal(r.sent, 2);
+  assert.match(r.refused, /3 of the store's unsent alerts had no time this round/);
+});
+
+test('L566 N1: a Record send that hangs every round still lets a store line go in each', async () => {
+  for (const writable of [false, true]) {
+    const w = world();
+    const rec = writable ? w.rec : stuckQueue(w, 1);
+    if (writable) outbox(w.rec, T0)('stuck alert 0');
+    appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['h1', 'h2', 'h3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+    const open = w.gh.open;
+    // The time a round sees is this count, not the wall clock: at a budget of exactly two sends a real 30 ms hang can read
+    // as 30 or 29, within budget, and every store line goes in one round (seen on #249's CI).
+    let elapsed = 0;
+    w.gh.open = (o) => {
+      if (!/stuck alert/.test(`${o.title}${o.body}`)) return open(o);
+      elapsed += 30;
+      return new Promise(() => {});
+    };
+    for (let round = 3; round > 0; round -= 1) {
+      await w.run({ rec, probe: ALIVE, sendMs: 30, budgetMs: 50, clock: () => elapsed });
+      assert.equal(readUnsent(w.root).length, round - 1, `writable ${writable}: one store line a round`);
+    }
+  }
+});
+
+test('L566 N1: GitHub at 6 s a call, the store still gets a line out each round', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 3);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['g1', 'g2', 'g3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 6000;
+  for (let round = 3; round > 0; round -= 1) {
+    await w.run({ rec, probe: ALIVE, clock });
+    assert.equal(readUnsent(w.root).length, round - 1);
+  }
+});
+
+test('L566 N1: past the budget only the one line goes: the rest wait and are named', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 1);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), ['o1', 'o2', 'o3'].map((id) => storeLine(id, `kind-${id}`)).join(''));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 60000;
+  const r = await w.run({ rec, probe: ALIVE, clock });
+  assert.equal(readUnsent(w.root).length, 2);
+  assert.match(r.refused, /2 of the store's unsent alerts had no time this round/);
+});
+
+test('L566 N2: a queue the round can\'t get through is named in `refused`', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 60);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
+  const r = await w.run({ rec, probe: ALIVE, clock });
+  assert.ok(r.sent < 60);
+  assert.match(r.refused, /60 alert\(s\) are still in the Record's queue after this round, which did not shrink it/);
+});
+
+test('L579: a backlog that is clearing fails no pass: a shrinking queue stays quiet', async () => {
+  const w = world();
+  for (let i = 0; i < 60; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 300;
+  const r = await w.run({ probe: ALIVE, clock });
+  assert.ok(queued(w.rec).length > 0 && queued(w.rec).length < 60, `${queued(w.rec).length} left`);
+  assert.equal(r.refused ?? '', '');
+});
+
+test('L579: one stuck entry on its own is named', async () => {
+  const w = world();
+  const rec = stuckQueue(w, 1);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /1 alert\(s\) are still in the Record's queue/);
+});
+
+// L593: a delivered alert whose told mark the Record refuses stays on the queue (L527). It went out, so it isn't waiting.
+const heldDelivered = async (w) => {
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === 'stop-m-1' ? { ok: false, reason: 'busy' } : w.rec.write(x)) } });
+  tellThen(outbox(rec, w.now()), 'cause still stands', { fact: 'stop-m-1', fields: { told_at: new Date(w.now()).toISOString() }, kind: 'k' });
+  await w.run({ rec, probe: ALIVE });     // delivered and held; the line about the mark arrives during this round
+  w.tick(5);
+  assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', 'the line about the mark goes out');
+  return rec;
+};
+
+test('L593: a delivered alert held on the queue fails no pass', async () => {
+  const w = world();
+  const rec = await heldDelivered(w);
+  for (let i = 0; i < 4; i += 1) {
+    w.tick(5);
+    const left = queued(rec).length;
+    assert.equal((await w.run({ rec, probe: ALIVE })).refused ?? '', '', `round ${i}`);
+    assert.equal(left, 1, 'still held on the queue');
+  }
+});
+
+test('L593: a stuck alert behind a held one is named, and only it is counted', async () => {
+  const w = world();
+  await heldDelivered(w);
+  outbox(w.rec, w.now())('a stuck alert');
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.id === ALERT_QUEUE_FACT || x.id === 'stop-m-1' ? { ok: false, reason: 'refused' } : w.rec.write(x)) } });
+  w.tick(5);
+  assert.equal(queued(rec).length, 2);
+  assert.match((await w.run({ rec, probe: ALIVE })).refused, /^1 alert\(s\) are still in the Record's queue/);
+});
+
+test('L566 N2: a queue that empties says nothing, and the one failed send is not counted twice', async () => {
+  const w = world();
+  outbox(w.rec, T0)('alert one');
+  assert.equal((await w.run({ probe: ALIVE })).refused ?? '', '');
+  const v = world();
+  outbox(v.rec, T0)('alert two');
+  v.gh.open = async () => { throw new Error('socket hang up'); };
+  assert.doesNotMatch((await v.run({ probe: ALIVE })).refused, /still in the Record's queue/);
+});
+
+test('L566 A7: with store lines waiting the queue gets exactly half of what can be started', async () => {
+  const w = world();
+  for (let i = 0; i < 12; i += 1) outbox(w.rec, T0)(`alert ${i}`);
+  appendFileSync(join(w.root, 'unsent-alerts.jsonl'), storeLine('s1', 'kind-s1'));
+  const clock = () => w.gh.calls.filter(([c]) => c !== 'findOpen').length * 1000;
+  await w.run({ probe: ALIVE, clock, sendMs: 1000, budgetMs: 5000 });
+  assert.equal(queued(w.rec).length, 9); // (5 s - 1 s) / 2 is held back, so 3 s: 3 sends start.
+});
+
 test('L288 plants: an unsent file that can\'t be read is refused, never read as empty (the channel and M9)', async () => {
   for (const make of [(f) => { rmSync(f); mkdirSync(f); }, (f) => { rmSync(f); writeFileSync(`${f}.real`, storeLine('z1')); symlinkSync(`${f}.real`, f); }]) {
     const w = world();
@@ -859,4 +1010,225 @@ test('L389 githubIssues.latestOwnComment: only the robot\'s comments, every page
   assert.equal(await gh.latestOwnComment(7, SINCE), false);
   answers.push([200, [said('robot[bot]', 'no time', 'x')]]);
   assert.equal(await gh.latestOwnComment(7, SINCE), false);
+});
+
+// ---- L620: warnings the store holds in this process only (a full disk) ----
+const withHeld = (rec, h) => ({ ...rec, heldHere: typeof h === 'function' ? h : () => h });
+const HELD = { held: [{ id: 'abcd0001', event: { at: '2026-11-03T08:00:00Z', type: 'diary_damaged', reason: 'a broken line' } }], dropped: 0 };
+
+test('L620: a held warning is sent from the pass, on its own key, and the round is still not clean', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.equal(r.sent, 1);
+  assert.equal(r.failed, 0);
+  assert.equal(r.held, 1);
+  assert.match(r.refused, /1 of the store's warnings could not be written to its disk \(is it full\?\) and are held in this process only \(1 sent this round\)/);
+  const open = w.gh.openIssues();
+  assert.equal(open.length, 1);
+  assert.match(open[0].body, /diary_damaged/);
+  assert.match(open[0].body, /a broken line/);
+  // Next round: still held, raised again on the same key, so the same issue, not a second.
+  w.tick(5);
+  const r2 = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.match(r2.refused, /held in this process only/);
+  assert.equal(w.gh.openIssues().length, 1);
+});
+
+test('L620: a held warning GitHub refuses is a failed send, named, and the held line stays', async () => {
+  const w = world();
+  w.gh.open = async () => { throw new Error('GitHub is down'); };
+  const r = await w.run({ rec: withHeld(w.rec, HELD) });
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /could not be delivered this round/);
+  assert.match(r.refused, /GitHub is down/);
+  assert.match(r.refused, /\(0 sent this round\)/);
+});
+
+test('L620: dropped kept-back counts alone make the round not clean', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 3 }) });
+  assert.equal(r.sent, 0);
+  assert.match(r.refused, /3 count\(s\) of alerts the Record's queue would not take could not be written to the store's disk and are lost/);
+  assert.doesNotMatch(r.refused, /held in this process only/);
+});
+
+test('L620: a heldHere that throws is a refusal; one that answers null or none adds nothing', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, () => { throw new Error('boom'); }) });
+  assert.match(r.refused, /what the store holds in memory could not be read: boom/);
+  for (const h of [null, { held: [], dropped: 0 }]) {
+    const w2 = world();
+    const r2 = await w2.run({ rec: withHeld(w2.rec, h) });
+    assert.equal(r2.refused, undefined, JSON.stringify(h));
+    assert.equal(r2.held, undefined);
+  }
+  const w3 = world();
+  assert.equal((await w3.run()).refused, undefined, 'a Record with no heldHere at all');
+});
+
+// ---- #260 r1: a store disk that can't take a write, a store answer that can't be read, and a held line flushed ----
+test('#260 r1 M2: a store disk that can\'t take a write makes the round not clean, with nothing held here', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { held: [], dropped: 0, disk: 'the store\'s disk is full (ENOSPC)' }) });
+  assert.equal(r.sent, 0);
+  assert.match(r.refused, /the store's disk is full \(ENOSPC\): a warning any process on this store raises now \(the Dispatcher too\) may be held in that process's memory only/);
+  assert.doesNotMatch(r.refused, /held in this process only/);
+  const ok = world();
+  assert.equal((await ok.run({ rec: withHeld(ok.rec, { held: [], dropped: 0, disk: null }) })).refused, undefined, 'a disk that takes writes adds nothing');
+});
+
+test('#260 r1 m1: a store answer that can\'t be read ({ error }, as makeRecord gives for a throw or a bad shape) is a refusal', async () => {
+  const w = world();
+  const r = await w.run({ rec: withHeld(w.rec, { error: 'the store\'s answer has a shape this does not know' }) });
+  assert.match(r.refused, /what the store holds in memory could not be read: the store's answer has a shape this does not know/);
+});
+
+test('#260 r1 m2: the store is asked before its file is read, so a held line it puts back on file goes out this round', async () => {
+  const w = world();
+  const line = { id: 'back0001', outcome: 'unsent', event: { at: '2026-11-03T08:00:00Z', type: 'diary_damaged', reason: 'put back on file' } };
+  const r = await w.run({ rec: withHeld(w.rec, () => { appendFileSync(join(w.root, 'unsent-alerts.jsonl'), `${JSON.stringify(line)}\n`); return { held: [], dropped: 0, disk: null }; }) });
+  assert.equal(r.sent, 1);
+  assert.equal(r.refused, undefined);
+  assert.match(w.gh.openIssues()[0].body, /put back on file/);
+  assert.equal(readUnsent(w.root).length, 0, 'and marked delivered');
+});
+
+// ---- #260 r2 M1 a: the held flag another process left (the Dispatcher exits after each pass) ----
+
+const OTHER = process.pid + 100000;
+const flagIn = (root, x = {}) => { makeHeldFlag(root); setHeldFlag(root, { pid: OTHER, at: '2026-11-05T08:00:00Z', held: 2, dropped: 0, id: 'abcd0009', event: { at: '2026-11-05T08:00:00Z', type: 'diary_damaged', reason: 'a broken line' }, ...x }); };
+
+test('#260 r2 M1: another process\'s held flag is told once on the held key, cleared, and that round is not clean; the next is', async () => {
+  const w = world();
+  flagIn(w.root);
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, new RegExp(`process ${OTHER} on this store held 2 warning\\(s\\) in its memory only at 2026-11-05T08:00:00Z, as the store's disk could not take them`));
+  const open = w.gh.openIssues();
+  assert.equal(open.length, 1);
+  assert.equal(open[0].assignee, 'owner-login');
+  assert.match(open[0].body, /a broken line/);
+  assert.equal(readHeldFlag(w.root), null, 'cleared once told');
+  w.tick(5);
+  const r2 = await w.run();
+  assert.equal(r2.refused, undefined, 'the next round is clean');
+  assert.equal(w.gh.openIssues().length, 1);
+});
+
+test('#260 r2 M1: a flag GitHub refuses is a failed send, named, and the flag stays up for the next round', async () => {
+  const w = world();
+  flagIn(w.root);
+  w.gh.open = async () => { throw new Error('GitHub is down'); };
+  const r = await w.run();
+  assert.equal(r.failed, 1);
+  assert.match(r.refused, /GitHub is down/);
+  assert.equal(readHeldFlag(w.root).flag.id, 'abcd0009');
+});
+
+test('#260 r2 M1: this process\'s own flag is left to its held list; a torn flag is a refusal, never clean', async () => {
+  const w = world();
+  flagIn(w.root, { pid: process.pid, token: newHeldToken() });
+  const r = await w.run();
+  assert.equal(r.refused, undefined);
+  assert.equal(w.gh.openIssues().length, 0);
+  assert.ok(readHeldFlag(w.root), 'not cleared from here');
+  const w2 = world();
+  makeHeldFlag(w2.root);
+  writeFileSync(join(w2.root, 'held-flag'), '{"pid":4'.padEnd(4096, ' '));
+  const r2 = await w2.run();
+  assert.match(r2.refused, /the store's held flag is set but can't be read/);
+});
+
+test('#260 r2 M1: a flag with lost counts says so; one with no warning says none can be told from here', async () => {
+  const w = world();
+  flagIn(w.root, { held: 0, dropped: 3, id: null, event: null });
+  const r = await w.run();
+  assert.match(r.refused, /held 0 warning\(s\) .*, and lost 3 count\(s\) of alerts: none can be told from here/);
+  assert.equal(readHeldFlag(w.root), null);
+});
+
+// ---- #260 r3: several holders in one flag; this process's own entry; a flag with no count ----
+
+test('#260 r3 M1: a flag with several holders tells the first warning once and names every holder and the total', async () => {
+  const w = world();
+  flagIn(w.root, { token: 'x1' });
+  setHeldFlag(w.root, { pid: OTHER + 1, token: 'x2', at: '2026-11-05T08:01:00Z', held: 1, dropped: 2, id: 'abcd0010', event: { type: 'diary_damaged', reason: 'the second' } });
+  const r = await w.run();
+  assert.equal(r.sent, 1, 'the first warning only');
+  assert.match(w.gh.openIssues()[0].body, /a broken line/);
+  assert.match(r.refused, new RegExp(`2 processes on this store held 3 warning\\(s\\) in all in their memory only, as the store's disk could not take them, and lost 2 count\\(s\\) of alerts \\(process ${OTHER} at 2026-11-05T08:00:00Z, 2; process ${OTHER + 1} at 2026-11-05T08:01:00Z, 1 and 2 lost\\): the first is told this round, and the others are lost if those processes have stopped`));
+  assert.equal(readHeldFlag(w.root), null);
+});
+
+test('#260 r3 M1: this process\'s own entry is not told from the flag and stays in it after the clear; the others are told and cleared', async () => {
+  const w = world();
+  const mine = newHeldToken();
+  flagIn(w.root, { pid: process.pid, token: mine });
+  setHeldFlag(w.root, { pid: OTHER, token: 'x1', at: '2026-11-05T08:01:00Z', held: 1, dropped: 0, id: 'abcd0011', event: { type: 'diary_damaged', reason: 'theirs' } });
+  const r = await w.run();
+  assert.equal(r.sent, 0, 'the first warning is this process\'s own; the other\'s warning is not in the flag');
+  assert.match(r.refused, new RegExp(`process ${OTHER} on this store held 1 warning\\(s\\) in its memory only at 2026-11-05T08:01:00Z, as the store's disk could not take them: the first is this process's own, told above, and none of the others' can be told from here`));
+  assert.deepEqual(heldHolders(readHeldFlag(w.root).flag).map((h) => [h.pid, h.token]), [[process.pid, mine]], 'only this process\'s own entry is left');
+  const r2 = await w.run();
+  assert.equal(r2.refused, undefined, 'its own alone is left to its held list');
+});
+
+test('#260 r3 m1: a flag with this pid but a token no store here made is another process\'s (a reused pid), and is told', async () => {
+  const w = world();
+  flagIn(w.root, { pid: process.pid, token: 'not-made-here' });
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.equal(readHeldFlag(w.root), null);
+});
+
+test('#260 r3 c2: a flag with no usable count does not say "it is told this round" as if it held one', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify({ pid: OTHER, at: '2026-11-05T08:00:00Z', id: 'abcd0012', event: { type: 'diary_damaged', reason: 'r' } }).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused, /held some warning\(s\) in its memory only.*: the first is told this round; how many it held is not known, and any others are lost if that process has stopped/);
+  assert.doesNotMatch(r.refused, /it is told this round/);
+});
+
+test('#260 r3 M1: holders folded out of a full flag are counted in the round, never dropped', async () => {
+  const w = world();
+  flagIn(w.root, { token: 'x0', event: { type: 'diary_damaged', reason: 'r'.repeat(3000) } });
+  for (let i = 1; i <= 120; i += 1) setHeldFlag(w.root, { pid: OTHER + i, token: `x${i}`, at: 'T', held: 1, dropped: 0 }, { settleMs: 0 });
+  const f = readHeldFlag(w.root).flag;
+  assert.ok(f.cut.holders > 0);
+  const r = await w.run();
+  assert.match(r.refused, /121 processes on this store held 122 warning\(s\) in all/);
+  assert.match(r.refused, new RegExp(`${f.cut.holders} more not named, as the flag is full, ${f.cut.held}`));
+});
+
+test('#260 r4 m2 (P1): a flag holding only folded counts (no named holder) is told and cleared', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  const f = { gen: 9, pid: null, token: null, at: null, held: 0, dropped: 0, id: null, event: null, also: [], cut: { holders: 3, held: 4, dropped: 1 }, total: { holders: 3, held: 4, dropped: 1 } };
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify(f).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.match(r.refused ?? '', /3 processes on this store held 4 warning\(s\) in all in their memory only, as the store's disk could not take them, and lost 1 count\(s\) of alerts \(3 more not named, as the flag is full, 4 and 1 lost\): none can be told from here/);
+  assert.equal(readHeldFlag(w.root), null, 'cleared once told');
+});
+
+test('#260 r4 m2 (P1): folded counts behind this process\'s own entry are still told, and only its own entry is kept', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  const mine = newHeldToken();
+  const f = { gen: 9, pid: process.pid, token: mine, at: 'T', held: 1, dropped: 0, id: 'w-own', event: { type: 'x' }, also: [], cut: { holders: 2, held: 2, dropped: 0 }, total: { holders: 3, held: 3, dropped: 0 } };
+  writeFileSync(join(w.root, 'held-flag'), JSON.stringify(f).padEnd(4096, ' '));
+  const r = await w.run();
+  assert.match(r.refused ?? '', /2 processes on this store held 2 warning\(s\) in all/);
+  assert.deepEqual(heldHolders(readHeldFlag(w.root).flag).map((h) => h.token), [mine]);
+});
+
+test('#260 r4 m2 (P3): a flag that replaced a torn one says an earlier flag could not be read', async () => {
+  const w = world();
+  makeHeldFlag(w.root);
+  writeFileSync(join(w.root, 'held-flag'), '{"pid":4'.padEnd(4096, ' '));
+  setHeldFlag(w.root, { pid: OTHER, token: 'x1', at: '2026-11-05T08:00:00Z', held: 1, dropped: 0, id: 'abcd0013', event: { type: 'diary_damaged', reason: 'after a torn flag' } });
+  const r = await w.run();
+  assert.equal(r.sent, 1);
+  assert.match(r.refused ?? '', /: it is told this round; an earlier flag could not be read, so a process before these may have held more/);
 });

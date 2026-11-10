@@ -552,7 +552,7 @@ export function parseStatus(s) {
 export const LEAD_CALLS_FILE = join(homedir(), 'Dropbox', '99.0 Claude Sync', 'audit-results', 'orchestrate-buildspec', 'LEAD-CALLS.md');
 // The lead calls the list may cite. Only the lead adds a number, after writing the call in LEAD-CALLS.md (this file is
 // in LEAD_FILES, so a lane PR cannot change it). Where LEAD-CALLS.md is readable, every number here must be an entry.
-export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 164, 170, 174, 176, 178, 188, 200, 201, 231, 237, 239, 240, 250, 258, 263, 272, 277, 282, 283, 291, 300, 320, 331, 339, 351, 380, 395, 413, 419, 427, 444, 448, 463, 472, 486]);
+export const LEAD_CALL_NUMBERS = Object.freeze([135, 139, 143, 152, 164, 170, 174, 176, 178, 188, 200, 201, 231, 237, 239, 240, 250, 258, 263, 272, 277, 282, 283, 291, 300, 320, 331, 339, 351, 380, 395, 413, 419, 427, 444, 448, 463, 472, 486, 527, 532, 536, 539, 544, 556, 585, 589, 598, 605, 608, 620, 642, 682, 705, 706]);
 /**
  * The call numbers LEAD-CALLS.md holds as entries: a table row "| L9 |", a heading "## L57" / "### L134 ·", or a
  * dated log line, at the start of a line, that starts with the call in bold ("- 2026-11-01 · **L170 ..."); an indented sub-bullet is not one. A number only mentioned inside
@@ -823,7 +823,7 @@ export function branchName(env, git) {
 
 // `node orchestrate/test/alert-inventory.mjs` prints what the list is missing and what it holds that the code no
 // longer has, with the scanner's hints and a suggested status. It changes nothing: the lead writes the list.
-if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
+if (await (async () => { try { return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === (await import('node:fs')).realpathSync(process.argv[1]); } catch { return false; } })()) { // a link resolves (#286 p1, L725: lead grants this one line)
   const root = fileURLToPath(new URL('..', import.meta.url));
   const files = orchestrateFiles(root);
   const prod = files.filter((f) => !f.testCode);

@@ -25,8 +25,8 @@
 import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { RULES_PATH } from '../M10-rules/reader.mjs';
-import { COMPARE_FILE_LIMIT } from '../M10-rules/git-view.mjs';
-import { approveNeeded, goCheck, ROW_FILE } from '../M2-approvals/go.mjs';
+import { COMPARE_FILE_LIMIT, notRead } from '../M10-rules/git-view.mjs';
+import { approveNeeded, goCheck, ROW_FILE, rowFile } from '../M2-approvals/go.mjs';
 import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { activeKind } from '../M2-approvals/kinds.mjs';
@@ -109,7 +109,7 @@ function watchReads({ view, gh } = {}) {
     .map((k) => [k, async (...a) => { try { return await view[k](...a); } catch (e) { throw note(e); } }]))) : view;
   const g = gh ? { ...gh, get: async (path) => {
     let r;
-    try { r = await gh.get(path); } catch (e) { throw note(e); }
+    try { r = await gh.get(path); } catch (e) { throw note(notRead(e)); }
     if (r?.status !== 200) note(Object.assign(new Error(`GitHub answered ${r?.status} for ${path}`), { status: r?.status }));
     return r;
   } } : gh;
@@ -146,6 +146,12 @@ export async function statusesAt(gh, base, sha) {
   if (!Array.isArray(j.statuses)) throw failed('the statuses answer is not a list');
   return j.statuses.map((s) => ({ context: s?.context, state: s?.state }));
 }
+
+// The rules' required checks, or null. An empty list is no list: with no check named, every check of the list passes
+// with none run, so main would read as green and an undo card, which skips refusal 1, would merge (L96 m-1).
+// The gate compares a check's name exactly, so a name with spaces around it would never match anything.
+export const checkName = (c) => typeof c === 'string' && c !== '' && c === c.trim();
+export const namedChecks = (list) => (Array.isArray(list) && list.length && list.every(checkName) ? list : null);
 
 // main is green when every required check ran there and passed, and no other check or status is red.
 async function mainGreen(gh, base, sha, required, ignoredList) {
@@ -185,9 +191,11 @@ export async function threads(gh, owner, repo, pr) {
 
 // A row file at the change's head. 404: the row isn't there (null, a reason for the go check). Any other status but
 // 200 is a read that went wrong, thrown for the go check's attempt to class (L205), never read as "no row".
-async function defaultReadRow(gh, base, id, head) {
+// Also the Dispatcher's planRows port (wiring/review-ports.mjs, A3a): one reader of a row file, so the go asked and the
+// go checked read a row the same way. → the parsed row, or null when it is missing or can't be parsed; a failed read throws.
+export async function readRowAt(gh, base, id, head) {
   let j;
-  try { j = await json(gh, `${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
+  try { j = await json(gh, `${base}/contents/${encodeURIComponent(rowFile(id)).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
   if (j?.encoding !== 'base64') return null;
   try { return parseYaml(Buffer.from(j.content, 'base64').toString('utf8'), `${id}.yaml`); } catch { return null; }
 }
@@ -224,7 +232,7 @@ export async function gatherFacts(ctx, merge) {
   });
   const head = SHA.test(f.pr?.head?.sha ?? '') ? f.pr.head.sha : null;
   const mainSha = await attempt(async () => { const s = (await json(gh, `${base}/git/ref/heads/main`)).object?.sha; if (!SHA.test(s ?? '')) throw new Error('no main'); return s; });
-  f.requiredChecks = Array.isArray(get('product_profile.required_checks')) ? get('product_profile.required_checks') : null;
+  f.requiredChecks = namedChecks(get('product_profile.required_checks'));
   // The rules file gives every value as text: an app id is turned into a number here, once, as botId does.
   const ignoredRaw = get('product_profile.checks_ignored');
   f.checksIgnored = Array.isArray(ignoredRaw) ? ignoredRaw.map((x) => ({ app_id: botId({ bot_user_id: x?.app_id }), name: x?.name })) : [];
@@ -346,7 +354,7 @@ export async function gatherFacts(ctx, merge) {
   if (skipped.length) f.reviewsSkipped = skipped.map((x) => `${x.name}: ${x.reason}`);
 
   // The owner's Approve (refusals 8, 13, 14): needed per M2, and standing on GitHub now.
-  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => {}), gh, owner, repo };
+  const apx = ctx.approvals ?? { record, rules, product, now: ctx.now, alert: ctx.alert ?? (() => false), gh, owner, repo };
   const need = approveNeeded({ risky, needsJoe: card.doc.needs_joe === true || card.doc.approval_required === true, tier: f.tier, module: card.doc.module }, rules, product);
   const ask = askStore(record).asks().filter((a) => a.doc.card === card.id && activeKind(a.doc.kind)?.merge_approve && a.doc.state === 'answered').sort((a, b) => String(b.doc.raised_at).localeCompare(String(a.doc.raised_at)))[0];
   // A check that could not read GitHub (M2's `unreadable`, or a watched read that failed inside M10's carry-over) or
@@ -369,7 +377,7 @@ export async function gatherFacts(ctx, merge) {
     if (!go) return { ok: false, reasons: [`no go for ${rootId}`] };
     const ids = new Set(Object.keys(go.doc.rows ?? {}));
     for (const x of f.files) for (const p of [x.path, x.previous_path]) { const m = typeof p === 'string' ? ROW_FILE.exec(p) : null; if (m) ids.add(m[1]); }
-    const readRow = ctx.readRow ?? ((id, h) => defaultReadRow(gh, base, id, h));
+    const readRow = ctx.readRow ?? ((id, h) => readRowAt(gh, base, id, h));
     const headRows = {};
     for (const id of [...ids].sort()) headRows[id] = await readRow(id, head);
     // M2 marks a check that could not read GitHub `unreadable` (L205): thrown here, so the go is unknown (f.go null,

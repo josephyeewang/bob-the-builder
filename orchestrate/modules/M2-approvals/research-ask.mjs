@@ -57,7 +57,10 @@ export function safeAlert(ctx, failed) {
   return (a) => {
     if (typeof ctx.alert !== 'function') return false;
     try {
-      if (ctx.alert(a) === false) { failed.n += 1; return false; }
+      const r = ctx.alert(a);
+      // A promise is no answer yet, and this path can't wait for one, so it counts as lost and is told again (L163).
+      if (typeof r?.then === 'function') { r.then(null, () => {}); failed.n += 1; return false; }
+      if (r === false) { failed.n += 1; return false; }
       return true;
     } catch { failed.n += 1; return false; }
   };
@@ -81,6 +84,8 @@ export function onceAlerts(ctx, refused, { file: name, make, alert, notSaved }) 
   }
   // A state file that can't be saved is alerted, never thrown: the pass must still hand back the asks it opened, so
   // their "on your waiting list" push goes out (L84 3). The cost is only that a refusal may be alerted again.
+  // Written only when it changed, so a folder that can't be written is alerted once per change, not every pass (L606 P4b).
+  if (JSON.stringify(now) === JSON.stringify(last) && (existsSync(file) || !Object.keys(now).length)) return;
   try { mkdirSync(ctx.stateDir, { recursive: true }); writeFileSync(file, `${JSON.stringify(now)}\n`); }
   catch (e) { alert({ kind: notSaved, reason: String(e?.code ?? e?.message ?? e) }); }
 }

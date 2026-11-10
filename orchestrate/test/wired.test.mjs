@@ -72,14 +72,15 @@ export const CONFIG = Object.freeze({
 
 // name → why it is not wired yet. Each names the capability row or issue that will give it a running home.
 export const UNWIRED = Object.freeze({
-  deliverAlertsPass: 'L236: the robot job runs it last in each round (deliverWith), lane 4 on R-0b-162; and not before lane 2 fixes M11 alerts.mjs putFact to write against the version it read (L288 MAT-4), since the robot job settles queue writes beside the Dispatcher',
   gatePass: 'L221: R-0b-162 wiring, lane 4',
   heartbeatOnce: 'L221: R-0b-162 wiring, lane 4',
   watchOnce: 'L221: R-0b-162 wiring, lane 4',
   installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
   proposalsPass: 'L233: R-0b-162 wiring, lane 4',
   researchPass: 'R-0b-135: R-0b-162 wiring beside proposalsPass, lane 4',
+  researchCopyPass: 'L286: R-0b-162 wiring beside researchPass, with the push script\'s pushResearch, lane 4',
   researchHandler: 'R-0b-135: R-0b-162 wiring, handed to proposalsPass as its research handler, lane 4 (L303)',
+  proposalRoutePass: 'L549: R-0b-162 wiring beside proposalsPass, with the push script\'s pushProposal and createToReview as its toReview; a toReview wired without this pass leaves cards claimed, lane 4',
 });
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -594,13 +595,13 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M1-front-door/': { files: 3, why: 'R-0b-162 D: the Front Door ports (frontDoorAlive, restartFrontDoor, sendFrontDoor); no job runs M1 yet' },
   'modules/M2-approvals/': { files: 3, why: 'R-0b-140 undo-flag, L135 transcript-copy, L86 required-keys: lead to place' },
   'modules/M3-lead/': { files: 2, why: 'R-0b-162 C: the Lead ports (leads, startLead) start the Lead that uses these (R-0b-143); L443: plan-go reaches the plan-review wording and its files' },
-  'modules/M4-workshop/': { files: 6, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor), save-work (saveWork); R-0b-147 review-walls-proof' },
-  'modules/M6-merge-gate/': { files: 5, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02)' },
+  'modules/M4-workshop/': { files: 7, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor), save-work (saveWork); R-0b-147 review-walls-proof; L601 required-keys, lead to place' },
+  'modules/M6-merge-gate/': { files: 4, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624)' },
   'modules/M9-record/': { files: 1, why: 'L86: required-keys, lead to place' },
   'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
-  'modules/M11-dispatcher/': { files: 5, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake, R-0b-135 research-intake' },
+  'modules/M11-dispatcher/': { files: 6, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake, R-0b-128 part 2 proposal-route, R-0b-135 research-intake' },
   'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
-  'modules/M13-ledger/': { files: 2, why: 'L237: alert-channel.mjs through lane 3 deliverAlertsPass (alerts.mjs is reached since #184, L428); R-0b-77 waiting' },
+  'modules/M13-ledger/': { files: 1, why: 'R-0b-77 waiting (alert-channel.mjs reached through the robot job since #288, L730; alerts.mjs since #184, L428)' },
 });
 const isFixture = (f) => /(?:^|[/-])(?:fixtures?|fakes?|png-fixture|test-tmp)\.mjs$/.test(f);
 const unreachedFiles = () => {

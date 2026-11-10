@@ -35,9 +35,9 @@
 //     exact_reverse   USED: made by the Dispatcher from Joe's Undo tap (M11 undo.mjs), go-free.
 //     ordinary        USED as the docs change the gate merged (made by Joe's tab or the Lead; its making is not
 //                     this path, so it is seeded).
-//     research_copy   designed for the first cutover, but nothing makes one yet and the fixture does not make it
-//                     go-free (todo below, R-0b-135, L204-c). Until it is built, nothing on day one makes a docs change
-//                     for the gate to merge or an Undo to reverse; the ordinary card here is seeded (day-one audit M-2).
+//     research_copy   go-free in the first-cutover rules (L514). M11 researchHandler makes the card and it goes ready
+//                     with no go (test below). Nothing calls that path yet (R-0b-162), so the docs change the gate
+//                     merges and the Undo reverses here is an ordinary seeded card (day-one audit M-2).
 //     fix, lead_daily_card  NOT USED: the Lead plans a fix card and makes the daily card; the Lead is not on the
 //                     product.
 //   Product state: active (the fixture's product_state_rules.active.start is within_caps). paused is "no starts" by
@@ -55,6 +55,13 @@ import { rulesFromText } from '../modules/M10-rules/from-text.mjs';
 import { firstCutoverProblems } from '../modules/M10-rules/first-cutover.mjs';
 import { makeGitView } from '../modules/M10-rules/git-view.mjs';
 import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
+import { createHash } from 'node:crypto';
+import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
+import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
+import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
+import { blobSha } from '../modules/M10-rules/reader.mjs';
+import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
 import { CARD_CREATORS } from '../modules/M9-record/permissions.mjs';
 import { setup, seed, product as writeProduct, PRODUCT } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { moduleSources, scanSources, stripComments } from '../modules/M9-record/write-sites.test-helper.mjs';
@@ -62,6 +69,8 @@ import { WRITERS } from '../modules/M9-record/permissions.mjs';
 import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
 import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
+import { tick } from '../modules/M11-dispatcher/tick.mjs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { usageFact, undoEntries, undoSha, filesOfCommits, UNDO_ASK, T0 } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -72,10 +81,14 @@ import { fakeGateGitHub } from '../modules/M6-merge-gate/fixtures/fake-gate-gith
 import { OUTBOX_KINDS, CARD_KINDS } from '../shared/record-names.mjs';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
+import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
+import { gitOk } from '../modules/M4-workshop/git/safe-git.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { LAST_PASS_FACT, STEP_ERROR_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { blobOf } from '../wiring/fake-github.test-helper.mjs';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
+import { reviewConfig } from '../wiring/review-ports.test-helper.mjs';
 
 const ORCH = join(dirname(fileURLToPath(import.meta.url)), '..');
 const P = PRODUCT;
@@ -109,6 +122,11 @@ function green(rules) {
 
 // The day so far: a docs change the gate merged earlier, and Joe's answered Undo tap on it (M11's undo fixtures,
 // taken up to the tap; the undo card itself is made below by the real undo step, never seeded).
+// The day-one engine answers the push; the push world's values reach it as the rules reader gives them, as text.
+function pushRules(w, world) {
+  return fakeRules({ answers: { push_branch: (x) => w.rules.may('push_branch', x) }, values: world.values });
+}
+
 const UNDO_ID = 'U1';
 function undoTapped(w) {
   const entries = undoEntries(UNDO_ID, {}, { product: P, files: [DOC], pr: 7 });
@@ -139,8 +157,8 @@ test('the kinds list at the top is what the fixture and the modules say', () => 
   assert.equal(rules.num('caps.editing_per_product', { product: P }), 0);
   // script: off.
   assert.equal(rules.get('roles_enabled.script', { product: P }), 'none');
-  // Undo cards are go-free; nothing else is (research_copy is not, and the Lead's daily card has no files).
-  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse']);
+  // Undo cards and research copies are go-free; nothing else is (the Lead's daily card has no files).
+  assert.deepEqual(goFreeKinds(rules, P), ['exact_reverse', 'research_copy']);
   assert.deepEqual(rules.get('approvals.plan_go.go_free.lead_daily_card', { product: P }), []);
   assert.ok(CARD_CREATORS.dispatcher.includes('exact_reverse'));
   assert.ok(CARD_KINDS.includes('research_copy') && CARD_KINDS.includes('exact_reverse'));
@@ -210,14 +228,16 @@ for (const kind of USED) {
   });
 }
 
-test('M10\'s start question: a worker for an undo card may start on day one', { todo: 'L199-B (lane 1, M10): an exact-reverse undo start is never refused by the editing caps' }, async () => {
+test('M10\'s start question: a worker for an undo card may start on day one', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
   // pass.mjs asks start_session with editing: true for an undo card too (its worker edits files), and the tier
-  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier).
-  const tier = riskOf(w.rules, cardOf(w.rec, id)).tier;
-  const r = w.rules.may('start_session', { product: P, role: 'worker', tier, editing: true });
+  // M11's riskOf gives the card the real undo step made (day-one audit Minor 1: never a handed-in tier). The card goes
+  // with it, as pass.mjs sends it: the engine knows an undo by the card's kind.
+  const card = cardOf(w.rec, id);
+  const tier = riskOf(w.rules, card).tier;
+  const r = w.rules.may('start_session', { product: P, card, role: 'worker', tier, editing: true });
   assert.equal(r.decision, 'allow', `the engine refuses the undo worker: ${r.reason}`);
 });
 
@@ -234,18 +254,88 @@ test('Joe\'s Undo on day one: the real undo step makes a ready card, and the Rec
   assert.ok(w.rec.ready().some((c) => c.id === id), 'the Record lists the undo card as ready');
 });
 
-test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', { todo: 'L199-B (lane 1): M10\'s start question refuses an undo at editing cap 0 (M11\'s side, L199-A, is done on #117)' }, async () => {
+test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
   // The Mac's launcher (a port): it answers yes, in the shape M11's own tests use.
   const launched = [];
   const r = await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
   assert.deepEqual(r.refused, [], 'the undo card is refused a start');
   assert.deepEqual(r.started, [id]);
   assert.deepEqual(launched, [id]);
   assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+// L595: a paused product's undo, through one real tick: the real rules text, the real Record, M11's real steps. Only the
+// ports are stand-ins. The rules draft's paused state is start: none, which is what stopped this card at M9 alone.
+const pause = (w) => { const r = w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: w.rec.read('product', P).rev, doc: { state: 'paused', return_to: 'active' } }); assert.equal(r.ok, true, r.reason); };
+async function oneTick(w, { sessions = [] } = {}) {
+  const dir = tempDir('orch-day-one-tick-');
+  const launched = [];
+  const stops = [];
+  const alert = fakeAlert();
+  const ports = {
+    alert, board: () => [], healthy: () => true, resume: () => false, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    leads: () => [], sessions: () => [...sessions], probe: () => ({ size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } }),
+    launch: async ({ card, kind, product, sessionId }) => { launched.push(card.id); sessions.push({ id: sessionId, product, kind, card: card.id, pgid: 101 }); return { ok: true, sessionId, outbox: `/outbox-root/worker/${sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; },
+    stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: () => ({ ok: true, requestId: 'Q-1' }), filesOf: filesOfCommits,
+    sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
+    cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
+  };
+  await tick({ rec: w.rec, rules: w.rules, now: T0, ports });
+  return { launched, alert, sessions, stops };
+}
+
+test('L595: the Undo tapped on a paused product starts in the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const { launched, alert } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+  assert.deepEqual(alert.texts.filter((t) => /can't start|is waiting/.test(t)), []);
+});
+
+// #252 r1 m3: this PR first lets an undo run on a paused product, so the next tick must leave it running.
+test('L595: a running undo on a paused product is not stopped or parked by the next tick', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  pause(w);
+  const first = await oneTick(w);
+  assert.deepEqual(first.launched, [id]);
+  const second = await oneTick(w, { sessions: first.sessions });
+  assert.deepEqual(second.launched, []);
+  assert.deepEqual(second.stops, []);
+  // A stop is first only wanted (a pending stop fact) until the session reaches a safe point: none may be wanted.
+  const wanted = w.rec.list('fact').filter((f) => f.doc?.state === 'pending' && f.doc?.card === id);
+  assert.deepEqual(wanted.map((f) => f.id), []);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: an undo card already in ready when the product is paused stays on the list and starts', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  pause(w);
+  assert.deepEqual(w.rec.ready().map((c) => c.id), [id], 'off this list, no check ever sees the card, so no alert either');
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', id).doc.state, 'running');
+});
+
+test('L595: on a paused product an ordinary ready card does not start beside the undo', async () => {
+  const w = dayOne();
+  const id = undoTapped(w);
+  await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const d = { state: 'ready', kind: 'ordinary', product: P, module: 'M-test', tier: 2, round: 1, files: [DOC], done_when: 'x', what: 'y' };
+  seed(w.env, 'card', 'C-3', d);
+  pause(w);
+  const { launched } = await oneTick(w);
+  assert.deepEqual(launched, [id]);
+  assert.equal(w.rec.read('card', 'C-3').doc.state, 'ready');
 });
 
 // The merge question below is built by hand (exact_reverse_ok, reversed_audit and the missing reverses_files are
@@ -281,7 +371,7 @@ function macBoot() {
   chmodSync(token, 0o600);
   const config = { installRoot: L.installRoot, wiring: L.path('wiring/dispatcher-wiring.mjs'), lockFile: f('dispatcher.lock'), product: ENTRY.product,
     recordRoot: f('record'), ownerUid: process.getuid(), productsFile: f('products.json'), rulesStateDir, tokenFile: token,
-    approvalsStateDir: f('approvals-state') };
+    approvalsStateDir: f('approvals-state'), ...reviewConfig(dir, { reviewUid: process.getuid() + 1 }) };
   const configFile = L.write('dispatcher.json', config);
   writeFileSync(f('fake-github.json'), JSON.stringify({ owner: ENTRY.owner, repo: ENTRY.repo, commit: 'a'.repeat(40), text: FIRST, logFile: f('github.log') }));
   const r = spawnSync(process.execPath, ['--import', join(ROOT_ORCH, 'wiring/fake-github.test-helper.mjs'), L.path('modules/M11-dispatcher/main.mjs'), configFile], {
@@ -294,6 +384,10 @@ test('with only production writers, the product reads active and the docs lane i
   const { code, err, rec } = macBoot();
   assert.equal(code, 0, err);
   const p = ENTRY.product;
+  // The review user is another user (the Dispatcher's own may not be it, L674), so this boot's status is not theirs and
+  // the limits step says exactly that (L674 re-rules L652 for this boot).
+  assert.equal(rec.read('fact', LAST_PASS_FACT)?.doc?.steps?.limits, 'failed');
+  assert.equal(rec.read('fact', STEP_ERROR_FACT('limits'))?.doc?.error, "no review was asked for: the review runner's folder is not owned by the review user");
   // The product document exists, and only the boot wrote it: approvals, kind onboard, once.
   assert.equal(rec.read('product', p)?.doc?.state, 'active', 'the boot turned the product on');
   assert.deepEqual(rec.diary({ since: 0 }).filter((l) => l.entity === 'product' && l.id === p).map((l) => [l.actor, l.kind]), [['approvals', 'onboard']]);
@@ -327,10 +421,36 @@ test('a research report sent again after an interrupted intake is told, never st
   assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
 });
 
-test('a research_copy card is ready on day one with no go', { todo: 'R-0b-135, L204-c, L286: M11 research-intake.mjs makes the card; the first-cutover rules do not set go_free.research_copy yet (it waits for step 15b)' }, () => {
-  const { rules } = dayOne();
-  assert.ok(goFreeKinds(rules, P).includes('research_copy'));
+// The real path to a research copy: an ask from the front door, then the report for it.
+const REPORT = '# One thing\n\nIt was found out.\n';
+function reportArrives(w) {
+  const now = w.env.clock.t;
+  const f = outboxFile('ask-request', '20261103-0915-rb', { ask: 'research', product: P, brief: 'find out one thing' });
+  assert.equal(checkOutboxFile(f.name, f.text, { products: [P], seenIds: [] }).ok, true);
+  const asked = w.rec.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(w.env, 'front_door', 'F-1', f.name, f.text));
+  assert.equal(asked.ok, true, asked.reason);
+  assert.equal(openResearchAsks({ record: w.rec, rules: w.rules, product: P, now: () => now, alert: fakeAlert() }).opened.length, 1);
+  return researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
+    sha256: createHash('sha256').update(REPORT).digest('hex'), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now });
+}
+
+test('a research_copy card is ready on day one with no go', () => {
+  const w = dayOne();
+  const made = reportArrives(w);
+  assert.equal(made.ok, true, made.reason);
+  const card = w.rec.read('card', RESEARCH_CARD('R-1'));
+  assert.equal(card.doc.state, 'ready');
+  assert.ok(w.rec.ready().some((c) => c.id === card.id), 'the Record lists it as ready, and no go was ever asked for');
 });
+
+for (const [name, off] of [['left out of', ''], ['false in', '      research_copy: false\n']]) {
+  test(`research copies ${name} the first-cutover rules fail closed: no card, and the kind is not go-free`, () => {
+    const w = dayOne({ text: swap(FIRST, '      research_copy: true\n', off) });
+    assert.deepEqual(goFreeKinds(w.rules, P), ['exact_reverse']);
+    assert.deepEqual(reportArrives(w), { ok: false, reason: RESEARCH_OFF });
+    assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')), null);
+  });
+}
 
 // ---- M6's checks step: the real gatherFacts over fake GitHub, then judge ----
 
@@ -361,9 +481,10 @@ test('M6\'s checks step reads the required checks from the real rules: green pas
   assert.deepEqual(refusal1(missing).map((x) => x.reason), ['required check build has not run']);
 });
 
-test('M6\'s checks step refuses a change when the rules name no required checks', { todo: 'L96 m-1: M6 refusals.mjs must refuse an empty required_checks too; today only the fit check does' }, async () => {
+test('M6\'s checks step refuses a change when the rules name no required checks', async () => {
   const empty = await checksStep(swap(FIRST, 'required_checks: [build, test]', 'required_checks: []'), (h) => [run(h, 'build'), run(h, 'test')]);
-  assert.deepEqual(empty.f.requiredChecks, []);
+  assert.equal(empty.f.requiredChecks, null, 'an empty list is no list');
+  assert.equal(empty.f.main.green, null, 'main is not green on a list that names no check');
   assert.notDeepEqual(refusal1(empty), []);
 });
 
@@ -393,23 +514,35 @@ function readsAndWriters() {
 }
 // The documents production reads that nothing in production makes, today. Each is a known gap; the test below fails
 // when one is made (take it off) or a new one appears.
-const KNOWN_UNWRITTEN = Object.freeze({
-  session: 'L129: read by M4 push.mjs, M2 binding.mjs and M11 merges.mjs; M11 has the create grant, no code makes one, so no worker branch can be pushed (L204-a)',
-});
+const KNOWN_UNWRITTEN = Object.freeze({});
 
-test('a worker the real pass starts has the session record M4\'s push script reads', { todo: 'L204-a (lane 2, M11 + M4): the Dispatcher writes only a launch record; push.mjs reads the session record and stops at "no launch record for this session"' }, async () => {
+test('a worker the real pass starts has the session record M4\'s push script reads', async () => {
   const w = dayOne();
   const id = undoTapped(w);
   await undoStep({ rec: w.rec, rules: w.rules, now: T0, filesOf: filesOfCommits, alert: w.alerts });
+  const root = tempDir('orch-day-one-push-');
+  const world = await pushWorld({ root, record: w.rec, seed: false, card: id, product: P });
   let sid = null;
   await undoStarts({ rec: w.rec, rules: w.rules, now: T0, bands: green(w.rules), running: [], filesOf: filesOfCommits, alert: w.alerts, host: 'mac-a',
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; } });
+    launch: async (x) => {
+      sid = x.sessionId;
+      // The launcher makes the session's own outbox and says where it is (pass.mjs's launch port).
+      const box = join(root, 'outboxes', 'worker', x.sessionId);
+      mkdirSync(box, { recursive: true, mode: 0o700 });
+      return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID), outbox: box };
+    } });
   assert.ok(sid, `the undo card ${id} was not started`);
-  // The fields M4 push.mjs attempt() reads from the session record; switching this on, add a push through the real
-  // createPushScript (L204-a's proof).
   const s = w.rec.read('session', sid)?.doc;
   assert.ok(s, 'no session record');
   for (const k of ['product', 'card', 'branch', 'outbox', 'attempt']) assert.ok(s[k], `the session record has no ${k}`);
+
+  // The worker's work, handed in as a bundle in that outbox, and the real push script with nothing else in the Record.
+  await world.commit('the undo', (dir) => { mkdirSync(dirname(join(dir, DOC)), { recursive: true }); writeFileSync(join(dir, DOC), 'the undo\n'); });
+  await world.bundle(undefined, s.outbox);
+  const tip = (await gitOk(['rev-parse', 'HEAD'], world.cg)).trim();
+  const p = await world.push({ rules: pushRules(w, world) }, sid);
+  assert.equal(p.ok, true, p.reason);
+  assert.ok((await world.ghRefs()).split('\n').includes(`refs/heads/${s.branch} ${tip}`), 'GitHub has the card branch at the worker\'s tip');
 });
 
 // Not run here, logged (day-one audit Minor 4): M2's undo-flag, schedule and binding. The answered Undo ask is seeded;
@@ -423,7 +556,7 @@ test('L97, L129: every Record document production reads, today, has a production
     `documents read with no writer: ${unwritten.map((e) => `${e} (read in ${[...reads.get(e)].join(', ')})`).join('; ')}`);
 });
 
-test('L97: every Record document production reads has a production writer', { todo: `L129: ${Object.entries(KNOWN_UNWRITTEN).map(([e, why]) => `${e} (${why.replace(/^L129: /, '')})`).join('; ')}` }, () => {
+test('L97: every Record document production reads has a production writer', () => {
   const { reads, makers } = readsAndWriters();
   assert.deepEqual([...reads.keys()].filter((e) => !makers.has(e)), []);
 });

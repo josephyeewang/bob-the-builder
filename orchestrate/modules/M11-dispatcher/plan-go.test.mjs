@@ -1,29 +1,40 @@
 // plan-go.test.mjs — L440, L442, L443: the Dispatcher asks for a card's go and records the answer, on a real Record, with
 // real M2 asks and fake reviewer, repo and alert-delivery ports.
 
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { env, OWNER_ID, PRODUCT, must } from '../M2-approvals/fixtures.test-helper.mjs';
-import { leadCard, roadmap } from '../M9-record/fixtures.test-helper.mjs';
+import { leadCard, planFile, product, roadmap, seed } from '../M9-record/fixtures.test-helper.mjs';
 import { fakeGitHub } from '../M2-approvals/fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { doneBar } from '../M2-approvals/go.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
+import { move } from './moves.mjs';
+import { intakePass } from './outbox-intake.mjs';
+import { recordLeadLaunch } from './lead-restart.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
 import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
-import { approvalsStep, APPROVALS_PRODUCT_MS } from './tick.mjs';
+import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { planRows } from '../../wiring/review-ports.mjs';
+import { sleepMs } from '../M9-record/lock.mjs';
+import { startGate, fileSet } from './gate.mjs';
+import { rulesWith } from './fixtures.test-helper.mjs';
 
 const HOUR = 3_600_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
 const ROWS = { 'R-1': row('R-1') };
 const SHA = 'e'.repeat(64);
 
+const LIVE_RULES = { 'caps.rounds': 3, 'product_state_rules.active.start': 'within_caps', 'product_state_rules.paused.start': 'none' };
+
 function world(values = {}) {
-  const t = env({ values });
+  const t = env({ values: { ...LIVE_RULES, ...values } });
+  product(t);
   const g = fakeGitHub({ ownerId: OWNER_ID, now: () => t.clock.t });
   const M0 = g.repo.commit([], { 'src/a.mjs': 'one' });
   g.repo.main = M0;
@@ -54,7 +65,14 @@ const later = (w, ms) => { w.t.clock.t += ms; };
 // M2 closing an ask, as the same actor (its writeDoc is fenced to its own folder).
 function close(w, id, state) { const a = askStore(w.t.record).ask(id); if (state === 'expired') must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: a.rev, doc: { ...a.doc, state: 'open', reask_count: 1, lapsed_at: new Date(w.t.clock.t).toISOString() } })); const b = askStore(w.t.record).ask(id); must(w.t.record.write({ actor: 'approvals', entity: 'ask', id, expectRev: b.rev, doc: { ...b.doc, state } })); }
 // The Lead changes the card's plan.
-function replan(w, id, files) { const c = w.t.record.read('card', id); must(roadmap(w.t, { id, expectRev: c.rev, fields: { ...c.doc, files: files ?? [...c.doc.files, 'src/b.mjs'] } })); }
+function replan(w, id, files) {
+  const c = w.t.record.read('card', id);
+  const to = files ?? [...c.doc.files, 'src/b.mjs'];
+  // A card made from a plan file is changed only by a plan file (L490 m2).
+  if (!c.doc.plan_sha256) { must(roadmap(w.t, { id, expectRev: c.rev, fields: { files: to } })); return; }
+  const d = c.doc;
+  must(planFile(w.t, [{ id, tier: d.tier, module: d.module, depends_on: d.depends_on, brief: { goal: d.what, done_when: d.done_when, files: to } }], { head: d.main_commit }));
+}
 
 // The owner's tap on a go box, as M2's binding records it. M2's writeDoc is fenced to its own folder, so this writes as
 // the same actor directly.
@@ -73,6 +91,42 @@ test('Tier 2: asked with no plan check and no reviewer, once', async () => {
   assert.equal(asks(w)[0].doc.kind, 'go_t2');
   assert.equal(asks(w)[0].doc.plan_check, undefined);
   assert.equal(w.started.length, 0);
+});
+
+// A3a: the wired planRows, reading the row files among the card's files from GitHub at main, gives M2 rows its go checks accept, and a row
+// file whose pass test has drifted from the card's bar is told, never asked on.
+function githubRows(w, files) {
+  const base = '/repos/sample-org/sample-app';
+  const gh = { get: async (p) => {
+    if (p === `${base}/git/ref/heads/main`) return { status: 200, json: { object: { sha: 'f'.repeat(40) } } };
+    const m = new RegExp(`^${base}/contents/docs/blueprint/rows/([^/?]+)\\.yaml\\?ref=${'f'.repeat(40)}$`).exec(p);
+    if (m && files[m[1]] !== undefined) return { status: 200, json: { encoding: 'base64', content: Buffer.from(files[m[1]]).toString('base64') } };
+    return { status: 404, json: null };
+  } };
+  return planRows({ gh, entry: { product: PRODUCT, owner: 'sample-org', repo: 'sample-app' }, rec: w.t.record });
+}
+test('A3a: the wired planRows reads rows M2 asks a go on; a drifted, missing or unnamed row is told, not asked', async () => {
+  const files = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
+  const w = world();
+  card(w, 'A', { files });
+  const yaml = (id, done) => `id: ${id}\nwhat: row ${id}\nmodule: M1\ntier: 2\ndone_when: ${done}\nstatus: planned\n`;
+  await pass(w, { planRows: githubRows(w, { 'R-1': yaml('R-1', ROWS['R-1'].done_when) }) });
+  assert.equal(asks(w).length, 1, w.sent.join(' | '));
+  const w2 = world();
+  card(w2, 'A', { files });
+  await pass(w2, { planRows: githubRows(w2, { 'R-1': yaml('R-1', 'a different test') }) });
+  assert.equal(asks(w2).length, 0);
+  assert.ok(w2.sent.some((s) => /card A could not be asked for a go: the card's done_when is not its rows' pass tests/.test(s)), w2.sent.join(' | '));
+  const w3 = world();
+  card(w3, 'A', { files });
+  await pass(w3, { planRows: githubRows(w3, {}) });
+  assert.equal(asks(w3).length, 0);
+  assert.ok(w3.sent.some((s) => /planRows: row R-1 is missing at main fffffff/.test(s)), w3.sent.join(' | '));
+  const w4 = world();
+  card(w4, 'A');
+  await pass(w4, { planRows: githubRows(w4, { 'R-1': yaml('R-1', ROWS['R-1'].done_when) }) });
+  assert.equal(asks(w4).length, 0);
+  assert.ok(w4.sent.some((s) => /card A names no row file/.test(s)), w4.sent.join(' | '));
 });
 
 test('only the root is asked: a fix card runs on its root\'s go', async () => {
@@ -169,14 +223,15 @@ test('a new plan gets a new review', async () => {
   const w = world();
   t1(w, 'A');
   await pass(w);
-  const cur = w.t.record.read('card', 'A');
-  must(roadmap(w.t, { id: 'A', expectRev: cur.rev, fields: { plan_sha256: 'd'.repeat(64) } }));
+  const { doc } = w.t.record.read('card', 'A');
+  must(planFile(w.t, [{ id: 'A', tier: 1, module: doc.module, depends_on: [], brief: { goal: 'a changed plan', done_when: doc.done_when, files: doc.files } }], { head: w.M0 }));
   await pass(w);
   assert.equal(w.started.length, 2);
   assert.notEqual(w.started[0].fingerprint, w.started[1].fingerprint);
   w.answer = { ok: true, answer: 'PASS' };
   await pass(w);
-  assert.equal(asks(w)[0].doc.plan_check.plan_sha256, 'd'.repeat(64));
+  assert.notEqual(w.t.record.read('card', 'A').doc.plan_sha256, doc.plan_sha256);
+  assert.equal(asks(w)[0].doc.plan_check.plan_sha256, w.t.record.read('card', 'A').doc.plan_sha256);
 });
 
 for (const [name, setup, told] of [
@@ -335,7 +390,7 @@ test('L462 m1: an answered ask is left alone once another ask gave this plan its
   must(w.t.record.write({ actor: 'approvals', entity: 'go', id: 'go-A', expectRev: 0, doc: { product: PRODUCT, card_id: 'A', plan_fingerprint, fingerprint_inputs, ask: 'go-A-other', binding: { kind: 'tap', session_id: 'S-1', tool_use_id: 't', at },
     rows, tier, files, done_bar: fingerprint_inputs.done_bar, main_commit: null, rechecked: [], at } }));
   const r = await pass(w);
-  assert.deepEqual(r.events, []);
+  assert.deepEqual(r.events, ['ready A'], 'no second go; the go it has moves the card on');
   assert.equal(w.t.record.read('go', 'go-A').doc.ask, 'go-A-other');
   assert.equal(askStore(w.t.record).ask(a.id).doc.state, 'answered');
 });
@@ -508,7 +563,7 @@ test('L462 M1: the age is from the first push, then the raise, then the ask itse
   assert.equal(w.sent.length, 1, 'only the ask\'s own time is left');
 });
 
-test('L462 M1: on real M2 scheduling, one push, then the owner hears daily with no answer', async () => {
+test('L462 M1, L523: on real M2 scheduling, one push a day, and the owner hears daily with no answer', async () => {
   const w = world();
   card(w, 'A');
   await pass(w);
@@ -517,7 +572,7 @@ test('L462 M1: on real M2 scheduling, one push, then the owner hears daily with 
   mkdirSync(w.t.ctx.stateDir, { recursive: true });
   w.t.ctx.push = async (e) => { pushes.push(e); return true; };
   for (let i = 0; i < 4 * 48; i += 1) { later(w, HOUR / 2); await schedulePass(w.t.ctx); await pass(w); }
-  assert.equal(pushes.length, 1, 'M2 pushes a go ask once');
+  assert.equal(pushes.length, 4, 'one push a day over four days, never one a pass');
   assert.equal(asks(w).length, 1);
   assert.ok(w.sent.filter((s) => s.includes('card A')).length >= 3, w.sent.join(' | '));
 });
@@ -651,7 +706,7 @@ for (const [port, setup] of [
   ['planView', (w) => card(w, 'A')],
   ['mainSha', (w) => card(w, 'A')],
 ]) {
-  test(`L462 m5: a ${port} that hangs is told under its card, and the next card still runs`, async () => {
+  test(`L462 m5: a ${port} that hangs is told under its card, and the next card still runs`, () => ownClock(async () => {
     const w = world();
     setup(w);
     card(w, 'B');
@@ -661,10 +716,10 @@ for (const [port, setup] of [
     await pass(w, { portMs: 20, passMs: 2000, [port]: hangsOnce });
     assert.ok(w.sent.some((s) => new RegExp(`card A failed: ${port}: it did not answer within 20 ms`).test(s)), w.sent.join(' | '));
     assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
-  });
+  }));
 }
 
-test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit, and is told', async () => {
+test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit, and is told', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   await pass(w);
@@ -676,7 +731,7 @@ test('L462 m5: a planReviewAnswer or replyToLead that hangs costs only its limit
   answer(v, asks(v)[0].id, 'Not now', false);
   await pass(v, { portMs: 20, passMs: 2000, replyToLead: () => new Promise(() => {}) });
   assert.ok(v.sent.some((s) => /Lead could not be told .*replyToLead: it did not answer within 20 ms/.test(s)), v.sent.join(' | '));
-});
+}));
 
 test('L462: a port not wired yet is told once for the product, not once per card', async () => {
   const w = world();
@@ -719,7 +774,9 @@ test('L462: with no diary line for the plan, the tell says so plainly', async ()
 
 test('L450: plan A, then B, then A again asks for A again, as its go was replaced', async () => {
   const w = world();
-  const files = card(w, 'A').files;
+  // It stays in draft through all this only because it waits on a dependency: a card with a go otherwise moves to ready.
+  seed(w.t, 'card', 'D', { state: 'running', product: PRODUCT });
+  const files = card(w, 'A', { depends_on: ['D'] }).files;
   const yes = async () => { answer(w, asks(w).find((a) => a.doc.state === 'open').id, 'Go', true); await pass(w); };
   await pass(w);
   await yes();
@@ -757,19 +814,22 @@ test('a card past draft is not asked', async () => {
 });
 
 // ---- L467: a pass under a hang. Each tick is its own process: when the step ends, main exits, so a pass cut off by the
-// product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits; much further and
-// the Record's own writes would take up too much of a port's limit.
+// product's deadline writes nothing more. Time is scaled down by 20, the same ratio as the real limits. These tests run on
+// the test's own clock (ownClock), so only a hang costs time, never the Record's writes or a busy machine.
 const SCALED = { portMs: PLAN_PORT_MS / 20, productMs: APPROVALS_PRODUCT_MS / 20 };
+const ROOMY_MS = 60_000;
 const ids10 = Array.from({ length: 10 }, (_, i) => `C${String(i + 1).padStart(2, '0')}`);
 
-async function tickAsProcess(w, over) {
+// `wallMs`: the step's limit. Under ownClock it runs on the test's clock with the pass's budget, so `stepError` says whether
+// the pass stopped in time; under timeJumps it runs on real time, so those tests give it room.
+async function tickAsProcess(w, over, wallMs = SCALED.productMs) {
   const now = w.t.clock.t;
   let alive = true;
   const base = w.t.record;
   const rec = Object.create(base, { write: { value: (x) => (alive ? base.write(x) : { ok: false, reason: 'process gone' }) } });
   const before = w.sent.length;
   w.stepError = null;
-  await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: SCALED.productMs,
+  await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx }], what: 'plan-go', productMs: wallMs,
     pass: (ctx) => planGoPass(ctx, { ...w.ports, alert: outbox(rec, now), portMs: SCALED.portMs, passMs: SCALED.productMs, ...over }) }).catch((e) => { w.stepError = e.message; });
   alive = false;
   await sendAlerts(base, async (text) => { w.sent.push(text); return true; }, now);
@@ -779,7 +839,7 @@ async function tickAsProcess(w, over) {
 
 const hangsFor = (w, who) => (x) => (who(x.card) ? new Promise(() => {}) : w.ports.planRows(x));
 
-test('L467: with every card hanging, the first tick names all of them and the step never fails', async () => {
+test('L467: with every card hanging, the first tick names all of them and the step never fails', () => ownClock(async () => {
   const w = world();
   ids10.forEach((id) => card(w, id));
   const planRows = hangsFor(w, () => true);
@@ -787,24 +847,32 @@ test('L467: with every card hanging, the first tick names all of them and the st
   assert.equal(w.stepError, null);
   assert.deepEqual(named, ids10, 'every card is named in the first tick');
   assert.ok(w.sent.some((s) => /card C10 was not reached/.test(s)), w.sent.join(' | '));
-});
+}));
 
-test('L467: with the first six hanging, all are named at once, the healthy four are asked next, and the turn is kept in a fact', async () => {
-  const w = world();
-  ids10.forEach((id) => card(w, id));
-  const planRows = hangsFor(w, (id) => Number(id.slice(1)) <= 6);
-  const first = await tickAsProcess(w, { planRows });
-  assert.deepEqual(first, ids10, 'all ten named in the first tick');
-  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at);
-  assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('C10')), null);
-  for (let n = 0; n < 3 && asks(w).length < 4; n++) {
+// The second run makes each healthy call take a quarter of the product's deadline in real time, as a busy machine can: on
+// the real clock the four healthy cards would use up the pass, and on the test's own it costs nothing.
+for (const [busy, realMs] of [['', 0], [', on a busy machine too', SCALED.productMs / 4]]) {
+  test(`L467: with the first six hanging, all are named at once, the healthy four are asked next, and the turn is kept in a fact${busy}`, () => ownClock(async () => {
+    const w = world();
+    ids10.forEach((id) => card(w, id));
+    const planRows = (x) => {
+      if (Number(x.card.slice(1)) <= 6) return new Promise(() => {});
+      if (realMs) sleepMs(realMs);
+      return w.ports.planRows(x);
+    };
+    const first = await tickAsProcess(w, { planRows });
+    assert.equal(w.stepError, null);
+    assert.deepEqual(first, ids10, 'all ten named in the first tick');
+    assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at);
+    assert.equal(w.t.record.read('fact', PLAN_SLOW_FACT('C10')), null);
     later(w, HOUR);
     await tickAsProcess(w, { planRows });
-  }
-  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C07', 'C08', 'C09', 'C10']);
-});
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C07', 'C08', 'C09', 'C10'], w.sent.join(' | '));
+  }));
+}
 
-test('L467: a card that hung stops being slow once its calls answer, and a not-reached card is told only once a day', async () => {
+test('L467: a card that hung stops being slow once its calls answer, and a not-reached card is told only once a day', () => ownClock(async () => {
   const w = world();
   card(w, 'A');
   card(w, 'B');
@@ -821,7 +889,7 @@ test('L467: a card that hung stops being slow once its calls answer, and a not-r
   await pass(v, { portMs: 20, passMs: 1 });
   assert.equal(v.sent.filter((s) => /card A was not reached/.test(s)).length, 2);
   assert.deepEqual(asks(v), []);
-});
+}));
 
 test('L467: a card that needs no call still goes on once the time is up', async () => {
   const w = world();
@@ -843,7 +911,7 @@ test('L467: a card told as not reached while time is up has no start mark left b
   assert.ok(!w.sent.some((s) => /never confirmed/.test(s)), w.sent.join(' | '));
 });
 
-test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the next card still runs', async () => {
+test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the next card still runs', () => ownClock(async () => {
   const w = world();
   card(w, 'A');
   card(w, 'B');
@@ -853,7 +921,7 @@ test('L467 m-a: a view.isDir that hangs is limited, told under its card, and the
   assert.ok(w.sent.some((s) => /card A could not be asked for a go: .*isDir: it did not answer within 20 ms/.test(s)), w.sent.join(' | '));
   assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
-});
+}));
 
 test('L467 m-a: time up before isDir counts as out of time, not as a failed read', async () => {
   const w = world();
@@ -866,12 +934,31 @@ test('L467 m-a: time up before isDir counts as out of time, not as a failed read
   assert.ok(!w.sent.some((s) => /could not be asked/.test(s)), w.sent.join(' | '));
 });
 
-// Runs f with a jump in the clock the budget reads, so which call runs out of time doesn't depend on how fast the test runs.
+// Runs f on a clock the budget reads and only the test moves, so which call runs out of time doesn't depend on how fast the
+// test runs or how busy the machine is. `jump(by)` sets it to that far past the start; `spend(ms)` adds a call's cost.
 async function timeJumps(f) {
   const real = Date.now;
+  const start = real();
   let extra = 0;
-  Date.now = () => real() + extra;
-  try { return await f((by = 60_000) => { extra = by; }); } finally { Date.now = real; }
+  Date.now = () => start + extra;
+  try { return await f((by = 60_000) => { extra = by; }, (ms) => { extra += ms; }); } finally { Date.now = real; }
+}
+
+// Runs f with timers and Date on a clock only the test moves. It moves 1 ms at a time, and only once nothing but a timer is
+// left to run, so a call that hangs costs exactly its limit, and the Record's writes, the machine's load and every call
+// that answers cost nothing. The pass's budget (Date.now), each call's limit and the step's deadline (setTimeout) all read it.
+async function ownClock(f) {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  let done = false;
+  const run = Promise.resolve().then(f);
+  run.then(() => { done = true; }, () => { done = true; });
+  try {
+    while (!done) {
+      await new Promise((r) => setImmediate(r));
+      if (!done) mock.timers.tick(1);
+    }
+    return await run;
+  } finally { mock.timers.reset(); }
 }
 
 // A Tier-1 ask with a pull request, asked for plan A, and the plan moved on.
@@ -887,13 +974,13 @@ async function askWithPr(w) {
   return a.id;
 }
 
-test('L467 m-a: a close of an old pull request that hangs is limited, and the card is told and marked slow', async () => {
+test('L467 m-a: a close of an old pull request that hangs is limited, and the card is told and marked slow', () => ownClock(async () => {
   const w = world();
   await askWithPr(w);
   const gh = { ...w.t.ctx.gh, patch: () => new Promise(() => {}) };
   await pass(w, { portMs: 20, passMs: 1000 }, { gh });
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
-});
+}));
 
 test('L467 m-a: with no time left for the close, the old ask stays and the card is told it ran out', async () => {
   const w = world();
@@ -909,7 +996,7 @@ test('L467 m-a: with no time left for the close, the old ask stays and the card 
   assert.ok(w.sent.some((s) => /card A was not finished/.test(s)), w.sent.join(' | '));
 });
 
-test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', async () => {
+test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, and started again after the hold', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
@@ -927,7 +1014,7 @@ test('L467 m-b: a start that hangs leaves a mark: no second start, told daily, a
   later(w, HOUR);
   await pass(w);
   assert.equal(w.started.length, 2, 'after the hold the start is tried again');
-});
+}));
 
 test('L467 m-b: the mark is on the Record before the start is called, and a mark that can\'t be written starts nothing', async () => {
   const w = world();
@@ -966,14 +1053,14 @@ test('L467 m-b: a start port not wired yet started nothing, so it leaves no mark
   assert.equal(w.started.length, 1);
 });
 
-test('L467 m-b: a new plan is not held by the old plan\'s mark', async () => {
+test('L467 m-b: a new plan is not held by the old plan\'s mark', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   await pass(w, { portMs: 20, passMs: 1000, startPlanReview: () => new Promise(() => {}) });
   replan(w, 'A');
   await pass(w);
   assert.equal(w.started.length, 1);
-});
+}));
 
 const OPEN_PR = (id) => new RegExp(`Ask ${id} was withdrawn; approving pull request 7 won't count`);
 function closingFails(w) {
@@ -1092,28 +1179,33 @@ test('L477 m1: a card whose own calls use up the pass goes behind the rest, each
   ids.slice(1).forEach((id) => card(w, id));
   let cur = null;
   const planRows = (x) => { cur = x.card; return w.ports.planRows(x); };
-  const planView = async (x) => {
-    const v = await w.ports.planView(x);
-    return { isDir: (sha, f) => (cur === 'C01' ? new Promise((r) => { setTimeout(() => r(false), SCALED.portMs * 0.9); }) : v.isDir(sha, f)) };
-  };
-  await tickAsProcess(w, { planRows, planView });
-  assert.equal(w.stepError, null);
-  assert.deepEqual(asks(w), []);
-  assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at, 'it never hung, and it is still marked');
-  assert.ok(w.sent.some((s) => /card C01 was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
-  assert.ok(w.sent.some((s) => /card C02 was not reached: slow calls on C01 used up/.test(s)), w.sent.join(' | '));
-  later(w, 25 * HOUR);
-  await tickAsProcess(w, { planRows, planView });
-  assert.equal(w.stepError, null);
-  assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C02', 'C03', 'C04']);
+  await timeJumps(async (jump, spend) => {
+    // Each of C01's calls costs 0.9 of a port limit on the test's clock: under the limit, and enough to use up the pass.
+    const planView = async (x) => {
+      const v = await w.ports.planView(x);
+      return { isDir: (sha, f) => { if (cur !== 'C01') return v.isDir(sha, f); spend(SCALED.portMs * 0.9); return false; } };
+    };
+    await tickAsProcess(w, { planRows, planView }, ROOMY_MS);
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w), []);
+    assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('C01')).doc.slow_at, 'it never hung, and it is still marked');
+    assert.ok(w.sent.some((s) => /card C01 was not finished: this card's own calls were slow/.test(s)), w.sent.join(' | '));
+    assert.ok(w.sent.some((s) => /card C02 was not reached: slow calls on C01 used up/.test(s)), w.sent.join(' | '));
+    later(w, 25 * HOUR);
+    await tickAsProcess(w, { planRows, planView }, ROOMY_MS);
+    assert.equal(w.stepError, null);
+    assert.deepEqual(asks(w).map((a) => a.doc.card).sort(), ['C02', 'C03', 'C04']);
+  });
 });
 
 test('L477 m1: calls that took more than a port limit between them mark a card that finished', async () => {
   const w = world();
   card(w, 'A', { files: ['src/a.mjs', 'src/b.mjs'] });
   card(w, 'B');
-  const planView = async () => ({ isDir: () => new Promise((r) => { setTimeout(() => r(false), 60); }) });
-  await pass(w, { portMs: 100, passMs: 1000, planView: async (x) => (x.product ? planView() : null) });
+  await timeJumps((jump, spend) => {
+    const planView = async () => ({ isDir: () => { spend(60); return false; } });
+    return pass(w, { portMs: 100, passMs: 1000, planView: async (x) => (x.product ? planView() : null) });
+  });
   assert.equal(asks(w).length, 2, 'both asked');
   assert.ok(w.t.record.read('fact', PLAN_SLOW_FACT('A')).doc.slow_at);
 });
@@ -1146,7 +1238,7 @@ test('L477 m2: a clear no clears the mark, so the next pass tries', async () => 
   assert.equal(w.started.length, 2);
 });
 
-test('L477 m5: a start that timed out is not started again two hours later', async () => {
+test('L477 m5: a start that timed out is not started again two hours later', () => ownClock(async () => {
   const w = world();
   t1(w, 'A');
   const startPlanReview = (x) => { w.started.push(x); return new Promise(() => {}); };
@@ -1157,7 +1249,7 @@ test('L477 m5: a start that timed out is not started again two hours later', asy
   later(w, PLAN_START_HOLD_MS);
   await pass(w, { portMs: 20, passMs: 1000, startPlanReview });
   assert.equal(w.started.length, 2);
-});
+}));
 
 test('L477 item (i): a go recorded on A withdraws B\'s live ask after A -> B -> A, and B coming back is asked', async () => {
   const w = world();
@@ -1170,7 +1262,10 @@ test('L477 item (i): a go recorded on A withdraws B\'s live ask after A -> B -> 
   const b1 = asks(w).find((a) => a.id !== a1);
   assert.equal(b1.doc.state, 'open');
   replan(w, 'A', files);
-  await pass(w);
+  // Held in draft here: a card that reached ready has a frozen plan (L473), so B could not come back.
+  const base = w.t.record;
+  const rec = Object.create(base, { write: { value: (x) => (x.entity === 'card' && x.doc?.state === 'ready' ? { ok: false, reason: 'held in draft' } : base.write(x)) } });
+  await pass(w, {}, { record: rec });
   assert.equal(w.t.record.read('go', 'go-A').doc.ask, a1);
   const after = askStore(w.t.record).ask(b1.id).doc;
   assert.equal(after.state, 'withdrawn');
@@ -1293,18 +1388,15 @@ test('L480 R2: at the real limits, moderate cards that never finish take turns, 
   const reached = [];
   // Each call costs 0.6 of a port limit on a clock that moves for nothing else: the ninth call goes out with exactly the
   // last-call margin left, so real time must not count or the machine's load decides this test.
-  const real = Date.now;
-  let clock = real();
-  Date.now = () => clock;
-  try {
-    const costs = (f) => (x) => { reached.at(-1).push(x.card); clock += PLAN_PORT_MS * 0.6; return f(x); };
+  await timeJumps(async (jump, spend) => {
+    const costs = (f) => (x) => { reached.at(-1).push(x.card); spend(PLAN_PORT_MS * 0.6); return f(x); };
     const ports = { portMs: PLAN_PORT_MS, passMs: APPROVALS_PRODUCT_MS, startPlanReview: costs(w.ports.startPlanReview), planReviewAnswer: costs(w.ports.planReviewAnswer) };
     for (let i = 0; i < 3; i += 1) {
       reached.push([]);
       await pass(w, ports);
       later(w, HOUR);
     }
-  } finally { Date.now = real; }
+  });
   assert.deepEqual(reached[0], ids10.slice(0, 9));
   assert.deepEqual(reached[1], [ids10[9], ...ids10.slice(0, 8)]);
   // The test's clock stands still within a pass, so cards reached in one pass tie and keep their list order.
@@ -1384,4 +1476,280 @@ test('L477 m3: a close that worked leaves no mark and tells nobody', async () =>
   const old = askStore(w.t.record).ask(id).doc;
   assert.equal(old.state, 'withdrawn');
   assert.equal(old.pr_close_due, undefined);
+});
+
+test('R-0b-170: end to end: a plan file in the Lead\'s outbox becomes a Tier-1 draft card, and the plan-go step reviews it and asks for its go', async () => {
+  const w = world();
+  const dir = join(w.t.outRoot, 'lead', 'L-1');
+  mkdirSync(dir, { recursive: true });
+  must(recordLeadLaunch({ rec: w.t.record, now: w.t.clock.t, alert: fakeAlert(), sessionId: 'L-1', head: w.M0, product: PRODUCT }));
+  const text = JSON.stringify({ cards: [{ id: 'A', wave: 1, tier: 1, module: 'M1', brief: { goal: 'the goal', done_when: doneBar(ROWS), files: ['src/a.mjs'], not_in_scope: 'anything else' } }] });
+  writeFileSync(join(dir, 'plan-a.json'), text);
+  const said = fakeAlert();
+  const [r] = await intakePass({ rec: w.t.record, now: w.t.clock.t, sessions: [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid() }], wait: async () => {},
+    alert: said, note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: async () => ({ ok: true }) });
+  assert.equal(r.applied, true, JSON.stringify(r));
+  const { doc } = w.t.record.read('card', 'A');
+  assert.deepEqual([doc.state, doc.tier, doc.main_commit, doc.plan_sha256], ['draft', 1, w.M0, createHash('sha256').update(text).digest('hex')]);
+  await pass(w);
+  assert.equal(w.started.length, 1, 'a fresh reviewer read the plan');
+  w.answer = { ok: true, answer: 'PASS' };
+  await pass(w);
+  assert.deepEqual(asks(w).map((a) => [a.doc.kind, a.doc.card]), [['go_t1', 'A']]);
+  assert.equal(asks(w)[0].doc.plan_check.plan_sha256, doc.plan_sha256);
+  assert.equal(asks(w)[0].doc.plan_check.author_session, 'L-1', 'the author is the Lead that handed the plan in');
+  answer(w, asks(w)[0].id, 'go', true);
+  await pass(w);
+  assert.equal(w.t.record.read('card', 'A').doc.state, 'ready', w.sent.join(' | '));
+  assert.deepEqual(w.t.record.ready().map((c) => c.id), ['A'], 'and a worker can take it');
+  assert.deepEqual(said.texts, []);
+});
+
+// ---- R-0b-170: the move from draft to ready, once a go covers the card.
+async function withGo(w, id) {
+  await pass(w);
+  answer(w, asks(w).find((a) => a.doc.card === id && a.doc.state !== 'consumed').id, 'Go', true);
+}
+const stateOf = (w, id) => w.t.record.read('card', id).doc.state;
+
+test('L696 M1: a card whose rows are only its row files gets its go, moves to ready and passes the start gate', async () => {
+  const files = ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'];
+  const yaml = (id) => `id: ${id}\nwhat: row ${id}\nmodule: M1\ntier: 2\ndone_when: ${ROWS[id].done_when}\nstatus: planned\n`;
+  const w = world();
+  card(w, 'A', { files });
+  w.ports.planRows = githubRows(w, { 'R-1': yaml('R-1') });
+  await withGo(w, 'A');
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready', w.sent.join(' | '));
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.rows, undefined, 'the card names its rows only through its files');
+  const GREEN = { band: 'green', own_building: 'open', prodBlocked: false };
+  const g = startGate({ rules: rulesWith(), rec: w.t.record, card: { id: 'A', ...doc }, kind: 'editing', product: PRODUCT, b: GREEN, running: [] });
+  assert.deepEqual(g, { ok: true });
+  assert.ok(fileSet({ id: 'A', ...doc }, { dailyPatterns: [] }).files.has('docs/blueprint/rows/r-1.yaml'), 'the row is in the card\'s file set');
+});
+
+test('R-0b-170: an ordinary card moves to ready in the pass that records its go, once', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  const r = await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready');
+  assert.deepEqual(r.events, ['go go-A', 'ready A']);
+  assert.equal(w.t.record.diary().filter((d) => d.kind === 'go_ready').length, 1);
+  const rev = w.t.record.read('card', 'A').rev;
+  assert.deepEqual((await pass(w)).events, []);
+  assert.equal(w.t.record.read('card', 'A').rev, rev, 'a card past draft is left alone');
+});
+
+test('R-0b-170: no go, a declined go or a go on an older plan does not move a card', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  await pass(w);
+  const a = asks(w).find((x) => x.doc.card === 'B');
+  answer(w, a.id, 'Go', true);
+  replan(w, 'B');
+  await pass(w);
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'draft');
+  assert.equal(stateOf(w, 'B'), 'draft', 'the go was on the plan before this one');
+  const d = world();
+  card(d, 'A');
+  await pass(d);
+  answer(d, asks(d)[0].id, 'Not now', false);
+  await pass(d);
+  assert.equal(stateOf(d, 'A'), 'draft');
+});
+
+test('R-0b-170: a card waiting on a dependency stays in draft with nothing told or refused, and moves once it has merged', async () => {
+  const w = world();
+  seed(w.t, 'card', 'D', { state: 'running', product: PRODUCT });
+  card(w, 'A', { depends_on: ['D'] });
+  await withGo(w, 'A');
+  const base = w.t.record;
+  let tried = 0;
+  const record = Object.create(base, { write: { value: (x) => { if (x.kind === 'go_ready') tried += 1; return base.write(x); } } });
+  await pass(w, {}, { record });
+  await pass(w, {}, { record });
+  assert.equal(stateOf(w, 'A'), 'draft');
+  assert.deepEqual(w.sent, []);
+  assert.equal(tried, 0, 'no write is tried only to be refused, which would alert');
+  const d = w.t.record.read('card', 'D');
+  seed(w.t, 'card', 'D', { ...d.doc, state: 'merged' });
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready');
+});
+
+test('R-0b-170: a card on a paused product waits quietly, and moves when it resumes', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  const p = w.t.record.read('product', PRODUCT);
+  seed(w.t, 'product', PRODUCT, { ...p.doc, state: 'paused' });
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'draft');
+  assert.deepEqual(w.sent, []);
+  seed(w.t, 'product', PRODUCT, { ...p.doc });
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready');
+});
+
+test('R-0b-170: a card whose dependency will never merge is told to the owner once a day, and stays in draft', async () => {
+  const w = world();
+  seed(w.t, 'card', 'D', { state: 'cancelled', product: PRODUCT });
+  card(w, 'A', { depends_on: ['D'] });
+  await withGo(w, 'A');
+  await pass(w);
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'draft');
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: dependency D is cancelled/.test(s)).length;
+  assert.equal(told(), 1, w.sent.join(' | '));
+  later(w, 25 * HOUR);
+  await pass(w);
+  assert.equal(told(), 2);
+});
+
+test('L490: a card whose dependency was reverted is told at once, at 24 hours and at 48 hours, and stays in draft', async () => {
+  const w = world();
+  seed(w.t, 'card', 'D', { state: 'reverted', product: PRODUCT });
+  card(w, 'A', { depends_on: ['D'] });
+  await withGo(w, 'A');
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: dependency D is reverted/.test(s)).length;
+  await pass(w);
+  await pass(w);
+  assert.equal(told(), 1, w.sent.join(' | '));
+  later(w, 24 * HOUR);
+  await pass(w);
+  assert.equal(told(), 2, 'at 24 hours');
+  later(w, 24 * HOUR);
+  await pass(w);
+  assert.equal(told(), 3, 'at 48 hours');
+  assert.equal(stateOf(w, 'A'), 'draft');
+});
+
+test('L490 m7: a card whose product record can\'t be read is told once, then daily; it never waits quietly', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  const base = w.t.record;
+  const corrupt = { id: PRODUCT, corrupt: true, reason: 'unreadable' };
+  const record = Object.create(base, { read: { value: (e, id) => (e === 'product' ? corrupt : base.read(e, id)) }, lookup: { value: (e, id) => (e === 'product' ? corrupt : base.lookup?.(e, id)) } });
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: product .* record can't be read/.test(s)).length;
+  await pass(w, {}, { record });
+  await pass(w, {}, { record });
+  assert.equal(told(), 1, w.sent.join(' | '));
+  later(w, 25 * HOUR);
+  await pass(w, {}, { record });
+  assert.equal(told(), 2);
+  assert.equal(stateOf(w, 'A'), 'draft');
+});
+
+test('R-0b-170: a write the Record refuses at the last moment is told, and the next pass tries again', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  const base = w.t.record;
+  const record = Object.create(base, { write: { value: (x) => (x.kind === 'go_ready' ? { ok: false, reason: 'turned down' } : base.write(x)) } });
+  await pass(w, {}, { record });
+  assert.equal(stateOf(w, 'A'), 'draft');
+  const told = () => w.sent.filter((s) => /card A has its go but can't start: turned down/.test(s)).length;
+  assert.equal(told(), 1, w.sent.join(' | '));
+  await pass(w, {}, { record });
+  assert.equal(told(), 1, 'once a day');
+  assert.ok(w.t.record.read('fact', 'hold-plan-go-A-ready'), 'under its own cause');
+  later(w, 25 * HOUR);
+  await pass(w, {}, { record });
+  assert.equal(told(), 2);
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'ready');
+});
+
+test('L473: the Record itself refuses draft to ready with no go covering the card, whatever the Dispatcher asks', async () => {
+  const w = world();
+  card(w, 'A');
+  const none = move(w.t.record, 'card', 'A', { state: 'ready' }, { kind: 'go_ready' });
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /no go from the owner matches this plan/);
+  assert.equal(stateOf(w, 'A'), 'draft');
+});
+
+test('L473: a go on an older plan does not cover the card at the Record either', async () => {
+  const w = world();
+  seed(w.t, 'card', 'D', { state: 'running', product: PRODUCT });
+  card(w, 'A', { depends_on: ['D'] });
+  await withGo(w, 'A');
+  await pass(w);
+  replan(w, 'A');
+  const d = w.t.record.read('card', 'D');
+  seed(w.t, 'card', 'D', { ...d.doc, state: 'merged' });
+  const r = move(w.t.record, 'card', 'A', { state: 'ready' }, { kind: 'go_ready' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /no go from the owner matches this plan/);
+});
+
+test('R-0b-170: a go-free card is left in draft for its own step', async () => {
+  const w = world({ 'approvals.plan_go.go_free.lead_daily_card': ['*.md'] });
+  card(w, 'A', { kind: 'lead_daily_card' });
+  await pass(w);
+  assert.equal(stateOf(w, 'A'), 'draft');
+});
+
+test('R-0b-170: moving a card needs no port, so a pass that has run out of time still moves it', async () => {
+  const w = world();
+  card(w, 'A');
+  await withGo(w, 'A');
+  await pass(w, { passMs: 0 });
+  assert.equal(stateOf(w, 'A'), 'ready');
+});
+
+test('L486: a refused write on a close still due is told once, then daily, through the whole step, and the close goes on being tried', async () => {
+  const w = world();
+  const id = await askWithPr(w);
+  const c = closingFails(w);
+  await pass(w, {}, { gh: c.gh });
+  c.status = 200;
+  const base = w.t.record;
+  let refusing = true;
+  const rec = Object.create(base, { write: { value: (x) => (refusing && x.entity === 'ask' && x.id === id ? { ok: false, reason: 'refused' } : base.write(x)) } });
+  const stateDir = join(w.t.base, 'm2-state');
+  mkdirSync(stateDir, { recursive: true });
+  const step = async () => {
+    const now = w.t.clock.t;
+    await approvalsStep({ rec, rules: w.t.ctx.rules, now, alert: outbox(rec, now), approvals: () => [{ ...w.t.ctx, stateDir, gh: c.gh }] });
+    await sendAlerts(base, async (text) => { w.sent.push(text); return true; }, now);
+  };
+  const refusals = () => w.sent.filter((s) => s.includes('approvals write refused') && s.includes(id)).length;
+  const calls = c.calls;
+  for (let i = 0; i < 4; i += 1) { await step(); later(w, HOUR / 2); }
+  assert.equal(refusals(), 1, w.sent.join(' | '));
+  assert.equal(c.calls, calls + 4, 'the close is tried every pass');
+  assert.equal(askStore(base).ask(id).doc.pr_close_due, true);
+  later(w, 25 * HOUR);
+  await step();
+  assert.equal(refusals(), 2, 'again the next day');
+  refusing = false;
+  await step();
+  assert.equal(askStore(base).ask(id).doc.pr_close_due, undefined, 'the write that was refused goes through once it can');
+  assert.equal(refusals(), 2);
+});
+
+test('L486: each ask is its own cause, and only the refused write is held', async () => {
+  const w = world();
+  const rec = w.t.record;
+  const now = w.t.clock.t;
+  const say = approvalsAlerts(outbox(rec, now), 'p', rec, now);
+  const send = () => sendAlerts(rec, async (text) => { w.sent.push(text); return true; }, now);
+  say({ type: 'approvals_write_refused', ask: 'A-1', reason: 'no' });
+  await send();
+  say({ type: 'approvals_write_refused', ask: 'A-1', reason: 'no' });
+  say({ type: 'approvals_write_refused', ask: 'A-2', reason: 'no' });
+  await send();
+  assert.equal(w.sent.filter((s) => s.includes('ask A-1')).length, 1);
+  assert.equal(w.sent.filter((s) => s.includes('ask A-2')).length, 1);
+  say({ type: 'approvals_config', reason: 'bad' });
+  await send();
+  say({ type: 'approvals_config', reason: 'bad' });
+  await send();
+  assert.equal(w.sent.filter((s) => s.includes('approvals config')).length, 2, 'only the write refusal is held here');
 });

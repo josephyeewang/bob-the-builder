@@ -31,7 +31,7 @@
 //   A start is marked before the call. If the call timed out it may still have started, so for PLAN_START_HOLD_MS the
 //   mark counts as started: no second start, and the owner told daily that it is unconfirmed (L467).
 // One ask per card and plan (L450), the time of it kept in a fact. The plan's latest ask says what happens next:
-//   Live for over GO_REASK_MS: the owner is told daily, naming the ask. M2 pushes a go ask once and never lapses it (L462).
+//   Live for over GO_REASK_MS: the owner is told daily, naming the ask. M2 re-pushes a go ask once a day and never lapses it (L523).
 //   Live for less, or a go it gave: nothing.
 //   Declined: never asked again for this plan. Its Lead is told once, so it can change the plan; a changed plan is a new ask.
 //   Expired, no answer: asked again at most once in GO_REASK_MS.
@@ -39,10 +39,14 @@
 //   only a changed plan is asked.
 //   Used by a go since replaced (plan A, then B, then A again): asked, as M2 allows.
 // A declined, expired, withdrawn or unanswered card is in the owner's daily hold tell while it waits.
+// A draft card with a go that covers it moves to ready (R-0b-170), in the pass that recorded the go if it can. It stays
+// in draft, quietly, while a dependency has yet to merge or the product is paused, and goes on by itself; anything else
+// that stops it is told, once a day per card. It is checked first because the Record logs and reports every write it
+// refuses. The Record checks again itself and refuses a card no go covers. A go-free card has no go, so its own step moves it.
 // Everything that stops a card reaches the owner, once a day per card and reason (holdAlert). One card failing never
 // stops the next. Facts sit in the Dispatcher's `hold-` family; a stale mark does no harm, and a new plan gets a new review.
 
-import { goNeeded } from '../M9-record/ready.mjs';
+import { goNeeded, readyCheck } from '../M9-record/ready.mjs';
 import { PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
@@ -50,6 +54,7 @@ import { PLAN_REVIEW_WORDING, readPlanReview } from '../M3-lead/lead-wording.mjs
 import { activeKind } from '../../shared/asks.mjs';
 import { planPass } from '../../shared/plan-review.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
+import { move } from './moves.mjs';
 import { guarded, holdAlert, HOLD_FACT } from './pass.mjs';
 
 // The read-only cap counts a Lead's sessions; plan reviewers count together under this name.
@@ -224,10 +229,18 @@ function noteAsked(ctx, tell, c, fp) {
   if (!w.ok) tell(c.id, 'noted', `card ${c.id} was asked for a go, but that could not be noted: ${short(w.reason)}`);
 }
 
+function goReady(ctx, tell, view, c, events) {
+  const can = readyCheck(c, view, { rules: ctx.rules, product: ctx.product });
+  if (!can.ok && can.waiting) return;
+  const r = can.ok ? move(ctx.record, 'card', c.id, { state: 'ready' }, { kind: 'go_ready' }) : can;
+  if (r.ok) events.push(`ready ${c.id}`);
+  else tell(c.id, 'ready', `card ${c.id} has its go but can't start: ${short(r.reason)}`);
+}
+
 async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const { product, rules } = ctx;
   const n = goNeeded(c, view, rules, product);
-  if (!n.needed) return;
+  if (!n.needed) { if (n.go) goReady(ctx, tell, view, c, events); return; }
   if (!n.root) { tell(c.id, 'chain', `card ${c.id} can't be asked for a go: ${short(n.reason)}`); return; }
   if (n.root.id !== c.id) { tell(c.id, 'root', `card ${c.id} runs on root card ${n.root.id}'s go, so it waits: ${short(n.reason)}`); return; }
   const d = c.doc;

@@ -19,9 +19,10 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
 import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
 import { readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
@@ -44,7 +45,7 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
-export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => {}, now = () => Date.now(), host = hostname(),
+export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
@@ -427,9 +428,27 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   }
 
   // ---- the outbox (R-0b-20, M-3, R2-M8 … R2-M10, R3-M4) ----
+  // A Lead's plan (R-0b-170, L460): every card checked, then all of them in one diary line, as the Lead, so the plan's
+  // author is a named session. Only the bytes M11's intake checked are applied (its plan check is not repeated here).
+  function applyPlan(tx, tag, f, actor) {
+    if (tag.checked_sha256 !== f.sha256) return no('this plan file is not the one the plan check read');
+    const launch = leadLaunchHead(tx, tag.sessionId);
+    if (!launch || tx.current('launch', launch.id)?.tampered) return no(`Lead session ${tag.sessionId} has no launch record naming the main commit it started on`);
+    const p = planCards({ text: f.body, sha256: f.sha256, mainCommit: launch.head, product, read: (id) => tx.current('card', id), cards: tx.list('card') });
+    if (!p.ok) return no(p.reason);
+    const said = { created: p.created, updated: p.updated, dropped: p.dropped };
+    if (!p.writes.length) return { ok: true, ...said };
+    const checked = p.writes.map((w) => check(tx, { entity: 'card', id: w.id, expectRev: w.expectRev, doc: w.doc }, actor));
+    const bad = checked.find((c) => !c.ok);
+    if (bad) return bad;
+    const r = tx.commit(checked.map(({ write }) => write), meta(actor, 'plan', { file: basename(f.realpath), sha256: f.sha256 }));
+    return { ok: true, rev: r.rev, seq: r.seq, ...said };
+  }
+
   function applyParsed(tx, tag, f) {
     const actor = `${tag.role}:${tag.sessionId}`;
     const entity = f.spec.entity;
+    if (f.kind === 'plan-') return applyPlan(tx, tag, f, actor);
     if (f.spec.mode === 'create') {
       // Created once per file content, even if the "seen" note was lost in a crash after the write.
       if (tx.list(entity).some((e) => e.doc.source_key === f.key)) return { ok: true, skipped: true };
@@ -471,7 +490,15 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (f.kind === 'roadmap-') {
       if (typeof h.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(h.id) || h.id.length > 200) return no('bad card id');
       if (!Number.isInteger(h.expectRev) || h.expectRev < 0) return no('the header needs expectRev');
+      // These two are worked out from the plan file and the Lead's launch, never typed (L460): only a plan- file sets them.
+      const typed = ['plan_sha256', 'main_commit'].filter((k) => Object.hasOwn(fields, k));
+      if (typed.length) return no(`a roadmap file may not set ${typed.join(' or ')}; hand in a plan file`);
       const cur = tx.lookup('card', h.id);
+      const changes = (keys) => keys.some((k) => Object.hasOwn(fields, k) && !same(fields[k], cur?.doc?.[k]));
+      if (cur?.doc && hasItsGo(cur) && changes(PLAN_INPUTS)) return no(PLAN_FROZEN(h.id));
+      // The plan file a card names stays true of the card (L490 m2), and what the go covered stays what is built (m3).
+      if (cur?.doc?.plan_sha256 && changes(PLAN_INPUTS)) return no(`card ${h.id} was made from a plan file, so only a plan file can change its plan`);
+      if (cur?.doc && cur.doc.state !== 'draft' && changes(['brief'])) return no(`card ${h.id} is ${cur.doc.state}, so its brief can't change: a brief is frozen once a card is ready`);
       const base = h.expectRev === 0 ? { state: 'draft' } : (cur?.doc ?? {});
       const doc = { ...base, ...fields };
       if (h.to_state !== undefined) doc.state = h.to_state;
@@ -690,7 +717,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         const since = store.meta(entity, d.id)?.stateSince;
         if (lim === undefined) { out.push({ entity, id: d.id, state: d.doc.state, since, limit: null, corrupt: true, reason: `the rules have no time limit for ${entity} ${d.doc.state}` }); continue; }
         if (lim.minutes) {
-          if (nowMs > Date.parse(since) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
+          if (nowMs > (pastTime(since, nowMs) ?? -Infinity) + lim.minutes * MIN) out.push({ entity, id: d.id, state: d.doc.state, since, limit: lim.minutes, then: lim.then });
         } else if (d.doc.wait?.next_check && nowMs > Date.parse(d.doc.wait.next_check)) {
           out.push({ entity, id: d.id, state: d.doc.state, since, limit: 'next_check', next_check: d.doc.wait.next_check });
         }
@@ -706,6 +733,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     // The Record's own times (L72): the Dispatcher's limits read these, never a field a script stamps.
     meta: (entity, id) => { const m = store.meta(entity, id); return m ? { ts: m.ts, stateSince: m.stateSince, createdBy: m.createdBy } : null; },
     write, applyOutbox, ready, overdue, release, breakIfDead, lapseClaims,
+    keepAlert: (text, key) => { store.keepAlert(text, key); },
+    heldHere: () => store.heldHere(),
   };
   return { record: makeRecord(impl), store, impl, recover: () => store.recover() };
 }
