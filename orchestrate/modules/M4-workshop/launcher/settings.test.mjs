@@ -383,6 +383,9 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   assert.deepEqual(DESIGN_PROFILES.script.outbox, ['report-']);
   const r = render('script', { paths: { ...PATHS, workerRunner: runner } });
   assert.equal(r.ok, true, r.reason);
+  // It asks nobody (dontAsk), and with no shell it reaches no host, even with the rules' hosts given (#331 audit m2).
+  assert.equal(r.settings[S.permissions][S.defaultMode], 'dontAsk');
+  assert.deepEqual(r.settings[S.sandbox][S.network][S.allowedDomains], []);
   assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
   const w = render('worker', { paths: { ...PATHS, workerRunner: runner } });
   const deny = r.settings[S.permissions][S.deny];
