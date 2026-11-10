@@ -883,6 +883,9 @@ export async function runnerPass(ctx) {
   if (names.length > MAX_PENDING) alert('requests-pending', `${names.length} review requests are waiting (more than ${MAX_PENDING}); something may be asking far too often.`);
   else state.told = state.told.filter((t) => t !== 'requests-pending');
   let starts = 0;
+  // Plan reviewers started this pass that the runner could not follow (a start that ran but gave no claude): each still
+  // holds a cap slot until the pass ends, so the cap is never passed by one (#294 self-review m1).
+  let untrackedPlans = 0;
   // A plan reviewer (L703). The Dispatcher asks once per plan (plan-go), so a start that failed is tried again by the
   // runner itself (`plan_tries`), RETRY_MS apart and MAX_FAILED_STARTS times in all, and then the owner is told. A refusal
   // that says the plan is not one to review (the card is gone, not a Tier-1 draft, or its plan is another) ends it.
@@ -936,7 +939,7 @@ export async function runnerPass(ctx) {
     // At the cap the request waits as the runner's own, tried each pass and never counted as a failed start.
     let cap; try { cap = await ctx.planReviewCap(d.product); } catch (e) { cap = { bad: e?.message ?? String(e) }; }
     if (!Number.isInteger(cap) || cap < 0) return again(`the plan reviewers' cap could not be read (${String(cap?.bad ?? cap).slice(0, 200)})`);
-    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE).length;
+    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE).length + untrackedPlans;
     if (runningPlans >= cap) {
       tries[k] = { ...(was ?? {}), card, fingerprint, request_id: rid, failures: was?.failures ?? 0, waiting_since: was?.waiting_since ?? iso(now) };
       refuse(`${runningPlans} plan reviewers already run (cap ${cap}); card ${card}'s waits, and the runner starts it itself once one ends`);
@@ -994,11 +997,12 @@ export async function runnerPass(ctx) {
       }
       drop(`the plan reviewer start said it failed (${String(r?.reason ?? 'no process id').slice(0, 200)}), but the session ran (${ranAs !== null ? `claude ${ranAs} carries its id` : liveNow === null ? 'the session list could not be read' : left.said}); it counts as started`);
       if (ranAs !== null) state.running.push({ card, role: PLAN_REVIEW_ROLE, fingerprint, request_id: rid, head: d.main_commit, session_id: sid, pid: ranAs, started_at: iso(now) });
-      else if (liveNow !== null) endPlan(doc, 'ended');
+      else { untrackedPlans += 1; if (liveNow !== null) endPlan(doc, 'ended'); }
       return;
     }
     let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
     if (!isClaudeCommand(cmd, ctx.claudeBin)) {
+      untrackedPlans += 1;
       drop(`the plan reviewer start gave process ${r.pid}, which is not claude; the session is held until the runner marks it ended`);
       alert(`untracked-${sid}`, `The plan reviewer ${sid} for card ${card} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it: a live claude of review's is stopped on the next pass, and the session is marked ended 5 minutes after its start.`);
       return;

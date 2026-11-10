@@ -11,6 +11,7 @@ import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, WORKER_ROLE
 import { nodeProblemOf, readConfigFile, realIo } from './mac.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofList } from './proofs.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { main } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
@@ -247,6 +248,20 @@ test('m8 and the table: the orchestrate entry on a worker outbox folder can list
   assert.deepEqual([...ORCHESTRATE_READ_ACL.perms].sort(), ['delete_child', 'directory_inherit', 'file_inherit', 'list', 'readattr', 'readextattr', 'readsecurity', 'search']);
   const names = proofList(cfg).map((p) => p.what).join('\n');
   for (const d of ['outboxes', 'outboxes/reviewer', 'outboxes/auditor', 'outboxes/plan_reviewer']) assert.ok(names.includes(P(d)), d);
+});
+
+test('L758: every role the review runner starts, the plan reviewer too, has a review-owned outbox folder the owner cannot write; no worker role is one of them', () => {
+  const by = new Map(folderTable(cfg).map((r) => [r.path, r]));
+  const names = proofList(cfg).map((p) => p.what);
+  for (const role of RUNNER_ROLES) {
+    const row = by.get(P(`outboxes/${role}`));
+    assert.ok(row, role);
+    assert.equal(row.owner, 'review', role);
+    assert.equal(row.mode, 0o755, role);
+    assert.ok(names.includes(`${cfg.owner} cannot write ${P(`outboxes/${role}`)}`), role);
+    assert.ok(!WORKER_ROLES.includes(role), role);
+  }
+  assert.ok(RUNNER_ROLES.includes('plan_reviewer'));
 });
 
 test('c1: the README\'s FAIL count is the real one (before setup, one product)', () => {

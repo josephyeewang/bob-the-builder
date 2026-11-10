@@ -12,6 +12,7 @@ import { createPushScript, bundleName } from './push.mjs';
 import { cardBranch } from './branch.mjs';
 import { DO_PLANE_TOML } from './gitleaks.mjs';
 import { factId } from './start-gate.mjs';
+import { intakeFactId } from '../../M11-dispatcher/intake-facts.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { fakeRules, makeRules } from '../../../shared/rules.mjs';
 import { makeEngine } from '../../M10-rules/engine.mjs';
@@ -59,6 +60,33 @@ process.exit(mode === 'leak' || mode === 'leakname' ? 1 : 0);
   writeFileSync(join(dir, 'do-plane.toml'), DO_PLANE_TOML);
   writeFileSync(join(dir, 'empty-ignore'), '');
   return { setup: { bin, version: '8.30.1', config: join(dir, 'do-plane.toml'), ignoreFile: join(dir, 'empty-ignore') }, setMode: (m) => writeFileSync(mode, m), calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8') : '') };
+}
+
+// ---- a fake git (L680): stalls, fails or answers as its rules say for one command, and runs the real git otherwise ----
+// `rules`: [{ cmd, has?, sleep?, code?, stderr?, stdout? }]. `cmd` is git's command (the first word after the leading
+// options; '--version' for the version check), `has` a text one of its words must hold (a bundle's '.bundle'). The
+// first rule that fits is used: `sleep` stalls past any time limit, else it prints and exits with `code`. Pass
+// `{ bin }` as createPushScript's testGit (with `timeouts` for a stall); setRules changes the rules mid-test.
+const REAL_GIT = ['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/opt/homebrew/bin', '/usr/local/bin'].map((d) => join(d, 'git')).find((f) => existsSync(f));
+export function makeFakeGit(dir, rules = []) {
+  mkdirSync(dir, { recursive: true });
+  const bin = join(dir, 'git');
+  const file = join(dir, 'rules.json');
+  const setRules = (r) => writeFileSync(file, JSON.stringify(r));
+  setRules(rules);
+  writeFileSync(bin, `#!${process.execPath}
+const fs = require('fs'); const { spawnSync } = require('child_process');
+const a = process.argv.slice(2);
+let i = 0; while (i < a.length && a[i] !== '--version' && a[i].startsWith('-')) i += a[i] === '-c' ? 2 : 1;
+const cmd = a[i] ?? '';
+fs.appendFileSync(${JSON.stringify(join(dir, 'calls'))}, cmd + '\\n');
+const rule = JSON.parse(fs.readFileSync(${JSON.stringify(file)}, 'utf8')).find((r) => r.cmd === cmd && (!r.has || a.some((w) => w.includes(r.has))));
+if (!rule) { const r = spawnSync(${JSON.stringify(REAL_GIT)}, a, { stdio: 'inherit' }); process.exit(r.status ?? 1); }
+if (rule.sleep) setTimeout(() => process.exit(0), 600000);
+else { if (rule.stdout) process.stdout.write(rule.stdout); if (rule.stderr) process.stderr.write(rule.stderr); process.exitCode = rule.code ?? 0; }
+`);
+  chmodSync(bin, 0o755);
+  return { bin, setRules, calls: () => (existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').split('\n').filter(Boolean) : []) };
 }
 
 /**
@@ -112,13 +140,18 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
 
   const fake = makeFakeScanner((mkdirSync(join(root, 'scan')), join(root, 'scan')));
   const issues = []; const prs = [];
-  const values = { 'product.repo': REPO, 'product.mirror': mirror, 'product.onboarded': true, 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'outside_check.workflow': WF, 'proposals.outbox': proposals };
+  const values = { 'onboarding.state': 'active', 'product.default_branch': 'main', 'product.vercel_project': 'prj_1', 'proposals.outbox': proposals };
+  // Where the product lives and which outside check to trust come from the wiring, not the rules file (L568).
+  const place = { repo: REPO, mirror };
   // push_branch is M10's real engine on its sample policy (L81 sweep): the push is asked what the engine reads.
   const answers = { push_branch: (s) => { onPushAsked(s); return realEngine().may('push_branch', s); } };
   const run = { workflow_path: WF, event: 'schedule', head_branch: 'main', run_at: fresh(), steps: [{ product, conclusion: 'success' }] };
   const ports = {
     record,
     rules: fakeRules({ answers, values }),
+    // The place for the product asked about, and none for any other: a push that asks with the wrong key waits (L719 m1).
+    productPlace: (p) => (p === product ? place : null),
+    outsideWorkflow: WF,
     privateDir,
     scanner: scannerOverride ?? fake.setup,
     getRobotToken: async () => 'robot-key-for-test',
@@ -135,14 +168,21 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
   const bundle = async (args = [`refs/heads/${cardBranch(card)}`, '^refs/heads/main'], into = outbox) => { rmSync(join(into, bundleName(card)), { force: true }); await gitOk(['bundle', 'create', '-q', join(into, bundleName(card)), ...args], cg); };
   const ghRefs = async () => (await gitOk(['for-each-ref', '--format=%(refname) %(objectname)'], { gitDir: gh })).trim();
   const push = (over = {}, sessionId = 'S-1') => createPushScript({ ...ports, ...over })(sessionId);
-  // A bundle the owner's tab drops in the proposals folder; answers the sha256 the intake would record for it.
+  // What the intake records for a bundle it took in; the push script reads this fact, and no caller names a hash (L325 m1).
+  const hold = (sha256, heldCard = 'C-1', heldProduct = product, state = 'held') => {
+    const id = intakeFactId(heldProduct, `bundle-${heldCard}.bundle`);
+    const put = record.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: record.read('fact', id)?.rev ?? 0, doc: { sha256, state, at: new Date().toISOString() }, kind: 'proposal_bundle' });
+    assert.equal(put.ok, true, put.reason);
+    return sha256;
+  };
+  // A bundle the owner's tab drops in the proposals folder; answers the sha256 the intake records for it.
   const propose = async (args = ['refs/heads/card/c-1', '^refs/heads/main']) => {
     const p = join(proposals, 'bundle-C-1.bundle');
     rmSync(p, { force: true });
     await gitOk(['bundle', 'create', '-q', p, ...args], cg);
-    return createHash('sha256').update(readFileSync(p)).digest('hex');
+    return hold(createHash('sha256').update(readFileSync(p)).digest('hex'));
   };
   // The proposal door, with the owner as the test user (and the worker as someone else) unless `over` says otherwise.
   const pushP = (input, { look = false, ...over } = {}) => createPushScript({ ...ports, uids: { worker: ME + 1 }, ownerUid: ME, ...over }).pushProposal(input, { look });
-  return { root, product, gh, mirror, clone, cg, outbox, proposals, record, values, answers, run, fake, issues, prs, commit, bundle, propose, ghRefs, push, pushP, ports, writeFact };
+  return { root, product, gh, mirror, clone, cg, outbox, proposals, record, values, answers, run, fake, issues, prs, commit, bundle, propose, hold, ghRefs, push, pushP, ports, writeFact };
 }

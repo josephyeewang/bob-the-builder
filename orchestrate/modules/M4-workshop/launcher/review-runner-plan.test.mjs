@@ -502,11 +502,11 @@ test('L735 m1-r2 planted: a file put first under the plan\'s request name is sai
   assert.match(other.reason, new RegExp(`it is uid ${ME}'s, not the Dispatcher's`));
 });
 
-// L735 M1: the runner keeps the plan reviewers' cap itself, across every product's requests. Two Records, each with its
-// own Dispatcher writing to the one shared runner: with 3 running and a cap of 4, both Dispatchers' gates let one
-// through, and the runner starts exactly one; the other waits as the runner's own, never counted as a failed start, and
+// L735 M1: the runner keeps the plan reviewers' cap itself, across every product's requests. Two products' requests
+// reach the one shared runner (each as its Dispatcher's gate would let it through; the gates are not run here): with
+// 3 running and a cap of 4, the runner starts exactly one; the other waits as the runner's own, never counted as a failed start, and
 // starts once one ends. A request no Dispatcher wrote is held by the same cap.
-test('L735 M1 planted: two Records share one runner; 3 running, cap 4: exactly 1 starts, the other waits and starts when one ends', async () => {
+test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 1 starts, the other waits and starts when one ends', async () => {
   const caps = [];
   const w = await ready({ planReviewCap: (product) => { caps.push(product); return 4; } });
   const two = (id, product) => { w.cards.set(id, card({ product })); return fingerprintOf(id, w.cards.get(id)); };
@@ -543,6 +543,19 @@ test('L735 M1 planted: two Records share one runner; 3 running, cap 4: exactly 1
   const y = await runnerPass(w.ctx);
   assert.deepEqual(y.started.map((s) => s.card), [waiting]);
   assert.equal(w.starts.length, 5);
+});
+
+// #294 self-review m1: a start the runner can't follow (it gave a process that is not claude) still holds its cap slot
+// for the rest of the pass, so a second request in the same pass waits rather than passing the cap by one.
+test('L735 M1 planted: a start the runner can\'t follow holds its cap slot for the rest of the pass', async () => {
+  let n = 0;
+  const w = await ready({ planReviewCap: () => 1, start: async () => { n += 1; return { ok: true, pid: 1 }; } });
+  w.cards.set('C-3', card());
+  w.ask();
+  w.ask({ card: 'C-3', fingerprint: fingerprintOf('C-3', w.cards.get('C-3')) });
+  const r = await runnerPass(w.ctx);
+  assert.equal(n, 1, 'one start only: the untracked one holds the one slot');
+  refusedFor(r, /1 plan reviewers already run \(cap 1\)/);
 });
 
 test('L735 M1: a cap that can\'t be read starts no plan reviewer, and is told once the runner gives up', async () => {
