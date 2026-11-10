@@ -282,12 +282,15 @@ test('R-0b-164 planted: a tap for a silent session of an older head starts nothi
   w.ask();
   let r = await runnerPass(w.ctx);
   assert.deepEqual(r.started.map((x) => x.session_id), ['S-2'], 'the new head gets its own review');
-  // A tap on the old head's silent session sets it aside (harmless: that head is superseded) and never starts a review of
-  // the old head, even when a request for the old head follows (#284 r1 m3: this part fails if the tap is not read).
+  // A tap on the old head's silent session (an offer read before the push) is read and refused, and Joe is told: it would
+  // set aside a session whose head no new review can follow (#307 r1 M1). Nor does a request for the old head start one
+  // (#284 r1 m3: this part fails if the tap is not read).
   assert.equal(writeTap({ dir: w.taps, ownerUid: ME, sessionId: 'S-1', offers }).ok, true);
   writeFileSync(join(w.root, 'requests', 'q-old.json'), JSON.stringify({ card: 'C-1', head: HEAD, role: 'reviewer', request_id: 'q-old' }), { mode: 0o644 });
   r = await runnerPass(w.ctx);
-  assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }], 'the tap was read');
+  assert.deepEqual(r.setAside, []);
+  assert.ok(r.refused.some((x) => /review again" for session S-1: card C-1 has moved on to head bbbbbbb/.test(x.reason)), 'the tap was read, and refused');
+  assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 1, 'Joe is told');
   assert.deepEqual(r.started, []);
   assert.ok(r.refused.some((x) => /request names head aaaaaaa, but the card's head is bbbbbbb/.test(x.reason)), r.refused.map((x) => x.reason).join(' | '));
   assert.equal(w.starts.filter((x) => x.head === HEAD).length, 1, 'the old head was reviewed once');
