@@ -208,3 +208,36 @@ test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, neve
   assert.equal(await of({ 1: ok, 2: async () => { throw new Error('git cat-file failed'); }, 3: ok, 8: ok }), 'check 2: git cat-file failed');
   assert.equal(await of({ 1: ok, 2: ok, 3: ok }), 'check 8 has no port');
 });
+
+test('#369 r2 m2 self-review: main gives the start port its keeper, so a product whose snapshot is not kept fresh starts nothing; a die, a restart that works, a die again', async () => {
+  const d = tempDir('orch-rmain-');
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    const rules = { production: { env_files: [], programs: [], hosts: [] } };
+    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'runner', 'rules-p1.json') } } } } });
+    const logs = []; let r;
+    const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
+    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh,
+      run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); } });
+    assert.equal(code, 0, logs.join('\n'));
+    assert.equal(r.ok, false); assert.match(r.reason, /p1's rules snapshot is not kept fresh \(EROFS\)/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+  // The cycle: dies, a restart works (told), dies again (told again), a restart fails (held, told once).
+  const rules = { production: {} };
+  const c = { products: { p1: { rules, render: { paths: { snapshot: '/r/rules-p1.json' } } } } };
+  const logs = []; const made = []; let failNext = false;
+  const fresh = () => { if (failNext) throw Object.assign(new Error('x'), { code: 'ENOSPC' }); const k = { dead: false, stopped: false }; made.push(k);
+    return { stop: () => { k.stopped = true; }, error: () => (k.dead ? new Error('gone') : null) }; };
+  const s = keepSnapshots(c, { fresh, log: (t) => logs.push(t) });
+  made[0].dead = true;
+  assert.equal(s.held('p1'), null); assert.equal(made[0].stopped, true); assert.equal(made.length, 2);
+  made[1].dead = true;
+  assert.equal(s.held('p1'), null); assert.equal(made[1].stopped, true); assert.equal(made.length, 3);
+  assert.equal(logs.filter((l) => /kept fresh again/.test(l)).length, 2);
+  made[2].dead = true; failNext = true;
+  assert.match(s.held('p1'), /ENOSPC/); assert.match(s.held('p1'), /ENOSPC/);
+  assert.equal(logs.filter((l) => /is not kept fresh/.test(l)).length, 1);
+  failNext = false;
+  assert.equal(s.held('p1'), null, 'and back once a restart works');
+  s.stop(); assert.equal(made.at(-1).stopped, true);
+});

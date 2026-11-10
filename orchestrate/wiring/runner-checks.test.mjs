@@ -96,7 +96,7 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     const gateOf = (b) => { given = b; return (ctx) => { seen = ctx; return { ok: true }; }; };
     const p = workerChecks({ ...x, budget, kind: 'undo' }, { gateOf });
     assert.deepEqual(await p[12](), { ok: true });
-    assert.equal(given, budget); assert.deepEqual(seen, { card: x.cardDoc, kind: 'undo', product: 'p1' });
+    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1' }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
     assert.match((await workerChecks({ ...x, budget, cardDoc: null }, { gateOf })[12]()).reason, /not in the Record/);
     // #369 r2 m4: the budget carries the pass's filesOf; an undo with none is refused here, saying so. Other kinds don't need it.
     seen = undefined;

@@ -46,8 +46,8 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { chmodSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
-import { spawn as childSpawn } from 'node:child_process';
+import { lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { join } from 'node:path';
 import { RUNNER_ROLE_OF } from './owner-status.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
@@ -161,6 +161,21 @@ function writeNew(file, text) {
   try { const b = Buffer.from(text, 'utf8'); for (let o = 0; o < b.length;) o += writeSync(fd, b, o, b.length - o); } finally { closeSync(fd); }
 }
 
+/** Removes a folder whole (#369 r2 m1, self-review m1, m2): removed at once; only when that fails are its folders made
+ * writable again, by /bin/chmod -R -P (never through a link, so nothing outside is changed), and it is removed once
+ * more. One still there is told with `log` and left until this card's next start removes it, which cleanup does not.
+ * → true when it is gone. */
+/** A folder's tree made owner-writable again, never through a link (-P). */
+export const chmodTree = (d) => execFileSync('/bin/chmod', ['-R', '-P', 'u+rwx', d], { stdio: 'ignore', timeout: 60_000 });
+export function removeAll(fs, dir, log = () => {}) {
+  try { fs.rm(dir, { recursive: true, force: true }); return true; } catch { /* made writable, then once more */ }
+  try { fs.chmodTree(dir); } catch { /* the removal says */ }
+  try { fs.rm(dir, { recursive: true, force: true }); return true; } catch (e) {
+    log(`the baseline's throwaway copy ${dir} can't be removed (${e?.code ?? e?.message}); it is left until this card's next start`);
+    return false;
+  }
+}
+
 /**
  * The start port. c (the runner's config, checked by runner-main.mjs): { copiesRoot, outboxRoot, settingsDir, home, path,
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
@@ -169,21 +184,10 @@ function writeNew(file, text) {
  * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
  * mainOf(mirror) → the mirror's main commit (read before and after the copy is made, #369 r1 m3), beforeStart(x) → null
  * or the reason claude must not start,
- * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
- * #364 self-review M1).
+ * walled, fs ({ mkdir, rm, writeNew, list, chmodTree }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
+ * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
+ * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude).
  */
-/** Removes a folder whole (#369 r2 m1): its folders made writable again first (never through a link), then removed,
- * once more on a failure; one still there is told with `log` and left for cleanup. → true when it is gone. */
-export function removeAll(fs, dir, log = () => {}) {
-  const writable = (p) => { let st; try { st = fs.lstat(p); } catch { return; } if (!st.isDirectory()) return;
-    try { fs.chmod(p, (st.mode & 0o7777) | 0o700); } catch { /* removal says */ } let names = []; try { names = fs.list(p); } catch { /* removal says */ }
-    for (const n of names) writable(join(p, n)); };
-  let last;
-  for (let i = 0; i < 2; i += 1) { writable(dir); try { fs.rm(dir, { recursive: true, force: true }); return true; } catch (e) { last = e; } }
-  log(`the baseline's throwaway copy ${dir} can't be removed (${last?.code ?? last?.message}); it is left for cleanup`);
-  return false;
-}
-
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
@@ -191,7 +195,7 @@ export function startPort(c, deps = {}) {
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
   } = deps;
-  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmod: chmodSync, ...(deps.fs ?? {}) };
+  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, chmodTree, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
   return async ({ card, kind, product, sessionId } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
@@ -202,13 +206,13 @@ export function startPort(c, deps = {}) {
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
     if (!p || typeof p.repo !== 'string' || typeof p.mirror !== 'string' || !p.render?.paths) return refuse(`product ${product} is not in the runner's config`);
+    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call. Asked before anything is read.
+    const held = deps.productHeld?.(product);
+    if (held) return refuse(held);
     const cd = readCard(card);
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
     if (cd.doc.product !== product) return refuse(cd.doc.product === undefined ? 'the card names no product' : 'the card is another product\'s');
-    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call.
-    const held = deps.productHeld?.(product);
-    if (held) return refuse(held);
     const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product });
     if (typeof prompt !== 'string' || !prompt) return notWired('no worker prompt is given to the runner');
     const who = account();
@@ -229,7 +233,7 @@ export function startPort(c, deps = {}) {
     if (!(await sameMain())) return undo('main changed during launch; retry');
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
-    // One that can't be removed is told and left; the new one has its own name, so the card is never stuck on it.
+    // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
     try { for (const n of fs.list(c.copiesRoot)) if (n === `${card}~baseline` || n.startsWith(`${card}~baseline-`)) removeAll(fs, join(c.copiesRoot, n), log); } catch { /* listed again below */ }
     let others; try { others = fs.list(c.copiesRoot).filter((n) => n !== card).map((n) => join(c.copiesRoot, n)); } catch (e) { return undo(`the copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other product's mirror (#364 r1 M1): known at start from the config.
@@ -271,9 +275,12 @@ export function startPort(c, deps = {}) {
         start: async () => {
           // Checks 1, 2, 3 and 8 once more (#369 M1, r1 m1 and m2): checks 4 and 11 ran the branch's own code.
           if (beforeStart) {
+            // The product held back since the checks began (self-review m4: a refresher that died during the baseline).
+            const h = deps.productHeld?.(product);
+            if (h) return refuse(h);
             const p = await beforeStart(x);
             // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
-            if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch)'}`);
+            if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch, or can\'t be read)'}`);
           }
           return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
         } });

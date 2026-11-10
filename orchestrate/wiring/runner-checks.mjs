@@ -52,8 +52,9 @@
 //                           so launch.mjs skips check 11 for it (#369 m6).
 //   12 budget               M11's own check12 with this session's kind (gate.mjs counts editing, undo and script
 //                           sessions themselves). The budget is check12's own inputs, and carries the pass's `filesOf`
-//                           (#369 r2 m4): check12 works out an undo's exact reverse with it, so an undo is refused
-//                           here, saying so, when the budget has none. No budget source, no port
+//                           (#369 r2 m4): check12 works out an undo's exact reverse with it (lane 2's #393, gate.mjs;
+//                           until it lands, check12 does not), so an undo is refused here, saying so, when the budget has
+//                           none. No budget source yet (runner-main.mjs budget: null), so no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 
@@ -65,6 +66,7 @@ import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
+import { groupThere } from './runner-ports.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 export const BASELINE_MS = 15 * 60_000;
@@ -152,8 +154,7 @@ export function baselineCommand(test, file) {
 // Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
 // time-out kills the tests it started too, not claude alone (#369 m2), and so does a normal end (#369 r1 M1): what the
 // tests left running in the group goes with it. After the end, the group is killed only if signal 0 still finds it
-// (#369 r2 c3): an empty group's number is not signalled.
-const groupThere = (g) => { try { process.kill(-g, 0); return true; } catch { return false; } };
+// (#369 r2 c3; runner-ports.mjs groupThere, the one test of a group): an empty group's number is not signalled.
 function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere) {
   return new Promise((resolve, reject) => {
     let child;
@@ -216,7 +217,8 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
     ports[12] = async () => {
       if (!x.cardDoc) return refuse('the card is not in the Record');
       if (x.kind === 'undo' && typeof x.budget.filesOf !== 'function') return refuse('the budget carries no filesOf (the pass\'s own), so the undo can\'t be shown an exact reverse');
-      return gate({ card: x.cardDoc, kind: x.kind, product: x.product });
+      // The card with its id (L863): without one, check12 reads the card's own claim as an undo already running.
+      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product });
     };
   }
   if (x.bobManifest && has(x.bobFolder)) ports[13] = r[13];

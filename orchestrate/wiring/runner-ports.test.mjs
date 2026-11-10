@@ -2,14 +2,14 @@
 // worker checks, the prompt) and on real files for what it makes; spawnLeader runs a real process group.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -274,7 +274,7 @@ test('#369 M1: check 2 runs once more just before claude starts; setup files cha
 
 test('#369 r1 m3, r2 m3: main moving during a launch is said as such, and never hides a check\'s own reason; checks get the main the copy was restored from', async () => {
   const A = 'a'.repeat(40); const B = 'e'.repeat(40);
-  for (const [when, re] of [['after prepare', /^main changed during launch; retry$/], ['before start', /^a check failed again just before claude was to start, so it was not started: the copy's \.mcp\.json is not main's \(main also moved during launch\)$/]]) {
+  for (const [when, re] of [['after prepare', /^main changed during launch; retry$/], ['before start', /^a check failed again just before claude was to start, so it was not started: the copy's \.mcp\.json is not main's \(main also moved during launch, or can't be read\)$/]]) {
     let mains = [A];
     let seen;
     const w = world({ mainOf: async () => mains.shift() ?? B, checksFor: (x) => { seen = x.mainAt; return {}; },
@@ -342,7 +342,20 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
     assert.equal(existsSync(join(w.copiesRoot, `C-1~baseline-${SID}`)), false);
     assert.deepEqual(logs, []);
   } finally { chmodSync(w.copiesRoot, 0o700); rmSync(w.d, { recursive: true, force: true }); }
-  // One that can't be removed: told once per try, left, and the start still goes on under the session's own name.
+  // Self-review m1: a link inside a throwaway is never followed; the read-only folder it points to outside is unchanged.
+  {
+    const d = tempDir('orch-rports-');
+    try {
+      const out = join(d, 'outside'); mkdirSync(join(out, 'sub'), { recursive: true }); chmodSync(join(out, 'sub'), 0o555); chmodSync(out, 0o555);
+      const spare = join(d, 'C-1~baseline-S-0'); mkdirSync(join(spare, 'ro'), { recursive: true }); writeFileSync(join(spare, 'ro', 'f'), 'x');
+      symlinkSync(out, join(spare, 'ro', 'link')); chmodSync(join(spare, 'ro'), 0o555);
+      const fs = { rm: rmSync, chmodTree };
+      assert.equal(removeAll(fs, spare), true);
+      assert.equal(existsSync(spare), false);
+      assert.deepEqual([statSync(out).mode & 0o777, statSync(join(out, 'sub')).mode & 0o777], [0o555, 0o555]);
+    } finally { execFileSync('/bin/chmod', ['-R', 'u+rwx', d]); rmSync(d, { recursive: true, force: true }); }
+  }
+  // One that can't be removed: told once (after a second try), left, and the start still goes on under the session's own name.
   const logs2 = []; let t2; let x2;
   const fails = (p) => p.includes('~baseline');
   const v = world({ log: (s) => logs2.push(s), checksFor: (x) => { x2 = x; return {}; }, launchFn: async (x) => { t2 = await x2.throwaway(); return { ok: true, started: await x.start() }; },
@@ -352,7 +365,7 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
     const a = await v.start();
     assert.equal(a.ok, true, a.reason); assert.equal(t2.ok, true, t2.reason);
     assert.equal(t2.copy, join(v.copiesRoot, `C-1~baseline-${SID}`, 'copy'));
-    assert.ok(logs2.some((l) => /C-1~baseline-S-0 can't be removed \(ENOTEMPTY\); it is left for cleanup/.test(l)), logs2.join('\n'));
+    assert.ok(logs2.some((l) => /C-1~baseline-S-0 can't be removed \(ENOTEMPTY\); it is left until this card's next start/.test(l)), logs2.join('\n'));
     await t2.done();
     assert.ok(logs2.some((l) => new RegExp(`C-1~baseline-${SID} can't be removed`).test(l)), logs2.join('\n'));
   } finally { rmSync(v.d, { recursive: true, force: true }); }
@@ -365,6 +378,14 @@ test('#369 r2 m2: a product the runner holds back (its rules snapshot not kept f
     assert.equal(a.ok, false); assert.match(a.reason, /p1's rules snapshot is not kept fresh/);
     assert.equal(w.calls.some((c) => c[0] === 'prepare'), false, 'nothing is made');
   } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Self-review m4: held back during the checks (a refresher that died in the baseline): claude is not started.
+  let n = 0;
+  const v = world({ productHeld: () => (n++ === 0 ? null : 'product p1\'s rules snapshot is not kept fresh (ENOSPC), so its sessions are not started'), beforeStart: async () => null });
+  try {
+    const a = await v.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /not kept fresh/);
+    assert.equal(v.calls.some((c) => c[0] === 'spawn'), false, 'not started');
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
 });
 
 test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {
