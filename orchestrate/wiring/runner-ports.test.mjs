@@ -5,15 +5,17 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { sessionArgs } from '../modules/M4-workshop/launcher/review-launch.mjs';
+import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
 
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const HEAD = 'b'.repeat(40);
@@ -42,17 +44,110 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('step 5: an outbox is drained only when nothing is in it (a dot file counts) or it is gone; one that can\'t be read is not', () => {
+test('L835: an outbox is drained once every file in it has the Record\'s done intake fact with its sha256, or it is empty or gone', () => {
   const d = tempDir('orch-rports-');
   try {
     const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
-    const drained = drainedPort();
-    assert.equal(drained({ outbox: o }), true);
+    const s = { id: SID, role: 'worker', card: 'C-1', outbox: o };
+    const facts = new Map();
+    const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
+    const fact = (name, over = {}) => facts.set(`intake-applied-${SID}-${name}`, { session: SID, name, state: 'applied', sha256: createHash('sha256').update(readFileSync(join(o, name))).digest('hex'), ...over });
+    const drained = drainedPort({ readFact });
+    assert.equal(drained(s), true, 'empty: nothing to take');
+    // The one set of used states (L852): a file lead-restart counts as used, and only those, counts as taken here.
+    assert.equal(INTAKE_DONE, USED_STATES, 'lane 2\'s one list (intake-facts.mjs), not a copy');
+    writeFileSync(join(o, 'report-C-1.md'), '{"a":1}');
+    assert.equal(drained(s), false, 'a file the Record has no fact for');
+    fact('report-C-1.md');
+    assert.equal(drained(s), true, 'the file is kept (push reads it), and the Record took it');
     writeFileSync(join(o, '.half'), 'x');
-    assert.equal(drained({ outbox: o }), false);
+    assert.equal(drained(s), false, 'a dot file with no fact counts');
+    rmSync(join(o, '.half'));
+    for (const state of ['refused', 'interrupted', 'waiting']) { fact('report-C-1.md', { state }); assert.equal(drained(s), true, state); }
+    // #388 r1 m2: waiting is done only for a worker or script; a Lead's queued request or plan starts later.
+    fact('report-C-1.md', { state: 'waiting' });
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s waiting');
+    for (const role of ['lead', undefined, 'reviewer']) assert.equal(drained({ ...s, role }), false, `waiting is not done for ${role}`);
+    // #388 r1 m3: the fact is read first; a file whose fact is not done is never hashed.
+    const hashed = [];
+    const counting = drainedPort({ readFact, hashOf: (p) => { hashed.push(p); return 'x'; } });
+    for (const state of ['applying', 'starting', 'told']) { fact('report-C-1.md', { state }); assert.equal(counting(s), false, state); }
+    const kept = new Map(facts); facts.clear(); assert.equal(counting(s), false, 'no fact');
+    for (const [k, v] of kept) facts.set(k, v);
+    assert.deepEqual(hashed, [], 'nothing hashed until its fact is done');
+    for (const state of ['applying', 'starting', 'told', undefined]) { fact('report-C-1.md', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
+    fact('report-C-1.md', { sha256: 'f'.repeat(64) }); assert.equal(drained(s), false, 'another sha256: the file changed after intake took it');
+    fact('report-C-1.md', { session: 'other' }); assert.equal(drained(s), false, 'a fact naming another session');
+    fact('report-C-1.md', { name: 'x.json' }); assert.equal(drained(s), false, 'a fact naming another file');
+    fact('report-C-1.md');
+    assert.equal(drainedPort({ readFact: () => ({ ok: false, reason: 'its file is not JSON' }) })(s), false, 'an unreadable fact');
+    fact('report-C-1.md');
+    assert.equal(drainedPort({ readFact: (id) => ({ ...readFact(id), ok: false }) })(s), false, 'a doc beside ok:false is not trusted (#388 r1 c1)');
+    assert.equal(drainedPort({ readFact })(s), true, 'the same doc with ok:true drains');
+    assert.equal(drainedPort({ readFact: () => { throw new Error('EACCES'); } })(s), false, 'a Record that throws');
+    assert.equal(drainedPort()(s), false, 'no fact reader wired: an outbox holding a file stays open');
+    symlinkSync(join(o, 'report-C-1.md'), join(o, 'handin-C-1.md')); fact('report-C-1.md');
+    facts.set(`intake-applied-${SID}-handin-C-1.md`, { ...facts.get(`intake-applied-${SID}-report-C-1.md`), name: 'handin-C-1.md' });
+    assert.equal(drained(s), false, 'a link is not a plain file');
+    rmSync(join(o, 'handin-C-1.md')); facts.delete(`intake-applied-${SID}-handin-C-1.md`);
+    assert.equal(drained(s), true);
+    // A named pipe opens without following a link, and reads as no bytes: not a plain file, never matched to a fact.
+    spawnSync('mkfifo', [join(o, 'pipe')]);
+    facts.set(`intake-applied-${SID}-pipe`, { ...facts.get(`intake-applied-${SID}-report-C-1.md`), name: 'pipe', sha256: createHash('sha256').update('').digest('hex') });
+    assert.equal(drained(s), false, 'a pipe is not a plain file');
     rmSync(o, { recursive: true });
-    assert.equal(drained({ outbox: o }), true, 'gone: nothing left to take');
-    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); } })({ outbox: o }), false);
+    assert.equal(drained(s), true, 'gone: nothing left to take');
+    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L898: the card\'s bundle counts as taken once the push of this session\'s attempt is pushed with its bytes\' sha256', () => {
+  const d = tempDir('orch-lane4-bundle-');
+  try {
+    const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
+    const s = { id: SID, role: 'worker', card: 'C-1', outbox: o };
+    writeFileSync(join(o, 'report-C-1.md'), '# done\n');
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a]));
+    const sha = (f) => createHash('sha256').update(readFileSync(join(o, f))).digest('hex');
+    const facts = new Map([[`intake-applied-${SID}-report-C-1.md`, { session: SID, name: 'report-C-1.md', state: 'applied', sha256: sha('report-C-1.md') }],
+      ['push.C-1.a1', { result: 'pushed', branch: 'card/c-1', tip: 'f'.repeat(40), bundle_sha256: sha('bundle-C-1.bundle') }]]);
+    const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
+    let sdoc = { card: 'C-1', attempt: 'a1' };
+    const readSession = (id) => (id === SID && sdoc ? { ok: true, doc: sdoc } : { ok: false, missing: true });
+    const drained = drainedPort({ readFact, readSession });
+    assert.equal(drained(s), true, 'a real binary bundle beside an applied report drains');
+    // Fails closed: each condition alone.
+    assert.equal(drainedPort({ readFact })(s), false, 'no session reader wired');
+    assert.equal(drainedPort({ readFact, readSession: () => { throw new Error('EIO'); } })(s), false, 'a session reader that throws');
+    assert.equal(drainedPort({ readFact, readSession: () => ({ ok: false, doc: sdoc }) })(s), false, 'a doc beside ok:false');
+    for (const v of [null, {}, { card: 'C-1' }, { card: 'C-1', attempt: '' }, { card: 'C-1', attempt: 1 }, { card: 'C-2', attempt: 'a1' }]) {
+      sdoc = v; assert.equal(drained(s), false, `session doc ${JSON.stringify(v)}`);
+    }
+    sdoc = { card: 'C-1', attempt: 'a2' }; assert.equal(drained(s), false, 'no push fact for this attempt');
+    sdoc = { card: 'C-1', attempt: 'a1' };
+    const push = facts.get('push.C-1.a1');
+    for (const v of [{ ...push, result: 'refused' }, { ...push, head_refused: 'the card head could not be noted' }, { ...push, bundle_sha256: undefined }, { ...push, bundle_sha256: 'F'.repeat(64) }, { ...push, bundle_sha256: 'f'.repeat(64) }]) {
+      facts.set('push.C-1.a1', v); assert.equal(drained(s), false, JSON.stringify(v));
+    }
+    facts.set('push.C-1.a1', push);
+    assert.equal(drainedPort({ readFact: (id) => (id === 'push.C-1.a1' ? { ok: false, doc: push } : readFact(id)), readSession })(s), false, 'a push doc beside ok:false');
+    assert.equal(drainedPort({ readFact: (id) => { if (id === 'push.C-1.a1') throw new Error('EIO'); return readFact(id); }, readSession })(s), false, 'a push read that throws');
+    assert.equal(drained(s), true);
+    writeFileSync(join(o, 'bundle-C-1.bundle'), 'other bytes'); assert.equal(drained(s), false, 'the bundle changed after its push');
+    rmSync(join(o, 'bundle-C-1.bundle')); symlinkSync(join(o, 'report-C-1.md'), join(o, 'bundle-C-1.bundle'));
+    facts.set('push.C-1.a1', { ...push, bundle_sha256: sha('report-C-1.md') });
+    assert.equal(drained(s), false, 'a link is not the bundle');
+    rmSync(join(o, 'bundle-C-1.bundle'));
+    // Another card's bundle name is not this session's: it is an intake file like any other, never taken.
+    writeFileSync(join(o, 'bundle-C-2.bundle'), 'x');
+    assert.equal(drained(s), false, 'another card\'s bundle');
+    assert.equal(drained({ ...s, card: undefined }), false, 'no card: no bundle is this session\'s');
+    // #388 r2 m1: only a worker's or script's session carries the card's bundle; another role's is an intake file, never taken.
+    rmSync(join(o, 'bundle-C-2.bundle'));
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a])); facts.set('push.C-1.a1', push);
+    assert.equal(drained(s), true, 'the worker\'s bundle, as pushed');
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s');
+    for (const role of ['lead', 'reviewer', undefined]) assert.equal(drained({ ...s, role }), false, `a ${role} session's bundle`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
