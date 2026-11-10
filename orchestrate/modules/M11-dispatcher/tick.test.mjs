@@ -590,6 +590,16 @@ export { rec };
   assert.equal(await main([config], { self, now: T0 + 3 * MIN, log: (s) => logs.push(s) }), 0);
   assert.equal(mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at ?? null, null, 'cleared once the config is fixed');
   logs.length = 0;
+  // L802: a deadline over the pass's own sum is refused by the reader, and nothing runs; the sum itself is taken.
+  const high = L.path('high.json');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS + 1 }));
+  const before = mod.seen.length;
+  assert.equal(await main([high], { self, now: T0 + 4 * MIN, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.join('\n'), new RegExp(`runDeadlineMs may be at most ${RUN_DEADLINE_MS} \\(this job's own limit\\)`));
+  assert.equal(mod.seen.length, before, 'no pass ran');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS }));
+  assert.equal(await main([high], { self, now: T0 + 5 * MIN, log: () => {} }), 0);
+  logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
   const rel = L.path('rel.json');
@@ -1827,4 +1837,33 @@ test('L596 O7: a Lead whose send throws, not a rules error, is skipped by name, 
   assert.match(r.steps.leads.result[0][1], /^skipped: the pane is gone/);
   assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
   assert.ok(w.calls.alerts.some((a) => /the Lead L-B \(product p1\) was skipped this pass: the pane is gone/.test(a)), w.calls.alerts.join(' | '));
+});
+
+// L785 m1: a refusal that moved a live lock and could not put it back (two passes may run) is told to Joe through the held
+// alert, once a day, not only noted in the record.
+test('L785 m1: runTick tells a moved, not-put-back live lock (moved_live) once a day; a plain refusal is not told', async () => {
+  const w = world([account(), usage()]);
+  const told = () => (w.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /two Dispatcher passes may be running at once/.test(e.text)).length;
+  const plain = await runTick({ lockFile: '/unused', lock: () => ({ ok: false, reason: 'another pass runs (pid 7)' }), rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(plain.ran, false); assert.equal(told(), 0);
+  const moved = () => ({ ok: false, reason: 'another pass runs (pid 7); its lock was moved while breaking a dead one and a third took the place', moved_live: true });
+  assert.equal((await runTick({ lockFile: '/unused', lock: moved, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
+  assert.equal(told(), 1, 'told');
+  await runTick({ lockFile: '/unused', lock: moved, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  assert.equal(told(), 1, 'once a day');
+});
+
+// L800 M-A: a pass that broke a dead lock and then lost the place to a late taker is refused, and the holder never saw the
+// dead lock: the refusal's `broke` is told, under the same cause as the holder's tell, so it is still once a day.
+test('L800 M-A: runTick tells a broken dead lock carried on a refusal, once a day with the holder\'s tell', async () => {
+  const w = world([account(), usage()]);
+  const told = () => (w.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /the last Dispatcher pass \(taken T-dead\) was stopped before it finished/.test(e.text));
+  const lostPlace = () => ({ ok: false, reason: 'another pass runs (pid 7)', broke: { pid: 999, taken_at: 'T-dead' } });
+  assert.equal((await runTick({ lockFile: '/unused', lock: lostPlace, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
+  assert.deepEqual(told().map((e) => e.text.endsWith('another pass holds the lock now')), [true], 'told on the refusal');
+  const held = () => ({ ok: true, broke: { pid: 999, taken_at: 'T-dead' }, release() {} });
+  await runTick({ lockFile: '/unused', lock: held, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  // The holder's pass sends what is queued, so count what was sent as well as what is still queued.
+  const said = [...told().map((e) => e.text), ...w.calls.alerts.filter((t) => /the last Dispatcher pass \(taken T-dead\) was stopped/.test(t))];
+  assert.equal(said.length, 1, `one cause: the holder's tell the same day is not a second one: ${said.join(' | ')}`);
 });

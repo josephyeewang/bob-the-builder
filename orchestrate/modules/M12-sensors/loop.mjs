@@ -64,7 +64,8 @@ export async function timed(fn, ms, what) {
 }
 
 /**
- * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason}}, problems: [...] }.
+ * One pass. `rec` is the record; `ports` as above; `now()` → Date. → { wrote: {id: {ok, unknown, reason, kept?, not_known?}}, problems: [...] }.
+ * `kept` names usage windows handed on from the stored reading; `not_known` names PR fields read as not known.
  * A problem is a read that failed or a write the record refused; the rest of the pass still runs.
  */
 export async function sensorsPass({ rec, ports, now = () => new Date(), deadlineMs = PROBE_DEADLINE_MS, loop = LOOP }) {
@@ -98,6 +99,8 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
       const read = port(ports.readUsage, 'the usage read', NO_USAGE);
       const r = await run('usage-', async (a) => { const v = await read(a); return v && typeof v === 'object' ? v : NO_USAGE; }, { account: who });
       note(`usage-${who}`, r, valueOf(`usage-${who}`)?.h5?.used_pct == null);
+      // A window handed on from the stored reading (no new figure for it) is kept, not known (L771).
+      if (r?.ok === true && r.handedOn?.length) wrote[`usage-${who}`].kept = [...r.handedOn];
     },
     'pr-': async () => {
       const g = ports.github;

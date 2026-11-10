@@ -15,6 +15,7 @@
 // The step's progress is the fact `lead-restart-<session>`.
 
 import { KEYS, need } from './keys.mjs';
+import { USED_STATES } from './intake-facts.mjs';
 import { plain, tellThen, writeFrom } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { ENTITIES, leadLaunchHead } from '../../shared/record.mjs';
@@ -68,7 +69,7 @@ export function leadInFlight({ rec, sessionId, outboxNames, questionOpen }) {
     // A read-only request queued on a refusal (`waiting`, held by the red band or a cap) is not in flight:
     // it could wait until the weekly reset, and the Lead's restart is never held by the budget (audit
     // 0b-6 r3 MAT-4, L31). WRAP tells the Lead that queued requests do not carry over.
-    if (name.startsWith('.') || !['applied', 'refused', 'interrupted', 'waiting'].includes(used)) return `outbox file ${name} not used yet`;
+    if (name.startsWith('.') || !USED_STATES.has(used)) return `outbox file ${name} not used yet`;
   }
   // `claim` leaves the record's entities in 0b-2; only the ones the record still has are read.
   for (const entity of ['card', 'merge', 'ask', 'go', 'claim', 'report'].filter((e) => ENTITIES.includes(e))) {

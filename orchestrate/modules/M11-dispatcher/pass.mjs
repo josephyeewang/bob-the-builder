@@ -28,6 +28,7 @@ import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
+import { machineId } from '../M9-record/lock.mjs';
 import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
@@ -78,10 +79,13 @@ const iso = (ms) => new Date(ms).toISOString();
 // STEP_DEADLINE_MS (tick.mjs).
 export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
+// `f` gets an AbortSignal that is aborted when guarded gives up on it (L822, #372 m2), so a port that honours it (a
+// stop, say) does nothing more once its answer no longer counts. A port that ignores it is unchanged.
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
   let timer;
-  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }), ms); });
-  try { return await Promise.race([Promise.resolve().then(f), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
+  const giveUp = new AbortController();
+  const late = new Promise((ok) => { timer = setTimeout(() => { giveUp.abort(); ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }); }, ms); });
+  try { return await Promise.race([Promise.resolve().then(() => f(giveUp.signal)), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
 }
 
 /**
@@ -149,13 +153,27 @@ export function refusalReport({ rec, alert, now, lines, failureLog = () => {} })
   };
 }
 
-/** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
-export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS }) {
+/**
+ * Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. `signal` (an AbortSignal,
+ * L822): a caller that gives up on the stop (a port limit, say) aborts it, and no signal is sent after that, so a stop
+ * it abandoned can't SIGKILL a group later. An aborted stop answers { ok: false, reason: 'abandoned' }: the caller
+ * gave up, which says nothing about whether the group still runs (#372 c2). A group seen gone after SIGTERM is still
+ * answered { ok: true, how: 'SIGTERM' }, even when the abort came at the same step. An abort during a `sleep` takes
+ * effect when that sleep ends (the sleep is the caller's, and is not cut short; #372 c1).
+ */
+export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS, signal }) {
   if (!Number.isInteger(pgid) || pgid <= 1) return { ok: false, reason: 'no process group to stop' };
+  const abandoned = { ok: false, reason: 'abandoned' };
+  if (signal?.aborted) return abandoned;
   // Any other error (EPERM, say) is an answer, not a throw (audit 0b-6 r2 MAT-7): one session must not end the pass.
   try { kill(pgid, 'SIGTERM'); } catch (e) { if (e.code === 'ESRCH') return { ok: true, how: 'gone' }; return { ok: false, reason: e.code ?? e.message }; }
-  for (let t = 0; t < waitMs; t += 500) { if (!alive(pgid)) return { ok: true, how: 'SIGTERM' }; await sleep(500); }
+  for (let t = 0; t < waitMs; t += 500) {
+    if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+    if (signal?.aborted) return abandoned;
+    await sleep(500);
+  }
   if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+  if (signal?.aborted) return abandoned;
   try { kill(pgid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') return { ok: false, reason: e.code ?? e.message }; }
   return { ok: true, how: 'SIGKILL' };
 }
@@ -174,8 +192,8 @@ export const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, 
 // The fields a told mark writes on the facts cleared here (L354 item 3).
 const TOLD = ['told_cause', 'told_at'];
 /** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
-export const writeLaunch = (rec, { sessionId, role, kind, card, head, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
-  doc: { session_id: sessionId, role, kind, card, head: head ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
+export const writeLaunch = (rec, { sessionId, role, kind, card, head, base, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+  doc: { session_id: sessionId, role, kind, card, head: head ?? null, base: base ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
@@ -277,7 +295,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
     due.push({ s, pending, late });
   }
-  const answers = await Promise.all(due.map(({ s }) => guarded(() => stopGroup(s), portDeadlineMs)));
+  const answers = await Promise.all(due.map(({ s }) => guarded((signal) => stopGroup(s, { signal }), portDeadlineMs)));
   const done = [];
   const failed = [];
   due.forEach((d, i) => {
@@ -353,10 +371,10 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, outbox, reason, signin, configDir }
+ *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
- *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
+ *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
@@ -719,7 +737,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
     const sessionId = randomUUID();
     const rulesRev = may.rev ?? rules.rev;
-    const claimDoc = { kind: 'session', session_id: sessionId, host, ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
+    const claimDoc = { kind: 'session', session_id: sessionId, host, ...(machineId() == null ? {} : { machine: machineId() }), ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claim: claimDoc }, kind: 'claim' });
     if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
@@ -751,7 +769,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // Under the role the session runs (L767: a script card's outbox is <root>/script/<id>).
     const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot, role: startRole(kind) });
     if (outboxWrong) {
-      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }), portDeadlineMs);
+      const stopped = await guarded((signal) => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }, { signal }), portDeadlineMs);
       const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
       const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
         : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`
@@ -765,11 +783,12 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
     if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
     // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
-    // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
+    // (refusal 5). `head` is the commit the copy started from; `base` the commit the launcher chose to start it on (L825-2:
+    // a Tier 1 card's main_commit, else the mirror's main; null when the launch port does not say); `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
     // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
-    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
+    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, base: l.base, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
     // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,

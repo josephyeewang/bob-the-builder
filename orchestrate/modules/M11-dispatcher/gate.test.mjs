@@ -392,3 +392,41 @@ test('L228 Minor 2: a cap value that is there but unreadable, whichever cap, ref
   // A non-undo is refused either way, with the same words.
   assert.equal(go({ rec, rules: rulesWith({ [K.editingPerMac]: 'two' }), product: 'p2', card: { id: 'n2', product: 'p2', tier: 2, files: ['src/n2.js'] } }).reason, `the rules' value for ${K.editingPerMac} is unreadable: start nothing`);
 });
+
+// L852 (#369 m3): the worker runner asks check 12 for an undo too; it asks the pass's own exact-reverse check, with the
+// same filesOf, so a paused product starts its exact undo through the launch as through the pass, and refuses, as the
+// pass does, an undo that is not an exact reverse, on any product.
+test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf, refused as not exact without', async () => {
+  const SHA = 'a'.repeat(40);
+  const rec = recWith([product('p1', 'paused'),
+    ['card', 'T-1', { state: 'merged', product: 'p1', tier: 2, files: ['src/a.js'], merge_commit: SHA }],
+    ['merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p1' }],
+    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }]]);
+  const rules = rulesWith();
+  const undo = { id: 'U-1', state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, product: 'p1', tier: 2, files: ['src/a.js'] };
+  const filesOf = () => ['src/a.js'];
+  const base = { rules, rec, bandsNow: () => GREEN, runningNow: () => [] };
+  const ask = (port, card = undo) => port({ card, kind: 'undo', product: 'p1' });
+  const viaPass = startGate({ rules, rec, card: undo, kind: 'undo', product: 'p1', b: GREEN, running: [], exactReverse: true });
+  assert.equal(viaPass.ok, true, 'control: the pass starts this undo on a paused product');
+  assert.deepEqual(await ask(check12({ ...base, filesOf })), viaPass);
+  for (const [why, port, card] of [['no filesOf', check12(base), undo], ['files differ', check12({ ...base, filesOf: () => ['src/b.js'] }), undo],
+    ['filesOf throws', check12({ ...base, filesOf: () => { throw new Error('x'); } }), undo], ['no merge', check12({ ...base, filesOf }), { ...undo, source: { ask: 'A-9' } }]]) {
+    const r = await ask(port, card);
+    assert.equal(r.ok, false, why);
+    assert.match(r.reason, /^it is not an exact reverse: /, why);
+  }
+  // On an active product with room too: the pass refuses a not-exact undo whatever the caps say, and so does the launch.
+  const active = recWith([product('p1'), ...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; })]);
+  const onActive = { ...base, rec: active };
+  assert.equal((await ask(check12({ ...onActive, filesOf }))).ok, true, 'control: exact on an active product');
+  for (const [why, port] of [['no filesOf', check12(onActive)], ['files differ', check12({ ...onActive, filesOf: () => ['src/b.js'] })]]) {
+    const r = await ask(port);
+    assert.equal(r.ok, false, why);
+    assert.match(r.reason, /^it is not an exact reverse: /, why);
+  }
+  assert.match((await check12({ ...base, filesOf })({ card: null, kind: 'undo', product: 'p1' })).reason, /^it is not an exact reverse: it has no card/);
+  // Every other kind is unchanged: exact or not is asked only for an undo.
+  const ed = { id: 'new', product: 'p1', tier: 2, files: ['src/new.js'] };
+  assert.deepEqual(await check12({ ...base, filesOf })({ card: ed, kind: 'editing', product: 'p1' }), startGate({ rules, rec, card: ed, kind: 'editing', product: 'p1', b: GREEN, running: [] }));
+});

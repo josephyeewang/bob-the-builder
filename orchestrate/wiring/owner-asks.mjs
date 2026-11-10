@@ -32,6 +32,7 @@ import { randomBytes } from 'node:crypto';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
+import { START_ISO } from '../modules/M9-record/lock.mjs';
 import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus, runnerCopy, runnerOutbox } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
@@ -42,7 +43,7 @@ export const ASK_GIVE_UP_MS = 600_000;
 // A product as a request file may name it: setup's product name (shared/product-paths.mjs PRODUCT, #378 r1 m3), never a path.
 const productName = (p) => typeof p === 'string' && PRODUCT.test(p);
 const HEAD = /^[0-9a-f]{40}$/;
-const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'outbox', 'signin', 'configDir', 'copy']);
+const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'base', 'outbox', 'signin', 'configDir', 'copy']);
 
 const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
@@ -57,8 +58,10 @@ export function launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoo
   if (a?.sessionId !== undefined && a.sessionId !== sessionId) return 'the answer names another session';
   if (!realPid(a?.pid)) return 'the start named no process';
   if (!realPid(a.pgid)) return 'the start named no process group';
-  if (!name(a.pidStart)) return 'the start named no start time for its process';
-  if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
+  if (typeof a.pidStart !== 'string' || !START_ISO.test(a.pidStart)) return 'the start named no UTC start time for its process (M9 startTime)';
+  if (typeof a.head !== 'string' || !HEAD.test(a.head)) return 'the start named no commit for its copy';
+  // base (L825-2): the commit the copy was started on. Optional until every runner answers it, but never malformed.
+  if (a.base !== undefined && (typeof a.base !== 'string' || !HEAD.test(a.base))) return 'the start named a malformed base commit';
   // A name the places can't be made from is said as such (#378 r1 m3), never as another outbox.
   let outbox; try { outbox = Object.hasOwn(RUNNER_ROLE_OF, kind) && typeof outboxRoot === 'string' ? runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }) : null; } catch (e) { return `the session's outbox can't be named: ${e.message}`; }
   if (!outbox || a.outbox !== outbox) return 'the start named another outbox than the session\'s own';
@@ -115,7 +118,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
           && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
-        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
+        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
       });
     },
     stopGroup: async (session) => {
