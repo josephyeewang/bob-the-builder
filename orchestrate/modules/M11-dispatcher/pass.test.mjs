@@ -49,7 +49,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir, ...('product' in a ? { product: a.product } : {}) }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -2094,7 +2094,7 @@ test('L744 2: a pauseLead that answers ok:false is told once and not counted as 
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
 });
 
-test('L767: a script card\'s outbox is <root>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+test('L767: a script card\'s outbox is <root>/<product>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
   const ok = world([card('C-2', { kind: 'script' })]);
   ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/${x.product}/script/${x.sessionId}` }));
   assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -506,10 +506,13 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   assert.ok(!existsSync(w.copy), 'its own copy, proven, is deleted');
   assert.equal(readFileSync(join(w.copiesRoot, 'p2', 'C-1', 'x'), 'utf8'), 'p2', 'another product\'s folder is untouched');
   for (const p of ['C-7', 'worker', join('..', 'elsewhere', 'C-1')]) assert.ok(existsSync(join(w.copiesRoot, p)), p);
-  // #403 r1 m4: the folders kept as no product's are named to Joe in one notice, once a day, and never moved.
-  const told = alerts.filter((a) => /no product's, kept as they are/.test(String(a?.text ?? a)));
+  // #403 r1 m4: the folders that can be no product's are named to Joe in one notice and never moved. c-8 has a
+  // product's shape and no product in this Record: most often another product's own folder (each product's Dispatcher
+  // has its own Record), so it is kept and not told (self-review M1); p4 is a file, which is no copy.
+  const told = alerts.filter((a) => /can be no product's copies folder/.test(String(a?.text ?? a)));
   assert.equal(told.length, 1, JSON.stringify(alerts));
-  assert.match(String(told[0]?.text ?? told[0]), /holds 4 folders that are no product's, kept as they are and never looked inside: C-7, c-8, p3, worker \(a copy from before/);
+  assert.match(String(told[0]?.text ?? told[0]), /holds 3 folders that can be no product's copies folder, kept as they are and never looked inside: C-7, p3, worker \(a card folder from before/);
+  assert.doesNotMatch(String(told[0]), /c-8|p2/);
   // Through holdAlert (once a day per cause, marked told only once delivered): the mark names its own cause.
   const call = alert.calls.find(([t]) => told[0] === t);
   assert.equal(call[1].mark.fact, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
@@ -541,7 +544,12 @@ test('#403 r1 A5, A6: a product read that throws, or a damaged product record, k
     assert.match(out[0][1].reasons.join(), why, name);
     assert.ok(existsSync(w.copy), `${name}: the copy is never deleted`);
     assert.deepEqual(saved, [], `${name}: nor bundled`);
-    assert.ok(alert.texts.some((t) => /no product's, kept as it is and never looked inside: p1 /.test(String(t))), `${name}: and told`);
+    // Told as possibly the product's own unpushed work, never as a folder to delete (self-review M1).
+    const told = alert.texts.filter((t) => /were not looked at this pass/.test(String(t)));
+    assert.equal(told.length, 1, `${name}: told once`);
+    assert.match(String(told[0]), /the worker copies of product p1 were not looked at this pass: its product record could not be read or is damaged\. The copies are kept and may hold unpushed work: do not delete them/, name);
+    assert.equal(alert.calls.find(([t]) => t === told[0])[1].mark.fact, `hold-${COPIES_UNREAD_CAUSE}`, name);
+    assert.ok(!alert.texts.some((t) => /can be no product's/.test(String(t))), `${name}: never told as no product's`);
   }
 });
 

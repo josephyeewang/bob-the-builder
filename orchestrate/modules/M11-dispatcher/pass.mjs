@@ -776,7 +776,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
     // must keep its card claimed or a second one would start.
     // The outbox must be the card's own product's folder (L836: <root>/<product>/<role>/<id>, shared/product-paths.mjs),
-    // under the role the session runs (L767: a script card's outbox is <root>/script/<id>); a product with no such folder
+    // under the role the session runs (L767: a script card's outbox is <root>/<product>/script/<id>); a product with no such folder
     // has none. `outboxRoot` is that root, not the product's folder: the product's own folder sits under it (#378 r1 m2).
     // The product is the one this pass launched, never one the launch answer names (#403 r1 A10).
     const outboxWrong = outboxProblemFor(l.outbox, sessionId, { outboxRoot, product, role: startRole(kind) });

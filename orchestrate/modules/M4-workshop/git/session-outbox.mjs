@@ -43,7 +43,9 @@ export function workerOutboxProblem(outbox, sessionId, { root, realpath = realpa
  * <outboxRoot>/<product>/<role>/<session id>, shared/product-paths.mjs runnerPlaces). A product the runner's folders
  * can't hold has no outbox, and is said so. With no root, the shape is checked as workerOutboxProblem does, and the
  * folder above the role must be named for this product (#403 r1 M1: the old flat place, or another product's, is not
- * this session's own). With a root, the real outbox must be runnerOutbox under the real root (#403 r1 m3).
+ * this session's own). That is a check by name only, so a caller that can know the root passes it: the pass and the
+ * push both do (the push requires it). With a root, the real outbox must be runnerOutbox under the real root, through
+ * any link in the outbox or the root (#403 r1 m3).
  */
 export function outboxProblemFor(outbox, sessionId, { outboxRoot, product, role, realpath = realpathSync } = {}) {
   const opts = { ...(role !== undefined ? { role } : {}), realpath };
