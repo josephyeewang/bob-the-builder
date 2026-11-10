@@ -257,9 +257,9 @@ export const COPY_RUN = (cardId, sha) => `copy-${cardId}-r-${sha.slice(0, 12)}`;
 export const COPY_ROLE = 'copy_run';
 const ROUTE_STATES = Object.freeze(['ready', 'claimed', 'running']);
 // M9's wait for a lapsed tab claim (writer.mjs lapseClaims). A lapse ends the claim, so this is how the card is known;
-// only researchCopyPass makes tab claims, so on a research_copy card it can only be this card's own run.
+// on a research_copy card only researchCopyPass makes them, so there it can only be this card's own run.
 const LAPSED_RUN = 'tab claim lapsed';
-const lapsedRun = (doc) => doc.state === 'waiting' && doc.wait?.what === LAPSED_RUN && doc.wait?.return_to === 'ready';
+export const lapsedRun = (doc) => doc.state === 'waiting' && doc.wait?.what === LAPSED_RUN && doc.wait?.return_to === 'ready';
 
 /**
  * A pushed copy goes to review by the three existing moves (L387), in one pass; a stop between them is picked up next

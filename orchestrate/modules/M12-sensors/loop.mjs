@@ -114,9 +114,16 @@ export async function sensorsPass({ rec, ports, now = () => new Date(), deadline
         threads: strict(reader.threads, 'threads'), behindBy: strict(reader.behindBy, 'behind') };
       await Promise.all(numbers.map(async (n) => {
         const r = await run('pr-', gh, { number: n });
-        const unknown = valueOf(`pr-${n}`)?.state == null;
+        const doc = valueOf(`pr-${n}`);
+        const unknown = doc?.state == null;
         if (unknown) problems.push(`pr-${n}: GitHub could not be read; written as unknown`);
         note(`pr-${n}`, r, unknown);
+        // A reading whose check runs alone could not be read is known for the rest, and says so (L728, #287 r1 M1):
+        // with no App client, or one GitHub refuses, every pass would otherwise write null and tell nobody.
+        if (!unknown && r?.ok === true && doc && doc.checks_at_head == null) {
+          wrote[`pr-${n}`].not_known = ['checks_at_head'];
+          problems.push(`pr-${n}: check runs not known (${doc.checks_reason ?? 'no reason given'})`);
+        }
       }));
     },
   };

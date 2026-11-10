@@ -21,21 +21,31 @@
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
 //   deliver     LAST, so every alert the passes above queued goes out in the same round (L242). The alert queue is the
 //               Record's, and delivery runs here, never in the Dispatcher (L236, L237): a dead Dispatcher is still told.
-//               The port is lane 3's M13 deliverAlertsPass, injected as `deliver({ rec, now })`; until it lands, it
-//               refuses, and the alerts stay queued.
+//               REAL when the config names the robot App (APP_KEYS, L600): M13 deliverAlertsPass through deliverWith, with
+//               the robot's installation token minted once per round (robotToken). Without those keys it refuses, and
+//               the alerts stay queued. A test may still inject `deliver({ rec, now })`.
 // A pass that refuses fails, and robot-main.mjs tells Joe ("the robot job's <pass> pass failed: not wired yet: …").
 //
-// The config: the Dispatcher's keys (dispatcher-wiring.mjs) and two more.
+// The config: the Dispatcher's keys (dispatcher-wiring.mjs) and these.
 //   keyDir              the robot key folder (setup: orchestrate's, 0700, no access list). The job starts only when this
-//                       process's user owns it.
+//                       process's user owns it. The App's key is token.mjs's default file name inside it.
 //   dispatcherLockFile  the Dispatcher's pass lock (its config's lockFile). A Dispatcher whose pass is still running is
 //                       not late (audit #137 M6): see dispatcherLate().
+//   APP_KEYS, all four or none (L600): appId (the robot App's id), appInstallation (its installation's number on the
+//   alert repository), alertRepo (owner/name: where alert issues go; the App must be installed there, and never Bob's
+//   repository) and alertOwner (the GitHub login the issues are assigned to). With none, deliver refuses as not wired;
+//   with some but not all, or a bad value, the job does not start.
+//
+// THE STORE-FREE CHANNEL. robotChannel(config) is the same App and alert repository with no Record behind it, for a
+// start that failed before the Record opened (L587: robot-main.mjs's catch hands it to M13 store-stopped.mjs). It never
+// throws and takes any config, even none.
 
 import { lstatSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
+import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
@@ -43,10 +53,16 @@ import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
+import { deliverWith, githubIssues, repoProblem } from '../modules/M13-ledger/alert-channel.mjs';
+import { mintInstallationToken } from '../modules/M6-merge-gate/token.mjs';
+import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
 
 // approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
 // (L639), so the robot config refuses them.
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile']);
+// The robot App and where its alerts go (L600): all four or none.
+export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
+  ...APP_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
 // #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. Nothing
@@ -56,9 +72,70 @@ export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: 'robot.issues (L235)', watch: 'robot.vercel',
-  deliver: 'robot.deliver (L237)' });
+  deliver: `robot.deliver: the config names no robot App (${APP_KEYS.join(', ')}; L600)` });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_IDEAS = 100;
+const APP_ID = /^[A-Za-z0-9.]{1,64}$/;            // token.mjs's: a numeric App id or an App's client id
+const INSTALL_ID = /^[1-9][0-9]{0,19}$/;
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * Why the config's robot App keys can't be used, or null. `none` is what to answer when no App key is set at all (wire():
+ * null, the deliver pass not wired; robotChannel: a reason). Fixed words: no value is echoed but the repository's.
+ */
+export function appProblem(c, { none = null } = {}) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return 'no config';
+  const set = APP_KEYS.filter((k) => c[k] !== undefined);
+  if (!set.length) return none;
+  if (set.length !== APP_KEYS.length) return `the robot App keys go together, all four or none: ${APP_KEYS.filter((k) => c[k] === undefined).join(', ')} missing`;
+  if ((typeof c.appId !== 'string' && !Number.isSafeInteger(c.appId)) || !APP_ID.test(String(c.appId))) return 'appId must be the robot App\'s id';
+  if ((typeof c.appInstallation !== 'string' && !Number.isSafeInteger(c.appInstallation)) || !INSTALL_ID.test(String(c.appInstallation))) return 'appInstallation must be the installation\'s number';
+  const bad = repoProblem(c.alertRepo);
+  if (bad) return `alertRepo: ${bad}`;
+  if (typeof c.alertOwner !== 'string' || !LOGIN.test(c.alertOwner)) return 'alertOwner must be a GitHub login';
+  return null;
+}
+
+/**
+ * The robot's installation token as M13's alert channel asks for it: `() => Promise<token.mjs's answer>`. LIMITED: minted
+ * on the first ask only, never before, and that one answer, a token or a refusal, is kept for the rest of this process.
+ * The robot job is one process per round, so that is at most one mint a round, however many calls or passes use it, and
+ * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
+ * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
+ */
+export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken } = {}) {
+  let p = null;
+  return () => (p ??= Promise.resolve()
+    .then(() => mint({ keyDir: c.keyDir, appId: c.appId, installationId: c.appInstallation, http: appMintClient({ fetchFn }), uid, scriptsUid: c.ownerUid, now }))
+    // A thrown message is masked before it is kept (#288 r1 m1): the reason reaches the job log and the alert queue, and
+    // token.mjs's own scrub only covers the mint that ships, not one swapped in. Masked first, then cut.
+    .catch((e) => ({ ok: false, reason: `token mint failed: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` })));
+}
+
+/**
+ * The store-free alert channel (L587, L600): { gh, owner } for M13 store-stopped.mjs, or null with the reason logged.
+ * NEVER THROWS, for any `config`, undefined included: it runs in robot-main.mjs's catch, after the start has already
+ * failed. It reads no Record and makes no call: the token is minted on the channel's first use (robotToken, so at most
+ * once). It holds the same walls as wire() before any key is read: this process is the config's owner and owns the
+ * private key folder (checkUser), and token.mjs checks the key file itself.
+ */
+export function robotChannel(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now,
+  mint = mintInstallationToken, check = checkUser } = {}) {
+  const none = (why) => { try { log(`robot: no alert channel without the Record: ${why}`); } catch { /* the log is all there is */ } return null; };
+  try {
+    const bad = appProblem(config, { none: `the config names no robot App (${APP_KEYS.join(', ')})` });
+    if (bad) return none(bad);
+    if (!Number.isSafeInteger(config.ownerUid) || config.ownerUid < 0) return none('ownerUid must be a Mac user id');
+    if (typeof config.keyDir !== 'string' || !isAbsolute(config.keyDir)) return none('keyDir must be an absolute path');
+    check({ uid, ownerUid: config.ownerUid, keyDir: config.keyDir });
+    const token = robotToken(config, { fetchFn, uid, now, mint });
+    return { gh: githubIssues({ repo: config.alertRepo, token, fetchFn }), owner: config.alertOwner };
+  } catch (e) {
+    let why = 'unknown error';
+    try { why = String(e?.message ?? e).slice(0, 200); } catch { /* keep the fixed words */ }
+    return none(why);
+  }
+}
 
 /** Refuses unless this process runs as the Record's owner AND owns the robot key folder, private to it, no access list. */
 export function checkUser({ uid, ownerUid, keyDir, lstat = lstatSync, acl = aclProblem }) {
@@ -160,8 +237,10 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.(), deliver = null, hold = holdAlert } = {}) {
+  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken } = {}) {
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
+  const appBad = appProblem(c);
+  if (appBad) throw new Error(`config: ${appBad}`);
   // Its own live pid in that file would read as a running Dispatcher, every round, for ever (audit #150 Minor 3).
   if (resolve(c.dispatcherLockFile) === resolve(c.lockFile)) throw new Error('dispatcherLockFile is this job\'s own lockFile: it must be the Dispatcher\'s');
   checkUser({ uid, ownerUid: c.ownerUid, keyDir: c.keyDir });
@@ -170,6 +249,12 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   const ledger = makeFactWriter(rec, { actor: 'ledger', now: () => new Date(now()) });
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
   if (deliver) passes.deliver = () => deliver({ rec, now });
+  else if (c.appId !== undefined) {
+    // One alert repository, for this Record's one product (L298: a Record tells only its own product's repository).
+    const send = deliverWith({ recordRoot: c.recordRoot, product: c.product, products: [c.product], repos: { [c.product]: c.alertRepo },
+      owner: c.alertOwner, token: robotToken(c, { fetchFn, uid, now, mint }), fetchFn });
+    passes.deliver = () => send({ rec, now });
+  }
   passes.heartbeat = async () => {
     const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
     let tell = null;

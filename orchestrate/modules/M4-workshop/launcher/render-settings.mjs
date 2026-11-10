@@ -9,8 +9,8 @@
 import { writeFileSync, readFileSync, renameSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
-import { hasShell, DESIGN_PROFILES, shadowKindsFor } from './role-profiles.mjs';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
 
@@ -70,8 +70,8 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
  * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session runs as
- * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required for every role but a
- * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
+ * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for
+ * every role but a reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
 export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
@@ -104,6 +104,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
   if (proposalOutboxes === undefined && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders were not given');
   if (proposalOutboxes !== undefined && !Array.isArray(proposalOutboxes)) return refuse('the rules\' proposals folders are not a list');
+  // An empty list would leave the role with no proposals wall at all (audit R-0b-148 slice 1, m1; L746).
+  if (Array.isArray(proposalOutboxes) && !proposalOutboxes.length && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders are an empty list, so nothing would deny them');
   const open = (proposalOutboxes ?? []).filter((f) => !denied(f));
   if (open.length) return refuse(`the rules' proposals folders are not all on the read-deny list: ${open.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
@@ -115,7 +117,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
   if (paths.bobFolder) deny.push(`Edit(/${abs(paths.bobFolder)}/**)`, `Write(/${abs(paths.bobFolder)}/**)`);
   const walls = [];
-  if (REVIEW_ROLES.includes(role)) {
+  // Every role the review runner starts sits behind the review walls, the plan reviewer too (L710).
+  if (RUNNER_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
     for (const k of REVIEW_WALLS) {
       if (typeof w[k] !== 'string' || !w[k].startsWith('/') || /[^A-Za-z0-9._/-]/.test(w[k]) || w[k].split('/').includes('..')) return refuse(`a ${role}'s settings need the review folder ${k} as a plain absolute path`);
@@ -144,8 +147,13 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // matching; this list also covers a longer kind added later that is not a compaction kind.
   const shadow = shadowKindsFor(role, profile.outbox);
   const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
+  // A role with no kinds (the plan reviewer) gets no --kinds word, and its exact outbox files (L710) go as --files.
+  const files = profile.files ?? [];
+  if (files.some((f) => !OUTBOX_FILE.test(f))) return refuse(`a ${role}'s outbox file names are not plain names`);
+  const kindsArg = profile.outbox.length ? ` --kinds ${profile.outbox.join(',')}` : '';
+  const filesArg = files.length ? ` --files ${files.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });

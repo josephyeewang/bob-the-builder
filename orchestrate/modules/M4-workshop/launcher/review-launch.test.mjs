@@ -21,7 +21,7 @@ import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smoke
 const PIN = '2.1.300';
 const ME = process.getuid();
 // The review roles run as this test's own user; every other role as someone else (the review user is separate).
-const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
+const UIDS = { ...Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000])), plan_reviewer: ME };
 
 const initFor = (role, over = {}) => {
   const p = DESIGN_PROFILES[role];
@@ -78,9 +78,9 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile, product: { commands: { test: 'npm test' } },
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, product: { commands: { test: 'npm test' } },
     paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, bobFolder, notes, mirror: join(root, 'mirror.git'),
-      deny: { secrets: [keys], claudeHome: join(reviewHome, '.claude'), otherCopies: [join(root, 'copy2')] },
+      deny: { proposals: ['/w/proposals'], secrets: [keys], claudeHome: join(reviewHome, '.claude'), otherCopies: [join(root, 'copy2')] },
       reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } } });
   assert.equal(r.ok, true, r.reason);
   const settingsFile = join(d('settings'), 'S-1.json');
