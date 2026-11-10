@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
-import { PRODUCT } from '../setup/layout.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
 import { fullPath } from './runner-job.mjs';
@@ -35,7 +35,7 @@ const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRo
 const UIDS = ['orchestrateUid', 'recordUid'];
 // The read-deny entries every product's sessions must have (#364 r1 M2): the Record, the keys, the sign-in and the home's.
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
-// The product rule is setup's (layout.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
+// The product rule is setup's (shared/product-paths.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
 const productName = (p) => PRODUCT.test(p);
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */

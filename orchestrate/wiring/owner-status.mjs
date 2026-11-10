@@ -57,8 +57,7 @@ import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { AI_ROLES } from '../shared/record.mjs';
-import { PRODUCT } from '../setup/layout.mjs';
+import { runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -66,21 +65,8 @@ export const USED_UP = Object.freeze(['refused', 'stopped', 'cancelled']);
 /** The kinds the worker runner starts and the one role each runs (pass.mjs kindOf and startRole): nothing else. */
 export const RUNNER_ROLE_OF = Object.freeze({ editing: 'worker', undo: 'worker', script: 'script' });
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
-/**
- * The runner's places for one product (L836): every product has its own copies folder and outbox folder, so a session
- * can be denied every other product's whole folder, copies made after it started included. A product's folder sits beside
- * the role folders under the outbox root, so a product may not be named as a role (in any letter case). The name is
- * setup's (layout.mjs PRODUCT, lower case only), so the name in each deny is the folder's name on disk (#378 M1).
- *   copy    <copiesRoot>/<product>/<card>          outbox  <outboxRoot>/<product>/<role>/<sessionId>
- */
-export const productRoleClash = (product) => typeof product === 'string' && AI_ROLES.some((r) => r.toLowerCase() === product.toLowerCase());
-export function runnerPlaces({ copiesRoot, outboxRoot, product }) {
-  if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error('not a product name setup makes a folder for (lower case letters, digits and -)');
-  if (productRoleClash(product)) throw new Error(`product ${product} is named as a role, and its outbox folder would be that role's`);
-  return { copies: join(copiesRoot, product), outboxes: join(outboxRoot, product) };
-}
-export const runnerCopy = ({ copiesRoot, product, card }) => join(runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies, card);
-export const runnerOutbox = ({ outboxRoot, product, role, sessionId }) => join(runnerPlaces({ copiesRoot: '/', outboxRoot, product }).outboxes, role, sessionId);
+// The runner's places for one product (L836) live in shared/product-paths.mjs (L848), re-exported here for the callers.
+export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } from '../shared/product-paths.mjs';
 /** How long the runner keeps a used-up request entry: a day, more than any claim timeout plus the stale window. */
 export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
 /** The runner rewrites its status at least this often (L769): a forged inode lasts no longer than one rewrite. */
@@ -137,7 +123,8 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
   if (x.uid !== uid) bad(x, 'names a Mac user other than the owner\'s');
   let root; try { root = runnerPlaces({ copiesRoot: '/', outboxRoot, product: x.product }).outboxes; } catch (e) { bad(x, `has a product the runner's folders can't hold (${e.message})`); }
   const wrong = workerOutboxProblem(x.outbox, x.id, x.outbox_open === true ? { root, realpath, role: x.role } : { role: x.role }); if (wrong) bad(x, `has an outbox that ${wrong}`);
-  if (x.outbox !== runnerOutbox({ outboxRoot, product: x.product, role: x.role, sessionId: x.id })) bad(x, 'has an outbox that is not inside the outbox root, in its product folder');
+  let own; try { own = runnerOutbox({ outboxRoot, product: x.product, role: x.role, sessionId: x.id }); } catch { own = null; }
+  if (!own || x.outbox !== own) bad(x, 'has an outbox that is not inside the outbox root, in its product folder');
   if ('request' in x) bad(x, 'names a read-only request, which the runner never starts');
   for (const f of ['outbox_open', 'stop_requested']) if (typeof x[f] !== 'boolean') bad(x, `has no ${f}`);
   for (const f of ['alive', 'ended']) if (f in x && typeof x[f] !== 'boolean') bad(x, `has ${f} that is not true or false`);

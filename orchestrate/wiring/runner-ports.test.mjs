@@ -315,6 +315,9 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
   // #378 m1: a product setup made but this config leaves out, and folders of the old flat layout, are denied too.
   const unlisted = [join(w.copiesRoot, 'p3'), join(w.copiesRoot, 'C-0'), join(w.outboxRoot, 'p3'), join(w.outboxRoot, 'worker')];
   for (const f of unlisted) mkdirSync(f, { recursive: true });
+  // A product in the config whose folders setup has not made yet is denied by name: a copy made there later stays walled.
+  w.c.products.p4 = { repo: 'o/p4', mirror: join(w.d, 'mirror-p4'), render: render('p4') };
+  const later = [join(w.copiesRoot, 'p4'), join(w.outboxRoot, 'p4')];
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
@@ -322,6 +325,7 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
     for (const p of [w.c.products.p2.mirror, theirs.copies, theirs.outboxes, join(w.mine.copies, 'C-9'), '/w/record', '/h/.ssh', '/w/keys']) assert.ok(denyRead.includes(p), `${p} is denied`);
     assert.equal(denyRead.includes(join(theirs.copies, 'C-7')), false, 'p2\'s whole copies folder is denied, not its copies one by one');
     for (const p of unlisted) assert.ok(denyRead.includes(p), `${p}, not in the config, is denied`);
+    for (const p of later) assert.ok(denyRead.includes(p), `${p}, not made yet, is denied`);
     for (const p of [w.mine.copies, w.mine.outboxes, w.copiesRoot, w.outboxRoot]) assert.equal(denyRead.includes(p), false, `${p} is not denied whole`);
     assert.equal(denyRead.includes(join(w.mine.copies, 'C-1')), false, 'its own copy is not denied');
     assert.equal(denyRead.includes(w.c.products.p1.mirror), false, 'its own product\'s mirror is not denied');

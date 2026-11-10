@@ -12,6 +12,8 @@
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
+// A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
+import { PRODUCT, productRoleClash } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
@@ -31,9 +33,6 @@ export const BASE_MARKER = '.made-by-setup';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
-// A product name is a folder name setup makes (L836): lower case only, so a name in the runner's config is the name on
-// the Mac's disk, which matches without regard to letter case (#378 M1). wiring/owner-status.mjs runnerPlaces uses it.
-export const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
 // Folders other users can write; compared without regard to case (the Mac's disk treats /users and /Users as one).
 // The chain check (guard.mjs) is the real wall: it runs before root changes anything. This only gives a clear early error.
@@ -60,7 +59,7 @@ export function parseConfig(raw) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
   }
   // A product's outbox folder sits beside the role folders (L836), so no product may be named as a role.
-  if (products.some((p) => AI_ROLES.includes(p))) {
+  if (products.some(productRoleClash)) {
     throw new Error('config: a product may not be named as a role (its outbox folder would be that role\'s)');
   }
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
