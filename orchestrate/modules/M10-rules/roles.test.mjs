@@ -26,7 +26,7 @@ const TABLE = {
   writer: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
   front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
   thinking: { model: 'main', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['report-', 'idea-'], auto_resume: false },
-  script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write', 'Workflow'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
+  script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
   plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false, context: 'context.plan_reviewer' },
   explore: { model: 'per_task', effort: 'as_asked', tools: [], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false },
 };
@@ -110,6 +110,16 @@ test('the subagent tool is refused under both its names, at the profile and at t
   }
   // One list in two homes: M4's is M10's plus Workflow, which only M10's script profile may hold.
   assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
+});
+
+test('L770: no published profile holds a tool M4 never starts, so a profile M10 loads is never refused at launch', () => {
+  const r = loadRoles(ROLES, { pin: PIN });
+  assert.ok(r.ok, r.reason);
+  for (const [role, p] of Object.entries(r.profiles)) {
+    const held = p.tools.filter((t) => M4_NEVER.includes(t));
+    assert.deepEqual(held, [], `${role} holds ${held.join(', ')}, which M4 refuses`);
+  }
+  assert.equal(r.profiles.script.tools.includes('Workflow'), false);
 });
 
 test('L683, L687: the plan reviewer reads and cannot write or hand anything in; a widened file is refused at load', () => {
