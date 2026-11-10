@@ -63,7 +63,7 @@ export function unreadableWhy(io, file, real, stderr = '', mode) {
   if (d) return `folder permissions: ${DISPATCHER_USER} can't go into ${d}, a folder above host.lock (every folder above it must let others search it, mode o+x)`;
   const m = Number.isInteger(mode) ? ` is mode ${(mode & 0o777).toString(8).padStart(3, '0')}, which` : '';
   if (asDispatcher(io, ['/bin/test', '-r', real]).status !== 0) return `file permissions: host.lock itself${m} doesn't let ${DISPATCHER_USER} read it (it must be readable by others, mode o+r, for example 644)`;
-  if (/Operation not permitted/.test(stderr)) return `macOS privacy protection: the permissions allow it, but macOS refused the read${real !== file ? ` (${file} is really ${real})` : ''}. macOS guards synced cloud folders (under ~/Library/CloudStorage) and the Desktop, Documents and Downloads folders; keep host.lock outside them`;
+  if (/Operation not permitted/.test(stderr)) return `macOS privacy protection: the permissions allow it, but macOS refused the read${real !== file ? ` (${file} is really ${real})` : ''}. macOS guards synced cloud folders (under ~/Library/CloudStorage), the Desktop, Documents and Downloads folders, and other disks under /Volumes; keep host.lock outside them`;
   return `the read failed: ${String(stderr).split('\n')[0].trim().slice(0, 160) || 'no reason given'}`;
 }
 
@@ -102,14 +102,14 @@ export function checkDispatcherKeys(io, cfg) {
   };
   let st;
   try { st = io.lstat(k.hostLockPath); } catch (e) {
-    if (e?.code === 'EACCES' && !root) { skip(what, needsRoot); return out; }
+    if (e?.code === 'EACCES' && !root) { skip(what, needsRoot); jobLine(k.hostLockPath); return out; }
     if (e?.code !== 'ENOENT') { item(false, what, `it can't be looked at (${e?.code ?? e})`); return out; }
     // Missing is what the Dispatcher reads as "no host claimed", but only if it can reach the folder to see that, and only
     // if macOS lets its job look there at all (r1 M1, L763): the guarded-folder test runs on the folder's real place.
     const gone = `the owner's host.lock (${k.hostLockPath}) is not there, which the Dispatcher reads as no host claimed, and ${DISPATCHER_USER} can reach its folder`;
     let real;
     try { real = join(realOf(dirname(k.hostLockPath)), basename(k.hostLockPath)); } catch (e2) {
-      if (e2?.code === 'EACCES' && !root) { skip(gone, needsRoot); return out; }
+      if (e2?.code === 'EACCES' && !root) { skip(gone, needsRoot); jobLine(k.hostLockPath, { missing: true }); return out; }
       item(false, gone, e2?.code === 'ENOENT' ? `its folder ${dirname(k.hostLockPath)} is not there, so the path is wrong; the Dispatcher would say "not known" on every pass` : `its folder's real place can't be found (${e2?.code ?? e2})`); return out;
     }
     if (!root) skip(gone, needsRoot);
@@ -124,7 +124,7 @@ export function checkDispatcherKeys(io, cfg) {
   if (st.size > HOST_LOCK_MAX) { item(false, what, `it is ${st.size} bytes; the Dispatcher reads at most ${HOST_LOCK_MAX}`); return out; }
   let real;
   try { real = realOf(k.hostLockPath); } catch (e) {
-    if (e?.code === 'EACCES' && !root) { skip(what, needsRoot); return out; }
+    if (e?.code === 'EACCES' && !root) { skip(what, needsRoot); jobLine(k.hostLockPath); return out; }
     item(false, what, `its real place can't be found (${e?.code ?? e})`); return out;
   }
   if (!root) { skip(what, needsRoot); jobLine(real); return out; }

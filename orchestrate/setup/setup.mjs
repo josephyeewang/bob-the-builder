@@ -9,7 +9,7 @@
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
 //   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
-//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot and hostLockPath as JSON       (read only)
+//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
