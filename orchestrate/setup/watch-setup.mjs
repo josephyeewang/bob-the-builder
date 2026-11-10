@@ -176,6 +176,14 @@ export function checkRulesCopy(io, cfg) {
 export function checkWatchAppKey(io, cfg) {
   const f = watchAppKeyPath(cfg);
   if (!f) return [{ ok: false, what: 'the watch job names a watcher App', why: 'the config\'s watch entry has no "app" (id, installation, keyFile): without it the job cannot read check runs' }];
+  return keyFileItems(io, f);
+}
+
+/**
+ * An App key file in the robot key folder (the watcher App's, L627; the robot App's, L727): orchestrate's own plain 0600
+ * file, of a key's size, one name, with no access list. Never reads it. Without root it is skipped, never a pass.
+ */
+export function keyFileItems(io, f) {
   const what = `${f} is orchestrate's own 0600 file of a key's size, with no access list`;
   if (io.euid() !== 0) return [{ ok: true, skip: true, what, why: 'the folder is orchestrate-only; needs root to look; run with sudo' }];
   const orch = readUser(io, 'orchestrate');

@@ -25,7 +25,7 @@ import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
-import { ROBOT_JOB, robotConfigProblem, robotPlist } from './robot-setup.mjs';
+import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
@@ -196,7 +196,11 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
     if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
-  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`); }
+  if (jobs.includes(ROBOT_JOB)) {
+    const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`);
+    // L727: robot.json names the robot App, so its key must be there, or no alert (not even the store-free one) reaches Joe.
+    for (const k of robotAppKeyItems(io, cfg)) if (!k.ok) problems.push(`${k.what}: ${k.why}, so the robot job could not send an alert`);
+  }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const text = fileText(io, cfg, job);
@@ -296,7 +300,10 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? 'it is loaded' : 'its file is there'}: take it out with daemons unload, then delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
   }
-  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
+  if (jobs.includes(ROBOT_JOB)) {
+    const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why);
+    for (const k of robotAppKeyItems(io, cfg)) item(k.ok, `the robot App's key: ${k.what}`, k.why, k.skip);
+  }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

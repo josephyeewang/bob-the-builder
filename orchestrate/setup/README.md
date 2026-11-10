@@ -157,5 +157,14 @@ prepared config as a file named `robot.json`, which the install puts in the copy
 |---|---|---|
 | `sudo node setup.mjs daemons place` / `load` / `check` (also `--only robot`) | a job `<label>.robot`: runs as `orchestrate` (the Record's owner and the key folder's), from the installed copy, `wiring/robot-main.mjs <copy>/robot.json`, every 60 s and once at load, logs `robot.out.log` / `robot.err.log` in the log folder (orchestrate's, as every job with a user). Built by M11's `loginJobPlist`, the Dispatcher's builder. `load` refuses, and `check` FAILs, unless the copy's `robot.json` is root's alone and holds the values setup knows: `wiring` = the copy's `wiring/robot-wiring.mjs`, `ownerUid` = orchestrate's, `keyDir` = `<base>/keys`, `installRoot` (if given) = the copy, `lockFile` and `dispatcherLockFile` full paths, different, and outside the install, no key the robot job does not take. The rest is the job's own start check; a refused start shows as a last exit that is not 0, which `check` fails on. A robot job placed or loaded while the config leaves it off fails a full `check`, as does one under an old label | yes |
 
+The robot App (L600, L727): `robot.json` may name it with four keys, all or none (the wiring's own `appProblem`):
+`appId` (the App's id), `appInstallation` (its installation's number on the alert repository), `alertRepo` (owner/name:
+the repository where alert issues go, where the App is installed; never Bob's repository) and `alertOwner` (the GitHub
+login the issues are assigned to). Some but not all, or a bad value: `load` refuses and `check` FAILs. With all four, the
+App's key must be in the robot key folder under token.mjs's default name, `<base>/keys/robot-app.pem`: orchestrate's own
+plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). Missing or open: `load` refuses
+(no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, it is not looked at).
+With none of the four, no key is asked for and the deliver pass refuses as not wired, so alerts stay queued.
+
 Loading it on the always-on Mac is an owner-run step. It waits for the robot's config (the Dispatcher's keys, C) and
 for the passes it runs to be wired.
