@@ -203,6 +203,7 @@ export const ALLOWED = Object.freeze({
   'modules/M4-workshop/launcher/review-updater.test.mjs': 1,
   'modules/M6-merge-gate/build-checker.test.mjs': 1,
   'modules/M9-record/write-sites.test.mjs': 1, // a plant's own test text, the 'dynamic, built name' case (L151)
+  'wiring/owner-status.test.mjs': 1, // #324: a child process loads owner-status.mjs by its file URL to test openRead on a pipe (L767); text in a test's string
   'test/wired.test.mjs': 5, // #197: the CONFIG_ENTRIES call strings it pins in each loader (L234, L235, L433); text in a test's string
 });
 
