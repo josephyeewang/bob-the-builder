@@ -16,7 +16,7 @@ import { MUST_KEEP } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
-import { JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts } from './daemons.mjs';
+import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts } from './daemons.mjs';
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
 import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig } from './dispatcher-setup.mjs';
 import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
@@ -1256,6 +1256,12 @@ const D_PLANTS = [
   ['the copy\'s file differs by one value', (w) => { const f = copyConfig(w); const c = JSON.parse(readFileSync(f, 'utf8')); c.lockFile = '/tmp/dispatcher.lock'; chmodSync(f, 0o644); rmSync(f); writeFileSync(f, dispatcherConfigText(c)); chmodSync(f, 0o644); }, /not the config this setup writes now/],
   ['the copy\'s file written by its group', (w) => chmodSync(copyConfig(w), 0o664), /not root's alone|has mode 664/],
   ['the copy\'s file gone', (w) => rmSync(copyConfig(w)), /dispatcher\.json is not in the copy/],
+  // Root's alone yet not 644: orchestrate, which the job runs as, could not read it.
+  ['the copy\'s file mode 600', (w) => chmodSync(copyConfig(w), 0o600), /orchestrate\/dispatcher\.json has mode 600, want 644/],
+  // The file is fine but the copy's folder is not root's alone, so another user could swap it.
+  ['the copy\'s folder written by its group', (w) => chmodSync(w.root, 0o775), /dispatcher\.json in the copy is not root's alone: /],
+  // The file is there, but the copy's updater would drop it on the next update.
+  ['the copy\'s updater does not keep it', (w) => { const f = join(w.root, UPDATER_CONFIG); const u = JSON.parse(readFileSync(f, 'utf8')); u.keep = u.keep.filter((k) => k !== 'dispatcher.json'); chmodSync(f, 0o600); writeFileSync(f, JSON.stringify(u, null, 2) + '\n'); chmodSync(f, 0o644); }, /was made before the Dispatcher was set up, so its updater does not keep dispatcher\.json/],
   ['the copy\'s file a link', (w) => { const f = copyConfig(w); renameSync(f, `${w.ext}/d.json`); symlinkSync(`${w.ext}/d.json`, f); }, /not root's alone|not a plain file/],
   ['the copy\'s file with a second name', (w) => { linkSync(copyConfig(w), join(w.root, 'second.json')); }, /orchestrate\/dispatcher\.json has 2 names/],
   ['the Dispatcher\'s lock folder writable by others', (w) => chmodSync(w.mac.at(`${BASE}/home/orchestrate`), 0o777), /the Dispatcher's lock \(lockFile\): its folder .* can be written by its group or others/],
@@ -1319,9 +1325,17 @@ test('Dispatcher config: each file is written whole and renamed over its name; r
   assert.equal(readFileSync(copyConfig(w), 'utf8'), before, 'planted: a writer without the copy check writes here');
 });
 
-test('Dispatcher job: daemons check reads a run as stuck only past the Dispatcher\'s deadline and the watchdog\'s margin', () => {
+test('Dispatcher job: daemons check reads a run as stuck only past the Dispatcher\'s deadline and the watchdog\'s margin', async () => {
   assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 >= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS, 'a healthy pass is never stuck');
   assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 <= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS + 120_000, 'and a hung one is told soon after');
+  const w = await dPlaced();
+  const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 0, ld.text);
+  const job = w.mac.loaded.get(D_LABEL); job.lastExit = '0';
+  // Past the review jobs' 30 minutes but inside the Dispatcher's own limit: a healthy pass, not stuck.
+  job.ageS = FIRST_RUN_LIMIT_S + 60; let ck = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck.code, 0, `planted: the Dispatcher judged by the review jobs' limit (${ck.text})`);
+  assert.match(ck.text, new RegExp(`current run is not stuck \\(at most ${Math.ceil(DISPATCHER_RUN_LIMIT_S / 60)} minutes\\)`));
+  job.ageS = DISPATCHER_RUN_LIMIT_S + 1; ck = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /current run is not stuck.*has been going for/);
+  delete job.lastExit; job.ageS = FIRST_RUN_LIMIT_S + 60; assert.equal(w.run(['daemons', 'check', '--only', 'dispatcher']).code, 0, 'a first run is held to the same limit');
 });
 
 // The base file is what install carries into the copy: each fault in it, planted after dispatcher-config, stops the install.
