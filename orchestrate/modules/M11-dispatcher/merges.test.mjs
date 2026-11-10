@@ -429,6 +429,16 @@ test('L387: a research copy\'s run counts as the card\'s session for its merge r
   assert.equal(c.read('merge_request', MERGE_REQUEST('C-1', HA, 0)).doc.session_id, 'copy-C-1-r-abc');
 });
 
+test('L549: a proposal\'s run counts as the card\'s session for its merge request, and is not a worker launch', () => {
+  const run = ['launch', 'L-prop', { session_id: 'prop-C-1-p-abc', role: 'proposal_run', card: 'C-1', head: HA, rev: 1, launched_at: at(-60) }];
+  const c = readyRec({}, [run, prSeen(7)]);
+  const alert = fakeAlert();
+  assert.deepEqual(requestMerges({ alert, rec: c, rules: R, now: T0, b: GREEN }), [['C-1', 'merge requested']]);
+  assert.deepEqual(alert.texts, []);
+  assert.equal(c.read('merge_request', MERGE_REQUEST('C-1', HA, 0)).doc.session_id, 'prop-C-1-p-abc');
+  assert.deepEqual(workerLaunches(readyRec({}, [run]), 'C-1').map((l) => l.doc.role).filter((r) => r === 'proposal_run'), []);
+});
+
 test('L441 m6: a research copy\'s run is not a worker launch: cleanup finds no work folder through it', () => {
   const run = ['launch', 'L-copy', { session_id: 'copy-C-1-r-abc', role: 'copy_run', card: 'C-1', head: HA, rev: 1, launched_at: at(-60) }];
   assert.deepEqual(workerLaunches(readyRec({}, [run]), 'C-1').map((l) => l.doc.role).filter((r) => r === 'copy_run'), []);

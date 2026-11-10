@@ -58,7 +58,7 @@ import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
 import { createHash } from 'node:crypto';
 import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
 import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
-import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF, COPY_NOT_ON } from '../modules/M11-dispatcher/research-intake.mjs';
 import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { blobSha } from '../modules/M10-rules/reader.mjs';
 import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
@@ -70,6 +70,7 @@ import { startGate, riskOf } from '../modules/M11-dispatcher/gate.mjs';
 import { bands, readFact } from '../modules/M11-dispatcher/usage.mjs';
 import { undoStep, UNDO_CARD, exactReverse } from '../modules/M11-dispatcher/undo.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
+import { intakeFactId, sourceOf } from '../modules/M11-dispatcher/proposals-intake.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { undoStarts } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
@@ -271,13 +272,13 @@ test('Joe\'s Undo on day one: M11\'s real undo start starts the undo card', asyn
 // L595: a paused product's undo, through one real tick: the real rules text, the real Record, M11's real steps. Only the
 // ports are stand-ins. The rules draft's paused state is start: none, which is what stopped this card at M9 alone.
 const pause = (w) => { const r = w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: w.rec.read('product', P).rev, doc: { state: 'paused', return_to: 'active' } }); assert.equal(r.ok, true, r.reason); };
-async function oneTick(w, { sessions = [] } = {}) {
+async function oneTick(w, { sessions = [], proposals = { products: [], ownerUid: 501 }, now = T0 } = {}) {
   const dir = tempDir('orch-day-one-tick-');
   const launched = [];
   const stops = [];
   const alert = fakeAlert();
   const ports = {
-    alert, board: () => [], healthy: () => true, resume: () => false, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    alert, board: () => [], healthy: () => true, resume: () => false, proposals: () => proposals, outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [], sessions: () => [...sessions], probe: () => ({ size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } }),
     launch: async ({ card, kind, product, sessionId }) => { launched.push(card.id); sessions.push({ id: sessionId, product, kind, card: card.id, pgid: 101 }); return { ok: true, sessionId, outbox: `/outbox-root/worker/${sessionId}`, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID) }; },
     stopGroup: async (x) => { stops.push(x); return { ok: true }; }, saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
@@ -285,8 +286,9 @@ async function oneTick(w, { sessions = [] } = {}) {
     sendFrontDoor: async () => ({ outcome: 'sent' }), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), frontDoorAlive: () => null, frontDoorHandoff: () => null,
     cleanup: { copiesRoot: dir, sealRoot: dir, mirrorFor: () => null }, approvals: () => [],
   };
-  await tick({ rec: w.rec, rules: w.rules, now: T0, ports });
-  return { launched, alert, sessions, stops };
+  w.env.clock.t = now;
+  const r = await tick({ rec: w.rec, rules: w.rules, now, ports });
+  return { launched, alert, sessions, stops, r };
 }
 
 test('L595: the Undo tapped on a paused product starts in the next tick', async () => {
@@ -411,26 +413,105 @@ test('with no product document today, the gaps are exactly the known ones (pause
   assert.match(start.reason, /no product record/);
 });
 
-// L303 (#154 audit Minors 4 and 5): two silences the research path leaves for its wiring. Today nothing calls the
-// handler or researchPass, so neither can happen; lane 4's R-0b-162 wiring PR must close both before it lands.
-test('a research report whose card can\'t go ready or land is told to Joe, every time', { todo: 'L303, R-0b-162 (lane 4): the wiring must tell Joe on every settle() failure (not ready, not landed) from researchHandler and researchPass, or a paused product leaves a draft card and a closed ask in silence' }, () => {
-  assert.fail('R-0b-162 wires researchHandler and researchPass; until then nothing reports their settle() results');
+// L303 (#154 audit Minors 4 and 5): two silences the research path could leave, closed by its wiring (R-0b-162, A4).
+// Through real ticks: the real rules text with a real proposals folder, the real Record, the real proposals intake
+// handing the report to the real research handler, and the tick's research step. Only the ports are stand-ins.
+const DAY = 24 * 60 * 60_000;
+function researchWorld() {
+  const dir = tempDir('orch-day-one-proposals-');
+  const w = dayOne({ text: swap(FIRST, 'outbox: /srv/sample-app/proposals', `outbox: ${dir}`) });
+  return { w, dir, proposals: { products: [P], ownerUid: process.getuid() } };
+}
+const notReady = (alert) => alert.texts.filter((t) => /the report for research ask R-1 was taken in, but its card research-R-1 could not go to ready/.test(t));
+
+test('a research report whose card can\'t go ready or land is told to Joe, every time', async () => {
+  const { w, dir, proposals } = researchWorld();
+  askOpened(w);
+  writeFileSync(join(dir, 'research-R-1.md'), REPORT);
+  pause(w);
+  const one = await oneTick(w, { proposals });
+  assert.equal(one.r.steps.proposals.ok, true, one.r.steps.proposals.error);
+  assert.equal(one.r.steps.research.ok, true, one.r.steps.research.error);
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'draft', 'a paused product keeps the card in draft');
+  // L736 m2: the ask stays on Joe's waiting list while its card is a draft, so a withdrawal is still seen (M1).
+  assert.equal(w.rec.read('ask', 'R-1').doc.landed, undefined, 'the ask still waits while its card is a draft');
+  assert.ok(w.rec.read('ask', 'R-1').doc.wait);
+  assert.equal(notReady(one.alert).length, 1, `told in the tick that took the report in: ${one.alert.texts.join(' | ')}`);
+  // Told once a day while it lasts, by the research step, never in silence.
+  const two = await oneTick(w, { proposals, now: T0 + 60_000 });
+  assert.equal(notReady(two.alert).length, 0, 'not again the same day');
+  assert.deepEqual(two.r.steps.research.result.map(([, x]) => x.replace(/:.*/, '')), ['not ready'], 'the research step tried again');
+  const three = await oneTick(w, { proposals, now: T0 + DAY + 60_000 });
+  assert.equal(notReady(three.alert).length, 1, 'told again the next day');
+  // Once the product is active, the card goes ready and nothing more is told.
+  const active = w.rec.read('product', P);
+  assert.equal(w.rec.write({ actor: 'approvals', entity: 'product', id: P, expectRev: active.rev, doc: { state: 'active' } }).ok, true);
+  const four = await oneTick(w, { proposals, now: T0 + DAY + 120_000 });
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
+  assert.equal(notReady(four.alert).length, 0);
+  assert.ok(w.rec.read('ask', 'R-1').doc.landed, 'landed once the card is ready');
+  // Landed while nothing copies it yet (L410): said once (L736 m2).
+  assert.equal(four.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 1, four.alert.texts.join(' | '));
+  const five = await oneTick(w, { proposals, now: T0 + 3 * DAY });
+  assert.equal(five.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 0, 'once');
 });
 
-test('a research report sent again after an interrupted intake is told, never stuck in silence', { todo: 'L303, R-0b-162 (lane 4): a re-sent report refused with "already has its research_copy card" after an interrupted intake must reach Joe, with what to do' }, () => {
-  assert.fail('R-0b-162 wires the research path; until then a re-send cannot happen');
+// L736 m6 (R4): the tick hands the research handler its own alert. A report taken in while the product is active lands in
+// the handler, and only the handler says that nothing copies it yet (researchPass leaves a landed card alone).
+// The handler tells it as it lands the card, and the research step of the same tick tells it again if that alert was
+// not queued: either way Joe hears it once.
+test('a research report taken in by the tick is told that nothing copies it yet; once', async () => {
+  const { w, dir, proposals } = researchWorld();
+  askOpened(w);
+  writeFileSync(join(dir, 'research-R-1.md'), REPORT);
+  const one = await oneTick(w, { proposals });
+  assert.equal(one.r.steps.proposals.ok, true, one.r.steps.proposals.error);
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
+  assert.ok(w.rec.read('ask', 'R-1').doc.landed);
+  assert.equal(one.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 1, one.alert.texts.join(' | '));
+  const two = await oneTick(w, { proposals, now: T0 + 2 * DAY });
+  assert.equal(two.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 0, 'once');
+});
+
+test('a research report sent again after an interrupted intake is told, never stuck in silence', async () => {
+  const { w, dir, proposals } = researchWorld();
+  // A pass took the report in and stopped after the handler made the card: its claim is left behind.
+  assert.equal(reportArrives(w).ok, true);
+  const name = 'research-R-1.md';
+  const first = createHash('sha256').update(REPORT).digest('hex');
+  // Written as the intake writes its claim: the Dispatcher's own fact, so the next pass may record the interruption.
+  const claim = w.rec.write({ actor: 'dispatcher', entity: 'fact', id: intakeFactId(P, name), expectRev: 0, kind: 'proposal_claim', doc: { session: sourceOf(P), product: P, name, sha256: first, state: 'applying', at: new Date(T0).toISOString() } });
+  assert.equal(claim.ok, true, claim.reason);
+  // The owner sends the report again, changed.
+  writeFileSync(join(dir, name), `${REPORT}\nOne more line.\n`);
+  const all = [];
+  for (const [i, now] of [T0, T0 + 60_000, T0 + 120_000].entries()) {
+    const t = await oneTick(w, { proposals, now });
+    assert.equal(t.r.steps.proposals.ok, true, `tick ${i}: ${t.r.steps.proposals.error}`);
+    all.push(...t.alert.texts);
+  }
+  assert.equal(all.filter((t) => /research-R-1\.md(<\/outside-text>)? from .*proposals folder was interrupted/.test(t)).length, 1, all.join(' | '));
+  const resent = all.filter((t) => /research-R-1\.md(<\/outside-text>)? in .*proposals folder was refused: research ask R-1 already has its research_copy card/.test(t));
+  assert.equal(resent.length, 1, `told once: ${all.join(' | ')}`);
+  assert.match(resent[0], /made from the report first taken in \(version [0-9a-f]{12}\), so this one was not used\. The first report is already on its card and will be copied; nothing to do for it\. To have this one used instead, ask again with a new research ask$/);
+  assert.doesNotMatch(resent[0], /put it back/, 'L736 m1: no advice that leads to silence');
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, first, 'the card keeps the first bytes');
 });
 
 // The real path to a research copy: an ask from the front door, then the report for it.
 const REPORT = '# One thing\n\nIt was found out.\n';
-function reportArrives(w) {
+function askOpened(w) {
   const now = w.env.clock.t;
   const f = outboxFile('ask-request', '20261103-0915-rb', { ask: 'research', product: P, brief: 'find out one thing' });
   assert.equal(checkOutboxFile(f.name, f.text, { products: [P], seenIds: [] }).ok, true);
   const asked = w.rec.applyOutbox({ role: 'front_door', sessionId: 'F-1' }, m9file(w.env, 'front_door', 'F-1', f.name, f.text));
   assert.equal(asked.ok, true, asked.reason);
   assert.equal(openResearchAsks({ record: w.rec, rules: w.rules, product: P, now: () => now, alert: fakeAlert() }).opened.length, 1);
-  return researchHandler({ rules: w.rules })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
+}
+function reportArrives(w) {
+  const now = w.env.clock.t;
+  askOpened(w);
+  return researchHandler({ rules: w.rules, alert: fakeAlert() })({ rec: w.rec, product: P, kind: 'research', id: 'R-1', name: 'research-R-1.md', source: 'research-file', fenced: cleanOutside(REPORT, 'research-file'),
     sha256: createHash('sha256').update(REPORT).digest('hex'), blob: blobSha(Buffer.from(REPORT)), size: Buffer.byteLength(REPORT), now });
 }
 

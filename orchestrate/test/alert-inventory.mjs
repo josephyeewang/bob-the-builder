@@ -823,7 +823,7 @@ export function branchName(env, git) {
 
 // `node orchestrate/test/alert-inventory.mjs` prints what the list is missing and what it holds that the code no
 // longer has, with the scanner's hints and a suggested status. It changes nothing: the lead writes the list.
-if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
+if (await (async () => { try { return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === (await import('node:fs')).realpathSync(process.argv[1]); } catch { return false; } })()) { // a link resolves (#286 p1, L725: lead grants this one line)
   const root = fileURLToPath(new URL('..', import.meta.url));
   const files = orchestrateFiles(root);
   const prod = files.filter((f) => !f.testCode);

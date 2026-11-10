@@ -18,7 +18,8 @@ import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
+import { generateKeyPairSync } from 'node:crypto';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -363,6 +364,7 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
 
 const noPorts = () => { const noop = () => [];
   return { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hasSession: () => true, gateAlive: () => true,
     hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop, sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }),
     startMinibase: async () => ({ ok: true }), cleanup: { copiesRoot: '/none', sealRoot: '/none', mirrorFor: () => null }, approvals: () => [] }; };
@@ -440,4 +442,182 @@ test('audit #150 P21: the wired heartbeat reads the lock file its config names: 
   rmSync(w.config.dispatcherLockFile);
   await passes.heartbeat().catch(() => {});
   assert.equal(lateQ().length, 1, 'no holder');
+});
+
+// ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────
+
+const ALERT_REPO = 'alerts-owner/alerts-repo';
+const APP = Object.freeze({ appId: 12345, appInstallation: 678, alertRepo: ALERT_REPO, alertOwner: 'owner-login' });
+const KEY_NAME = 'robot-app.pem';   // token.mjs's default key file name
+
+// The robot App's key, in the key folder under token.mjs's default name, the scripts' user's own, mode 600.
+let KEY_TEXT = null;
+function withKey(w) {
+  KEY_TEXT ??= generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+  writeFileSync(join(w.config.keyDir, KEY_NAME), KEY_TEXT, { mode: 0o600 });
+  return w;
+}
+
+/**
+ * GitHub for one round of the robot job: the product repository's reads (fakeGitHubFetch), the App's token request and
+ * GET /app, and an issues store for the alert repository. `mintStatus` answers the token request. Every call is in `calls`.
+ */
+function appGitHub(w, { mintStatus = 201 } = {}) {
+  const reads = fakeGitHubFetch(w.fake);
+  const calls = []; const issues = new Map();
+  const TOKEN = 'ghs_'.padEnd(40, 'q');
+  const res = (status, json = null) => ({ status, json: async () => json });
+  const fetchFn = async (url, init = {}) => {
+    const u = new URL(url); const method = init.method ?? 'GET'; const path = `${u.pathname}${u.search}`;
+    calls.push(`${method} ${path}`);
+    if (u.host !== 'api.github.com') throw new Error('no test reaches the network');
+    if (path === `/app/installations/${APP.appInstallation}/access_tokens` && method === 'POST') return mintStatus === 201 ? res(201, { token: TOKEN, expires_at: '2099-01-01T00:00:00Z' }) : res(mintStatus, {});
+    if (path === '/app') return res(200, { slug: 'robot' });
+    const base = `/repos/${ALERT_REPO}`;
+    if (!u.pathname.startsWith(base)) return reads(url, init);
+    if (init.headers?.authorization !== `Bearer ${TOKEN}`) return res(401, {});
+    const rest = u.pathname.slice(base.length);
+    const body = init.body ? JSON.parse(init.body) : {};
+    if (rest === '/issues' && method === 'GET') return res(200, [...issues.values()].filter((i) => i.state === 'open'));
+    if (rest === '/issues' && method === 'POST') {
+      const number = issues.size + 1;
+      issues.set(number, { number, state: 'open', title: body.title, body: body.body, assignees: body.assignees, user: { login: 'robot[bot]', type: 'Bot' } });
+      return res(201, { number });
+    }
+    const m = /^\/issues\/(\d+)(\/comments)?$/.exec(rest);
+    const i = m && issues.get(Number(m[1]));
+    if (!i) return res(404, {});
+    if (m[2] && method === 'POST') return res(201, { created_at: new Date().toISOString() });
+    if (m[2]) return res(200, []);
+    if (method === 'PATCH') { Object.assign(i, body); return res(200, i); }
+    return res(200, i);
+  };
+  return { fetchFn, calls, issues, mints: () => calls.filter((c) => c.endsWith('/access_tokens')).length,
+    writesOutside: () => calls.filter((c) => !c.startsWith('GET') && !c.includes(ALERT_REPO) && !c.endsWith('/access_tokens')) };
+}
+
+test('L600 PR 1: with the robot App named, the real deliver pass sends the round\'s queued alerts as issues, with one mint', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const logs = [];
+  const code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn: gh.fetchFn } });
+  assert.equal(code, 0, logs.join('\n'));
+  assert.doesNotMatch(logs.join('\n'), /robot: deliver (failed|ran, and)/);
+  const sent = [...gh.issues.values()].map((i) => `${i.title}\n${i.body}`).join('\n---\n');
+  // The passes before it that are not wired, and the Dispatcher that never ran, all reached the alert repository.
+  assert.match(sent, /the Dispatcher has no full pass on record/);
+  for (const p of ['gate', 'heartbeat', 'watch']) assert.match(sent, new RegExp(`the robot job's ${p} pass failed`), p);
+  assert.ok([...gh.issues.values()].every((i) => i.assignees?.[0] === APP.alertOwner), 'assigned to alertOwner');
+  assert.equal(gh.mints(), 1, 'one mint for the whole round');
+  assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
+});
+
+test('L600 PR 1: a refused mint fails the deliver pass, told and kept in the queue, and is not asked again that round', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w, { mintStatus: 401 });
+  const logs = [];
+  assert.equal(await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn: gh.fetchFn } }), 0);
+  assert.match(logs.join('\n'), /robot: deliver failed: alert channel not set up: GitHub refused the token request \(401\)/);
+  assert.equal(gh.mints(), 1);
+  assert.equal(gh.issues.size, 0);
+  const q = queued(readRecord(w));
+  assert.ok(q.some((t) => /^the robot job's deliver pass failed: alert channel not set up/.test(t)), q.join(' | '));
+  assert.ok(q.includes('the Dispatcher has no full pass on record: nothing is started or merged until it runs'), 'still queued, not lost');
+});
+
+test('L600 PR 1: without the App keys deliver is not wired; some but not all, or a bad value, stops the start', async () => {
+  const none = world();
+  const { passes } = await wire(none.config, { fetchFn: fakeGitHubFetch(none.fake), log: () => {} });
+  assert.throws(() => passes.deliver(), (e) => e.message === notWiredText(NOT_WIRED_PASSES.deliver));
+  assert.match(NOT_WIRED_PASSES.deliver, /appId, appInstallation, alertRepo, alertOwner/);
+  for (const k of APP_KEYS) {
+    const { [k]: _, ...three } = APP;
+    const w = world({ extra: three });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), new RegExp(`all four or none: ${k} missing`));
+  }
+  for (const [k, v, why] of [['appId', 'not an id!', /appId/], ['appId', true, /appId/], ['appInstallation', '0', /appInstallation/], ['appInstallation', 1.5, /appInstallation/],
+    ['alertRepo', 'no-slash', /alertRepo/], ['alertRepo', 'someone/bob-the-builder', /never go to Bob/], ['alertOwner', 'bad login!', /alertOwner/]]) {
+    const w = world({ extra: { ...APP, [k]: v } });
+    await assert.rejects(wire(w.config, { fetchFn: fakeGitHubFetch(w.fake), log: () => {} }), why, `${k}=${v}`);
+  }
+  // Through the real entry point: exit 1, the reason in the job's log.
+  const { alertOwner: _o, ...three } = APP;
+  const r = boot(world({ extra: three }));
+  assert.equal(r.code, 1);
+  assert.match(r.err, /robot: not started: config: the robot App keys go together, all four or none: alertOwner missing/);
+});
+
+test('L600 PR 1: robotToken mints on the first ask only, keeps that one answer, and never rejects', async () => {
+  const c = { keyDir: '/k', ownerUid: 501, ...APP };
+  // What the mint is asked is kept and checked out here: an assert inside the mint would be swallowed, since robotToken
+  // never rejects. The process runs as a uid that is not the owner's, so the two cannot be swapped unseen (plant P8).
+  let n = 0; let asked = null;
+  const t = robotToken(c, { uid: 7001, mint: async (o) => { n += 1; asked = o; return { ok: true, token: 'x' }; } });
+  assert.equal(n, 0, 'nothing is minted before it is asked for');
+  const [a, b] = await Promise.all([t(), t()]);
+  assert.equal(await t(), a); assert.equal(a, b);
+  assert.deepEqual(a, { ok: true, token: 'x' });
+  assert.equal(n, 1);
+  assert.equal(asked.uid, 7001, 'the mint is asked as this process');
+  assert.equal(asked.scriptsUid, 501, 'with the config\'s owner as the one who owns the key folder');
+  assert.equal(asked.installationId, 678);
+  let m = 0;
+  const bad = robotToken(c, { mint: () => { m += 1; throw new Error('boom'); } });
+  assert.deepEqual(await bad(), { ok: false, reason: 'token mint failed: boom' });
+  assert.deepEqual(await bad(), { ok: false, reason: 'token mint failed: boom' });
+  assert.equal(m, 1, 'a refused mint is not retried in the same process');
+});
+
+test('#288 r1 m1: a mint that throws a token-shaped message has it masked before the reason is kept', async () => {
+  const c = { keyDir: '/k', ownerUid: 501, ...APP };
+  const secret = `gh${'s'}_${'S'.repeat(36)}`;   // built here so no token-shaped text sits in the source
+  const r = await robotToken(c, { mint: () => { throw new Error(`upstream said ${secret}`); } })();
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /^token mint failed: upstream said /);
+  assert.equal(r.reason.includes(secret), false, 'the token-shaped text is masked');
+  assert.equal(r.reason.includes('SSSSSSSS'), false, 'no part of it is left');
+});
+
+test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints only when the channel is used', async () => {
+  const logs = [];
+  const log = (s) => logs.push(s);
+  for (const c of [undefined, null, 'x', [], {}, { ownerUid: 1 }]) {
+    assert.equal(robotChannel(c, { log }), null);
+  }
+  assert.equal(logs.length, 6);
+  assert.ok(logs.every((l) => /^robot: no alert channel without the Record: /.test(l)), logs.join('\n'));
+  // A config whose reads throw, and a log that throws: still null, still no throw.
+  const hostile = new Proxy({}, { get() { throw new Error('read me not'); }, ownKeys() { throw new Error('no keys'); } });
+  assert.equal(robotChannel(hostile, { log: () => { throw new Error('log down'); } }), null);
+  const w = withKey(world({ extra: APP }));
+  const { alertRepo: _r, ...three } = { ...w.config };
+  logs.length = 0;
+  assert.equal(robotChannel(three, { log }), null);
+  assert.match(logs[0], /all four or none: alertRepo missing/);
+  // The same walls as wire(): not the owner, or a key folder others can read.
+  assert.equal(robotChannel(w.config, { log, uid: process.getuid() + 1 }), null);
+  assert.match(logs.at(-1), /runs only as the Record's owner/);
+  const open = withKey(world({ extra: APP, keyMode: 0o755 }));
+  assert.equal(robotChannel(open.config, { log }), null);
+  assert.match(logs.at(-1), /can be read by others/);
+  // A good config: a channel, and no call to GitHub until it is used; then one mint for the look and the send.
+  const gh = appGitHub(w);
+  const ch = robotChannel(w.config, { log, fetchFn: gh.fetchFn });
+  assert.equal(ch.owner, APP.alertOwner);
+  assert.equal(gh.calls.length, 0, 'made no call');
+  // Plant P6: a mint started at once runs a tick later, so the call count above cannot see it. A spy mint and one
+  // turn of the event loop (every pending promise step has run by then) show it was never asked.
+  let asked = 0;
+  assert.ok(robotChannel(w.config, { log, fetchFn: gh.fetchFn, mint: async () => { asked += 1; return { ok: false, reason: 'spy' }; } }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(asked, 0, 'building the channel asks for no mint');
+  // What M13 store-stopped.mjs (lane 1, #250) does with it: look for the open issue, then open one.
+  const marker = '<!-- orch:store_stopped x -->';
+  assert.equal(await ch.gh.findOpen((l) => l === marker), null);
+  assert.equal(await ch.gh.open({ title: 't', body: `store_layout\n\n${marker}`, assignee: ch.owner }), 1);
+  assert.equal(await ch.gh.findOpen((l) => l === marker), 1);
+  assert.equal(gh.mints(), 1);
+  assert.equal(gh.issues.size, 1);
+  assert.match(gh.issues.get(1).body, /store_layout/);
+  assert.deepEqual(gh.issues.get(1).assignees, [APP.alertOwner]);
 });

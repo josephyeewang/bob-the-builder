@@ -111,7 +111,7 @@ test('A1: a wait it can\'t read waits no time', { timeout: 5000 }, async (t) => 
 
 test('A1, A2: the port file answers exactly what it took off its list', () => {
   const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config: reviewConfig(temp()), now: Date.now, selfUid: SELF }));
-  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'wait']);
   for (const k of answered) assert.ok(!NOT_WIRED_REVIEW.includes(k), k);
 });
 
@@ -227,7 +227,7 @@ test('A2: a review uid that is the Dispatcher\'s own or the workers\' stops the 
   const config = reviewConfig(temp());
   const me = process.getuid();
   assert.throws(() => reviewRunner({ config, now: Date.now, selfUid: me }), /config: reviewUid is the Dispatcher's own user/);
-  assert.throws(() => reviewRunner({ config: { ...config, ownerUid: me }, now: Date.now, selfUid: SELF }), /config: reviewUid is the workers' user \(ownerUid\)/);
+  assert.throws(() => reviewRunner({ config: { ...config, ownerUid: me }, now: Date.now, selfUid: SELF }), /config: reviewUid is the Record owner's \(ownerUid\)/);
   assert.doesNotThrow(() => reviewRunner({ config: { ...config, ownerUid: me + 1 }, now: Date.now, selfUid: SELF }));
   // With no stand-in, the Dispatcher's own user is this process's (main.mjs passes none).
   assert.throws(() => reviewRunner({ config, now: Date.now }), /Dispatcher's own user/);
@@ -313,4 +313,31 @@ test('A3a: a main that can\'t be read throws before any row is read', async () =
   await assert.rejects(planRows({ gh, entry: ENTRY, rec: cardRec({ 'C-1': { files: [rf('R-1')] } }) })({ product: ENTRY.product, card: 'C-1' }), /answered 404/);
   assert.equal(gh.asked.length, 1);
   assert.throws(() => planRows({ gh, entry: ENTRY }), /planRows needs the Record/);
+});
+
+// ---- A3b (L703): the plan reviewer's two ports.
+test('A3b: startPlanReview writes one plan request, the same one for the same plan, and refuses another product', async () => {
+  const config = reviewConfig(temp());
+  const ports = reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: SELF });
+  const fp = 'f'.repeat(64);
+  const ask = (over = {}) => ports.startPlanReview({ lead: 'plan-review', product: ENTRY.product, card: 'C-7', fingerprint: fp, plan_sha256: 'a'.repeat(64), key: `C-7-${fp}`, ...over });
+  const r = ask();
+  assert.equal(r.ok, true, r.reason);
+  assert.match(r.session, /^[0-9a-f]{64}$/);
+  const files = readdirSync(config.reviewRequestsDir);
+  assert.deepEqual(files, [`${r.session}.json`], 'one whole file, no hidden copy left');
+  assert.deepEqual(JSON.parse(readFileSync(join(config.reviewRequestsDir, files[0]), 'utf8')), { card: 'C-7', fingerprint: fp, request_id: r.session, role: 'plan_reviewer' });
+  assert.deepEqual(ask(), { ok: true, session: r.session }, 'asked again for the same plan: the same request, still one file');
+  assert.deepEqual(readdirSync(config.reviewRequestsDir), files);
+  assert.notEqual(ask({ fingerprint: 'e'.repeat(64), key: `C-7-${'e'.repeat(64)}` }).session, r.session, 'a new plan is a new request');
+  assert.match(ask({ fingerprint: 'F'.repeat(64) }).reason, /no fingerprint/);
+  assert.match(ask({ card: '../x' }).reason, /not a card id/);
+  assert.match(ask({ key: `C-8-${fp}` }).reason, /the start's key is not its card and plan/, 'the one id is the card and plan the key names (L726 m1)');
+  assert.throws(() => ask({ product: 'other' }), /can't ask about product other's plans/);
+  assert.throws(() => ports.planReviewAnswer({ product: 'other', card: 'C-7', fingerprint: fp, session: r.session }), /can't ask about product other's plans/);
+  // Nothing launched yet: still working.
+  assert.deepEqual(ports.planReviewAnswer({ product: ENTRY.product, card: 'C-7', fingerprint: fp, session: r.session }), { ok: true });
+  // A runner folder another user could write: an error, never "still working".
+  chmodSync(join(config.reviewRequestsDir, '..'), 0o777);
+  assert.throws(() => ports.planReviewAnswer({ product: ENTRY.product, card: 'C-7', fingerprint: fp, session: r.session }), /the review runner's folder/);
 });
