@@ -297,6 +297,32 @@ test('a plan waiting at the plan reviewers\' cap is told as waiting for a slot, 
   assert.equal(w2.sent.filter((s) => /already running \(the runner's status names none of them\)\. Until one finishes, card B/.test(s)).length, 1);
 });
 
+// #335 r2 m3, c1: at most 10 holders are named, the rest counted; a long card id is cut at 40 characters; "1 minute".
+test('#335 r2 m3 planted: past 10 holders the rest are counted, a long card id is cut, and one minute is "1 minute"', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  const told = w.t.clock.t + PLAN_REVIEW_SLOW_MS;
+  const long = `C-${'x'.repeat(60)}`;
+  const holders = [{ card: long, started_at: new Date(told - 60_000).toISOString() }, null, { card: 7 }, ...Array.from({ length: 11 }, (_, i) => ({ card: `C-${i + 1}` }))];
+  later(w, PLAN_REVIEW_SLOW_MS);
+  await pass(w, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', holders }) });
+  const [msg] = w.sent.filter((s) => /plan review hasn't started/.test(s));
+  assert.ok(msg.includes(`(card ${long.slice(0, 40)} running for 1 minute; card C-1; `), msg);
+  assert.ok(!msg.includes(long.slice(0, 41)), 'cut at 40');
+  assert.ok(msg.includes('; card C-9; and 2 more)'), msg);
+  assert.ok(!msg.includes('card C-10'), msg);
+  // Exactly 10: all named, and no "more".
+  const v = world();
+  t1(v, 'A');
+  await pass(v);
+  later(v, PLAN_REVIEW_SLOW_MS);
+  await pass(v, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', holders: Array.from({ length: 10 }, (_, i) => ({ card: `C-${i + 1}` })) }) });
+  const [ten] = v.sent.filter((s) => /plan review hasn't started/.test(s));
+  assert.ok(ten.includes('; card C-10)'), ten);
+  assert.ok(!/more\)/.test(ten), ten);
+});
+
 // #335 r1 m1: once a long wait for a slot ends, the hour runs from the reviewer's own start, not from the request.
 test('after a long wait for a slot, "slow" is counted from when the reviewer started', async () => {
   const w = world();
