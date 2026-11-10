@@ -31,7 +31,9 @@ export const BASE_MARKER = '.made-by-setup';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
-const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// A product name is a folder name setup makes (L836): lower case only, so a name in the runner's config is the name on
+// the Mac's disk, which matches without regard to letter case (#378 M1). wiring/owner-status.mjs runnerPlaces uses it.
+export const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
 // Folders other users can write; compared without regard to case (the Mac's disk treats /users and /Users as one).
 // The chain check (guard.mjs) is the real wall: it runs before root changes anything. This only gives a clear early error.
@@ -175,7 +177,9 @@ export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', per
 // pass, through this one entry, inherited by every file and folder made under it. No add or write. `list` on a folder is
 // `read` on the files it holds (an inherited entry shows "read"), and `delete_child` on every folder deletes anything below
 // it, so neither `read` (the Mac shows it as `list` on a folder, and the exact check would never pass) nor `delete` (which
-// would let orchestrate remove the empty copies folder itself) is in it.
+// would let orchestrate remove the empty copies folder itself) is in it. A product's own copies folder sits under it
+// (L836), so orchestrate can remove that one once it is empty (#378 m7); the start then refuses that product ("setup has
+// made no folder") until setup is run again: it fails safe.
 // Equal to ORCHESTRATE_READ_ACL's rights today on purpose; kept apart because the two may need to differ.
 export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
@@ -218,7 +222,7 @@ export function folderTable(cfg) {
     [sealRootPath(cfg), 'orchestrate', 0o700, 'cleanup\'s sealed bundles (the Dispatcher\'s sealRoot): orchestrate\'s alone'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
-    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
+    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): a folder per role and one per product (L836) under it'],
     ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
@@ -227,7 +231,7 @@ export function folderTable(cfg) {
     // role folders above (the runner starts worker and script sessions).
     ...cfg.products.flatMap((prod) => [
       [join(workerCopiesPath(cfg), prod), 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
-      [join(outboxRootPath(cfg), prod), 'root', 0o755, `${prod}: its worker runner outboxes, one folder per role`],
+      [join(outboxRootPath(cfg), prod), 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
       ...PRODUCT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), prod, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
     ]),
     ...cfg.products.flatMap((prod) => [

@@ -159,9 +159,9 @@ test('#364 r2 n1, n4: deny entries and the config\'s own paths must be spelled a
   }
 });
 
-test('L836: a product named as a role, or two products one letter case apart, would share a folder, so the config is refused', () => {
+test('L836: a product named as a role, or not named as setup names its folders, is refused (#378 M1)', () => {
   const p = (n) => ({ repo: `o/${n}`, mirror: `/x/${n}`, render: { paths: { deny: DENY('/x') } } });
-  for (const n of ['worker', 'Script', 'lead']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /named as a role/, n);
-  assert.throws(() => checkRunnerConfig(config('/x', { products: { Alpha: p('a'), alpha: p('b') } })), /same but for letter case/);
+  for (const n of ['worker', 'script', 'lead']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /named as a role/, n);
+  for (const n of ['Alpha', 'Script', 'p.1', 'p_1']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /is not a product name/, n);
   assert.doesNotThrow(() => checkRunnerConfig(config('/x', { products: { alpha: p('a'), beta: p('b') } })));
 });

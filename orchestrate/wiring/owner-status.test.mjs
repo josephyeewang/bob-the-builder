@@ -7,7 +7,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRoleClash } from './owner-status.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
@@ -38,7 +38,7 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
   assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
-  // L767: a script session has its own outbox, <root>/script/<id>, and intake tags its hand-ins 'script'.
+  // L767, L836: a script session has its own outbox, <root>/<product>/script/<id>, and intake tags its hand-ins 'script'.
   const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/p/script/s1`, ...more })] });
   assert.deepEqual(world(scriptDoc()).ports.sessions().map((x) => x.kind), ['script']);
   assert.deepEqual(world(scriptDoc()).ports.outboxSessions().map((x) => [x.role, x.outbox]), [['script', `${ROOT}/p/script/s1`]]);
@@ -231,11 +231,15 @@ test('L836: an outbox is its product\'s, in its product\'s folder; a product nam
   assert.deepEqual(runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product: 'p' }), { copies: '/c/p', outboxes: '/o/p' });
   assert.equal(runnerOutbox({ outboxRoot: '/o', product: 'p', role: 'worker', sessionId: 's1' }), '/o/p/worker/s1');
   assert.equal(runnerCopy({ copiesRoot: '/c', product: 'p', card: 'C-1' }), '/c/p/C-1');
-  for (const product of ['worker', 'Script', 'LEAD', 'reviewer']) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /named as a role/, product);
+  for (const product of ['worker', 'script', 'lead', 'reviewer']) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /named as a role/, product);
+  // Setup's name rule (#378 M1): a name in upper case, or with a dot or an underscore, has no folder setup makes; on the
+  // Mac's disk an upper-case name would reach the lower-case folder while its deny entries, spelled otherwise, match nothing.
+  for (const product of ['Script', 'LEAD', 'Alpha', 'p.1', 'p_1', '-p', 'a'.repeat(65)]) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /not a product name setup makes a folder for/, product);
+  assert.equal(productRoleClash('Worker'), true, 'the clash itself is still read in any letter case');
   for (const product of ['', '../x', '.p', 'a/b', undefined, 'x'.repeat(65)]) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /not a product name/, String(product));
   // The status: an outbox under another product's folder, or straight under the root, is not this session's.
   for (const outbox of [`${ROOT}/q/worker/s1`, `${ROOT}/worker/s1`]) {
-    assert.throws(() => world(doc({ sessions: [session('s1', { outbox })] })).ports.sessions(), /outbox/, outbox);
+    assert.throws(() => world(doc({ sessions: [session('s1', { outbox })] })).ports.sessions(), /not inside the outbox root/, outbox);
   }
   // A closed outbox's folder is not looked up, so the place itself must say it is the product's (pp-status-flat).
   for (const outbox of [`${ROOT}/q/worker/s1`, `${ROOT}/worker/s1`]) {

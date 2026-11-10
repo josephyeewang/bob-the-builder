@@ -312,12 +312,16 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
   w.c.products.p2 = { repo: 'o/p2', mirror: join(w.d, 'mirror-p2'), render: render('p2') };
   const theirs = { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') };
   for (const f of [join(theirs.copies, 'C-7'), join(theirs.outboxes, 'worker'), join(theirs.outboxes, 'script')]) mkdirSync(f, { recursive: true });   // p2's card, made before this start
+  // #378 m1: a product setup made but this config leaves out, and folders of the old flat layout, are denied too.
+  const unlisted = [join(w.copiesRoot, 'p3'), join(w.copiesRoot, 'C-0'), join(w.outboxRoot, 'p3'), join(w.outboxRoot, 'worker')];
+  for (const f of unlisted) mkdirSync(f, { recursive: true });
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
     const denyRead = got.settings[S.sandbox][S.filesystem][S.denyRead];
     for (const p of [w.c.products.p2.mirror, theirs.copies, theirs.outboxes, join(w.mine.copies, 'C-9'), '/w/record', '/h/.ssh', '/w/keys']) assert.ok(denyRead.includes(p), `${p} is denied`);
     assert.equal(denyRead.includes(join(theirs.copies, 'C-7')), false, 'p2\'s whole copies folder is denied, not its copies one by one');
+    for (const p of unlisted) assert.ok(denyRead.includes(p), `${p}, not in the config, is denied`);
     for (const p of [w.mine.copies, w.mine.outboxes, w.copiesRoot, w.outboxRoot]) assert.equal(denyRead.includes(p), false, `${p} is not denied whole`);
     assert.equal(denyRead.includes(join(w.mine.copies, 'C-1')), false, 'its own copy is not denied');
     assert.equal(denyRead.includes(w.c.products.p1.mirror), false, 'its own product\'s mirror is not denied');
@@ -363,10 +367,10 @@ test('#364 r2 c-b: a group is gone only on ESRCH; EPERM (there, not ours to sign
 test('L836: a product named as a role is refused before anything is made; a product with no copies folder yet makes nothing', async () => {
   const w = world();
   try {
-    w.c.products.Worker = w.c.products.p1; w.card.product = 'Worker';
-    const a = await w.start({ product: 'Worker' });
+    w.c.products.worker = w.c.products.p1; w.card.product = 'worker';
+    const a = await w.start({ product: 'worker' });
     assert.equal(a.ok, false); assert.match(a.reason, /named as a role/);
-    assert.equal(existsSync(join(w.copiesRoot, 'Worker')), false); assert.equal(existsSync(join(w.outboxRoot, 'Worker')), false);
+    assert.equal(existsSync(join(w.copiesRoot, 'worker', 'C-1')), false); assert.equal(existsSync(join(w.outboxRoot, 'worker', 'worker')), false);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
   const v = world();
   try {

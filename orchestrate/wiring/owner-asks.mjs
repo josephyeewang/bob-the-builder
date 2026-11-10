@@ -59,9 +59,10 @@ export function launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoo
   if (!realPid(a.pgid)) return 'the start named no process group';
   if (!name(a.pidStart)) return 'the start named no start time for its process';
   if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
-  let own; try { own = { outbox: runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }), copy: runnerCopy({ copiesRoot, product, card }) }; } catch { own = null; }
-  if (!own || !Object.hasOwn(RUNNER_ROLE_OF, kind) || typeof outboxRoot !== 'string' || a.outbox !== own.outbox) return 'the start named another outbox than the session\'s own';
-  if (typeof copiesRoot !== 'string' || a.copy !== own.copy) return 'the start named another copy than the card\'s';
+  let outbox; try { outbox = Object.hasOwn(RUNNER_ROLE_OF, kind) && typeof outboxRoot === 'string' ? runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }) : null; } catch { outbox = null; }
+  if (!outbox || a.outbox !== outbox) return 'the start named another outbox than the session\'s own';
+  let copy; try { copy = typeof copiesRoot === 'string' ? runnerCopy({ copiesRoot, product, card }) : null; } catch { copy = null; }
+  if (!copy || a.copy !== copy) return 'the start named another copy than the card\'s';
   if (!name(a.signin) || !name(a.configDir)) return 'the start named no sign-in';
   return null;
 }

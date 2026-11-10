@@ -58,7 +58,7 @@ test('config: every forbidden folder is refused, in any letter case (K15: /Volum
   assert.doesNotThrow(() => parseConfig({ ...RAW, base: '/Library/orchestrate' }));
 });
 
-test('the folder table: parents first, exact modes and owners, one outbox root with one folder per role, nothing outside the base', () => {
+test('the folder table: parents first, exact modes and owners, one outbox root with a folder per role and per product, nothing outside the base', () => {
   const t = folderTable(cfg);
   const seen = new Set();
   for (const r of t) {

@@ -208,6 +208,12 @@ export function startPort(c, deps = {}) {
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     let others; try { others = fs.list(mine.copies).filter((n) => n !== card).map((n) => join(mine.copies, n)); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
+    // Every other folder under the copies root and the outbox root, whole (#378 m1): a product setup made but this config
+    // leaves out, and anything left in the old flat layout, as well as the config's other products.
+    for (const top of [c.copiesRoot, c.outboxRoot]) {
+      let names; try { names = fs.list(top); } catch (e) { return undo(`${top} can't be listed (${e?.code ?? e?.message})`); }
+      for (const n of names) if (n !== product) others.push(join(top, n));
+    }
     // Every other product's mirror, copies folder and outbox folder, whole (#364 r1 M1, L836): known at start from the config.
     for (const [q, o] of Object.entries(c.products)) {
       if (q === product) continue;
@@ -215,6 +221,7 @@ export function startPort(c, deps = {}) {
       others.push(theirs.copies, theirs.outboxes);
       if (typeof o?.mirror === 'string') others.push(o.mirror);
     }
+    others = [...new Set(others)];
     const r = p.render;
     const w = walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
       paths: { ...r.paths, copy, outbox, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...others] } } });

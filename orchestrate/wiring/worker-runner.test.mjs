@@ -50,8 +50,8 @@ test('step 3: a launch asked through owner-asks starts once, is listed, and the 
   const w = world();
   await w.pass();
   // The product rule is M10's (as the ask checks it): a name with capitals, a dot and an underscore is taken.
-  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'P.1_x', sessionId: 'S-1' });
-  assert.equal(r.ok, true, r.reason); assert.equal(r.outbox, `${ROOT}/P.1_x/worker/S-1`); assert.equal(r.copy, `${COPIES}/P.1_x/C-1`);
+  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'p1-x', sessionId: 'S-1' });
+  assert.equal(r.ok, true, r.reason); assert.equal(r.outbox, `${ROOT}/p1-x/worker/S-1`); assert.equal(r.copy, `${COPIES}/p1-x/C-1`);
   assert.deepEqual(w.started, ['S-1']);
   const s = w.read();
   assert.deepEqual([s.requests['S-1'].state, s.sessions.map((x) => [x.id, x.alive, x.stop_requested, x.outbox_open])], ['started', [['S-1', true, false, true]]]);

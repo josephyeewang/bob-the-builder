@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
-import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../setup/layout.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
 import { fullPath } from './runner-job.mjs';
@@ -35,8 +35,8 @@ const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRo
 const UIDS = ['orchestrateUid', 'recordUid'];
 // The read-deny entries every product's sessions must have (#364 r1 M2): the Record, the keys, the sign-in and the home's.
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
-// The product rule is M10's, as the pass and owner-asks.mjs check it.
-const productName = (p) => p.length <= 64 && PRODUCT_NAME.test(p);
+// The product rule is setup's (layout.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
+const productName = (p) => PRODUCT.test(p);
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -58,8 +58,6 @@ export function checkRunnerConfig(c) {
     for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path in its simplest form, not / itself`);
     if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths in their simplest form (the secrets, and the approvals and rules state)`);
   }
-  // Two names one letter case apart would share one folder on the Mac's disk (L836: a folder per product).
-  if (new Set(Object.keys(c.products).map((n) => n.toLowerCase())).size !== Object.keys(c.products).length) fail('two products are named the same but for letter case');
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),

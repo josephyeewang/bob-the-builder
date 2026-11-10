@@ -58,7 +58,7 @@ import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
-import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../setup/layout.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -69,12 +69,13 @@ export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
 /**
  * The runner's places for one product (L836): every product has its own copies folder and outbox folder, so a session
  * can be denied every other product's whole folder, copies made after it started included. A product's folder sits beside
- * the role folders under the outbox root, so a product may not be named as a role (in any letter case).
+ * the role folders under the outbox root, so a product may not be named as a role (in any letter case). The name is
+ * setup's (layout.mjs PRODUCT, lower case only), so the name in each deny is the folder's name on disk (#378 M1).
  *   copy    <copiesRoot>/<product>/<card>          outbox  <outboxRoot>/<product>/<role>/<sessionId>
  */
 export const productRoleClash = (product) => typeof product === 'string' && AI_ROLES.some((r) => r.toLowerCase() === product.toLowerCase());
 export function runnerPlaces({ copiesRoot, outboxRoot, product }) {
-  if (typeof product !== 'string' || !PRODUCT_NAME.test(product) || product.length > 64) throw new Error('not a product name');
+  if (typeof product !== 'string' || !PRODUCT.test(product)) throw new Error('not a product name setup makes a folder for (lower case letters, digits and -)');
   if (productRoleClash(product)) throw new Error(`product ${product} is named as a role, and its outbox folder would be that role's`);
   return { copies: join(copiesRoot, product), outboxes: join(outboxRoot, product) };
 }
@@ -193,7 +194,9 @@ const requestOf = (s, id) => (Object.hasOwn(s.requests, id) ? s.requests[id] : u
  * share only: the wiring merges them with every other kind before the tick sees them (owner-ports.mjs). `stopSession` may
  * write a stop request (`writeRequest(name, text)`, made exclusive by the caller) and never waits for it. `holds({ card,
  * sessionId })` is the Record's answer: is that card still claimed or running under that session's claim? A card it can't
- * read is a throw, never false; any answer but true or false makes the board "not known".
+ * read is a throw, never false; any answer but true or false makes the board "not known". `outboxRoot` is the runner's
+ * top outbox root, holding one folder per product (L836), not a product's Record root `<outboxRoot>/<product>` (#378 m2).
+ * The sessions are every product's: wiring that gives one product's Record its sessions picks them by `product` (#378 m3).
  */
 export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, stat, open, realpath, writeRequest, holds }) {
   if (typeof holds !== 'function') throw new Error('the board needs the Record\'s holds({ card, sessionId })');
