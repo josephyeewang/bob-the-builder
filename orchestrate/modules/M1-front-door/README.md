@@ -16,6 +16,7 @@ write nothing yet. Milestone 0b-8 is its minimum.
 | `transcript.mjs` | R-0b-82, 84 | Reads the Front Door's own conversation log: the owner's turns, question boxes and their answers, "turn finished". |
 | `restart.mjs` | R-0b-82 | When to restart after a quiet spell (past 150k, quiet 15 min, no open question box, turn finished), and the ≤3k handoff. |
 | `readback.mjs` | R-0b-81 | Checks the read-back the owner gets from the phone against the role profile passed in. |
+| `review-again.mjs` | R-0b-164 | The owner's [Review again] tap: the phone card for each silent review the runner offers it for, and the plain handler (run as the owner, never the AI) that writes `<session>.json` into the owner's taps folder for the runner's `readJoeTaps`, and clears taps the runner has read. What starts it from the phone is R-0b-162's; the Front Door's deny on the folder is lane 2's render-settings line. |
 | `OWNER-TEST.md` | R-0b-81 to 84 | The owner's steps for the real halves, with the stop conditions. |
 
 Two pieces sit in other lane 3 folders because trip mode needs them: `M12-sensors/power-source.mjs` (battery backup,
