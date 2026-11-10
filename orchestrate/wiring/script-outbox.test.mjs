@@ -4,9 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { outboxPlace } from '../shared/record.mjs';
-import { setup, product, readyCard, runCard, outboxFile, UID } from '../modules/M9-record/fixtures.test-helper.mjs';
+import { PRODUCT, setup, product, readyCard, runCard, outboxFile, UID } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { ownerSyncPorts } from './owner-status.mjs';
 
 function scriptWorld() {
@@ -14,12 +14,11 @@ function scriptWorld() {
   const env = setup({ prefix: 'orch-script-outbox-' });
   product(env); readyCard(env, 'C-1'); runCard(env, 'C-1');
   const outRoot = realpathSync(env.outRoot);
-  // L836: a product's Record is opened on that product's own outbox folder, <runner outbox root>/<product>. The fixture's
-  // Record has its folder at outRoot, so the runner's root is the folder above it and the product folder is named so.
-  const runnerRoot = dirname(outRoot); const prod = basename(outRoot);
+  // L836, L895 m1: the fixture's Record reads the runner's outbox root, and a script's outbox is in its product's folder.
+  const runnerRoot = outRoot; const prod = PRODUCT;
   const dir = join(env.base, 'runner'); mkdirSync(dir, { mode: 0o755 }); chmodSync(dir, 0o755);
   const statusFile = join(realpathSync(dir), 'status.json');
-  const outbox = join(outRoot, role, 'S-1'); mkdirSync(outbox, { recursive: true });
+  const outbox = join(outRoot, PRODUCT, role, 'S-1'); mkdirSync(outbox, { recursive: true });
   const session = { id: 'S-1', product: prod, kind, card: 'C-1', lead: null, role, pgid: 77, signin: 's', config_dir: '/cfg', bundle_files: [],
     outbox, uid: process.getuid(), alive: true, ended: false, outbox_open: true, stop_requested: false };
   writeFileSync(statusFile, JSON.stringify({ written_at: new Date().toISOString(), sessions: [session], requests: { 'S-1': { state: 'started' } } }), { mode: 0o644 });
@@ -31,8 +30,8 @@ function scriptWorld() {
 test('L767: a script hand-in of a report- reaches outboxPlace under its own folder, tagged script, and the Record takes it', () => {
   const { env, ports, outRoot } = scriptWorld();
   const [s] = ports.outboxSessions();
-  assert.deepEqual([s.role, s.outbox], ['script', join(outRoot, 'script', 'S-1')]);
-  const tag = { role: s.role, sessionId: s.sessionId, card: s.card };
+  assert.deepEqual([s.role, s.outbox], ['script', join(outRoot, PRODUCT, 'script', 'S-1')]);
+  const tag = { role: s.role, product: s.product, sessionId: s.sessionId, card: s.card };
   const file = outboxFile(env, 'script', 'S-1', 'report-1.md', 'what the script did\n');
   assert.equal(outboxPlace({ outboxRoot: outRoot, tag, file }).ok, true);
   const r = env.record.applyOutbox(tag, file);
@@ -43,7 +42,7 @@ test('L767: a script hand-in of a report- reaches outboxPlace under its own fold
 test('L767, L838: a script hands in its own claimed card through handin- (as a worker does), and the card goes to in_review', () => {
   const { env, ports } = scriptWorld();
   const [s] = ports.outboxSessions();
-  const tag = { role: s.role, sessionId: s.sessionId, card: s.card };
+  const tag = { role: s.role, product: s.product, sessionId: s.sessionId, card: s.card };
   const file = outboxFile(env, 'script', 'S-1', 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`);
   const r = env.record.applyOutbox(tag, file);
   assert.equal(r.ok, true, r.reason);

@@ -17,7 +17,7 @@ import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-na
 import { readOutboxFile } from './outbox.mjs';
 import { decide, kindIn } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
-import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
+import { outboxDir, outboxTag, setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 
 // The roles M4 launches: every AI role. A script card's session is one since L760, with its own profile and hook.
 const LAUNCHED = AI_ROLES;
@@ -47,14 +47,14 @@ const m9Listed = (r) => !(r.ok === false && /is not listed for|no outbox kind/.t
 
 // One probe: a file in the role's session outbox, judged by all three in the order a write meets them.
 function judge(env, role, sid, name) {
-  const outbox = join(env.outRoot, role, sid);
+  const outbox = outboxDir(env, role, sid);
   mkdirSync(outbox, { recursive: true });
   const file = join(outbox, name);
   const args = parseArgs(hookArgv(role, outbox));
   const hook = !decide(write(file), args).block;
   writeFileSync(file, 'some text\n');
   const m4 = readOutboxFile(outbox, name, { kinds: DESIGN_PROFILES[role].outbox, uid: UID }).ok;
-  const m9 = m9Listed(env.record.applyOutbox({ role, sessionId: sid, card: 'C-x' }, file));
+  const m9 = m9Listed(env.record.applyOutbox(outboxTag(role, sid, { card: 'C-x' }), file));
   return { hook, m4, m9 };
 }
 
@@ -202,7 +202,7 @@ test('L101: the rendered compaction hooks name a notes folder apart from the out
 
 test('L82 M-1: a published profile that lists fewer kinds is refused at the hook for the ones it leaves out, as at M4\'s read', () => {
   const env = setup({ prefix: 'm4-kinds-' });
-  const outbox = join(env.outRoot, 'worker', 'N-1');
+  const outbox = outboxDir(env, 'worker', 'N-1');
   mkdirSync(outbox, { recursive: true });
   const profile = { ...DESIGN_PROFILES.worker, outbox: ['report-'] };
   const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile, product: { commands: { test: 'npm test' } },
