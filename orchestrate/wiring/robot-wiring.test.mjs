@@ -26,6 +26,7 @@ import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
+import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -89,6 +90,55 @@ test('R-0b-162 B: `node robot-main.mjs <config>` runs every pass; the ones not w
   const second = boot(w);
   assert.equal(second.code, 0, second.err);
   assert.deepEqual(queued(readRecord(w)), q);
+});
+
+test('L587: a store that won\'t open is told once per reason through the channel, and the job still exits 1', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const diary = join(w.config.recordRoot, 'diary.jsonl');
+  rmSync(diary);
+  mkdirSync(diary);
+  const gh = fakeIssues();
+  const run = async (stopChannel) => {
+    const logs = [];
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: stopChannel ? { stopChannel } : {} });
+    return { code, logs: logs.join('\n') };
+  };
+  const first = await run({ gh, owner: 'owner-login' });
+  assert.equal(first.code, 1);
+  assert.match(first.logs, /robot: not started: .*diary\.jsonl/);
+  assert.equal(gh.issues.size, 1);
+  assert.match(gh.issues.get(1).body, /store_layout/);
+  assert.equal((await run({ gh, owner: 'owner-login' })).code, 1);
+  assert.equal(gh.issues.size, 1, 'the next start finds the open issue');
+  const bare = await run(null);
+  assert.equal(bare.code, 1);
+  assert.match(bare.logs, /could not be told: .*R-0b-02/);
+});
+
+// L724: a recovery that stops writes does not stop the start (a store write never throws), so the round runs and its own
+// deliver pass sends the store's kept line. The start's stop path, and its issue, is only for a store that won't open.
+test('L724: a Record whose recovery stopped still starts the round, and the stop path opens no issue', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const tmp = join(w.config.recordRoot, 'tmp');
+  const gh = fakeIssues();
+  const logs = [];
+  chmodSync(tmp, 0o000);
+  try {
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } });
+    assert.notEqual(code, 1, logs.join('\n'));
+    assert.doesNotMatch(logs.join('\n'), /robot: not started/);
+    assert.equal(gh.issues.size, 0);
+  } finally { chmodSync(tmp, 0o755); }
+});
+
+test('L587: a start that fails for any other reason is not told as a stopped Record', async () => {
+  const w = world({ keyMode: 0o755 });
+  const gh = fakeIssues();
+  const logs = [];
+  assert.equal(await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } }), 1);
+  assert.equal(gh.issues.size, 0);
 });
 
 test('R-0b-162 B (L238): the job refuses to start, loudly, unless it runs as the Record\'s and the key folder\'s owner', async () => {
