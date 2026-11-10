@@ -509,6 +509,22 @@ test('L896: an ended session\'s outbox undrained past the limit is listed with i
   answer = { drained: false, cause: 'hash-mismatch' };
   w.now += MIN; await w.pass();
   assert.deepEqual(row().drain_held, { cause: 'hash-mismatch', since: new Date(w.now).toISOString() }, 'a new cause, a new since');
+  // #425 r1 m1: a late or failed check keeps the cause already held, and its since: one slow pass tells nothing new.
+  const kept = row().drain_held;
+  for (const slow of [() => new Promise(() => {}), () => { throw new Error(''); }]) {
+    answer = undefined; const was = w.ports.outboxDrained; w.ports.outboxDrained = slow;
+    w.now += MIN; await w.pass();
+    w.ports.outboxDrained = was;
+    assert.deepEqual(row().drain_held, kept, 'a slow or failed pass keeps the held cause');
+  }
+  answer = { drained: false, cause: 'hash-mismatch' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, kept, 'back to the same cause: still the same since');
+  // #425 r1 m4: a memory that keeps drain_held but not when it was first seen (an older one) is past the limit at once.
+  delete w.state.sessions.find((x) => x.id === 'S-1').undrained_since;
+  answer = { drained: false, cause: 'in-flight' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'in-flight', since: new Date(w.now).toISOString() }, 'a changed cause shows at once, not half an hour on');
   answer = true;
   w.now += MIN; await w.pass();
   assert.equal(row().outbox_open, false);
@@ -518,7 +534,7 @@ test('L896: an ended session\'s outbox undrained past the limit is listed with i
 });
 
 test('L896: a drain check that is late, fails or answers no known cause is held under its own cause', async () => {
-  for (const [why, drained, cause] of [['late', () => new Promise(() => {}), 'check-late'], ['throws', () => { throw new Error('EIO'); }, 'check-failed'],
+  for (const [why, drained, cause] of [['late', () => new Promise(() => {}), 'check-late'], ['throws', () => { throw new Error('EIO'); }, 'check-failed'], ['throws with no message', () => { throw new Error(''); }, 'check-failed'],
     ['false', () => false, 'other'], ['an unknown cause', () => ({ drained: false, cause: 'made-up' }), 'other'], ['nothing', () => undefined, 'other'],
     ...DRAIN_CAUSES.map((c) => [c, () => ({ drained: false, cause: c }), c])]) {
     const w = world({ drained });

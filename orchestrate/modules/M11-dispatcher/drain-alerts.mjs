@@ -25,7 +25,7 @@ import { stillWaiting } from '../../shared/still-waiting.mjs';
 /** Why an ended session's outbox is not drained: the runner's one list (L896). */
 export const DRAIN_CAUSES = Object.freeze([
   'fact-id-too-long', 'name-not-utf8', 'name-not-a-fact-id', 'dot-name', 'not-a-plain-file', 'file-unreadable',
-  'not-taken', 'in-flight', 'hash-mismatch', 'bundle-not-pushed', 'bundle-changed', 'record-unreadable', 'check-late',
+  'not-taken', 'in-flight', 'hash-mismatch', 'bundle-no-attempt', 'bundle-not-pushed', 'bundle-changed', 'record-unreadable', 'check-late',
   'check-failed', 'other',
 ]);
 const CAUSE_TEXT = Object.freeze({
@@ -38,6 +38,7 @@ const CAUSE_TEXT = Object.freeze({
   'not-taken': 'a file in it was never taken in or told',
   'in-flight': 'a file\'s intake has been in progress for too long',
   'hash-mismatch': 'a file changed after the Record took it',
+  'bundle-no-attempt': 'the Record\'s session gives no attempt of this card, so its bundle\'s push can\'t be found',
   'bundle-not-pushed': 'the card\'s bundle has no push of this session\'s attempt that took it',
   'bundle-changed': 'the card\'s bundle changed after its push took it',
   'record-unreadable': 'the Record\'s note of a file can\'t be read',
@@ -53,7 +54,7 @@ export const DRAIN_HOLD_FACT = (session) => `${DRAIN_PREFIX}${idHash(session)}`;
 /** The hold of a status that could not be read. */
 export const DRAIN_UNKNOWN_FACT = HOLD_FACT('drain-status-unknown');
 
-const heldText = (h) => `worker runner: session ${plain(h.session, 140)} (card ${plain(h.card, 140)}) has ended, but its outbox stays open: ${CAUSE_TEXT[h.cause]}. Nothing more is taken from it until that is fixed by hand`;
+const heldText = (h) => `worker runner: session ${plain(h.session, 140)} (card ${plain(h.card ?? 'none', 140)}) has ended, but its outbox stays open: ${CAUSE_TEXT[h.cause]}. It is never closed, and the session stays listed, until this clears or is fixed by hand`;
 
 /**
  * `held` is the status reader's drainHolds(): [{ session, card, product, cause, since }], or null with `error` when the

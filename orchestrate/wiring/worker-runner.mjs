@@ -156,9 +156,15 @@ export async function workerRunnerPass(ctx) {
 
   // An outbox the drain did not close: its cause listed once it has stayed so for RUNNER_DRAIN_HELD_MS (L896).
   function heldOpen(s, d) {
-    const cause = d?.late ? 'check-late' : d?.threw ? 'check-failed' : DRAIN_CAUSES.includes(d?.cause) ? d.cause : 'other';
-    if (!Number.isFinite(s.undrained_since)) s.undrained_since = now;
+    const asked = d && typeof d === 'object';
+    const check = asked && d.late ? 'check-late' : asked && 'threw' in d ? 'check-failed' : null;
+    const cause = check ?? (DRAIN_CAUSES.includes(d?.cause) ? d.cause : 'other');
+    // One already held whose first sight is not kept (a memory without it) is past the limit: it was told before.
+    if (!Number.isFinite(s.undrained_since)) s.undrained_since = s.drain_held ? now - RUNNER_DRAIN_HELD_MS : now;
     if (now - s.undrained_since < RUNNER_DRAIN_HELD_MS) return;
+    // A late or failed check tells nothing new of a cause already held (#425 r1 m1): that one stays, so one slow pass
+    // does not tell the owner twice.
+    if (check && s.drain_held) return;
     if (s.drain_held?.cause !== cause) s.drain_held = { cause, since: new Date(now).toISOString() };
   }
   // 1. The sessions as they are now. Ended is final (M1).

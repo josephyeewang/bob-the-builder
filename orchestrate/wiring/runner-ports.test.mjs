@@ -123,12 +123,12 @@ test('L898: the card\'s bundle counts as taken once the push of this session\'s 
     assert.deepEqual(drainedPort({ readFact, readSession: () => { throw new Error('EIO'); } })(s), held('record-unreadable'), 'a session reader that throws');
     assert.deepEqual(drainedPort({ readFact, readSession: () => ({ ok: false, doc: sdoc }) })(s), held('record-unreadable'), 'a doc beside ok:false');
     for (const v of [null, {}, { card: 'C-1' }, { card: 'C-1', attempt: '' }, { card: 'C-1', attempt: 1 }, { card: 'C-2', attempt: 'a1' }]) {
-      sdoc = v; assert.deepEqual(drained(s), held(v ? 'other' : 'record-unreadable'), `session doc ${JSON.stringify(v)}`);
+      sdoc = v; assert.deepEqual(drained(s), held('bundle-no-attempt'), `session doc ${JSON.stringify(v)}`);
     }
     sdoc = { card: 'C-1', attempt: 'a2' }; assert.deepEqual(drained(s), held('bundle-not-pushed'), 'no push fact for this attempt');
     sdoc = { card: 'C-1', attempt: 'a1' };
     const push = facts.get('push.C-1.a1');
-    for (const [v, why] of [[{ ...push, result: 'refused' }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: undefined }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: 'F'.repeat(64) }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: 'f'.repeat(64) }, 'bundle-changed']]) {
+    for (const [v, why] of [[{ ...push, result: 'refused' }, 'bundle-not-pushed'], [{ ...push, head_refused: 'the card head could not be noted' }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: undefined }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: 'F'.repeat(64) }, 'bundle-not-pushed'], [{ ...push, bundle_sha256: 'f'.repeat(64) }, 'bundle-changed']]) {
       facts.set('push.C-1.a1', v); assert.deepEqual(drained(s), held(why), JSON.stringify(v));
     }
     facts.set('push.C-1.a1', push);
@@ -144,6 +144,12 @@ test('L898: the card\'s bundle counts as taken once the push of this session\'s 
     writeFileSync(join(o, 'bundle-C-2.bundle'), 'x');
     assert.deepEqual(drained(s), held('not-taken'), 'another card\'s bundle');
     assert.deepEqual(drained({ ...s, card: undefined }), held('not-taken'), 'no card: no bundle is this session\'s');
+    // #388 r2 m1: only a worker's or script's session carries the card's bundle; another role's is an intake file, never taken.
+    rmSync(join(o, 'bundle-C-2.bundle'));
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a])); facts.set('push.C-1.a1', push);
+    assert.equal(drained(s), true, 'the worker\'s bundle, as pushed');
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s');
+    for (const role of ['lead', 'reviewer', undefined]) assert.deepEqual(drained({ ...s, role }), held('not-taken'), `a ${role} session's bundle`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -190,6 +196,8 @@ test('L896: an undrained outbox names its cause, one of the one list, checking t
     assert.deepEqual(drainedPort({ readSession, readFact: pushed({ result: 'pushed', bundle_sha256: 'e'.repeat(64) }) })(s), held('bundle-changed'));
     assert.deepEqual(drainedPort({ readSession, readFact: () => ({ ok: false, missing: true }) })(s), held('bundle-not-pushed'));
     assert.deepEqual(drainedPort({ readSession, readFact: () => ({ ok: false }) })(s), held('record-unreadable'));
+    assert.deepEqual(drainedPort({ readSession: () => ({ ok: true, doc: { card: 'C-9', attempt: 'a1' } }), readFact: pushed({ result: 'pushed' }) })(s), held('bundle-no-attempt'), 'a session doc naming another card');
+    assert.deepEqual(drainedPort({ readSession: () => ({ ok: false }), readFact: pushed({ result: 'pushed' }) })(s), held('record-unreadable'), 'a session doc not read, not missing');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
