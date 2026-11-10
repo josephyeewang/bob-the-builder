@@ -118,13 +118,18 @@ const whole = (product) => `product.${product}`;
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
 // The plan reviewers holding the slots, as the runner's status lists them: "card A, on an older plan, for 3 hours, card B
-// for 20 minutes". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
-const runFor = (ms) => (ms < 2 * 60 * 60_000 ? `for ${Math.max(1, Math.round(ms / 60_000))} minutes` : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+// for 20 minutes, …; and 3 more". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
+const minutes = (n) => `for ${n} minute${n === 1 ? '' : 's'}`;
+const runFor = (ms) => (ms < 2 * 60 * 60_000 ? minutes(Math.max(1, Math.round(ms / 60_000))) : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+// At most 10 are named; the rest are counted, so a longer list never reads as complete (#335 r2 m3).
+const HOLDERS_NAMED = 10;
 const slotHolders = (holders, now) => {
-  const list = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string').slice(0, 10).map((h) => {
+  const all = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string');
+  const list = all.slice(0, HOLDERS_NAMED).map((h) => {
     const at = pastTime(h.started_at, now);
     return `card ${short(h.card).slice(0, 40)}${h.older_plan === true ? ', on an older plan,' : ''}${at === null ? '' : ` running ${runFor(now - at)}`}`;
   });
+  if (all.length > HOLDERS_NAMED) list.push(`and ${all.length - HOLDERS_NAMED} more`);
   return list.length ? list.join('; ') : "the runner's status names none of them";
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
