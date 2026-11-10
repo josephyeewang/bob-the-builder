@@ -4,6 +4,7 @@
 
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
 
 const iso = (ms) => new Date(ms).toISOString();
 
@@ -28,7 +29,10 @@ export function workerConfig(dir) {
   mkdirSync(join(runner, 'launches'), { recursive: true, mode: 0o755 });
   const mirror = join(dir, 'mirror');
   mkdirSync(mirror, { recursive: true, mode: 0o755 }); chmodSync(mirror, 0o755);
-  return { reviewRoot: runner, mirror, sealRoot: join(dir, 'seals'), hostLockPath: join(dir, 'host.lock') };
+  // The shape safe-git's checkMirror wants (worker-ports.mjs mirrorProblem, L763): its config is the template.
+  writeFileSync(join(mirror, 'config'), MIRROR_CONFIG_TEMPLATE);
+  // host.lock's owner is not the Dispatcher's own user (worker-ports.mjs, L763); the test's Dispatcher is this user.
+  return { reviewRoot: runner, mirror, sealRoot: join(dir, 'seals'), hostLockPath: join(dir, 'host.lock'), hostLockUid: process.getuid() + 1 };
 }
 
 const C = 'c'.repeat(40);

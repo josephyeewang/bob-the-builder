@@ -7,13 +7,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
 import { CLEANUP_GIT, HOST_LOCK_MAX, cleanupPorts, hostLockPort, mirrorProblem, reviewEndedPort, workerPorts } from './worker-ports.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 
@@ -49,9 +50,11 @@ function mirrorWorld() {
   const empty = g(work, 'rev-parse', 'HEAD');
   const mirror = join(base, 'mirror');
   g(base, 'clone', '-q', '--bare', work, mirror);
-  // The clone's own config names its origin; the mirror setup makes has the same shape (a remote, on the safe list).
+  // The mirror's config is safe-git's template, as worker-copy and push require of it (checkMirror, L763 r1 m2).
+  writeFileSync(join(mirror, 'config'), MIRROR_CONFIG_TEMPLATE);
   chmodSync(mirror, 0o755);
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock') };
+  // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 1 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
 }
@@ -74,7 +77,7 @@ test('C (L739): the mirror is checked at start: missing, a link, another user\'s
   assert.throws(start({ mirror: join(w.base, 'nope') }), /the product's mirror \(mirror\) .*nope can't be read \(ENOENT\)/);
   symlinkSync(w.mirror, join(w.base, 'link'));
   assert.throws(start({ mirror: join(w.base, 'link') }), /is not a plain folder/);
-  assert.throws(() => workerPorts({ ...w.ctx, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
+  assert.throws(() => workerPorts({ ...w.ctx, ownerUid: ME, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
   chmodSync(w.mirror, 0o775);
   assert.throws(start({}), /can be written by others \(mode 775\)/);
   chmodSync(w.mirror, 0o755);
@@ -100,11 +103,24 @@ test('C (L739): cleanup.git is safe-git on the mirror, and only the two reads cl
   const seen = [];
   const spy = cleanupPorts(w.ctx, { run: async (a, o) => { seen.push(o); return { code: 0, stdout: Buffer.alloc(0), stderr: '' }; } }).git;
   await spy(['ls-tree', w.second], { gitDir: w.mirror, purpose: 't', gitBin: '/bin/sh', extraConfig: ['core.pager=x'], workTree: '/', timeoutMs: 1e9 });
-  assert.deepEqual(seen, [{ gitDir: w.mirror, purpose: 't', timeoutMs: 60_000 }]);
-  // It is safe-git's runner: a mirror whose config sets a program is refused before git runs, and the tree is not read.
+  // The cap holds when no limit is given, as cleanup.mjs gives none (r1 m1, L763), and for a smaller one given.
+  await spy(['merge-base', '--is-ancestor', w.first, 'refs/heads/main'], { gitDir: w.mirror, purpose: 'u' });
+  await spy(['ls-tree', w.second], { gitDir: w.mirror, purpose: 'v', timeoutMs: 5_000 });
+  assert.deepEqual(seen, [{ gitDir: w.mirror, purpose: 't', timeoutMs: 60_000 }, { gitDir: w.mirror, purpose: 'u', timeoutMs: 60_000 }, { gitDir: w.mirror, purpose: 'v', timeoutMs: 5_000 }]);
+  // safe-git's own mirror check runs on each call (r1 m2, L763): grafts or a shallow file would change a commit's parents,
+  // so merge-base and the tree would be read wrong. Each is refused before git runs, and the tree is not read.
+  for (const f of ['info/grafts', 'shallow', 'objects/info/alternates']) {
+    mkdirSync(join(w.mirror, f, '..'), { recursive: true }); writeFileSync(join(w.mirror, f), `${w.first}\n`);
+    const r = await git(['merge-base', '--is-ancestor', w.second, 'refs/heads/main'], { gitDir: w.mirror, purpose: 't' });
+    assert.equal(r.code, -1, `planted: a cleanup.git without checkMirror runs git with ${f} there`); assert.match(String(r.stderr), new RegExp(`mirror has ${f}`));
+    assert.equal(await mirrorTree(git, w.mirror, w.second), null);
+    rmSync(join(w.mirror, f));
+  }
+  assert.ok(await mirrorTree(git, w.mirror, w.second), 'with the mirror as it should be again, the tree is read');
+  // A mirror whose config sets a program is refused before git runs, and the tree is not read.
   g(w.mirror, 'config', 'diff.external', '/bin/echo');
   const held = await git(['ls-tree', '-r', '-z', '--full-tree', w.second], { gitDir: w.mirror, purpose: 't' });
-  assert.equal(held.code, -1); assert.match(String(held.stderr), /not on the safe list: diff\.external/);
+  assert.equal(held.code, -1); assert.match(String(held.stderr), /mirror config differs from the template/);
   assert.equal(await mirrorTree(git, w.mirror, w.second), null);
 });
 
@@ -157,9 +173,17 @@ test('C (L739): filesOf throws, never answers empty, on a commit it can\'t read,
   assert.throws(() => filesOf('HEAD'), /is not a commit id/);
   assert.throws(() => mirrorFilesOf({ mirror: w.mirror, uid: ME })(w.second), /no limitedSync/);
   assert.throws(() => mirrorFilesOf({ mirror: w.mirror, uid: ME + 1, run })(w.second), /belongs to uid/);
-  // safe-git's repository check, run here too: a config key off the safe list is refused before git reads the commit.
+  // safe-git's mirror check, run here too (r1 m2, L763): grafts or a shallow file would change a commit's parents, and so
+  // the files diff-tree names; each is refused before git reads the commit.
+  for (const f of ['info/grafts', 'shallow', 'objects/info/commit-graph']) {
+    mkdirSync(join(w.mirror, f, '..'), { recursive: true }); writeFileSync(join(w.mirror, f), `${w.second}\n`);
+    assert.throws(() => filesOf(w.second), new RegExp(`the product's mirror \\(mirror\\) .* can't be used: mirror has ${f}`), `planted: a filesOf without checkMirror reads the commit with ${f} there`);
+    rmSync(join(w.mirror, f));
+  }
+  assert.deepEqual(filesOf(w.second).sort(), ['a.txt', 'b/c.txt']);
+  // A config key off the safe list is refused before git reads the commit (the config is no longer the template).
   g(w.mirror, 'config', 'diff.external', '/bin/echo');
-  assert.throws(() => filesOf(w.second), /the product's mirror's config sets what is not on the safe list: diff\.external/);
+  assert.throws(() => filesOf(w.second), /can't be used: mirror config differs from the template/);
   g(w.mirror, 'config', '--unset', 'diff.external');
   assert.deepEqual(filesOf(w.second).sort(), ['a.txt', 'b/c.txt']);
   rmSync(w.mirror, { recursive: true, force: true });
@@ -172,7 +196,7 @@ test('C (L739): hostLock answers the text, null only when no file is there, and 
   const w = mirrorWorld();
   const path = w.config.hostLockPath;
   // The file is the owner's, never the Dispatcher's (M1): this user stands in for the owner, so the Dispatcher is another.
-  const hostLock = hostLockPort({ path, run, selfUid: ME + 1 });
+  const hostLock = hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 });
   assert.equal(hostLock(), null, 'no file in a folder that is there: no host claimed');
   writeFileSync(path, 'mini\n');
   assert.equal(hostLock(), 'mini\n', 'planted: a hostLock answering null while the file is there fails here');
@@ -189,34 +213,78 @@ test('C (L739): hostLock answers the text, null only when no file is there, and 
   assert.throws(() => hostLock(), /is not a plain file/);
   rmSync(path, { recursive: true });
   // A path whose folder is not there is a wrong path, told, never "no host".
-  assert.throws(() => hostLockPort({ path: join(w.base, 'no-folder', 'host.lock'), run, selfUid: ME + 1 })(), /host\.lock's folder .*no-folder can't be read \(ENOENT\)/);
+  assert.throws(() => hostLockPort({ path: join(w.base, 'no-folder', 'host.lock'), run, ownerUid: ME, selfUid: ME + 1 })(), /host\.lock's folder .*no-folder can't be read \(ENOENT\)/);
   const shut = join(w.base, 'shut');
   mkdirSync(shut); writeFileSync(join(shut, 'host.lock'), 'x'); chmodSync(shut, 0o000);
-  try { assert.throws(() => hostLockPort({ path: join(shut, 'host.lock'), run, selfUid: ME + 1 })(), /host\.lock .* can't be read \(EACCES\)/); } finally { chmodSync(shut, 0o755); }
+  try { assert.throws(() => hostLockPort({ path: join(shut, 'host.lock'), run, ownerUid: ME, selfUid: ME + 1 })(), /host\.lock .* can't be read \(EACCES\)/); } finally { chmodSync(shut, 0o755); }
   // A folder that is a link to a folder is still a folder: a missing file there is no host.
   mkdirSync(join(w.base, 'real-folder'));
   symlinkSync(join(w.base, 'real-folder'), join(w.base, 'folder-link'));
-  assert.equal(hostLockPort({ path: join(w.base, 'folder-link', 'host.lock'), run, selfUid: ME + 1 })(), null);
-  assert.throws(() => hostLockPort({ path, selfUid: ME + 1 })(), /no limitedSync/);
+  assert.equal(hostLockPort({ path: join(w.base, 'folder-link', 'host.lock'), run, ownerUid: ME, selfUid: ME + 1 })(), null);
+  assert.throws(() => hostLockPort({ path, ownerUid: ME, selfUid: ME + 1 })(), /no limitedSync/);
   // A read held past its limit (a Dropbox stuck fetching), or one that says nothing usable, is "not known", never "no host".
-  assert.throws(() => hostLockPort({ path, run: () => ({ ok: false, why: 'timed out after 10000 ms' }), selfUid: ME + 1 })(), /host\.lock .* can't be read \(timed out after 10000 ms\)/);
-  assert.throws(() => hostLockPort({ path, run: () => ({ ok: true, stdout: '' }), selfUid: ME + 1 })(), /said nothing it could parse/);
-  assert.throws(() => hostLockPort({ path, run })(), /no Dispatcher uid/);
+  assert.throws(() => hostLockPort({ path, run: () => ({ ok: false, why: 'timed out after 10000 ms' }), ownerUid: ME, selfUid: ME + 1 })(), /host\.lock .* can't be read \(timed out after 10000 ms\)/);
+  assert.throws(() => hostLockPort({ path, run: () => ({ ok: true, stdout: '' }), ownerUid: ME, selfUid: ME + 1 })(), /said nothing it could parse/);
+  assert.throws(() => hostLockPort({ path, run, ownerUid: ME })(), /no Dispatcher uid/);
+  assert.throws(() => hostLockPort({ path, run, selfUid: ME + 1 })(), /hostLockUid \(the owner's Mac user id\) must be a Mac user id/);
 });
 
-test('C (L739, self-review M1): hostLock never reads the Dispatcher\'s own file, or a hard link, into the Record', () => {
+test('C (L739, self-review M1, L763): hostLock reads only a file of the owner\'s, never the Dispatcher\'s own or a hard link', () => {
   const w = mirrorWorld();
   const path = w.config.hostLockPath;
   const own = join(w.base, 'dispatcher-only');
   writeFileSync(own, 'private', { mode: 0o600 });
-  // A file of the Dispatcher's own in host.lock's place: here the test user is the Dispatcher.
+  // A file of the Dispatcher's own in host.lock's place: here the test user is the Dispatcher, and the owner is another.
   writeFileSync(path, 'mini\n');
-  assert.throws(() => hostLockPort({ path, run, selfUid: ME })(), /is the Dispatcher's own file, not the owner's/);
-  assert.throws(() => workerPorts(w.ctx).hostLock(), /is the Dispatcher's own file/, 'through workerPorts, checked against the Dispatcher\'s uid');
+  assert.throws(() => workerPorts(w.ctx).hostLock(), /is not the owner's file \(its owner is uid \d+, not \d+\)/, 'through workerPorts, checked against hostLockUid');
+  // A config naming the Dispatcher's own user as host.lock's owner, or none, stops the start.
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME } }), /hostLockUid is the Dispatcher's own user/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: undefined } }), /hostLockUid .* must be a Mac user id/);
+  assert.throws(() => hostLockPort({ path, run, ownerUid: ME, selfUid: ME })(), /hostLockUid is the Dispatcher's own user/);
   rmSync(path);
   // A hard link to a file only the Dispatcher can read: lstat shows a plain file, so the name alone can't tell.
   linkSync(own, path);
-  assert.throws(() => hostLockPort({ path, run, selfUid: ME + 1 })(), /has another name too \(a hard link\)/);
+  assert.throws(() => hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 })(), /has another name too \(a hard link\)/);
+});
+
+// A file this user can read but doesn't own, which a hard link can name (macOS lets a user hard-link a file it doesn't own).
+// Null where the system has none, or links across to it are refused (another disk, or a system that forbids them).
+function foreignFile(base) {
+  for (const f of ['/private/etc/shells', '/etc/shells']) {
+    try { const at = join(base, `probe-${Math.random().toString(36).slice(2)}`); linkSync(f, at); rmSync(at); return f; } catch { /* next */ }
+  }
+  return null;
+}
+
+test('C (L763 r1 M1): a link in the folders above host.lock never reads another user\'s file into the Record', () => {
+  const w = mirrorWorld();
+  // The owner can write host.lock's folder, so they can make it a link to a folder of someone else's files: lstat of the
+  // name shows a plain file with one name, so only its owner tells it apart.
+  symlinkSync('/private/etc', join(w.base, 'etc-link'));
+  assert.throws(() => hostLockPort({ path: join(w.base, 'etc-link', 'shells'), run, ownerUid: ME, selfUid: ME + 1 })(), /is not the owner's file \(its owner is uid 0, not \d+\)/,
+    'planted: a reader without the owner check reads root\'s file here');
+});
+
+test('C (L763 r1 M1): a hard link made and removed between the open and the check never reads another user\'s file', (t) => {
+  const w = mirrorWorld();
+  const victim = foreignFile(w.base);
+  if (!victim) { t.skip('no file of another user can be hard-linked here, so the race can\'t be made'); return; }
+  const path = join(w.base, 'owner', 'host.lock');
+  mkdirSync(join(w.base, 'owner'));
+  // The owner's side: link the victim to host.lock and remove it, over and over (the r1 race, scratchpad race.mjs).
+  const loop = `const fs=require('fs');const [v,p]=process.argv.slice(1);for(;;){try{fs.linkSync(v,p)}catch{}try{fs.unlinkSync(p)}catch{}}`;
+  const atk = spawn(process.execPath, ['-e', loop, victim, path], { stdio: 'ignore' });
+  try {
+    const port = hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 });
+    const seen = { text: 0, refused: 0, none: 0 };
+    for (let i = 0; i < 120; i++) {
+      let got; try { got = port(); } catch { seen.refused++; continue; }
+      if (got === null) seen.none++; else seen.text++;
+    }
+    // Before L763 the hard-link check came after the open, and 44 of 400 reads got the victim's text.
+    assert.equal(seen.text, 0, `planted: the old order reads the victim's text (${JSON.stringify(seen)})`);
+    assert.ok(seen.refused > 0, `the race ran: some reads saw the link (${JSON.stringify(seen)})`);
+  } finally { atk.kill('SIGKILL'); }
 });
 
 // ---- reviewEnded ----

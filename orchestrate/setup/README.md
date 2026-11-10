@@ -87,7 +87,7 @@ Every name, path and layout rule comes from the launcher's own modules (`install
 | `sudo /usr/local/bin/node setup.mjs install` | makes the root-owned `install` folder, a root-owned copy of the updater's three files and of node, the seed (`updater.json`, `review.json`, the extras), then runs the updater's `--first` run, which builds the `.v-<commit>` copy and flips the link; then checks | yes |
 | `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists. Once the config names `hostLockPath`, a last line points to `check-dispatcher` | no |
 | `/usr/local/bin/node setup.mjs check-dispatcher --config <file>`, or with sudo | read only: the Dispatcher's lines (below). Its own command, so a host.lock problem never stops `daemons load` or the watch cutover, which wait on check-install | no; sudo for the host.lock read |
-| `/usr/local/bin/node setup.mjs dispatcher-keys --config <file>` | read only: prints the Dispatcher config's four worker and cleanup keys as JSON, from this config: `reviewRoot` (`<base>/review`), `mirror` (`<base>/mirror`), `sealRoot` (`<base>/seals`) and `hostLockPath`. Without `hostLockPath` it says so and exits 1 | no |
+| `/usr/local/bin/node setup.mjs dispatcher-keys --config <file>` | read only: prints the Dispatcher config's five worker and cleanup keys as JSON, from this config: `reviewRoot` (`<base>/review`), `mirror` (`<base>/mirror`), `sealRoot` (`<base>/seals`), `hostLockPath`, and `hostLockUid` (the owner's Mac user id, read on this Mac: the Dispatcher reads host.lock only when the file it opened is that user's). Without `hostLockPath`, or with no such owner on this Mac, it says so and exits 1 | no |
 | `sudo /usr/local/bin/node setup.mjs daemons place` | writes the three job files into `/Library/LaunchDaemons` (root:wheel 0644, exactly what `review-daemons.mjs` builds) | yes |
 | `sudo /usr/local/bin/node setup.mjs daemons load` / `unload` | `launchctl bootstrap` / `bootout` for each job not yet loaded / loaded; load refuses unless the install check passes and the job files are there; a job loaded from an older file is taken out and loaded again (`load` records each file's fingerprint in `<base>/install/loaded-jobs.json`, root's); unload with nothing loaded is not an error | yes |
 | `/usr/local/bin/node setup.mjs daemons list` / `check` | read only: `list` shows loaded or not, state and last exit. `check` FAILs on: a job file wrong or missing; a leftover job file under another label; a job not loaded; a job loaded from an older file than the one on disk; a job whose last run did not end with exit 0; a job whose current run has been going over 30 minutes (a hung run keeps the last exit green); `ps` answering with something unreadable counts as a FAIL, `ps` printing nothing (the run ended meanwhile) does not. It cannot see a job loaded under an old label whose file is gone: `daemons unload` under the old label first. Changing the label, `review.json` or the owner's home folder needs `daemons unload`, the change, `place`, `load` | no |
@@ -99,13 +99,16 @@ in the owner's home (`/Users/<owner>/...`; spaces are fine). check-dispatcher sa
   (`HOST_LOCK_MAX` in `wiring/worker-ports.mjs`), and `orchestrate` can read it. As root it reads it as `orchestrate`;
   without sudo that line is NEEDS ROOT. When the read fails it says why, in plain words: a folder above it `orchestrate`
   can't go into (it names the folder; the folders of the path as written and of its real place, through links), the file's
-  own permissions, macOS privacy protection (when macOS answered "Operation not permitted" and the permissions allow the
+  own permissions (naming the file's mode, for example 600), macOS privacy protection (when macOS answered "Operation not permitted" and the permissions allow the
   read), or else the read's own error. A missing host.lock passes when `orchestrate` can reach its folder: the Dispatcher
-  reads that as no host claimed.
+  reads that as no host claimed. A folder that is not there is a wrong path, and fails.
 - whether the Dispatcher's background job can read it. macOS judges a read by the app it runs from, so a read from the
   Terminal proves nothing for the job when host.lock is in a folder macOS guards (a synced cloud folder under
-  `~/Library/CloudStorage` or `~/Library/Mobile Documents`, or Desktop, Documents, Downloads). There this line is NOT TRIED,
-  which counts as a FAIL: keep host.lock outside those folders, or prove the read from the job itself.
+  `~/Library/CloudStorage` or `~/Library/Mobile Documents`, Desktop, Documents, Downloads, or another disk under
+  `/Volumes`). There this line is NOT TRIED, which counts as a FAIL: keep host.lock outside those folders, or prove the read
+  from the job itself. That holds when host.lock is missing too: the job would be refused the read, not told the file is
+  missing, so it would say "not known" on every pass. The place is judged on its real path, as the disk spells it (a
+  config spelling `library/cloudStorage` is still the guarded folder), after any links.
 The mirror and `seals/` are rows of the folder table, so `check` compares their owner and mode.
 
 Root never runs code a user can write: the updater runs from a root-owned `install-work/bootstrap` copy with a root-owned

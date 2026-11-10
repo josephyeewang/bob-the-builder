@@ -3,7 +3,7 @@
 //
 //   the config      <base>/dispatcher.json, root's 0644, written by `dispatcher-config` from the setup config: every key
 //                   main.mjs and wiring/dispatcher-wiring.mjs take (CONFIG_KEYS). Setup knows most of them (the copy, the
-//                   lock, the Record's folder and owner, the review runner's files, the four worker keys of dispatcherKeys);
+//                   lock, the Record's folder and owner, the review runner's files, the five worker keys of dispatcherKeys);
 //                   the owner names the rest in the setup config's `dispatcher` entry (the product, M10's products file and
 //                   state folder, the read token's file, M2's state folder). The install carries the file into the copy, and
 //                   every update keeps it (it is one of the updater's `keep`), as review.json. main.mjs reads the config
@@ -25,10 +25,10 @@ import { NODE, UPDATER_CONFIG, currentCopy, installProblem } from '../modules/M4
 import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
-import { dispatcherKeys, homeOf } from './layout.mjs';
+import { homeOf } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
-import { checkDispatcherKeys } from './dispatcher-check.mjs';
+import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 
 export const DISPATCHER_JOB = 'dispatcher';
 export const DISPATCHER_CONFIG = 'dispatcher.json';
@@ -83,7 +83,8 @@ export function dispatcherConfigFor(io, cfg) {
   if (!orch.exists) problems.push(`the ${DISPATCHER_USER} user does not exist (run users-folders first)`);
   if (!rev.exists) problems.push('the review user does not exist (run users-folders first)');
   if (problems.length) return { config: null, problems };
-  const P = installPaths(cfg); const root = io.at(P.installRoot); const k = dispatcherKeys(cfg);
+  const P = installPaths(cfg); const root = io.at(P.installRoot);
+  let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { return { config: null, problems: [e.message] }; }
   const at = (p) => io.at(p);
   const value = {
     installRoot: root, wiring: join(root, DISPATCHER_WIRING), lockFile: dispatcherLockOf(io, cfg), runDeadlineMs: d.runDeadlineMs,
@@ -91,8 +92,12 @@ export function dispatcherConfigFor(io, cfg) {
     productsFile: at(d.productsFile), rulesStateDir: at(d.rulesStateDir), tokenFile: at(d.tokenFile), approvalsStateDir: at(d.approvalsStateDir),
     reviewRequestsDir: at(join(k.reviewRoot, FOLDERS.requests)), reviewStatusFile: at(join(k.reviewRoot, FOLDERS.status)), reviewUid: rev.uid,
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
-    reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), hostLockPath: at(k.hostLockPath),
+    reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
   };
+  // Every key the Dispatcher reads is written; only runDeadlineMs may be left to main.mjs's default. A key the wiring adds
+  // and this doesn't fill is told here, never dropped (the Dispatcher would refuse to start on it).
+  const unfilled = CONFIG_KEYS.filter((key) => value[key] === undefined && key !== 'runDeadlineMs');
+  if (unfilled.length) return { config: null, problems: [`setup doesn't fill the Dispatcher's config keys ${unfilled.join(', ')}`] };
   const config = Object.fromEntries(CONFIG_KEYS.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
   try { checkConfig(config); } catch (e) { return { config: null, problems: [`the config this would write is one the Dispatcher refuses (${e.message})`] }; }
   return { config, problems: [] };

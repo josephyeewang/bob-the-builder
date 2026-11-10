@@ -20,7 +20,8 @@ import { JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistT
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
 import { dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig } from './dispatcher-setup.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
-import { ROOT_CONFIG_PATH as _R, dispatcherKeys } from './layout.mjs';
+import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
+import { dispatcherKeysOn } from './dispatcher-check.mjs';
 import { checkInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
@@ -1201,10 +1202,12 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
     productsFile: at(GOOD_DISPATCHER.productsFile), rulesStateDir: at(GOOD_DISPATCHER.rulesStateDir), tokenFile: at(GOOD_DISPATCHER.tokenFile), approvalsStateDir: at(GOOD_DISPATCHER.approvalsStateDir),
     reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
     reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,
-    reviewRoot: at(`${BASE}/review`), mirror: at(`${BASE}/mirror`), sealRoot: at(`${BASE}/seals`), hostLockPath: at(DLOCK),
+    reviewRoot: at(`${BASE}/review`), mirror: at(`${BASE}/mirror`), sealRoot: at(`${BASE}/seals`), hostLockPath: at(DLOCK), hostLockUid: uid('sam'),
   });
-  // The four worker keys are dispatcherKeys' (the one source), as the job sees them.
-  const k = dispatcherKeys(w.cfg); for (const key of Object.keys(k)) assert.equal(config[key], at(k[key]), key);
+  // The five worker keys are dispatcherKeys' (the one source), as the job sees them; host.lock's owner is the owner's uid.
+  const k = dispatcherKeysOn(w.mac, w.cfg);
+  for (const key of Object.keys(k)) assert.equal(config[key], key === 'hostLockUid' ? k[key] : at(k[key]), key);
+  assert.notEqual(config.hostLockUid, config.ownerUid, 'host.lock is the owner\'s, not the Dispatcher\'s');
 });
 
 test('Dispatcher config: install refuses until dispatcher-config wrote it; then the copy carries it, the updater keeps it; place, load, check pass; twice does nothing', async () => {
