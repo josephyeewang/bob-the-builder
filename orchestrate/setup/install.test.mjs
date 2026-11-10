@@ -24,6 +24,7 @@ import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
+import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { runnerUidsProblem } from './install.mjs';
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
@@ -1211,6 +1212,20 @@ test('add-to-install: every refusal comes before any change', async () => {
     const before = tree(real(w)); const n = w.mac.log.length;
     const r = w.run(ADD);
     assert.equal(r.code, 1, name); assert.match(r.text, why, name); assert.match(r.text, /nothing was changed/, name);
+    assert.deepEqual(tree(real(w)), before, name); assert.equal(w.mac.log.length, n, name);
+  }
+});
+
+test('add-to-install: a missing or malformed fingerprint, or a pin the tool lists were not checked on, is refused at the plan (#243 audit m1, c2)', async () => {
+  for (const [name, args, why] of [
+    ['no sha256', { pin: PIN }, /needs --sha256/],
+    ['a sha256 in capitals', { pin: PIN, sha256: SHA.toUpperCase() }, /needs --sha256/],
+    ['a pin the tool lists were not checked on', { pin: '2.1.300', sha256: SHA }, new RegExp(`role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code.replaceAll('.', '\\.')}`)],
+  ]) {
+    const w = await readyToAdd(args.pin === PIN ? {} : { pin: args.pin });
+    const before = tree(real(w)); const n = w.mac.log.length;
+    const r = planAddToInstall(w.mac, w.cfg, { ...args, readSource: (p) => readFileSync(p, 'utf8') });
+    assert.ok(r.problems.some((p) => why.test(p)), `${name}: ${r.problems.join(' | ')}`);
     assert.deepEqual(tree(real(w)), before, name); assert.equal(w.mac.log.length, n, name);
   }
 });

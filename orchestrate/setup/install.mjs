@@ -30,6 +30,7 @@ import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, parseConfig } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
+import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
@@ -245,9 +246,15 @@ export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
   const source = pinnedBinary(cfg.base, pin);
   const hookSource = join(copy, 'modules/M4-workshop/hooks');
   const problems = [];
+  // The pin the role tool lists were checked on, as review-config asks (#243 audit m1): found here, not when the runner starts.
+  const pinWhy = pinProblem(pin); if (pinWhy) problems.push(pinWhy);
+  // The fingerprint is refused here when it is missing or malformed, by a caller that skipped parsing too (#243 audit c2):
+  // every refusal comes before any change, never only at the copy step.
+  const shaOk = typeof sha256 === 'string' && /^[0-9a-f]{64}$/.test(sha256);
+  if (!shaOk) problems.push('add-to-install needs --sha256: the pinned program\'s fingerprint, 64 lower-case hex characters');
   const link = linkProblem(io, io.at(source));
   if (link) problems.push(`the pinned program ${source} ${link}`);
-  else if (fingerprint(readFileSync(io.at(source))) !== sha256) problems.push(`the pinned program ${source} does not have the fingerprint given`);
+  else if (shaOk && fingerprint(readFileSync(io.at(source))) !== sha256) problems.push(`the pinned program ${source} does not have the fingerprint given`);
   let keep = null; let scripts = [];
   try { keep = readUpdaterConfig(io.at(join(copy, UPDATER_CONFIG))); } catch (e) { problems.push(`the copy's ${UPDATER_CONFIG} was refused: ${e.message}`); }
   try { scripts = io.list(hookSource); } catch { /* reported below */ }
