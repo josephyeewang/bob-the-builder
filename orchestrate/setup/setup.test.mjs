@@ -765,6 +765,11 @@ test('L836 check: the workers\' copies folder holds only the config\'s product f
   // A flat copy whose card is named as a product looks like that product's folder, but it is a copy (review m4).
   mkdirSync(mac.at(C('alpha/.git'))); assert.match(row().why, new RegExp(`^holds an entry .*: ${C('alpha')}\\. Check`));
   rmSync(mac.at(C('alpha/.git')), { recursive: true }); assert.equal(row().ok, true);
+  // A product's name in another letter case is not that product's folder (review r1 m2). This Mac's disk ignores case, so
+  // the listing a case-sensitive volume would give (Alpha beside alpha) is handed to check.
+  { const ls = mac.list; mac.list = (d) => (d === P('worker-copies') ? [...ls(d), 'Alpha'] : ls(d));
+    assert.match(row().why, new RegExp(`^holds an entry .*: ${C('Alpha')}\\. Check`)); mac.list = ls; }
+  assert.equal(row().ok, true);
   // A folder that cannot be listed FAILs rather than drops the row (review m2).
   const list = mac.list; mac.list = (d) => { if (d === P('worker-copies')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return list(d); };
   assert.deepEqual(row(), { ok: false, what: `${P('worker-copies')} holds only the config's product folders (L836)`, why: 'its contents could not be listed' });

@@ -61,6 +61,9 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   denied every other product's whole folder (which names a product may take: `shared/product-paths.mjs`). The review roles take no product: their
   folders, and `review-copies/`, stay as they are. `proofs` checks, per product, that the owner CAN write
   `worker-copies/<product>` and both role folders (controls) and can NOT write `outboxes/<product>` itself.
+  Every "cannot write" proof shows the state now; that the owner cannot gain write (own the folder and `chmod` it) is
+  `check`'s job: it wants each of these folders owned by root, orchestrate or review (never the owner), with the exact
+  mode and access list.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and
