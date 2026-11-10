@@ -167,6 +167,8 @@ function writeNew(file, text) {
  * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
  * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
+ * mainOf(mirror) → the mirror's main commit (read before and after the copy is made, #369 r1 m3), beforeStart(x) → null
+ * or the reason claude must not start,
  * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1).
  */
@@ -175,7 +177,7 @@ export function startPort(c, deps = {}) {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
-    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart,
+    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, ...(deps.fs ?? {}) };
   return async ({ card, kind, product, sessionId } = {}) => {
@@ -199,29 +201,60 @@ export function startPort(c, deps = {}) {
     const copy = join(c.copiesRoot, card);
     const outbox = join(c.outboxRoot, role, sessionId);
     const settingsFile = join(c.settingsDir, `${sessionId}.json`);
-    const made = await prepare({ product: { repo: p.repo, mirror: p.mirror }, card: { id: card, repo: p.repo, commit, branch: cardBranch(card) }, dest: copy });
+    // The main the copy's setup files are restored from (#369 r1 m3): read before and after the copy is made, so checks 2
+    // compare with that commit, and main moving meanwhile is said as such, never read as the branch's tampering.
+    let mainAt; try { mainAt = await mainOf(p.mirror); } catch (e) { return refuse(`the mirror's main can't be read (${e?.message ?? e})`); }
+    const sameMain = async () => { try { return (await mainOf(p.mirror)) === mainAt; } catch { return false; } };
+    const making = { product: { repo: p.repo, mirror: p.mirror }, card: { id: card, repo: p.repo, commit, branch: cardBranch(card) } };
+    const made = await prepare({ ...making, dest: copy });
     if (!made?.ok) return refuse(`the copy can't be made (${made?.reason ?? 'no answer'})`);
     const ours = [copy];
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
+    if (!(await sameMain())) return undo('main changed during launch; retry');
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     let others; try { others = fs.list(c.copiesRoot).filter((n) => n !== card).map((n) => join(c.copiesRoot, n)); } catch (e) { return undo(`the copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other product's mirror (#364 r1 M1): known at start from the config.
     for (const [q, o] of Object.entries(c.products)) if (q !== product && typeof o?.mirror === 'string') others.push(o.mirror);
+    // The baseline's throwaway place (#369 r1 M1): `~` is in no card id (CARD_ID), so no card's copy is named so.
+    const spare = join(c.copiesRoot, `${card}~baseline`);
+    if (!others.includes(spare)) others.push(spare);
     const r = p.render;
-    const w = walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
-      paths: { ...r.paths, copy, outbox, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...others] } } });
+    const settingsFor = (at, box, deny) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
+      paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny] } } });
+    const w = settingsFor(copy, outbox, others);
     if (!w?.ok) return undo(w?.reason ?? 'not walled: no answer');
     try { fs.writeNew(settingsFile, `${JSON.stringify(w.settings, null, 2)}\n`); ours.push(settingsFile); } catch (e) { return undo(`the settings file can't be written (${e?.code ?? e?.message})`); }
     const env = roleEnv(process.env, { path: c.path, extra: { ...who.env, HOME: c.home } });
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid };
+    // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
+    // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
+    const throwaway = async () => {
+      const spareSettings = join(c.settingsDir, `${sessionId}~baseline.json`);
+      const done = async () => { for (const f of [spare, spareSettings]) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } };
+      const no = async (reason) => { await done(); return refuse(`the baseline's throwaway copy ${reason}`); };
+      try { fs.mkdir(spare, { mode: 0o700 }); } catch (e) { return refuse(`the baseline's throwaway copy can't be made (${e?.code ?? e?.message})`); }
+      const at = join(spare, 'copy'); const box = join(spare, 'outbox');
+      const t = await prepare({ ...making, dest: at });
+      if (!t?.ok) return no(`can't be made (${t?.reason ?? 'no answer'})`);
+      if (t.head !== made.head) return no('holds another commit than the session\'s copy');
+      if (!(await sameMain())) { await done(); return refuse('main changed during launch; retry'); }
+      try { fs.mkdir(box, { mode: 0o700 }); } catch (e) { return no(`has no outbox (${e?.code ?? e?.message})`); }
+      const tw = settingsFor(at, box, [...others.filter((o) => o !== spare), copy, outbox]);
+      if (!tw?.ok) return no(`is not walled (${tw?.reason ?? 'no answer'})`);
+      try { fs.writeNew(spareSettings, `${JSON.stringify(tw.settings, null, 2)}\n`); } catch (e) { return no(`has no settings file (${e?.code ?? e?.message})`); }
+      return { ok: true, copy: at, settingsFile: spareSettings, done };
+    };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
       const args = sessionArgs({ profile, settingsFile, sessionId, prompt });
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
         start: async () => {
-          // Check 2 once more (#369 M1): checks 4 and 11 ran the branch's own code, which could write the copy's setup files.
-          if (beforeStart) { const p = await beforeStart(x); if (p) return refuse(`the copy's setup files changed after check 2, so claude was not started: ${p}`); }
+          // Checks 1, 2, 3 and 8 once more (#369 M1, r1 m1 and m2): checks 4 and 11 ran the branch's own code.
+          if (beforeStart) {
+            const p = await beforeStart(x);
+            if (p) return refuse(!(await sameMain()) ? 'main changed during launch; retry' : `a check failed again just before claude was to start, so it was not started: ${p}`);
+          }
           return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
         } });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }

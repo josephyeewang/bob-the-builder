@@ -98,6 +98,7 @@ function world(over = {}) {
   w.deps = {
     readCard: () => ({ ok: true, doc: w.card }),
     startCommit: async () => HEAD,
+    mainOf: async () => 'c'.repeat(40),
     prepare: async (x) => { w.calls.push(['prepare', x]); mkdirSync(x.dest); return { ok: true, dest: x.dest, head: HEAD }; },
     promptFor: () => 'do the card',
     account: () => ({ account: 'a', dir: join(d, 'home', '.claude'), env: {} }),
@@ -123,7 +124,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.copiesRoot, 'C-1')); assert.equal(wl.paths.outbox, join(w.outboxRoot, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.copiesRoot, 'C-9')] }, 'every other card\'s copy is denied');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.copiesRoot, 'C-9'), join(w.copiesRoot, 'C-1~baseline')] }, 'every other card\'s copy is denied, and the baseline\'s throwaway place');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -262,13 +263,58 @@ test('#369 M1: check 2 runs once more just before claude starts; setup files cha
     launchFn: async (x) => ({ ok: true, started: await x.start() }) });
   try {
     const a = await w.start();
-    assert.equal(a.ok, false); assert.match(a.reason, /setup files changed after check 2, so claude was not started: the copy holds \.claude\/settings\.local\.json/);
+    assert.equal(a.ok, false); assert.match(a.reason, /a check failed again just before claude was to start, so it was not started: the copy holds \.claude\/settings\.local\.json/);
     assert.equal(seen.length, 1); assert.equal(typeof seen[0][0], 'string');
     assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
     assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
   } finally { rmSync(w.d, { recursive: true, force: true }); }
   const ok = world({ beforeStart: async () => null, launchFn: async (x) => ({ ok: true, started: await x.start() }) });
   try { assert.equal((await ok.start()).ok, true); assert.equal(ok.calls.some((c) => c[0] === 'spawn'), true); } finally { rmSync(ok.d, { recursive: true, force: true }); }
+});
+
+test('#369 r1 m3: main moving during a launch is said as such, never as tampering; checks get the main the copy was restored from', async () => {
+  const A = 'a'.repeat(40); const B = 'e'.repeat(40);
+  for (const [when, re] of [['after prepare', /^main changed during launch; retry$/], ['before start', /^main changed during launch; retry$/]]) {
+    let mains = [A];
+    let seen;
+    const w = world({ mainOf: async () => mains.shift() ?? B, checksFor: (x) => { seen = x.mainAt; return {}; },
+      beforeStart: async () => 'the copy\'s .mcp.json is not main\'s', launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+    if (when === 'before start') mains = [A, A];
+    try {
+      const a = await w.start();
+      assert.equal(a.ok, false); assert.match(a.reason, re, when);
+      if (when === 'before start') assert.equal(seen, A, 'the checks compare with the main read before the copy was made');
+      assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
+test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apart from the session\'s copy and outbox, and removed', async () => {
+  let t; let x0;
+  const w = world({ checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const spare = join(w.copiesRoot, 'C-1~baseline');
+    assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}~baseline.json`) });
+    const preps = w.calls.filter((c) => c[0] === 'prepare').map((c) => c[1]);
+    assert.equal(preps.length, 2); assert.deepEqual(preps[1].card, preps[0].card, 'the same card and commit'); assert.equal(preps[1].dest, join(spare, 'copy'));
+    const [own, theirs] = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    assert.ok(own.paths.deny.otherCopies.includes(spare), 'the session denies the throwaway place');
+    assert.equal(theirs.paths.copy, join(spare, 'copy')); assert.equal(theirs.paths.outbox, join(spare, 'outbox'));
+    for (const p of [join(w.copiesRoot, 'C-1'), join(w.outboxRoot, 'worker', SID), join(w.copiesRoot, 'C-9')]) assert.ok(theirs.paths.deny.otherCopies.includes(p), `the baseline denies ${p}`);
+    assert.equal(theirs.paths.deny.otherCopies.includes(spare), false, 'never its own place');
+    assert.equal(existsSync(t.settingsFile), true); assert.equal(statSync(spare).mode & 0o077, 0);
+    await t.done();
+    assert.equal(existsSync(spare), false); assert.equal(existsSync(t.settingsFile), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Another commit than the session's copy, or main moved: refused, and nothing is left.
+  for (const [over, re] of [[{ prepare: async (x) => { mkdirSync(x.dest); return { ok: true, dest: x.dest, head: x.dest.endsWith('~baseline/copy') ? 'f'.repeat(40) : HEAD }; } }, /holds another commit than the session's copy/],
+    [{ mainOf: (() => { let n = 0; return async () => (++n > 2 ? 'e'.repeat(40) : 'c'.repeat(40)); })() }, /^main changed during launch; retry$/]]) {
+    let r; let x1;
+    const v = world({ ...over, checksFor: (x) => { x1 = x; return {}; }, launchFn: async () => { r = await x1.throwaway(); return { ok: false, reason: 'stop here' }; } });
+    try { await v.start(); assert.equal(r.ok, false); assert.match(r.reason, re); assert.equal(existsSync(join(v.copiesRoot, 'C-1~baseline')), false); } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
 });
 
 test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {

@@ -11,8 +11,13 @@
 //                           depth outside a linked folder, which is not followed, as worker-copy.mjs removeProtected;
 //                           any letter case, isProtectedName) is a plain file byte for byte main's in the mirror, no
 //                           link, and each of main's is there (names compared after folding letter case, as the Mac's
-//                           disk does). The start port runs it once more just before claude starts (#369 M1), since
-//                           checks 4 and 11 run the branch's own code, which could write them.
+//                           disk does), against the main commit the copy was restored from (`mainAt`, #369 r1 m3), so
+//                           main moving during a launch is never read as the branch's tampering. The walk stops at
+//                           WALK_LIMIT entries or WALK_DEPTH folders deep (#369 r1 c3). Names are compared after
+//                           lower-casing, not after worker-copy.mjs `fold` (#369 r1 c2): fold also drops invisible
+//                           characters, which the disk keeps, so a look-alike name would stand in for a missing file.
+//                           Checks 1, 2, 3 and 8 run once more just before claude starts (#369 M1, r1 m1 and m2;
+//                           runner-main.mjs startDeps `beforeStart`), since checks 4 and 11 run the branch's own code.
 //   3  outbox emptied       reviewChecks' 3 (emptyOutbox, with `busy` the "what holds this folder" port)
 //   4  dependencies         NO PORT: the install runs inside the lock-down (launch.mjs installStep), through the
 //                           lock-down runner (`runLocked`), which is not built (save-work waits on it too). Until it is,
@@ -27,8 +32,17 @@
 //   10 machine-wide block   reviewChecks' 10 (checkMachineWide)
 //   11 smoke and baseline   reviewChecks' smoke first, with the owner's home as the place outside the copy it must not
 //                           write, so the lock-down is shown on before any of the branch's code runs (#369 M2); then a
-//                           worker's baseline (the product's test command, run once by the role's own start with its
-//                           own settings through lockedRunCommand, must exit 0). The baseline's exit code is written by
+//                           worker's baseline (the product's test command, run once through lockedRunCommand, must exit
+//                           0). The baseline never runs in the session's copy (#369 r1 M1): the start port makes a
+//                           throwaway copy of the same commit (`x.throwaway()`), with its own settings that allow writes
+//                           there only and deny the session's copy and outbox, and removes it after. So a process the
+//                           tests leave running, one that started its own session (setsid) too, can't reach the copy
+//                           claude starts in; the baseline's process group is killed after a normal end as well as on a
+//                           time-out. A leftover may still write in the throwaway's place after it is removed (its
+//                           settings allow it); nothing reads that place. Whether the smoke's and the baseline's claude,
+//                           started in the copy, read the branch's CLAUDE.md (not a protected name) is not proven on the
+//                           pin: if one does, the branch could steer the smoke to a false pass (#369 r1 m5), behind
+//                           failIfUnavailable. A capability claim to prove on the Mini, void on a pin move. The baseline's exit code is written by
 //                           the command into the copy, where the branch's code could forge it: it is a sanity check
 //                           that the branch's tests pass, not a wall (#369 m1). Whether claude runs that one compound
 //                           command under dontAsk (its exact allow rules reject `;` and `>`, so it rests on sandboxed
@@ -53,14 +67,19 @@ import { check12 } from '../modules/M11-dispatcher/gate.mjs';
 const refuse = (reason) => ({ ok: false, reason });
 export const BASELINE_MS = 15 * 60_000;
 const has = (v) => v !== undefined && v !== null && v !== '';
+export const WALK_LIMIT = 200_000;
+export const WALK_DEPTH = 64;
+const SHA = /^[0-9a-f]{40}$/;
 
 /**
  * Check 2: the copy's settings-bearing files are exactly main's. → null, or the reason. `run` is safe-git's git (a port).
  */
-export async function setupFilesProblem({ copy, mirror }, { run = git } = {}) {
+export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } = {}) {
+  // The main commit the copy was restored from, when the start port read it; refs/heads/main for a bare call.
+  const main = SHA.test(String(mainAt ?? '')) ? mainAt : 'refs/heads/main';
   let raw;
   try {
-    const r = await run(['ls-tree', '-r', '-z', '--full-tree', 'refs/heads/main'], { gitDir: mirror, purpose: 'runner-check-2-list', timeoutMs: 60_000 });
+    const r = await run(['ls-tree', '-r', '-z', '--full-tree', main], { gitDir: mirror, purpose: 'runner-check-2-list', timeoutMs: 60_000 });
     if (r?.code !== 0) throw new Error(String(r?.stderr ?? '').trim().slice(0, 200) || `exit ${r?.code}`);
     raw = r.stdout.toString();
   } catch (e) { return `main's file list can't be read from the mirror (${e?.message ?? e})`; }
@@ -75,8 +94,15 @@ export async function setupFilesProblem({ copy, mirror }, { run = git } = {}) {
     want.set(path.toLowerCase(), { path, oid });
   }
   const found = [];
+  let seen = 0;
+  const entries = (dir, rel) => {
+    if (rel.split('/').length > WALK_DEPTH) throw new Error(`more than ${WALK_DEPTH} folders deep at ${rel}`);
+    const all = readdirSync(dir, { withFileTypes: true });
+    if ((seen += all.length) > WALK_LIMIT) throw new Error(`more than ${WALK_LIMIT} files to look through`);
+    return all;
+  };
   const under = (dir, rel) => {
-    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    for (const ent of entries(dir, rel)) {
       const r = rel ? `${rel}/${ent.name}` : ent.name; const p = join(dir, ent.name);
       const st = lstatSync(p);
       if (st.isSymbolicLink()) throw new Error(`${r} is a link`);
@@ -84,7 +110,7 @@ export async function setupFilesProblem({ copy, mirror }, { run = git } = {}) {
     }
   };
   const walk = (dir, rel) => {
-    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    for (const ent of entries(dir, rel)) {
       if (!rel && ent.name === '.git') continue;
       const r = rel ? `${rel}/${ent.name}` : ent.name; const p = join(dir, ent.name);
       if (isProtectedName(ent.name)) {
@@ -122,57 +148,62 @@ export function baselineCommand(test, file) {
 }
 
 // Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
-// time-out kills the tests it started too, not claude alone (#369 m2).
+// time-out kills the tests it started too, not claude alone (#369 m2), and so does a normal end (#369 r1 M1): what the
+// tests left running in the group goes with it.
 function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL')) {
   return new Promise((resolve, reject) => {
     let child;
     try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
+    const group = () => Number.isInteger(child.pid) && child.pid > 1;
     const t = setTimeout(() => {
-      try { if (Number.isInteger(child.pid) && child.pid > 1) kill(child.pid); else child.kill('SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      try { if (group()) kill(child.pid); else child.kill('SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
       reject(new Error('it did not finish in time'));
     }, timeoutMs);
     child.on('error', (e) => { clearTimeout(t); reject(e); });
-    child.on('close', (code) => { clearTimeout(t); resolve({ exitCode: code }); });
+    child.on('close', (code) => { clearTimeout(t); try { if (group()) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
   });
 }
 
 /**
  * The ports for one worker-runner session. x: the start port's { role, profile, kind, sessionId, card, cardDoc, product,
- * copy, outbox, env, head, claudeBin, settings: { file, settings }, ownUid } plus the config's { mirror, pin, hooksDir,
+ * copy, outbox, env, head, mainAt, claudeBin, settings: { file, settings }, ownUid, throwaway() → { ok, copy, settingsFile,
+ * done() } (the baseline's own copy, #369 r1 M1) } plus the config's { mirror, pin, hooksDir,
  * rules, snapshot, writeSnapshot, machineWide, busy, alert, spawn, home, testCommand, budget, bobFolder, bobManifest,
  * probeMs?, baselineMs? }. gateOf is M11's check12 (a port for tests). → { [n]: async () => { ok, reason } }, with no entry for a check whose inputs are not there.
  */
 export function workerChecks(x, { gateOf = check12 } = {}) {
   const r = reviewChecks({ ...x, reviewHome: x.home });
-  const ports = { 1: r[1], 5: r[5], 9: r[9] };
+  // reviewChecks' check 1 says "the review copy"; a worker's is the card's copy (#369 r1 c1).
+  const ports = { 1: async () => { const a = await r[1](); return a?.ok ? a : { ...a, reason: String(a?.reason).replaceAll('the review copy', 'the copy') }; }, 5: r[5], 9: r[9] };
   if (has(x.mirror)) ports[2] = async () => { const p = await setupFilesProblem(x); return p ? refuse(p) : { ok: true }; };
   if (typeof x.busy === 'function') ports[3] = r[3];
   if (has(x.pin) && typeof x.spawn === 'function') ports[6] = r[6];
   if (has(x.pin) && has(x.hooksDir) && x.rules) ports[7] = r[7];
   if (has(x.snapshot) && x.rules && typeof x.writeSnapshot === 'function') ports[8] = r[8];
   if (has(x.machineWide)) ports[10] = r[10];
-  if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || has(x.testCommand))) {
+  if (typeof x.spawn === 'function' && has(x.home) && (x.role !== 'worker' || (has(x.testCommand) && typeof x.throwaway === 'function'))) {
     ports[11] = async () => {
       // The smoke first (#369 M2): the branch's tests run only once the lock-down is shown on.
       const smoke = await r[11]();
       if (!smoke?.ok || x.role !== 'worker') return smoke;
-      {
-        const f = baselineFile(x);
+      // In a throwaway copy of the same commit, never the session's (#369 r1 M1).
+      let t; try { t = await x.throwaway(); } catch (e) { t = refuse(`the baseline's throwaway copy can't be made (${e?.message ?? e})`); }
+      if (!t?.ok) return t?.reason ? t : refuse('the baseline\'s throwaway copy can\'t be made (no answer)');
+      let b;
+      try {
+        const f = baselineFile({ copy: t.copy, sessionId: x.sessionId });
         let cmd; try { cmd = baselineCommand(x.testCommand, f); } catch (e) { return refuse(e.message); }
-        const lr = lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: x.settings.file, command: cmd, roleArgs, profile: x.profile });
+        const lr = lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, roleArgs, profile: x.profile });
         if (!lr.ok) return lr;
         rmSync(f, { force: true });
-        let b;
-        try {
-          b = await baselineTest({ run: async () => {
-            await runToEnd(x.spawn, lr.bin, lr.args, { cwd: x.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup);
-            // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
-            let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
-            return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
-          } });
-        } finally { rmSync(f, { force: true }); }
-        if (!b.ok) return b;
-      }
+        b = await baselineTest({ run: async () => {
+          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup);
+          // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
+          let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
+          return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
+        } });
+      } finally { try { await t.done(); } catch { /* left for cleanup */ } }
+      if (!b.ok) return b;
       return smoke;
     };
   }

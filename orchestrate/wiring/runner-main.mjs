@@ -26,16 +26,16 @@
 // read back, or a start the loop must refuse).
 
 import { mkdirSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
-import { workerChecks, setupFilesProblem } from './runner-checks.mjs';
+import { workerChecks } from './runner-checks.mjs';
 import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
-import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 
@@ -81,6 +81,8 @@ export function checkRunnerConfig(c) {
     const s = p.render.paths.snapshot;
     if (s === undefined) continue;
     if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
+    // Not one of the runner's own files there (#369 r1 m4): check 8 would rename the snapshot over it.
+    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => n.toLowerCase() === basename(s).toLowerCase())) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
     if (snaps.has(s.toLowerCase())) fail(`product ${name}: render.paths.snapshot is another product's`);
     snaps.add(s.toLowerCase());
   }
@@ -96,11 +98,22 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
     testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
 }
 
-/** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and check 2
- * once more just before claude starts (#369 M1). */
+/** The checks run once more just before claude starts (#369 M1, r1 m1 and m2): the copy (its folder and HEAD), its setup
+ * files, the outbox, and the rules snapshot written afresh. */
+export const RECHECK = Object.freeze([1, 2, 3, 8]);
+/** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
+ * RECHECK checks once more just before claude starts. */
 export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin },
   checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })),
-  beforeStart: (x) => setupFilesProblem(workerCheckInputs(c, x, { log })) });
+  beforeStart: async (x) => {
+    const k = workerChecks(workerCheckInputs(c, x, { log }));
+    for (const n of RECHECK) {
+      if (typeof k[n] !== 'function') return `check ${n} has no port`;
+      let a; try { a = await k[n](); } catch (e) { a = { ok: false, reason: e?.message ?? String(e) }; }
+      if (!a?.ok) return `check ${n}: ${a?.reason ?? 'no answer'}`;
+    }
+    return null;
+  } });
 /** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
@@ -122,7 +135,7 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
-  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop } = {}) {
+  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   let l; let held;
@@ -133,11 +146,21 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
+  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2): the sessions' hooks refuse every call
+  // once it is 5 minutes old. A rewrite that fails stops its refresher; the snapshot then goes stale, failing safe.
+  const kept = [];
   try {
+    for (const [name, p] of Object.entries(c.products)) {
+      if (typeof p.render.paths.snapshot !== 'string' || !p.rules) continue;
+      try { kept.push([name, fresh(p.render.paths.snapshot, p.rules)]); } catch (e) { log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
+    }
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
       outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping, log }), note: log, stopWhen: () => stopping });
     return 0;
-  } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally { try { l.release(held.nonce); } catch { /* gone */ } }
+  } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
+    for (const [name, k] of kept) { try { k.stop(); if (k.error()) log(`product ${name}'s rules snapshot stopped being kept fresh (${k.error()?.code ?? k.error()?.message})`); } catch { /* stopped */ } }
+    try { l.release(held.nonce); } catch { /* gone */ }
+  }
 }
 
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }

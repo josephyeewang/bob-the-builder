@@ -11,8 +11,8 @@ import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
-import { baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
-import { checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
+import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
+import { RECHECK, checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
 
 const REPO = 'example-owner/example-repo';
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -65,7 +65,7 @@ function standIn(calls, { sandbox = false, baseline = true } = {}) {
     // Sandboxed: the smoke's first step (marking it ran, inside the copy) runs; its write outside and network reach do not.
     const smoke = cmd.includes('.orch-smoke-');
     const run = smoke && sandbox ? cmd.split(';')[0] : smoke || baseline ? cmd : null;
-    setImmediate(() => { if (run) spawnSync('/bin/sh', ['-c', run], { cwd: opts.cwd }); c.emit('close', 0); });
+    setImmediate(() => { if (run) spawnSync('/bin/sh', ['-c', run], { cwd: opts.cwd, stdio: 'ignore' }); c.emit('close', 0); });
     return c;
   };
 }
@@ -74,11 +74,14 @@ function inputs(over = {}) {
   const d = tempDir('orch-rchecks-');
   const copy = join(d, 'copy'); mkdirSync(copy); chmodSync(copy, 0o700);
   const home = join(d, 'home'); mkdirSync(home);
-  return { d, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
+  // The baseline's throwaway copy (#369 r1 M1), as the start port makes it: its own folder and settings file.
+  const spare = join(d, 'spare');
+  const throwaway = async () => { mkdirSync(join(spare, 'copy'), { recursive: true }); return { ok: true, copy: join(spare, 'copy'), settingsFile: join(d, 'spare.json'), done: async () => rmSync(spare, { recursive: true, force: true }) }; };
+  return { d, spare, x: { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', sessionId: SID, card: 'C-1', cardDoc: { product: 'p1' }, product: 'p1',
     copy, outbox: join(d, 'outbox'), env: { PATH: '/usr/bin:/bin' }, head: 'b'.repeat(40), claudeBin: '/x/claude-code/2.1.300/claude',
     settings: { file: join(d, 'settings.json'), settings: {} }, ownUid: () => process.getuid(), mirror: '/m', pin: '2.1.300', hooksDir: '/h', rules: {},
     snapshot: join(d, 'rules.json'), writeSnapshot: () => {}, machineWide: '/mw', busy: () => [], alert: () => {}, spawn: () => { throw new Error('no'); },
-    home, testCommand: 'npm test', budget: null, bobFolder: null, bobManifest: null, ...over } };
+    home, testCommand: 'npm test', budget: null, bobFolder: null, bobManifest: null, throwaway, ...over } };
 }
 
 test('step 6: a port for each check whose inputs are there, none for one whose inputs are not (launch() refuses it)', async () => {
@@ -108,15 +111,19 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   const runs = [['exit 3', /baseline tests failed inside the lock-down \(exit 3\)/, 2, true], ['true', null, 2, true], ['true', /wrote outside the copy/, 1, false]];
   for (const [testCommand, re, n, sandbox] of runs) {
     const calls = [];
-    const { d, x } = inputs({ testCommand, spawn: standIn(calls, { sandbox }) });
+    const { d, x, spare } = inputs({ testCommand, spawn: standIn(calls, { sandbox }) });
     try {
       const r = await workerChecks(x)[11]();
       if (re) { assert.equal(r.ok, false); assert.match(r.reason, re, testCommand); } else assert.deepEqual(r, { ok: true });
       assert.equal(calls.length, n, `${testCommand}: the baseline runs only after the smoke passed`);
       assert.ok(calls[0].cmd.includes(`'${x.home}/`), 'the smoke is first, and tries to write in the owner\'s home, outside the copy');
-      for (const c of calls) { assert.equal(c.cwd, x.copy); assert.ok(c.args.includes(x.settings.file), 'the role\'s own settings'); }
-      if (n === 2) assert.equal(calls[1].cmd, baselineCommand(testCommand, baselineFile(x)));
-      assert.equal(existsSync(baselineFile(x)), false, 'the exit file is removed');
+      assert.equal(calls[0].cwd, x.copy); assert.ok(calls[0].args.includes(x.settings.file), 'the smoke: the role\'s own settings, in the session\'s copy');
+      if (n === 2) {
+        // #369 r1 M1: the baseline runs in the throwaway copy with its settings, never in the session's copy.
+        assert.equal(calls[1].cwd, join(spare, 'copy')); assert.ok(calls[1].args.includes(join(d, 'spare.json'))); assert.equal(calls[1].args.includes(x.settings.file), false);
+        assert.equal(calls[1].cmd, baselineCommand(testCommand, baselineFile({ copy: join(spare, 'copy'), sessionId: SID })));
+      }
+      assert.equal(existsSync(spare), false, 'the throwaway copy, its exit file with it, is removed');
     } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // A command that never writes its exit code can't say: refused.
@@ -135,12 +142,53 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
       assert.deepEqual(killed, [4321], 'the group, by its leader\'s pid'); assert.equal(spawned.at(-1), true, 'the baseline leads its own group');
     } finally { rmSync(d, { recursive: true, force: true }); }
   }
+  // #369 r1 M1: the group is killed after a normal end too, so what the tests left running in it goes.
+  {
+    const killed = [];
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g) });
+    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, [4322]); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // #369 r1 m6: an empty exit file, one that is not a number, and a link to a file holding 0 are not exit 0.
+  for (const [what, write] of [['empty', (f) => writeFileSync(f, '')], ['abc', (f) => writeFileSync(f, 'abc\n')],
+    ['a link', (f, d) => { writeFileSync(join(d, 'zero'), '0\n'); symlinkSync(join(d, 'zero'), f); }]]) {
+    const smoke = standIn([], { sandbox: true });
+    let dd;
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
+    const { d, x } = inputs({ spawn }); dd = d;
+    try { const r = await workerChecks(x)[11](); assert.equal(r.ok, false, what); assert.match(r.reason, /baseline tests failed inside the lock-down \(exit (|abc|not written)\)/, what); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // No throwaway port: a worker gets no check 11, so launch() refuses there.
+  { const { d, x } = inputs({ throwaway: undefined }); try { assert.equal(workerChecks(x)[11], undefined); } finally { rmSync(d, { recursive: true, force: true }); } }
+  // A throwaway that can't be made refuses, and nothing runs.
+  {
+    const calls = [];
+    const { d, x } = inputs({ spawn: standIn(calls, { sandbox: true }), throwaway: async () => ({ ok: false, reason: 'the baseline\'s throwaway copy can\'t be made (EEXIST)' }) });
+    try { assert.match((await workerChecks(x)[11]()).reason, /throwaway copy can't be made \(EEXIST\)/); assert.equal(calls.length, 1, 'the smoke only'); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
   // A script session has no shell, so launch() skips check 11 for it (#369 m6): its port is never called.
   assert.equal(CHECKS.find((c) => c.n === 11).applies('script', DESIGN_PROFILES.script), false);
   assert.equal(CHECKS.find((c) => c.n === 11).applies('worker', DESIGN_PROFILES.worker), true);
   assert.throws(() => baselineCommand('a\nb', '/f'), /one-line test command/);
   assert.throws(() => baselineCommand('', '/f'), /one-line/);
   assert.throws(() => baselineCommand('t', "/f'x"), /quote/);
+});
+
+test('#369 r1 M1: what the baseline leaves running, in its group or in a session of its own, never reaches the session\'s copy', async () => {
+  const late = [
+    ['a background child', '( sleep 1; echo x > .mcp.json; mkdir -p .claude; echo x > .claude/settings.local.json ) & true'],
+    ['a child in its own session', "perl -e 'use POSIX; exit 0 if fork; POSIX::setsid(); sleep 1; open(my $f, q{>}, q{.mcp.json}); print $f q{x};'; true"],
+  ];
+  for (const [what, cmd] of late) {
+    const { d, x } = inputs({ testCommand: cmd, spawn: standIn([], { sandbox: true }) });
+    try {
+      assert.deepEqual(await workerChecks(x)[11](), { ok: true }, what);
+      await new Promise((r) => setTimeout(r, 1600));
+      assert.equal(existsSync(join(x.copy, '.mcp.json')), false, `${what}: the session's copy is untouched`);
+      assert.equal(existsSync(join(x.copy, '.claude')), false, what);
+    } finally { rmSync(d, { recursive: true, force: true }); }
+  }
 });
 
 test('step 6, check 2 (#369 m7): names compared after folding letter case, a non-plain file of main\'s refused, a nested change found', async () => {
@@ -172,9 +220,12 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   // The start port gets these checks and check 0's version.
   const sd = startDeps(c);
   assert.equal(sd.names.version, '2.1.300');
-  // Check 2 once more just before claude starts (#369 M1), on this product's mirror: here none, so it can't pass.
-  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1' }), /main's file list can't be read from the mirror/);
-  assert.deepEqual(Object.keys(sd.checksFor({ role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
+  // Checks 1, 2, 3 and 8 once more just before claude starts (#369 M1, r1 m1): here no copy, so check 1 refuses first.
+  assert.deepEqual(RECHECK, [1, 2, 3, 8]);
+  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the copy is missing/);
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
+  assert.deepEqual(Object.keys(sd.checksFor(wx)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'no throwaway port, no check 11');
+  assert.deepEqual(Object.keys(sd.checksFor({ ...wx, throwaway: async () => ({}) })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
@@ -188,4 +239,56 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   assert.doesNotThrow(() => checkRunnerConfig(withSnap('/o/s1.json', '/o/s2.json')));
   for (const s of ['/x/s.json', '/o/sub/s.json', '/o/../o/s.json', 's.json', '/o']) assert.throws(() => checkRunnerConfig(withSnap(s, '/o/s2.json')), /p1: render\.paths\.snapshot must be a file in the runner's own folder \(\/o\)/, s);
   assert.throws(() => checkRunnerConfig(withSnap('/o/s.json', '/o/S.json')), /p2: render\.paths\.snapshot is another product's/);
+  // #369 r1 m4: never one of the runner's own files there.
+  for (const s of ['/o/status.json', '/o/Memory.json', '/o/settings', '/o/lock', '/o/break.lock']) assert.throws(() => checkRunnerConfig(withSnap(s, '/o/s2.json')), /named as one of the runner's own files/, s);
+});
+
+test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the outbox and the rules snapshot are checked again', async () => {
+  const f = await copyOfMain();
+  try {
+    const own = join(f.root, 'runner'); mkdirSync(own);
+    const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: join(own, 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+      path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: REPO, mirror: f.mirror, rules: RULES,
+        render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, snapshot: join(own, 'rules.json') } } } } });
+    chmodSync(f.copy, 0o700);
+    const outbox = join(f.root, 'outbox'); mkdirSync(outbox, { mode: 0o700 });
+    const x = { product: 'p1', sessionId: SID, copy: f.copy, head: f.head, outbox, ownUid: () => process.getuid() };
+    const again = startDeps(c).beforeStart;
+    assert.equal(await again(x), null);
+    // A check with no port refuses the start, never passes on a guess: here a product with no rules snapshot (check 8).
+    const noSnap = { ...c, products: { p1: { ...c.products.p1, render: { paths: { ...c.products.p1.render.paths, snapshot: undefined } } } } };
+    assert.equal(await startDeps(noSnap).beforeStart(x), 'check 8 has no port');
+    // Check 8: the snapshot is written afresh.
+    rmSync(join(own, 'rules.json'));
+    assert.equal(await again(x), null); assert.equal(existsSync(join(own, 'rules.json')), true, 'the snapshot is written again');
+    // Check 3: a hand-in left in the outbox.
+    writeFileSync(join(outbox, 'bundle-C-1.json'), '{}');
+    const o3 = await again(x);
+    assert.ok(o3 === null ? !existsSync(join(outbox, 'bundle-C-1.json')) : /^check 3:/.test(o3), String(o3));
+    // Check 2: a setup file changed.
+    writeFileSync(join(f.copy, '.mcp.json'), '{"x":1}\n');
+    assert.match(await again(x), /^check 2: the copy's \.mcp\.json is not main's/);
+    writeFileSync(join(f.copy, '.mcp.json'), '{}\n');
+    // Check 1: HEAD moved, and the copy's folder opened up.
+    assert.match(await again({ ...x, head: 'a'.repeat(40) }), /^check 1: the copy holds/);
+    chmodSync(f.copy, 0o755);
+    assert.match(await again(x), /^check 1: the copy is not this user's alone/);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('#369 r1 m3: check 2 compares with the main the copy was restored from, not the main that moved since', async () => {
+  const f = await copyOfMain();
+  try {
+    const at = (await gitOk(['rev-parse', 'refs/heads/main'], { gitDir: f.mirror })).trim();
+    const src = join(f.root, 'src'); const o = { gitDir: join(src, '.git'), workTree: src, cwd: src };
+    writeFileSync(join(src, '.mcp.json'), '{"moved":true}\n');
+    await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-am', 'm2'], o);
+    await gitOk(['fetch', '-q', src, 'refs/heads/main:refs/heads/main'], { gitDir: f.mirror });
+    assert.match(await setupFilesProblem(f), /\.mcp\.json is not main's/, 'against the moving main');
+    assert.equal(await setupFilesProblem({ ...f, mainAt: at }), null, 'against the main it was restored from');
+    // #369 r1 c3: a tree deeper than the walk goes is refused, not walked for ever.
+    let deep = f.copy; for (let i = 0; i < WALK_DEPTH + 2; i++) deep = join(deep, 'd');
+    mkdirSync(deep, { recursive: true });
+    assert.match(await setupFilesProblem({ ...f, mainAt: at }), /more than 64 folders deep/);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
