@@ -4,7 +4,8 @@
 // head if needed). Never the default branch: the owner's ruleset locks it to the owner alone (lead call L24).
 // Whether a GITHUB_TOKEN commit on a side branch counts as activity is NOT verified (GitHub docs, 29 Oct 2026, don't
 // say): the owner's day-61 re-check (README) is the real test, and this note is void once it has run (Principle 9).
-import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 export const QUIET_DAYS = 50;
 export const KEEP_BRANCH = 'keep-alive';
@@ -25,7 +26,12 @@ export async function keepAlive({ api, now = () => Date.now() }) {
   return { committed: true, age: Math.floor(age), branch: KEEP_BRANCH };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a link such as an installed copy (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so argv[1] is resolved before the two are compared.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) {
   const base = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}`;
   const api = async (method, path, body) => {
     const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json' }, body: body ? JSON.stringify(body) : undefined });
