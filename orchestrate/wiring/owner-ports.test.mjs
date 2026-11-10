@@ -110,7 +110,7 @@ test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs
 
 test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a failed pause, whether or not the pass reads the answer', () => {
   const pass = code('pass.mjs');
-  const at = pass.indexOf('await guarded(async () => { await pauseLead('); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
+  const at = pass.search(/await guarded\(async \(\) => \{ (const a = )?await pauseLead\(/); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
   assert.match(pass.slice(at, at + 800), /'pause_lead_failed'/);
   assert.match(OWNER_PORTS.pauseLead.out, /^resolves \{ ok: true \}/); assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
 });

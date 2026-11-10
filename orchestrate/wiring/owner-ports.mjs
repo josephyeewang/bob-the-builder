@@ -56,7 +56,7 @@ export const OWNER_PORTS = Object.freeze({
     '{ ok: false, reason }: it may still run', PORT_DEADLINE_MS),
   saveWork: ask('(session): any session sessions() lists, routed by kind', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down), or the session has no work copy to save: any kind but editing, undo or script (by kind, never by role: M11 records role worker for a script card too), so a stop never reads as unsaved work. A worker kind whose copy is missing or unreadable is { ok: false, reason }', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
   pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow). An unknown outcome is answered by the tick\'s limit and asked again next pass, so asking twice must be harmless',
-    'throws (rejects): today pass.mjs ignores what it resolves to, so a refusal answered as { ok: false } would read as asked', PORT_DEADLINE_MS),
+    'throws (rejects): a failed pause whether or not the pass reads the answer (pass.mjs now also reads a resolved { ok: false } as failed, so either holds there; the port throws)', PORT_DEADLINE_MS),
 });
 
 /**
