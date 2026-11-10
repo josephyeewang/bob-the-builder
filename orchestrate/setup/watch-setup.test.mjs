@@ -307,7 +307,7 @@ test('r7 c-C class check: the setup code reads cfg.watch in exactly these places
     const n = (readFileSync(new URL(`./${f}`, here), 'utf8').match(/cfg\.watch\b/g) ?? []).length;   // each read, not each line
     if (n) at[f] = n;
   }
-  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 20 });   // +6 (L627): the App's key path, the job's three App arguments and check-watch-rules' key check, each reached only past the fingerprint gate; +3 (L633): checkRulesHash, which reads only the fingerprint itself
+  assert.deepEqual(at, { 'daemons.mjs': 4, 'extras.mjs': 1, 'watch-setup.mjs': 22 });   // +6 (L627): the App's key path, the job's three App arguments and check-watch-rules' key check, each reached only past the fingerprint gate; +3 (L633): checkRulesHash, which reads only the fingerprint itself; +2 (L707 M1): proveWatchAppChecks reads only watch.repo (always there), and only once the App is named
 });
 
 test('R6 m-1 a named pipe given as the rules file is refused at once, not waited on', { skip: process.platform === 'win32' }, () => {
