@@ -600,5 +600,13 @@ test('apart path card: the runner folders refuse a session folder spelled throug
 });
 test('apart path card: the notes folder spelled through .. into the outbox is refused', () => {
   assert.equal(render('lead').ok, true);
-  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/notes/../outbox' } }).reason ?? '', /notes folder must be apart from the outbox/);
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/notes/../outbox' } }).reason ?? '', /path "\/w\/notes\/\.\.\/outbox" is not a plain absolute path, spelled as it resolves/);
+  for (const notes of ['/w/notes/', '/w//notes', '/w/./notes']) assert.match(render('lead', { paths: { ...PATHS, notes } }).reason ?? '', /is not a plain absolute path, spelled as it resolves/, notes);
+  // Spelled plainly but naming a folder inside the outbox: refused as not apart.
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/outbox/notes' } }).reason ?? '', /notes folder must be apart from the outbox/);
+});
+test('#420 r1 c2: the runner folders refuse a `.` or empty step, as they refuse `..`', () => {
+  for (const [k, v] of [['requestsDir', '/u/runner/./requests'], ['requestsDir', '/u//runner/requests'], ['statusFile', '/u/runner/./state/status.json'], ['statusFile', '/u//runner/state/status.json'], ['requestsDir', '/u/runner/../requests']])
+    assert.match(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, [k]: v } } }).reason ?? '', new RegExp(`worker runner's ${k} is not a plain absolute path`), v);
+  assert.equal(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, requestsDir: '/u/runner/requests/' } } }).ok, true, 'one trailing slash is dropped');
 });

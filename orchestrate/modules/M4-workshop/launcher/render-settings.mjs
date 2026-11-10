@@ -13,6 +13,7 @@ import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-p
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
+import { foldKey } from '../../../shared/plan-fingerprint.mjs';
 
 // Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
 // case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
@@ -21,7 +22,7 @@ import { inside } from '../hooks/lib.mjs';
 // This compares text in its simplest form; it follows no symlink (the real-path walls are elsewhere).
 export const apart = (a, b) => {
   if (wallPath(a) !== a || wallPath(b) !== b) return false;
-  const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()];
+  const [x, y] = [foldKey(a), foldKey(b)];
   return !inside(x, y) && !inside(y, x);
 };
 
@@ -86,7 +87,8 @@ export function runnerWallDirs(workerRunner) {
   const wr = workerRunner ?? {};
   for (const k of ['requestsDir', 'statusFile']) {
     const v = wr[k];
-    if (typeof v !== 'string' || !v.startsWith('/') || /[^A-Za-z0-9._/-]/.test(v) || v.split('/').includes('..')) return refuse(`the worker runner's ${k} is not a plain absolute path`);
+    // No `..`, `.` or empty (`//`) step: each is a spelling the wall's rules may not match (#420 r1 c2). One trailing slash run is dropped below.
+    if (typeof v !== 'string' || !v.startsWith('/') || /[^A-Za-z0-9._/-]/.test(v) || v.replace(/\/+$/, '').split('/').slice(1).some((x) => x === '' || x === '.' || x === '..')) return refuse(`the worker runner's ${k} is not a plain absolute path`);
   }
   const dirs = [];
   for (const dir of [wr.requestsDir, dirname(wr.statusFile)].map((x) => x.replace(/\/+$/, ''))) {
@@ -239,6 +241,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   let notesArg = '';
   if (!noteInOutbox(profile.compactKind, profile.outbox)) {
     if (paths.notes === undefined) return refuse(`a ${role}'s compaction note is kept outside the outbox, and no notes folder was given`);
+    // Say which folder is badly spelled, before apart refuses it as not apart (#420 r1 c1).
+    const odd = [paths.notes, paths.outbox].find((x) => wallPath(x) !== x);
+    if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);
     if (!apart(paths.notes, paths.outbox)) return refuse('the notes folder must be apart from the outbox');
     notesArg = ` --notes ${paths.notes}`;
   }
