@@ -3,25 +3,32 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId, live }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
 //        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main), then M4's
-//        prepareWorkerCopy makes <copiesRoot>/<card> (never over a folder that is there). The answer's `base` names that
+//        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there). The answer's `base` names that
 //        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
 //        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
-//     3. the outbox <outboxRoot>/<role>/<sessionId> is made, 0o700 (the role folder's access list lets intake read it);
+//        The copy is <copiesRoot>/<product>/<card> and the outbox <outboxRoot>/<product>/<role>/<sessionId> (L836,
+//        owner-status.mjs runnerPlaces), so each product's copies and outboxes are one folder a session can be denied whole;
+//     3. the outbox <outboxRoot>/<product>/<role>/<sessionId> is made, 0o700 (the role folder's access list lets intake read it);
 //     4. the session's settings: walledLaunchSettings (step 2's wall) with the product's fixed paths from the config and
 //        this session's copy and outbox, the other cards' copies that are there at this start denied, written 0o600
-//        under the runner's own folder, which the wall denies to every session. Every other product's mirror is denied
-//        too (#364 r1 M1), and the config must name the Record, key and home deny entries (runner-main.mjs, r1 M2).
-//        KNOWN GAP, accepted (#364 r1 M1 ruling (a)): a copy made after this start is not in this session's list. Every
-//        session runs as the owner's own Mac user, the same user that owns every copy, so no access list can tell one
-//        session from another, and the list is fixed when the session starts (a deny on all of <copiesRoot> would deny
-//        its own copy too, since a deny wins over an allow). All copies share one copies folder, so this holds for another
-//        product's copy made after the start as well as this product's. A Mac user per session or per product would close
-//        it: a choice not taken ("we chose not to", no expiry);
+//        under the runner's own folder, which the wall denies to every session. Every other product's mirror, copies
+//        folder and outbox folder is denied whole (#364 r1 M1, L836: cross-product reads are the line held), and the config
+//        must name the Record, key and home deny entries (runner-main.mjs, r1 M2).
+//        KNOWN GAP, accepted (#364 r1 M1 ruling (a)), inside one product only: a copy of this product made after this
+//        start is not in this session's list. Every session runs as the owner's own Mac user, the same user that owns
+//        every copy, so no access list can tell one session from another, and the list is fixed when the session starts
+//        (a deny on the product's whole copies folder would deny its own copy too, since a deny wins over an allow). A Mac
+//        user per session would close it: a choice not taken ("we chose not to", no expiry).
+//        Across products (#378 r1 M1) the line is held at the start instead: a product's folders added after a session
+//        of another product started are not on that session's list, so a start of product Q is refused while any live
+//        session of another product has settings that do not deny Q's copies and outbox folders whole (liveWallProblem;
+//        the worker runner passes its live sessions as `live`), and the runner itself does not start while a session it
+//        carries over has such settings for any product in its config (runner-main.mjs carriedOverProblem);
 //     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
 //        by runner-main.mjs; none by default); a check that applies and has no port is refused there. Just before
 //        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
@@ -46,10 +53,11 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
-import { join } from 'node:path';
-import { RUNNER_ROLE_OF } from './owner-status.mjs';
+import { dirname, join } from 'node:path';
+import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
+import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
@@ -177,6 +185,57 @@ export function removeAll(fs, dir, log = () => {}) {
 }
 
 /**
+ * Whether a session's settings deny a product's folders whole (#378 r1 M1): its shell's read-deny list holds each one, or
+ * a folder above it, and so do Claude's own Read and Edit denies. → null, or what is not denied.
+ */
+export function productWallGap(settings, places) {
+  const shell = settings?.[S.sandbox]?.[S.filesystem]?.[S.denyRead];
+  const perms = settings?.[S.permissions]?.[S.deny];
+  const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  const over = (dirs, f) => dirs.some((d) => f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`));
+  // Claude's form is Read(//path/**) (render-settings.mjs denyPair).
+  const tool = (verb) => list(perms).map((e) => e.match(new RegExp(`^${verb}\\(/(/.*)/\\*\\*\\)$`))?.[1]).filter(Boolean);
+  // The product's mirror too, when given (#378 self-review M1): every other product's mirror is denied as its copies are.
+  for (const f of [places.copies, places.outboxes, places.mirror].filter((v) => typeof v === 'string')) {
+    if (!over(list(shell), f)) return `its shell may read ${f}`;
+    for (const verb of ['Read', 'Edit']) if (!over(tool(verb), f)) return `its ${verb} may reach ${f}`;
+  }
+  return null;
+}
+
+/** A live session's settings file as the start port wrote it: never through a link, a plain file, JSON. */
+export const sessionSettingsOf = (settingsDir) => (id) => {
+  if (typeof id !== 'string' || !SESSION_ID.test(id)) throw new Error('not a session id');
+  const fd = openSync(join(settingsDir, `${id}.json`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
+};
+
+/**
+ * → null, or why product's start must wait (#378 r1 M1): a live session of another product whose settings do not deny
+ * the product's folders whole. live: [{ id, product, unstarted? }]; `unstarted` marks a start not known to have reached
+ * claude (a waiting request), whose settings file missing means no claude was started with it (it is written first),
+ * with or without a product named (a row from before rows named one). places: runnerPlaces and the product's mirror.
+ * A session whose settings can't be read, or that names no product, can't be told about, so the start waits too.
+ */
+export function liveWallProblem(live, product, places, read) {
+  for (const s of Array.isArray(live) ? live : []) {
+    if (s?.product === product) continue;
+    const who = `session ${s?.id}`;
+    let set; let err;
+    try { set = read(s?.id); } catch (e) { err = e; }
+    if (err && s?.unstarted === true && err?.code === 'ENOENT') continue;
+    if (typeof s?.product !== 'string') return `${who} names no product, so whether it may read product ${product}'s folders can't be told`;
+    if (err) return `${who}'s settings can't be read (${err?.code ?? err?.message}), so whether it may read product ${product}'s folders can't be told`;
+    const gap = productWallGap(set, places);
+    if (gap) return s.unstarted === true
+      // A waiting row never ends (#378 r2 c1): the owner removes its settings file once no claude runs with it (then ENOENT: skipped).
+      ? `${who} (product ${s.product}), a start from an earlier run still waiting, left settings that don't deny product ${product}'s folders (${gap}); once no claude runs with them, the owner removes that settings file (${s.id}.json in the runner's settings folder), and product ${product}'s sessions can start`
+      : `${who} (product ${s.product}) started before product ${product}'s folders were on its deny list (${gap}); start product ${product}'s sessions once it has ended`;
+  }
+  return null;
+}
+
+/**
  * The start port. c (the runner's config, checked by runner-main.mjs): { copiesRoot, outboxRoot, settingsDir, home, path,
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
  * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
@@ -184,9 +243,11 @@ export function removeAll(fs, dir, log = () => {}) {
  * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
  * mainOf(mirror) → the mirror's main commit (read before and after the copy is made, #369 r1 m3), beforeStart(x) → null
  * or the reason claude must not start,
- * walled, fs ({ mkdir, rm, writeNew, list, chmodTree }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
+ * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
- * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude).
+ * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
+ * readSettings(id) → a live session's settings (#378 r1 M1).
+ * The request: { card, kind, product, sessionId, live } (live: the runner's other live sessions, liveWallProblem).
  */
 export function startPort(c, deps = {}) {
   const {
@@ -194,10 +255,11 @@ export function startPort(c, deps = {}) {
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
+    readSettings = sessionSettingsOf(c.settingsDir),
   } = deps;
-  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, chmodTree, ...(deps.fs ?? {}) };
+  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
-  return async ({ card, kind, product, sessionId } = {}) => {
+  return async ({ card, kind, product, sessionId, live = [] } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
@@ -218,9 +280,17 @@ export function startPort(c, deps = {}) {
     const who = account();
     if (!who?.account) return refuse(`no sign-in to start with (${who?.reason ?? 'no answer'})`);
     let commit; try { commit = await startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }); } catch (e) { return refuse(`the copy's start commit can't be read (${e?.message ?? e})`); }
-    const copy = join(c.copiesRoot, card);
-    const outbox = join(c.outboxRoot, role, sessionId);
+    let mine; let copy; let outbox;
+    try {
+      mine = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product });
+      copy = runnerCopy({ copiesRoot: c.copiesRoot, product, card });
+      outbox = runnerOutbox({ outboxRoot: c.outboxRoot, product, role, sessionId });
+    } catch (e) { return refuse(e.message); }
+    const wall = liveWallProblem(live, product, { ...mine, mirror: p.mirror }, readSettings);
+    if (wall) return refuse(wall);
     const settingsFile = join(c.settingsDir, `${sessionId}.json`);
+    // Setup makes each product's folders (setup/layout.mjs, L836); the start never does, so one missing is refused here.
+    for (const f of [mine.copies, dirname(outbox)]) { let st; try { st = fs.lstat(f); } catch { st = null; } if (!st?.isDirectory()) return refuse(`setup has made no folder ${f} for product ${product}`); }
     // The main the copy's setup files are restored from (#369 r1 m3): read before and after the copy is made, so checks 2
     // compare with that commit, and main moving meanwhile is said as such, never read as the branch's tampering.
     let mainAt; try { mainAt = await mainOf(p.mirror); } catch (e) { return refuse(`the mirror's main can't be read (${e?.message ?? e})`); }
@@ -234,14 +304,27 @@ export function startPort(c, deps = {}) {
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
     // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
-    try { for (const n of fs.list(c.copiesRoot)) if (n === `${card}~baseline` || n.startsWith(`${card}~baseline-`)) removeAll(fs, join(c.copiesRoot, n), log); } catch { /* listed again below */ }
-    let others; try { others = fs.list(c.copiesRoot).filter((n) => n !== card).map((n) => join(c.copiesRoot, n)); } catch (e) { return undo(`the copies folder can't be listed (${e?.code ?? e?.message})`); }
-    // Every other product's mirror (#364 r1 M1): known at start from the config.
-    for (const [q, o] of Object.entries(c.products)) if (q !== product && typeof o?.mirror === 'string') others.push(o.mirror);
-    // The baseline's throwaway place (#369 r1 M1): `~` is in no card id (CARD_ID), so no card's copy is named so. Its
-    // name is this session's (#369 r2 m1), so one left behind never refuses a later start of the card.
-    const spare = join(c.copiesRoot, `${card}~baseline-${sessionId}`);
-    if (!others.includes(spare)) others.push(spare);
+    try { for (const n of fs.list(mine.copies)) if (n === `${card}~baseline` || n.startsWith(`${card}~baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
+    let others; try { others = fs.list(mine.copies).filter((n) => n !== card).map((n) => join(mine.copies, n)); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
+    // Every other folder under the copies root and the outbox root, whole (#378 m1): a product setup made but this config
+    // leaves out, and anything left in the old flat layout, as well as the config's other products.
+    for (const top of [c.copiesRoot, c.outboxRoot]) {
+      let names; try { names = fs.list(top); } catch (e) { return undo(`${top} can't be listed (${e?.code ?? e?.message})`); }
+      for (const n of names) if (n !== product) others.push(join(top, n));
+    }
+    // Every other product's mirror, copies folder and outbox folder, whole (#364 r1 M1, L836): known at start from the config.
+    for (const [q, o] of Object.entries(c.products)) {
+      if (q === product) continue;
+      let theirs; try { theirs = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }); } catch (e) { return undo(`product ${q}'s folders can't be named (${e.message})`); }
+      others.push(theirs.copies, theirs.outboxes);
+      if (typeof o?.mirror === 'string') others.push(o.mirror);
+    }
+    // The baseline's throwaway place (#369 r1 M1), in the product's own copies folder (L836): `~` is in no card id
+    // (CARD_ID), so no card's copy is named so. Its name is this session's (#369 r2 m1), so one left behind never refuses
+    // a later start of the card.
+    const spare = join(mine.copies, `${card}~baseline-${sessionId}`);
+    others.push(spare);
+    others = [...new Set(others)];
     const r = p.render;
     const settingsFor = (at, box, deny) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
       paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny] } } });

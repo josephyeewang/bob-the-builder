@@ -20,9 +20,11 @@
 import { createHash } from 'node:crypto';
 import { TIER1_BAR, canonicalJson, planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { planCheckProblem } from '../../shared/plan-review.mjs';
+import { LINE_BREAKS } from './payload.mjs';
 
 const fail = (reason) => ({ ok: false, reason });
-const firstLine = (s) => String(s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
+// The first line at any break a screen may show (L787), the one class payload.mjs flattens titles at.
+const firstLine = (s) => String(s ?? '').split(LINE_BREAKS).map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const SHA256 = /^[0-9a-f]{64}$/;
 

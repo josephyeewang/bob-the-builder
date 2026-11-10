@@ -114,6 +114,32 @@ test('L688: planReviewsRunning lists only the plan reviewers in the runner\'s st
   assert.throws(() => reviewPorts({ requests: dir, status: file, reviewUid: ME + 1, now: () => now }).planReviewsRunning(), /not owned by the review user/);
 });
 
+// #335 r2 m2: the holders are built here, so they are tested here. Only plan reviewers are listed, and "an older plan" is
+// set only for this card's own reviewer on another fingerprint.
+test('#335 r2 m2 planted: a plan waiting for a slot names only the plan reviewers, and marks an older plan only on its own card', () => {
+  const dir = tempDir('m11-holders-');
+  const at = new Date(T0 - 30 * MINUTE).toISOString();
+  const running = [
+    { card: 'C-1', role: 'plan_reviewer', head: HEAD, session_id: 's-1', started_at: at, fingerprint: 'f-old', request_id: 'q-0' },
+    { card: 'C-2', role: 'plan_reviewer', head: HEAD, session_id: 's-2', started_at: at, fingerprint: 'f-other', request_id: 'q-2' },
+    { card: 'C-3', role: 'plan_reviewer', head: HEAD, session_id: 's-3', fingerprint: 'f-new', request_id: 'q-3' },
+    { card: 'C-4', role: 'reviewer', head: HEAD, session_id: 's-4', started_at: at },
+    { card: 'C-5', role: 'auditor', head: HEAD, session_id: 's-5', started_at: at },
+    { card: 'C-1', role: 'plan_reviewer', head: HEAD, session_id: 's-6', fingerprint: 'f-new', request_id: 'q-6' },
+  ];
+  const plans_waiting = [{ card: 'C-1', fingerprint: 'f-new', request_id: 'q-1', waiting_since: at }];
+  const file = status(dir, { written_at: new Date(T0).toISOString(), ok: true, running, alerts: [], plans_waiting });
+  const p = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0 + MINUTE });
+  assert.deepEqual(p.planReviewAnswer({ card: 'C-1', fingerprint: 'f-new', session: 'q-1' }), { ok: true, waiting: 'slot', holders: [
+    { card: 'C-1', started_at: at, older_plan: true },
+    { card: 'C-2', started_at: at },
+    { card: 'C-3' },
+    { card: 'C-1' },
+  ] });
+  // A plan that is not waiting is not told as waiting, whoever holds the slots.
+  assert.equal(p.planReviewAnswer({ card: 'C-1', fingerprint: 'f-new', session: 'q-9' }).waiting, undefined);
+});
+
 test('L66, L315: a failed runner pass and an installed copy behind main are holds, each naming its cause', () => {
   const MAIN = 'c'.repeat(40);
   const ok = { ok: true, error: null, installed_commit: MAIN, alerts: [], running: [] };

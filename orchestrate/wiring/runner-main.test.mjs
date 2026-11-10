@@ -1,17 +1,19 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, checkRunnerConfig, keepSnapshots, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, carriedOverProblem, checkRunnerConfig, keepSnapshots, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
   outboxRoot: join(d, 'outboxes'), copiesRoot: join(d, 'copies'), home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: join(d, 'install', 'claude'),
   recordRoot: join(d, 'record'), recordUid: 501, claimMs: 600_000, products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { deny: DENY(d) } } } }, ...over });
+// The roots as setup makes them, at their real paths (#378 r1 m4: the Mac's temp folder is reached through /var).
+const roots = (d0) => { const d = realpathSync.native(d0); mkdirSync(join(d, 'copies')); mkdirSync(join(d, 'outboxes')); return d; };
 const DENY = (d) => ({ record: join(d, 'record'), ssh: join(d, 'home', '.ssh'), gh: join(d, 'home', '.config', 'gh'), claudeHome: join(d, 'home', '.claude'),
   robotKeys: join(d, 'keys'), secrets: [join(d, 'secrets'), join(d, 'approvals')] });
 
@@ -38,7 +40,7 @@ test('step 5: the real ports are all there, each a function, and a test can repl
 });
 
 test('step 5: main runs the loop with the config\'s paths, holds one lock for its life, and stops on SIGTERM', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const logs = []; let stop; let ctx;
@@ -58,7 +60,7 @@ test('step 5: main runs the loop with the config\'s paths, holds one lock for it
 });
 
 test('step 5: main does not start on a bad config, while another runner holds the lock, and answers 1 when the loop stops on a throw', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const logs = [];
@@ -95,7 +97,7 @@ test('step 5: the LaunchAgent file is loginJobPlist\'s, with its own logs, the o
 });
 
 test('#364 self-review m6: main never makes the runner\'s own folder (setup does, with the access the Dispatcher needs)', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   try {
     const logs = [];
     assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run: async () => {}, onStop: () => {} }), 1);
@@ -128,7 +130,7 @@ test('#364 r1 m4: every SIGTERM is heard, not only the first', () => {
 });
 
 test('#364 r1 m4: main listens with listenStop by default, so a second SIGTERM in the run is heard too', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   const before = process.listeners('SIGTERM');
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
@@ -160,7 +162,7 @@ test('#364 r2 n1, n4: deny entries and the config\'s own paths must be spelled a
 });
 
 test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, and stops doing so at the end', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
@@ -210,7 +212,7 @@ test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, neve
 });
 
 test('#369 r2 m2 self-review: main gives the start port its keeper, so a product whose snapshot is not kept fresh starts nothing; a die, a restart that works, a die again', async () => {
-  const d = tempDir('orch-rmain-');
+  const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
@@ -240,4 +242,78 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
   failNext = false;
   assert.equal(s.held('p1'), null, 'and back once a restart works');
   s.stop(); assert.equal(made.at(-1).stopped, true);
+});
+
+test('L836: a product named as a role, or not named as setup names its folders, is refused (#378 M1)', () => {
+  const p = (n) => ({ repo: `o/${n}`, mirror: `/x/${n}`, render: { paths: { deny: DENY('/x') } } });
+  for (const n of ['worker', 'script', 'lead']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /named as a role/, n);
+  for (const n of ['Alpha', 'Script', 'p.1', 'p_1']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /is not a product name/, n);
+  assert.doesNotThrow(() => checkRunnerConfig(config('/x', { products: { alpha: p('a'), beta: p('b') } })));
+});
+
+test('#378 r1 m4: main does not start when the copies or outbox root is reached through a link, or is missing', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'));
+    const logs = []; let ran = false; const run = async () => { ran = true; };
+    mkdirSync(join(d, 'real-copies'));
+    symlinkSync(join(d, 'real-copies'), join(d, 'linked'));
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { copiesRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.match(logs.at(-1), /did not start: copiesRoot is reached through a link/);
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { outboxRoot: join(d, 'linked') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.match(logs.at(-1), /did not start: outboxRoot is reached through a link/);
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d, { outboxRoot: join(d, 'none') }), log: (s) => logs.push(s), run, onStop: () => {} }), 1);
+    assert.match(logs.at(-1), /did not start: outboxRoot can't be read \(ENOENT\)/);
+    assert.equal(ran, false);
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run, onStop: () => {} }), 0, logs.join('\n'));
+    assert.equal(ran, true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#378 r1 M1: a runner restart carrying over a product A session whose settings do not deny product B, added since, does not start', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner', 'settings'), { recursive: true });
+    const c0 = config(d, { products: { p1: config(d).products.p1, p2: { repo: 'o/p2', mirror: join(d, 'mirror2'), render: { paths: { deny: DENY(d) } } } } });
+    const c = checkRunnerConfig(c0);
+    const SA = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    // A's settings as written when p1 was the only product (runner-ports.test.mjs makes them for real): p2 is not on them.
+    const denied = [join(d, 'record'), join(d, 'copies', 'p1', 'C-9')];
+    const w = { settings: { sandbox: { filesystem: { denyRead: denied } }, permissions: { deny: denied.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } } };
+    writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify(w.settings));
+    const A = { id: SA, product: 'p1', kind: 'editing', card: 'C-1', pgid: 4242, pid: 4242, pid_start: '2026-11-10T10:00:00Z', alive: true };
+    const logs = []; let ran = false; const run = async () => { ran = true; };
+    const go = (memory, groupGone) => main(['/cfg.json'], { readConfig: () => c0, log: (s) => logs.push(s), run, onStop: () => {}, memory: () => memory, ports: { groupGone } });
+    assert.equal(await go({ sessions: [A], requests: {} }, () => false), 1);
+    assert.match(logs.at(-1), new RegExp(`did not start: session ${SA} \\(product p1\\) started before product p2's folders were on its deny list`));
+    assert.equal(await go({ sessions: [A] }, () => { throw new Error('can\'t tell'); }), 1, 'a group the port can\'t tell about is live');
+    assert.equal(ran, false);
+    // #378 self-review M2: a waiting start of an earlier run never keeps the runner down (it can't be shown gone); each
+    // start checks it instead (runner-ports.test.mjs).
+    assert.equal(await go({ sessions: [], requests: { [SA]: { state: 'waiting', card: 'C-1', product: 'p1' } } }, () => false), 0, logs.join('\n'));
+    ran = false;
+    // A's group shown gone, or A ended: the runner starts.
+    assert.equal(await go({ sessions: [A] }, () => true), 0, logs.join('\n'));
+    assert.equal(await go({ sessions: [{ ...A, alive: false }] }, () => false), 0, logs.join('\n'));
+    assert.equal(await go({ sessions: [], requests: { [SA.replace('0f', '9f')]: { state: 'waiting', card: 'C-2', product: 'p1' } } }, () => false), 0, logs.join('\n'));
+    assert.equal(ran, true);
+    // #378 self-review M3: no memory while earlier sessions' settings files are there: a session may run unknown.
+    assert.match(carriedOverProblem(c, {}, { groupGone: () => false }), new RegExp(`no memory, but its settings folder holds 1 earlier session's settings \\(${SA}\\.json\\)`));
+    assert.equal(await go({}, () => false), 1); assert.match(logs.at(-1), /did not start: it has no memory/);
+    // #378 r2 n4: a memory with empty lists is no memory either. n3 (A10): a settings folder that can't be listed refuses.
+    assert.match(carriedOverProblem(c, { sessions: [], requests: {} }, { groupGone: () => false }), /no memory, but its settings folder holds 1/);
+    assert.match(carriedOverProblem(c, {}, { groupGone: () => false, listSettings: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }), /settings folder can't be listed \(EACCES\)/);
+    // n3 (A11): a carried-over session that names no product can't be told about: the runner does not start.
+    assert.match(carriedOverProblem(c, { sessions: [{ ...A, product: undefined }], requests: {} }, { groupGone: () => false }), /names no product/);
+    // A first run (no memory, no settings files) starts.
+    rmSync(join(c.settingsDir, `${SA}.json`));
+    assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);
+    // #378 self-review M1: B's copies and outboxes denied, but not B's mirror: still a gap.
+    const most = [...denied, join(d, 'copies', 'p2'), join(d, 'outboxes', 'p2')];
+    writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: most } }, permissions: { deny: most.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    assert.match(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), new RegExp(`shell may read ${join(d, 'mirror2')}$|shell may read ${join(d, 'mirror2')}\\)`));
+    const all = [...most, join(d, 'mirror2')];
+    writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

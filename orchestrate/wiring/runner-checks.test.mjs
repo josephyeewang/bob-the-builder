@@ -234,7 +234,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   assert.equal(sd.names.version, '2.1.300');
   // Checks 1, 2, 3 and 8 once more just before claude starts (#369 M1, r1 m1): here no copy, so check 1 refuses first.
   assert.deepEqual(RECHECK, [1, 2, 3, 8]);
-  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the copy is missing/);
+  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the card's copy is missing/);
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
   assert.deepEqual(Object.keys(sd.checksFor(wx)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'no throwaway port, no check 11');
   assert.deepEqual(Object.keys(sd.checksFor({ ...wx, throwaway: async () => ({}) })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
@@ -282,9 +282,9 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
     assert.match(await again(x), /^check 2: the copy's \.mcp\.json is not main's/);
     writeFileSync(join(f.copy, '.mcp.json'), '{}\n');
     // Check 1: HEAD moved, and the copy's folder opened up.
-    assert.match(await again({ ...x, head: 'a'.repeat(40) }), /^check 1: the copy holds/);
+    assert.match(await again({ ...x, head: 'a'.repeat(40) }), /^check 1: the card's copy holds/);
     chmodSync(f.copy, 0o755);
-    assert.match(await again(x), /^check 1: the copy is not this user's alone/);
+    assert.match(await again(x), /^check 1: the card's copy is not this user's alone/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

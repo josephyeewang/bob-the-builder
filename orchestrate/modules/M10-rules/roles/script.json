@@ -7,13 +7,13 @@
     "Read",
     "Glob",
     "Grep",
-    "Write",
-    "Workflow"
+    "Write"
   ],
   "permission_mode": "dontAsk",
   "restricted_mode": false,
   "outbox_kinds": [
-    "report-"
+    "report-",
+    "handin-"
   ],
   "auto_resume": false,
   "context": "context.script"
