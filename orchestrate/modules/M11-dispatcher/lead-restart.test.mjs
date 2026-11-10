@@ -558,3 +558,13 @@ test('L359: a re-ask the Lead keeps refusing is told from the first refusal, the
   assert.equal(doc.reask_refused_told, null);
   assert.equal(w.calls.stops, 0);
 });
+
+// L863 c1 (plant P10): what leadInFlight counts as used, by behaviour, not by its source text. Each used state lets the
+// restart go; a file still being applied, or in any other state or none, keeps it in flight.
+test('L863 c1: an outbox file is used only in a USED_STATES state; applying, or any other, is still in flight', async () => {
+  const { USED_STATES } = await import('./intake-facts.mjs');
+  const at = (state) => recWith(state === undefined ? [] : [['fact', `intake-applied-${SID}-wish-1.md`, { state }]]);
+  const ask = (state) => leadInFlight({ rec: at(state), sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false });
+  for (const state of USED_STATES) assert.equal(ask(state), null, state);
+  for (const state of ['applying', 'started', 'Applied', '', undefined]) assert.match(ask(state) ?? '', /wish-1\.md not used yet/, String(state));
+});

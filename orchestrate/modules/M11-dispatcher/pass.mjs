@@ -192,7 +192,16 @@ export const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, 
 // The fields a told mark writes on the facts cleared here (L354 item 3).
 const TOLD = ['told_cause', 'told_at'];
 /** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
-export const writeLaunch = (rec, { sessionId, role, kind, card, head, base, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+// `base` is a commit id or not said (#384 m2): a launch port other than owner-asks (which checks it, launchAnswerWrong)
+// could hand on 'main', a number or an object, and the record would say the copy was started on it. Such a launch is
+// not recorded, as any refused write: the caller tells it, and its merge is refused. Refused on purpose rather than
+// recorded as null (self-review m2): a port that hands on garbage for one field can't be trusted for the rest, and
+// owner-asks already stops such a session before it gets here.
+const BASE_COMMIT = /^[0-9a-f]{40}$/;
+export const writeLaunch = (rec, { base, ...rest }) => (base === undefined || base === null || (typeof base === 'string' && BASE_COMMIT.test(base))
+  ? writeLaunchRecord(rec, { base, ...rest })
+  : { ok: false, reason: 'the launch named a malformed base commit' });
+const writeLaunchRecord = (rec, { sessionId, role, kind, card, head, base, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
   doc: { session_id: sessionId, role, kind, card, head: head ?? null, base: base ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
