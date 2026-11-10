@@ -4,7 +4,8 @@
 //   readOwnerAnswer({ file, ownerUid, now?, staleMs?, acl? }) → { ok: true, answer } | { ok: false, reason }
 //   sensorsPorts({ file, ownerUid, now?, staleMs?, stored }) → { whoIsSignedIn, readUsage, lastReason }
 //     stored(account) → the usage fact the Record holds for that account, or null (storedUsage(rec) builds it): the marks
-//                       the window checks compare with, so they hold across runs (L746 M-A). Required: missing, it throws.
+//                       the window checks compare with, so they hold across runs (L746 M-A); a failed read throws, never null
+//                       (L781). Required: missing, it throws.
 //     whoIsSignedIn() → { account, signed_in, observed_at?, reason? }: signed_in false only when the answer says plainly
 //                       that the named account is signed out; null (couldn't tell) with the reason for everything else
 //     readUsage(account) → { source, h5, week, week_from, observed_at } | null

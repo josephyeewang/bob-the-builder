@@ -65,8 +65,8 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   // A stored fact that can't be read is never taken as none: that would write over the marks (self-review Minor). The fact
   // writer's getKnown throws on a failed Record read, which M9 answers as `corrupt`, not by throwing (L781); a writer
   // without it (a test's) is read through get.
-  const read = typeof writer.getKnown === 'function' ? writer.getKnown : typeof writer.get === 'function' ? writer.get : null;
-  let stored = null; try { stored = read ? read(USAGE_FACT(account)) : null; } catch (e) {
+  const id = USAGE_FACT(account);
+  let stored = null; try { stored = typeof writer.getKnown === 'function' ? writer.getKnown(id) : typeof writer.get === 'function' ? writer.get(id) : null; } catch (e) {
     return { ok: false, reason: `the stored usage for ${account} could not be read, so nothing was written over it (${String(e?.message ?? e).slice(0, 80)})` };
   }
   const at = Date.parse(started);
@@ -130,7 +130,7 @@ export async function writeLimitHit(writer, exit, { now = () => new Date() } = {
   if (resets_at !== null && Date.parse(resets_at) < Date.parse(observed_at) - PAST_SLACK_MS) resets_at = null;
   if (resets_at === null) {
     // A failed read is never taken as no stored hit (L781 class sweep): that would write null over a reset time still ahead.
-    let stored; try { stored = (typeof writer.getKnown === 'function' ? writer.getKnown : writer.get)(LIMIT_FACT(exit.account)); } catch (e) {
+    let stored; try { stored = typeof writer.getKnown === 'function' ? writer.getKnown(LIMIT_FACT(exit.account)) : writer.get(LIMIT_FACT(exit.account)); } catch (e) {
       return { ok: false, reason: `the stored limit hit for ${exit.account} could not be read, so nothing was written over it (${String(e?.message ?? e).slice(0, 80)})` };
     }
     const kept = timeOrNull(stored?.resets_at);
