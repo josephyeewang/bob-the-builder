@@ -24,7 +24,7 @@ import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.m
 import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { installHooks, pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
-import { parseConfig } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, parseConfig } from './layout.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
@@ -160,8 +160,6 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
 }
 
 const fingerprint = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const CLAUDE_CODE = 'claude-code';
-const HOOKS = 'hooks';
 const ADDING = '.adding';
 
 /**

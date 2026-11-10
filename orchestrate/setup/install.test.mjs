@@ -1149,10 +1149,14 @@ test('add-to-install: a dry run lists the steps and changes nothing; the flags b
   assert.throws(() => parseArgs(['add-to-install', '--pin', '2.1.316']), /needs --pin/);
   assert.throws(() => parseArgs(['add-to-install', '--pin', 'latest', '--sha256', SHA]), /--pin must be a version/);
   assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', 'ABC']), /--sha256 must be/);
-  assert.throws(() => parseArgs(['install', '--pin', PIN]), /only for add-to-install/);
+  assert.throws(() => parseArgs(['install', '--pin', PIN]), /--pin is only for review-config and add-to-install/);
+  // #291's review-config takes --pin too, and only add-to-install takes --sha256 (merge with #291).
+  assert.throws(() => parseArgs(['install', '--sha256', SHA]), /--sha256 is only for add-to-install/);
+  assert.throws(() => parseArgs(['review-config', '--pin', PIN, '--input', '/a', '--out', '/b', '--sha256', SHA]), /--sha256 is only for add-to-install/);
+  assert.equal(parseArgs(['review-config', '--pin', PIN, '--input', '/a', '--out', '/b']).claudePin, PIN);
   // watch-app's --rules-sha256 and this command's --pin are kept apart: neither is taken for the other (merge with main, #243).
   assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA, '--rules-sha256', SHA]), /only for watch-app/);
-  assert.throws(() => parseArgs(['watch-app', '--app-id', '1', '--app-installation', '2', '--app-key-name', 'app-key', '--pin', PIN]), /only for add-to-install/);
+  assert.throws(() => parseArgs(['watch-app', '--app-id', '1', '--app-installation', '2', '--app-key-name', 'app-key', '--pin', PIN]), /--pin is only for review-config and add-to-install/);
   assert.equal(parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA]).claudePin, PIN);
 });
 

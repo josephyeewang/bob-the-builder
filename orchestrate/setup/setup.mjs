@@ -8,6 +8,9 @@
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
+//   review-config --pin <x.y.z> --input <file> --out <file> [--for-install] [--dry-run]   the review runner's review.json,
+//                                       built: setup's values, the pin, and the owner's few from --input; read back with
+//                                       the runner's own check; --for-install for a first install (review-config.mjs) (NOT root)
 //   add-to-install --pin <x.y.z> --sha256 <hex> [--dry-run]   the pinned Claude Code and the hooks into the installed copy, in
 //                                       place: no update, no job touched; safe to run again                    (root)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
@@ -45,6 +48,8 @@ import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
+import { reviewConfigCommand } from './review-config.mjs';
+import { readUser } from './users-folders.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 // What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
@@ -54,22 +59,23 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'review-config', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
-const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
   if (!COMMANDS.includes(cmd)) throw new Error(`first word must be ${COMMANDS.join(', ')}`);
   let rest = argv.slice(1); let sub = null;
   if (cmd === 'daemons') { sub = rest[0]; rest = rest.slice(1); if (!DAEMON_SUBS.includes(sub)) throw new Error(`daemons needs one of ${DAEMON_SUBS.join(', ')}`); }
-  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null };
+  const o = { cmd, sub, config: null, dry: false, prefix: '', main: null, repo: null, rulesSource: null, printLine: false, only: null, app: {}, pin: null, claudePin: null, sha256: null, input: null, out: null, forInstall: false };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--dry-run') o.dry = true;
     else if (a === '--print-config-line') o.printLine = true;
+    else if (a === '--for-install') o.forInstall = true;
     else if (a === '--rules-sha256') {
       const v = rest[++i];
       if (typeof v !== 'string' || !/^[0-9a-f]{64}$/.test(v)) throw new Error('--rules-sha256 needs the rules file\'s 64-hex fingerprint');
@@ -79,11 +85,13 @@ export function parseArgs(argv) {
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
       o.app[{ '--app-id': 'id', '--app-installation': 'installation', '--app-key-name': 'keyFile' }[a]] = v;
     }
-    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256') {
+    else if (a === '--config' || a === '--root-prefix' || a === '--main' || a === '--repo' || a === '--rules-source' || a === '--only' || a === '--pin' || a === '--sha256' || a === '--input' || a === '--out') {
       const v = rest[++i];
       if (typeof v !== 'string' || v.startsWith('--')) throw new Error(`${a} needs a value`);
       if (a === '--pin') { if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error('--pin must be a version, x.y.z'); o.claudePin = v; continue; }
       if (a === '--sha256') { if (!/^[0-9a-f]{64}$/.test(v)) throw new Error('--sha256 must be 64 lower-case hex characters'); o.sha256 = v; continue; }
+      if (a === '--input') { o.input = v; continue; }
+      if (a === '--out') { o.out = v; continue; }
       if (a === '--config') o.config = v; else if (a === '--main') { if (!/^[0-9a-f]{40}$/.test(v)) throw new Error('--main must be a 40-hex commit'); o.main = v; } else if (a === '--repo') o.repo = v; else if (a === '--rules-source') o.rulesSource = v; else if (a === '--only') o.only = v; else o.prefix = v;
     } else throw new Error(`argument ${i + 1} is not one this command takes (it is not shown, in case it is a secret)`);
   }
@@ -99,7 +107,11 @@ export function parseArgs(argv) {
   if (o.pin !== null && cmd !== 'watch-app') throw new Error('--rules-sha256 is only for watch-app');
   if (cmd === 'watch-app' && Object.keys(o.app).length !== 3) throw new Error('watch-app needs all three: --app-id <id> --app-installation <id> --app-key-name <the key file\'s name in the keys folder>');
   if (o.main && cmd !== 'check-install') throw new Error('--main is only for check-install');
-  if ((o.claudePin !== null || o.sha256 !== null) && cmd !== 'add-to-install') throw new Error('--pin and --sha256 are only for add-to-install');
+  if ((o.input !== null || o.out !== null) && cmd !== 'review-config') throw new Error('--input and --out are only for review-config');
+  if (o.claudePin !== null && cmd !== 'review-config' && cmd !== 'add-to-install') throw new Error('--pin is only for review-config and add-to-install');
+  if (o.sha256 !== null && cmd !== 'add-to-install') throw new Error('--sha256 is only for add-to-install');
+  if (o.forInstall && cmd !== 'review-config') throw new Error('--for-install is only for review-config');
+  if (cmd === 'review-config' && (o.claudePin === null || o.input === null || o.out === null)) throw new Error('review-config needs --pin <x.y.z>, --input <your file of the owner\'s fields> and --out <the file to write>');
   if (cmd === 'add-to-install' && (o.claudePin === null || o.sha256 === null)) throw new Error('add-to-install needs --pin <x.y.z> and --sha256 <hex>');
   return o;
 }
@@ -154,6 +166,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only);   // a name that is no job of this config is refused before anything runs
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
+  if (o.cmd === 'review-config') return reviewConfigCommand(cfg, { pin: o.claudePin, input: o.input, out: o.out, dry: o.dry, forInstall: o.forInstall }, { euid: io.euid(), userOf: (n) => readUser(io, n), out, err });
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }), out);
   if (o.cmd === 'check-install') return report(checkInstall(io, cfg, { main: o.main }), out);
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);

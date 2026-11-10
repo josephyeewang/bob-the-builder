@@ -86,11 +86,15 @@ import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
 import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
+import { TOOLS_CHECKED } from '../../M10-rules/roles.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
 const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget'];
 const PIN = /^\d+\.\d+\.\d+$/;
+// Every field readConfig reads, and nothing else: setup's review-config (setup/review-config.mjs) builds each from
+// exactly one source, and its test holds that table equal to this list.
+export const CONFIG_FIELDS = Object.freeze([...ABS, ...OPTIONAL_ABS, 'deny', 'pin', 'rules', 'uids', 'recordUid', 'ownerUid']);
 // The one export a wiring may have (R-0b-163, L78 n4).
 export const WIRING_EXPORTS = Object.freeze(['start']);
 const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
@@ -111,6 +115,10 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
   if (typeof c.pin !== 'string' || !PIN.test(c.pin)) throw new Error('config: pin must be the Claude Code version the rules pin (x.y.z)');
+  // m-5 (L599, L709): the pin is the one the role tool lists were checked on. add-to-install wrote this pin, and the
+  // program at claudeBin, into the copy; a pin moved without that re-check is refused here, at daemon start, by its own
+  // name, not later by launch check 0 as "setting names not confirmed". No rules snapshot is read for it.
+  if (c.pin !== TOOLS_CHECKED.claude_code) throw new Error(`config: pin is ${c.pin}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
   // No path may be / itself (L83 minor 3): a deny of / denies nothing the template can name, and a bobFolder of / would
   // attach the whole disk read-only as the method folder.
   for (const [k, p] of [...[...ABS, ...OPTIONAL_ABS].map((k) => [k, c[k]]), ...c.deny.map((p) => ['deny', p])]) {

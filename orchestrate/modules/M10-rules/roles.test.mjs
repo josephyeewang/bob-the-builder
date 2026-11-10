@@ -125,7 +125,7 @@ test('L683, L687: the plan reviewer reads and cannot write or hand anything in; 
   // A kind the shared table lists for it would still be refused: a read-only role hands in nothing.
   for (const k of ['verdict-', 'report-']) assert.equal(withEdit('plan_reviewer', (p) => ({ ...p, outbox_kinds: [k] })).ok, false, k);
   assert.ok(ROLE_FILES.includes('plan_reviewer'), 'its file is one ROLE_FILES names');
-  // Its file without its ROLE_FILES line is an extra file, so loading refuses.
+  // Its ROLE_FILES line without its file is a missing file, so loading refuses.
   const dir = copyRoles();
   rmSync(join(dir, 'plan_reviewer.json'));
   assert.match(loadRoles(dir, { pin: PIN }).reason, /role files must be exactly/);
