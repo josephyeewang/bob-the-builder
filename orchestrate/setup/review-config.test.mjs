@@ -149,7 +149,7 @@ test('m-5: a pin other than the one the tool lists were checked on is refused, t
   } finally { w.done(); }
 });
 
-test('a wall the runner would refuse removes the file too: the review folder missing', () => {
+test('a wall the runner would refuse: nothing is written, the dry run refuses it too (the review folder missing)', () => {
   const w = world();
   try {
     rmSync(join(w.base, 'review'), { recursive: true });
@@ -157,6 +157,8 @@ test('a wall the runner would refuse removes the file too: the review folder mis
     assert.equal(r.code, 1);
     assert.match(r.err.join('\n'), /the review runner would refuse it: config: root: .* is missing/);
     assert.equal(r.text, null);
+    const d = w.run({ dry: true });
+    assert.equal(d.code, 1); assert.match(d.err.join('\n'), /the review runner would refuse it: config: root: .* is missing/); assert.deepEqual(d.out, []);
   } finally { w.done(); }
 });
 

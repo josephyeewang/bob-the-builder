@@ -28,7 +28,8 @@
 //                  places this file names (COPY_CLAUDE_CODE/<pin>/claude, COPY_HOOKS) and installs this file last.
 // So the order is: review-config --for-install, install; then review-config, add-to-install (README).
 
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, lstatSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix } from 'node:path';
 import { RUNNER_CONFIG } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
@@ -172,7 +173,7 @@ function writeOut(out, { text, checkText = text }, check) {
 
 /**
  * The command. `userOf`, `check` (the runner's readConfig, with its ports) and `write` are ports for a test. → exit code:
- * 0 written and read back, 1 a problem (nothing left at `out`), 2 usage.
+ * 0 written and read back, 1 a problem (`out` as it was), 2 usage.
  */
 export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, dry, forInstall = false }, { euid, userOf, out, err, check = (f) => readConfig(f), write = writeOut, readIn = readInput }) {
   if (euid === 0) { err('refused: review-config reads your own input file and writes your own copy, so it runs without sudo. Root reads the result only once you have put it in place (README).'); return 2; }
@@ -186,7 +187,15 @@ export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, 
   const text = forInstall ? json(Object.fromEntries(Object.entries(built.config).filter(([k]) => !INSTALL_LATER.includes(k)))) : full;
   const left = Object.entries(SOURCES).filter(([, s]) => s === 'later').map(([k]) => k);
   const leftNow = forInstall ? `${left.join(', ')}; and, for the first install, ${INSTALL_LATER.join(' and ')} (add-to-install's)` : left.join(', ');
-  if (dry) { out(text.trimEnd()); out(`dry run: nothing written. Left out (no source yet): ${leftNow}.`); return 0; }
+  if (dry) {
+    // The dry run reads the whole file back too (L731 self-review m3), through a scratch copy that is then removed, so it
+    // refuses what the real run refuses.
+    const scratch = mkdtempSync(join(tmpdir(), 'review-config-dry-'));
+    try { write(join(scratch, RUNNER_CONFIG), { text: full }, check); } catch (e) {
+      err(e?.refused ? `PROBLEM  the review runner would refuse it: ${e.message}` : `PROBLEM  the dry run's scratch copy could not be written (${e?.code ?? e?.message ?? 'error'})`); err('dry run: nothing written.'); return 1;
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+    out(text.trimEnd()); out(`dry run: nothing written. Left out (no source yet): ${leftNow}.`); return 0;
+  }
   try { write(outFile, { text, checkText: full }, check); } catch (e) {
     if (e?.refused) { err(`PROBLEM  the review runner would refuse it: ${e.message}`); err(`nothing was written; ${outFile} is as it was.`); return 1; }
     err(`PROBLEM  ${outFile} could not be written (${e?.code ?? e?.message ?? 'error'}); it is as it was.`); return 1;
