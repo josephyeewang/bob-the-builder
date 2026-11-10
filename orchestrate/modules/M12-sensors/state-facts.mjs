@@ -61,8 +61,11 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   let observed_at = relayed(started, r.observed_at);
   if (!observed_at) return { ok: false, reason: `the usage reading for ${account} has an observed_at that is not a time` };
   const win = (w) => ({ used_pct: w?.used_pct ?? null, resets_at: w?.resets_at ?? null });
-  // A stored fact that can't be read is never taken as none: that would write over the marks (self-review Minor).
-  let stored = null; try { stored = typeof writer.get === 'function' ? writer.get(USAGE_FACT(account)) : null; } catch (e) {
+  // A stored fact that can't be read is never taken as none: that would write over the marks (self-review Minor). The fact
+  // writer's getKnown throws on a failed Record read, which M9 answers as `corrupt`, not by throwing (L781); a writer
+  // without it (a test's) is read through get.
+  const read = typeof writer.getKnown === 'function' ? writer.getKnown : typeof writer.get === 'function' ? writer.get : null;
+  let stored = null; try { stored = read ? read(USAGE_FACT(account)) : null; } catch (e) {
     return { ok: false, reason: `the stored usage for ${account} could not be read, so nothing was written over it (${String(e?.message ?? e).slice(0, 80)})` };
   }
   const at = Date.parse(started);
@@ -123,7 +126,11 @@ export async function writeLimitHit(writer, exit, { now = () => new Date() } = {
   let resets_at = timeOrNull(exit.resets_at);
   if (resets_at !== null && Date.parse(resets_at) < Date.parse(observed_at) - PAST_SLACK_MS) resets_at = null;
   if (resets_at === null) {
-    const kept = timeOrNull(writer.get(LIMIT_FACT(exit.account))?.resets_at);
+    // A failed read is never taken as no stored hit (L781 class sweep): that would write null over a reset time still ahead.
+    let stored; try { stored = (typeof writer.getKnown === 'function' ? writer.getKnown : writer.get)(LIMIT_FACT(exit.account)); } catch (e) {
+      return { ok: false, reason: `the stored limit hit for ${exit.account} could not be read, so nothing was written over it (${String(e?.message ?? e).slice(0, 80)})` };
+    }
+    const kept = timeOrNull(stored?.resets_at);
     if (kept && Date.parse(kept) > Date.parse(observed_at)) resets_at = kept;
   }
   return writer.put(LIMIT_FACT(exit.account), { kind: 'fact.limit-hit', account: exit.account, resets_at, observed_at, source: exit.source ?? null });

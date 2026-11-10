@@ -7,12 +7,12 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { writeAnswer, ANSWER_FILE } from './owner-answer.mjs';
 import { readOwnerAnswer, sensorsPorts, storedUsage, ANSWER_STALE_MS } from './sensors-ports.mjs';
 import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
-import { memoryRecord } from '../shared/record.mjs';
+import { memoryRecord, makeRecord } from '../shared/record.mjs';
 import { writeUsageFact, writeSignedInAccount } from '../modules/M12-sensors/state-facts.mjs';
 import { readFact, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { shapeFact } from '../modules/M12-sensors/fact-shapes.mjs';
-import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
+import { makeFactWriter, knownDoc } from '../modules/M12-sensors/facts.mjs';
 
 const T0 = Date.parse('2026-11-05T12:00:00Z');
 const UID = process.getuid();
@@ -309,7 +309,10 @@ test('L746 M-A: a lower percent in the same window, read by the NEXT run, is ref
     assert.deepEqual(stale(await run(later).readUsage('a')), storedNow(), 'the weekly row is held to the stored week, from the same row');
     assert.equal(writeAnswer({ to: w.file, answer: answer({ observed_at: new Date(T0 + later).toISOString(), usage: { h5: H(5, '2026-11-05T20:00:00.000Z'), week: W(10), week_from: 'weekly_scoped:Y' } }) }).ok, true);
     assert.deepEqual(stale(await run(later).readUsage('a')), storedNow(), "another row's week is held to the stored week too (switching rows is no way round)");
-    assert.equal(storedUsage({ read: () => { throw new Error('x'); } })('a'), null, 'a Record that throws is no mark, never a throw');
+    // A failed read is never "no mark" (L781): the real Record answers a store error as `corrupt`, and that throws here.
+    assert.throws(() => storedUsage(makeRecord({ read: () => { throw new Error('SQLITE_BUSY'); } }))('a'), /the stored usage for a could not be read \(record error: SQLITE_BUSY\)/);
+    assert.throws(() => storedUsage({ read: () => ({ id: 'usage-a', corrupt: true, reason: 'x' }) })('a'), /could not be read/);
+    assert.equal(storedUsage(makeRecord(memoryRecord()))('a'), null, 'a Record that holds no usage fact is no mark');
   } finally { w.done(); }
 });
 
@@ -417,7 +420,9 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
     const w = makeFactWriter(rec, { now: () => new Date(T0) });
     assert.equal((await writeUsageFact(w, async () => ({ source: 's', ...real }), 'a', { now: () => new Date(T0) })).ok, true);
     const before = rec.read('fact', USAGE_FACT('a'));
-    const broken = { ...w, get: () => { throw new Error('record read failed'); } };
+    // Through the real Record wrapper (L781): its read answers a store error as `corrupt`, never by throwing.
+    const failing = makeRecord(new Proxy({}, { get: (_, k) => (k === 'read' ? () => { throw new Error('record read failed'); } : typeof rec[k] === 'function' ? rec[k].bind(rec) : rec[k]) }));
+    const broken = makeFactWriter(failing, { now: () => new Date(T0 + 60e3) });
     const r = await writeUsageFact(broken, async () => ({ source: null, h5: null, week: null }), 'a', { now: () => new Date(T0 + 60e3) });
     assert.equal(r.ok, false); assert.match(r.reason, /could not be read, so nothing was written over it/);
     assert.deepEqual(rec.read('fact', USAGE_FACT('a')), before, 'the stored fact is untouched');
@@ -431,3 +436,59 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+
+// L781 (audit #283 r4 M-1, probe283r4 R1x and R5): over the REAL Record wrapper (makeRecord), whose read answers a store error
+// as { corrupt: true } and never throws, brief read failures of the usage fact never let a forged low reading through and
+// never write unknown over the marks. The store fails the next N reads of the usage fact, then answers again.
+function flakyWorld() {
+  const dir = tempDir('orch-l781-'); chmodSync(dir, 0o755);
+  const file = join(dir, ANSWER_FILE); const real = memoryRecord();
+  let failNext = 0;
+  const rec = makeRecord(new Proxy({}, { get(_, k) {
+    if (k === 'read') return (e, id) => { if (e === 'fact' && id === USAGE_FACT('a') && failNext > 0) { failNext -= 1; throw new Error('SQLITE_BUSY'); } return real.read(e, id); };
+    const v = real[k]; return typeof v === 'function' ? v.bind(real) : v;
+  } }));
+  const put = (usage, n, extra = {}) => assert.equal(writeAnswer({ to: file, answer: { v: 1, account: 'a', signed_in: true, observed_at: new Date(T0 + n).toISOString(), usage, ...extra } }).ok, true);
+  const pass = (n) => { const q = sensorsPorts({ file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
+    return sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {} }, now: () => new Date(T0 + n), deadlineMs: 200 }); };
+  const marks = () => { const d = real.read('fact', USAGE_FACT('a'))?.doc; return [d?.h5?.used_pct, d?.week?.used_pct]; };
+  return { put, pass, marks, fail: (k) => { failNext = k; }, done: () => rmSync(dir, { recursive: true, force: true }) };
+}
+const R781_H = (p) => ({ used_pct: p, resets_at: '2026-11-05T15:00:00.000Z' });
+const R781_W = (p) => ({ used_pct: p, resets_at: '2026-11-07T22:59:59.000Z' });
+const R781_REAL = { h5: R781_H(90), week: R781_W(95), week_from: 'weekly_all' };
+const R781_FORGED = { h5: R781_H(5), week: R781_W(5), week_from: 'weekly_all' };
+
+for (const k of [1, 2, 3, 4, 5, 6]) {
+  test(`L781 R1x: the first ${k} usage-fact read(s) of a run fail, and a forged 5/5 is not written over 90/95`, async () => {
+    const w = flakyWorld();
+    try {
+      w.put(R781_REAL, 0); await w.pass(0); assert.deepEqual(w.marks(), [90, 95]);
+      w.put(R781_FORGED, 60e3); w.fail(k); const out = await w.pass(60e3);
+      assert.deepEqual(w.marks(), [90, 95], JSON.stringify(out.problems));
+    } finally { w.done(); }
+  });
+}
+for (const k of [1, 2]) {
+  test(`L781 R5: a gap run with ${k} failing read(s) at the write keeps the marks, and the next run's forged 5/5 is refused`, async () => {
+    const w = flakyWorld();
+    try {
+      w.put(R781_REAL, 0); await w.pass(0);
+      w.put(null, 60e3, { usage_reason: 'x' }); w.fail(k); const gap = await w.pass(60e3);
+      assert.deepEqual(w.marks(), [90, 95], `the gap run wrote nothing over the marks: ${JSON.stringify(gap.problems)}`);
+      w.put(R781_FORGED, 120e3); await w.pass(120e3);
+      assert.deepEqual(w.marks(), [90, 95]);
+    } finally { w.done(); }
+  });
+}
+
+test('L781: knownDoc and the fact writer\'s getKnown: none is null, a failed read throws; get is unchanged', () => {
+  assert.equal(knownDoc(null), null);
+  assert.deepEqual(knownDoc({ doc: { a: 1 } }), { a: 1 });
+  assert.throws(() => knownDoc({ corrupt: true, reason: 'record error: x' }, 'it'), /^Error: it could not be read \(record error: x\)$/);
+  assert.throws(() => knownDoc({ id: 'x' }), /could not be read \(no document\)/);
+  const rec = makeRecord({ read: () => { throw new Error('SQLITE_BUSY'); }, write: () => ({ ok: true }) });
+  const fw = makeFactWriter(rec);
+  assert.throws(() => fw.getKnown('usage-a'), /the fact usage-a could not be read/);
+  assert.equal(fw.get('usage-a'), null, 'get still reads a failed read as none (its other callers are reported, not changed)');
+});
