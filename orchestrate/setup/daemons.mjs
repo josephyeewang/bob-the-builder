@@ -26,7 +26,7 @@ import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
 import { ROBOT_JOB, robotConfigProblem, robotPlist } from './robot-setup.mjs';
-import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem } from './dispatcher-setup.mjs';
+import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
@@ -62,7 +62,7 @@ const sha = (t) => createHash('sha256').update(t).digest('hex');
 const recordPath = (cfg) => join(installPaths(cfg).install, 'loaded-jobs.json');
 /** What `load` recorded: job label → fingerprint of the job file it loaded. Anything unreadable is an empty record (every job then counts as not known to match). */
 function readRecord(io, cfg) { try { const r = JSON.parse(io.readText(recordPath(cfg))); return r && typeof r === 'object' && !Array.isArray(r) ? r : {}; } catch { return {}; } }
-function changeRecord(io, cfg, fn) { const rec = readRecord(io, cfg); fn(rec); const f = recordPath(cfg); io.rm(f); io.write(f, `${JSON.stringify(rec, null, 1)}\n`, 0o600); io.secureFile(f, { uid: io.rootUid, gid: 0, mode: 0o644 }); }
+function changeRecord(io, cfg, fn) { const rec = readRecord(io, cfg); fn(rec); writeAside(io, recordPath(cfg), `${JSON.stringify(rec, null, 1)}\n`); }   // whole or not at all (L807 m4)
 /** A step that asks launchd AFTER a load whether the job is really there: a bootstrap that said yes but left nothing is a failure, not "done" (L150 m2). */
 const readBackOp = (io, cfg, job) => op(`read back: ${labelOf(cfg, job)} is loaded`, () => {
   const s = jobState(io, cfg, job);
@@ -165,7 +165,22 @@ export function jobState(io, cfg, job) {
   return { loaded: true, pid: Number(/^\s*pid = (\d+)$/m.exec(r.stdout)?.[1]) || null, state: /^\s*state = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown', lastExit: /^\s*last exit code = (.+)$/m.exec(r.stdout)?.[1]?.trim() ?? 'unknown' };
 }
 
+/** 'loaded' (launchd runs it), 'placed' (its job file is there, so launchd starts it at boot) or null; throws when launchd can't be asked. */
+export function jobLive(io, cfg, job) {
+  const s = jobState(io, cfg, job);
+  if (s.error) throw new Error(`could not ask launchd about ${labelOf(cfg, job)}: ${s.error}`);
+  if (s.loaded) return 'loaded';
+  try { io.lstat(plistPath(cfg, job)); return 'placed'; } catch { return null; }
+}
+
+/** `daemons place`: launchd starts every job file in its folder at boot, with no load to refuse it, so a job file is placed only when load would start the job (L807 M1). */
 export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
+  const gate = startProblems(io, cfg, jobs);
+  return gate.length ? { ops: [], problems: gate } : placeSteps(io, cfg, jobs);
+}
+
+/** The job files and their log files, without the start checks: only planPlace calls it outside the tests of the log files. */
+export function placeSteps(io, cfg, jobs = jobsFor(cfg)) {
   const P = installPaths(cfg); const ops = []; const { plists, problems } = plistTexts(io, cfg);
   if (problems.length) return { ops, problems };
   // The job files go outside the base, into launchd's own folder: it and every folder above it must be root's alone too.
@@ -182,9 +197,9 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
     let same = false;
     try { const s = io.lstat(f); same = s.isFile() && !s.isSymbolicLink() && s.uid === io.rootUid && (s.mode & 0o7777) === 0o644 && io.readText(f) === plists[job] && aclProblem([io.at(f)]) === null; } catch { /* not there */ }
     if (same) continue;
-    // The old file (or a link in its place) is removed, a new one is made with a private mode, and only then are its owner and mode set
-    // through the open handle; launchd refuses a file with any other owner or mode, so a cut-off run leaves a file it will not load.
-    ops.push(op(`write ${f}   (root:wheel 0644)`, () => { io.rm(f); io.write(f, plists[job], 0o600); io.secureFile(f, { uid: io.rootUid, gid: 0, mode: 0o644 }); }));
+    // Written whole beside the name, given its owner and mode, then renamed over the old file (or a link in its place, which the
+    // rename replaces, never follows): a cut-off run leaves the old job file, never none (L807 m4).
+    ops.push(op(`write ${f}   (root:wheel 0644)`, () => writeAside(io, f, plists[job])));
   }
   for (const job of jobs) { const logs = planLogs(io, plists[job]); ops.push(...logs.ops); problems.push(...logs.problems); }
   return { ops, problems };
@@ -199,8 +214,13 @@ function installProblem(io, cfg) {
   return bad.length ? `the install check fails (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-install shows all of it)` : null;
 }
 
-export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
-  const ops = []; const problems = [];
+/**
+ * Why these jobs may not start now → problems (none: they may). The one list both place and load refuse on, because a placed
+ * job starts at boot without load (L807 M1): the install whole and root's; the watch job's rules; the robot's config and its
+ * match with the Dispatcher's; the Dispatcher's config and check-dispatcher.
+ */
+export function startProblems(io, cfg, jobs) {
+  const problems = [];
   const bad = installProblem(io, cfg); if (bad) problems.push(bad);
   if (jobs.includes('watch-only')) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
@@ -213,6 +233,11 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
   }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
+  return problems;
+}
+
+export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
+  const ops = []; const problems = startProblems(io, cfg, jobs);
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const text = fileText(io, cfg, job);
@@ -317,6 +342,8 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   }
   if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg) ?? robotMatchProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherConfigProblem(io, cfg); item(why === null, `the Dispatcher's config in the copy (dispatcher.json) is the one this setup writes`, why); }
+  // check-dispatcher's FAILs only: a NOT TRIED line (no root to look) is not one, so check without sudo stays quiet on it (L807 m3).
+  if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherKeysProblem(io, cfg); item(why === null, 'check-dispatcher has no FAIL', why); }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
     const f = plistPath(cfg, job); const why = [];

@@ -26,6 +26,7 @@ import { NODE, UPDATER_CONFIG, currentCopy, installProblem } from '../modules/M4
 import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
+import { tokenPath } from './extras.mjs';
 import { homeOf } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
@@ -50,21 +51,32 @@ export const recordRootOf = (cfg, product) => join(cfg.base, 'products', product
 // The keys only the owner can name; every other key setup writes itself.
 export const OWNER_KEYS = Object.freeze(['product', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']);
 const OWNER_PATHS = Object.freeze(OWNER_KEYS.filter((k) => k !== 'product'));
+
+/**
+ * The paths setup chooses when the entry leaves them out (L802), each under setup's own folders: the token where `token` puts it
+ * (orchestrate's keys folder), the rest in orchestrate's private folder, which only it reads (products.json is put there by root).
+ * The entry may still name any of them; `dispatcher-config` prints what it uses.
+ */
+export const dispatcherDefaults = (base) => Object.freeze({
+  productsFile: join(base.base, 'private', 'products.json'), rulesStateDir: join(base.base, 'private', 'rules-state'),
+  tokenFile: tokenPath(base), approvalsStateDir: join(base.base, 'private', 'approvals'),
+});
 const PLAIN_PATH = (p) => typeof p === 'string' && p.startsWith('/') && p !== '/' && posix.normalize(p) === p && !p.endsWith('/') && !/[\u0000-\u001f\u007f]/.test(p) && p.length <= 300;
 const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 export const DISPATCHER_OFF = 'the config does not turn the Dispatcher job on: add its "dispatcher" entry (README, part 6)';
 
 /**
  * The setup config's `dispatcher` entry → the checked entry, or undefined when there is none. `cfg` is the parsed setup config.
- * Exactly the owner's keys (OWNER_KEYS), plus an optional runDeadlineMs; the product one of the config's products; each path
- * full and plain and outside the install. The Dispatcher can't start without hostLockPath, so the entry needs it too.
+ * Only the owner's keys (OWNER_KEYS), plus an optional runDeadlineMs; the product one of the config's products; a path left
+ * out is setup's default (dispatcherDefaults); each path full and plain and outside the install. The Dispatcher can't start without hostLockPath, so the entry needs it too.
  */
 export function parseDispatcher(raw, cfg) {
   if (raw === undefined) return undefined;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`config: dispatcher must be an object with ${OWNER_KEYS.join(', ')}`);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`config: dispatcher must be an object with product, and optionally ${OWNER_PATHS.join(', ')} and runDeadlineMs`);
   const extra = Object.keys(raw).filter((k) => !OWNER_KEYS.includes(k) && k !== 'runDeadlineMs');
   if (extra.length) throw new Error(`config: dispatcher has keys it does not take: ${extra.slice(0, 5).map((k) => JSON.stringify(k.slice(0, 40))).join(', ')} (setup writes the others itself)`);
   if (!cfg.products.includes(raw.product)) throw new Error('config: dispatcher.product must be one of the config\'s products');
+  raw = { ...dispatcherDefaults(cfg), ...Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== undefined)) };
   const install = `${installPaths(cfg).install}/`;
   for (const k of OWNER_PATHS) {
     if (!PLAIN_PATH(raw[k])) throw new Error(`config: dispatcher.${k} must be a full path, written plainly (no . or .., no doubled or trailing /)`);
@@ -106,7 +118,12 @@ export function dispatcherConfigFor(io, cfg) {
   const unfilled = CONFIG_KEYS.filter((key) => value[key] === undefined && key !== 'runDeadlineMs');
   if (unfilled.length) return { config: null, problems: [`setup doesn't fill the Dispatcher's config keys ${unfilled.join(', ')}`] };
   const config = Object.fromEntries(CONFIG_KEYS.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
-  try { checkConfig(config); } catch (e) { return { config: null, problems: [`the config this would write is one the Dispatcher refuses (${e.message})`] }; }
+  // Checked as the Dispatcher checks it, as orchestrate: so host.lock's owner (the owner's Mac user, read from the user records)
+  // may be neither root, orchestrate nor review (#323 c1).
+  try { checkConfig(config, { selfUid: orch.uid }); } catch (e) { return { config: null, problems: [`the config this would write is one the Dispatcher refuses (${e.message})`] }; }
+  // Nor the pages user, whom the wiring does not know (#318 c3): an owner whose uid is one of setup's own users is a setup mistake.
+  const pages = readUser(io, 'pages');
+  if (pages.exists && config.hostLockUid === pages.uid) return { config: null, problems: [`the owner's Mac user (${cfg.owner}, uid ${pages.uid}) has the pages user's uid; host.lock's owner must be the owner's own user (the config's "owner")`] };
   return { config, problems: [] };
 }
 /** The file's exact text: what the writer writes and what every check compares. */
@@ -145,25 +162,48 @@ function fileProblem(io, file, want, { inCopy = false } = {}) {
   return t === want ? null : `${file} is not the config this setup writes now (run dispatcher-config)`;
 }
 
-/** `dispatcher-config`: write <base>/dispatcher.json, and the copy's when the copy keeps it. → { ops, problems }. Twice does nothing. */
-export function planDispatcherConfig(io, cfg) {
+/**
+ * Root's 0644 file `f` with exactly `text`, written whole beside the name and renamed over it: there is never a moment with no
+ * file or half a file, so a reader (an update, a start, launchd at boot) sees the old text or the new. The side file is made
+ * private (exclusive, no links followed) and only then given its owner and mode. Used for dispatcher.json and the job files (L807 m4).
+ */
+export function writeAside(io, f, text) {
+  const tmp = join(dirname(f), `.${posix.basename(f)}.new`);
+  // A leftover side name is only a name: plain unlink, never a folder's contents. A failed write or rename removes it.
+  io.unlink(tmp);
+  const drop = () => { try { io.unlink(tmp); } catch { /* the first error is the one to report */ } };
+  try { io.write(tmp, text, 0o600); io.secureFile(tmp, { uid: io.rootUid, gid: 0, mode: 0o644 }); io.rename(tmp, f); } catch (e) { drop(); throw e; }
+}
+
+/**
+ * `dispatcher-config`: write <base>/dispatcher.json, and the copy's when the copy keeps it. → { ops, problems }. Twice does nothing.
+ * `jobLive()` → 'loaded', 'placed' or null: whether the Dispatcher job runs now or starts at boot (daemons.mjs jobLive; setup.mjs
+ * passes it in, since daemons.mjs imports this file).
+ */
+export function planDispatcherConfig(io, cfg, { jobLive = () => null } = {}) {
   const { config, problems } = dispatcherConfigFor(io, cfg);
   if (problems.length) return { ops: [], problems };
   const text = dispatcherConfigText(config); const ops = [];
   // Written whole beside the name and renamed over it, so there is never a moment with no file or half a file: an update or a
   // start that reads it then sees the old text or the new (self-review m2).
-  const write = (f) => ({ text: `write ${f}   (root:wheel 0644)`, run: () => {
-    const tmp = join(dirname(f), `.${DISPATCHER_CONFIG}.new`);
-    // A leftover side name is only a name: plain unlink, never a folder's contents. A failed write or rename removes it.
-    io.unlink(tmp);
-    const drop = () => { try { io.unlink(tmp); } catch { /* the first error is the one to report */ } };
-    try { io.write(tmp, text, 0o600); io.secureFile(tmp, { uid: io.rootUid, gid: 0, mode: 0o644 }); io.rename(tmp, f); } catch (e) { drop(); throw e; }
-  } });
+  const write = (f) => ({ text: `write ${f}   (root:wheel 0644)`, run: () => writeAside(io, f, text) });
   const src = dispatcherSourcePath(cfg);
-  if (fileProblem(io, src, text)) ops.push(write(src));
   // The copy is root's (and every folder above it), so writing in it through its link is root writing in root's folders.
   const P = installPaths(cfg); const inCopy = join(P.installRoot, DISPATCHER_CONFIG);
-  if (copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true })) {
+  const toBase = fileProblem(io, src, text) !== null;
+  const toCopy = copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true }) !== null;
+  // A job that runs (or starts at boot) reads the copy's file on every pass, so new text reaches it with no load to refuse it:
+  // the checks load makes come first. The base file is held back too, since the next update carries it into the copy (L807 m1).
+  if (toBase || toCopy) {
+    let live; try { live = jobLive(); } catch (e) { return { ops: [], problems: [`could not tell whether the Dispatcher job is loaded (${e.message}), so its config is not changed`] }; }
+    const why = live ? robotMatchProblem(io, cfg, config) ?? dispatcherKeysProblem(io, cfg) : null;
+    if (why) return { ops: [], problems: [`the Dispatcher job is ${live} and reads ${inCopy}, and the new config would not start it: ${why}. Put that right first, or take the job out (sudo node setup.mjs daemons unload --only ${DISPATCHER_JOB}, then delete its job file), run dispatcher-config again, then daemons place and load`] };
+  }
+  // What the paths are, and which setup chose (L802): printed by every run, so the owner can copy them into the robot's robot.json.
+  const defaults = dispatcherDefaults(cfg);
+  const notes = OWNER_PATHS.map((k) => `${k}: ${cfg.dispatcher[k]}${cfg.dispatcher[k] === defaults[k] ? ' (setup\'s default; the dispatcher entry may name another)' : ''}`);
+  if (toBase) ops.push(write(src));
+  if (toCopy) {
     // Root writes in the copy only when the copy is root's alone, every folder above it too (self-review m3).
     const bad = installProblem(io.at(P.installRoot), [], { owner: io.rootUid, top: io.prefix || '/' });
     // The base file is still written, so the install that replaces the copy carries the new text and is not refused for it
@@ -171,11 +211,11 @@ export function planDispatcherConfig(io, cfg) {
     if (bad) {
       const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`;
       ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } });
-      return { ops, problems: [] };
+      return { ops, problems: [], notes };
     }
     ops.push(write(inCopy));
   }
-  return { ops, problems: [] };
+  return { ops, problems: [], notes };
 }
 
 /**
@@ -228,10 +268,15 @@ export function checkDispatcherConfig(io, cfg) {
   ];
 }
 
+/** Null, or check-dispatcher's FAILs in one line (NOT TRIED is not a FAIL). Load and place refuse on it, and daemons check FAILs on it (L807 m3). */
+export function dispatcherKeysProblem(io, cfg) {
+  const bad = checkDispatcherKeys(io, cfg).filter((r) => !r.ok && !r.notTried);
+  return bad.length ? `check-dispatcher FAILs (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-dispatcher shows all of it)` : null;
+}
+
 /** Why the Dispatcher job may not be loaded now, or null: its config, then check-dispatcher's FAILs (NOT TRIED does not stop it). */
 export function dispatcherLoadProblem(io, cfg) {
   const why = dispatcherConfigProblem(io, cfg);
   if (why) return `${why}, so the Dispatcher job would not start`;
-  const bad = checkDispatcherKeys(io, cfg).filter((r) => !r.ok && !r.notTried);
-  return bad.length ? `check-dispatcher FAILs (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-dispatcher shows all of it)` : null;
+  return dispatcherKeysProblem(io, cfg);
 }
