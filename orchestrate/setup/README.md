@@ -52,7 +52,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   whose children belong to different users (`products/<product>`) is root's, so none of them can rename another's away.
 - **One outbox root.** `outboxes/` is root's 0755; under it one folder for each role the review runner starts
   (`reviewer/`, `auditor/` and `plan_reviewer/`, `RUNNER_ROLES`) belongs to `review` (0755), so no worker can write their
-  answers (L722), and each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
+  answers (L722). An earlier setup built from the plan-reviewer branch alone made `plan_reviewer/` the workers' user's; `users-folders` refuses to take that over, so look inside it, remove it by hand, then run `users-folders` again. Each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
   list, read and clear (`delete_child`), with inheritance. The worker seals its own hand-in file 0440. `check` compares the
   access list and the group exactly: a missing or an extra entry FAILs.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
