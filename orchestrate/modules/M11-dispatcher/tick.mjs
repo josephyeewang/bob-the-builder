@@ -284,6 +284,8 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // L761: a refused write of the deaths already counted means they may be counted again (a false outage), or that
     // the Record is failing. Told through the refused-save path (refusalReport, holdAlert): once, then daily.
     if (o.countedRefused) refusalReport({ rec, alert, now, lines: [], failureLog: failed('outage') })(`the dead sessions already counted toward an outage could not be saved (${o.countedRefused}), so they may be counted again`, 'outage-counted');
+    // L765: a refused outage end leaves the outage open in the Record (nothing restarts); told the same way.
+    if (o.endRefused) refusalReport({ rec, alert, now, lines: [], failureLog: failed('outage') })(`the outage could not be ended (${o.endRefused}), so nothing restarts until it can be`, 'outage-end');
     const acted = o.outage ? [] : actOnDead({ rec, rules, now, restart: o.restart, asks: o.asks, cards: o.cards, alert, missing });
     // A claim whose session never started lapses (the Record stops that session id first; L72). Not in an outage.
     const lapse = o.outage ? null : rec.lapseClaims(now, { stopSession: p.stopSession });

@@ -15,11 +15,13 @@
 // breakIfDead only breaks the claim it is given.
 // Counted once (L759, from lane 4's #324 r3 m3): a dead session the Record would not take off the board (its ask or
 // its claim's break refused) stays on it, dead, every pass. The deaths already counted are kept in the outage fact
-// (`counted_dead`: each as its session id and last write time, so a session restarted under the same id that dies
-// again counts again), set by the last pass outside an outage, or by the outage's end. Only new deaths count toward
+// (`counted_dead`: each as its session id and last write time, so a session restarted under the same id counts again
+// only if it wrote to its transcript or a pass saw it alive), set by the last pass outside an outage, or by the outage's end. Only new deaths count toward
 // an outage, against the board less the deaths already counted; the still-dead are still handed to `actOnDead` each
 // pass, to try again. The list is written only when it changes; a refused write is returned as `countedRefused`
 // (they would be counted again next pass, as before L759).
+// A refused end (L765): the Record still holds the outage open, so this pass stays in it (nothing restarts, no card is
+// decided) and the end is tried again next pass; the refusal is returned as `endRefused`, for tick.mjs to tell Joe.
 
 import { KEYS, need, minutes } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
@@ -54,7 +56,8 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
   if (open) {
     const passes = healthy ? (cur.doc.healthy_passes ?? 0) + 1 : 0;
     if (resume || passes >= HEALTHY_PASSES) {
-      write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: dead.map(deathKey) }, 'outage_end');
+      const ew = write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: dead.map(deathKey) }, 'outage_end');
+      if (!ew?.ok) return { outage: true, ended: false, restart: [], asks: [], endRefused: ew?.reason ?? 'refused' };
       // Sessions that died in the outage left the board; they are decided now, with the newly dead.
       const held = (cur.doc.dead ?? []).filter((d) => !dead.some((s) => s.id === d.id));
       return { outage: false, ended: true, ...decide(rec, [...held, ...dead]) };
