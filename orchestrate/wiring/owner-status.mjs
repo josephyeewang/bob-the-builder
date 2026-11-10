@@ -11,6 +11,10 @@
 // what it must be (outbox, uid, role from kind), so a forged file can at worst lie about liveness, card or product, never
 // widen which file kinds or which outbox a session may use. The wiring cross-checks card against the launch record.
 //
+// The status file's folder is the runner's own, apart from the requests folder the Dispatcher writes into (that one
+// would fail the folder's write check). The owner and mode checks do not see macOS access lists; that is moot while the
+// workers share the owner's user (the runner wall, L751), and is a check to add once they do not.
+//
 // The status file (the runner writes it; this is the only reader):
 //   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
@@ -18,12 +22,15 @@
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/worker/<id>, which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
-//   - stop_requested: true once the runner acted on a stop request for it, or stopped its group (stopGroup), written
-//     before it answers; such a session leaves the board. One that
+//   - stop_requested: true once the runner has confirmed a stop it was asked for (a stop request or stopGroup): the
+//     session's process group is gone. It is written before the runner answers. A stop that failed leaves it false. Only a
+//     session that is stopped on request and no longer live leaves the board (a live one stays, whatever the flag says). One that
 //     ends without it stays on the board only while its card's claim is still its own (`holds`): the outage step sees it
 //     die once, and once the card has been handled (waiting on Joe, back in the queue, run again) it is off.
 //   - requests[id].state: 'waiting' (seen, not yet acted on), 'started', 'refused', 'stopped' (started and since stopped)
-//     or 'cancelled' (a stop request reached it first). A launch request the runner has not seen has no entry. The runner
+//     or 'cancelled' (a stop request reached it first). A launch request the runner has not seen has no entry. A listed
+//     session always has its entry, 'started' while it is live (and then its outbox is open) and 'started' or 'stopped'
+//     once it is not; anything else makes the whole status "not known" (r1 audit m1). The runner
 //     keeps a used-up entry for at least RUNNER_KEEP_USED_UP_MS (the longest claim timeout plus the stale window), and marks
 //     a session that ends on its own 'stopped'.
 // The runner's probe answers only for its own sessions: the wiring routes each session to its own kind's probe.
@@ -34,6 +41,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
+import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -48,6 +56,8 @@ export const STATUS_MAX_BYTES = 1_000_000;
 /** How far ahead of this clock a status may be dated: a small clock difference, not the stale window. */
 export const CLOCK_SKEW_MS = 30_000;
 const SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files']);
+/** The activity tracker's states (send-safe/activity.mjs State): probe passes on no other. */
+const ACTIVITY_STATES = Object.freeze(Object.values(State));
 const SIZE_FIELDS = Object.freeze(['tokens', 'compactions', 'turnEnded', 'endedAt', 'openTools']);
 
 const plainOwned = (st, uid, what) => {
@@ -73,6 +83,8 @@ export function openRead(file) {
   } finally { closeSync(fd); }
 }
 
+// Running: its process group is known to be there, or nothing says it is gone or ended.
+const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
 const bad = (x, why) => { throw new Error(`session ${x.id} in the worker runner's status ${why}`); };
 function checkSession(x, { uid, outboxRoot, realpath }) {
   if (!x || typeof x !== 'object' || !REQUEST_ID.test(x.id ?? '')) throw new Error('a session in the worker runner\'s status is not what the runner writes');
@@ -99,6 +111,8 @@ function checkSession(x, { uid, outboxRoot, realpath }) {
  * → { sessions, requests }
  */
 export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = lstatSync, open = openRead }) {
+  if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the worker runner\'s status file is not a full path');
+  if (!Number.isFinite(now)) throw new Error('the clock gave no time, so the worker runner\'s status can\'t be dated');
   if (!Number.isInteger(uid) || uid < 0) throw new Error('the owner\'s uid is not known, so the worker runner\'s status can\'t be checked');
   if (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot)) throw new Error('the outbox root is not known, so the worker runner\'s outboxes can\'t be checked');
   let ds; try { ds = stat(dirname(file)); } catch { throw new Error('the worker runner\'s folder is missing'); }
@@ -116,12 +130,18 @@ export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = l
   const ids = new Set();
   for (const x of s.sessions) { checkSession(x, { uid, outboxRoot, realpath }); if (ids.has(x.id)) bad(x, 'is listed twice'); ids.add(x.id); }
   for (const [id, r] of Object.entries(s.requests)) if (!REQUEST_ID.test(id) || !REQUEST_STATES.includes(r?.state)) throw new Error('a request in the worker runner\'s status is not what the runner writes');
+  // A status that contradicts itself is not known: never a session that silently drops off the board or out of intake.
+  for (const x of s.sessions) {
+    const state = Object.hasOwn(s.requests, x.id) ? s.requests[x.id].state : undefined;
+    if (live(x)) {
+      if (state !== 'started') bad(x, state === undefined ? 'is running with no launch request entry' : `is running under a launch request marked ${state}`);
+      if (!x.outbox_open) bad(x, 'is running with its outbox marked closed');
+    } else if (state !== 'started' && state !== 'stopped') bad(x, state === undefined ? 'is listed with no launch request entry' : `is listed under a launch request marked ${state}`);
+  }
   return { sessions: s.sessions, requests: s.requests };
 }
 
 const pick = (x, fields) => Object.fromEntries(fields.map((f) => [f, x[f]]));
-// Running: its process group is known to be there, or nothing says it is gone or ended.
-const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
 const requestOf = (s, id) => (Object.hasOwn(s.requests, id) ? s.requests[id] : undefined);
 
 /**
@@ -141,10 +161,11 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
   const status = () => readOwnerStatus({ file: statusFile, now: clock(), uid, outboxRoot, realpath, stat, open });
   return {
     sessions: () => status().sessions.filter(live).map((x) => pick(x, SESSION_FIELDS)),
-    // The sessions meant to run: started and never stopped on request. One that ended without a stop request stays only
-    // while its card's claim is still its own, so the outage step sees each death once, not on every pass after.
+    // The sessions meant to run: every live one (a stop that failed leaves it running, so it stays, r1 audit m4). One that
+    // is no longer live leaves when it was stopped on request; one that ended without a stop request stays only while its
+    // card's claim is still its own, so the outage step sees each death once, not on every pass after.
     board: () => { const s = status();
-      return s.sessions.filter((x) => !x.stop_requested && ['started', 'stopped'].includes(requestOf(s, x.id)?.state) && (live(x) || held(x))).map((x) => {
+      return s.sessions.filter((x) => live(x) || (!x.stop_requested && held(x))).map((x) => {
       const row = { id: x.id, card: x.card };
       if ('alive' in x) row.alive = x.alive;
       if ('ended' in x) row.ended = x.ended;
@@ -159,7 +180,7 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
       const full = z && typeof z === 'object' && (z.tokens === null || Number.isFinite(z.tokens)) && Number.isInteger(z.compactions)
         && typeof z.turnEnded === 'boolean' && (z.endedAt === null || Number.isFinite(z.endedAt)) && Array.isArray(z.openTools);
       if (!full) throw new Error(`session ${x.id} has no full size in the worker runner's status`);
-      if (typeof x.activity?.state !== 'string') throw new Error(`session ${x.id} has no activity in the worker runner's status`);
+      if (!ACTIVITY_STATES.includes(x.activity?.state)) throw new Error(`session ${x.id} has no activity state the tracker gives in the worker runner's status`);
       return { size: pick(z, SIZE_FIELDS), activity: { state: x.activity.state } };
     },
     stopSession: (sessionId) => {
