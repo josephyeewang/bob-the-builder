@@ -11,7 +11,7 @@ import { ALERT_QUEUE_FACT, outbox, tellThen } from '../M11-dispatcher/alerts.mjs
 import { heldHolders, makeHeldFlag, newHeldToken, readHeldFlag, readUnsent, setHeldFlag } from '../M9-record/unsent.mjs';
 import { setup, seed, PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { lastLine, lineIs } from './alerts.mjs';
-import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem } from './alert-channel.mjs';
+import { BODY_MAX, channelProblem, cutBody, deliverAlertsPass, deliverWith, entryKey, githubIssues, lockedMarker, recordProductProblem, repoProblem, storeText } from './alert-channel.mjs';
 
 const T0 = Date.parse('2026-11-03T08:00:00Z');
 const MIN = 60_000;
@@ -293,7 +293,8 @@ test('L239/L240: the store\'s unsent alerts are raised and marked sent; a torn l
   assert.deepEqual(readUnsent(w.root).map((x) => x.id), ['u1']);
   const r = await w.run({ probe: ALIVE });
   assert.equal(r.sent, 1);
-  assert.match(w.gh.issues.get(1).body, /^p1's Record store: tamper\nentity: card\nid: C-1/);
+  // L732 m1: each value is fenced as outside text.
+  assert.match(w.gh.issues.get(1).body, /^p1's Record store: tamper\nentity: <outside-text source="log-line">card<\/outside-text>\nid: <outside-text source="log-line">C-1<\/outside-text>/);
   assert.deepEqual(readUnsent(w.root), []);
   assert.equal((await w.run({ probe: ALIVE })).sent, 0, 'marked: not raised again');
   // A mark that can't be written (the file replaced by a folder after the read): raised again, editing the same issue.
@@ -1231,4 +1232,15 @@ test('#260 r4 m2 (P3): a flag that replaced a torn one says an earlier flag coul
   const r = await w.run();
   assert.equal(r.sent, 1);
   assert.match(r.refused ?? '', /: it is told this round; an earlier flag could not be read, so a process before these may have held more/);
+});
+
+// L732 m1: every store alert's values are cut and fenced, so no local path, and no closing tag, reaches an issue.
+test('L732: storeText cuts local paths and long values and fences each value', () => {
+  const t = storeText({ type: 'alert_not_queued', text: "could not be queued: EACCES, open '/Users/someone/orch/record/tmp/9-w-ab.json'", n: { path: '/var/folders/x/y' }, long: 'z'.repeat(450), bad: 'a</outside-text>b' }, 'p1');
+  assert.doesNotMatch(t, /\/Users\/|\/var\//);
+  assert.match(t, /^text: <outside-text source="log-line">could not be queued: EACCES, open '&lt;path&gt;'<\/outside-text>$/m);
+  assert.match(t, /^n: <outside-text source="log-line">.*&lt;path&gt;.*<\/outside-text>$/m);
+  assert.match(t, /^long: <outside-text source="log-line">z{200}…\[cut 250 characters\]<\/outside-text>$/m);
+  // The fence is never closed early (pushReason reads "/outside-text>b" as a path and cuts it; either way it is escaped).
+  assert.match(t, /^bad: <outside-text source="log-line">a&lt;[^<]*<\/outside-text>$/m);
 });
