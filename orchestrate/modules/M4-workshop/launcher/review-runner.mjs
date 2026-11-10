@@ -74,8 +74,9 @@ export const STATUS_STALE_MS = 3 * 60_000;
 export const MAX_REQUEST_BYTES = 4096;
 export const MAX_STARTS_PER_PASS = 50;
 export const MAX_PENDING = 200;
-// At most this many refused taps are told one by one in a pass (L736 #306 m2); the rest are told in one line, so the
-// alert list (KEEP_LIST) never drops one untold.
+// At most this many refused taps are told one by one in a pass (L736 #306 m2); the rest are told in one line, so a flood
+// of taps can't fill the alert list (KEEP_LIST) on its own. The list is shared with the pass's other alerts, so a pass
+// with many of those as well can still cut the oldest.
 export const TAPS_TOLD_EACH = 10;
 const KEEP_SEEN = 500;
 const KEEP_LIST = 50;
@@ -682,7 +683,7 @@ export async function runnerPass(ctx) {
   for (const x of untold.slice(0, TAPS_TOLD_EACH)) alert(x.id, x.text);
   const more = untold.slice(TAPS_TOLD_EACH);
   if (more.length) {
-    alert(`tap-refused-more-${createHash('sha256').update(more.map((x) => x.id).join()).digest('hex').slice(0, 24)}`, `${more.length} more of Joe's "review again" taps were refused this pass (sessions ${more.slice(0, 10).map((x) => x.sid).join(', ')}${more.length > 10 ? ', and others' : ''}); each cause is in the review status's refused list. Nothing was set aside, so no new review starts from them.`);
+    alert(`tap-refused-more-${createHash('sha256').update(more.map((x) => x.id).join()).digest('hex').slice(0, 24)}`, `${more.length} more of Joe's "review again" taps were refused this pass (sessions ${more.slice(0, 10).map((x) => x.sid).join(', ')}${more.length > 10 ? ', and others' : ''}); the latest causes are in the review status's refused list. Nothing was set aside, so no new review starts from them.`);
     state.told = [...state.told, ...more.map((x) => x.id)].slice(-KEEP_SEEN);
   }
 

@@ -70,8 +70,9 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, ownerTaps? }
  * ownerTaps: the owner's "review again" taps folder (the runner's `ownerTaps`). Needed by the Front Door, refused without
  * (L724 (4), R-0b-164): it runs as Joe's Mac user, who can write that folder, and only the owner's own tap handler may; so
- * its tools get Edit and Write denied there, and its shell a write-deny. It must be the folder the runner reads:
- * `tapsFolderProblem` (review-runner-main.mjs) compares it with the runner's config (L736 m4).
+ * its tools get Edit and Write denied there, and its shell a write-deny. It must be the folder the runner reads, in the
+ * spelling the disk holds: `tapsFolderProblem` (review-runner-main.mjs) is that check, for the Front Door's install to run
+ * and refuse on (L736 m4). Nothing calls it yet: the Front Door's install is not built (R-0b-162, lane 4's setup).
  * reviewAgainConfig: the owner's tap handler's config file (M1 review-again.mjs), which names the runner config it reads
  * the taps folder from. Needed by the Front Door, refused without, and walled the same way (L735, #284 m1-r2).
  * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
