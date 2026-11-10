@@ -2,8 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
@@ -125,7 +125,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
 });
 
 test('step 1 m6: the status is opened once, never through a link, and that open file is what is checked and read', () => {
-  const d = mkdtempSync(join(tmpdir(), 'owner-status-'));
+  const d = tempDir('orch-owner-status-');
   try {
     writeFileSync(join(d, 'real.json'), 'hello'); symlinkSync(join(d, 'real.json'), join(d, 'link.json'));
     const { st: s, text } = openRead(join(d, 'real.json'));
