@@ -22,7 +22,7 @@
 //   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
 //              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
-//   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/worker/<id>, which exists
+//   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/<role>/<id> (L767), which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
 //   - stop_requested: true once the runner acts on a stop it was asked for (a stop request or stopGroup), written before
@@ -106,7 +106,8 @@ export function openRead(file) {
 // Running: its process group is known to be there, or nothing says it is gone or ended.
 export const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
 const bad = (x, why) => { throw new Error(`session ${x.id} in the worker runner's status ${why}`); };
-function checkSession(x, { uid, outboxRoot, realpath }) {
+/** One listed session checked as the reader checks it, or a throw (the runner checks a start's answer with it before listing it). */
+export function checkSession(x, { uid, outboxRoot, realpath }) {
   if (!x || typeof x !== 'object' || !REQUEST_ID.test(x.id ?? '')) throw new Error('a session in the worker runner\'s status is not what the runner writes');
   for (const f of SESSION_FIELDS) if (x[f] === undefined) bad(x, `has no ${f}`);
   if (!Object.hasOwn(RUNNER_ROLE_OF, x.kind)) bad(x, `has kind ${JSON.stringify(x.kind)}, which the runner does not start`);
@@ -117,8 +118,8 @@ function checkSession(x, { uid, outboxRoot, realpath }) {
   if (typeof x.card !== 'string' || !x.card) bad(x, 'has no card (every session the runner starts has one)');
   if (!Array.isArray(x.bundle_files)) bad(x, 'has bundle_files that are not a list');
   if (x.uid !== uid) bad(x, 'names a Mac user other than the owner\'s');
-  const wrong = workerOutboxProblem(x.outbox, x.id, x.outbox_open === true ? { root: outboxRoot, realpath } : {}); if (wrong) bad(x, `has an outbox that ${wrong}`);
-  if (x.outbox !== join(outboxRoot, 'worker', x.id)) bad(x, 'has an outbox that is not inside the outbox root');
+  const wrong = workerOutboxProblem(x.outbox, x.id, x.outbox_open === true ? { root: outboxRoot, realpath, role: x.role } : { role: x.role }); if (wrong) bad(x, `has an outbox that ${wrong}`);
+  if (x.outbox !== join(outboxRoot, x.role, x.id)) bad(x, 'has an outbox that is not inside the outbox root');
   if ('request' in x) bad(x, 'names a read-only request, which the runner never starts');
   for (const f of ['outbox_open', 'stop_requested']) if (typeof x[f] !== 'boolean') bad(x, `has no ${f}`);
   for (const f of ['alive', 'ended']) if (f in x && typeof x[f] !== 'boolean') bad(x, `has ${f} that is not true or false`);
