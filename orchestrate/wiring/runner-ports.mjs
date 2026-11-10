@@ -43,9 +43,9 @@
 //     lock-down runner (`runLocked`), which is not built; without it save-work refuses, as it says it must.
 //   pauseLead({ product }): the Lead's WRAP flow (lead-restart.mjs through sendSafe) needs the activity tracker's feed,
 //     which nothing gives the runner yet; it refuses ("not wired").
-//   outboxDrained(session): true when the outbox holds no file (dot files count) or is gone. Intake keeps its own keys
-//     and may delete a hand-in it took (its access list has delete_child, setup/layout.mjs); until intake does, or tells
-//     the runner some other way, an outbox with a file in it stays open and its session stays listed. A lead question.
+//   outboxDrained(session): true when the outbox is gone, or every file in it (dot files count) has the Record's intake
+//     fact for it in a done state with the sha256 of its bytes now (L852, drainedPort below, read with M4 readFactFile).
+//     Any other file keeps the outbox open and its session listed: it fails safe, never closing on a hand-in not taken.
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
