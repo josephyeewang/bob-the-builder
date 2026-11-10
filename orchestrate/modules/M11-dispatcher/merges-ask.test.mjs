@@ -45,7 +45,7 @@ function world({ refuseWait = false, refuseIf = null } = {}) {
   const ports = {
     alert: (t) => { delivered.push(typeof t === 'string' ? t : t.text); return true; },
     board: () => [], healthy: () => true, resume: () => false,
-    outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [], sessions: () => [], probe: () => idle,
     launch: async () => ({ ok: false, reason: 'no launches in this test' }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},

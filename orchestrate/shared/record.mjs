@@ -48,7 +48,7 @@ import { claimCheck, fixPlanCheck, guardWrite, keptSince, same } from '../module
 export const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 export const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
-  'front_door', 'thinking', 'learning', 'script']);
+  'front_door', 'thinking', 'learning', 'script', 'plan_reviewer']);
 
 // A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
 // a diary kind only.
@@ -59,6 +59,8 @@ export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session'
 // verdict missing a line is no verdict (Merge Gate refusal 5). An auditor's verdict says its Material count instead.
 export const VERDICT_CHECKLIST = Object.freeze(['correct', 'well_built', 'works_for_user', 'holds_up']);
 export const CHECKLIST_LEVELS = Object.freeze(['clean', 'cosmetic', 'minor', 'material']);
+// What a verdict's finding may be, worst first.
+export const FINDING_LEVELS = Object.freeze(['material', 'minor', 'cosmetic']);
 
 // Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
 // launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is

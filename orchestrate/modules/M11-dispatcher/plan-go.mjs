@@ -9,7 +9,9 @@
 //     ctx: one product's Approvals context (tick.mjs approvalsStep). The ports take { product, card, ... }:
 //     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording, key }) → { ok: true, session } | { ok: false, reason }
 //       key is the same for a card's plan: a port that can use it gives a repeated start the same session
-//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works | { ok: false, reason }
+//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true, started_at? } while it
+//       works (started_at: when its reviewer started, if known) | { ok: true, waiting: 'slot', holders: [{ card, started_at? }] }
+//       while it waits at the plan reviewers' cap, none started yet, holders being the plan reviewers that run | { ok: false, reason }
 //     planRows({ product, card }) → { <row id>: row }      planView({ product }) → a repo view      mainSha({ product }) → sha
 //     replyToLead({ lead, text }) → { ok: true } | { ok: false, reason }      leaves a note for the Lead whose session wrote the plan
 //   Each port call has a time limit (PLAN_PORT_MS), and so has each call raiseGo makes: the repo view's isDir and the close
@@ -49,7 +51,7 @@
 import { goNeeded, readyCheck } from '../M9-record/ready.mjs';
 import { PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
-import { goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
+import { doneBar, goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
 import { PLAN_REVIEW_WORDING, readPlanReview } from '../M3-lead/lead-wording.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { planPass } from '../../shared/plan-review.mjs';
@@ -72,7 +74,42 @@ export const PLAN_PORT_MS = 5_000;
 const PLAN_LAST_CALL = 1.2;
 export const PLAN_SLOW_FACT = (card) => HOLD_FACT(`plan-slow-${card}`);
 export const PLAN_TURN_FACT = (card) => HOLD_FACT(`plan-turn-${card}`);
+// How many passes in a row a card changed between being compared and its pass test being written (L733): told once
+// that reaches PLAN_CHANGED_TELL_AT, then once a day while it lasts; before that it is a pass event only.
+export const PLAN_CHANGED_FACT = (card) => HOLD_FACT(`plan-changed-${card}`);
+export const PLAN_CHANGED_TELL_AT = 3;
 export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The plan reviews the Dispatcher has asked for that may be running or about to (L726 M1), for the read-only limit: the
+ * review runner lists only the reviewers it has started, and it starts a request on its own next pass. One per card's
+ * plan-review fact from the last PLAN_START_HOLD_MS: a start marked but never confirmed (it may have started), or a
+ * request whose answer is not in yet (`planReviewAnswer` says it works; a read that throws counts it too). An answer,
+ * or an end without one, is not running. `except` is the card being started now. Only `product`'s cards: a Dispatcher
+ * runs one product and may read only its plans' answers, so another product's asked-for ones are not counted here: this
+ * count is a first wall only. The review runner keeps the cap itself across every product's requests (L735 M1), so two
+ * Dispatchers each under it can't put it over between them. → [{ id, card }] (id: the request).
+ */
+export async function plansAwaitingAnswer({ rec, now, product, planReviewAnswer, except = null }) {
+  const prefix = PLAN_REVIEW_FACT('');
+  const out = [];
+  for (const f of rec.list('fact')) {
+    if (typeof f?.id !== 'string' || !f.id.startsWith(prefix)) continue;
+    const card = f.id.slice(prefix.length);
+    const d = f.doc ?? {};
+    if (card === except || typeof d.fingerprint !== 'string') continue;
+    let cp; try { cp = rec.read('card', card)?.doc?.product; } catch { cp = product; }
+    if (cp !== undefined && cp !== product) continue;
+    const hasSession = typeof d.session === 'string' && d.session !== '';
+    const at = pastTime(hasSession ? d.started_at : d.starting_at, now);
+    if (at === null || now - at >= PLAN_START_HOLD_MS) continue;
+    if (!hasSession) { out.push({ id: `starting-${card}`, card }); continue; }
+    let a;
+    try { a = await planReviewAnswer({ product, card, fingerprint: d.fingerprint, session: d.session }); } catch { a = { ok: true }; }
+    if (a?.ok === true && (a.answer === undefined || a.answer === null)) out.push({ id: d.session, card });
+  }
+  return out;
+}
 const PLAN_PORTS = ['startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha', 'replyToLead'];
 // The words every unwired port throws (wiring/dispatcher-wiring.mjs): told once per product, not once per card.
 const NOT_WIRED = /not wired yet: /;
@@ -84,6 +121,16 @@ const whole = (product) => `product.${product}`;
 // The step's one write: its notes on a card's plan facts.
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
+// The plan reviewers holding the slots, as the runner's status lists them: "card A, on an older plan, for 3 hours, card B
+// for 20 minutes". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
+const runFor = (ms) => (ms < 2 * 60 * 60_000 ? `for ${Math.max(1, Math.round(ms / 60_000))} minutes` : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+const slotHolders = (holders, now) => {
+  const list = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string').slice(0, 10).map((h) => {
+    const at = pastTime(h.started_at, now);
+    return `card ${short(h.card).slice(0, 40)}${h.older_plan === true ? ', on an older plan,' : ''}${at === null ? '' : ` running ${runFor(now - at)}`}`;
+  });
+  return list.length ? list.join('; ') : "the runner's status names none of them";
+};
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // The session after the `role:` of an actor; a script actor, or a role with no session, names none.
@@ -156,8 +203,15 @@ async function reviewed(ctx, ports, tell, c, fp) {
   const a = await ports.planReviewAnswer({ product: ctx.product, card: c.id, fingerprint: fp.fingerprint, session: f.session });
   if (a?.ok !== true) { tell(c.id, 'answer', `the plan reviewer's answer on card ${c.id} could not be read: ${short(a?.reason)}`); return null; }
   if (a.answer === undefined || a.answer === null) {
-    const since = pastTime(f.started_at, ctx.now());
-    if (since === null || ctx.now() - since >= PLAN_REVIEW_SLOW_MS) tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
+    // The hour runs from the plan's request while it waits for a slot, and from its reviewer's own start once one runs
+    // (#335 r1 m1): a plan that waited three hours is not told "slow" a minute after its reviewer starts.
+    const slot = a.waiting === 'slot';
+    const since = (slot ? null : pastTime(a.started_at, ctx.now())) ?? pastTime(f.started_at, ctx.now());
+    if (since !== null && ctx.now() - since < PLAN_REVIEW_SLOW_MS) return null;
+    // At the cap no reviewer has started, so "has not answered" would point at one that isn't there (#294 r3 m1). The
+    // slots' holders are named, since one stuck on an old plan holds its slot until its session ends (#335 r1 M1).
+    if (slot) tell(c.id, 'slot', `card ${c.id}'s plan review hasn't started: the most plan reviews allowed at once are already running (${slotHolders(a.holders, ctx.now())}). Until one finishes, card ${c.id} can't be asked for a go`);
+    else tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
     return null;
   }
   const review = readPlanReview(a.answer);
@@ -237,6 +291,63 @@ function goReady(ctx, tell, view, c, events) {
   else tell(c.id, 'ready', `card ${c.id} has its go but can't start: ${short(r.reason)}`);
 }
 
+// A draft card's done_when becomes doneBar(rows), the one form M2 checkRows takes (L698 design b, L699). True when it
+// already is. No rows is refused, told under 'raise' with raiseGo's own words, before any plan review. A write
+// stops the card for this pass: the next pass fingerprints the card as it now is. A write the Record refuses (no
+// `dispatcher.updateInDraft: ['done_when']` in M9's permissions, a card that moved on) is told under the card's own cause,
+// never skipped: the card stays in draft and is never asked for a go on the Lead's free text.
+//
+// Every row must have its own pass test before one is set from them (L726 m4): M2 checkRows' done_when check, run first,
+// so a row without one is named, never written as a blank piece the fingerprint later refuses for another reason. The
+// write is checked against the card as it was compared (L726 m5): a card that changed since is tried again next pass.
+// That is a pass event; Joe is told only once the same card has hit it PLAN_CHANGED_TELL_AT passes in a row (L733).
+// A note it can't read or write is told under its own cause, as noteSlow's and noteReached's are (#295 r2 m1): a run of
+// changes would otherwise go on untold. A note it can't read is never written over.
+function changedStreak(ctx, tell, c, hit) {
+  const rec = ctx.record;
+  const id = PLAN_CHANGED_FACT(c.id);
+  const lost = (why) => tell(c.id, 'changed-noted', `card ${c.id}'s run of passes where it changed between reading and writing could not be noted, so a long run may go untold: ${short(why)}`);
+  let f;
+  try { f = rec.read('fact', id); } catch (e) { lost(e?.message ?? e); return hit ? 1 : 0; }
+  const was = Number.isInteger(f?.doc?.streak) && f.doc.streak > 0 ? f.doc.streak : 0;
+  if (!hit && !was) return 0;
+  const streak = hit ? was + 1 : 0;
+  const w = noteFact(rec, id, f?.rev ?? 0, { streak, at: new Date(ctx.now()).toISOString() });
+  if (!w.ok) lost(w.reason);
+  return streak;
+}
+function doneFromRows(ctx, tell, c, rows, events) {
+  const r = doneFromRowsOnce(ctx, tell, c, rows, events);
+  if (r !== 'changed') { changedStreak(ctx, tell, c, false); return r; }
+  const streak = changedStreak(ctx, tell, c, true);
+  events.push(`done_when-changed ${c.id}`);
+  if (streak >= PLAN_CHANGED_TELL_AT) tell(c.id, 'done-when-changed', `card ${c.id}'s pass test was not set from its rows: the card changed between reading and writing on ${streak} passes in a row; trying again next pass`);
+  return false;
+}
+function doneFromRowsOnce(ctx, tell, c, rows, events) {
+  // No rows is refused here, with raiseGo's own words, so a Tier-1 card's plan is never reviewed for a go with no rows
+  // (#295 r1 c5, r2 c3). Rows that break raiseGo's other checks are still refused by raiseGo, after the review.
+  if (!rows || typeof rows !== 'object' || Array.isArray(rows)) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: the rows the card names are missing`); return false; }
+  if (!Object.keys(rows).length) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: a go names at least one row`); return false; }
+  for (const id of Object.keys(rows).sort()) {
+    const r = rows[id];
+    if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.done_when !== 'string' || !r.done_when.trim()) {
+      tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: row ${short(id)} has no pass test (done_when), so the card's pass test can't be set from its rows`);
+      return false;
+    }
+  }
+  const bar = doneBar(rows);
+  if (c.doc.done_when === bar) return true;
+  if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its version number)`); return false; }
+  const w = ctx.record.write({ actor: 'dispatcher', entity: 'card', id: c.id, expectRev: c.rev, doc: { ...c.doc, done_when: bar }, kind: 'done_when_from_rows' });
+  if (w.ok) { events.push(`done_when ${c.id}`); return false; }
+  let now = null;
+  try { now = ctx.record.read('card', c.id); } catch { /* told below as the write's own refusal */ }
+  if (now && !now.corrupt && now.rev !== c.rev) return 'changed';
+  tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (${short(w.reason)})`);
+  return false;
+}
+
 async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const { product, rules } = ctx;
   const n = goNeeded(c, view, rules, product);
@@ -248,12 +359,16 @@ async function raiseFor(ctx, ports, tell, view, st, c, events) {
   const fp = goFingerprint(ctx, c.id);
   if (!fp.ok) { tell(c.id, 'plan', `card ${c.id} can't be asked for a go: ${short(fp.reason)}`); return; }
   if (!await mayAsk(ctx, ports, tell, st, c, fp)) return;
+  // The rows before the Tier-1 review and the ask (L698, L699): a go's pass test is its rows' (M2 checkRows), so it is
+  // set from them here, and the next pass fingerprints, reviews and asks on the card as it then is. The Lead's own words
+  // stay in brief.done_when. A card waiting on an ask makes no call: no ask is ever made on a text this did not set.
+  const rows = await ports.planRows({ product, card: c.id });
+  if (!doneFromRows(ctx, tell, c, rows, events)) return;
   let planCheck;
   if (d.tier === 1) {
     planCheck = await reviewed(ctx, ports, tell, c, fp);
     if (!planCheck) return;
   }
-  const rows = await ports.planRows({ product, card: c.id });
   const repo = await ports.planView({ product });
   const mainSha = await ports.mainSha({ product });
   const r = await raiseGo(limitedCtx(ctx, ports), { cardId: c.id, rows, view: repo && { isDir: (sha, f) => ports.timed('isDir', () => repo.isDir(sha, f)) }, mainSha, planCheck });
@@ -279,7 +394,11 @@ function limited(ports) {
     const r = await guarded(async () => ({ value: await f() }), portMs);
     counted.ms += Date.now() - from;
     if ('value' in r) return r.value;
-    if (!/^it did not answer within /.test(r.reason)) throw new Error(`${name}: ${r.reason}`);
+    // Late is known by `timedOut` (guarded's own late answer), the wording only as a backstop (L755), so it is counted
+    // and told as a timeout whatever words it carries. The wording half is an untested backstop by ruling (L771 Q1): guarded
+    // always marks its own late answer `timedOut`, and a timeout and a failure end the same way here (both throw the same
+    // message; the only difference, `counted.timeouts`, feeds ownSlow, which a real timeout's time already sets).
+    if (r.timedOut !== true && !/^it did not answer within /.test(r.reason ?? '')) throw new Error(`${name}: ${r.reason}`);
     counted.timeouts += 1;
     throw new TimedOut(`${name}: ${r.reason}`);
   };

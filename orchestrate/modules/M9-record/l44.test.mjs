@@ -7,7 +7,7 @@ import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, 
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
-import { headReviews, reviewUserProblem, runnerLaunchFor, runnerLaunches, sessionVerdict, verdictFromFile } from './outbox.mjs';
+import { headReviews, reviewUserProblem, runnerEnded, runnerFinalized, runnerLaunchFor, runnerLaunches, sessionVerdict, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
@@ -122,6 +122,17 @@ test('L65: the verdict rule reads the runner\'s record again, so a record gone o
   unlinkSync(p);
   writeFileSync(p, text, { mode: 0o644 });
   must(put(env.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
+});
+
+test('L445 c2 planted: every runner record that names another session than its file name is refused', () => {
+  const env = setup({ prefix: 'm9-c2-' });
+  const q = { root: env.launchRoot, uids: env.reviewUids, role: 'reviewer', card: 'C-1', head: HEAD };
+  writeFileSync(join(env.launchRoot, 'R-3.json'), JSON.stringify({ session_id: 'R-1', role: 'reviewer', card: 'C-1', head: HEAD, verdict_sha256: 'a'.repeat(64) }), { mode: 0o644 });
+  for (const read of [runnerLaunchFor, runnerEnded, runnerFinalized]) {
+    assert.match(read({ ...q, sessionId: 'R-3' }).reason ?? '', /names another session/, read.name);
+  }
+  const all = runnerLaunches({ root: env.launchRoot, uids: env.reviewUids });
+  assert.deepEqual(all.refused.map((r) => [r.sid, /names another session/.test(r.reason)]), [['R-3', true]]);
 });
 
 test('L65: a runner launch record is read only from a safe file in a safe folder', () => {

@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 44 FAILs of 48 items for one product (about 5 more for each extra product), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 47 FAILs of 51 items for one product (about 5 more for each extra product), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -50,14 +50,24 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   run stops it before anything is done. Each folder is then changed through an open handle (a link, or a folder swapped
   since the plan, is refused), all folders are made first, and children are handed over before their parents. A folder
   whose children belong to different users (`products/<product>`) is root's, so none of them can rename another's away.
-- **One outbox root.** `outboxes/` is root's 0755; under it `reviewer/` and `auditor/` belong to `review` (0755) and each
-  worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
+- **One outbox root.** `outboxes/` is root's 0755; under it one folder for each role the review runner starts
+  (`reviewer/`, `auditor/` and `plan_reviewer/`, `RUNNER_ROLES`) belongs to `review` (0755), so no worker can write their
+  answers (L722). An earlier setup built from the plan-reviewer branch alone made `plan_reviewer/` the workers' user's; `users-folders` refuses to take that over, so look inside it, remove it by hand, then run `users-folders` again. Each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
   list, read and clear (`delete_child`), with inheritance. The worker seals its own hand-in file 0440. `check` compares the
   access list and the group exactly: a missing or an extra entry FAILs.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and
   is refused when running as root.
+- **The workers' copies (L747, L751).** `worker-copies/` is the owner's 0755, group wheel, with one access-list entry letting
+  `orchestrate` list, read and delete (`list`, `search`, the read-attribute rights and `delete_child`, inherited by every
+  file and folder made under it), so cleanup can check a card's copy and remove it. It can't add or write anything. The
+  entry has no `read` (a folder shows it as `list`, so the exact check would never pass; a file made under it shows `read`)
+  and no `delete` (with it, `orchestrate` could remove the empty copies folder itself). The entry reaches only what is made
+  after it is set: copies that were already there need it added by hand. Cleanup's git runs only on the mirror
+  (orchestrate's own), never inside a copy, so no `safe.directory` is needed for it.
+- **The seal folder.** `seals/` is orchestrate's 0700: where cleanup seals a copy's bundle it could not prove saved (the
+  Dispatcher config's `sealRoot`).
 - It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
 - Not in this part: the install and the background jobs (part 2, below); the ownerTaps and proposals folders, the account job
   reload and the watch-only token file (part 3).
@@ -65,21 +75,49 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 ## Part 2: the install and the background jobs
 
 Extra config keys (the same file): `address` (https address of the repository), `label` (starts the jobs' names),
-`runnerConfig` (full path of the review runner's prepared `review.json`, whose `installRoot` is `<base>/install/orchestrate`),
-`extras` (full paths of the files and folders the runner config names: its claude program and hooks; the wiring and the budget module are the copy's own code, never extras. With the base `/Library/orchestrate` the runner config names the wiring exactly `"wiring": "/Library/orchestrate/install/orchestrate/modules/M4-workshop/launcher/review-wiring.mjs"`; for the budget module use the path of its file under the same `modules/` folder), and
+`runnerConfig` (full path of the review runner's prepared `review.json`, whose `installRoot` is `<base>/install/orchestrate`,
+and whose `"uids"` names the Mac user id of every role: `reviewer`, `auditor` and `plan_reviewer` all name `review`'s id
+(`dscl . -read /Users/review UniqueID` prints it), every other role the owner's, and none root. `install` refuses, and `check-install` FAILs,
+a map that leaves a role out (L726), names root, gives a runner role an id another role also names, or names a key no role is called; without `plan_reviewer` the runner refuses every plan review. Both say "couldn't read the review user" rather than pass when `review` can't be read (run `users-folders` first). **An install made before the plan reviewer** (L737 M1): its copy's `review.json` has no `plan_reviewer`, and re-running `install` does not change it (the copy is kept, and every update carries its `review.json` forward). `check-install` gives a WARNING for that, not a FAIL, so the jobs still load. To put it right: add `"plan_reviewer": <review's id>` to the `uids` of your checked `review.json` (the one `runnerConfig` names), then `sudo install -o root -g wheel -m 0644 <that file> /Library/orchestrate/install/orchestrate/review.json` (with your base), then `check-install` again. Once add-to-install lands (#243) that is the step instead, and the WARNING becomes a FAIL),
+`extras` (full paths of anything else the runner config names in the copy, often none: its claude program and hooks are put in by `add-to-install`, not carried as extras, and the `--for-install` file names neither; the wiring and the budget module are the copy's own code, never extras. With the base `/Library/orchestrate` the runner config names the wiring exactly `"wiring": "/Library/orchestrate/install/orchestrate/modules/M4-workshop/launcher/review-wiring.mjs"`; for the budget module use the path of its file under the same `modules/` folder), and
 optionally `gitBin` (default `/usr/bin/git`) and `nodeBin` (default and advised: leave it out, so it is the node running the command; a node root may not run, such as a Homebrew one, is refused before any step; a `nodeBin` that is a link, not the program's own real file, is refused too, because the copy is made from the name). Each extra is named by its real file, not by a shortcut: a link, a missing file or a link inside a folder is refused at plan time, with no step run. Root reads the runner config through one handle, never through a link, and only if it is root's own and written by no one else; an error never shows a byte of it.
 When root runs `install` for real, the `runnerConfig` file must be root's own, written by no one else, with every folder above it root's too (root takes no orders from a file others could change). A `--dry-run` reads the file with root's own rules and prints a WARNING, with the reason, only when root would refuse it (a dry run that prints no warning means root will take it). To put the file in place: keep your copy of `review.json` in a folder only you can open, run `sudo install -o root -g wheel -m 0644 /dev/stdin /Library/<name>.json < ~/review.json`, and set `runnerConfig` to that `/Library` path. The file is read once; the copy root installs is the text that was checked.
 Every name, path and layout rule comes from the launcher's own modules (`install-check.mjs`, `review-daemons.mjs`,
 `review-updater.mjs`); `install.test.mjs` pins the two copies it cannot import (the label rule, the updater's file set).
 
+**The order, for the review runner's file (L731):** (1) `review-config --for-install`, then put the file in place as `runnerConfig`; (2) `install`, then `check-install`; (3) `review-config` again without `--for-install`, put that file in place; (4) `add-to-install`; (5) `daemons place` and `load`. Jobs loaded before step 4 show FAIL in `daemons check` (the runner refuses its file until `claudeBin` is there).
+
 | Command | What it does | Root? |
 |---|---|---|
+| `/usr/local/bin/node setup.mjs review-config --pin <x.y.z> --input <file> --out <file> [--for-install]` (`--dry-run` first) | builds the review runner's `review.json` rather than having it typed (L709). Each field has one source (`review-config.mjs` `SOURCES`): the folders, the copy's paths and the Mac users' ids come from the setup config and the Mac; the pin and the program's place in the copy from `--pin`; only three come from your `--input` file, each required, with no default: `product` (whose Record the runner reads), `machineWide` (the machine-wide Claude Code settings file; on a Mac usually `/Library/Application Support/ClaudeCode/managed-settings.json`) and `rules` (`production.env_files`, `production.programs`, `production.hosts`, `secrets.paths`; an empty list says none). The input may hold nothing else. A pin other than the one the role tool lists were checked on (M10 `TOOLS_CHECKED`) is refused, the dry run included. The file is read back with the runner's own `readConfig` before it replaces `--out`; if it refuses, nothing is written and an earlier file at `--out` is kept. `budget` and `bobManifest` are left out until something makes them. Put it in place as root's own: `sudo install -o root -g wheel -m 0644 /dev/stdin <runnerConfig> < <the file>`. **Two forms, in this order:** with `--for-install` for a first `install` (it leaves out `claudeBin` and `hooksDir`, which a first install can't carry; the runner refuses reviews until the next step), then without it for `add-to-install`, which puts the pinned Claude Code and the hooks where the file names them | no (refused under sudo) |
 | `/usr/local/bin/node setup.mjs install --config <file> --dry-run` | prints every step (and every refusal, before any step) | no |
 | `sudo /usr/local/bin/node setup.mjs install` | makes the root-owned `install` folder, a root-owned copy of the updater's three files and of node, the seed (`updater.json`, `review.json`, the extras), then runs the updater's `--first` run, which builds the `.v-<commit>` copy and flips the link; then checks | yes |
-| `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists | no |
+| `sudo /usr/local/bin/node setup.mjs add-to-install --pin <x.y.z> --sha256 <hex>` (`--dry-run` first) | puts the pinned Claude Code and the hooks into the copy that is installed now, in place, and replaces its `review.json` with the prepared `runnerConfig`. The program comes from `<base>/claude-code/<pin>/claude` and must match the fingerprint. Take `--sha256` from the checksum the official release publishes (or from the one download you checked yourself), never from the file already in that folder: the orchestrate account can write there, so its own fingerprint proves only that it didn't change after you read it. The hooks come from the copy's own modules; `claude-code` and `hooks` join `keep`. No update, no flip, no job touched, every other file unchanged. Safe to run again: a second run finishes a cut-off one. `keep` carries the hooks across an update as they are, so an update that changes a hook makes review launches refuse by name until this runs again | yes |
+| `/usr/local/bin/node setup.mjs check-install --config <file> [--main <commit>]` | read only: the link is root's; the copy and every folder above it are root's alone; the commit stamp; **no access list on any install folder**; `review.json` names this copy and what it names exists. Once the config names `hostLockPath`, a last line points to `check-dispatcher` | no |
+| `/usr/local/bin/node setup.mjs check-dispatcher --config <file>`, or with sudo | read only: the Dispatcher's lines (below). Its own command, so a host.lock problem never stops `daemons load` or the watch cutover, which wait on check-install | no; sudo for the host.lock read |
+| `/usr/local/bin/node setup.mjs dispatcher-keys --config <file>` | read only: prints the Dispatcher config's five worker and cleanup keys as JSON, from this config: `reviewRoot` (`<base>/review`), `mirror` (`<base>/mirror`), `sealRoot` (`<base>/seals`), `hostLockPath`, and `hostLockUid` (the owner's Mac user id, read on this Mac: the Dispatcher reads host.lock only when the file it opened is that user's). Without `hostLockPath`, or with no such owner on this Mac, it says so and exits 1 | no |
 | `sudo /usr/local/bin/node setup.mjs daemons place` | writes the three job files into `/Library/LaunchDaemons` (root:wheel 0644, exactly what `review-daemons.mjs` builds) | yes |
 | `sudo /usr/local/bin/node setup.mjs daemons load` / `unload` | `launchctl bootstrap` / `bootout` for each job not yet loaded / loaded; load refuses unless the install check passes and the job files are there; a job loaded from an older file is taken out and loaded again (`load` records each file's fingerprint in `<base>/install/loaded-jobs.json`, root's); unload with nothing loaded is not an error | yes |
 | `/usr/local/bin/node setup.mjs daemons list` / `check` | read only: `list` shows loaded or not, state and last exit. `check` FAILs on: a job file wrong or missing; a leftover job file under another label; a job not loaded; a job loaded from an older file than the one on disk; a job whose last run did not end with exit 0; a job whose current run has been going over 30 minutes (a hung run keeps the last exit green); `ps` answering with something unreadable counts as a FAIL, `ps` printing nothing (the run ended meanwhile) does not. It cannot see a job loaded under an old label whose file is gone: `daemons unload` under the old label first. Changing the label, `review.json` or the owner's home folder needs `daemons unload`, the change, `place`, `load` | no |
+
+**The Dispatcher's lines: check-dispatcher (L748).** The config's `hostLockPath` is the full path of the owner's `host.lock`,
+in the owner's home (`/Users/<owner>/...`; spaces are fine). check-dispatcher says:
+- the review runner's folder holds its `launches` folder (the runner makes it on its first run; the Dispatcher won't start without it);
+- host.lock is the owner's (not orchestrate's), one plain file with one name, no bigger than the Dispatcher reads
+  (`HOST_LOCK_MAX` in `wiring/worker-ports.mjs`), and `orchestrate` can read it. As root it reads it as `orchestrate`;
+  without sudo that line is NEEDS ROOT. When the read fails it says why, in plain words: a folder above it `orchestrate`
+  can't go into (it names the folder; the folders of the path as written and of its real place, through links), the file's
+  own permissions (naming the file's mode, for example 600), macOS privacy protection (when macOS answered "Operation not permitted" and the permissions allow the
+  read), or else the read's own error. A missing host.lock passes when `orchestrate` can reach its folder: the Dispatcher
+  reads that as no host claimed. A folder that is not there is a wrong path, and fails.
+- whether the Dispatcher's background job can read it. macOS judges a read by the app it runs from, so a read from the
+  Terminal proves nothing for the job when host.lock is in a folder macOS guards (a synced cloud folder under
+  `~/Library/CloudStorage` or `~/Library/Mobile Documents`, Desktop, Documents, Downloads, or another disk under
+  `/Volumes`). There this line is NOT TRIED, which counts as a FAIL: keep host.lock outside those folders, or prove the read
+  from the job itself. That holds when host.lock is missing too: the job would be refused the read, not told the file is
+  missing, so it would say "not known" on every pass. The place is judged on its real path, as the disk spells it (a
+  config spelling `library/cloudStorage` is still the guarded folder), after any links.
+The mirror and `seals/` are rows of the folder table, so `check` compares their owner and mode.
 
 Root never runs code a user can write: the updater runs from a root-owned `install-work/bootstrap` copy with a root-owned
 copy of node. A plain folder where the copy's link belongs is refused, not replaced.
@@ -94,13 +132,14 @@ run the real updater in a child process against a local folder standing in for G
 root folder prefix, an in-memory `dscl`/`dseditgroup`, owners kept in a table) and never as root. The stand-in refuses what
 the real tool refuses (a `dscl` write without root, a bad path, a missing record, the password hash for anyone but root).
 The last tests run the real read-only tools on this Mac (`dscl -read`, `dseditgroup -o checkmember`, `stat`, `ls -led`).
-Each `PLANT` test breaks one clause and names the check that catches it.
+Each `PLANT` test breaks one clause and names the check that catches it. `dispatcher-check.test.mjs` covers the Dispatcher's keys: the seal folder, the copies' access list on the real `chmod` and `ls`, `hostLockPath`, `dispatcher-keys` and each reason check-dispatcher gives for a host.lock orchestrate can't read.
 
 ## Part 3 — taps, proposals, git trust, the account job reload, the watch-only token
 
 | Command | What it does | Root? |
 |---|---|---|
 | `sudo /usr/local/bin/node setup.mjs users-folders` | now also makes `<base>/owner-taps` (the owner's, 0755, no access list; runner setting `ownerTaps`) | yes |
+| `sudo /usr/local/bin/node setup.mjs users-folders` (same command) | also makes `<base>/owner-answer` (the owner's, 0755, no access list; L727): the owner's Sensors job (`wiring/owner-answer.mjs --to <base>/owner-answer/owner-answer.json`, run as the owner) writes `owner-answer.json` there, 0644; `orchestrate` lists and reads it, and no one but the owner writes. Point the Sensors' answer file at that path | yes |
 | `sudo /usr/local/bin/node setup.mjs users-folders` (same command) | also makes `<base>/watch` (orchestrate's, 0700: the runner's log and rules draft) and `<base>/watch-notes` (the owner's, 0755: the written explanations; only the owner writes, orchestrate and the summary read) (R-0b-122) | yes |
 | `sudo /usr/local/bin/node setup.mjs proposals` | makes `proposalsParent` (default `/Users/Shared/orchestrate-proposals`: root's, **0711**) and one folder per product (the owner's, **0700**, one access-list entry for `orchestrate`: list/search/read, inherited). Runs behind the same folder-chain wall as every root command; the folder the parent sits in must be root's and either written by no one else or sticky (as the Mac's own `/Users/Shared` is), and the parent itself root's and not writable by others unless sticky. A file moved in from elsewhere may not be readable by `orchestrate` (it keeps its old owner and mode): copy it in instead. | yes |
 | `/usr/local/bin/node setup.mjs check-proposals` | read only: owner, mode, exact access list; with `sudo` also: the owner can write, `orchestrate` reads and cannot write, `review` cannot read | no (sudo for proofs) |
