@@ -613,6 +613,32 @@ expect "... CLAUDE.md is untouched" 0 "" -- bash -c "[ \"\$(cat '$UG/ptr/CLAUDE.
 expect "report: the two 'Present' groups print as one" 0 "" -- bash -c "[ \"\$(cd '$UG/fresh' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 | grep -c '^Present (')\" = 1 ]"
 expect "--apply all on an up-to-date project: no 'already up to date' lines" 0 "" -- bash -c "! (cd '$UG/fresh' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02 --apply all) | grep -q 'already up to date'"
 
+# Hand steps (D-036): the matrix's Works column and the wiring check are the project's own files. The report says
+# what to change; nothing applies them.
+scaffold hand; H="$UG/hand"; mkdir -p "$H/docs" "$H/tests"
+printf '# Capability Traceability Matrix\n| Capability | Phase 1 |\n|---|---|\n| sign in | E |\n' > "$H/docs/matrix.md"; cp "$H/docs/matrix.md" "$UG/matrix.before"
+expect "hand: a matrix without Works -> a hand step naming the file" 0 "Open docs/matrix.md and add two columns to its table, Works and Evidence" -- ub hand
+expect "hand: no wiring check yet -> a hand step" 0 "copy Bob's templates/wired.test.mjs into this project's tests and set its CONFIG" -- ub hand
+expect "hand: listed under 'By hand' in what to do next" 0 "By hand .*: capability-matrix-works, wiring-check" -- ub hand
+ub hand --apply all >/dev/null
+expect "hand: --apply all leaves the matrix as it was" 0 "" -- cmp -s "$H/docs/matrix.md" "$UG/matrix.before"
+expect "hand: naming one is refused with the reason" 0 "a hand step: Bob never edits this file for you" -- ub hand --apply capability-matrix-works
+printf '# Capability Traceability Matrix\n| Capability | Phase 1 | Works | Evidence |\n|---|---|---|---|\n| sign in | E | e2e | signin.e2e.test |\n' > "$H/docs/matrix.md"
+sed "s|SOURCE: \['src'\]|SOURCE: ['lib']|" "$OB/templates/wired.test.mjs" > "$H/tests/wired.test.mjs"
+expect "hand: Works added and a set-up copy of the current wiring check -> both listed as present" 0 "^  bob-pointer, capability-matrix-works, wiring-check$" -- ub hand
+expect "... and nothing is left by hand" 0 "" -- bash -c "out=\$(cd '$H' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02) && ! grep -q 'By hand' <<<\"\$out\""
+echo "// a newer line from a later Bob" >> "$OB/templates/wired.test.mjs"
+git -C "$OB" commit -qam "Wiring check reads one more case — D-036"
+expect "hand: Bob's wiring check is newer -> copy it again, keeping your settings" 0 "tests/wired.test.mjs matches Bob's copy from commit .*put back your CONFIG and UNWIRED blocks" -- ub hand
+echo "// changed in this project" >> "$H/tests/wired.test.mjs"
+expect "hand: changed outside its settings -> keep it (with a reason) or take Bob's" 0 "was changed here outside its CONFIG and UNWIRED blocks" -- ub hand
+echo "- wiring-check: this project scans one more import form" >> "$H/.bob/differences.md"
+expect "hand: listed in .bob/differences.md -> left alone" 0 "\[wiring-check\]" -- bash -c "(cd '$H' && GIT_CONFIG_GLOBAL='$UG/gitconfig' node '$OB/scripts/bob-upgrade.mjs' --today 2026-01-02) | sed -n '/^Changed here on purpose/,/^\$/p'"
+sed -i.bak '/^- wiring-check:/d' "$H/.bob/differences.md"; rm "$H/tests/wired.test.mjs"
+printf '## Phase 1 Report\n### Wiring and Simplicity\n- Gate 17: no units of work\n' > "$H/docs/phase-1-report.md"
+expect "hand: 'Gate 17: no units of work' recorded -> no wiring step asked for" 0 "^  bob-pointer, capability-matrix-works, wiring-check$" -- ub hand
+git -C "$OB" checkout -q HEAD~1 -- templates/wired.test.mjs && git -C "$OB" commit -qam "back to the current wiring check"
+
 # ── 14. commit-sweep.sh (D-020): blocking mode judges what is being committed ─
 echo "commit-sweep.sh"
 CS="$HERE/commit-sweep.sh"; CW="$TMP/cs"; newrepo "$CW"
@@ -747,6 +773,16 @@ printf '## Phase 2 Report\n### Acceptance Bar\n- login works\n### Built\n- x\n##
 expect "phase-report: a short report with --abbreviated -> OK" 0 "phase-report-check: OK" -- node "$PR" "$PD/short.md" --abbreviated
 expect "phase-report: --abbreviated reads its list from the template (Acceptance Bar is on it)" 1 'missing the "acceptance bar" section' -- bash -c "sed '/Acceptance Bar/,/^- login works/d' '$PD/short.md' > '$PD/short2.md' && node '$PR' '$PD/short2.md' --abbreviated"
 expect "phase-report: ...the same short report checked in full -> REFUSED" 1 'missing the "implementation decisions" section' -- node "$PR" "$PD/short.md"
+# A project that keeps a Capability Traceability Matrix must fill in its two sections (D-036, Phase Gates 16-17).
+PM="$TMP/prm"; mkdir -p "$PM/docs/reports"; git init -q "$PM"; cp "$PD/short.md" "$PM/docs/reports/short.md"
+printf '# Capability Traceability Matrix\n| Capability | Phase 1 | Works |\n|---|---|---|\n| sign in | E | e2e |\n' > "$PM/docs/matrix.md"
+expect "phase-report: the project keeps a matrix, its sections are left out -> REFUSED" 1 'missing the "capability scoreboard" section — required because this project keeps a Capability Traceability Matrix' -- node "$PR" "$PM/docs/reports/short.md" --abbreviated
+expect "phase-report: ...and Wiring and Simplicity is named too" 1 'missing the "wiring and simplicity" section' -- node "$PR" "$PM/docs/reports/short.md" --abbreviated
+printf '### Capability Scoreboard\n- live 0 · e2e 1 · unwired 0 · partial 0 · none 0 — done 1 of 1\n### Wiring and Simplicity\n- Gate 17: no units of work\n' >> "$PM/docs/reports/short.md"
+expect "phase-report: ...with both sections filled in -> OK, and says why they were needed" 0 'since the project keeps a capability matrix' -- node "$PR" "$PM/docs/reports/short.md" --abbreviated
+expect "phase-report: no matrix in the project -> the two sections stay optional" 0 "phase-report-check: OK — $PD/short.md has every required section filled in$" -- node "$PR" "$PD/short.md" --abbreviated
+expect "phase-report: --matrix names one that is not there -> cannot run (exit 2)" 2 "no matrix at" -- node "$PR" "$PD/short.md" --abbreviated --matrix "$PD/none-here.md"
+expect "phase-report: --matrix names one -> its sections are required" 1 'missing the "capability scoreboard" section' -- node "$PR" "$PD/short.md" --abbreviated --matrix "$PM/docs/matrix.md"
 
 # ── 18. autonomy-check.mjs (D-033, Rule 27) ─────────────────────────────────
 echo "autonomy-check.mjs"

@@ -55,12 +55,15 @@
 
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, unlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { dirname, join } from 'node:path';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { planFingerprint } from '../../../shared/plan-fingerprint.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
 import { pastTime, STILL_WAITING_MS } from '../../../shared/still-waiting.mjs';
-import { ASIDE_FOLDER, ENDED_FOLDER, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
+import { ASIDE_FOLDER, ENDED_FOLDER, MAX_OUTBOX_BYTES, NEVER_RAN, PASSES, launchesFolderProblem, reviewUid, runnerEnded, runnerLaunches, CARD_ID } from '../../M9-record/outbox.mjs';
 import { checkReviewOutbox, reviewOutbox, uidsProblem } from './review-user.mjs';
+import { PLAN_ANSWER_NAME } from './role-profiles.mjs';
 import { ACCOUNT_NAMES, accountDir, accountEnv } from './accounts.mjs';
 import { DIFF_NAME } from '../../M5-review-audit/review-package.mjs';
 
@@ -98,8 +101,18 @@ export function newestFirst(launches, now) {
   return [...launches].sort((x, y) => at(y) - at(x));
 }
 export const MAX_EARLIER_NOTES = 4000;
-export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, packages: 'packages', status: 'status.json', state: 'state.json' });
+export const FOLDERS = Object.freeze({ requests: 'requests', rejected: 'rejected', launches: 'launches', ended: ENDED_FOLDER, aside: ASIDE_FOLDER, packages: 'packages',
+  planLaunches: 'plan-launches', planEnded: 'plan-ended', status: 'status.json', state: 'state.json' });
 const REQUEST_KEYS = ['card', 'head', 'request_id', 'role'];
+// A plan reviewer's request names the plan it checks, by its fingerprint, not a head (L703).
+const PLAN_REQUEST_KEYS = ['card', 'fingerprint', 'request_id', 'role'];
+// In a plan reviewer's package: the plan file as intake checked it. In its outbox: its one-line answer.
+export const PLAN_FILE_NAME = 'plan.txt';
+// The answer's name is the plan reviewer's profile's one outbox file (role-profiles.mjs), so the hook and the runner agree.
+export { PLAN_ANSWER_NAME };
+export const MAX_PLAN_ANSWER_BYTES = 4096;
+// The plan file is an outbox file intake took, so it is never bigger than intake reads.
+export const MAX_PLAN_BYTES = MAX_OUTBOX_BYTES;
 
 const iso = (t) => new Date(t).toISOString();
 
@@ -161,8 +174,12 @@ export function earlierBlock(earlier) {
     ...list.map((e) => `Session ${String(e?.session_id ?? '').slice(0, 64)} at ${String(e?.head ?? '').slice(0, 7)} wrote (quoted):\n${quote(e?.notes)}`)].join('\n\n');
 }
 
-/** Does a card in this state need a session of this role? A reviewer for every card in review; an auditor too on Tier 1 (m-6). */
+/**
+ * Does a card in this state need a session of this role? A reviewer for every card in review; an auditor too on Tier 1
+ * (m-6). A plan reviewer only for a Tier-1 card still in draft, before its go (L703); never a card in review.
+ */
 export function needsRole(doc, role) {
+  if (role === PLAN_REVIEW_ROLE) return doc?.state === 'draft' && doc.tier === 1;
   if (!doc || doc.state !== 'in_review') return false;
   if (role === 'reviewer') return true;
   return role === 'auditor' && doc.tier === 1;
@@ -200,10 +217,13 @@ export function readRequest(dir, name) {
       let req; try { req = JSON.parse(readFileSync(fd, 'utf8')); } catch { return { ok: false, reason: 'it is not JSON' }; }
       if (!req || typeof req !== 'object' || Array.isArray(req)) return { ok: false, reason: 'it is not an object' };
       const keys = Object.keys(req).sort();
-      if (keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')}` };
+      const plan = keys.join() === PLAN_REQUEST_KEYS.join();
+      if (!plan && keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')} (or, for a plan reviewer, ${PLAN_REQUEST_KEYS.join(', ')})` };
       // No card file's name starts with a dot, so no such card can be read (R-0b-171).
       if (typeof req.card !== 'string' || !CARD_ID.test(req.card) || req.card.startsWith('.')) return { ok: false, reason: 'the card id is not a plain id' };
-      if (typeof req.head !== 'string' || !HEX40.test(req.head)) return { ok: false, reason: 'the head is not 40 hex' };
+      if (plan && req.role !== PLAN_REVIEW_ROLE) return { ok: false, reason: 'only a plan reviewer\'s request names a fingerprint' };
+      if (plan && (typeof req.fingerprint !== 'string' || !HEX64.test(req.fingerprint))) return { ok: false, reason: 'the fingerprint is not 64 hex' };
+      if (!plan && (typeof req.head !== 'string' || !HEX40.test(req.head))) return { ok: false, reason: 'the head is not 40 hex' };
       if (typeof req.role !== 'string' || req.role.length > 40) return { ok: false, reason: 'the role is not a short word' };
       if (typeof req.request_id !== 'string' || !REQUEST_ID.test(req.request_id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
       return { ok: true, req };
@@ -266,8 +286,11 @@ export function pinPackage(dir, sessionId, sha) {
   if (!HEX64.test(sha ?? '')) throw new Error('the package\'s sha256 is not 64 hex');
   writeFileSync(join(dir, `${sessionId}.sha256`), `${sha}\n`, { mode: 0o644, flag: 'wx' });
 }
-/** → null when the package is the one pinned, else why not. `kept`: the runner's own record, state.packages[<session>]. */
-export function packageProblem({ dir, sessionId, uid, kept }) {
+/**
+ * → null when the package is the one pinned, else why not. `kept`: the runner's own record, state.packages[<session>].
+ * `name`: the file the pin is of: the diff for a reviewer or auditor, the plan for a plan reviewer.
+ */
+export function packageProblem({ dir, sessionId, uid, kept, name = DIFF_NAME }) {
   if (!kept || !HEX64.test(kept.sha256 ?? '')) return 'the runner kept no sha256 for the review package it was given';
   if (kept.pinned !== true) return 'the review package it was given could not be pinned when it started';
   const pin = readOwn(join(dir, `${sessionId}.sha256`), uid, PIN_MAX);
@@ -278,10 +301,119 @@ export function packageProblem({ dir, sessionId, uid, kept }) {
   const folder = join(dir, sessionId);
   const fb = folderProblem(folder, uid);
   if (fb) return `the review package's folder: ${fb}`;
-  const got = readOwn(join(folder, DIFF_NAME), uid);
-  if (!got.ok) return `the review package's diff: ${got.reason}`;
+  const what = name === DIFF_NAME ? 'diff' : name;
+  const got = readOwn(join(folder, name), uid);
+  if (!got.ok) return `the review package's ${what}: ${got.reason}`;
   const sha = createHash('sha256').update(got.bytes).digest('hex');
-  return sha === want ? null : `the review package changed while the session ran (its diff's sha256 is ${sha.slice(0, 12)}, not the ${want.slice(0, 12)} it was given)`;
+  return sha === want ? null : `the review package changed while the session ran (its ${what}'s sha256 is ${sha.slice(0, 12)}, not the ${want.slice(0, 12)} it was given)`;
+}
+
+/**
+ * A plan reviewer's package (L703): the plan file intake took, copied into the runner's own folder. The trust anchor is
+ * the Record's plan_sha256, not the Lead's outbox: the file is opened once (no link followed, a plain file, at most
+ * `max` bytes), its bytes are read into memory and hashed, and those same bytes are written into `dir`. The path is never
+ * read a second time, so a file changed after the check can't reach the reviewer. `between()` (tests only) runs after
+ * the hash and before the write. A file that is gone, or whose bytes are not the plan the card names, is `gone` or
+ * `changed`: the card stays a draft, and a new plan gets a new fingerprint. → { ok, sha256, file } | { ok: false, reason, lasting? }
+ */
+export function packagePlan({ path, sha256, dir, max = MAX_PLAN_BYTES, between }) {
+  if (!HEX64.test(sha256 ?? '')) return { ok: false, reason: 'the card names no plan sha256' };
+  let bytes;
+  let fd;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    if (e?.code === 'ENOENT') return { ok: false, lasting: true, reason: 'the plan file is gone from the Lead\'s outbox' };
+    return { ok: false, reason: e?.code === 'ELOOP' ? 'the plan file is a link' : `the plan file can't be opened (${e?.code ?? e})` };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { ok: false, lasting: true, reason: 'the plan file is not a plain file' };
+    if (st.size > max) return { ok: false, lasting: true, reason: 'the plan file changed after intake (it is now too big)' };
+    bytes = readFileSync(fd);
+  } catch (e) { return { ok: false, reason: `the plan file can't be read (${e?.code ?? e})` }; } finally { closeSync(fd); }
+  const got = createHash('sha256').update(bytes).digest('hex');
+  if (got !== sha256) return { ok: false, lasting: true, reason: 'the plan file changed after intake' };
+  between?.();
+  const file = join(dir, PLAN_FILE_NAME);
+  try {
+    mkdirSync(dir, { mode: 0o755 });
+    chmodSync(dir, 0o755);
+    writeFileSync(file, bytes, { mode: 0o644, flag: 'wx' });
+    chmodSync(file, 0o644);
+  } catch (e) { return { ok: false, reason: `the plan could not be put in its package (${e?.code ?? e?.message})` }; }
+  return { ok: true, sha256: got, file };
+}
+
+/**
+ * The one request id a plan review is asked by (L726 m1): the sha256 of `<card>-<fingerprint>`, which the Dispatcher's
+ * request writer uses. The runner takes no plan request with another id, so a request someone else wrote with the
+ * right card and plan can't take the one start that plan gets.
+ */
+export const PLAN_REQUEST_ID = (card, fingerprint) => createHash('sha256').update(`${card}-${fingerprint}`).digest('hex');
+
+const PLAN_RECORD_MAX = 64 * 1024;
+const goodPlanLaunch = (d, name) => isObject(d) && d.role === PLAN_REVIEW_ROLE && typeof d.session_id === 'string' && SESSION_ID.test(d.session_id) && name === `${d.session_id}.json`
+  && typeof d.card === 'string' && CARD_ID.test(d.card) && typeof d.fingerprint === 'string' && HEX64.test(d.fingerprint) && typeof d.request_id === 'string' && REQUEST_ID.test(d.request_id);
+/**
+ * The plan reviewers' launch records (plan-launches/, the runner's own). → { ok, launches: [doc], bad: [{ name, reason }] }
+ * | { ok: false, reason }. One that fails its checks is listed in `bad` and counts for nothing.
+ */
+export function readPlanLaunches(dir, uid) {
+  const fb = folderProblem(dir, uid);
+  if (fb) return { ok: false, reason: fb };
+  let names; try { names = readdirSync(dir).filter((n) => !n.startsWith('.')); } catch (e) { return { ok: false, reason: `they could not be listed (${e?.code ?? e})` }; }
+  const launches = [];
+  const bad = [];
+  for (const name of names) {
+    const r = readOwn(join(dir, name), uid, PLAN_RECORD_MAX);
+    if (!r.ok) { bad.push({ name, reason: r.reason }); continue; }
+    let d; try { d = JSON.parse(r.bytes.toString('utf8')); } catch { d = null; }
+    if (!goodPlanLaunch(d, name)) { bad.push({ name, reason: 'it is not a plan reviewer\'s launch record' }); continue; }
+    launches.push(d);
+  }
+  return { ok: true, launches, bad };
+}
+/** One plan reviewer's ended record (plan-ended/). → { ok, ended } | { ok: false, none: true } | { ok: false, reason } */
+export function readPlanEnded(dir, uid, sessionId) {
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return { ok: false, reason: 'not a session id' };
+  const r = readOwn(join(dir, `${sessionId}.json`), uid, PLAN_RECORD_MAX);
+  if (!r.ok) return r.reason === 'it is gone' ? { ok: false, none: true } : { ok: false, reason: `its ended record: ${r.reason}` };
+  let d; try { d = JSON.parse(r.bytes.toString('utf8')); } catch { d = null; }
+  if (!isObject(d) || d.session_id !== sessionId || typeof d.answer_sha256 !== 'string') return { ok: false, reason: 'its ended record is not the runner\'s' };
+  return { ok: true, ended: d };
+}
+
+/**
+ * The Dispatcher's read of a plan reviewer's answer (plan-go's planReviewAnswer, L703), from the runner's own records
+ * only: the launches the runner made for this request, card and plan, and the answer the runner kept in the ended record
+ * when the session ended. `session` is the request id the Dispatcher wrote. → { ok: true, answer } | { ok: true } while
+ * none has ended with one (none started yet, one running, or a start that never ran and is tried again) | { ok: false,
+ * reason } when it ended with no answer that counts. A folder or record that fails its checks throws: never "working".
+ */
+export function planAnswerFor({ root, uid, card, fingerprint, session }) {
+  if (!Number.isInteger(uid) || uid < 0) throw new Error('the review user\'s uid is not known, so its records can\'t be checked');
+  const fb = folderProblem(root, uid);
+  if (fb) throw new Error(`the review runner's folder: ${fb}`);
+  const pl = readPlanLaunches(join(root, FOLDERS.planLaunches), uid);
+  if (!pl.ok) {
+    // No plan reviewer has ever been started: no folder yet.
+    try { lstatSync(join(root, FOLDERS.planLaunches)); } catch (e) { if (e?.code === 'ENOENT') return { ok: true }; }
+    throw new Error(`the plan reviewers' launch records: ${pl.reason}`);
+  }
+  const mine = pl.launches.filter((d) => d.request_id === session && d.card === card && d.fingerprint === fingerprint)
+    .sort((x, y) => (Date.parse(y.launched_at) || 0) - (Date.parse(x.launched_at) || 0));
+  const endedDir = join(root, FOLDERS.planEnded);
+  for (const d of mine) {
+    const e = readPlanEnded(endedDir, uid, d.session_id);
+    if (e.none) return { ok: true };
+    if (!e.ok) throw new Error(`plan reviewer ${d.session_id}: ${e.reason}`);
+    const said = e.ended.answer_sha256;
+    if (said === NEVER_RAN) continue;
+    if (said === 'none') return { ok: false, reason: `the plan reviewer ${d.session_id} ended without an answer (a crash, a context-limit stop or a kill does this too); a new plan gets a new reviewer` };
+    if (!HEX64.test(said) || typeof e.ended.answer !== 'string') return { ok: false, reason: `the plan reviewer ${d.session_id}'s answer can't be counted (${String(e.ended.reason ?? 'no reason given').slice(0, 300)})` };
+    if (createHash('sha256').update(e.ended.answer, 'utf8').digest('hex') !== said) return { ok: false, reason: `the plan reviewer ${d.session_id}'s ended record does not match its own answer` };
+    return { ok: true, answer: e.ended.answer };
+  }
+  return { ok: true };
 }
 
 /**
@@ -331,7 +463,7 @@ export async function runnerPass(ctx) {
   const rootBad = folderProblem(ctx.root, uid);
   if (rootBad) return { ...result, ok: false, error: `the review folder: ${rootBad}`, wrote: false };
 
-  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
+  const P = { requests: join(ctx.root, FOLDERS.requests), rejected: join(ctx.root, FOLDERS.rejected), launches: join(ctx.root, FOLDERS.launches), ended: join(ctx.root, FOLDERS.ended), aside: join(ctx.root, FOLDERS.aside), packages: join(ctx.root, FOLDERS.packages), planLaunches: join(ctx.root, FOLDERS.planLaunches), planEnded: join(ctx.root, FOLDERS.planEnded), status: join(ctx.root, FOLDERS.status), state: join(ctx.root, FOLDERS.state) };
   const st = readState(P.state);
   const state = st.ok ? st.state : { running: [], attempts: {}, seen: [], alerts: [], told: [], packages: {} };
   // `at` is the alert's time; the Dispatcher tells each id and time once.
@@ -349,7 +481,7 @@ export async function runnerPass(ctx) {
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
-      running: state.running.map(({ card, head, role, session_id, started_at }) => ({ card, head, role, session_id, started_at })),
+      running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
@@ -460,10 +592,14 @@ export async function runnerPass(ctx) {
     ensureFolder(P.ended, 0o755);
     ensureFolder(P.aside, 0o755);
     ensureFolder(P.packages, 0o755);
+    ensureFolder(P.planLaunches, 0o755);
+    ensureFolder(P.planEnded, 0o755);
   } catch (e) { fail(`the review folders could not be made (${e?.code ?? e?.message})`); return finish(); }
   const reqBad = folderProblem(P.requests, uid, 0o1733) ?? folderProblem(P.rejected, uid, 0o700) ?? launchesFolderProblem(P.launches, uid)
     ?? ((b) => b && `the ended records: ${b}`)(launchesFolderProblem(P.ended, uid)) ?? ((b) => b && `the set-aside records: ${b}`)(launchesFolderProblem(P.aside, uid))
-    ?? ((b) => b && `the review packages: ${b}`)(folderProblem(P.packages, uid, 0o755));
+    ?? ((b) => b && `the review packages: ${b}`)(folderProblem(P.packages, uid, 0o755))
+    ?? ((b) => b && `the plan reviewers' launch records: ${b}`)(folderProblem(P.planLaunches, uid, 0o755))
+    ?? ((b) => b && `the plan reviewers' ended records: ${b}`)(folderProblem(P.planEnded, uid, 0o755));
   if (reqBad) { fail(`the review folders: ${reqBad}`); return finish(); }
 
   // The sessions alive now. One the runner did not start is stopped, and Joe is told (m-7); one that ended leaves `running`.
@@ -549,8 +685,51 @@ export async function runnerPass(ctx) {
     if (!checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: d.role, sessionId: d.session_id, uid }).ok) return false;
     return outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: d.role, sessionId: d.session_id })).empty;
   };
+  // A plan reviewer (L703) ends into plan-ended/, with the answer the runner read from its outbox at that moment kept in
+  // the record itself: the Dispatcher reads that answer from the runner's own folder, never from the outbox. `none`: no
+  // answer file; `refused`: one that can't be counted (why in `reason`); `never_ran`: claude never started. Written once.
+  const markPlanEnded = (doc, said, how, more = {}) => {
+    try {
+      writeLaunch(P.planEnded, doc.session_id, { session_id: doc.session_id, role: PLAN_REVIEW_ROLE, card: doc.card, fingerprint: doc.fingerprint, request_id: doc.request_id,
+        ended_at: iso(now), answer_sha256: said, how, ...more });
+    } catch (e) {
+      if (e?.code !== 'EEXIST') { fail(`plan reviewer ${doc.session_id} could not be marked ended (${e?.code ?? e?.message})`); return false; }
+    }
+    try { ctx.removeCopy?.(doc.session_id); } catch (e) { alert(`copy-${doc.session_id}`, `The review copy of plan reviewer ${doc.session_id} could not be removed (${e?.code ?? e?.message}); it is left in place and needs removing by hand.`); }
+    return true;
+  };
+  // Nothing starts again for a plan once its reviewer ran: plan-go reads the end and tells the owner, and a new plan gets
+  // a new fingerprint, so a new reviewer.
+  const endPlan = (doc, how) => {
+    const sid = doc.session_id;
+    const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: sid, uid });
+    const pkgBad = walls.ok ? packageProblem({ dir: P.packages, sessionId: sid, uid, kept: state.packages?.[sid], name: PLAN_FILE_NAME }) : null;
+    let said = 'refused';
+    let more = {};
+    if (!walls.ok) more = { reason: `its outbox fails its checks: ${walls.reason}` };
+    else if (pkgBad) more = { reason: pkgBad };
+    else {
+      const a = readOwn(join(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: sid }), PLAN_ANSWER_NAME), uid, MAX_PLAN_ANSWER_BYTES);
+      if (!a.ok && a.reason === 'it is gone') said = 'none';
+      else if (!a.ok) more = { reason: `its answer file: ${a.reason}` };
+      else if (!isUtf8(a.bytes)) more = { reason: 'its answer file is not text' };
+      else { said = createHash('sha256').update(a.bytes).digest('hex'); more = { answer: a.bytes.toString('utf8') }; }
+    }
+    if (!markPlanEnded(doc, said, how, more)) return false;
+    if (state.packages) delete state.packages[sid];
+    return true;
+  };
+  const planNeverRan = (d) => {
+    const e = readPlanEnded(P.planEnded, uid, d.session_id);
+    if (!e.ok || e.ended.answer_sha256 !== NEVER_RAN) return false;
+    if (!checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: d.session_id, uid }).ok) return false;
+    return outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: d.session_id })).empty;
+  };
   const alive = new Set(live.map((s) => s.pid));
-  for (const r of state.running.filter((x) => !alive.has(x.pid))) await endSession(r, 'ended');
+  for (const r of state.running.filter((x) => !alive.has(x.pid))) {
+    if (r.role === PLAN_REVIEW_ROLE) endPlan(r, 'ended');
+    else await endSession(r, 'ended');
+  }
   state.running = state.running.filter((x) => alive.has(x.pid));
 
   // The launch records, read once for the sweep, Joe's taps and the requests. One that fails its checks is told to Joe
@@ -619,6 +798,28 @@ export async function runnerPass(ctx) {
     }
   }
 
+  // The plan reviewers' sweep, on the same terms: a plan launch the runner is not running, with no ended record, 5
+  // minutes old, on a pass where every live claude of review's is its own. A launch record that fails its checks is told.
+  const planLaunched = readPlanLaunches(P.planLaunches, uid);
+  if (!planLaunched.ok) fail(`the plan reviewers' launch records could not be read: ${planLaunched.reason}`);
+  for (const b of planLaunched.ok ? planLaunched.bad : []) alert(`bad-plan-record-${b.name}`, `The review runner's plan launch record ${b.name.slice(0, 80)} fails its checks (${b.reason}); it counts for nothing.`);
+  if (!strayClaude && planLaunched.ok) {
+    const runningIds = new Set(state.running.map((x) => x.session_id));
+    const seen = state.sweep_seen && typeof state.sweep_seen === 'object' ? state.sweep_seen : (state.sweep_seen = {});
+    for (const doc of planLaunched.launches) {
+      const sid = doc.session_id;
+      if (runningIds.has(sid)) continue;
+      try { lstatSync(join(P.planEnded, `${sid}.json`)); delete seen[sid]; continue; } catch { /* not marked */ }
+      let from = pastTime(doc.launched_at, now);
+      if (from === null) {
+        from = pastTime(seen[sid], now);
+        if (from === null) { seen[sid] = iso(now); from = now; }
+      }
+      if (now - from < SWEEP_AFTER_MS) continue;
+      if (endPlan(doc, 'swept')) alert(`swept-${sid}`, `The plan reviewer ${sid} for card ${doc.card} was not being tracked by the review runner; it is now marked ended.`);
+    }
+  }
+
   // Joe's "review again" (L69 point 1, L70 points 2 and 3). A tap names a session. It counts only for a session that
   // ended silent with nothing in its outbox: its launch record is good, it is not running, the runner holds its head
   // with the tap offered, its ended record says `none`, and nothing in its outbox (read again now) says anything, least
@@ -682,6 +883,142 @@ export async function runnerPass(ctx) {
   if (names.length > MAX_PENDING) alert('requests-pending', `${names.length} review requests are waiting (more than ${MAX_PENDING}); something may be asking far too often.`);
   else state.told = state.told.filter((t) => t !== 'requests-pending');
   let starts = 0;
+  // Plan reviewers started this pass that the runner could not follow (a start that ran but gave no claude): each still
+  // holds a cap slot until the pass ends, so the cap is never passed by one (#294 self-review m1).
+  let untrackedPlans = 0;
+  // A plan reviewer (L703). The Dispatcher asks once per plan (plan-go), so a start that failed is tried again by the
+  // runner itself (`plan_tries`), RETRY_MS apart and MAX_FAILED_STARTS times in all, and then the owner is told. A refusal
+  // that says the plan is not one to review (the card is gone, not a Tier-1 draft, or its plan is another) ends it.
+  const planKey = (card, fingerprint) => `${card}:${fingerprint}:${PLAN_REVIEW_ROLE}`;
+  const planStart = async ({ card, fingerprint, rid, refuse }) => {
+    const k = planKey(card, fingerprint);
+    const tries = state.plan_tries && typeof state.plan_tries === 'object' ? state.plan_tries : (state.plan_tries = {});
+    const was = tries[k];
+    // Once the request is for the card's plan as it is now, a refusal that ends it is told (L726 m2): the Dispatcher
+    // waits on this plan's answer, and the owner must hear why none comes, not only that it is slow. Before that check
+    // it is not told: anyone may write a request, so made-up cards and plans must not reach the owner.
+    let real = false;
+    const drop = (reason) => {
+      delete tries[k];
+      refuse(reason);
+      if (real) alert(`plan-refused-${k}`, `The review runner did not start a plan reviewer for card ${card} (plan ${fingerprint.slice(0, 12)}): ${String(reason).slice(0, 300)}. The card stays a draft and can't be asked for a go; a new plan gets a new reviewer.`);
+    };
+    const again = (reason) => {
+      const t = { card, fingerprint, request_id: rid, failures: (was?.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: String(reason).slice(0, 300) };
+      refuse(`the plan reviewer could not be started: ${reason}`);
+      if (t.failures < MAX_FAILED_STARTS) { tries[k] = t; return; }
+      delete tries[k];
+      alert(`plan-gave-up-${k}`, `No plan reviewer could be started for card ${card} (plan ${fingerprint.slice(0, 12)}) after ${MAX_FAILED_STARTS} tries (last: ${t.last_reason}). Nothing starts again on its own: a new plan gets a new reviewer.`);
+    };
+    let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
+    if (!c?.ok) return c?.missing === true ? drop(`card ${card} is not in the Record`) : again(`card ${card} could not be read${c?.reason ? ` (${c.reason})` : ''}`);
+    const d = c.doc;
+    if (!needsRole(d, PLAN_REVIEW_ROLE)) return drop(`card ${card} does not need a plan reviewer (it is ${d?.state ?? 'in no state'}, tier ${d?.tier ?? 'none'})`);
+    const fp = planFingerprint({ product: d.product, card_id: card, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
+    if (!fp.ok) return drop(`card ${card}'s plan can't be fingerprinted (${fp.reason})`);
+    if (fp.sha256 !== fingerprint) return drop(`the request names plan ${fingerprint.slice(0, 12)}, but card ${card}'s plan is ${fp.sha256.slice(0, 12)}`);
+    real = true;
+    // A map of Mac users from before the plan reviewer blocks plan reviews alone (L726 m3); the runner tries again
+    // itself, so setting it up before it gives up lets this plan's reviewer start. Once it gives up, the owner is told
+    // the cause, and that plan never starts: a new plan gets a new reviewer (L735 c1-r2).
+    const mapBad = uidsProblem(ctx.uids, { plan: true });
+    if (mapBad) return again(`the review user is not set up for plan reviews: ${mapBad}`);
+    if (ctx.uids[PLAN_REVIEW_ROLE] !== uid) return again(`the plan reviewer's Mac user (uid ${ctx.uids[PLAN_REVIEW_ROLE]}) is not the review user (uid ${uid})`);
+    // Its own reviewer running or already started is no refusal of the Dispatcher's request (L735 m2-r2): the answer it
+    // waits on comes from that one. So a replay of the plan's id is refused quietly, never told as a stop.
+    const already = (reason) => { delete tries[k]; refuse(reason); };
+    if (state.running.some((r) => r.role === PLAN_REVIEW_ROLE && r.card === card && r.fingerprint === fingerprint)) return already(`a plan reviewer is already running for card ${card}'s plan ${fingerprint.slice(0, 12)}`);
+    const pl = readPlanLaunches(P.planLaunches, uid);
+    if (!pl.ok) return again(`the plan reviewers' launch records could not be read (${pl.reason})`);
+    // One start per plan: a launch on it counts, unless claude never ran and its outbox is still review's own and empty.
+    if (pl.launches.some((l) => l.card === card && l.fingerprint === fingerprint && !planNeverRan(l))) return already(`a plan reviewer was already started for card ${card}'s plan ${fingerprint.slice(0, 12)}; one per plan`);
+    if (was && now - (pastTime(was.last_failed_at, now) ?? -Infinity) < RETRY_MS) { refuse(`the last start of a plan reviewer for card ${card} failed less than 15 minutes ago; the runner tries again itself`); return; }
+    // The plan reviewers' cap, kept here too (L735 M1): the runner is the one place that sees every product's requests,
+    // so two Dispatchers each under the cap can't put it over between them, and a request no Dispatcher wrote can't
+    // either. It is the Dispatcher's own read-only cap for the card's product, against every plan reviewer that runs.
+    // At the cap the request waits as the runner's own, tried each pass and never counted as a failed start.
+    let cap; try { cap = await ctx.planReviewCap(d.product); } catch (e) { cap = { bad: e?.message ?? String(e) }; }
+    if (!Number.isInteger(cap) || cap < 0) return again(`the plan reviewers' cap could not be read (${String(cap?.bad ?? cap).slice(0, 200)})`);
+    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE).length + untrackedPlans;
+    if (runningPlans >= cap) {
+      tries[k] = { ...(was ?? {}), card, fingerprint, request_id: rid, failures: was?.failures ?? 0, waiting_since: was?.waiting_since ?? iso(now) };
+      refuse(`${runningPlans} plan reviewers already run (cap ${cap}); card ${card}'s waits, and the runner starts it itself once one ends`);
+      return;
+    }
+
+    starts += 1;
+    const sid = newId();
+    if (typeof sid !== 'string' || !SESSION_ID.test(sid)) return again('the new session id is not letters, digits and dashes');
+    let where; try { where = await ctx.planFile({ card, plan_sha256: d.plan_sha256 }); } catch (e) { where = { ok: false, reason: e?.message ?? String(e) }; }
+    if (where?.ok !== true || typeof where.path !== 'string' || !where.path.startsWith('/')) return again(`the plan file could not be found (${where?.reason ?? 'no path given'})`);
+    // The plan is read once, hashed, and those bytes are what the reviewer gets; the pin is the sha256 of those bytes.
+    const pk = packagePlan({ path: where.path, sha256: d.plan_sha256, dir: join(P.packages, sid) });
+    if (!pk.ok && pk.lasting) {
+      drop(`no plan reviewer starts for card ${card}: ${pk.reason}`);
+      alert(`plan-file-${k}`, `No plan reviewer starts for card ${card}: ${pk.reason}. The card stays a draft; a new plan gets a new reviewer.`);
+      return;
+    }
+    if (!pk.ok) return again(pk.reason);
+    state.packages ??= {};
+    state.packages[sid] = { sha256: pk.sha256, pinned: false };
+    try { pinPackage(P.packages, sid, pk.sha256); state.packages[sid].pinned = true; } catch (e) { delete state.packages[sid]; return again(`its plan could not be pinned (${e?.code ?? e?.message})`); }
+    let acct; try { acct = await ctx.accountInUse(); } catch { acct = null; }
+    if (!ACCOUNT_NAMES.includes(acct)) { delete state.packages[sid]; return again('the account in use could not be read'); }
+    let outbox;
+    try {
+      ensureFolder(join(ctx.outboxRoot, PLAN_REVIEW_ROLE), 0o755);
+      outbox = reviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: sid });
+      mkdirSync(outbox, { mode: 0o755 });
+      chmodSync(outbox, 0o755);
+    } catch (e) { delete state.packages[sid]; return again(`its outbox could not be made (${e?.code ?? e?.message})`); }
+    const ob = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: sid, uid });
+    if (!ob.ok) { delete state.packages[sid]; return again(ob.reason); }
+    const configDir = accountDir(ctx.reviewHome, acct);
+    const doc = { session_id: sid, role: PLAN_REVIEW_ROLE, card, fingerprint, request_id: rid, plan_sha256: d.plan_sha256, main_commit: d.main_commit, launched_at: iso(now), signin: acct, config_dir: configDir };
+    try { writeLaunch(P.planLaunches, sid, doc); } catch (e) { delete state.packages[sid]; return again(`its launch record could not be written (${e?.code ?? e?.message})`); }
+    // The reviewer reads main as the plan was made on it, and the plan from its package.
+    let r;
+    try { r = await ctx.start({ role: PLAN_REVIEW_ROLE, card, head: d.main_commit, fingerprint, sessionId: sid, outbox, configDir, env: accountEnv(ctx.reviewHome, acct), signin: acct, earlier: '', packageDir: join(P.packages, sid), planFile: pk.file }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+    if (!r?.ok || !Number.isInteger(r.pid)) {
+      // As for a review (L70 point 4, L71 point 2): it never ran only when no live claude carries its id and its outbox
+      // is review's own and empty; then its launch stays, marked never_ran, and the runner tries again itself.
+      let liveNow; try { liveNow = await ctx.sessions(); } catch { liveNow = null; }
+      let ranAs = null;
+      for (const s of liveNow ?? []) {
+        if (s?.sessionId !== sid) continue;
+        let c2 = null; try { c2 = await ctx.processName(s.pid); } catch { c2 = null; }
+        if (isClaudeCommand(c2, ctx.claudeBin)) { ranAs = s.pid; break; }
+      }
+      const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: sid, uid });
+      const left = walls.ok ? outboxLeft(outbox) : { empty: false, said: `its outbox fails its checks (${walls.reason})` };
+      if (left.empty && liveNow !== null && ranAs === null) {
+        if (markPlanEnded(doc, NEVER_RAN, NEVER_RAN)) { delete state.packages[sid]; return again(String(r?.reason ?? 'the start gave no process id').slice(0, 300)); }
+        return drop('the plan reviewer start failed, and it could not be marked never ran, so it counts as started');
+      }
+      drop(`the plan reviewer start said it failed (${String(r?.reason ?? 'no process id').slice(0, 200)}), but the session ran (${ranAs !== null ? `claude ${ranAs} carries its id` : liveNow === null ? 'the session list could not be read' : left.said}); it counts as started`);
+      if (ranAs !== null) state.running.push({ card, role: PLAN_REVIEW_ROLE, fingerprint, request_id: rid, head: d.main_commit, session_id: sid, pid: ranAs, started_at: iso(now) });
+      else { untrackedPlans += 1; if (liveNow !== null) endPlan(doc, 'ended'); }
+      return;
+    }
+    let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
+    if (!isClaudeCommand(cmd, ctx.claudeBin)) {
+      untrackedPlans += 1;
+      drop(`the plan reviewer start gave process ${r.pid}, which is not claude; the session is held until the runner marks it ended`);
+      alert(`untracked-${sid}`, `The plan reviewer ${sid} for card ${card} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it: a live claude of review's is stopped on the next pass, and the session is marked ended 5 minutes after its start.`);
+      return;
+    }
+    delete tries[k];
+    state.running.push({ card, role: PLAN_REVIEW_ROLE, fingerprint, request_id: rid, head: d.main_commit, session_id: sid, pid: r.pid, started_at: iso(now) });
+    result.started.push({ card, role: PLAN_REVIEW_ROLE, fingerprint, session_id: sid, signin: acct });
+  };
+  // The runner's own tries again, before new requests.
+  for (const [k, t] of Object.entries(state.plan_tries ?? {})) {
+    if (starts >= MAX_STARTS_PER_PASS) break;
+    if (!isObject(t) || typeof t.card !== 'string' || !CARD_ID.test(t.card) || typeof t.fingerprint !== 'string' || !HEX64.test(t.fingerprint) || typeof t.request_id !== 'string' || !REQUEST_ID.test(t.request_id) || k !== planKey(t.card, t.fingerprint)) { delete state.plan_tries[k]; continue; }
+    if (now - (pastTime(t.last_failed_at, now) ?? -Infinity) < RETRY_MS) continue;
+    await planStart({ card: t.card, fingerprint: t.fingerprint, rid: t.request_id,
+      refuse: (reason) => result.refused.push({ at: iso(now), request: null, card: t.card, role: PLAN_REVIEW_ROLE, request_id: t.request_id, reason }) });
+  }
   for (const name of names) {
     if (starts >= MAX_STARTS_PER_PASS) break;
     delete state.first_seen[name];
@@ -712,8 +1049,25 @@ export async function runnerPass(ctx) {
       else if (Object.keys(state.refused_more).length < MAX_MORE_STREAKS) state.refused_more[streakKey] = entry;
     };
     const accepted = () => { delete state.refused_streaks?.[streakKey]; delete state.refused_more?.[streakKey]; };
+    // A plan request under another id is refused before it is remembered as seen (L735 m2-r2): anyone may write those,
+    // and a flood of them must not push the Dispatcher's own ids out of what the runner remembers.
+    if (got.req.fingerprint !== undefined) {
+      if (rid !== PLAN_REQUEST_ID(card, got.req.fingerprint)) {
+        // Not the Dispatcher's id (L726 m1): refused, and it can't take the plan's one start. It is a request anyone
+        // could write, so it is kept as one hold for its cause (like an unreadable request), never one alert a file.
+        refuse(`a plan review request must have the id the Dispatcher gives card ${card}'s plan; ${rid.slice(0, 16)} is not it`);
+        const cause = 'plan request with another id';
+        const was = state.unread_requests?.[cause];
+        state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: name, first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
+        continue;
+      }
+    }
     if (state.seen.includes(rid)) { refuse(`request id ${rid} was seen before`); continue; }
     state.seen = [...state.seen, rid].slice(-KEEP_SEEN);
+    if (got.req.fingerprint !== undefined) {
+      await planStart({ card, fingerprint: got.req.fingerprint, rid, refuse });
+      continue;
+    }
     if (!REVIEW_ROLES.includes(role)) { refuse(`"${role}" is not a review role`); continue; }
     let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
     // A card that isn't there is no streak: anyone may write a request, so made-up ids must not reach the owner. It is

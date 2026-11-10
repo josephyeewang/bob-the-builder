@@ -88,6 +88,23 @@ test('L65: hasReviewer reads the runner\'s status: the card, role and head must 
   assert.throws(() => p.hasReviewer('C-1', 'reviewer', HEAD), /written by others/);
 });
 
+test('L688: planReviewsRunning lists only the plan reviewers in the runner\'s status, and an untrusted status throws (never none)', () => {
+  const dir = tempDir('m11-status-');
+  const at = new Date(T0).toISOString();
+  const running = [{ card: 'C-1', role: 'reviewer', head: HEAD, session_id: 's-1', started_at: at },
+    { card: 'C-2', role: 'plan_reviewer', head: HEAD, session_id: 's-2', started_at: at, pid: 7 },
+    { card: 'C-3', role: 'auditor', head: HEAD, session_id: 's-3', started_at: at }];
+  const file = status(dir, { written_at: at, ok: true, running, alerts: [] });
+  let now = T0 + MINUTE;
+  const p = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => now });
+  assert.deepEqual(p.planReviewsRunning(), [{ card: 'C-2', session_id: 's-2', started_at: at }]);
+  assert.equal(p.hasReviewer('C-2', 'reviewer', HEAD), false, 'a plan reviewer is no reviewer of the change');
+  now = T0 + STATUS_STALE_MS + 1;
+  assert.throws(() => p.planReviewsRunning(), /minutes old/);
+  now = T0;
+  assert.throws(() => reviewPorts({ requests: dir, status: file, reviewUid: ME + 1, now: () => now }).planReviewsRunning(), /not owned by the review user/);
+});
+
 test('L66, L315: a failed runner pass and an installed copy behind main are holds, each naming its cause', () => {
   const MAIN = 'c'.repeat(40);
   const ok = { ok: true, error: null, installed_commit: MAIN, alerts: [], running: [] };
