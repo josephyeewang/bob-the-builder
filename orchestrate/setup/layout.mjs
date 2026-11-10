@@ -116,6 +116,8 @@ export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store'
 export const REVIEW_SNAPSHOT_FILE = 'review-rules-snapshot.json';
 // The two items add-to-install puts into the installed copy (L573): the pinned Claude Code (CLAUDE_CODE/<pin>/claude,
 // hooks-check.mjs pinnedBinary) and the hook scripts. One spelling each, for review-config and add-to-install alike.
+// M4's pinnedBinary spells claude-code once more, as a launcher may not depend on setup; review-config.test.mjs pins the two
+// as equal.
 export const COPY_CLAUDE_CODE = 'claude-code';
 export const COPY_HOOKS = 'hooks';
 

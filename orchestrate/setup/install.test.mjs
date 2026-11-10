@@ -1158,6 +1158,10 @@ test('add-to-install: a dry run lists the steps and changes nothing; the flags b
   assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA, '--rules-sha256', SHA]), /only for watch-app/);
   assert.throws(() => parseArgs(['watch-app', '--app-id', '1', '--app-installation', '2', '--app-key-name', 'app-key', '--pin', PIN]), /--pin is only for review-config and add-to-install/);
   assert.equal(parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA]).claudePin, PIN);
+  // review-config's own flags are not add-to-install's (merge self-review m2).
+  for (const f of [['--input', '/a'], ['--out', '/b'], ['--for-install']]) {
+    assert.throws(() => parseArgs(['add-to-install', '--pin', PIN, '--sha256', SHA, ...f]), /only for review-config/, f[0]);
+  }
 });
 
 test('add-to-install: the next real update carries claude-code and hooks across, and the runner config still passes', async () => {

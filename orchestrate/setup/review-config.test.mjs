@@ -273,7 +273,7 @@ test('refused as root, without the Mac users, with --out naming the installed co
   } finally { w.done(); }
 });
 
-test('setup.mjs: review-config needs --pin, --input and --out, and those flags belong to it alone', () => {
+test('setup.mjs: review-config needs --pin, --input and --out, and --input, --out and --for-install belong to it alone (--pin it shares with add-to-install)', () => {
   const o = parseArgs(['review-config', '--pin', PIN, '--input', '/a/in.json', '--out', '/a/review.json', '--dry-run']);
   assert.deepEqual([o.cmd, o.claudePin, o.input, o.out, o.dry], ['review-config', PIN, '/a/in.json', '/a/review.json', true]);
   assert.throws(() => parseArgs(['review-config', '--pin', PIN, '--input', '/a']), /review-config needs --pin/);
