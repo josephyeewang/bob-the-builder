@@ -44,7 +44,7 @@ test('L759 step 2: launch trusts no answer the rest of the status does not bear 
     { answer: { sessionId: 'S-2' } }, { answer: { outbox: `${ROOT}/worker/S-2` } }, { answer: { copy: `${COPIES}/C-2` } }, { answer: { copy: '/elsewhere/C-1' } },
     { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } },
     { answer: { head: 'main' } }, { answer: { head: 'A'.repeat(40) } }, { answer: { signin: '' } }, { answer: { configDir: null } },
-    { answer: { base: 'main' } }, { answer: { base: 'B'.repeat(40) } }, { answer: { base: null } }, { answer: { base: '' } },
+    { answer: { base: 'main' } }, { answer: { base: 'B'.repeat(40) } }, { answer: { base: null } }, { answer: { base: '' } }, { answer: { base: ['b'.repeat(40)] } }, { answer: { head: ['a'.repeat(40)] } },
   ];
   for (const bad of wrong) {
     const w = world((i, x) => { startedAt(0)(i, x); if (bad.requests) { x.doc.requests = bad.requests; x.doc.sessions = []; } Object.assign(x.doc.answers['launch-S-1'], bad.answer ?? {}); }, { giveUpMs: 10_000 });

@@ -92,7 +92,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
         const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
           // base (L825-2): the commit the copy was started on. Optional until every runner answers it, but never malformed.
-          && HEAD.test(a.head ?? '') && (a.base === undefined || HEAD.test(a.base)) && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
+          && typeof a.head === 'string' && HEAD.test(a.head) && (a.base === undefined || (typeof a.base === 'string' && HEAD.test(a.base))) && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
