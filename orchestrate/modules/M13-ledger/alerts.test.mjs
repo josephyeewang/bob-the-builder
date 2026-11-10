@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
-import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold } from './alerts.mjs';
+import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold, clockAhead, clockTooFast, CLOCK_AHEAD_MS } from './alerts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
@@ -1100,4 +1100,28 @@ test('r5 m2: the three callers\' names are distinct; c1: the alert\'s title says
   await a.raise(standing);
   await a.reportTrouble('p', TROUBLE_SOURCES.WATCHER);
   assert.equal(troubleIssues(w.gh)[0].title, `p: the Record is refusing alert writes (${TROUBLE_SOURCES.WATCHER})`);
+});
+
+test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minutes ahead still does, and the day is GitHub\'s', async () => {
+  const make = (aheadMin) => {
+    let t = Date.parse('2026-11-03T08:00:00Z');
+    const robot = { now: () => new Date(t + aheadMin * 60000) };
+    const gh = fakeIssues({ now: robot.now, serverNow: () => new Date(t) });
+    const alerts = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: robot.now });
+    return { gh, alerts, tick: (min) => { t += min * 60000; } };
+  };
+  const far = make(3 * 24 * 60);
+  assert.equal(await far.alerts.raise(standing), 'opened');
+  for (let i = 0; i < 5; i++) { far.tick(25 * 60); assert.equal(await far.alerts.raise(standing), 'updated', 'not known, so not told'); }
+  assert.equal(comments(far.gh), 0);
+  const near = make(3);
+  await near.alerts.raise(standing);
+  near.tick(2 * 60);
+  assert.equal(await near.alerts.raise(standing), 'updated');
+  near.tick(23 * 60);
+  assert.equal(await near.alerts.raise(standing), 'reminded');
+  assert.equal(comments(near.gh), 1);
+  assert.equal(clockAhead({ lastServerTime: null }, 5), null, 'no Date header: not known, and the old count stands');
+  assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS + 1), true);
+  assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS), false);
 });

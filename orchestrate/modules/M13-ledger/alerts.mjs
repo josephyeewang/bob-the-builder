@@ -75,6 +75,17 @@ export const lastLine = (body) => String(body ?? '').trimEnd().split('\n').at(-1
 /** A findOpen test for a fixed marker: the marker has to be the whole last line. */
 export const lineIs = (marker) => (line) => line === marker;
 
+/**
+ * The robot's clock against GitHub's (L768). A client's `lastServerTime` is GitHub's own time on its latest answer (its
+ * Date header), in ms, or null when GitHub gave none. clockAhead → how far the robot's clock `t` is ahead of it, in ms,
+ * or null when not known. A "told again once a day" check counts the day by GitHub's times, and when the robot's clock
+ * is more than CLOCK_AHEAD_MS ahead the time since the last notice is not known, so nothing is told again (else a fast
+ * clock would tell the owner on every pass).
+ */
+export const CLOCK_AHEAD_MS = 5 * 60_000;
+export const clockAhead = (gh, t) => { const g = gh?.lastServerTime; return Number.isFinite(g) && Number.isFinite(t) ? t - g : null; };
+export const clockTooFast = (gh, t) => (clockAhead(gh, t) ?? 0) > CLOCK_AHEAD_MS;
+
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
 
 /** Whether raise's answer means the alert went out: not when GitHub lost it (false). */
@@ -199,6 +210,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (owedNow) return tell(still, 'reminded');
       // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
       // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
+      // A clock too far ahead of GitHub's can't count the 24 h (L768): the issue is kept up to date, and not told again.
+      if (clockTooFast(gh, Date.parse(t))) return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
       const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
       if (told.did !== 'quiet') return told.answer;
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
@@ -289,25 +302,28 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 
 // A fake GitHub issue client that records every call but its reads (tests, and the owner's dry runs). With no `now` its
 // comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock. close is the robot's
-// and ownerCloses the owner's.
-export function fakeIssues({ now = null } = {}) {
+// and ownerCloses the owner's. `serverNow` is GitHub's clock (lastServerTime, an issue's created_at); with none given,
+// GitHub's time is not known, as when an answer has no Date header.
+export function fakeIssues({ now = null, serverNow = null } = {}) {
   const issues = new Map();
   const calls = [];
   const spoken = [];
-  const said = (i, body) => { if (now) spoken.push({ i, at: now().toISOString(), body }); };
+  const gNow = serverNow ?? now;
+  const said = (i, body) => { if (gNow) spoken.push({ i, at: gNow().toISOString(), body }); };
   let n = 0;
   return {
     calls, issues,
-    async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [] }); calls.push(['open', n]); return n; },
+    get lastServerTime() { return serverNow ? +serverNow() : null; },
+    async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [], created_at: serverNow ? serverNow().toISOString() : null }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
-    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: now?.().toISOString() }; },
+    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: gNow?.().toISOString() }; },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; if (text != null) { x.comments.push(text); said(i, text); } calls.push(['close', i]); },
     // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about something that is not an issue number is a
     // caller's bug, so it throws rather than answering "gone".
     async read(i) {
       if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.read: not an issue number: ${JSON.stringify(i)}`);
       const x = issues.get(i);
-      return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true } : null;
+      return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true, created_at: x.created_at } : null;
     },
     async findOpen(test) { for (const [k, x] of issues) if (!x.closed && x.ours !== false && test(lastLine(x.body))) return k; return null; },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },

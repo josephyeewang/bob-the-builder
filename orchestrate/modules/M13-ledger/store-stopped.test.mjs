@@ -172,3 +172,33 @@ test('L732 self-review: an issue closed between the search and the read gets no 
   assert.equal((await run({ gh: closing, owner: 'owner-login' }, { now: () => t })).r, 'already open');
   assert.equal(gh.issues.get(1).comments.length, 0);
 });
+
+test('L768: the stop issue counts its day by GitHub\'s clock; a robot clock far ahead says nothing, never a comment each start', async () => {
+  const HOUR = 3600e3;
+  let g = Date.parse('2026-11-09T08:00:00Z');
+  const ahead = 3 * 24 * HOUR;
+  const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
+  const at = () => run({ gh, owner: 'owner-login' }, { now: () => g + ahead });
+  assert.equal((await at()).r, 'opened');
+  for (let i = 0; i < 4; i++) {
+    g += 25 * HOUR;
+    const a = await at();
+    assert.equal(a.r, 'already open');
+    assert.match(a.logs.join('\n'), /clock is 4320 minutes ahead of GitHub's/);
+  }
+  assert.equal(gh.issues.get(1).comments.length, 0);
+  // A clock a few minutes ahead, or behind, counts the day by GitHub's times: the opening, then the last comment.
+  for (const skew of [3 * 60e3, -2 * HOUR]) {
+    let h = Date.parse('2026-11-09T08:00:00Z');
+    const gh2 = fakeIssues({ now: () => new Date(h + skew), serverNow: () => new Date(h) });
+    const go = () => run({ gh: gh2, owner: 'owner-login' }, { now: () => h + skew });
+    await go();
+    h += 23 * HOUR;
+    assert.equal((await go()).r, 'already open', `${skew}: not a day yet by GitHub`);
+    h += 2 * HOUR;
+    assert.equal((await go()).r, 'reminded', String(skew));
+    h += 24 * HOUR - 2 * 60e3;   // 2 minutes short of a day by GitHub, which a clock 3 minutes ahead would count as past
+    assert.equal((await go()).r, 'already open', `${skew}: once a day`);
+    assert.equal(gh2.issues.get(1).comments.length, 1);
+  }
+});
