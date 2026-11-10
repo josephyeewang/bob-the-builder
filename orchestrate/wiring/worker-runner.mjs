@@ -258,7 +258,7 @@ export async function workerRunnerPass(ctx) {
     if (!wrong && !(a.pid === a.pgid && typeof a.pidStart === 'string' && a.pidStart)) wrong = `session ${id}'s start named no group leader with a start time`;
     if (!wrong) {
       state.sessions.push(s); state.requests[id] = { state: 'started', at: now };
-      return answer(key, { ok: true, sessionId: id, pid: a.pid, pidStart: a.pidStart, pgid: a.pgid, head: a.head, base: a.base, outbox: a.outbox, signin: a.signin, configDir: a.configDir, copy: a.copy });
+      return answer(key, { ok: true, sessionId: id, pid: a.pid, pidStart: a.pidStart, pgid: a.pgid, head: a.head, ...(a.base !== undefined ? { base: a.base } : {}), outbox: a.outbox, signin: a.signin, configDir: a.configDir, copy: a.copy });
     }
     note(`the start of ${id} answered what the status can't carry (${wrong}); it is stopped`);
     if (!(Number.isInteger(a.pgid) && a.pgid > 1)) { note(`the start of ${id} named no process group, so it can't be stopped; it stays waiting, so its claim stays`); return; }
