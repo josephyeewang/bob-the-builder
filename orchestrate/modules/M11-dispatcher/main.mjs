@@ -110,11 +110,11 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     ? `the Dispatcher config's runDeadlineMs (${config.runDeadlineMs}) is below the pass's own sum (${RUN_DEADLINE_MS} ms: every step's deadline and the two sends), so a slow step can get the pass stopped; raise it, or take it out`
     : null;
   if (low) log(`dispatcher: ${low}`);
-  const lowBox = outbox(wired.rec, now); // the queue's alert, made once (it only queues)
+  const alert = outbox(wired.rec, now); // the queue's alert (L47: the outbox), made once; it only queues
   const tellLow = () => {
     // Fixed (self-review m6): a copy still queued goes, and a deadline lowered again is told afresh.
     if (!low) { try { clearHold(wired.rec, HOLD_FACT('run-deadline-low'), now, (line) => log(`dispatcher: ${line}`)); } catch (e) { log(`dispatcher: the low-deadline hold could not be cleared: ${e?.message ?? e}`); return false; } return; }
-    try { return holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: lowBox, now }); }
+    try { return holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: alert, now }); }
     catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); return false; }
   };
   let timer;
