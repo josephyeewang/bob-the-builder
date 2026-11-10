@@ -47,10 +47,12 @@ export const SHAPES = Object.freeze({
   'fact.pr': { number: 'count', title: 'text', author: 'text', head_sha: 'id', state: 'id', merged: 'bool', merge_commit_sha: 'id',
     observed_at: 'time', base: 'text', branch: 'text',
     changed_files: [{ path: 'text', from: 'text', status: 'id', added: 'count', removed: 'count' }],
-    diff_summary: { files: 'count', added: 'count', removed: 'count' }, checks_at_head: [check],
+    // checks_at_head null = NOT KNOWN (the check runs could not be read; why is in checks_reason), never "no checks" and
+    // never a pass; [] = GitHub listed none (L619, L728 m2). A reader must treat null as not known.
+    diff_summary: { files: 'count', added: 'count', removed: 'count' }, checks_at_head: [check], checks_reason: 'text',
     unresolved_threads: [{ author: 'text', body: 'text', path: 'text' }], behind_main: 'count' },
   'fact.prod-watch': { product: 'id', stage: 'id', live: 'id', newest_supported: 'id', env: { map: { key: 'text', print: 'id' } },
-    settings: { map: 'id' }, seen: ['id'], baseline: 'bool' },
+    settings: { map: 'id' }, unclear: ['id'], seen: ['id'], baseline: 'bool' },
   'fact.push-request': { idempotency_key: 'id', state: 'id', product: 'id', text: 'text' },
   'fact.signed-out': { product: 'id', signed_out: 'bool', since: 'time' },
   'fact.start-gate-env': { product: 'id', vercel_project: 'id', read_at: 'time', result: 'bool', reason: 'text', both: ['text'] },

@@ -7,6 +7,12 @@
 //        once also takes, all three or none: --app-id <id> --app-installation <id> --app-key-file <full path>
 //   node watch-run.mjs summary --dir <folder> --end-day <YYYY-MM-DD> --explanations <file> --owner-uid <number>
 //   node watch-run.mjs explain --file <file> --sha <commit> --text "<why this disagreement is fine>"
+//   node watch-run.mjs checks  --repo <owner/name> --sha <commit> --app-id <id> --app-installation <id> --app-key-file <full path>
+//
+// `checks` is setup's proof of the one read the job makes with the App's token (L707 M1): run as `orchestrate` by
+// `setup.mjs prove-token`, it mints the App's token the way `once` does (the same function) and reads the check runs at
+// <commit> the job's way, then prints one JSON line: { ok, stage: 'mint' | 'read', reason? | kind?, status?, said? }. Never the
+// token. Exit 0 read, 1 not.
 //
 // `once` is one pass (a background job runs it every hour); it writes only into --dir and never writes to GitHub. The first
 // pass pins main's head: nothing before it is judged. `summary` is read only (it never makes a folder) and exits 0 only when
@@ -24,16 +30,16 @@ import { chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, open
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isRepoName } from '../../setup/layout.mjs';
-import { CHECKS_NOT_KNOWN, draftRules, githubRules, readExplanations, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
+import { CHECKS_NOT_KNOWN, draftRules, githubRules, proveChecksRead, readExplanations, readOnlyClient, summary, tokenFile, watchPass } from './watch-only.mjs';
 import { mintInstallationToken } from './token.mjs';
 
 const OPTS = ['--repo', '--dir', '--token-file', '--rules', '--rules-sha256', '--app-id', '--app-installation', '--app-key-file', '--end-day', '--explanations', '--owner-uid', '--file', '--sha', '--text'];
-const USAGE = 'usage: node watch-run.mjs once --repo owner/name --dir <folder> --token-file <file> (--rules draft --rules-sha256 <hex> | --rules github) [--app-id <id> --app-installation <id> --app-key-file <full path>] | summary --dir <folder> --end-day <YYYY-MM-DD> --explanations <file> --owner-uid <n> | explain --file <file> --sha <commit> --text "<why>"';
-const NEED = { once: ['repo', 'dir', 'tokenFile', 'rules'], summary: ['dir', 'endDay', 'explanations', 'ownerUid'], explain: ['file', 'sha', 'text'] };
+const USAGE = 'usage: node watch-run.mjs once --repo owner/name --dir <folder> --token-file <file> (--rules draft --rules-sha256 <hex> | --rules github) [--app-id <id> --app-installation <id> --app-key-file <full path>] | summary --dir <folder> --end-day <YYYY-MM-DD> --explanations <file> --owner-uid <n> | explain --file <file> --sha <commit> --text "<why>" | checks --repo owner/name --sha <commit> --app-id <id> --app-installation <id> --app-key-file <full path>';
+const NEED = { once: ['repo', 'dir', 'tokenFile', 'rules'], summary: ['dir', 'endDay', 'explanations', 'ownerUid'], explain: ['file', 'sha', 'text'], checks: ['repo', 'sha', 'appId', 'appInstallation', 'appKeyFile'] };
 
 export function parseArgs(argv) {
   const cmd = argv[0];
-  if (!Object.hasOwn(NEED, cmd ?? '')) throw new Error('first word must be once, summary or explain');
+  if (!Object.hasOwn(NEED, cmd ?? '')) throw new Error('first word must be once, summary, explain or checks');
   const o = { cmd };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
@@ -43,11 +49,19 @@ export function parseArgs(argv) {
     o[a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = v;
   }
   for (const k of NEED[cmd]) if (!o[k]) throw new Error(`--${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)} is required`);
-  if (cmd === 'once') {
+  if (cmd === 'once' || cmd === 'checks') {
     if (!isRepoName(o.repo)) throw new Error('--repo must be owner/name');   // the one owner/name check, shared with the setup's config and print-config-line (L203 m-B)
+  }
+  if (cmd === 'checks') {
+    for (const k of ['dir', 'tokenFile', 'rules', 'rulesSha256', 'endDay', 'explanations', 'ownerUid', 'file', 'text']) if (o[k] !== undefined) throw new Error('checks takes only --repo, --sha and the three --app-* arguments');
+    if (!/^[0-9a-f]{40}$/.test(o.sha)) throw new Error('--sha must be the full 40-character commit id');
+  }
+  if (cmd === 'once') {
     if (!['draft', 'github'].includes(o.rules)) throw new Error('--rules must be draft or github');
     if (o.rules === 'draft' && !/^[0-9a-f]{64}$/.test(o.rulesSha256 ?? '')) throw new Error('--rules draft needs --rules-sha256 (64 hex characters)');
     if (o.rules === 'github' && o.rulesSha256) throw new Error('--rules-sha256 is only for --rules draft');
+  }
+  if (cmd === 'once' || cmd === 'checks') {
     const app = [o.appId, o.appInstallation, o.appKeyFile].filter((x) => x !== undefined).length;
     if (app !== 0 && app !== 3) throw new Error('--app-id, --app-installation and --app-key-file go together: all three or none');
     if (app && !/^[A-Za-z0-9.]{1,64}$/.test(o.appId)) throw new Error('--app-id must be the App\'s id');
@@ -83,6 +97,15 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let o; try { o = parseArgs(argv); } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
   if (o.cmd === 'explain') {
     try { explain({ file: o.file, sha: o.sha, text: o.text, ...(uid !== undefined ? { uid } : {}) }); out(`written: an explanation for ${o.sha.slice(0, 8)} in ${o.file}`); return 0; } catch (e) { err(`not written: ${e.message}`); return 1; }
+  }
+  if (o.cmd === 'checks') {
+    // Setup's proof (L707 M1): the job's own mint and the job's own read, nothing printed but one JSON line of fixed words.
+    const [owner, repo] = o.repo.split('/');
+    const m = await mintChecksClient(o, { owner, repo, fetchFn, ...(uid !== undefined ? { uid } : {}) });
+    if (!m.client) { out(JSON.stringify({ ok: false, stage: 'mint', reason: m.reason })); return 1; }
+    const r = await proveChecksRead({ checksGh: m.client, owner, repo, sha: o.sha });
+    out(JSON.stringify(r.ok ? { ok: true, stage: 'read' } : { ok: false, stage: 'read', kind: r.kind, status: r.status, said: r.said }));
+    return r.ok ? 0 : 1;
   }
   if (o.cmd === 'summary') {
     if (!existsSync(join(o.dir, 'log.jsonl'))) { err('there is no log in that folder (no pass has run, or the folder is wrong)'); return 1; }
@@ -133,13 +156,19 @@ export function appMintClient({ fetchFn = globalThis.fetch, timeoutMs = 15_000 }
 // minted (the check runs are then not known).
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 async function appChecksClient(o, { owner, repo, fetchFn, err, uid = process.getuid?.() }) {
+  const m = await mintChecksClient(o, { owner, repo, fetchFn, uid });
+  if (!m.client) { err(`PROBLEM  ${CHECKS_NOT_KNOWN}: the robot App's token could not be minted (${m.reason})`); return null; }
+  return m.client;
+}
+/** The mint and the client, shared by `once` and `checks` so setup proves the job's own path (L707 M1). → { client } | { reason }. */
+async function mintChecksClient(o, { owner, repo, fetchFn, uid = process.getuid?.() }) {
   const m = await mintInstallationToken({ keyDir: dirname(o.appKeyFile), keyFile: basename(o.appKeyFile), appId: o.appId, installationId: o.appInstallation,
     http: appMintClient(fetchFn ? { fetchFn } : {}), uid, scriptsUid: uid });
-  if (!m.ok) { err(`PROBLEM  ${CHECKS_NOT_KNOWN}: the robot App's token could not be minted (${m.reason})`); return null; }
+  if (!m.ok) return { reason: m.reason };
   const token = m.token;
   const inner = readOnlyClient({ token: () => token, ...(fetchFn ? { fetchFn } : {}) });
   const only = new RegExp(`^/repos/${esc(owner)}/${esc(repo)}/commits/[0-9a-f]{40}/check-runs\\?per_page=[0-9]{1,3}$`);
-  return { get: async (path, ...rest) => { if (typeof path !== 'string' || !only.test(path)) throw Object.assign(new Error('the App\'s client reads only this repo\'s check runs'), { unreadable: true }); return inner.get(path, ...rest); } };
+  return { client: { get: async (path, ...rest) => { if (typeof path !== 'string' || !only.test(path)) throw Object.assign(new Error('the App\'s client reads only this repo\'s check runs'), { unreadable: true }); return inner.get(path, ...rest); } } };
 }
 
 // Started as a program? Compare real paths: launchd starts it through the installed link, so argv[1] is the link while
