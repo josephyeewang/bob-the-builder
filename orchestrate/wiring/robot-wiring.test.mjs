@@ -565,6 +565,15 @@ test('L771 Minor 1: two takers over one dead lock: only one breaks it and holds;
   assert.deepEqual([b2.ok, b2.held?.pid], [false, 5001], b2.reason);
   assert.deepEqual(leftover(), []);
   a2.release();
+  // The round's own take: it loses the same race and puts the other's lock back; that holder is a live round of ours, so the
+  // round exits 0 (another round runs), never 3 (self-review Minor 1).
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let a3 = null;
+  const r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => { a3 ??= takePassLock(f, { pid: 5001, now: at, dead: isDead }); return isDead(p) ? 'dead' : 'ours'; } });
+  assert.equal(a3?.ok, true);
+  assert.deepEqual([r.ok, r.code], [false, 0], r.line);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).pid, 5001);
+  a3.release();
 });
 
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────

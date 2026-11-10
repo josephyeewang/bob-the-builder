@@ -16,8 +16,9 @@
 // moved it first) tries the link again. One that moved a lock that is not the dead one (another broke it and linked a live
 // lock in between) puts it back and refuses. Deleting it after the check, as before, could delete a live lock another taker
 // had just linked, and both passes ran.
-// Known limit: a third taker that links in the instant a moved live lock is out of place leaves two passes running. It needs
-// three takers inside microseconds over a dead lock; the put-back says so (`moved_live`) rather than pass it off.
+// Known limits: a third taker that links in the instant a moved live lock is out of place, or a put-back that fails, leaves
+// two passes running; and a holder that releases in that instant has its lock put back, so a later pass breaks it and says
+// a pass was stopped. Each needs takers inside microseconds over a dead lock; a failed put-back says so (`moved_live`).
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, renameSync } from 'node:fs';
 
@@ -61,10 +62,17 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
       let was = null; try { was = JSON.parse(readFileSync(moved, 'utf8')); } catch { /* checked below */ }
       if (was?.pid !== held?.pid || was?.taken_at !== held?.taken_at) {
         // Not the dead lock: another taker broke it and linked its own in between. Put that one back and refuse.
-        let back = false; try { linkSync(moved, file); back = true; } catch { /* a third took the place: told below */ }
-        try { unlinkSync(moved); } catch { /* gone */ }
-        return back ? { ok: false, reason: `another pass runs (pid ${was?.pid})`, held: was }
-          : { ok: false, reason: `another pass runs (pid ${was?.pid}); its lock was moved while breaking a dead one and a third took the place`, held: was, moved_live: true };
+        // Only EEXIST means a third took the place; any other failure of the link puts it back by rename, or leaves it where
+        // it is, never deleted (self-review Minor 2).
+        let back = false; let third = false;
+        try { linkSync(moved, file); back = true; } catch (e) { third = e?.code === 'EEXIST'; }
+        if (!back && !third) { try { renameSync(moved, file); back = true; } catch { /* left at `moved`: told below */ } }
+        else { try { unlinkSync(moved); } catch { /* gone */ } }
+        const who = was ? `pid ${was.pid}` : 'a lock that could not be read';
+        // The holder put back is judged like any holder read, so a caller's `dead` sees it (robot-main's exit code; self-review Minor 1).
+        if (back) { if (was) dead(was.pid); return { ok: false, reason: `another pass runs (${who})`, held: was }; }
+        return { ok: false, reason: third ? `another pass runs (${who}); its lock was moved while breaking a dead one and a third took the place`
+          : `another pass runs (${who}); its lock was moved while breaking a dead one and could not be put back (it is at ${moved})`, held: was, moved_live: true };
       }
       try { unlinkSync(moved); } catch { /* the dead lock is out of place either way */ }
       broke = held;
