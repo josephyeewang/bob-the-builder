@@ -92,12 +92,16 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     assert.deepEqual(Object.keys(none).map(Number), [1, 5, 9]);
     // Check 12 is M11's own gate, with this session's kind.
     let seen; let given;
-    const budget = { rules: {} };
+    const budget = { rules: {}, filesOf: () => [] };
     const gateOf = (b) => { given = b; return (ctx) => { seen = ctx; return { ok: true }; }; };
     const p = workerChecks({ ...x, budget, kind: 'undo' }, { gateOf });
     assert.deepEqual(await p[12](), { ok: true });
-    assert.equal(given, budget); assert.deepEqual(seen, { card: x.cardDoc, kind: 'undo', product: 'p1' });
+    assert.equal(given, budget); assert.deepEqual(seen, { card: { id: x.card, ...x.cardDoc }, kind: 'undo', product: 'p1' }); assert.equal(seen.card.id, x.card, 'L863: the card carries its id');
     assert.match((await workerChecks({ ...x, budget, cardDoc: null }, { gateOf })[12]()).reason, /not in the Record/);
+    // #369 r2 m4: the budget carries the pass's filesOf; an undo with none is refused here, saying so. Other kinds don't need it.
+    seen = undefined;
+    assert.match((await workerChecks({ ...x, budget: { rules: {} }, kind: 'undo' }, { gateOf })[12]()).reason, /carries no filesOf/); assert.equal(seen, undefined);
+    assert.deepEqual(await workerChecks({ ...x, budget: { rules: {} }, kind: 'editing' }, { gateOf })[12](), { ok: true });
     assert.equal(typeof workerChecks({ ...x, bobFolder: '/b', bobManifest: { a: 'x' } })[13], 'function');
     assert.equal(workerChecks({ ...x, bobFolder: '/b', bobManifest: null })[13], undefined, 'no pinned list, no port');
     // Check 1 on the copy: this user's alone and holding the head.
@@ -147,8 +151,16 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
     const killed = [];
     const smoke = standIn([], { sandbox: true });
     const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
-    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g) });
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: (g) => g === 4322 });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, [4322]); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // #369 r2 c3: after the end, a group signal 0 no longer finds is not killed (its number may be another's).
+  {
+    const killed = [];
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: () => false });
+    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, []); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // #369 r1 m6: an empty exit file, one that is not a number, and a link to a file holding 0 are not exit 0.
   for (const [what, write] of [['empty', (f) => writeFileSync(f, '')], ['abc', (f) => writeFileSync(f, 'abc\n')],
@@ -222,7 +234,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   assert.equal(sd.names.version, '2.1.300');
   // Checks 1, 2, 3 and 8 once more just before claude starts (#369 M1, r1 m1): here no copy, so check 1 refuses first.
   assert.deepEqual(RECHECK, [1, 2, 3, 8]);
-  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the copy is missing/);
+  assert.match(await sd.beforeStart({ product: 'p1', sessionId: SID, copy: '/c/C-1', ownUid: () => process.getuid() }), /^check 1: the card's copy is missing/);
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
   assert.deepEqual(Object.keys(sd.checksFor(wx)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'no throwaway port, no check 11');
   assert.deepEqual(Object.keys(sd.checksFor({ ...wx, throwaway: async () => ({}) })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
@@ -270,9 +282,9 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
     assert.match(await again(x), /^check 2: the copy's \.mcp\.json is not main's/);
     writeFileSync(join(f.copy, '.mcp.json'), '{}\n');
     // Check 1: HEAD moved, and the copy's folder opened up.
-    assert.match(await again({ ...x, head: 'a'.repeat(40) }), /^check 1: the copy holds/);
+    assert.match(await again({ ...x, head: 'a'.repeat(40) }), /^check 1: the card's copy holds/);
     chmodSync(f.copy, 0o755);
-    assert.match(await again(x), /^check 1: the copy is not this user's alone/);
+    assert.match(await again(x), /^check 1: the card's copy is not this user's alone/);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

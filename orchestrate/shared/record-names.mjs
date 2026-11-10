@@ -35,7 +35,8 @@ export const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create',
     kept: 'the Front Door\'s note at a compaction, kept for the history; nothing acts on it' },
   'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
-  'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
+  // A worker's or a script's running → in_review (0b-2 R3-M4; L838: a script card has no other way to leave running).
+  'handin-': { roles: ['worker', 'script'], entity: 'card', mode: 'move' },
   'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
   'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
   // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.

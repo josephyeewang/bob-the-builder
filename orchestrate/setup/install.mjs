@@ -31,6 +31,7 @@ import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, parseConfig } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
 import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
+import { parseRobot } from './robot-setup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
@@ -47,7 +48,7 @@ const KEEP_NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 /** Config for the install and the jobs: the setup config (layout.mjs) plus these keys. */
 export function parseInstallConfig(raw) {
   const base = parseConfig(raw);
-  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath) } = raw;
+  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot } = raw;
   if (typeof address !== 'string' || !HTTPS.test(address)) throw new Error('config: address must be the https address of the repository');
   if (!PLAIN_ABS(gitBin)) throw new Error('config: gitBin must be a full path');
   if (typeof label !== 'string' || !LABEL_RE.test(label)) throw new Error('config: label must be letters, digits, . and - (it starts the jobs\' names)');
@@ -59,7 +60,8 @@ export function parseInstallConfig(raw) {
   if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
-  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin };
+  // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
+  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}) };
 }
 
 export function installPaths(cfg) {

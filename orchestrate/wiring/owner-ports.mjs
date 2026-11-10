@@ -52,7 +52,7 @@ export const OWNER_PORTS = Object.freeze({
   stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows the launch request for that id used up (started and since stopped, refused, or cancelled by this stop request); a request the runner has not yet seen is never true, and the runner refuses a launch request older than the claim timeout. It saves nothing: a session that started late, under a claim that never moved to running, leaves its work in its copy, and cleanup asks Joe about it',
     'false or a throw: the claim stays, and the owner is told once a day (M9 lapseClaims)'),
   launch: ask('({ card, kind, product, sessionId })',
-    '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; outbox is <outboxRoot>/<role>/<sessionId>, role worker or, for a script card, script (L767: its own outbox, so a script hands in only what the script role may), and copy <copiesRoot>/<card>',
+    '{ ok: true, sessionId, pid, pidStart, pgid, head, base, outbox, signin, configDir, copy }: the session started under the claimed id; pidStart is the UTC ISO start time M9 lock.mjs startTime reads (START_ISO); base (optional, 40 hex) is the commit the copy was started on (L825-2), left out when not known (null or any other value is refused); outbox is <outboxRoot>/<product>/<role>/<sessionId> (L836), role worker or, for a script card, script (L767: its own outbox, so a script hands in only what the script role may), and copy <copiesRoot>/<product>/<card>',
     '{ ok: false, reason }: nothing was started (the claim is given back); a throw reads the same, so throw only before the request is written. Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
   stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid, kind } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone, and the runner has set stop_requested for it in a status written before it answers',
     '{ ok: false, reason }: it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out, so a session the Dispatcher stopped is never counted as a death', PORT_DEADLINE_MS),
@@ -66,7 +66,7 @@ export const OWNER_PORTS = Object.freeze({
  * cleanupCopy puts no time limit on saveWork, so that port keeps its own.
  */
 export const OWNER_CLEANUP_PORTS = Object.freeze({
-  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate an access list of its own there (L747): list, search, read (file contents and attributes, so a copy can be hashed) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass\'s checks (or on Joe\'s counted Yes). The runner never moves a file in from outside it, so a delete never stops partway',
+  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the product\'s own folder of worker copies, runnerPlaces(...).copies = <copiesRoot>/<product> (L836, #378 r1 m2), so each entry in it is a card\'s copy, never the top copies folder whose entries are products; fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate an access list of its own there (L747): list, search, read (file contents and attributes, so a copy can be hashed) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass\'s checks (or on Joe\'s counted Yes). The runner never moves a file in from outside it, so a delete never stops partway',
     notKnown: 'the read throws, never a folder that reads as empty', deadlineMs: null }),
   saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox, which is orchestrate\'s private staging folder: the runner writes the bundle where orchestrate can read it, and the port (orchestrate-side) copies it into outbox',
     '{ ok: false, reason }, or { ok: false, timedOut: true, reason } at its own limit', SAVE_DEADLINE_MS),
@@ -77,7 +77,7 @@ export const OWNER_CLEANUP_PORTS = Object.freeze({
  * the push script's inputs (branch, outbox, attempt) are in the `session` record the Dispatcher writes at launch (#248,
  * L589), the one source for them. Read them there; the launch doc does not gain them.
  */
-export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
+export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'base', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
 export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'attempt']);
 
 /**

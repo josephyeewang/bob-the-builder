@@ -49,7 +49,7 @@
 // stops the next. Facts sit in the Dispatcher's `hold-` family; a stale mark does no harm, and a new plan gets a new review.
 
 import { goNeeded, readyCheck } from '../M9-record/ready.mjs';
-import { PLAN_INPUTS } from '../M9-record/permissions.mjs';
+import { draftFields, PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { doneBar, goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
 import { PLAN_REVIEW_WORDING, readPlanReview } from '../M3-lead/lead-wording.mjs';
@@ -122,13 +122,18 @@ const whole = (product) => `product.${product}`;
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
 // The plan reviewers holding the slots, as the runner's status lists them: "card A, on an older plan, for 3 hours, card B
-// for 20 minutes". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
-const runFor = (ms) => (ms < 2 * 60 * 60_000 ? `for ${Math.max(1, Math.round(ms / 60_000))} minutes` : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+// for 20 minutes, …; and 3 more". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
+const minutes = (n) => `for ${n} minute${n === 1 ? '' : 's'}`;
+const runFor = (ms) => (ms < 2 * 60 * 60_000 ? minutes(Math.max(1, Math.round(ms / 60_000))) : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+// At most 10 are named; the rest are counted, so a longer list never reads as complete (#335 r2 m3).
+const HOLDERS_NAMED = 10;
 const slotHolders = (holders, now) => {
-  const list = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string').slice(0, 10).map((h) => {
+  const all = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string');
+  const list = all.slice(0, HOLDERS_NAMED).map((h) => {
     const at = pastTime(h.started_at, now);
     return `card ${short(h.card).slice(0, 40)}${h.older_plan === true ? ', on an older plan,' : ''}${at === null ? '' : ` running ${runFor(now - at)}`}`;
   });
+  if (all.length > HOLDERS_NAMED) list.push(`and ${all.length - HOLDERS_NAMED} more`);
   return list.length ? list.join('; ') : "the runner's status names none of them";
 };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -338,6 +343,12 @@ function doneFromRowsOnce(ctx, tell, c, rows, events) {
   }
   const bar = doneBar(rows);
   if (c.doc.done_when === bar) return true;
+  // #295 r3 m1: a kind the Dispatcher may not set done_when on (permissions.mjs draftKinds) is told what fixes it,
+  // before a write that can't be taken (so a Lead edit between read and write never hides it as 'changed').
+  if (typeof c.doc.kind === 'string' && !draftFields('dispatcher', c.doc.kind).includes('done_when')) {
+    tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test can't be filled in from its rows on a ${short(c.doc.kind)} card; the Lead must write this card's pass tests before a go can be asked: its rows' pass tests in row-id order, each separated by a line of ---, exactly`);
+    return false;
+  }
   if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its version number)`); return false; }
   const w = ctx.record.write({ actor: 'dispatcher', entity: 'card', id: c.id, expectRev: c.rev, doc: { ...c.doc, done_when: bar }, kind: 'done_when_from_rows' });
   if (w.ok) { events.push(`done_when ${c.id}`); return false; }

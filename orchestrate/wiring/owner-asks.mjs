@@ -14,7 +14,7 @@
 // An answer is trusted only when the same status agrees with it; until then the ask keeps waiting (the outcome is not
 // known, so it never answers { ok: false }):
 //   - launch ok: the request is 'started' (or since 'stopped'), and every field is what this runner must make:
-//     sessionId the asked one, outbox <outboxRoot>/<role>/<id> (worker, or script for a script card: L767), copy <copiesRoot>/<card>, pid and pgid real, pid_start
+//     sessionId the asked one, outbox <outboxRoot>/<product>/<role>/<id> (worker, or script for a script card: L767, L836), copy <copiesRoot>/<product>/<card>, pid and pgid real, pid_start
 //     a non-empty string, head a commit id, signin and configDir non-empty. The session it started is listed while
 //     'started' (and may be after), and the listing agrees: card, product, kind, pgid, signin, config_dir and outbox.
 //     launch ok: false: the request is 'refused'.
@@ -29,21 +29,21 @@
 // runner's process (runner-launch.mjs and the later loop).
 
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
-import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus } from './owner-status.mjs';
+import { START_ISO } from '../modules/M9-record/lock.mjs';
+import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus, runnerCopy, runnerOutbox } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
 export const NO_COPY_KINDS = Object.freeze(['review', 'audit', 'readonly', 'lead', 'front_door']);
 /** How often an ask reads the status while it waits, and when it stops waiting (past any tick limit). */
 export const ASK_POLL_MS = 2_000;
 export const ASK_GIVE_UP_MS = 600_000;
-// A product as a request file may name it: M10's product name (never a path), at most 64 characters.
-const productName = (p) => typeof p === 'string' && p.length <= 64 && PRODUCT_NAME.test(p);
+// A product as a request file may name it: setup's product name (shared/product-paths.mjs PRODUCT, #378 r1 m3), never a path.
+const productName = (p) => typeof p === 'string' && PRODUCT.test(p);
 const HEAD = /^[0-9a-f]{40}$/;
-const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'outbox', 'signin', 'configDir', 'copy']);
+const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'base', 'outbox', 'signin', 'configDir', 'copy']);
 
 const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
@@ -51,17 +51,22 @@ const realPid = (n) => Number.isInteger(n) && n > 1;
 /**
  * What is wrong with a start's answer, or null: the one definition both sides use (#358 r1 m1), the runner before it
  * lists a session and the Dispatcher's launch ask before it trusts one. sessionId the asked one, pid and pgid real, a
- * leader start time, head a commit id, outbox <outboxRoot>/<role>/<sessionId>, copy <copiesRoot>/<card>, signin and
+ * leader start time, head a commit id, outbox <outboxRoot>/<product>/<role>/<sessionId>, copy <copiesRoot>/<product>/<card> (L836), signin and
  * configDir non-empty.
  */
-export function launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copiesRoot }) {
+export function launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot }) {
   if (a?.sessionId !== undefined && a.sessionId !== sessionId) return 'the answer names another session';
   if (!realPid(a?.pid)) return 'the start named no process';
   if (!realPid(a.pgid)) return 'the start named no process group';
-  if (!name(a.pidStart)) return 'the start named no start time for its process';
-  if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
-  if (!Object.hasOwn(RUNNER_ROLE_OF, kind) || a.outbox !== join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId)) return 'the start named another outbox than the session\'s own';
-  if (typeof copiesRoot !== 'string' || a.copy !== join(copiesRoot, card)) return 'the start named another copy than the card\'s';
+  if (typeof a.pidStart !== 'string' || !START_ISO.test(a.pidStart)) return 'the start named no UTC start time for its process (M9 startTime)';
+  if (typeof a.head !== 'string' || !HEAD.test(a.head)) return 'the start named no commit for its copy';
+  // base (L825-2): the commit the copy was started on. Optional until every runner answers it, but never malformed.
+  if (a.base !== undefined && (typeof a.base !== 'string' || !HEAD.test(a.base))) return 'the start named a malformed base commit';
+  // A name the places can't be made from is said as such (#378 r1 m3), never as another outbox.
+  let outbox; try { outbox = Object.hasOwn(RUNNER_ROLE_OF, kind) && typeof outboxRoot === 'string' ? runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }) : null; } catch (e) { return `the session's outbox can't be named: ${e.message}`; }
+  if (!outbox || a.outbox !== outbox) return 'the start named another outbox than the session\'s own';
+  let copy; try { copy = typeof copiesRoot === 'string' ? runnerCopy({ copiesRoot, product, card }) : null; } catch (e) { return `the card's copy can't be named: ${e.message}`; }
+  if (!copy || a.copy !== copy) return 'the start named another copy than the card\'s';
   if (!name(a.signin) || !name(a.configDir)) return 'the start named no sign-in';
   return null;
 }
@@ -108,12 +113,12 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
-        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copiesRoot });
+        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot });
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
           && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
-        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
+        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
       });
     },
     stopGroup: async (session) => {

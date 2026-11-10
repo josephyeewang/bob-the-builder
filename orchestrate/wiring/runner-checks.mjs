@@ -51,7 +51,10 @@
 //                           not written", which fails safe (#369 m5). A script session has no shell (role-profiles.mjs),
 //                           so launch.mjs skips check 11 for it (#369 m6).
 //   12 budget               M11's own check12 with this session's kind (gate.mjs counts editing, undo and script
-//                           sessions themselves); no budget source, no port
+//                           sessions themselves). The budget is check12's own inputs, and carries the pass's `filesOf`
+//                           (#369 r2 m4): check12 works out an undo's exact reverse with it (lane 2's #393, gate.mjs;
+//                           until it lands, check12 does not), so an undo is refused here, saying so, when the budget has
+//                           none. No budget source yet (runner-main.mjs budget: null), so no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 
@@ -63,6 +66,8 @@ import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
+import { groupThere } from './runner-ports.mjs';
+import { foldKey } from '../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 export const BASELINE_MS = 15 * 60_000;
@@ -91,7 +96,10 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
     if (!path.split('/').some(isProtectedName)) continue;
     // Only a plain file of main's is put back (worker-copy.mjs restoreMainCopies refuses a link, 120000).
     if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return `main's ${path} is not a plain file (mode ${mode})`;
-    want.set(path.toLowerCase(), { path, oid });
+    const k = foldKey(path);
+    // A name that can't be folded can't be compared, so it never shares a key (#369 merge review minor 1).
+    if (k === null) return `main's ${path} has a name that can't be compared`;
+    want.set(k, { path, oid });
   }
   const found = [];
   let seen = 0;
@@ -122,14 +130,16 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
   };
   try { walk(copy, ''); } catch (e) { return `the copy's setup files: ${e?.message ?? e}`; }
   for (const r of found) {
-    const w = want.get(r.toLowerCase());
+    const k = foldKey(r);
+    if (k === null) return `the copy's ${r} has a name that can't be compared`;
+    const w = want.get(k);
     if (!w) return `the copy holds ${r}, which main does not`;
     const b = await run(['cat-file', 'blob', w.oid], { gitDir: mirror, purpose: 'runner-check-2-blob', timeoutMs: 60_000 });
     if (b?.code !== 0) return `main's ${r} can't be read from the mirror`;
     let mine; try { mine = readNoLink(join(copy, r)); } catch (e) { return `the copy's ${r} can't be read (${e?.code ?? e?.message})`; }
     if (!Buffer.from(b.stdout).equals(mine)) return `the copy's ${r} is not main's`;
   }
-  const have = new Set(found.map((r) => r.toLowerCase()));
+  const have = new Set(found.map((r) => foldKey(r)));
   const missing = [...want].filter(([k]) => !have.has(k)).map(([, w]) => w.path);
   return missing.length ? `main's ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not put back in the copy` : null;
 }
@@ -149,8 +159,9 @@ export function baselineCommand(test, file) {
 
 // Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
 // time-out kills the tests it started too, not claude alone (#369 m2), and so does a normal end (#369 r1 M1): what the
-// tests left running in the group goes with it.
-function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL')) {
+// tests left running in the group goes with it. After the end, the group is killed only if signal 0 still finds it
+// (#369 r2 c3; runner-ports.mjs groupThere, the one test of a group): an empty group's number is not signalled.
+function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere) {
   return new Promise((resolve, reject) => {
     let child;
     try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
@@ -160,7 +171,7 @@ function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(
       reject(new Error('it did not finish in time'));
     }, timeoutMs);
     child.on('error', (e) => { clearTimeout(t); reject(e); });
-    child.on('close', (code) => { clearTimeout(t); try { if (group()) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
+    child.on('close', (code) => { clearTimeout(t); try { if (group() && there(child.pid)) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
   });
 }
 
@@ -197,7 +208,7 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         if (!lr.ok) return lr;
         rmSync(f, { force: true });
         b = await baselineTest({ run: async () => {
-          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup);
+          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup, x.groupThere);
           // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
           let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
           return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
@@ -209,7 +220,12 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
   }
   if (x.budget) {
     const gate = gateOf(x.budget);
-    ports[12] = async () => (x.cardDoc ? gate({ card: x.cardDoc, kind: x.kind, product: x.product }) : refuse('the card is not in the Record'));
+    ports[12] = async () => {
+      if (!x.cardDoc) return refuse('the card is not in the Record');
+      if (x.kind === 'undo' && typeof x.budget.filesOf !== 'function') return refuse('the budget carries no filesOf (the pass\'s own), so the undo can\'t be shown an exact reverse');
+      // The card with its id (L863): without one, check12 reads the card's own claim as an undo already running.
+      return gate({ card: { id: x.card, ...x.cardDoc }, kind: x.kind, product: x.product });
+    };
   }
   if (x.bobManifest && has(x.bobFolder)) ports[13] = r[13];
   return ports;
