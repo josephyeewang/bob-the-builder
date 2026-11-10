@@ -25,10 +25,13 @@ import { QUOTE_NOTE, changeReaders, finalize, labelled, quoteFound } from './fin
 import { finalizeMark } from '../M4-workshop/launcher/review-runner.mjs';
 import { verdictFileText, verdictFormat } from './verdict-file.mjs';
 import { VERDICT_CHECKLIST } from '../../shared/record.mjs';
+import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
+import { RUNNER_ROLES } from '../../shared/review-roles.mjs';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME };
+// Every role the design table and the runner know, so a role main adds (script, plan_reviewer) is never left out (L824).
+const UIDS = Object.fromEntries([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])].map((r) => [r, RUNNER_ROLES.includes(r) ? ME : OTHER]));
 const CLAUDE = '/pinned/claude';
 const CLEAN = Object.fromEntries(VERDICT_CHECKLIST.map((k) => [k, 'clean']));
 const NUM = ['export function total(rows) {', '  let sum = 0;', '  for (const r of rows) sum += r.amount;', '  return sum;', '}', '', 'export function share(part, whole) {', '  return part / whole;', '}', ''];

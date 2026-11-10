@@ -83,7 +83,7 @@ export { notWiredText, refusing };
 // tick starts reading a new port. Options with defaults are not ports. `alert` and `approvals` are answered here.
 const WIRED_HERE = Object.freeze(['alert', 'approvals']);
 export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'replyToLead', 'requestReview',
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'proposals', 'replyToLead', 'requestReview',
   'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
   'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 
