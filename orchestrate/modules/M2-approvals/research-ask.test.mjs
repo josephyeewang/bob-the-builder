@@ -337,3 +337,17 @@ test('join 10 (r1 audit of #313): a failure later in the pass does not hold the 
   t.ctx.record = t.record;
   assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at, 'and marked');
 });
+
+// Review of the r1 fixes: a refused mark plus a failure later in the pass is still held, and told once.
+test('join 10 (r1 audit of #313): a held push stays held, and is told once, when a later step fails every pass', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.record = Object.create(t.record, {
+    write: { value: (w) => (w.entity === 'ask' && w.doc?.push_sent_at ? { ok: false, reason: 'planted refusal' } : t.record.write(w)) },
+    read: { value: (e, ...x) => { if (e === 'product') throw new Error('planted product read failure'); return t.record.read(e, ...x); } },
+  });
+  for (let i = 0; i < 3; i++) await assert.rejects(s.pass(), /planted product read failure/);
+  assert.equal(s.pushes.length, 1, 'one push, then held');
+  assert.equal(t.alerts.filter((a) => a.type === 'approvals_write_refused').length, 1, JSON.stringify(t.alerts));
+});

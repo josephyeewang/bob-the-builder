@@ -343,6 +343,9 @@ export async function schedulePass(ctx) {
   const once = askOnce(ctx);
   const researchEvents = [];
   const researchFailed = await researchStep(ctx, once, researchEvents);
+  // Saved now as well as at the end, so a failure later in the pass never loses a hold or a told mark (review of the
+  // r1 fixes: without it, a refused mark plus a later failure re-pushed and re-told every pass).
+  once.save(waitingIds(ctx, researchFailed));
   // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
   // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the
   // rest of the pass reads is the one just made (pinned: onboarded is events[0]). Joe is told once (onboard.mjs).
