@@ -38,6 +38,10 @@ test('L741: every port says what goes in, what comes out, and how it fails; sync
   for (const k of ['launch', 'stopGroup', 'pauseLead']) assert.equal(OWNER_PORTS[k].deadlineMs, PORT_DEADLINE_MS, k);
   // The ports the tick calls without await must be sync (tick.mjs: p.sessions(), p.board(), stopSession inside lapseClaims).
   for (const k of ['sessions', 'probe', 'board', 'outboxSessions', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
+  // lapseClaims gives the card back once stopSession answers true, so true must never mean "a launch request not seen yet"
+  // (that request could still start a second session for the card: third check M2).
+  assert.match(readFileSync(new URL('../modules/M9-record/writer.mjs', import.meta.url), 'utf8'), /once `stopSession\(session_id\)` answers true: whatever was started under that id is stopped/);
+  assert.match(OWNER_PORTS.stopSession.out, /a request the runner has not yet seen is never true, and the runner refuses a launch request older than the claim timeout/);
   assert.equal(STATUS_STALE_MS, 3 * 60_000);
 });
 
@@ -47,7 +51,7 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.ok(start > 0);
   const end = pass.indexOf('\n}\n', start); assert.ok(end > start);   // the starts loop's own function, not the rest of the file
   const body = pass.slice(start, end);
-  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.indexOf('l = ')], 'the launch answer is read only as l.<field>, never handed on or destructured');
+  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.search(/\bl = /)], 'the launch answer is read only as l.<field>, never handed on or destructured');
   const read = new Set([...body.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
   const said = new Set(OWNER_PORTS.launch.out.match(/\{([^}]*)\}/)[1].split(',').map((x) => x.trim().split(':')[0].trim()).concat(['reason', 'timedOut']));
   const unsaid = [...read].filter((f) => !said.has(f));
@@ -97,8 +101,10 @@ test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs
   // would leave them unread, in silence (second self-review M1).
   const it = code('outbox-intake.mjs');
   assert.match(it, /s\.role === 'lead'/); assert.match(it, /if \(entry\.request\) return \['report-'\];/);
-  assert.match(OWNER_PORTS.outboxSessions.out, /every running session with an outbox, Mac-wide \(workers, Leads, read-only helpers\)/);
-  assert.match(OWNER_PORTS.outboxSessions.out, /request is there only for a read-only request session, and narrows its hand-ins to report- files/);
+  assert.match(OWNER_PORTS.outboxSessions.out, /every session whose outbox may still hold a file not yet taken, Mac-wide: running, or ended until intake has taken or told every file in it \(workers, Leads, read-only helpers, reviewers, auditors/);
+  assert.match(OWNER_PORTS.outboxSessions.out, /request \(a non-empty value\) is there only for a read-only request session, and narrows its hand-ins to report- files/);
+  // A verdict is taken only after its session ended, so a list of running sessions only would leave it unread (third check M1).
+  assert.match(it, /a verdict is taken only once its session's ended record exists/); assert.match(it, /file\.kind === 'verdict-'/);
 });
 
 test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a failed pause, whether or not the pass reads the answer', () => {

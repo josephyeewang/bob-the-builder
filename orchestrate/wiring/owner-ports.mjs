@@ -7,7 +7,7 @@
 // status file. Requests trust nothing, and the runner stops only what it started.
 //
 // Two kinds of port:
-// - A sync port reads status files only and never waits on the runner. If a file it needs is older than STATUS_STALE_MS,
+// - A sync port reads status files only (stopSession may also write a stop request) and never waits on the runner. If a file it needs is older than STATUS_STALE_MS,
 //   or can't be read, the answer is "not known", which is a throw (the tick's step fails and the owner is told), never an
 //   empty or partial answer.
 // - An async port writes one request and waits for the runner's answer. The time limit is the tick's (pass.mjs guarded(),
@@ -37,9 +37,9 @@ export const OWNER_PORTS = Object.freeze({
     'throws; the stop step reads that as "not at a safe point" (the late hard stop still applies). Never a partial size'),
   board: sync('()', '[{ id, card, alive, ended, lastWriteAt }]: the sessions meant to run (the outage step); lastWriteAt is epoch ms. An alive or ended the runner does not know is left out, never false',
     `${NO}; the outage step fails and is told`),
-  outboxSessions: sync('()', '[{ sessionId, role, outbox, uid, card, product, request? }]: every running session with an outbox, Mac-wide (workers, Leads, read-only helpers), merged in the wiring as for sessions; outbox as its launch named it; uid is the Mac user that must own the outbox\'s files; request is there only for a read-only request session, and narrows its hand-ins to report- files',
+  outboxSessions: sync('()', '[{ sessionId, role, outbox, uid, card, product, request? }]: every session whose outbox may still hold a file not yet taken, Mac-wide: running, or ended until intake has taken or told every file in it (workers, Leads, read-only helpers, reviewers, auditors: a verdict is taken only after its session\'s ended record exists, and a worker\'s last files after the stop step), merged in the wiring as for sessions; outbox as its launch named it; uid is the Mac user that must own the outbox\'s files; request (a non-empty value) is there only for a read-only request session, and narrows its hand-ins to report- files',
     `${NO}; intake fails and is told`),
-  stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows everything started under that id stopped, or nothing ran under it',
+  stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows the launch request for that id used up (started and since stopped, refused, or cancelled by this stop request); a request the runner has not yet seen is never true, and the runner refuses a launch request older than the claim timeout',
     'false or a throw: the claim stays, and the owner is told once a day (M9 lapseClaims)'),
   launch: ask('({ card, kind, product, sessionId })',
     '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; outbox is <outboxRoot>/worker/<sessionId> and copy <copiesRoot>/<card>',
@@ -47,7 +47,7 @@ export const OWNER_PORTS = Object.freeze({
   stopGroup: ask('(session): works from { id, pgid } alone (pass.mjs also stops a session it just launched, not yet in any status)', '{ ok: true, how }: the session\'s process group is gone',
     '{ ok: false, reason }: it may still run', PORT_DEADLINE_MS),
   saveWork: ask('(session)', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down)', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
-  pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow)',
+  pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow). An unknown outcome is answered by the tick\'s limit and asked again next pass, so asking twice must be harmless',
     'throws (rejects): today pass.mjs ignores what it resolves to, so a refusal answered as { ok: false } would read as asked', PORT_DEADLINE_MS),
 });
 
@@ -56,7 +56,7 @@ export const OWNER_PORTS = Object.freeze({
  * cleanupCopy puts no time limit on saveWork, so that port keeps its own.
  */
 export const OWNER_CLEANUP_PORTS = Object.freeze({
-  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate list, read and delete there (an access list, as on the worker outboxes)',
+  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate list, read and delete there (an access list, as on the worker outboxes), inherited by every file and folder made under it; the runner never moves a file in from outside it, so a delete never stops partway',
     notKnown: 'the read throws, never a folder that reads as empty', deadlineMs: null }),
   saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox, which is orchestrate\'s private staging folder: the runner writes the bundle where orchestrate can read it, and the port (orchestrate-side) copies it into outbox',
     '{ ok: false, reason }, or { ok: false, timedOut: true, reason } at its own limit', SAVE_DEADLINE_MS),
