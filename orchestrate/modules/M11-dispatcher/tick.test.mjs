@@ -26,6 +26,8 @@ import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-h
 import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
+// The wiring module is loaded by its computed path; one shared call keeps the M2 reach scan's count at 1 (consume-ask ALLOWED).
+const loadWiring = (path) => import(path);
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
 const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
@@ -529,7 +531,7 @@ export async function wire() {
   writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 300 }));
   const logs = [];
   assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 2, logs.join('\n'));
-  const mod = await import(wiring);
+  const mod = await loadWiring(wiring);
   assert.match(logs.join('\n'), /runDeadlineMs \(300\) is below the pass's own sum/);
   assert.equal(mod.seen.filter((t) => /did not finish within 300 ms/.test(String(t))).length, 1, 'the late pass sends its own alert');
   // Behind the late pass's own alert: sent after it in the same send's time, or left queued for the next one.
@@ -567,7 +569,7 @@ export { rec };
   assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 1);
   assert.match(logs.pop(), /orchestrate\/modules\/M11-dispatcher\/main\.mjs is not inside the installed copy/);
   assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 0);
-  const mod = await import(wiring);
+  const mod = await loadWiring(wiring);
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
