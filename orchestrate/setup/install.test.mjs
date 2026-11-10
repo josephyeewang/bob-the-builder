@@ -1396,6 +1396,10 @@ test('L871: keysDiffer names each key that is missing, other or extra', () => {
   assert.equal(keysDiffer(dispatcherConfigText({ a: '/y', b: 1, zz: 2 }), want), ': outboxRoot is missing (setup writes "/b/outboxes"); a is "/y", not "/x"; "zz" is not a key setup writes');
   assert.equal(keysDiffer('not json', want), '');
   assert.equal(keysDiffer('[1]', want), '');
+  // More than five: the first five, then how many more (L905 C1).
+  const six = dispatcherConfigText({ a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 });
+  assert.equal(keysDiffer('{}', six), ': a is missing (setup writes 1); b is missing (setup writes 2); c is missing (setup writes 3); d is missing (setup writes 4); e is missing (setup writes 5); and 1 more');
+  assert.equal(keysDiffer(dispatcherConfigText({ zz: 0 }), six).endsWith('; and 2 more'), true);
 });
 
 test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, with another root, or with a product\'s own folder FAILs by name; load refuses', async () => {
@@ -1411,6 +1415,8 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
     ['outboxRoot', (c) => { c.outboxRoot = C; }, `it names ${JSON.stringify(C)}, not ${O}; run dispatcher-config`],
     ['copiesRoot', (c) => { c.copiesRoot = `${C}/alpha`; }, `it names ${C}/alpha, product alpha's own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config`],
     ['outboxRoot', (c) => { c.outboxRoot = `${O}/beta`; }, `it names ${O}/beta, product beta's own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config`],
+    // A child that is no product's name is just another folder (L905 C3).
+    ['copiesRoot', (c) => { c.copiesRoot = `${C}/Alpha`; }, `it names ${JSON.stringify(`${C}/Alpha`)}, not ${C}; run dispatcher-config`],
   ];
   for (const [key, edit, why] of cases) {
     put(edit);
@@ -1419,6 +1425,12 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
     const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes(why), `check-dispatcher says: ${why}`);
     const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, new RegExp(`dispatcher\\.json is not the config this setup writes now: ${key} is `), 'load names the key');
   }
+  // Valid JSON that is not an object FAILs both rows (L905 m2).
+  for (const t of ['null', '[1]']) {
+    chmodSync(f, 0o644); rmSync(f); writeFileSync(f, t); chmodSync(f, 0o644);
+    for (const key of ['outboxRoot', 'copiesRoot']) assert.deepEqual([rowOf(key).ok, rowOf(key).why], [false, `${BASE}/install/orchestrate/dispatcher.json is not a JSON object; run dispatcher-config`], `${t} ${key}`);
+    const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes('is not a JSON object'), cd.text);
+  }
   // Once there is a copy, the job reads the copy's file: with it gone, the row FAILs on it, never passes on the base's (review m1).
   chmodSync(f, 0o644); rmSync(f);
   assert.deepEqual(rowOf('outboxRoot'), { ok: false, what: `${BASE}/install/orchestrate/dispatcher.json names the top outbox root ${O} as outboxRoot (the Dispatcher's outboxRoot)`, why: `${BASE}/install/orchestrate/dispatcher.json can't be read (the job reads the copy's); run dispatcher-config, then install again if the copy does not keep it` });
@@ -1426,6 +1438,23 @@ test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, wi
   const w0 = await world({ dispatcher: true }); assert.equal(w0.run(['dispatcher-config']).code, 0);
   const r0 = checkDispatcherKeys(w0.mac, w0.cfg).find((r) => r.what.endsWith('(the Dispatcher\'s outboxRoot)'));
   assert.equal(r0.what.startsWith(`${D_SRC} names`), true, r0.what); assert.equal(r0.ok, true, r0.why);
+});
+
+test('L905 m1: a dispatcher entry setup refuses makes check-dispatcher FAIL, saying the roots can\'t be checked', async () => {
+  const w = await dWorld();
+  const f = copyConfig(w); const c = JSON.parse(readFileSync(f, 'utf8')); delete c.outboxRoot;
+  chmodSync(f, 0o644); rmSync(f); writeFileSync(f, dispatcherConfigText(c)); chmodSync(f, 0o644);
+  w.raw.dispatcher = { ...w.raw.dispatcher, runDeadlineMs: -1 };   // the audit's probe: it gave "all 3 PASS"
+  const cd = w.run(['check-dispatcher']);
+  assert.equal(cd.code, 1, cd.text);
+  assert.match(cd.text, /the dispatcher entry is refused \(config: dispatcher\.runDeadlineMs must be [^)]*\); its roots can't be checked/);
+  // The roots were skipped, never checked: the missing outboxRoot is not what it says (it can't name the roots).
+  assert.match(cd.text, /^FAIL {2}the config's dispatcher entry is one setup takes/m);
+  assert.equal(/\(the Dispatcher's (outboxRoot|copiesRoot)\)/.test(cd.text), false, cd.text);
+  const rows = checkDispatcherKeys(w.mac, w.cfg, { dispatcher: false, refused: 'x' });
+  assert.deepEqual(rows.filter((r) => !r.ok && /refused/.test(r.why ?? '')).map((r) => r.why), ['the dispatcher entry is refused (x); its roots can\'t be checked']);
+  // No entry at all: no such row (the Dispatcher is simply off).
+  assert.equal(checkDispatcherKeys(w.mac, w.cfg, { dispatcher: false }).some((r) => /refused/.test(r.why ?? '')), false);
 });
 
 test('L871 review M1: with the job loaded, dispatcher-config writes the roots into a dispatcher.json an older setup wrote without them', async () => {

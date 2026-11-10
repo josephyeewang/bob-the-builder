@@ -106,7 +106,7 @@ export function rootRows(io, cfg, k) {
  * Not part of checkInstall (install.mjs): `daemons load` and the watch cutover wait on that, and a host.lock the
  * Dispatcher can't read must not stop the review or watch jobs. Its own command is `check-dispatcher`.
  */
-export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined } = {}) {
+export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused } = {}) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
@@ -121,6 +121,8 @@ export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== u
 
   // With a dispatcher entry (check-dispatcher reads the plain config, so setup.mjs says whether its parser takes one).
   if (dispatcher) for (const row of rootRows(io, cfg, k)) out.push(row);
+  // An entry setup refuses (`refused`, its parser's reason): the roots can't be named, which is never a PASS (L905 m1).
+  else if (refused !== undefined) item(false, 'the config\'s dispatcher entry is one setup takes, so its outboxRoot and copiesRoot can be checked', `the dispatcher entry is refused (${refused}); its roots can't be checked`);
 
   const what = `the owner's host.lock (${k.hostLockPath}) is ${cfg.owner}'s and ${DISPATCHER_USER} can read it (the Dispatcher's hostLockPath)`;
   const owner = readUser(io, cfg.owner); const me = readUser(io, DISPATCHER_USER);

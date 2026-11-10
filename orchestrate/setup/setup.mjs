@@ -174,7 +174,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
     // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
-    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch { return false; } })();
+    // An entry there that its parser refuses: check-dispatcher says so rather than leave its root rows out (L905 m1).
+    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch (e) { if (raw?.dispatcher !== undefined) o.dispatcherWhy = e?.message ?? 'it can\'t be read'; return false; } })();
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
@@ -187,7 +188,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     if (cfg.hostLockPath !== undefined) out('the Dispatcher\'s folders and host.lock: run check-dispatcher (sudo to read host.lock as orchestrate)');
     return code;
   }
-  if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg, { dispatcher: o.dispatcherOn }), out);
+  if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg, { dispatcher: o.dispatcherOn, refused: o.dispatcherWhy }), out);
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);

@@ -226,7 +226,7 @@ its own wiring (`wiring/dispatcher-wiring.mjs` beside it) doesn't take is refuse
 start on an unknown key). **An existing `dispatcher.json` without the two keys won't start the Dispatcher until
 `dispatcher-config` is run again**; check-dispatcher says exactly that. When a `dispatcher.json` differs from what
 `dispatcher-config` writes, `dispatcher-config`'s own check, `daemons place` and `load`, and `daemons check` name the keys
-that are missing or other than setup's (the first five).
+that are missing, extra or other than setup's (the first five).
 
 | Command | What it does | Root? |
 |---|---|---|
