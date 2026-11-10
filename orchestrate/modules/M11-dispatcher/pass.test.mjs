@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -49,7 +49,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -502,6 +502,12 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   const l = w.rec.read('launch', sid).doc;
   assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
+  assert.equal(l.base, null, 'a launcher that does not say a base records null');
+  // L825-2: the commit the launcher started the copy on is recorded as it said it.
+  const b = world([card('C-3')]);
+  b.refuseLaunch(() => ({ ok: true, base: 'b'.repeat(40) }));
+  await b.pass();
+  assert.equal(b.rec.read('launch', b.sessions[0].id).doc.base, 'b'.repeat(40));
   // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
@@ -691,6 +697,60 @@ test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
   assert.equal((await stopProcessGroup({ pgid: 1, kill, alive: () => true, sleep })).ok, false, 'never signals group 1');
   const gone = await stopProcessGroup({ pgid: 42, kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, alive: () => false, sleep });
   assert.equal(gone.how, 'gone');
+});
+
+test('L822 planted: a stop its caller aborted sends nothing more: not before SIGTERM, not during the wait, not SIGKILL', async () => {
+  const sent = [];
+  const kill = (p, s) => sent.push(s);
+  // Aborted before it starts: nothing is sent.
+  const before = new AbortController();
+  before.abort();
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: before.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, []);
+  // Aborted while it waits (the caller's port limit): SIGTERM only, no SIGKILL, and it stops waiting.
+  const mid = new AbortController();
+  let t = 0;
+  const sleep = async (ms) => { t += ms; if (t >= 3000) mid.abort(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep, signal: mid.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual([sent, t], [['SIGTERM'], 3000]);
+  // Aborted on the last wait, just before SIGKILL.
+  sent.length = 0;
+  const last = new AbortController();
+  let u = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async (ms) => { u += ms; if (u >= 10_000) last.abort(); }, signal: last.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // #372 m1: the abort and the group's exit at the same step: the exit is told, not 'abandoned'.
+  sent.length = 0;
+  const both = new AbortController();
+  let gone = false;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => !gone, sleep: async () => { gone = true; both.abort(); }, signal: both.signal }), { ok: true, how: 'SIGTERM' });
+  sent.length = 0;
+  const atEnd = new AbortController();
+  let v = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => v < 10_000, sleep: async (ms) => { v += ms; if (v >= 10_000) atEnd.abort(); }, signal: atEnd.signal }), { ok: true, how: 'SIGTERM' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // Never aborted: the same as with no signal.
+  sent.length = 0;
+  assert.equal((await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: new AbortController().signal })).how, 'SIGKILL');
+  assert.deepEqual(sent, ['SIGTERM', 'SIGKILL']);
+});
+
+test('#372 m2: guarded aborts the signal it hands its port when it gives up, and never when the port answers', async () => {
+  let seen;
+  const late = await guarded((signal) => { seen = signal; return new Promise(() => {}); }, 20);
+  assert.equal(late.timedOut, true);
+  assert.equal(seen.aborted, true);
+  let quick;
+  assert.deepEqual(await guarded((signal) => { quick = signal; return { ok: true }; }, 20), { ok: true });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(quick.aborted, false);
+  // The stops hand the pass's signal to the port.
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const got = [];
+  w.setCard('C-1', { state: 'cancelled' });
+  await w.pass(1, { stopGroup: async (s, o) => { got.push(o?.signal instanceof AbortSignal); return { ok: true, how: 'SIGTERM' }; } });
+  assert.deepEqual(got, [true]);
 });
 
 test('M7: a stop that fails alerts and leaves the card as it was; a failed save alerts but the stop stands', async () => {

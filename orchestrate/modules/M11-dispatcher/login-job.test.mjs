@@ -52,3 +52,17 @@ test('L246: logName names both logs; left out, they are the Dispatcher\'s; a nam
 test('m4: text is escaped', () => {
   assert.match(loginJobPlist({ ...OK, workDir: '/a&b' }), /<string>\/a&amp;b<\/string>/);
 });
+
+test('L734 answer 1 (audit #292 m1): home and umask are written only when passed, so the Dispatcher\'s job text is unchanged; bad values are refused', (t) => {
+  const plain = loginJobPlist(OK);
+  assert.doesNotMatch(plain, /HOME|Umask/);
+  const t2 = loginJobPlist({ ...OK, home: '/srv/orch/home', umask: 0o77 });
+  assert.match(t2, /<key>EnvironmentVariables<\/key><dict><key>PATH<\/key><string>\/opt\/node\/bin:\/usr\/bin:\/bin<\/string><key>HOME<\/key><string>\/srv\/orch\/home<\/string><\/dict>/);
+  assert.match(t2, /<key>Umask<\/key><integer>63<\/integer>/);
+  assert.equal(t2.replace('<key>HOME</key><string>/srv/orch/home</string>', '').replace('  <key>Umask</key><integer>63</integer>\n', ''), plain, 'only the two keys are added');
+  for (const bad of [{ home: 'rel/home' }, { umask: -1 }, { umask: 0o1000 }, { umask: 1.5 }, { umask: '63' }]) assert.throws(() => loginJobPlist({ ...OK, ...bad }), /home must be|umask must be/, JSON.stringify(bad));
+  const p = join(tempDir('m11-plist-'), 'job.plist'); writeFileSync(p, t2);
+  const r = spawnSync('plutil', ['-lint', p], { encoding: 'utf8' });
+  if (r.error) return t.skip('plutil is not on this machine');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+});

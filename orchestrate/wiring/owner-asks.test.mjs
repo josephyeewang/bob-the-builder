@@ -10,7 +10,7 @@ const FILE = '/runner/state/status.json'; const ROOT = '/out'; const COPIES = '/
 const st = ({ dir = false, mode = dir ? 0o755 : 0o644 } = {}) => ({ uid: OWNER, mode, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false });
 const session = (id, more = {}) => ({ id, product: 'p1', kind: 'editing', card: 'C-1', lead: 'L', role: 'worker', pgid: 77, signin: 's', config_dir: '/cfg', bundle_files: [],
   outbox: `${ROOT}/p1/worker/${id}`, uid: OWNER, alive: true, ended: false, outbox_open: true, stop_requested: false, ...more });
-const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: 'Mon Nov  9 12:00:01 2026', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1` };
+const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: '2026-11-09T12:00:01Z', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1` };
 
 // A fake runner: `script(n, w)` runs before the n-th status read and may change w.doc (the runner's next status).
 function world(script = () => {}, { giveUpMs = ASK_GIVE_UP_MS } = {}) {
@@ -31,7 +31,10 @@ test('L759 step 2: launch writes one request and answers the runner\'s started s
   assert.deepEqual(w.writes[0][1].launch, LAUNCH);
   assert.equal(w.reads, 4, 'it waited, reading the status, until the answer was there');
   const extra = world((i, x) => { startedAt(0)(i, x); x.doc.answers['launch-S-1'] = { ...LAUNCHED, settings: { evil: 1 } }; });
-  assert.deepEqual(Object.keys(await extra.ports.launch(LAUNCH)), Object.keys(LAUNCHED));
+  assert.deepEqual(Object.keys(await extra.ports.launch(LAUNCH)), Object.keys(LAUNCHED), 'no base is named when the runner names none');
+  // L825-2: a base the runner names is handed on as it said it.
+  const based = world((i, x) => { startedAt(0)(i, x); x.doc.answers['launch-S-1'] = { ...LAUNCHED, base: 'c'.repeat(40) }; });
+  assert.equal((await based.ports.launch(LAUNCH)).base, 'c'.repeat(40));
   for (const k of ['launch', 'stopGroup', 'saveWork', 'pauseLead']) assert.equal(OWNER_PORTS[k].sync, false, k);
 });
 
@@ -39,8 +42,9 @@ test('L759 step 2: launch trusts no answer the rest of the status does not bear 
   const wrong = [
     { requests: {} }, { requests: { 'S-1': { state: 'waiting' } } }, { requests: { 'S-1': { state: 'refused' } } },
     { answer: { sessionId: 'S-2' } }, { answer: { outbox: `${ROOT}/p1/worker/S-2` } }, { answer: { copy: `${COPIES}/p1/C-2` } }, { answer: { copy: `${COPIES}/C-1` } }, { answer: { copy: `${COPIES}/p2/C-1` } }, { answer: { outbox: `${ROOT}/worker/S-1` } }, { answer: { outbox: `${ROOT}/p2/worker/S-1` } }, { answer: { copy: '/elsewhere/C-1' } },
-    { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } },
+    { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } }, { answer: { pidStart: 'Mon Nov  9 12:00:01 2026' } }, { answer: { pidStart: '2026-11-09 12:00:01' } },
     { answer: { head: 'main' } }, { answer: { head: 'A'.repeat(40) } }, { answer: { signin: '' } }, { answer: { configDir: null } },
+    { answer: { base: 'main' } }, { answer: { base: 'B'.repeat(40) } }, { answer: { base: null } }, { answer: { base: '' } }, { answer: { base: ['b'.repeat(40)] } }, { answer: { head: ['a'.repeat(40)] } },
   ];
   for (const bad of wrong) {
     const w = world((i, x) => { startedAt(0)(i, x); if (bad.requests) { x.doc.requests = bad.requests; x.doc.sessions = []; } Object.assign(x.doc.answers['launch-S-1'], bad.answer ?? {}); }, { giveUpMs: 10_000 });
@@ -196,7 +200,7 @@ test('#328 r1 c2 (P11): the ask stops at its limit by the clock too, not only by
 test('#378 m4: launchAnswerWrong itself refuses a flat, another product\'s or a role-named product\'s outbox or copy', () => {
   const sid = 'S-1';
   const ask = { sessionId: sid, kind: 'editing', card: 'C-1', product: 'p1', outboxRoot: '/o', copiesRoot: '/c' };
-  const good = { sessionId: sid, pid: 10, pgid: 10, pidStart: 'Mon Nov 10 03:00:00 2026', head: 'a'.repeat(40), outbox: '/o/p1/worker/S-1', copy: '/c/p1/C-1', signin: 'me', configDir: '/h/.claude' };
+  const good = { sessionId: sid, pid: 10, pgid: 10, pidStart: '2026-11-10T03:00:00Z', head: 'a'.repeat(40), outbox: '/o/p1/worker/S-1', copy: '/c/p1/C-1', signin: 'me', configDir: '/h/.claude' };
   assert.equal(launchAnswerWrong(good, ask), null);
   for (const outbox of ['/o/worker/S-1', '/o/p2/worker/S-1', '/o/p1/script/S-1', '/o/p1/worker/S-2']) assert.match(launchAnswerWrong({ ...good, outbox }, ask), /another outbox/, outbox);
   for (const copy of ['/c/C-1', '/c/p2/C-1', '/c/p1/C-2']) assert.match(launchAnswerWrong({ ...good, copy }, ask), /another copy/, copy);

@@ -217,6 +217,11 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     // #378 self-review M3: no memory while earlier sessions' settings files are there: a session may run unknown.
     assert.match(carriedOverProblem(c, {}, { groupGone: () => false }), new RegExp(`no memory, but its settings folder holds 1 earlier session's settings \\(${SA}\\.json\\)`));
     assert.equal(await go({}, () => false), 1); assert.match(logs.at(-1), /did not start: it has no memory/);
+    // #378 r2 n4: a memory with empty lists is no memory either. n3 (A10): a settings folder that can't be listed refuses.
+    assert.match(carriedOverProblem(c, { sessions: [], requests: {} }, { groupGone: () => false }), /no memory, but its settings folder holds 1/);
+    assert.match(carriedOverProblem(c, {}, { groupGone: () => false, listSettings: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }), /settings folder can't be listed \(EACCES\)/);
+    // n3 (A11): a carried-over session that names no product can't be told about: the runner does not start.
+    assert.match(carriedOverProblem(c, { sessions: [{ ...A, product: undefined }], requests: {} }, { groupGone: () => false }), /names no product/);
     // A first run (no memory, no settings files) starts.
     rmSync(join(c.settingsDir, `${SA}.json`));
     assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);

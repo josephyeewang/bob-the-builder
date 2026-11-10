@@ -4,7 +4,7 @@
 // Run: node --test orchestrate/modules/M11-dispatcher/proposal-route.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createToReview, proposalRoutePass, pushReason, routeReopened, shownName, ROUTE_FACT, ROUTE_LIST_FACT, ROUTE_RUN, ROUTE_TELL_MS } from './proposal-route.mjs';
+import { createToReview, proposalRoutePass, routeReopened, shownName, ROUTE_FACT, ROUTE_LIST_FACT, ROUTE_RUN, ROUTE_TELL_MS } from './proposal-route.mjs';
 import { plainError, PUSH_FACT, PROPOSAL_ATTEMPT } from '../M4-workshop/git/push.mjs';
 import { isFenced } from '../M12-sensors/escape.mjs';
 import { outbox, sendAlerts, isQueued } from './alerts.mjs';
@@ -12,6 +12,7 @@ import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { setup, must, put, readyCard } from '../M9-record/fixtures.test-helper.mjs';
 import { PRODUCT } from '../M9-record/fixtures.test-helper.mjs';
 import { STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
+import { pushReason } from '../../shared/push-reason.mjs';
 
 const CARD = 'C-1';
 const SHA = 'a'.repeat(64);

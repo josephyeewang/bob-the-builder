@@ -331,7 +331,10 @@ export function createPushScript(deps) {
     if (typeof card !== 'string' || !CARD.test(card)) no('the launch record has a bad card id');
     if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
     // The record says role worker for a script card too (L759), so either runner role's folder is this session's own (L767).
-    // In the session's own product's folder (L836: <root>/<product>/<role>/<id>).
+    // Taking either here is safe because of an earlier check, not this one (#358 c3): the Dispatcher wrote this outbox
+    // into the record only after checking it under the session's own role (M11 pass.mjs, startRole(kind)), so a
+    // worker's record never names the script folder, nor a script's the worker one. In the session's own product's
+    // folder (L836: <root>/<product>/<role>/<id>).
     const badOutbox = outboxProblemFor(outbox, sessionId, { outboxRoot, product, role: WORKER_OUTBOX_ROLES });
     if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
