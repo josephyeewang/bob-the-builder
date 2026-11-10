@@ -175,9 +175,9 @@ test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or t
   const opts = (w) => ({ log: () => {}, fetchFn: fakeGitHubFetch(w.fake) });
   const self = world({ extra: { reviewUid: me } });
   await assert.rejects(wire(self.config, opts(self)), /config: reviewUid is the Dispatcher's own user/);
-  // The workers' user: the Record's owner must be this process, so the Dispatcher's own user is stood in for.
+  // The Record owner's user (ownerUid): it must be this process, so the Dispatcher's own user is stood in for.
   const workers = world({ extra: { reviewUid: me } });
-  await assert.rejects(wire(workers.config, { ...opts(workers), selfUid: me + 2 }), /config: reviewUid is the workers' user \(ownerUid\)/);
+  await assert.rejects(wire(workers.config, { ...opts(workers), selfUid: me + 2 }), /config: reviewUid is the Record owner's \(ownerUid\)/);
   const other = world();
   const { ports } = await wire(other.config, opts(other));
   assert.equal(typeof ports.hasReviewer, 'function', 'another user\'s uid starts');

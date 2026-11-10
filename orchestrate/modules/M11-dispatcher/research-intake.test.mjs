@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, settleCause, alreadyCarded, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
+import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, settleCause, alreadyCarded, CLOSED_CAUSE, NOCOPY_CAUSE, COPY_NOT_ON, COPY_WIRED, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { isQueued } from './alerts.mjs';
 import { proposalsPass } from './proposals-intake.mjs';
@@ -121,6 +121,9 @@ test('refused: no open ask by that number, an odd name, another product, no proo
   // never only "not open".
   assert.equal(w.hand('R-2', REPORT).ok, true);
   assert.equal(w.hand('R-2', 'a second take').reason, alreadyCarded('R-2', sha(REPORT)));
+  // L736 m6 (R6): other bytes from another product's folder, for an ask that has its card: the reason names the product,
+  // never the "already has its card" advice meant for the ask's own owner.
+  assert.equal(w.hand('R-2', 'a third take', { product: 'other-app' }).reason, 'research ask R-2 is for product sample-app, not this one');
   assert.equal(w.rec.list('card').length, 1);
 });
 
@@ -132,7 +135,8 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   assert.match(w.hand('R-1', 'other bytes').reason, /R-1 already has its research_copy card/);
   // With what to do (L303): which version the card holds, and the two ways on.
   assert.equal(w.hand('R-1', 'other bytes').reason, alreadyCarded('R-1', sha(REPORT)));
-  assert.match(alreadyCarded('R-1', sha(REPORT)), new RegExp(`version ${sha(REPORT).slice(0, 12)}\\).*put it back unchanged.*ask again with a new research ask`));
+  assert.match(alreadyCarded('R-1', sha(REPORT)), new RegExp(`version ${sha(REPORT).slice(0, 12)}\\), so this one was not used\\. The first report is already on its card and will be copied; nothing to do for it\\. To have this one used instead, ask again with a new research ask$`));
+  assert.doesNotMatch(alreadyCarded('R-1', sha(REPORT)), /put it back/, 'L736 m1');
   assert.match(w.hand('R-1', REPORT, { blob: 'b'.repeat(40) }).reason, /R-1 already has its research_copy card/, 'same sha256, another blob');
   assert.equal(w.hand('R-1', REPORT).ok, true);
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
@@ -141,7 +145,9 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
   assert.equal(w.hand('R-2', REPORT).ok, true, 'the file is used; the card waits in draft');
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-2')).doc.state, 'draft');
-  assert.ok(w.rec.read('ask', 'R-2').doc.landed, 'the owner\'s part is done: the ask leaves the waiting list');
+  // L736 m2: the ask leaves the waiting list only once its card is ready, so a withdrawal meanwhile is still seen.
+  assert.equal(w.rec.read('ask', 'R-2').doc.landed, undefined);
+  assert.ok(researchBrief(w.rec, 'R-2').ok, 'still waiting on the owner while its card is a draft');
   // The refused move is told from the handler (L303), on the card's own ready cause, never in silence.
   const readyMark = HOLD_FACT(settleCause('ready', RESEARCH_CARD('R-2')));
   const toldReady = () => w.alert.calls.filter(([, o]) => o?.mark?.fact === readyMark);
@@ -151,30 +157,92 @@ test('restart-safe: a card written before a crash is landed by the same bytes or
   // This stand-in never marks a tell delivered, so holdAlert asks again: the pass's refusal reaches Joe too.
   assert.equal(toldReady().length, 2, 'researchPass told it');
   must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[RESEARCH_CARD('R-2'), 'ready']]);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[RESEARCH_CARD('R-2'), 'ready'], [RESEARCH_CARD('R-2'), 'landed']]);
+  assert.ok(w.rec.read('ask', 'R-2').doc.landed, 'landed once ready');
   assert.equal(toldReady().length, 2, 'a move made is not told');
   assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [], 'nothing left to do');
   assert.equal(w.alert.calls.filter(([, o]) => o?.mark?.fact === HOLD_FACT(settleCause('land', RESEARCH_CARD('R-2')))).length, 0, 'both asks landed: no land tell');
 });
 
+// The Record with its ask writes refused (a full disk, say): landResearch can't mark the ask answered.
+const askWritesRefused = (rec) => new Proxy({}, { get: (_, k) => (k === 'write' ? (x) => (x?.entity === 'ask' ? { ok: false, reason: 'the disk is full' } : rec.write(x)) : typeof rec[k] === 'function' ? rec[k].bind(rec) : rec[k]) });
+
 test('L303: a card whose ask can\'t be marked answered is told from researchPass, and not again once it lands', () => {
   const w = world({ asks: 1 });
   const id = RESEARCH_CARD('R-1');
-  // A pass wrote the card and stopped; the ask then moved out of open, so it can't be marked answered.
+  // A pass wrote the card and stopped; the next pass can't write the ask, so it can't be marked answered.
   must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
     doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
-  const ask = w.rec.read('ask', 'R-1');
-  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state: 'pushed' } }), 'move out of open');
   const landMark = HOLD_FACT(settleCause('land', id));
   const toldLand = () => w.alert.calls.filter(([, o]) => o?.mark?.fact === landMark);
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[id, 'ready'], [id, 'not landed: no open research ask R-1']]);
+  const out = researchPass({ rec: askWritesRefused(w.rec), now: w.t.clock.t, alert: w.alert });
+  assert.deepEqual(out.map(([, x]) => x.replace(/:.*/, '')), ['ready', 'not landed']);
   assert.equal(toldLand().length, 1, 'told, never silent');
-  assert.match(toldLand()[0][0], /research ask R-1 is on its card research-R-1, but the ask could not be marked as answered \(no open research ask R-1\)/);
-  // Open again and still waiting: the next pass lands it, and a landing is not told.
-  const closed = w.rec.read('ask', 'R-1');
-  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: closed.rev, doc: { ...closed.doc, state: 'open' } }), 'reopen');
+  assert.match(toldLand()[0][0], /research ask R-1 is on its card research-R-1, but the ask could not be marked as answered \(.*the disk is full.*\); it is tried again each pass$/);
+  // The ask still open and waiting: the next pass lands it, and a landing is not told.
   assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[id, 'landed']]);
   assert.equal(toldLand().length, 1);
+});
+
+// L736 M1: a report whose ask Joe withdrew between its card and the ready move never goes ready, is never copied, and
+// Joe is told once.
+test('L736 M1 planted: withdrawn between the card and the ready move: the card stays a draft, is never copied, and Joe is told once', async () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
+  assert.equal(w.hand('R-1', REPORT).ok, true);
+  assert.equal(w.rec.read('card', id).doc.state, 'draft');
+  const ask = w.rec.read('ask', 'R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state: 'withdrawn' } }), 'withdraw');
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
+  // The real queue, sent each pass: told once however many passes.
+  const port = fakeAlert();
+  const pass = async (at) => { const q = outbox(w.rec, at); const o = researchPass({ rec: w.rec, now: at, alert: q }); await sendAlerts(w.rec, port, at); return o; };
+  assert.deepEqual(await pass(w.t.clock.t), [[id, 'not used: the ask was withdrawn']]);
+  for (const dt of [60_000, DAY, 3 * DAY]) assert.deepEqual(await pass(w.t.clock.t + dt), [[id, 'not used: the ask was withdrawn']]);
+  assert.equal(w.rec.read('card', id).doc.state, 'draft', 'never ready');
+  const closed = port.texts.filter((t) => /the report for research ask R-1 was not used: the ask was withdrawn; its card research-R-1 is not copied/.test(t));
+  assert.equal(closed.length, 1, port.texts.join(' | '));
+  // Its old "could not go to ready" is cleared, not left to be sent.
+  assert.equal(isQueued(w.rec, HOLD_FACT(settleCause('ready', id))), false);
+  assert.equal(w.rec.read('ask', 'R-1').doc.state, 'withdrawn', 'the withdrawal stands');
+});
+
+// L736 M1 (3): an ask closed between the ready move and the landing is told as it is: not tried again, not copied.
+test('L736 M1 planted: an ask withdrawn just before its landing is told without a promise to try again', () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  // The withdrawal lands right after the ready move, before the ask is marked answered.
+  const racing = new Proxy({}, { get: (_, k) => (k === 'write' ? (x) => {
+    const r = w.rec.write(x);
+    if (x?.kind === 'research_ready' && r.ok) { const a = w.rec.read('ask', 'R-1'); must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: a.rev, doc: { ...a.doc, state: 'withdrawn' } }), 'withdraw'); }
+    return r;
+  } : typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]) });
+  assert.deepEqual(researchPass({ rec: racing, now: w.t.clock.t, alert: w.alert }).map(([, x]) => x.replace(/:.*/, '')), ['ready', 'not landed']);
+  const told = w.alert.calls.filter(([, o]) => o?.mark?.fact === HOLD_FACT(settleCause('land', id)));
+  assert.equal(told.length, 1);
+  assert.match(told[0][0], /could not be marked as answered \(no open research ask R-1\); the ask was withdrawn, so the report is not copied$/);
+  assert.doesNotMatch(told[0][0], /tried again/);
+});
+
+test('L736 M1 planted: researchCopyPass never pushes or sends on a card whose ask was withdrawn or expired, and says so once', async () => {
+  for (const state of ['withdrawn', 'expired']) {
+    const w = copyWorld();
+    let ask = w.rec.read('ask', 'R-1');
+    // An ask expires only after its one re-ask (M9 writer): lapsed once, then expired.
+    if (state === 'expired') {
+      must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, reask_count: 1, lapsed_at: new Date(w.T).toISOString() } }), 'lapse');
+      ask = w.rec.read('ask', 'R-1');
+    }
+    must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state } }), state);
+    assert.deepEqual(await w.pass(), [[w.card, `not copied: the ask was ${state}`]]);
+    assert.deepEqual(await w.pass(w.T + RETRY_MS * 4), [[w.card, `not copied: the ask was ${state}`]]);
+    assert.equal(w.calls.length, 0, 'never pushed');
+    assert.equal(w.alerts.filter((t) => t.includes(`was not used: the ask was ${state}`)).length, 1, w.alerts.join(' | '));
+    assert.equal(w.rec.read('card', w.card).doc.state, 'ready', 'left where it is');
+  }
 });
 
 test('L303: a tell still queued when the move is made leaves the queue, so a stale "could not go to ready" is never sent', () => {
@@ -185,11 +253,31 @@ test('L303: a tell still queued when the move is made leaves the queue, so a sta
     doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
   const mark = HOLD_FACT(settleCause('ready', id));
   const queue = outbox(w.rec, w.t.clock.t);
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }).map(([, x]) => x.replace(/:.*/, '')), ['not ready', 'landed']);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }).map(([, x]) => x.replace(/:.*/, '')), ['not ready']);
   assert.equal(isQueued(w.rec, mark), true, 'queued, not sent yet');
   must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
-  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }), [[id, 'ready']]);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }), [[id, 'ready'], [id, 'landed']]);
   assert.equal(isQueued(w.rec, mark), false, 'the move was made, so its tell is dropped');
+});
+
+// L736 m6 (R1): a card that has gone past draft by another way clears its old "could not go to ready", so a refusal that
+// comes back later is told afresh, and a stale one is never sent.
+test('L736 m6 planted: a card already past draft clears its old "could not go to ready" tell', () => {
+  const w = world();
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'paused', return_to: 'active' } }), 'pause');
+  const queue = outbox(w.rec, w.t.clock.t);
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }).map(([, x]) => x.replace(/:.*/, '')), ['not ready']);
+  const mark = HOLD_FACT(settleCause('ready', id));
+  assert.equal(isQueued(w.rec, mark), true);
+  // The card goes ready by another way (here: the move itself, made directly), while the ask still waits.
+  must(w.rec.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: w.rec.read('product', PRODUCT).rev, doc: { state: 'active' } }), 'resume');
+  const c = w.rec.read('card', id);
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: c.rev, kind: 'research_ready', doc: { ...c.doc, state: 'ready' } }), 'ready');
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: queue }), [[id, 'landed']]);
+  assert.equal(isQueued(w.rec, mark), false, 'cleared by a card past draft');
 });
 
 test('through the real proposals intake: taken in once, and a refusal is told to the owner once', async () => {
@@ -242,6 +330,37 @@ test('L290: through the real proposals intake, the card\'s sha256 and blob are t
     const git = execFileSync('git', ['hash-object', '--stdin'], { input: bytes }).toString().trim();
     assert.deepEqual(src, { file: `research-${id}.md`, sha256: sha(bytes), blob: git, size: bytes.length }, id);
   }
+});
+
+// L736 m3: the write that marks the file applied is read. Refused, the pass's lines say the file was used and the mark is
+// tried again; the next pass marks it, and nothing is told as an interruption.
+test('L736 m3 planted: a refused "applied" mark is said in the pass\'s lines and made next pass, never told as an interruption', async () => {
+  const w = world({ asks: 1 });
+  const dir = join(w.t.base, 'proposals'); mkdirSync(dir); chmodSync(dir, 0o750);
+  const port = fakeAlert();
+  const now = w.t.clock.t + 3_600_000;
+  const rules = { get: (k, o) => (k === 'proposals.outbox' ? dir : w.t.rules.get(k, o)) };
+  const refusesApplied = new Proxy({}, { get: (_, k) => (k === 'write' ? (x) => (x?.kind === 'proposal_applied' ? { ok: false, reason: 'the disk is full' } : w.rec.write(x)) : typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]) });
+  const pass = async (rec, at) => {
+    const out = await proposalsPass({ rec, rules, products: [PRODUCT], ownerUid: UID, wait: async () => {}, alert: outbox(w.rec, at), handlers: { research: w.research }, now: at });
+    await sendAlerts(w.rec, port, at);
+    return out.find((r) => r.name === 'research-R-1.md');
+  };
+  writeFileSync(join(dir, 'research-R-1.md'), REPORT);
+  const one = await pass(refusesApplied, now);
+  assert.equal(one.applied, true);
+  assert.match(one.unmarked, /^used, but it could not be marked applied \(.*the disk is full.*\); the mark is tried again next pass$/);
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, sha(REPORT), 'the file was used');
+  // Still refused next pass: said again, and never used twice.
+  const two = await pass(refusesApplied, now + 60_000);
+  assert.match(two.marked, /still could not be marked applied/);
+  assert.equal(w.rec.list('card').length, 1);
+  const three = await pass(w.rec, now + 120_000);
+  assert.equal(three.marked, 'used in an earlier pass; marked applied now');
+  const four = await pass(w.rec, now + 180_000);
+  assert.equal(four.already, true);
+  assert.deepEqual(port.texts.filter((t) => /interrupted/.test(t)), [], port.texts.join(' | '));
+  assert.equal(w.rec.list('card').length, 1);
 });
 
 // ---- the merge gate, refusal 10 ----

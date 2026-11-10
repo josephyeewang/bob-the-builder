@@ -14,11 +14,15 @@
 //   researchHandler({ rules, alert }) → the proposals intake's `research` handler:
 //     ({ rec, product, id, name, sha256, blob, size, now }) → { ok: true, card } | { ok: false, reason }   (`fenced` is read only to see that it is not blank; `now` is the pass's clock, required; an empty or blank report is refused)
 //   researchPass({ rec, now, alert })  (now and alert required) → [[card, what]]   each pass: a research_copy card left in draft is moved to
-//                                                  ready, and an ask whose card exists leaves the waiting list (restart-safe)
+//                                                  ready while its ask is open and waiting, and the ask leaves the waiting
+//                                                  list once its card is ready (restart-safe). A draft whose ask was
+//                                                  withdrawn or expired never goes ready; Joe is told once (L736 M1). A
+//                                                  landing is told once that nothing copies the report yet (COPY_WIRED, L410)
 //   Either move refused, from the handler or the pass, is told to the owner (L303): at once, then daily while it lasts, one
 //   cause per card and move (settleCause), cleared once the move is made, so a return is told afresh (pass.mjs holdAlert)
 //   researchCopyPass({ rec, rules, pushResearch, alert, now, host })  (now required) → [[card, what]]   each pass, for each
-//                                                  ready card: not yet pushed, it is pushed, at most every RETRY_MS while
+//                                                  ready card: its ask no longer open, it is never pushed or sent on, and
+//                                                  that is told once (L736 M1); not yet pushed, it is pushed, at most every RETRY_MS while
 //                                                  refused and never while the rules have copies off. A report whose bytes
 //                                                  changed is told once, at once. A card a day in ready is told, then daily,
 //                                                  until it leaves ready, pushed or not (L313, shared stillWaiting)
@@ -56,6 +60,13 @@ export const RESEARCH_LANE = 'docs';
 /** How long a refused copy rests before the next try: each try reads GitHub. */
 export const RETRY_MS = 15 * 60_000;
 export const RESEARCH_OFF = `research copies are off: the rules don't set ${GO_FREE_KEY}.research_copy to true`;
+/** Whether the tick runs researchCopyPass. Not yet (L410): a landed report is then told once that nothing copies it. */
+export const COPY_WIRED = false;
+export const COPY_NOT_ON = 'copying research reports into the product is not switched on yet (L410), so nothing is copied for now';
+// holdAlert's `every` for a tell said once: no repeat inside any real life of a Record (it needs a finite number).
+const ONCE = Number.MAX_SAFE_INTEGER;
+// An ask's state, or null when there is none to read.
+const askState = (rec, askId) => { const a = rec.read('ask', askId); return a && !a.corrupt ? a.doc?.state ?? null : null; };
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -120,8 +131,10 @@ export function researchHandler({ rules, alert }) {
 /** The refusal of a second report for an ask that has its card, with what to do. */
 export function alreadyCarded(id, sha) {
   const first = typeof sha === 'string' ? ` (version ${sha.slice(0, 12)})` : '';
+  // Never "put it back unchanged" (L736 m1): the first bytes are on the card already, and putting them back is skipped
+  // by the intake in silence, so that advice led nowhere.
   return `research ask ${id} already has its research_copy card, made from the report first taken in${first}, so this one was not used. `
-    + 'To have the first one copied, put it back unchanged; to have this one copied, ask again with a new research ask';
+    + 'The first report is already on its card and will be copied; nothing to do for it. To have this one used instead, ask again with a new research ask';
 }
 
 /** The hold cause of a research_copy card's refused move: `ready` (draft to ready) or `land` (the ask leaves the waiting list). */
@@ -136,21 +149,49 @@ function settleTell(rec, alert, now, out, cardId, which, why, text) {
   holdAlert({ rec, cause, text, alert, now });
 }
 
+/** The hold cause of a report whose ask closed before it was used: told once (L736 M1). */
+export const CLOSED_CAUSE = (cardId) => settleCause('closed', cardId);
+/** The hold cause of a landed report that nothing copies yet: told once (L736 m2). */
+export const NOCOPY_CAUSE = (cardId) => settleCause('nocopy', cardId);
+const closedWhy = (st, reason) => (st === null ? 'the ask is gone' : st === 'open' ? `the ask no longer waits on a report (${reason})` : `the ask was ${st}`);
+function tellClosed(rec, alert, now, cardId, askId, product, why) {
+  holdAlert({ rec, cause: CLOSED_CAUSE(cardId), text: `${product}: the report for research ask ${askId} was not used: ${why}; its card ${cardId} is not copied`, alert, now, every: ONCE });
+}
+
 function settle(rec, cardId, askId, now, alert) {
   const out = [];
   const c = rec.read('card', cardId);
   const product = c?.doc?.product ?? 'a product';
   if (c?.doc?.state === 'draft') {
+    // A report whose ask Joe withdrew, or that expired, never reaches ready, so it can never be copied (L736 M1). Its
+    // card stays a draft, its old "could not go to ready" goes, and Joe is told once.
+    const brief = researchBrief(rec, askId);
+    if (!brief.ok) {
+      const why = closedWhy(askState(rec, askId), brief.reason);
+      out.push(`not used: ${why}`);
+      settleTell(rec, alert, now, out, cardId, 'ready', null);
+      tellClosed(rec, alert, now, cardId, askId, product, why);
+      return out;
+    }
     const r = move(rec, 'card', cardId, { state: 'ready' }, { kind: 'research_ready' });
     out.push(r.ok ? 'ready' : `not ready: ${r.reason}`);
     settleTell(rec, alert, now, out, cardId, 'ready', r.ok ? null : r.reason,
       `${product}: the report for research ask ${askId} was taken in, but its card ${cardId} could not go to ready (${r.reason}), so it is not copied yet; it is tried again each pass`);
+    // The ask leaves Joe's waiting list only once its card is ready (L736 m2): while it is a draft, the ask stays open
+    // and waiting, so the check above still sees a withdrawal.
+    if (!r.ok) return out;
   } else if (c && !c.corrupt) settleTell(rec, alert, now, out, cardId, 'ready', null);
   const l = landResearch({ record: rec, now: () => now }, askId);
   if (l.ok && !l.already) out.push('landed');
   else if (!l.ok) out.push(`not landed: ${l.reason}`);
+  // Tried again each pass only while the ask is still open and waiting; once it is closed, researchPass leaves the card,
+  // and researchCopyPass refuses it, so the text says that instead (L736 M1).
+  const st = askState(rec, askId);
+  const next = st === 'open' ? 'it is tried again each pass' : `${closedWhy(st)}, so the report is not copied`;
   settleTell(rec, alert, now, out, cardId, 'land', l.ok ? null : l.reason,
-    `${product}: the report for research ask ${askId} is on its card ${cardId}, but the ask could not be marked as answered (${l.reason}); it is tried again each pass`);
+    `${product}: the report for research ask ${askId} is on its card ${cardId}, but the ask could not be marked as answered (${l.reason}); ${next}`);
+  // Landed while nothing copies it yet (L410): said once, so Joe never sees the ask answered and waits for a copy.
+  if (l.ok && !l.already && !COPY_WIRED) holdAlert({ rec, cause: NOCOPY_CAUSE(cardId), text: `${product}: the report for research ask ${askId} is on its card ${cardId} and the ask is answered, but ${COPY_NOT_ON}`, alert, now, every: ONCE });
   return out;
 }
 
@@ -230,6 +271,15 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now, h
     const ready = state === 'ready';
     const ours = c.doc.source?.sha256 && c.doc.claim?.claim_id === COPY_RUN(c.id, c.doc.source.sha256);
     const held = ready || Boolean(stopped) || (ours && ROUTE_STATES.includes(state));
+    // A report whose ask was withdrawn or expired (or is otherwise no longer open) is never pushed or sent on (L736 M1):
+    // told once, and the card is left where it is.
+    const st = held ? askState(rec, ask) : 'open';
+    if (st !== 'open') {
+      const why = closedWhy(st);
+      out.push([c.id, `not copied: ${why}`]);
+      tellClosed(rec, alert, now, c.id, ask, product, why);
+      continue;
+    }
     const on = goFreeOn(rules, product, 'research_copy');
     let doc = held ? copyDoc(rec, c) : null;
     // A refused head write is retried like a refused push: the next try of the same bytes finishes it.

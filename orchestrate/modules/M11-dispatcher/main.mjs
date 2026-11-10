@@ -102,6 +102,19 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     return 1;
   }
   const limit = runDeadlineMs ?? config.runDeadlineMs ?? RUN_DEADLINE_MS;
+  // A config deadline under the pass's own sum (L736 m5): the run can be cut in its last steps whenever one is slow. Not
+  // refused, since the watchdog's own tests run whole passes on a short deadline through a real config; said in the log
+  // every run and told to Joe once a day. Queued after the pass, never before it: the tick's early send carries the
+  // oldest alert first, and this one must never stand ahead of a safety step's (the r7 M1 broken-lock alert).
+  const low = config.runDeadlineMs !== undefined && config.runDeadlineMs < RUN_DEADLINE_MS
+    ? `the Dispatcher config's runDeadlineMs (${config.runDeadlineMs}) is below the pass's own sum (${RUN_DEADLINE_MS} ms: every step's deadline and the two sends), so a slow step can get the pass stopped; raise it, or take it out`
+    : null;
+  if (low) log(`dispatcher: ${low}`);
+  const tellLow = () => {
+    if (!low) return;
+    try { if (holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the low-deadline alert could not be queued'); }
+    catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); }
+  };
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
@@ -113,7 +126,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
     // Queued, then sent with one send's time: a pass that is late every time never reaches its own sender.
     // A refused alert is logged (L130 m12): the late pass is otherwise silent.
-    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
+    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); tellLow(); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     flushHeld(wired.rec, log);
     return 2;
@@ -121,6 +134,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
   if (!r.ran) log(`dispatcher: ${r.reason}`);
   // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
   for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
+  tellLow();
   flushHeld(wired.rec, log);
   return 0;
 }

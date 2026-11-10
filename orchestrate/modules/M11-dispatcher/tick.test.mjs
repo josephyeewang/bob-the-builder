@@ -439,6 +439,16 @@ export { rec };
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
+  // L736 m5: a config deadline under the pass's own sum is said in the log, and queued for Joe after the pass, so the
+  // next pass's send carries it.
+  const low = L.path('low.json');
+  writeFileSync(low, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS - 1 }));
+  assert.equal(await main([low], { self, now: T0 + MIN, log: (s) => logs.push(s) }), 0);
+  assert.match(logs.join('\n'), new RegExp(`runDeadlineMs \\(${RUN_DEADLINE_MS - 1}\\) is below the pass's own sum`));
+  assert.equal(mod.seen.filter((t) => /runDeadlineMs/.test(String(t))).length, 0, 'not ahead of the pass');
+  assert.equal(await main([low], { self, now: T0 + 2 * MIN, log: () => {} }), 0);
+  assert.equal(mod.seen.filter((t) => /runDeadlineMs .* is below the pass's own sum/.test(String(t))).length, 1, 'told to Joe');
+  logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
   const rel = L.path('rel.json');
@@ -647,6 +657,9 @@ export async function wire() {
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
+  assert.match(r.stderr, /dispatcher: the Dispatcher config's runDeadlineMs \(300\) is below the pass's own sum/, 'L736 m5: a deadline under the sum is said in the log');
+  // The late pass sends one alert, its own; the low deadline waits in the queue behind it (L736 m5).
+  assert.doesNotMatch(r.stderr, /ALERT the Dispatcher config's runDeadlineMs/);
   assert.match(r.stderr, /ALERT a Dispatcher pass did not finish within 300 ms and was stopped/, 'Joe is told (L38)');
   assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the stuck run left its lock');
   const l = takePassLock(lockFile);
@@ -1160,6 +1173,7 @@ export async function wire() {
   let got = '';
   try { got = readFileSync(sent, 'utf8'); } catch { /* nothing sent */ }
   assert.match(got, /was stopped before it finished/, 'the broken-lock alert reached the working port');
+  assert.doesNotMatch(got, /runDeadlineMs/, 'L736 m5: the low-deadline alert never stands ahead of a safety one');
 });
 
 // Audit 0b-6 r7 M2: a copy of an alert out while its cause clears marks nothing, so the next time the cause

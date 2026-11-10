@@ -58,7 +58,7 @@ import { readyCheck, goFreeKinds } from '../modules/M9-record/ready.mjs';
 import { createHash } from 'node:crypto';
 import { checkOutboxFile, outboxFile } from '../modules/M1-front-door/outbox.mjs';
 import { openResearchAsks } from '../modules/M2-approvals/research-ask.mjs';
-import { researchHandler, RESEARCH_CARD, RESEARCH_OFF } from '../modules/M11-dispatcher/research-intake.mjs';
+import { researchHandler, RESEARCH_CARD, RESEARCH_OFF, COPY_NOT_ON } from '../modules/M11-dispatcher/research-intake.mjs';
 import { outboxFile as m9file } from '../modules/M9-record/fixtures.test-helper.mjs';
 import { blobSha } from '../modules/M10-rules/reader.mjs';
 import { cleanOutside } from '../modules/M12-sensors/escape.mjs';
@@ -433,7 +433,9 @@ test('a research report whose card can\'t go ready or land is told to Joe, every
   assert.equal(one.r.steps.proposals.ok, true, one.r.steps.proposals.error);
   assert.equal(one.r.steps.research.ok, true, one.r.steps.research.error);
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'draft', 'a paused product keeps the card in draft');
-  assert.ok(w.rec.read('ask', 'R-1').doc.landed, 'the ask was marked answered');
+  // L736 m2: the ask stays on Joe's waiting list while its card is a draft, so a withdrawal is still seen (M1).
+  assert.equal(w.rec.read('ask', 'R-1').doc.landed, undefined, 'the ask still waits while its card is a draft');
+  assert.ok(w.rec.read('ask', 'R-1').doc.wait);
   assert.equal(notReady(one.alert).length, 1, `told in the tick that took the report in: ${one.alert.texts.join(' | ')}`);
   // Told once a day while it lasts, by the research step, never in silence.
   const two = await oneTick(w, { proposals, now: T0 + 60_000 });
@@ -447,6 +449,26 @@ test('a research report whose card can\'t go ready or land is told to Joe, every
   const four = await oneTick(w, { proposals, now: T0 + DAY + 120_000 });
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
   assert.equal(notReady(four.alert).length, 0);
+  assert.ok(w.rec.read('ask', 'R-1').doc.landed, 'landed once the card is ready');
+  // Landed while nothing copies it yet (L410): said once (L736 m2).
+  assert.equal(four.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 1, four.alert.texts.join(' | '));
+  const five = await oneTick(w, { proposals, now: T0 + 3 * DAY });
+  assert.equal(five.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 0, 'once');
+});
+
+// L736 m6 (R4): the tick hands the research handler its own alert. A report taken in while the product is active lands in
+// the handler, and only the handler says that nothing copies it yet (researchPass leaves a landed card alone).
+test('a research report taken in by the tick is told, from the handler, that nothing copies it yet; once', async () => {
+  const { w, dir, proposals } = researchWorld();
+  askOpened(w);
+  writeFileSync(join(dir, 'research-R-1.md'), REPORT);
+  const one = await oneTick(w, { proposals });
+  assert.equal(one.r.steps.proposals.ok, true, one.r.steps.proposals.error);
+  assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.state, 'ready');
+  assert.ok(w.rec.read('ask', 'R-1').doc.landed);
+  assert.equal(one.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 1, one.alert.texts.join(' | '));
+  const two = await oneTick(w, { proposals, now: T0 + 2 * DAY });
+  assert.equal(two.alert.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 0, 'once');
 });
 
 test('a research report sent again after an interrupted intake is told, never stuck in silence', async () => {
@@ -469,7 +491,8 @@ test('a research report sent again after an interrupted intake is told, never st
   assert.equal(all.filter((t) => /research-R-1\.md(<\/outside-text>)? from .*proposals folder was interrupted/.test(t)).length, 1, all.join(' | '));
   const resent = all.filter((t) => /research-R-1\.md(<\/outside-text>)? in .*proposals folder was refused: research ask R-1 already has its research_copy card/.test(t));
   assert.equal(resent.length, 1, `told once: ${all.join(' | ')}`);
-  assert.match(resent[0], /made from the report first taken in \(version [0-9a-f]{12}\), so this one was not used\. To have the first one copied, put it back unchanged; to have this one copied, ask again with a new research ask/);
+  assert.match(resent[0], /made from the report first taken in \(version [0-9a-f]{12}\), so this one was not used\. The first report is already on its card and will be copied; nothing to do for it\. To have this one used instead, ask again with a new research ask$/);
+  assert.doesNotMatch(resent[0], /put it back/, 'L736 m1: no advice that leads to silence');
   assert.equal(w.rec.read('card', RESEARCH_CARD('R-1')).doc.source.sha256, first, 'the card keeps the first bytes');
 });
 

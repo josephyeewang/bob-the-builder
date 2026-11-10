@@ -102,6 +102,8 @@ test('L95 Minor 1: a research push is never lost to a throwing alert sink or a l
 
 test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report lands in the record (through R-0b-135)', () => {
   const t = m2env({ values: RESEARCH_ON });
+  // An active product: the card goes ready, and only then is the ask answered (L736 m2).
+  must(t.record.write({ actor: 'approvals', entity: 'product', id: PRODUCT, expectRev: 0, doc: { state: 'active' } }), 'product');
   fileAsk(t, 'find out which payroll tools small agencies use');
   const { id } = openResearchAsks(t.ctx).opened[0];
   // The desktop session reads the brief and the file to leave from the record, by the ask's number alone.
@@ -114,9 +116,9 @@ test('R-0b-136: "run research ask R-1" needs nothing pasted, and the report land
   assert.equal(researchBrief(t.record, id).ok, true);
   must(handIn(t, researchFileName(id), report), 'research report');
   const card = t.record.read('card', RESEARCH_CARD(id)).doc;
-  assert.equal(card.kind, 'research_copy'); assert.equal(card.research_ask, id);
+  assert.equal(card.kind, 'research_copy'); assert.equal(card.research_ask, id); assert.equal(card.state, 'ready');
   assert.equal(card.source.sha256, createHash('sha256').update(report).digest('hex'));
-  // The handler lands the ask: it leaves the waiting list; landing again and a second report are refused.
+  // The handler moves the card to ready and lands the ask: it leaves the waiting list; landing again and a second report are refused.
   assert.deepEqual(waitingItems(t.record), []);
   assert.equal(t.record.read('ask', id).doc.landed.card, RESEARCH_CARD(id));
   assert.deepEqual(landResearch(t.ctx, id), { ok: true, already: true });
