@@ -16,6 +16,8 @@
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
 // pinned Bob file list (check 13) have no config field yet, so check 12 refuses every start until they do.
+// Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
+// not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
 // lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
@@ -23,7 +25,7 @@
 // read back, or a start the loop must refuse).
 
 import { mkdirSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
@@ -37,6 +39,9 @@ import { spawn as childSpawn } from 'node:child_process';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
+// The read-deny entries every product's sessions must have (#364 r1 M2): the Record, the keys, the sign-in and the home's.
+export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
+const fullPath = (p) => typeof p === 'string' && isAbsolute(p) && resolve(p) !== '/';
 // The product rule is M10's, as the pass and owner-asks.mjs check it.
 const productName = (p) => p.length <= 64 && PRODUCT_NAME.test(p);
 
@@ -54,6 +59,11 @@ export function checkRunnerConfig(c) {
     if (typeof p.mirror !== 'string' || !isAbsolute(p.mirror)) fail(`product ${name}: mirror must be a full path`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
     if (p.rules !== undefined && (!p.rules || typeof p.rules !== 'object' || Array.isArray(p.rules))) fail(`product ${name}: rules must be the product's rules`);
+    // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
+    // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
+    const d = p.render.paths.deny;
+    for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path, not / itself`);
+    if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths (the secrets, and the approvals and rules state)`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
   if (c.machineWide !== undefined && (typeof c.machineWide !== 'string' || !isAbsolute(c.machineWide))) fail('machineWide must be a full path');
@@ -73,6 +83,8 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
 
 /** The start port's ports from the config: the stop flag, check 0's pinned version, and the worker launch checks. */
 export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin }, checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })) });
+/** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
+export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
 export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {}) {
@@ -92,7 +104,7 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
-  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = (fn) => process.once('SIGTERM', fn) } = {}) {
+  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   let l; let held;

@@ -228,10 +228,12 @@ export async function workerRunnerPass(ctx) {
   async function settle({ key, id, l, a }) {
     if (state.requests[id]?.state !== 'waiting') return;
     const refuse = (reason) => { state.requests[id] = { state: 'refused', at: now }; answer(key, { ok: false, reason }); };
+    // A start whose claude may still run (#364 r1 m3) is not refused: the request stays waiting, so its claim stays.
+    if (a?.ok === false && a.running === true) { note(`the start of ${id} may have left claude running (${a.reason}); it stays waiting, so its claim stays`); return; }
     if (!a || a.threw || a.ok !== true) return refuse(failed(a, 'the start'));
     const s = { id, product: l.product, kind: l.kind, card: l.card, lead: null, role: RUNNER_ROLE_OF[l.kind], pgid: a.pgid, signin: a.signin, config_dir: a.configDir,
       bundle_files: [], outbox: a.outbox, uid, outbox_open: true, stop_requested: false, alive: true, ended: false,
-      pid: a.pid, pid_start: a.pidStart, head: a.head, copy: a.copy, started_at: now };
+      pid: a.pid, pid_start: a.pidStart, head: a.head, base: a.base, copy: a.copy, started_at: now };
     let wrong = null;
     try { checkSession(project(s), { uid, outboxRoot, realpath }); } catch (e) { wrong = e.message; }
     if (!wrong) wrong = launchAnswerWrong(a, { sessionId: id, kind: l.kind, card: l.card, outboxRoot, copiesRoot });
@@ -239,7 +241,7 @@ export async function workerRunnerPass(ctx) {
     if (!wrong && !(a.pid === a.pgid && typeof a.pidStart === 'string' && a.pidStart)) wrong = `session ${id}'s start named no group leader with a start time`;
     if (!wrong) {
       state.sessions.push(s); state.requests[id] = { state: 'started', at: now };
-      return answer(key, { ok: true, sessionId: id, pid: a.pid, pidStart: a.pidStart, pgid: a.pgid, head: a.head, outbox: a.outbox, signin: a.signin, configDir: a.configDir, copy: a.copy });
+      return answer(key, { ok: true, sessionId: id, pid: a.pid, pidStart: a.pidStart, pgid: a.pgid, head: a.head, base: a.base, outbox: a.outbox, signin: a.signin, configDir: a.configDir, copy: a.copy });
     }
     note(`the start of ${id} answered what the status can't carry (${wrong}); it is stopped`);
     if (!(Number.isInteger(a.pgid) && a.pgid > 1)) { note(`the start of ${id} named no process group, so it can't be stopped; it stays waiting, so its claim stays`); return; }

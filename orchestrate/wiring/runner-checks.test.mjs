@@ -126,7 +126,7 @@ test('step 6, check 11: a worker\'s baseline runs first and must exit 0; then th
 test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/mw.json',
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: { k: 1 }, render: { paths: { hooksDir: '/h', snapshot: '/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: { k: 1 }, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
     ['/m', '2.1.300', '/h', { k: 1 }, '/s.json', '/mw.json', '/home', 'npm test', '/b', null]);
@@ -136,7 +136,7 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   assert.equal(sd.names.version, '2.1.300');
   assert.deepEqual(Object.keys(sd.checksFor({ role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
-    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: {} } } } };
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
   assert.throws(() => checkRunnerConfig({ ...base, machineWide: 'mw' }), /machineWide/);
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);

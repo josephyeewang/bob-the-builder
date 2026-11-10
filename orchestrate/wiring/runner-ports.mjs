@@ -9,15 +9,19 @@
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
 //        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main), then M4's
 //        prepareWorkerCopy makes <copiesRoot>/<card> (never over a folder that is there). The answer's `base` names that
-//        commit; the launch record has no field for it yet (writeLaunch, lane 2), so until it does only the runner's
-//        status shows it;
+//        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
+//        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
 //     3. the outbox <outboxRoot>/<role>/<sessionId> is made, 0o700 (the role folder's access list lets intake read it);
 //     4. the session's settings: walledLaunchSettings (step 2's wall) with the product's fixed paths from the config and
 //        this session's copy and outbox, the other cards' copies that are there at this start denied, written 0o600
-//        under the runner's own folder, which the wall denies to every session. KNOWN GAP (#364 self-review M2): a copy
-//        made after this start is not in this session's list (a deny on all of <copiesRoot> would deny its own copy too,
-//        and a deny wins over an allow). What closes it is the copies folder's access list (L751, lane 3's draft), so
-//        each session's user reaches only its own copy; until then this list is defence in depth only;
+//        under the runner's own folder, which the wall denies to every session. Every other product's mirror is denied
+//        too (#364 r1 M1), and the config must name the Record, key and home deny entries (runner-main.mjs, r1 M2).
+//        KNOWN GAP, accepted (#364 r1 M1 ruling (a)): a copy made after this start is not in this session's list. Every
+//        session runs as the owner's own Mac user, the same user that owns every copy, so no access list can tell one
+//        session from another, and the list is fixed when the session starts (a deny on all of <copiesRoot> would deny
+//        its own copy too, since a deny wins over an allow). All copies share one copies folder, so this holds for another
+//        product's copy made after the start as well as this product's. A Mac user per session or per product would close
+//        it: a choice not taken ("we chose not to", no expiry);
 //     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
 //        by runner-main.mjs; none by default); a check that applies and has no port is refused there;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
@@ -105,13 +109,22 @@ export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up nee
  * Spawns claude as the leader of its own process group and reads its start time. `kill(pgid, signal)` signals a group.
  * → { ok: true, pid, pgid, pidStart } | { ok: false, reason }
  */
-export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = leaderStart, kill = (g, sig) => process.kill(-g, sig) }) {
+export const SPAWN_KILL_WAIT_MS = 2_000;
+const groupThere = (g) => { try { process.kill(-g, 0); return true; } catch (e) { return e?.code !== 'ESRCH'; } };
+export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = leaderStart, kill = (g, sig) => process.kill(-g, sig),
+  there = groupThere, killWaitMs = SPAWN_KILL_WAIT_MS }) {
   const s = await spawnClaude(spawn, bin, args, { cwd, env });
   if (!s.ok) return s;
   let at = null;
   try { at = pidStartOf(s.pid); } catch { at = null; }
   if (typeof at !== 'string' || !at) {
-    try { kill(s.pid, 'SIGKILL'); } catch { /* already gone */ }
+    try { kill(s.pid, 'SIGKILL'); } catch { /* already gone, or shown below */ }
+    // Refused only once the group is shown gone (#364 r1 m3); one that may still run is answered as running, so the
+    // start keeps what it made and the runner keeps the request waiting and the claim held.
+    const until = Date.now() + killWaitMs;
+    let on = true;
+    for (;;) { try { on = there(s.pid); } catch { on = true; } if (!on || Date.now() >= until) break; await new Promise((r) => setTimeout(r, 50)); }
+    if (on) return { ok: false, running: true, pgid: s.pid, reason: 'claude started, its start time could not be read, and its group could not be shown gone after a kill' };
     return refuse('claude started, but its start time could not be read, so its group was killed');
   }
   return { ok: true, pid: s.pid, pgid: s.pid, pidStart: at };
@@ -122,6 +135,8 @@ export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pid
  * tier, L228, and is held to the same rule); any other card starts on the mirror's main. → the commit, or a throw.
  */
 export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain } = {}) {
+  // Only 1, 2 or none (#364 r1 m1): any other tier is refused, never read as the less strict path.
+  if (![undefined, null, 1, 2].includes(cardDoc?.tier)) throw new Error(`the card's tier ${JSON.stringify(cardDoc?.tier)} is not 1 or 2`);
   if (cardDoc?.tier === undefined || cardDoc?.tier === null || cardDoc.tier === 1) {
     if (typeof cardDoc?.main_commit !== 'string' || !SHA.test(cardDoc.main_commit)) throw new Error('a Tier 1 card needs its plan\'s main_commit (40 hex)');
     return cardDoc.main_commit;
@@ -187,6 +202,8 @@ export function startPort(c, deps = {}) {
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
     let others; try { others = fs.list(c.copiesRoot).filter((n) => n !== card).map((n) => join(c.copiesRoot, n)); } catch (e) { return undo(`the copies folder can't be listed (${e?.code ?? e?.message})`); }
+    // Every other product's mirror (#364 r1 M1): known at start from the config.
+    for (const [q, o] of Object.entries(c.products)) if (q !== product && typeof o?.mirror === 'string') others.push(o.mirror);
     const r = p.render;
     const w = walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
       paths: { ...r.paths, copy, outbox, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...others] } } });
@@ -201,6 +218,8 @@ export function startPort(c, deps = {}) {
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
         start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}) }) });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
+    // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.
+    if (l?.started?.running === true) return { ok: false, running: true, pgid: l.started.pgid, reason: l.started.reason };
     if (!l?.ok) return undo(l?.reason ?? 'the launch gave no answer');
     const s = l.started;
     if (!s?.ok) return undo(s?.reason ?? 'claude was not started');
