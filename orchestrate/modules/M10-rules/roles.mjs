@@ -39,7 +39,7 @@ export const TOOLS_CHECKED = Object.freeze({ claude_code: '2.1.316', date: '2026
 export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
   'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile', 'Workflow']);
 export const KNOWN_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'Bash',
-  'AskUserQuestion', 'PushNotification', 'Skill', 'Workflow', 'EndConversation', ...NEVER_TOOLS]);
+  'AskUserQuestion', 'PushNotification', 'Skill', 'EndConversation', ...NEVER_TOOLS]);
 
 const MODELS = ['main', 'sonnet', 'haiku', 'per_task'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'per_row', 'as_asked'];
