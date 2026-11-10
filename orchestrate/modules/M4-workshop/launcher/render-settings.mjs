@@ -62,7 +62,11 @@ export const bobFolderDeny = (folder) => [`Edit(/${abs(folder)}/**)`, `Write(/${
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes? }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner? }
+ * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
+ * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
+ * for every role the runner starts, its requests folder and its status file's folder are denied to read, edit and write,
+ * for the tools and the shell alike. Malformed is refused.
  * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
  * `<compactKind>-compact-` kind (all but the worker and the Front Door), refused without: their note never goes in the outbox.
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
@@ -98,7 +102,21 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   }
 
   const d = paths.deny ?? {};
-  const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? [])].filter(Boolean);
+  // The worker runner's folders (L751), for every role the runner starts: all but the Lead and the review roles.
+  const runnerDirs = [];
+  if (paths.workerRunner !== undefined && role !== 'lead' && !REVIEW_ROLES.includes(role)) {
+    const wr = paths.workerRunner ?? {};
+    for (const k of ['requestsDir', 'statusFile']) {
+      const v = wr[k];
+      if (typeof v !== 'string' || !v.startsWith('/') || /[^A-Za-z0-9._/-]/.test(v) || v.split('/').includes('..')) return refuse(`the worker runner's ${k} is not a plain absolute path`);
+    }
+    for (const dir of [wr.requestsDir, dirname(wr.statusFile)].map((x) => x.replace(/\/+$/, ''))) {
+      if (!dir || dir === '/' || dir.split('/').length < 3) return refuse('the worker runner\'s folders must sit below a folder of their own, not at the top');
+      if ([paths.outbox, paths.copy, paths.notes].some((x) => typeof x === 'string' && (inside(x, dir) || x === dir))) return refuse('the worker runner\'s folders must be apart from the session\'s own outbox, copy and notes');
+      if (!runnerDirs.includes(dir)) runnerDirs.push(dir);
+    }
+  }
+  const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? []), ...runnerDirs].filter(Boolean);
   if (paths.mirror && denyPaths.includes(paths.mirror)) return refuse('the mirror must not be on the read-deny list');
   if (!Array.isArray(productionFiles)) return refuse('the rules\' production file list was not given');
   // One rule for every path that must be denied (lane 2's #124 review, m2): the path itself, or a folder above it, is on the list.
@@ -117,6 +135,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
   }
   if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
+  for (const dir of runnerDirs) deny.push(`Write(/${abs(dir)}/**)`);
   const walls = [];
   if (REVIEW_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
@@ -170,7 +189,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : []), ...walls] },
+      [S.filesystem]: { [S.denyRead]: denyPaths, [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : []), ...runnerDirs.flatMap((r) => [r, `${r}/**`]), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
