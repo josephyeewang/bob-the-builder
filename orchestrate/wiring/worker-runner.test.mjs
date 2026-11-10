@@ -417,7 +417,7 @@ test('#364 r1 m3, m2: a start answered as running stays waiting with its claim; 
   assert.equal(JSON.stringify(answers.at(-1)).includes(B), true, 'the answer names base');
 });
 
-test('#364 r2 n2: a start answered as running keeps its process group in the waiting row and every note; a stop asked for it names the group and signals nothing', async () => {
+test('#364 r2 n2: a start answered as running keeps its process group in the waiting row and every note; a stop asked for it names the group and signals nothing', { timeout: 10_000 }, async () => {   // L842: a stop that falls through to a signal fails, never hangs
   const notes = []; const stops = [];
   const mk = (start, now) => ({ uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, pending: new Map(), realpath: (p) => p, keep: () => {}, now,
     ports: { start, groupGone: async () => false, stopGroup: async (s) => { stops.push(s); return { ok: true }; }, saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => false },
