@@ -16,6 +16,8 @@
 // round may run. A round that can never take its lock then shows as a last exit that is not 0, which `daemons check`
 // fails on, never as a quiet 0 every minute. The log line names the lock and the cause. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
 // M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
+// One exception: a store that stopped the start is told to the owner (L587). `stopChannel` ({ gh, owner }) is injected like
+// `deliver`, and needs the same writing token: until the robot App exists (R-0b-02) the stop is only logged.
 //
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
 // keeps its lock, as M11 does for a late pass: the process exits, and the next start breaks the dead lock and says so.
@@ -26,6 +28,7 @@ import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-di
 import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
+import { tellStoreStopped } from '../modules/M13-ledger/store-stopped.mjs';
 import { ROBOT_PASSES } from './robot-wiring.mjs';
 
 export const PASS_DEADLINE_MS = 120_000;
@@ -114,6 +117,9 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     wired = await mod.wire(config, { now, log, ...wireOpts });
   } catch (e) {
     log(`robot: not started: ${e.message}`);
+    // A store that won't open has no alert queue, so this is told here: one issue per fault, a comment once a day while it
+    // lasts (L587, L724, L732).
+    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel, log, now });
     dog?.terminate();
     return 1;
   }
