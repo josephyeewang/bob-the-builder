@@ -632,6 +632,41 @@ test('#367 r1 self-review m1, m2 planted: the restore write is never taken; a li
   assert.match(msg, /is this check, not a lost write/);
 });
 
+// L882 m1, m2: a store read that throws names every refusal this pass, once: on the normal path, and inside tellKept
+// after a restore.
+test('L882 m1, m2: a read that throws names every refusal this pass, once', () => {
+  const many = Array.from({ length: REFUSED_LIST_MAX + 5 }, (_, i) => `C-${i + 1}`);
+  const once = (msg, id) => msg.split(`; ${id} (r)`).length + msg.split(`: ${id} (r)`).length - 2;
+  // m1: the first read throws, on the normal path.
+  const a = keptWorld(many);
+  const down = Object.create(a.rec);
+  Object.defineProperty(down, 'read', { value: (e, id) => { if (e === 'fact' && id === REFUSED_FACT('park')) throw new Error('store down'); return a.rec.read(e, id); } });
+  let msg = '';
+  assert.throws(() => tellRefused({ rec: down, alert: a.alert, now: T0, refused: new Map([['park', many.map((id) => a.item(id))]]), ran: () => true }), (e) => { msg = e.message; return true; });
+  assert.match(msg, /store down/);
+  for (const id of many) assert.equal(once(msg, id), 1, `${id} is named once`);
+  assert.doesNotMatch(msg, /more/);
+  // m2: corrupt, restored, then a read inside tellKept throws.
+  const b = keptWorld(many);
+  let reads = 0;
+  const later = Object.create(b.rec);
+  Object.defineProperty(later, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park')) {
+      reads += 1;
+      if (reads === 1) return { id, entity: e, corrupt: true, reason: 'bad bytes' };
+      if (reads >= 3) throw new Error('store down later');
+    }
+    return b.rec.read(e, id);
+  } });
+  msg = '';
+  assert.throws(() => tellRefused({ rec: later, alert: b.alert, now: T0, refused: new Map([['park', many.map((id) => b.item(id))]]), ran: () => true }), (e) => { msg = e.message; return true; });
+  assert.ok(reads >= 3, 'the throw came from inside tellKept');
+  assert.match(msg, /no list was on record, so it starts again, then store down later|restored from the Record's diary, then store down later/);
+  for (const id of many) assert.equal(once(msg, id), 1, `${id} is named once`);
+  assert.doesNotMatch(msg, /more/);
+  assert.match(msg, /is this check, not a lost write/);
+});
+
 // L875 m3: on the normal path too, a keep write refused when no reminder is due saves this pass's refusals nowhere, so
 // the error names every one.
 test('L875 m3: a refused keep write with no reminder due names every refusal this pass', () => {

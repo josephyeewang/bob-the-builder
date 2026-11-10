@@ -212,7 +212,7 @@ test('self-review M1: an ended session is final; a process group number used aga
 // #384 m1: the start's base reaches the answer the Dispatcher's launch ask reads; a start that says none leaves it out,
 // never null (owner-asks launchAnswerWrong refuses a null one).
 test('#384 m1: a start\'s base is handed on in its answer, and left out when the start names none', async () => {
-  const ok = (x, more = {}) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more });
+  const ok = (x, more = {}) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}`, ...more });
   const w = world({ startAnswer: (x) => ok(x, { base: 'b'.repeat(40) }) });
   await w.pass([launchReq('S-1')]);
   assert.equal(w.read().answers['launch-S-1'].base, 'b'.repeat(40));

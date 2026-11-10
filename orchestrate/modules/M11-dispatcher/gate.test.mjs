@@ -433,7 +433,9 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   // with no id is refused for that, never counted as "an undo is already running" by its own claim.
   const claimed = recWith([...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; }),
     product('p1', 'paused'), ['card', 'U-1', { ...undo, id: undefined, state: 'claimed' }],
-    ['card', 'U-9', { ...undo, id: undefined, state: 'ready', source: { ask: 'A-7' } }], ['card', 'E-1', { state: 'ready', product: 'p1', tier: 2, files: ['src/e.js'] }]]);
+    ['card', 'U-9', { ...undo, id: undefined, state: 'ready', source: { ask: 'A-7' } }], ['card', 'E-1', { state: 'ready', product: 'p1', tier: 2, files: ['src/e.js'] }],
+    // L882 m3: one field off each: the product only, the kind only.
+    ['card', 'P-2', { ...undo, id: undefined, state: 'claimed', product: 'p2' }], ['card', 'K-1', { ...undo, id: undefined, state: 'claimed', kind: 'editing' }]]);
   const atLaunch = check12({ ...base, rec: claimed, filesOf });
   assert.equal((await atLaunch({ card: { ...undo, state: 'claimed' }, kind: 'undo', product: 'p1' })).ok, true, 'with its id: its own claim is not another undo');
   const { id: _, ...noId } = { ...undo, state: 'claimed' };
@@ -444,12 +446,23 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   for (const id of ['', 7]) assert.match((await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' })).reason, /the undo's card names no id/, String(id));
   // L875 m2: a blank id, a padded one, or one naming another card (another undo's, a plain card, or none) is refused
   // too, and never as "already running".
-  for (const id of [' ', ' U-1']) assert.match((await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' })).reason, /the undo's card names no id/, JSON.stringify(id));
-  for (const id of ['U-9', 'E-1', 'U-404']) {
+  assert.match((await atLaunch({ card: { ...noId, id: ' ' }, kind: 'undo', product: 'p1' })).reason, /the undo's card names no id/);
+  // L882 c1: a padded id has its own reason.
+  for (const id of [' U-1', 'U-1 ']) assert.match((await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' })).reason, new RegExp(`the undo's card id ${JSON.stringify(id)} has spaces around it`), JSON.stringify(id));
+  for (const id of ['U-9', 'E-1', 'U-404', 'P-2', 'K-1']) {
     const w = await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' });
     assert.equal(w.ok, false, id);
     assert.match(w.reason, new RegExp(`the undo's card id ${id} names no card of its kind, product and source`), id);
     assert.doesNotMatch(w.reason, /already running/, id);
+  }
+  // L882 m3: a lookup that throws, or a card the store reads as corrupt, names no card either: refused, never running.
+  for (const [what, read] of [['throws', () => { throw new Error('store down'); }], ['corrupt', (e, id) => ({ id, entity: e, corrupt: true, reason: 'bad bytes' })]]) {
+    const odd = Object.create(claimed);
+    Object.defineProperty(odd, 'read', { value: (e, id) => (e === 'card' && id === 'U-1' ? read(e, id) : claimed.read(e, id)) });
+    const w = await check12({ ...base, rec: odd, filesOf })({ card: { ...undo, state: 'claimed' }, kind: 'undo', product: 'p1' });
+    assert.equal(w.ok, false, what);
+    assert.match(w.reason, /the undo's card id U-1 names no card of its kind, product and source/, what);
+    assert.doesNotMatch(w.reason, /already running/, what);
   }
   // L875 c1 (plant G8): an id is asked only of an undo; a card of any other kind with no id goes to startGate as before.
   const plain = { product: 'p1', tier: 2, files: ['src/x.js'] };

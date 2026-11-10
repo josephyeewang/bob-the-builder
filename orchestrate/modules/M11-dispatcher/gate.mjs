@@ -208,9 +208,11 @@ export function disjoint({ rules, card, product, others, rec }) {
 
 // L875 m2: what is wrong with an undo card's id for check12, or null (see check12 below).
 function undoIdProblem(rec, card) {
-  if (typeof card.id !== 'string' || !card.id.trim() || card.id.trim() !== card.id) {
+  if (typeof card.id !== 'string' || !card.id.trim()) {
     return 'the undo\'s card names no id, so its own claim can\'t be told from another undo (pass { id, ...doc })';
   }
+  // L882 c1: its own reason, so a caller's padding is told as that.
+  if (card.id.trim() !== card.id) return `the undo's card id ${JSON.stringify(card.id)} has spaces around it`;
   let held;
   try { held = rec.read('card', card.id); } catch { held = null; }
   const doc = held && !held.corrupt ? held.doc : null;
@@ -222,8 +224,8 @@ function undoIdProblem(rec, card) {
 
 /**
  * M4's launch check 12, as a port: the same answer the pass got (L852, #369 m3). Reviewers and auditors
- * (review-launch.mjs GATE_KIND) never start an undo, but the worker runner (wiring/runner-checks.mjs) asks it for editing,
- * undo and script sessions. For an undo the pass asks undo.mjs exactReverse first and hands its answer to startGate, so
+ * (review-launch.mjs GATE_KIND) never start an undo, but the worker runner's `checksFor` (wiring/runner-ports.mjs
+ * step 5; lane 4's, not built yet; L882 c4) is to ask it for editing, undo and script sessions. For an undo the pass asks undo.mjs exactReverse first and hands its answer to startGate, so
  * this port asks the same check, with the same `filesOf` (the files a merge commit changed), and refuses as the pass
  * does an undo that is not an exact reverse: given no `filesOf`, every undo is refused (the caller must pass the pass's
  * own). undo.mjs is loaded only when an undo asks: it imports the pass, which imports this file.
