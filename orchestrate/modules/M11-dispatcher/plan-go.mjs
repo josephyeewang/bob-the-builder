@@ -72,6 +72,10 @@ export const PLAN_PORT_MS = 5_000;
 const PLAN_LAST_CALL = 1.2;
 export const PLAN_SLOW_FACT = (card) => HOLD_FACT(`plan-slow-${card}`);
 export const PLAN_TURN_FACT = (card) => HOLD_FACT(`plan-turn-${card}`);
+// How many passes in a row a card changed between being compared and its pass test being written (L733): told once
+// that reaches PLAN_CHANGED_TELL_AT, then once a day while it lasts; before that it is a pass event only.
+export const PLAN_CHANGED_FACT = (card) => HOLD_FACT(`plan-changed-${card}`);
+export const PLAN_CHANGED_TELL_AT = 3;
 export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -276,7 +280,27 @@ function goReady(ctx, tell, view, c, events) {
 // Every row must have its own pass test before one is set from them (L726 m4): M2 checkRows' done_when check, run first,
 // so a row without one is named, never written as a blank piece the fingerprint later refuses for another reason. The
 // write is checked against the card as it was compared (L726 m5): a card that changed since is tried again next pass.
+// That is a pass event; Joe is told only once the same card has hit it PLAN_CHANGED_TELL_AT passes in a row (L733).
+function changedStreak(ctx, c, hit) {
+  const rec = ctx.record;
+  const id = PLAN_CHANGED_FACT(c.id);
+  let f = null;
+  try { f = rec.read('fact', id); } catch { f = null; }
+  const was = Number.isInteger(f?.doc?.streak) && f.doc.streak > 0 ? f.doc.streak : 0;
+  if (!hit && !was) return 0;
+  const streak = hit ? was + 1 : 0;
+  noteFact(rec, id, f?.rev ?? 0, { streak, at: new Date(ctx.now()).toISOString() });
+  return streak;
+}
 function doneFromRows(ctx, tell, c, rows, events) {
+  const r = doneFromRowsOnce(ctx, tell, c, rows, events);
+  if (r !== 'changed') { changedStreak(ctx, c, false); return r; }
+  const streak = changedStreak(ctx, c, true);
+  events.push(`done_when-changed ${c.id}`);
+  if (streak >= PLAN_CHANGED_TELL_AT) tell(c.id, 'done-when-changed', `card ${c.id}'s pass test was not set from its rows: the card changed between reading and writing on ${streak} passes in a row; trying again next pass`);
+  return false;
+}
+function doneFromRowsOnce(ctx, tell, c, rows, events) {
   if (!rows || typeof rows !== 'object' || Array.isArray(rows) || !Object.keys(rows).length) return true;
   for (const id of Object.keys(rows).sort()) {
     const r = rows[id];
@@ -292,8 +316,8 @@ function doneFromRows(ctx, tell, c, rows, events) {
   if (w.ok) { events.push(`done_when ${c.id}`); return false; }
   let now = null;
   try { now = ctx.record.read('card', c.id); } catch { /* told below as the write's own refusal */ }
-  if (now && !now.corrupt && now.rev !== c.rev) tell(c.id, 'done-when-changed', `card ${c.id}'s pass test was not set from its rows: the card changed; trying again next pass`);
-  else tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (${short(w.reason)})`);
+  if (now && !now.corrupt && now.rev !== c.rev) return 'changed';
+  tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (${short(w.reason)})`);
   return false;
 }
 

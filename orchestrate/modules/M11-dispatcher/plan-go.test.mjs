@@ -17,7 +17,7 @@ import { move } from './moves.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
+import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_CHANGED_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
 import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { planRows } from '../../wiring/review-ports.mjs';
@@ -1845,7 +1845,8 @@ test('L726 m4 planted: a row with no done_when is named, the card keeps its text
   }
 });
 
-// L726 m5: the write is checked against the card as it was compared, not a fresh read.
+// L726 m5: the write is checked against the card as it was compared, not a fresh read. L733: a pass event; Joe is told
+// only when the same card hits it 3 passes in a row.
 test('L726 m5 planted: a card that changed after it was compared is not written, and is tried again next pass', async () => {
   const w = world();
   card(w, 'A', { done_when: 'free text' });
@@ -1854,11 +1855,34 @@ test('L726 m5 planted: a card that changed after it was compared is not written,
   seed(w.t, 'card', 'A', { ...stale.doc, brief: { ...(stale.doc.brief ?? {}), goal: 'the newer wording' } });
   assert.notEqual(w.t.record.read('card', 'A').rev, stale.rev);
   const rec = { ...w.t.record, list: (e) => (e === 'card' ? w.t.record.list('card').map((c) => (c.id === 'A' ? stale : c)) : w.t.record.list(e)) };
-  await pass(w, { planRows: async () => ROWS }, { record: rec });
-  assert.ok(w.sent.some((s) => /card A's pass test was not set from its rows: the card changed; trying again next pass/.test(s)), w.sent.join(' | '));
+  const changed = /card A's pass test was not set from its rows: the card changed between reading and writing on 3 passes in a row; trying again next pass/;
+  for (let i = 1; i <= 2; i++) {
+    const r = await pass(w, { planRows: async () => ROWS }, { record: rec });
+    assert.ok(r.events.includes('done_when-changed A'), JSON.stringify(r.events));
+    assert.ok(!w.sent.some((s) => /card A/.test(s)), `pass ${i}: a pass event only: ${w.sent.join(' | ')}`);
+  }
   assert.equal(w.t.record.read('card', 'A').doc.done_when, 'free text');
   assert.equal(w.t.record.read('card', 'A').doc.brief.goal, 'the newer wording', 'the newer card is kept');
-  // Next pass, on the card as it now is: set.
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.equal(w.sent.filter((s) => changed.test(s)).length, 1, `third in a row: told: ${w.sent.join(' | ')}`);
+  // Next pass, on the card as it now is: set, and the run of changes ends.
   await pass(w, { planRows: async () => ROWS });
   assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+  assert.equal(w.t.record.read('fact', PLAN_CHANGED_FACT('A')).doc.streak, 0);
+});
+
+test('L733: changes that are not in a row are never told', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, brief: { goal: 'newer' } });
+  const rec = { ...w.t.record, list: (e) => (e === 'card' ? w.t.record.list('card').map((c) => (c.id === 'A' ? stale : c)) : w.t.record.list(e)) };
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  // A pass in between that is not a change (the row has no pass test: told for that), then two more changes.
+  await pass(w, { planRows: async () => ({ 'R-1': row('R-1', { done_when: '' }) }) });
+  assert.equal(w.t.record.read('fact', PLAN_CHANGED_FACT('A')).doc.streak, 0);
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(!w.sent.some((s) => /the card changed/.test(s)), w.sent.join(' | '));
 });
