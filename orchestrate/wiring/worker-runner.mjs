@@ -16,6 +16,9 @@
 //      final: an ended session is never checked again (a reused process group must not bring it back, self-review M1).
 //      A session not live closes its outbox once outboxDrained says intake has taken or told every file, and leaves the
 //      listing once its outbox is closed, it ended more than RUNNER_KEEP_USED_UP_MS ago, and no kept answer names it.
+//      An outbox not drained for RUNNER_DRAIN_HELD_MS is listed with `drain_held: { cause, since }` (L896): the cause is
+//      outboxDrained's (a DRAIN_CAUSES name; a late or failed check is its own), since the first pass it was seen, a new
+//      since when the cause changes. The Dispatcher tells each one (M11 drain-alerts.mjs). Drained, it goes.
 //   2. Requests, oldest first. Each is read once and removed (a request is never acted on twice):
 //      - refused unread (only noted) when its body's verb or id does not match its file name, its key was answered or
 //        seen before, or its asked_at is older than RUNNER_KEEP_USED_UP_MS or later than now by more than CLOCK_SKEW_MS
@@ -56,6 +59,7 @@ import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, USED_UP, checkSession } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
@@ -63,9 +67,12 @@ export const RUNNER_PORT_MS = 10_000;
 if (RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
 /** How often a start still on, or a 'waiting' entry with none held, is noted again (#358 r1 m6). */
 export const RUNNER_NOTE_EVERY_MS = 10 * 60_000;
+/** How long an ended session's outbox may stay undrained before its cause is listed for the owner (L896): intake takes a
+ * hand-in within a few Dispatcher passes, so half an hour is a stuck file, not a slow one. */
+export const RUNNER_DRAIN_HELD_MS = 30 * 60_000;
 /** The status's session fields (owner-status.mjs SESSION), in its order: nothing of the runner's own memory. */
 export const STATUS_SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files',
-  'outbox', 'uid', 'outbox_open', 'stop_requested', 'alive', 'ended', 'last_write_at', 'size', 'activity']);
+  'outbox', 'uid', 'outbox_open', 'stop_requested', 'alive', 'ended', 'last_write_at', 'size', 'activity', 'drain_held']);
 const VERBS = Object.freeze(['stop', 'launch', 'stopGroup', 'saveWork', 'pauseLead']);
 const NAME = /^(stop|launch|stopGroup|saveWork|pauseLead)-([A-Za-z0-9._-]{1,140})\.json$/;
 const NONCE = /^[a-f0-9]{16}$/;
@@ -147,6 +154,13 @@ export async function workerRunnerPass(ctx) {
       : pending.has(id) ? `the start of ${id} is still on; it stays waiting, so its claim stays` : `the start of ${id} was on when the runner last stopped; it stays waiting, so its claim stays until the owner is told`);
   }
 
+  // An outbox the drain did not close: its cause listed once it has stayed so for RUNNER_DRAIN_HELD_MS (L896).
+  function heldOpen(s, d) {
+    const cause = d?.late ? 'check-late' : d?.threw ? 'check-failed' : DRAIN_CAUSES.includes(d?.cause) ? d.cause : 'other';
+    if (!Number.isFinite(s.undrained_since)) s.undrained_since = now;
+    if (now - s.undrained_since < RUNNER_DRAIN_HELD_MS) return;
+    if (s.drain_held?.cause !== cause) s.drain_held = { cause, since: new Date(now).toISOString() };
+  }
   // 1. The sessions as they are now. Ended is final (M1).
   async function check(s) {
     if (s.ended === true) { s.alive = false; return; }
@@ -160,7 +174,10 @@ export async function workerRunnerPass(ctx) {
       const z = await wait(() => ports.size(s));
       if (z && !z.late && !z.threw && z.size) { s.size = z.size; s.activity = z.activity; if (Number.isFinite(z.lastWriteAt)) s.last_write_at = z.lastWriteAt; } else { delete s.size; delete s.activity; }
     }
-    if (!isLive(s) && s.outbox_open) { const d = await wait(() => ports.outboxDrained(s)); if (d === true) s.outbox_open = false; }
+    if (!isLive(s) && s.outbox_open) {
+      const d = await wait(() => ports.outboxDrained(s));
+      if (d === true) { s.outbox_open = false; delete s.undrained_since; delete s.drain_held; } else heldOpen(s, d);
+    }
     flush();
   }
   // A session leaves only once no kept answer names it (#328 r1 m1): an ok is never read with its session gone.

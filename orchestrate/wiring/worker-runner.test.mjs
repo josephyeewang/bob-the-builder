@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_STATUS_EVERY_MS, ownerSyncPorts, readOwnerStatus } from './owner-status.mjs';
 import { ownerAsyncPorts } from './owner-asks.mjs';
-import { RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 
 const OWNER = 501; const ROOT = '/outboxes'; const COPIES = '/copies'; const FILE = '/runner/status.json';
 const T0 = Date.parse('2026-11-09T12:00:00Z'); const MIN = 60_000; const CLAIM = 10 * MIN;
@@ -471,4 +472,46 @@ test('#378 r1 M1, m3: a start is told the other live sessions (listed, and an ea
   await w.pass([launchReq('S-3', { product: 'Alpha' })]);
   assert.equal(seen, undefined, 'not started');
   assert.equal(w.state.requests['S-3'].state, 'refused');
+});
+
+test('L896: an ended session\'s outbox undrained past the limit is listed with its cause and since, read on by the status reader; drained, it goes', async () => {
+  let answer = { drained: false, cause: 'not-taken' };
+  const w = world({ drained: () => answer });
+  await w.pass([launchReq('S-1')]);
+  const row = () => w.status.sessions.find((x) => x.id === 'S-1');
+  await w.pass();
+  assert.equal(row().drain_held, undefined, 'running: never held');
+  w.gone.add(4001); await w.pass();
+  const first = w.now;
+  assert.equal(row().outbox_open, true);
+  assert.equal(row().drain_held, undefined, 'not yet past the limit');
+  w.now = first + RUNNER_DRAIN_HELD_MS - 1; await w.pass();
+  assert.equal(row().drain_held, undefined, 'one ms short');
+  w.now = first + RUNNER_DRAIN_HELD_MS; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() });
+  assert.deepEqual(w.sync().drainHolds(), [{ session: 'S-1', card: 'C-1', product: 'p1', cause: 'not-taken', since: new Date(w.now).toISOString() }]);
+  const since = row().drain_held.since;
+  w.now += MIN; await w.pass();
+  assert.equal(row().drain_held.since, since, 'the same cause keeps its since');
+  answer = { drained: false, cause: 'hash-mismatch' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'hash-mismatch', since: new Date(w.now).toISOString() }, 'a new cause, a new since');
+  answer = true;
+  w.now += MIN; await w.pass();
+  assert.equal(row().outbox_open, false);
+  assert.equal('drain_held' in row(), false, 'drained: no longer held');
+  assert.deepEqual(w.sync().drainHolds(), []);
+  assert.ok(!JSON.stringify(w.status).includes('undrained_since'), 'when it was first seen stays in the runner\'s memory');
+});
+
+test('L896: a drain check that is late, fails or answers no known cause is held under its own cause', async () => {
+  for (const [why, drained, cause] of [['late', () => new Promise(() => {}), 'check-late'], ['throws', () => { throw new Error('EIO'); }, 'check-failed'],
+    ['false', () => false, 'other'], ['an unknown cause', () => ({ drained: false, cause: 'made-up' }), 'other'], ['nothing', () => undefined, 'other'],
+    ...DRAIN_CAUSES.map((c) => [c, () => ({ drained: false, cause: c }), c])]) {
+    const w = world({ drained });
+    await w.pass([launchReq('S-1')]);
+    w.gone.add(4001); await w.pass();
+    w.now += RUNNER_DRAIN_HELD_MS; await w.pass();
+    assert.equal(w.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, cause, why);
+  }
 });

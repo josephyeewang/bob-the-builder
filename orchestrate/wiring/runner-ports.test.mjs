@@ -53,37 +53,70 @@ test('L835: an outbox is drained once every file in it has the Record\'s done in
     const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
     const fact = (name, over = {}) => facts.set(`intake-applied-${SID}-${name}`, { session: SID, name, state: 'applied', sha256: createHash('sha256').update(readFileSync(join(o, name))).digest('hex'), ...over });
     const drained = drainedPort({ readFact });
+    const held = (cause) => ({ drained: false, cause });
     assert.equal(drained(s), true, 'empty: nothing to take');
     // The one set of used states (L852): a file lead-restart counts as used, and only those, counts as taken here.
     assert.equal(INTAKE_DONE, USED_STATES, 'lane 2\'s one list (intake-facts.mjs), not a copy');
     writeFileSync(join(o, 'bundle-C-1.json'), '{"a":1}');
-    assert.equal(drained(s), false, 'a file the Record has no fact for');
+    assert.deepEqual(drained(s), held('not-taken'), 'a file the Record has no fact for');
     fact('bundle-C-1.json');
     assert.equal(drained(s), true, 'the file is kept (push reads it), and the Record took it');
     writeFileSync(join(o, '.half'), 'x');
-    assert.equal(drained(s), false, 'a dot file with no fact counts');
+    assert.deepEqual(drained(s), held('dot-name'), 'a dot file with no fact counts');
     rmSync(join(o, '.half'));
     for (const state of ['refused', 'interrupted', 'waiting']) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), true, state); }
-    for (const state of ['applying', 'starting', 'told', undefined]) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
-    fact('bundle-C-1.json', { sha256: 'f'.repeat(64) }); assert.equal(drained(s), false, 'another sha256: the file changed after intake took it');
-    fact('bundle-C-1.json', { session: 'other' }); assert.equal(drained(s), false, 'a fact naming another session');
-    fact('bundle-C-1.json', { name: 'x.json' }); assert.equal(drained(s), false, 'a fact naming another file');
+    for (const [state, why] of [['applying', 'in-flight'], ['starting', 'in-flight'], ['told', 'other'], [undefined, 'other']]) { fact('bundle-C-1.json', { state }); assert.deepEqual(drained(s), held(why), `not done: ${state}`); }
+    fact('bundle-C-1.json', { sha256: 'f'.repeat(64) }); assert.deepEqual(drained(s), held('hash-mismatch'), 'another sha256: the file changed after intake took it');
+    fact('bundle-C-1.json', { session: 'other' }); assert.deepEqual(drained(s), held('other'), 'a fact naming another session');
+    fact('bundle-C-1.json', { name: 'x.json' }); assert.deepEqual(drained(s), held('other'), 'a fact naming another file');
     fact('bundle-C-1.json');
-    assert.equal(drainedPort({ readFact: () => ({ ok: false, reason: 'its file is not JSON' }) })(s), false, 'an unreadable fact');
-    assert.equal(drainedPort({ readFact: () => { throw new Error('EACCES'); } })(s), false, 'a Record that throws');
-    assert.equal(drainedPort()(s), false, 'no fact reader wired: an outbox holding a file stays open');
+    assert.deepEqual(drainedPort({ readFact: () => ({ ok: false, reason: 'its file is not JSON' }) })(s), held('record-unreadable'), 'an unreadable fact');
+    assert.deepEqual(drainedPort({ readFact: () => { throw new Error('EACCES'); } })(s), held('record-unreadable'), 'a Record that throws');
+    assert.deepEqual(drainedPort()(s), held('record-unreadable'), 'no fact reader wired: an outbox holding a file stays open');
     symlinkSync(join(o, 'bundle-C-1.json'), join(o, 'report-C-1.md')); fact('bundle-C-1.json');
     facts.set(`intake-applied-${SID}-report-C-1.md`, { ...facts.get(`intake-applied-${SID}-bundle-C-1.json`), name: 'report-C-1.md' });
-    assert.equal(drained(s), false, 'a link is not a plain file');
+    assert.deepEqual(drained(s), held('not-a-plain-file'), 'a link is not a plain file');
     rmSync(join(o, 'report-C-1.md')); facts.delete(`intake-applied-${SID}-report-C-1.md`);
     assert.equal(drained(s), true);
     // A named pipe opens without following a link, and reads as no bytes: not a plain file, never matched to a fact.
     spawnSync('mkfifo', [join(o, 'pipe')]);
     facts.set(`intake-applied-${SID}-pipe`, { ...facts.get(`intake-applied-${SID}-bundle-C-1.json`), name: 'pipe', sha256: createHash('sha256').update('').digest('hex') });
-    assert.equal(drained(s), false, 'a pipe is not a plain file');
+    assert.deepEqual(drained(s), held('not-a-plain-file'), 'a pipe is not a plain file');
     rmSync(o, { recursive: true });
     assert.equal(drained(s), true, 'gone: nothing left to take');
-    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), false);
+    assert.deepEqual(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), held('file-unreadable'));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L896: an undrained outbox names its cause, one of the one list, checking the name before the bytes', () => {
+  const d = tempDir('orch-lane4-drain-');
+  try {
+    const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
+    const s = { id: SID, outbox: o };
+    const held = (cause) => ({ drained: false, cause });
+    const hashed = [];
+    const drained = drainedPort({ readFact: () => ({ ok: false, missing: true }), hashOf: (p) => { hashed.push(p); return 'h'; } });
+    const only = (names, cause, why) => { hashed.length = 0; assert.deepEqual(drainedPort({ list: () => names, readFact: () => ({ ok: false, missing: true }), hashOf: (p) => { hashed.push(p); return 'h'; } })(s), held(cause), why); };
+    // The Record's fact id holds at most 200 of [A-Za-z0-9._-] (M4 readFactFile): the id with its prefix and session.
+    const room = 200 - `intake-applied-${SID}-`.length;
+    only(['a'.repeat(room + 1)], 'fact-id-too-long', 'one over');
+    assert.equal(hashed.length, 0, 'told by its name, never read');
+    only(['a'.repeat(room)], 'not-taken', 'at the limit is a name the Record can hold');
+    only(['bad\uFFFDname'], 'name-not-utf8', 'a name not valid UTF-8 reads with the replacement mark');
+    only([`bad\uFFFD${'a'.repeat(room)}`], 'name-not-utf8', 'not UTF-8 is told before too long');
+    for (const n of ['a b', 'a/b', 'é', 'x:y']) only([n], 'name-not-a-fact-id', JSON.stringify(n));
+    only(['.dot'], 'dot-name');
+    only(['ok.json', '.dot'], 'not-taken', 'the first file that holds it open is the one told');
+    // A real folder in the outbox: not a plain file.
+    mkdirSync(join(o, 'sub'));
+    assert.deepEqual(drainedPort({ readFact: () => ({ ok: true, doc: {} }) })(s), held('not-a-plain-file'));
+    rmSync(join(o, 'sub'));
+    writeFileSync(join(o, 'f.json'), 'x');
+    assert.deepEqual(drainedPort({ readFact: () => ({ ok: true, doc: {} }), hashOf: () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); } })(s), held('file-unreadable'));
+    assert.deepEqual(drainedPort({ readFact: () => ({ ok: true, doc: {} }), hashOf: () => { throw Object.assign(new Error('loop'), { code: 'ELOOP' }); } })(s), held('not-a-plain-file'));
+    assert.deepEqual(drained(s), held('not-taken'));
+    for (const v of [null, undefined, { ok: false }, { ok: false, missing: false }]) assert.deepEqual(drainedPort({ readFact: () => v })(s), held('record-unreadable'), JSON.stringify(v));
+    assert.deepEqual(drainedPort({ readFact: () => ({ ok: true, doc: null }) })(s), held('other'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

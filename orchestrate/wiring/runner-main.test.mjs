@@ -329,12 +329,12 @@ test('L852: main\'s drain reads the Record\'s own fact file (M4 readFactFile): a
     writeFileSync(join(o, 'bundle-C-1.json'), '{"a":1}');
     const p = realRunnerPorts(checkRunnerConfig(config(d, { recordUid: process.getuid(), orchestrateUid: process.getuid() + 1 })));
     const s = { id: SID, outbox: o };
-    assert.equal(p.outboxDrained(s), false, 'no fact yet');
+    assert.deepEqual(p.outboxDrained(s), { drained: false, cause: 'not-taken' }, 'no fact yet');
     const id = `intake-applied-${SID}-bundle-C-1.json`;
     const doc = { session: SID, name: 'bundle-C-1.json', state: 'applied', sha256: createHash('sha256').update('{"a":1}').digest('hex') };
     writeFileSync(join(fdir, `${id}.json`), JSON.stringify({ entity: 'fact', id, rev: 1, doc }), { mode: 0o644 });
     assert.equal(p.outboxDrained(s), true, 'taken by the Record');
     writeFileSync(join(fdir, `${id}.json`), JSON.stringify({ entity: 'fact', id, rev: 2, doc: { ...doc, state: 'applying' } }), { mode: 0o644 });
-    assert.equal(p.outboxDrained(s), false, 'still in flight');
+    assert.deepEqual(p.outboxDrained(s), { drained: false, cause: 'in-flight' }, 'still in flight');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

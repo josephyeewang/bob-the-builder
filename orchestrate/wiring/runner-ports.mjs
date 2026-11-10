@@ -46,6 +46,7 @@
 //   outboxDrained(session): true when the outbox is gone, or every file in it (dot files count) has the Record's intake
 //     fact for it in a done state with the sha256 of its bytes now (L852, drainedPort below, read with M4 readFactFile).
 //     Any other file keeps the outbox open and its session listed: it fails safe, never closing on a hand-in not taken.
+//     It answers why (`{ drained: false, cause }`, a DRAIN_CAUSES name, L896), so the runner can tell it once it lasts.
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
@@ -60,6 +61,7 @@ import { dirname, join } from 'node:path';
 import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
@@ -98,7 +100,8 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
 }
 
 /**
- * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else false. Intake
+ * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else { drained:
+ * false, cause } naming why for the first file that holds it open (a DRAIN_CAUSES name, M11 drain-alerts.mjs, L896). Intake
  * keeps every hand-in (push and M6 gather read them from the outbox), so an empty folder is not the sign: each file
  * must have the Record's own `intake-applied-<session>-<name>` fact (M11 outbox-intake.mjs), naming this session and
  * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
@@ -115,14 +118,32 @@ function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
+// The fact id rule the Record reads by (M4 readFactFile): a name it can't hold is told by what is wrong with it (L896).
+const FACT_ID = /^[A-Za-z0-9._-]{1,200}$/;
+const IN_FLIGHT = new Set(['applying', 'starting']);
+const held = (cause) => {
+  if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);
+  return { drained: false, cause };
+};
+function nameCause(id, name) {
+  if (name.includes('\uFFFD')) return 'name-not-utf8';
+  if (id.length > 200) return 'fact-id-too-long';
+  return FACT_ID.test(id) ? null : 'name-not-a-fact-id';
+}
 export function drainedPort({ list = readdirSync, readFact = noFactReader, hashOf = fileSha256 } = {}) {
   return (s) => {
-    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
+    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT' ? true : held('file-unreadable'); }
     for (const name of names) {
-      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
-      let f; try { f = readFact(`intake-applied-${s.id}-${name}`); } catch { return false; }
-      const d = f?.ok === true ? f.doc : null;
-      if (!d || d.session !== s.id || d.name !== name || !INTAKE_DONE.has(d.state) || d.sha256 !== hash) return false;
+      const id = `intake-applied-${s.id}-${name}`;
+      const bad = nameCause(id, name);
+      if (bad) return held(bad);
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch (e) { return held(/not a plain file/.test(e?.message ?? '') || e?.code === 'ELOOP' ? 'not-a-plain-file' : 'file-unreadable'); }
+      let f; try { f = readFact(id); } catch { return held('record-unreadable'); }
+      if (f?.ok !== true) return held(f?.missing === true ? (name.startsWith('.') ? 'dot-name' : 'not-taken') : 'record-unreadable');
+      const d = f.doc;
+      if (!d || d.session !== s.id || d.name !== name) return held('other');
+      if (!INTAKE_DONE.has(d.state)) return held(IN_FLIGHT.has(d.state) ? 'in-flight' : 'other');
+      if (d.sha256 !== hash) return held('hash-mismatch');
     }
     return true;
   };

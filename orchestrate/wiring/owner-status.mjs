@@ -21,7 +21,9 @@
 // The status file (the runner writes it; this is the only reader):
 //   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
-//              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
+//              stop_requested, alive?, ended?, last_write_at?, size?, activity?, drain_held? }
+//   - drain_held (L896): { cause: a DRAIN_CAUSES name (M11 drain-alerts.mjs), since: ISO }, only on a session not live
+//     whose outbox is still open, once it has stayed undrained past the runner's limit. drainHolds() hands them on.
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/<product>/<role>/<id> (L767, L836), which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
@@ -58,6 +60,7 @@ import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 import { runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -129,6 +132,12 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
   for (const f of ['outbox_open', 'stop_requested']) if (typeof x[f] !== 'boolean') bad(x, `has no ${f}`);
   for (const f of ['alive', 'ended']) if (f in x && typeof x[f] !== 'boolean') bad(x, `has ${f} that is not true or false`);
   if ('last_write_at' in x && !Number.isFinite(x.last_write_at)) bad(x, 'has last_write_at that is not a time in ms');
+  if ('drain_held' in x) {
+    const h = x.drain_held;
+    if (!h || typeof h !== 'object' || !DRAIN_CAUSES.includes(h.cause) || typeof h.since !== 'string' || !Number.isFinite(Date.parse(h.since))
+      || Object.keys(h).some((k) => k !== 'cause' && k !== 'since')) bad(x, 'has a drain_held that is not a cause and a time');
+    if (live(x) || x.outbox_open !== true) bad(x, 'has a drain_held but is running or its outbox is closed');
+  }
 }
 
 /**
@@ -217,6 +226,9 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
       if (!ACTIVITY_STATES.includes(x.activity?.state)) throw new Error(`session ${x.id} has no activity state the tracker gives in the worker runner's status`);
       return { size: pick(z, SIZE_FIELDS), activity: { state: x.activity.state } };
     },
+    // Every ended session whose outbox stays undrained past the runner's limit, with why (L896). A status that can't be
+    // read throws, so the relay says so and never reads it as "nothing held".
+    drainHolds: () => status().sessions.filter((x) => x.drain_held).map((x) => ({ session: x.id, card: x.card, product: x.product, cause: x.drain_held.cause, since: x.drain_held.since })),
     stopSession: (sessionId) => {
       if (!REQUEST_ID.test(sessionId ?? '')) return false;
       const s = status();
