@@ -209,6 +209,23 @@ test('self-review M1: an ended session is final; a process group number used aga
   assert.deepEqual(w.sync().sessions(), [], 'not live');
 });
 
+// #384 m1: the start's base reaches the answer the Dispatcher's launch ask reads; a start that says none leaves it out,
+// never null (owner-asks launchAnswerWrong refuses a null one).
+test('#384 m1: a start\'s base is handed on in its answer, and left out when the start names none', async () => {
+  const ok = (x, more = {}) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more });
+  const w = world({ startAnswer: (x) => ok(x, { base: 'b'.repeat(40) }) });
+  await w.pass([launchReq('S-1')]);
+  assert.equal(w.read().answers['launch-S-1'].base, 'b'.repeat(40));
+  const v = world({ startAnswer: (x) => ok(x) });
+  await v.pass([launchReq('S-1')]);
+  assert.equal(v.read().answers['launch-S-1'].ok, true);
+  assert.ok(!Object.hasOwn(v.read().answers['launch-S-1'], 'base'), 'no base key at all');
+  // A malformed one is refused as any other bad answer, and the session stopped.
+  const m = world({ startAnswer: (x) => ok(x, { base: 'main' }) });
+  await m.pass([launchReq('S-1')]);
+  assert.deepEqual([m.read().answers['launch-S-1'].ok, m.stops.map((x) => x.id)], [false, ['S-1']]);
+});
+
 test('self-review M2: a start answer the reader would refuse is never listed; it is stopped, then refused once its group is gone', async () => {
   const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/script/S-1` },
     'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 },
