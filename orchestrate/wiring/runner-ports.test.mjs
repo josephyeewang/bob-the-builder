@@ -425,6 +425,18 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     s[S.permissions][S.deny].push(`Edit(/${join(w.copiesRoot, 'p2')}/**)`, `Edit(/${join(w.outboxRoot, 'p2')}/**)`);
     writeFileSync(f, JSON.stringify(s));
     assert.match((await startB([A])).reason, new RegExp(`its shell may read ${join(w.d, 'mirror-p2')}\\)`));
+    // #378 r2 n2, c1: a waiting start of an earlier run whose settings are still there, without p2: held too, saying
+    // that the owner removes the settings file (a waiting row never ends).
+    const wr = await startB([{ ...A, unstarted: true }]);
+    assert.equal(wr.ok, false);
+    assert.match(wr.reason, new RegExp(`session ${SID} \\(product p1\\), a start from an earlier run still waiting, left settings that don't deny product p2's folders .*the owner removes that settings file \\(${SID}\\.json`));
+    // #378 r2 n3 (A6): the mirror's Read and Edit denies are checked as well as the shell's.
+    s[S.sandbox][S.filesystem][S.denyRead].push(join(w.d, 'mirror-p2'));
+    writeFileSync(f, JSON.stringify(s));
+    assert.match((await startB([A])).reason, new RegExp(`its Read may reach ${join(w.d, 'mirror-p2')}\\)`));
+    s[S.permissions][S.deny].push(`Read(/${join(w.d, 'mirror-p2')}/**)`);
+    writeFileSync(f, JSON.stringify(s));
+    assert.match((await startB([A])).reason, new RegExp(`its Edit may reach ${join(w.d, 'mirror-p2')}\\)`));
     // A session that can't be told about holds B's start too: its settings gone or not JSON, or no product named.
     rmSync(f);
     assert.match((await startB([A])).reason, /settings can't be read \(ENOENT\)/);

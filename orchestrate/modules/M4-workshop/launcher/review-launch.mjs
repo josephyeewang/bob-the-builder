@@ -122,13 +122,16 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  */
 export function reviewChecks(x) {
   const probeMs = x.probeMs ?? PROBE_MS;
+  // The worker runner (wiring/runner-checks.mjs) reuses these ports on a card's own copy (#369 c3): its refusals name
+  // that copy, never a review copy.
+  const copyName = GATE_KIND[x.role] ? 'the review copy' : 'the card\'s copy';
   const ports = {
     1: async () => {
-      let st; try { st = lstatSync(x.copy); } catch { return refuse('the review copy is missing'); }
-      if (st.isSymbolicLink() || !st.isDirectory()) return refuse('the review copy is not a plain folder');
-      if (st.uid !== x.ownUid() || st.mode & 0o077) return refuse('the review copy is not this user\'s alone (0700)');
-      let h; try { h = (await gitOk(['rev-parse', 'HEAD'], { gitDir: join(x.copy, '.git'), workTree: x.copy, cwd: x.copy, purpose: 'review-launch-head', timeoutMs: 30_000 })).trim(); } catch (e) { return refuse(`the review copy's commit can't be read (${e?.message ?? e})`); }
-      return h === x.head ? { ok: true } : refuse(`the review copy holds ${h.slice(0, 7)}, not the head ${x.head.slice(0, 7)}`);
+      let st; try { st = lstatSync(x.copy); } catch { return refuse(`${copyName} is missing`); }
+      if (st.isSymbolicLink() || !st.isDirectory()) return refuse(`${copyName} is not a plain folder`);
+      if (st.uid !== x.ownUid() || st.mode & 0o077) return refuse(`${copyName} is not this user's alone (0700)`);
+      let h; try { h = (await gitOk(['rev-parse', 'HEAD'], { gitDir: join(x.copy, '.git'), workTree: x.copy, cwd: x.copy, purpose: 'review-launch-head', timeoutMs: 30_000 })).trim(); } catch (e) { return refuse(`${copyName}'s commit can't be read (${e?.message ?? e})`); }
+      return h === x.head ? { ok: true } : refuse(`${copyName} holds ${h.slice(0, 7)}, not the head ${x.head.slice(0, 7)}`);
     },
     3: async () => emptyOutbox(x.outbox, { busy: x.busy, alert: x.alert }),
     5: async () => {

@@ -26,8 +26,9 @@ export const MOVES = Object.freeze({
     ready: { claimed: D, waiting: D, cancelled: A },
     // claimed → ready: the holder's release, a lapse or a dead owner's claim broken (always with the claim cleared).
     claimed: { running: D, ready: D, cancelled: A },
-    // running → in_review: a worker's hand-in through its own outbox, or the Dispatcher for a tab's accepted proposal.
-    running: { in_review: ['worker', 'dispatcher'], failed: D, waiting: D, cancelled: A },
+    // running → in_review: a worker's or a script's hand-in through its own outbox (L838), or the Dispatcher for a tab's
+    // accepted proposal.
+    running: { in_review: ['worker', 'script', 'dispatcher'], failed: D, waiting: D, cancelled: A },
     in_review: { verified: D, failed: D, waiting: D, cancelled: A },
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
     // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);

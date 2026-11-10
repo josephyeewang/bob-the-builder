@@ -693,7 +693,7 @@ test('L387: a pushed copy goes to review in one pass, on a tab claim, with one l
   assert.equal(c.doc.claim, undefined, 'the claim ends at the hand-in, so M9 will take a merge request');
   assert.match(w.run, new RegExp(`^copy-${w.card}-r-[0-9a-f]{12}$`));
   const l = w.rec.read('launch', w.run).doc;
-  assert.deepEqual(Object.keys(l).sort(), ['card', 'config_dir', 'copy', 'head', 'kind', 'launched_at', 'product', 'rev', 'role', 'session_id', 'signin']);
+  assert.deepEqual(Object.keys(l).sort(), ['base', 'card', 'config_dir', 'copy', 'head', 'kind', 'launched_at', 'product', 'rev', 'role', 'session_id', 'signin']);
   assert.deepEqual([l.session_id, l.role, l.kind, l.card, l.head, l.product], [w.run, 'copy_run', 'copy_run', w.card, TIP, PRODUCT]);
   assert.ok(Number.isInteger(l.rev) && l.rev > 0);
   await w.pass(w.T + 5 * DAY);

@@ -1711,3 +1711,8 @@ test('R-0b-170: a Lead that can\'t be told means the owner reads it instead', as
     assert.match(p.owner[1], /the Lead L-1's plan plan-b\.json was not applied.* The Lead could not be told/);
   }
 });
+
+test('L838: a script session hands in report- and handin- only (no worker compaction note, no other kind)', () => {
+  assert.deepEqual(kindsFor({ role: 'script' }), ['report-', 'handin-']);
+  assert.ok(kindsFor({ role: 'worker' }).includes('report-compact-'), 'the worker keeps its own');
+});
