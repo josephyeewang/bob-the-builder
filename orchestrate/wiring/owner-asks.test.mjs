@@ -10,7 +10,7 @@ const FILE = '/runner/state/status.json'; const ROOT = '/out'; const COPIES = '/
 const st = ({ dir = false, mode = dir ? 0o755 : 0o644 } = {}) => ({ uid: OWNER, mode, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false });
 const session = (id, more = {}) => ({ id, product: 'p1', kind: 'editing', card: 'C-1', lead: 'L', role: 'worker', pgid: 77, signin: 's', config_dir: '/cfg', bundle_files: [],
   outbox: `${ROOT}/worker/${id}`, uid: OWNER, alive: true, ended: false, outbox_open: true, stop_requested: false, ...more });
-const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: 'Mon Nov  9 12:00:01 2026', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1` };
+const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: '2026-11-09T12:00:01Z', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1` };
 
 // A fake runner: `script(n, w)` runs before the n-th status read and may change w.doc (the runner's next status).
 function world(script = () => {}, { giveUpMs = ASK_GIVE_UP_MS } = {}) {
@@ -39,7 +39,7 @@ test('L759 step 2: launch trusts no answer the rest of the status does not bear 
   const wrong = [
     { requests: {} }, { requests: { 'S-1': { state: 'waiting' } } }, { requests: { 'S-1': { state: 'refused' } } },
     { answer: { sessionId: 'S-2' } }, { answer: { outbox: `${ROOT}/worker/S-2` } }, { answer: { copy: `${COPIES}/C-2` } }, { answer: { copy: '/elsewhere/C-1' } },
-    { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } },
+    { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } }, { answer: { pidStart: 'Mon Nov  9 12:00:01 2026' } }, { answer: { pidStart: '2026-11-09 12:00:01' } },
     { answer: { head: 'main' } }, { answer: { head: 'A'.repeat(40) } }, { answer: { signin: '' } }, { answer: { configDir: null } },
   ];
   for (const bad of wrong) {

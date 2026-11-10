@@ -33,6 +33,7 @@ import { join } from 'node:path';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
+import { START_ISO } from '../modules/M9-record/lock.mjs';
 import { RUNNER_KINDS, live, readOwnerStatus } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
@@ -90,7 +91,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
-        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
+        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && typeof a.pidStart === 'string' && START_ISO.test(a.pidStart)
           && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);

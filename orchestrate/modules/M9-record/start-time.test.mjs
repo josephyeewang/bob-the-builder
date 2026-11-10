@@ -99,9 +99,14 @@ test('L830: a claim the runner records through this reader is alive to processDe
     // A reader that answers in any other shape (the runner's raw UTC ps text today, a stand-in) can't be compared: alive.
     const raw = spawnSync('ps', ['-o', 'lstart=', '-p', String(kid.pid)], { encoding: 'utf8', env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } }).stdout.trim();
     assert.equal(processDead({ pid: kid.pid, pid_start: raw }), false, 'a claim holding the raw UTC text reads alive');
-    for (const other of [raw, 'start', ' ']) {
+    for (const other of [raw, 'start', ' ', null, undefined, 42]) {
       assert.equal(processDead(claim, { kill: realProbe.kill, pidStart: () => other }), false, `a "${other}" answer is no comparison`);
     }
+    // #379 r1 m3: a live process whose start-time read fails, throws or times out is alive, never reused.
+    assert.equal(processDead(claim, { kill: realProbe.kill, pidStart: () => { throw new Error('ps failed'); } }), false, 'a throwing read');
+    const timedOut = (pid) => startTime(pid, { run: () => { throw Object.assign(new Error('spawnSync ps ETIMEDOUT'), { code: 'ETIMEDOUT' }); } });
+    assert.equal(timedOut(kid.pid), null, 'a timed-out ps reads as no start time');
+    assert.equal(processDead(claim, { kill: realProbe.kill, pidStart: timedOut }), false, 'a timed-out read');
   } finally { kid.kill('SIGKILL'); }
 });
 
@@ -127,6 +132,10 @@ test('L826: onThisMachine and holderDead: host or machine id; an empty or missin
   assert.equal(onThisMachine({ host: 'a', machine: 'M' }, { host: 'b', machine: 'M' }), true);
   assert.equal(onThisMachine({ host: 'a', machine: 'M' }, { host: 'b', machine: 'N' }), false);
   assert.equal(onThisMachine({ host: 'a', machine: '' }, { host: 'b', machine: '' }), false);
+  // #379 r1 m2: both ids known, the id decides: one host name on two Macs is two machines.
+  assert.equal(onThisMachine({ host: 'a', machine: 'M' }, { host: 'a', machine: 'N' }), false, 'same name, another Mac');
+  assert.equal(onThisMachine({ host: 'a', machine: 'M' }, { host: 'a', machine: null }), true, 'no id here: the host name');
+  assert.equal(onThisMachine({ host: 'a', machine: '' }, { host: 'a', machine: 'N' }), true, 'no id there: the host name');
   assert.equal(onThisMachine({ host: 'a' }, { host: 'b', machine: null }), false);
   const gone = await deadPid();
   assert.equal(holderDead({ pid: gone, host: 'old', machine: 'M' }, { host: 'new', machine: 'M' }), true);
@@ -171,11 +180,20 @@ test('L830: a lock whose live holder has another start time (a reused pid) is br
   } finally { kid.kill('SIGKILL'); }
 });
 
-test('L830: a failed read of this process\'s own start time is tried again, never kept as null', () => {
+test('L830, #379 r1 m5: a failed read of this process\'s own start time is remembered for a while, then tried again; a good one is kept', () => {
   // A fresh node, so this process's own cached value is not touched.
-  const code = `import { ownPidStart } from ${JSON.stringify(LOCK)};\nconst a = ownPidStart({ read: () => null });\nconst b = ownPidStart({ read: () => '2026-11-10T10:16:00Z' });\nconst c = ownPidStart({ read: () => 'other' });\nprocess.stdout.write(JSON.stringify([a, b, c]));`;
+  const code = `import { ownPidStart, OWN_RETRY_MS } from ${JSON.stringify(LOCK)};
+let t = 1000; let reads = 0;
+const now = () => t;
+const fail = () => { reads += 1; return null; };
+const good = () => { reads += 1; return '2026-11-10T10:16:00Z'; };
+const out = [ownPidStart({ read: fail, now })];
+t += 1; out.push(ownPidStart({ read: good, now }), reads);
+t += OWN_RETRY_MS; out.push(ownPidStart({ read: good, now }), reads);
+t += OWN_RETRY_MS; out.push(ownPidStart({ read: () => 'other', now }), reads);
+process.stdout.write(JSON.stringify(out));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), [null, '2026-11-10T10:16:00Z', '2026-11-10T10:16:00Z'], 'read again after null, then kept');
-  assert.equal(typeof ownPidStart, 'function');
+  assert.deepEqual(JSON.parse(r.stdout), [null, null, 1, '2026-11-10T10:16:00Z', 2, '2026-11-10T10:16:00Z', 2],
+    'no second ps within the wait after a failure; read again after it; then kept');
 });

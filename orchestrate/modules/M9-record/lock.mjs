@@ -97,15 +97,22 @@ export function processDead({ pid, pid_start: recorded } = {}, probe = realProbe
 
 // The one comparison of two start times (L830): true only when both are in the one shape and differ, so the pid was
 // reused. A value in any other shape (the local lstart recorded before L830, an unread one) can't be compared: false.
-// Every check of a recorded start time uses it, the runner's own group check included, never a copy of `!==`.
+// Every check of a recorded start time is to use it, never a copy of `!==`: lane 4 switches the runner's group check
+// (runner-loop.mjs groupGone) and leaderStart to startDiffers and startTime once this lands (L850 X1).
 const comparable = (v) => typeof v === 'string' && START_ISO.test(v);
 export function startDiffers(recorded, now) { return comparable(recorded) && comparable(now) && now !== recorded; }
 
-// This process's own start time, read once it is read at all: a ps that failed (a busy Mac, the cap) is tried again next
-// time, never kept as null, which would leave this process's locks without a start time to compare.
+// This process's own start time, kept once read. A ps that failed (a busy Mac, the cap) is not kept as null for ever, which
+// would leave this process's locks without a start time to compare, but it is not run again on every lock attempt
+// either (#379 r1 m5): a hung ps costs up to START_PS_MS, so a failure is remembered for OWN_RETRY_MS before the next try.
+export const OWN_RETRY_MS = 60_000;
 let ownStart = null;
-export function ownPidStart({ read = pidStart } = {}) {
-  if (ownStart === null) ownStart = read(process.pid);
+let ownFailedAt = -Infinity;
+export function ownPidStart({ read = pidStart, now = Date.now } = {}) {
+  if (ownStart === null && now() - ownFailedAt >= OWN_RETRY_MS) {
+    ownStart = read(process.pid);
+    if (ownStart === null) ownFailedAt = now();
+  }
   return ownStart;
 }
 
@@ -130,9 +137,13 @@ export function readHolder(dir) { return readJson(join(dir, 'lock')); }
 export function holderDead(h, { host = hostname(), machine = machineId(), probe = realProbe } = {}) {
   return !!h && !h.unreadable && onThisMachine(h, { host, machine }) && processDead(h, probe);
 }
-// A holder is this machine's when its host name matches, or its machine id does (L826): only a process here can be probed.
+// A holder is this machine's (L826, #379 r1 m2): when both sides carry a machine id, the id decides, so a renamed Mac is
+// still itself and two Macs that share a host name are two. When either id is missing (an older record, an id not read),
+// the host name decides, as before. Only a process here can be probed.
+const anId = (v) => typeof v === 'string' && v !== '';
 export function onThisMachine(h, { host, machine }) {
-  return h?.host === host || (typeof h?.machine === 'string' && h.machine !== '' && typeof machine === 'string' && h.machine === machine);
+  if (anId(h?.machine) && anId(machine)) return h.machine === machine;
+  return h?.host === host;
 }
 
 export function makeLock({ dir, host = hostname(), machine = machineId(), timeoutMs = 10000, probe = realProbe, disabled = false } = {}) {
