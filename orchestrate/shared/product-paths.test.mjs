@@ -17,6 +17,8 @@ test('L836, #378 M1: a product is a name setup makes a folder for, never a role\
   for (const product of ['Alpha', 'p.1', 'p_1', '-p', '', 'a'.repeat(65), 'p/q', '..', undefined]) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /not a product name setup makes a folder for/, String(product));
   assert.equal(productRoleClash('Worker'), true); assert.equal(productRoleClash('p1'), false); assert.equal(productRoleClash(undefined), false);
   assert.equal(PRODUCT.test('a'.repeat(64)), true);
+  // L890 m-2: a digit may lead, and one character is a name.
+  for (const product of ['1app', '0']) { assert.equal(PRODUCT.test(product), true, product); assert.doesNotThrow(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), product); }
 });
 
 test('L848: a card, role or session id that is not one plain folder name is refused', () => {

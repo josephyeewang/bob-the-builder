@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf } from './layout.mjs';
+import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, workerCopiesPath } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -322,6 +322,23 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
   const tableRows = folderTable(cfg);
   folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]) });
+  // The workers' copies folder is the owner's, so the root-only rule above does not list it. Since L836 it holds one folder
+  // per product and nothing else: a copy made before (flat, `<copies>/<card>`, also one whose card is named as a product:
+  // it has its own .git) or a dropped product's folder is named, for the owner to clear by hand. Setup deletes nothing:
+  // the copy may hold work not yet saved. Finder's own .DS_Store is let be. Missing, a link or a file: its own row FAILs.
+  {
+    const wc = workerCopiesPath(cfg); const what = `${wc} holds only the config's product folders (L836)`;
+    let isDir = false; try { isDir = io.lstat(wc).isDirectory(); } catch { /* missing: its own row says so */ }
+    let names = null;
+    if (isDir) { try { names = io.list(wc); } catch { item(false, what, 'its contents could not be listed'); } }
+    if (names) {
+      const known = new Set(tableRows.map((r) => r.path));
+      const isCopy = (n) => { try { io.lstat(`${wc}/${n}/.git`); return true; } catch { return false; } };
+      const left = names.filter((n) => n !== '.DS_Store' && (!known.has(`${wc}/${n}`) || isCopy(n))).sort();
+      const one = left.length === 1;
+      item(left.length === 0, what, `holds ${one ? 'an entry' : `${left.length} entries`} that ${one ? 'is' : 'are'} no product folder of this config (a copy made before the folders per product, or a dropped product's folder): ${left.slice(0, 5).map((n) => `${wc}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}. Check that each holds nothing unsaved (git status, and commits not yet pushed), then remove it; setup removes nothing itself`);
+    }
+  }
   return out;
 }
 

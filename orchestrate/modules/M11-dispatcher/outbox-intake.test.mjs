@@ -40,6 +40,24 @@ test('M15: the role comes from the session map, never from the file', async () =
   assert.equal(line.data.card, 'C-1');
 });
 
+// L865: the hand-in's tag names the session's product, so the Record finds its outbox in that product's own folder
+// (L836: <outboxRoot>/<product>/<role>/<session id>). A session with no product hands in no product key.
+test('L865: the intake tags a hand-in with its session\'s product', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'p1', 'worker', 'S-1'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const real = recWith();
+  const tags = [];
+  const rec = Object.create(real, { applyOutbox: { value: (tag, file) => { tags.push(tag); return real.applyOutbox(tag, file); } } });
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1', product: 'p1' }], ...w.ports });
+  assert.equal(out[0].applied, true);
+  assert.equal(tags[0].product, 'p1');
+  const ob2 = mk(join(w.root, 'flat', 'worker', 'S-2'));
+  writeFileSync(join(ob2, 'report-C-2.md'), 'done');
+  await intakePass({ rec, sessions: [{ sessionId: 'S-2', role: 'worker', outbox: ob2, uid: UID, card: 'C-2' }], ...w.ports });
+  assert.ok(!Object.hasOwn(tags[1], 'product'));
+});
+
 test('M15: a file is applied once; the same name with new content is refused with an alert', async () => {
   const w = world();
   const ob = mk(join(w.root, 'worker'));

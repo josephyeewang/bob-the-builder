@@ -55,6 +55,15 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   answers (L722). An earlier setup built from the plan-reviewer branch alone made `plan_reviewer/` the workers' user's; `users-folders` refuses to take that over, so look inside it, remove it by hand, then run `users-folders` again. Each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
   list, read and clear (`delete_child`), with inheritance. The worker seals its own hand-in file 0440. `check` compares the
   access list and the group exactly: a missing or an extra entry FAILs.
+  **One folder per product, too (L836).** Beside the role folders, `outboxes/<product>/` is root's 0755, and under it
+  `worker/` and `script/` (the roles the worker runner starts) are the workers' user's 0750 with the same `orchestrate`
+  entry. The worker runner writes a session's outbox at `outboxes/<product>/<role>/<session>`, so a session can be
+  denied every other product's whole folder (which names a product may take: `shared/product-paths.mjs`). The review roles take no product: their
+  folders, and `review-copies/`, stay as they are. `proofs` checks, per product, that the owner CAN write
+  `worker-copies/<product>` and both role folders (controls) and can NOT write `outboxes/<product>` itself.
+  Every "cannot write" proof shows the state now; that the owner cannot gain write (own the folder and `chmod` it) is
+  `check`'s job: it wants each of these folders owned by root, orchestrate or review (never the owner), with the exact
+  mode and access list.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and
@@ -66,6 +75,14 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   and no `delete` (with it, `orchestrate` could remove the empty copies folder itself). The entry reaches only what is made
   after it is set: copies that were already there need it added by hand. Cleanup's git runs only on the mirror
   (orchestrate's own), never inside a copy, so no `safe.directory` is needed for it.
+  Since L836 `worker-copies/` holds one folder per product (the owner's 0755, the same entry), and each card's copy is
+  `worker-copies/<product>/<card>`. The entry lets `orchestrate` remove a product's folder once it is empty; the worker
+  runner then refuses that product until `users-folders` is run again (it fails safe). `check` FAILs on anything else in
+  `worker-copies/`, by name: a copy made before L836 (directly under it) or the folder of a product the config no longer
+  names. Setup removes nothing: check that each holds nothing unsaved (`git status`, and commits not yet pushed), then
+  remove it by hand. To drop a product, take it out of `products`, then clear its `worker-copies/<product>` that way and
+  remove its `outboxes/<product>` (root's, which `check` also names); its `products/<product>` folders stay until removed
+  by hand as well.
 - **The seal folder.** `seals/` is orchestrate's 0700: where cleanup seals a copy's bundle it could not prove saved (the
   Dispatcher config's `sealRoot`).
 - It never sets or reads a password. An unknown argument is never printed back (it could be a secret).
