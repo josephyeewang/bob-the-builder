@@ -43,7 +43,7 @@ test('L759 step 2: launch trusts no answer the rest of the status does not bear 
     { answer: { head: 'main' } }, { answer: { head: 'A'.repeat(40) } }, { answer: { signin: '' } }, { answer: { configDir: null } },
   ];
   for (const bad of wrong) {
-    const w = world((i, x) => { startedAt(0)(i, x); if (bad.requests) x.doc.requests = bad.requests; Object.assign(x.doc.answers['launch-S-1'], bad.answer ?? {}); }, { giveUpMs: 10_000 });
+    const w = world((i, x) => { startedAt(0)(i, x); if (bad.requests) { x.doc.requests = bad.requests; x.doc.sessions = []; } Object.assign(x.doc.answers['launch-S-1'], bad.answer ?? {}); }, { giveUpMs: 10_000 });
     const r = await w.ports.launch(LAUNCH);
     assert.equal(r.ok, false, JSON.stringify(bad)); assert.equal(r.timedOut, true, JSON.stringify(bad));
     assert.match(r.reason, /did not answer launch-S-1 within 10000 ms \(an answer the rest of its status does not bear out\)/);
