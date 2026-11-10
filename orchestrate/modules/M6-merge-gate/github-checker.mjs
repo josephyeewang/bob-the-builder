@@ -2043,7 +2043,7 @@ function guardWrite({ entity, id, actor, old, doc, createdBy }) {
   const keys = new Set([...Object.keys(old), ...Object.keys(out)]);
   // On an entity with no states (a fact), `state` is an ordinary field: a change to it alone is a change.
   const changed = [...keys].filter((k) => !(stateful && k === 'state') && !cleared.includes(k) && !same(old[k], out[k]));
-  const allowed = fieldsAllowed(entity, actor, { state: from });
+  const allowed = fieldsAllowed(entity, actor, { state: from, kind: old.kind });
   if (!allowed) return no(`${name} may not change ${entity}`);
   if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity}${id === undefined ? '' : ` ${id}`}`); }
   if (entity === 'card' && changed.includes('attempts')) { const p = attemptsProblem(name, old.attempts, out.attempts); if (p) return no(p); }
@@ -2275,6 +2275,7 @@ Object.defineProperties(__bob_e, {
   WRITERS: { get: () => WRITERS, enumerable: true },
   actorName: { get: () => actorName, enumerable: true },
   fieldsAllowed: { get: () => fieldsAllowed, enumerable: true },
+  draftFields: { get: () => draftFields, enumerable: true },
   mayCreateKind: { get: () => mayCreateKind, enumerable: true },
 });
 // permissions.mjs — who may create or change which document, and which fields (0b-2 M-1, R2-M12, R3-M2, R3-M3, R3-m5).
@@ -2286,9 +2287,11 @@ Object.defineProperties(__bob_e, {
 // Said plainly: every plain script runs as the same `orchestrate` user, so the rows between scripts catch bugs, not
 // attackers. The real boundary is between the AI roles (whose tag comes from their outbox folder) and the scripts.
 //
-//   WRITERS[entity][actorName] = { create?: fields | '*', update?: fields | '*', kinds?: [...] }
+//   WRITERS[entity][actorName] = { create?: fields | '*', update?: fields | '*', updateInDraft?: fields,
+//                                  draftKinds?: [...], kinds?: [...] }
 //   actorName is a script actor, or an AI role (the part before ':' in `role:session`).
-//   fieldsAllowed(entity, actor, { create, state }) → Set of fields, or '*' (any), or null (may not write at all)
+//   fieldsAllowed(entity, actor, { create, state, kind }) → Set of fields, or '*' (any), or null (may not write at all)
+//   draftFields(actor, kind) → the card fields this actor may change while a card of this kind is a draft (L731)
 
 
 // Fields a card is created with; never changed after create (R3-m5). Plan inputs are separate below.
@@ -2408,6 +2411,13 @@ const WRITERS = Object.freeze({
       // tab's hand-in: the writer checks each against the move.
       // attempts: only its own keys (ATTEMPTS), checked by the guard.
       update: f('claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'),
+      // done_when only while the card is a draft: the Dispatcher sets it to its rows' pass tests before the Tier-1
+      // review and the ask (L698 design b, L699, L722); the Lead's own words stay in brief.done_when.
+      updateInDraft: f('done_when'),
+      // L731 M1: and only on a kind that always needs a go, so the go is asked on the bar as it then stands. Not its own
+      // kinds: a fix card's plan never changes, and exact_reverse and research_copy reach ready with no go (ready.mjs
+      // GO_FREE), so a bar changed there would be one nobody approved. Missing draftKinds means every kind (the Lead).
+      draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
@@ -2441,15 +2451,27 @@ const WRITERS = Object.freeze({
 const actorName = (actor) => String(actor).split(':')[0];
 
 // The fields this actor may set on this write, or null when it may not write this entity this way at all.
-function fieldsAllowed(entity, actor, { create, state } = {}) {
+function fieldsAllowed(entity, actor, { create, state, kind } = {}) {
   const row = WRITERS[entity]?.[actorName(actor)];
   if (!row || !Object.hasOwn(WRITERS[entity], actorName(actor))) return null;
   const base = create ? row.create : row.update;
   if (base === undefined) return null;
   if (base === '*') return '*';
   const out = new Set(base);
-  if (!create && state === 'draft' && row.updateInDraft) for (const x of row.updateInDraft) out.add(x);
+  if (!create && state === 'draft' && entity === 'card') for (const x of draftFields(actor, kind)) out.add(x);
+  else if (!create && state === 'draft' && row.updateInDraft) for (const x of row.updateInDraft) out.add(x);
   return out;
+}
+
+// The one place a card's draft-only grant is read (L731): the field gate and the writer's plan gate both ask here, so
+// they cannot disagree on which kinds it covers. A row with draftKinds grants nothing on any other kind, nor on a card
+// whose kind is not given.
+function draftFields(actor, kind) {
+  const name = actorName(actor);
+  const row = Object.hasOwn(WRITERS.card, name) ? WRITERS.card[name] : null;
+  if (!row?.updateInDraft) return [];
+  if (row.draftKinds && !row.draftKinds.includes(kind)) return [];
+  return row.updateInDraft;
 }
 
 function mayCreateKind(actor, kind) {
@@ -2805,7 +2827,7 @@ const outboxKind = outboxKindOf;
 const SCRIPT_ACTORS = Object.freeze(['dispatcher', 'workshop', 'merge_gate', 'approvals', 'sensors', 'ledger',
   'live_check', 'joe']);
 const AI_ROLES = Object.freeze(['lead', 'worker', 'reviewer', 'auditor', 'incident', 'scout', 'writer',
-  'front_door', 'thinking', 'learning', 'script']);
+  'front_door', 'thinking', 'learning', 'script', 'plan_reviewer']);
 
 // A claim is a field on its card, set and cleared in the same write as the card's move (0b-2 R2-M6); `claim` stays
 // a diary kind only.

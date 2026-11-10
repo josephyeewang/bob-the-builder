@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
-import { renderRoleSettings, POLICY_HOOKS } from './render-settings.mjs';
+import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack } from './readback.mjs';
 import { roleEnv, checkRoleEnv, checkMachineWide } from './env-check.mjs';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
@@ -26,21 +26,21 @@ const tmp = () => realpathSync(tempDir('orch-launch-'));
 // stand-in table that marks every name confirmed on the test version.
 const N_PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
-  deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
+  deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const N_VERSION = '2.1.300';
 const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
 function NAMES(role, over = {}) {
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, `${role}: ${r.reason}`);
   const confirmed = Object.fromEntries([...namesIn(r.settings), ...N_FLAGS].map((n) => [n, { by: 'readback:stand-in', version: N_VERSION }]));
   return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, script: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -86,6 +86,8 @@ test('launch: which checks apply to which role', async () => {
   assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('auditor'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('learning'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // L760: a script card's session, on a fresh copy with the Bob folder checked, as a worker's; no shell, no install.
+  assert.deepEqual(await ran('script'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
   // A shell added to a role that had none brings check 11 with it.
   const called = [];
   const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
@@ -349,7 +351,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, notes, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, notes, deny: { proposals: ['/w/proposals'], secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };
@@ -525,9 +527,9 @@ test('intake: only a plain, single-link file of the role user, with an allowed n
 
 test('check 4: the registry is allowed for the install step only', async () => {
   const profile = DESIGN_PROFILES.worker;
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes' };
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
   const registryHosts = ['registry.example.org'];
-  const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
+  const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
   const written = [];
   const write = (s) => { written.push(s[S.sandbox][S.network][S.allowedDomains]); return { ok: true }; };
   let seenDuringInstall;
@@ -542,7 +544,7 @@ test('check 4: the registry is allowed for the install step only', async () => {
   const leaky = (phase) => { const x = render('install'); return phase === 'install' ? x : x; };
   assert.match((await installStep({ render: leaky, write: () => ({ ok: true }), install: async () => ({ ok: true }), registryHosts })).reason, /still allowed/);
   // Only a worker has an install step.
-  assert.equal(renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'lead', profile: DESIGN_PROFILES.lead, paths, phase: 'install' }).ok, false);
+  assert.equal(renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'lead', profile: DESIGN_PROFILES.lead, paths, phase: 'install' }).ok, false);
   // A card that changes the dependency files triggers an install at the next round.
   const first = needsInstall({ lastInstalledHash: null, files: [['package-lock.json', 'a']] });
   assert.equal(first.needed, true);
@@ -557,9 +559,20 @@ test('check 13: the Bob folder matches the pin, holds no skill, and is read-only
   const bob = join(d, 'bob'); mkdirSync(join(bob, 'modes'), { recursive: true });
   writeFileSync(join(bob, 'rules.md'), 'r'); writeFileSync(join(bob, 'modes', 'audit.md'), 'a');
   const manifest = { 'rules.md': sha256(Buffer.from('r')), [join('modes', 'audit.md')]: sha256(Buffer.from('a')) };
-  const abs = bob.replace(/^\/+/, '');
-  const settings = { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } };
+  // L750: the Lead's and a worker's real rendered settings, passed through check 13 as they are, not a hand-built form.
+  const real = (role) => {
+    const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role],
+      paths: { ...N_PATHS, bobFolder: bob, deny: { ...N_PATHS.deny, proposals: ['/w/proposals'] } }, product: { commands: { test: 'npm test' } } });
+    assert.equal(r.ok, true, `${role}: ${r.reason}`);
+    return r.settings;
+  };
+  const settings = real('lead');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings }).ok, true);
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: real('worker') }).ok, true, 'worker');
+  // The one-slash form render-settings never writes is not taken for it, and neither is half the pair.
+  const abs = bob.replace(/^\/+/, '');
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } } }).ok, false, 'one slash');
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: { [S.deny]: settings[S.permissions][S.deny].filter((r) => !r.startsWith('Write(')) } } }).ok, false, 'no Write rule');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings: {} }).ok, false, 'not read-only');
   assert.equal(checkBobFolder({ folder: join(d, 'none'), manifest, settings }).ok, false, 'missing');
   assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).ok, false, 'no pin');
@@ -640,8 +653,8 @@ test('check 7: a missing hook folder, no outbox kinds, a hook that is not a comm
 });
 
 test('check 4: a role file that will not write, before or after the install, refuses with its own reason', async () => {
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes' };
-  const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
+  const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
   const failOn = (n) => { let i = 0; return () => (++i === n ? { ok: false, reason: 'disk full' } : { ok: true }); };
   let ran = false;
   const install = async () => { ran = true; return { ok: true }; };
@@ -655,8 +668,8 @@ test('check 13: each Bob folder refusal gives its own reason', () => {
   const bob = join(d, 'bob'); mkdirSync(bob);
   writeFileSync(join(bob, 'rules.md'), 'r');
   const manifest = { 'rules.md': sha256(Buffer.from('r')) };
-  const abs = bob.replace(/^\/+/, '');
-  const settings = { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } };
+  // The shared rules (L750), for the tools and the shell (L763).
+  const settings = { [S.permissions]: { [S.deny]: bobFolderDeny(bob) }, [S.sandbox]: { [S.filesystem]: { [S.denyWrite]: bobFolderShell(bob) } } };
   const file = join(d, 'a-file'); writeFileSync(file, 'x');
   assert.equal(checkBobFolder({ folder: file, manifest, settings }).reason, 'the Bob folder is not a plain folder');
   assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).reason, 'no pinned Bob file list');
@@ -666,6 +679,16 @@ test('check 13: each Bob folder refusal gives its own reason', () => {
   assert.equal(plant('skills/a.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a skills folder (skills/a.md)');
   assert.equal(plant('extra.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a file the pin does not (extra.md)');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings }).ok, true);
+  // L763: every rule is needed, for the tools and for the shell; drop any one and check 13 refuses.
+  for (const r of bobFolderDeny(bob)) {
+    const s = structuredClone(settings); s[S.permissions][S.deny] = s[S.permissions][S.deny].filter((x) => x !== r);
+    assert.equal(checkBobFolder({ folder: bob, manifest, settings: s }).reason, 'the Bob folder is not attached read-only', r);
+  }
+  for (const r of bobFolderShell(bob)) {
+    const s = structuredClone(settings); s[S.sandbox][S.filesystem][S.denyWrite] = s[S.sandbox][S.filesystem][S.denyWrite].filter((x) => x !== r);
+    assert.equal(checkBobFolder({ folder: bob, manifest, settings: s }).reason, 'the Bob folder is not walled off from the shell\'s writes', r);
+  }
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: settings[S.permissions] } }).reason, 'the Bob folder is not walled off from the shell\'s writes', 'no sandbox at all');
 });
 
 test('check 11: a smoke or baseline run that does not finish refuses with its own reason', async () => {
