@@ -226,6 +226,14 @@ test('L731 M1: --for-install builds the file a first install takes; the plain fi
     assert.equal(first.code, 0, first.err.join('\n'));
     assert.match(first.out.join('\n'), /checked whole, then written without claudeBin and hooksDir/);
     assert.match(first.out.join('\n'), /Then: install\. After it, run review-config again without --for-install/);
+    // L783 (#291 audit m1): the dry run of the first-install file checks the whole file and prints the short one.
+    const dryOut = join(w.base, 'out', 'first-dry.json');
+    const dry = w.run({ forInstall: true, dry: true, outFile: dryOut });
+    assert.equal(dry.code, 0, dry.err.join('\n'));
+    const shown = JSON.parse(dry.out.slice(0, -1).join('\n'));
+    for (const k of INSTALL_LATER) assert.equal(Object.hasOwn(shown, k), false, `the dry run shows the short file: ${k}`);
+    assert.match(dry.out.at(-1), /dry run: nothing written\. .*claudeBin and hooksDir/);
+    assert.equal(existsSync(dryOut), false, 'and writes nothing');
     const a = JSON.parse(full.text); const b = JSON.parse(first.text);
     assert.deepEqual(INSTALL_LATER, ['claudeBin', 'hooksDir']);
     for (const k of INSTALL_LATER) assert.equal(Object.hasOwn(b, k), false, k);
