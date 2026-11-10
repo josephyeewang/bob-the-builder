@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
@@ -54,7 +54,7 @@ function mirrorWorld() {
   writeFileSync(join(mirror, 'config'), MIRROR_CONFIG_TEMPLATE);
   chmodSync(mirror, 0o755);
   // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 1 };
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
 }
@@ -77,7 +77,7 @@ test('C (L739): the mirror is checked at start: missing, a link, another user\'s
   assert.throws(start({ mirror: join(w.base, 'nope') }), /the product's mirror \(mirror\) .*nope can't be read \(ENOENT\)/);
   symlinkSync(w.mirror, join(w.base, 'link'));
   assert.throws(start({ mirror: join(w.base, 'link') }), /is not a plain folder/);
-  assert.throws(() => workerPorts({ ...w.ctx, ownerUid: ME, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
   chmodSync(w.mirror, 0o775);
   assert.throws(start({}), /can be written by others \(mode 775\)/);
   chmodSync(w.mirror, 0o755);
@@ -226,7 +226,7 @@ test('C (L739): hostLock answers the text, null only when no file is there, and 
   assert.throws(() => hostLockPort({ path, run: () => ({ ok: false, why: 'timed out after 10000 ms' }), ownerUid: ME, selfUid: ME + 1 })(), /host\.lock .* can't be read \(timed out after 10000 ms\)/);
   assert.throws(() => hostLockPort({ path, run: () => ({ ok: true, stdout: '' }), ownerUid: ME, selfUid: ME + 1 })(), /said nothing it could parse/);
   assert.throws(() => hostLockPort({ path, run, ownerUid: ME })(), /no Dispatcher uid/);
-  assert.throws(() => hostLockPort({ path, run, selfUid: ME + 1 })(), /hostLockUid \(the owner's Mac user id\) must be a Mac user id/);
+  assert.throws(() => hostLockPort({ path, run, selfUid: ME + 1 })(), /hostLockUid \(the owner's Mac user id, host\.lock's owner\) must be a Mac user id/);
 });
 
 test('C (L739, self-review M1, L763): hostLock reads only a file of the owner\'s, never the Dispatcher\'s own or a hard link', () => {
@@ -237,8 +237,15 @@ test('C (L739, self-review M1, L763): hostLock reads only a file of the owner\'s
   // A file of the Dispatcher's own in host.lock's place: here the test user is the Dispatcher, and the owner is another.
   writeFileSync(path, 'mini\n');
   assert.throws(() => workerPorts(w.ctx).hostLock(), /is not the owner's file \(its owner is uid \d+, not \d+\)/, 'through workerPorts, checked against hostLockUid');
-  // A config naming the Dispatcher's own user as host.lock's owner, or none, stops the start.
+  // A config naming the Dispatcher's own user, root or the review user as host.lock's owner, or none, stops the start.
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME } }), /hostLockUid is the Dispatcher's own user/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: 0 } }), /hostLockUid is root/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 7, reviewUid: ME + 7 } }), /hostLockUid is the review user/);
+  assert.throws(() => hostLockPort({ path, run, ownerUid: 0, selfUid: ME })(), /hostLockUid is root/);
+  // The checks come first: a bad owner stops the start before the seal folder is made.
+  rmSync(w.config.sealRoot, { recursive: true, force: true });
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME } }), /hostLockUid/);
+  assert.equal(existsSync(w.config.sealRoot), false, 'nothing was made before the refusal');
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: undefined } }), /hostLockUid .* must be a Mac user id/);
   assert.throws(() => hostLockPort({ path, run, ownerUid: ME, selfUid: ME })(), /hostLockUid is the Dispatcher's own user/);
   rmSync(path);
@@ -260,7 +267,8 @@ test('C (L763 r1 M1): a link in the folders above host.lock never reads another 
   const w = mirrorWorld();
   // The owner can write host.lock's folder, so they can make it a link to a folder of someone else's files: lstat of the
   // name shows a plain file with one name, so only its owner tells it apart.
-  symlinkSync('/private/etc', join(w.base, 'etc-link'));
+  // /private/etc on a Mac, /etc elsewhere (the Linux CI job): root's either way, and /etc/shells is in both.
+  symlinkSync(existsSync('/private/etc/shells') ? '/private/etc' : '/etc', join(w.base, 'etc-link'));
   assert.throws(() => hostLockPort({ path: join(w.base, 'etc-link', 'shells'), run, ownerUid: ME, selfUid: ME + 1 })(), /is not the owner's file \(its owner is uid 0, not \d+\)/,
     'planted: a reader without the owner check reads root\'s file here');
 });
@@ -277,7 +285,8 @@ test('C (L763 r1 M1): a hard link made and removed between the open and the chec
   try {
     const port = hostLockPort({ path, run, ownerUid: ME, selfUid: ME + 1 });
     const seen = { text: 0, refused: 0, none: 0 };
-    for (let i = 0; i < 120; i++) {
+    // At least 120 reads, and on until one has seen the link (at most 600): a busy machine may be slow to make it.
+    for (let i = 0; i < 600 && (i < 120 || seen.refused === 0); i++) {
       let got; try { got = port(); } catch { seen.refused++; continue; }
       if (got === null) seen.none++; else seen.text++;
     }
