@@ -27,6 +27,7 @@ import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { machineId, onThisMachine, processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
+import { PRODUCT, productRoleClash } from '../../shared/product-paths.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 const MIN = 60000;
@@ -65,7 +66,9 @@ export function grantedDoneWhenProblem(doc) {
 
 export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
   machine = machineId(), probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
-  if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
+  // The product name is the one rule setup makes folders by (shared/product-paths.mjs PRODUCT, L890): a Record opened for a
+  // name setup can't make (`My.App`) or a role's (`lead`) would have no front door, and every file handed in would be refused.
+  if (typeof product !== 'string' || !PRODUCT.test(product) || productRoleClash(product)) throw new Error('the record needs its product name: lower case letters, digits and -, and not an AI role');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
   const get = (key) => rules.get(key, { product });
@@ -532,6 +535,9 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   }
 
   function applyOutbox(tag, file) {
+    // A worker runner session's tag names its product (L836): this Record takes only its own product's hand-ins, so
+    // another product's outbox (client work) is never read from here (L850-2).
+    if (tag?.product != null && tag.product !== product) return no(`this record is product ${product}'s, and the outbox is product ${tag.product}'s`);
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
     // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
     if (isNotARecord(f)) return notARecord(f.kind);
