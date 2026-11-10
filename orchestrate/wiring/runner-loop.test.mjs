@@ -21,7 +21,7 @@ function world() {
   w.gone = new Set();
   w.ports = {
     start: async (x) => { w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 7000 + w.n, pidStart: 's', pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
+      return { ok: true, pid: 7000 + w.n, pidStart: 's', pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid), stopGroup: async (s) => { w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => true,
   };
@@ -269,7 +269,7 @@ test('#358 r1 M1 through the loop: each write carries the clock at that write', 
 
 test('#364 self-review M1: a start still on when the stop comes is waited for and settled by a last tick that reads no request', async () => {
   const w = world(); let n = 0; let release;
-  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, pid: 7001, pidStart: 's', pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }); });
+  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, pid: 7001, pidStart: 's', pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }); });
   w.ask(...launch('S-1'));
   const state = await runRunner({ ...w.ctx({ portMs: 30 }), stopWhen: () => n >= 1, sleep: async () => { w.ask(...launch('S-2')); setTimeout(() => release(), 50); n += 1; } });
   assert.deepEqual(state.sessions.map((s) => s.id), ['S-1']);

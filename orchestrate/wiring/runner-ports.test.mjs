@@ -89,8 +89,10 @@ test('step 5: spawnLeader starts its own process group with a start time; one wh
 function world(over = {}) {
   const d = tempDir('orch-rports-');
   const w = { d, copiesRoot: join(d, 'copies'), outboxRoot: join(d, 'outboxes'), settingsDir: join(d, 'runner', 'settings'), calls: [] };
-  for (const f of [w.copiesRoot, join(w.outboxRoot, 'worker'), join(w.outboxRoot, 'script'), w.settingsDir]) mkdirSync(f, { recursive: true });
-  mkdirSync(join(w.copiesRoot, 'C-9'));
+  // As setup makes them (L836): a copies folder and an outbox folder per product, and the role folders in it.
+  w.mine = { copies: join(w.copiesRoot, 'p1'), outboxes: join(w.outboxRoot, 'p1') };
+  for (const f of [w.mine.copies, join(w.mine.outboxes, 'worker'), join(w.mine.outboxes, 'script'), w.settingsDir]) mkdirSync(f, { recursive: true });
+  mkdirSync(join(w.mine.copies, 'C-9'));
   w.c = { copiesRoot: w.copiesRoot, outboxRoot: w.outboxRoot, settingsDir: w.settingsDir, home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: '/bin/sleep',
     workerRunner: { requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json') },
     products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { hooksDir: '/h', deny: { secrets: ['/s'] } }, product: { hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/prop'] } } } };
@@ -108,7 +110,7 @@ function world(over = {}) {
     ...over,
   };
   w.start = (x = {}) => startPort(w.c, w.deps)({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: SID, ...x });
-  w.left = () => ({ copy: existsSync(join(w.copiesRoot, 'C-1')), outbox: existsSync(join(w.outboxRoot, 'worker', SID)), settings: existsSync(join(w.settingsDir, `${SID}.json`)) });
+  w.left = () => ({ copy: existsSync(join(w.mine.copies, 'C-1')), outbox: existsSync(join(w.mine.outboxes, 'worker', SID)), settings: existsSync(join(w.settingsDir, `${SID}.json`)) });
   return w;
 }
 
@@ -116,20 +118,20 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
   const w = world();
   try {
     const a = await w.start();
-    assert.deepEqual(a, { ok: true, pid: 4242, pgid: 4242, pidStart: 'Tue Nov 10 12:00:00 2026', head: HEAD, base: HEAD, outbox: join(w.outboxRoot, 'worker', SID),
-      signin: 'a', configDir: join(w.d, 'home', '.claude'), copy: join(w.copiesRoot, 'C-1') });
+    assert.deepEqual(a, { ok: true, pid: 4242, pgid: 4242, pidStart: 'Tue Nov 10 12:00:00 2026', head: HEAD, base: HEAD, outbox: join(w.mine.outboxes, 'worker', SID),
+      signin: 'a', configDir: join(w.d, 'home', '.claude'), copy: join(w.mine.copies, 'C-1') });
     const prep = w.calls.find((c) => c[0] === 'prepare')[1];
     assert.deepEqual(prep.card, { id: 'C-1', repo: 'o/p1', commit: HEAD, branch: 'card/c-1' });
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
-    assert.equal(wl.paths.copy, join(w.copiesRoot, 'C-1')); assert.equal(wl.paths.outbox, join(w.outboxRoot, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.copiesRoot, 'C-9')] }, 'every other card\'s copy is denied');
+    assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9')] }, 'every other card\'s copy of this product is denied');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
-    assert.equal(statSync(join(w.outboxRoot, 'worker', SID)).mode & 0o077, 0);
+    assert.equal(statSync(join(w.mine.outboxes, 'worker', SID)).mode & 0o077, 0);
     const sp = w.calls.find((c) => c[0] === 'spawn');
-    assert.equal(sp[1], '/bin/sleep'); assert.equal(sp[3].cwd, join(w.copiesRoot, 'C-1')); assert.equal(sp[3].detached, true);
+    assert.equal(sp[1], '/bin/sleep'); assert.equal(sp[3].cwd, join(w.mine.copies, 'C-1')); assert.equal(sp[3].detached, true);
     assert.ok(sp[2].includes(f) && sp[2].includes(SID) && sp[2].at(-1) === 'do the card');
     assert.equal(sp[3].env.HOME, w.c.home); assert.equal(sp[3].env.PATH, '/usr/bin:/bin');
     // Launch check 0 is given the very flags claude is started with (#364 self-review m5).
@@ -143,7 +145,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const b = await startPort(w.c, { ...w.deps, prepare: (x) => import('../modules/M4-workshop/launcher/worker-copy.mjs').then((m) => m.prepareWorkerCopy(x)) })({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: SID2 });
     assert.equal(b.ok, false); assert.match(b.reason, /already exists/);
     assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true });
-    assert.equal(existsSync(join(w.outboxRoot, 'worker', SID2)), false);
+    assert.equal(existsSync(join(w.mine.outboxes, 'worker', SID2)), false);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
@@ -151,7 +153,7 @@ test('step 5: a script card gets the script outbox', async () => {
   const w = world();
   try {
     const a = await w.start({ kind: 'script' });
-    assert.equal(a.ok, true, a.reason); assert.equal(a.outbox, join(w.outboxRoot, 'script', SID));
+    assert.equal(a.ok, true, a.reason); assert.equal(a.outbox, join(w.mine.outboxes, 'script', SID));
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
@@ -194,7 +196,7 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
       const a = await w.start();
       assert.equal(a.ok, false, what); assert.match(a.reason, re, what);
       assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false }, `${what}: what the start made is removed`);
-      assert.ok(existsSync(join(w.copiesRoot, 'C-9')), `${what}: another card's copy is left alone`);
+      assert.ok(existsSync(join(w.mine.copies, 'C-9')), `${what}: another card's copy is left alone`);
     } finally { rmSync(w.d, { recursive: true, force: true }); }
   }
 });
@@ -308,13 +310,16 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
   w.c.products.p1.render = render('p1');
   w.c.products.p2 = { repo: 'o/p2', mirror: join(w.d, 'mirror-p2'), render: render('p2') };
-  mkdirSync(join(w.copiesRoot, 'C-7'));   // p2's card, made before this start
+  const theirs = { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') };
+  for (const f of [join(theirs.copies, 'C-7'), join(theirs.outboxes, 'worker'), join(theirs.outboxes, 'script')]) mkdirSync(f, { recursive: true });   // p2's card, made before this start
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
     const denyRead = got.settings[S.sandbox][S.filesystem][S.denyRead];
-    for (const p of [w.c.products.p2.mirror, join(w.copiesRoot, 'C-7'), join(w.copiesRoot, 'C-9'), '/w/record', '/h/.ssh', '/w/keys']) assert.ok(denyRead.includes(p), `${p} is denied`);
-    assert.equal(denyRead.includes(join(w.copiesRoot, 'C-1')), false, 'its own copy is not denied');
+    for (const p of [w.c.products.p2.mirror, theirs.copies, theirs.outboxes, join(w.mine.copies, 'C-9'), '/w/record', '/h/.ssh', '/w/keys']) assert.ok(denyRead.includes(p), `${p} is denied`);
+    assert.equal(denyRead.includes(join(theirs.copies, 'C-7')), false, 'p2\'s whole copies folder is denied, not its copies one by one');
+    for (const p of [w.mine.copies, w.mine.outboxes, w.copiesRoot, w.outboxRoot]) assert.equal(denyRead.includes(p), false, `${p} is not denied whole`);
+    assert.equal(denyRead.includes(join(w.mine.copies, 'C-1')), false, 'its own copy is not denied');
     assert.equal(denyRead.includes(w.c.products.p1.mirror), false, 'its own product\'s mirror is not denied');
     // And the other way: a p2 session denies p1's mirror.
     const SID2 = SID.replace('0f', '2f');
@@ -322,7 +327,9 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
     const b = await startPort(w.c, w.deps)({ card: 'C-2', kind: 'editing', product: 'p2', sessionId: SID2 });
     assert.equal(b.ok, true, b.reason);
     const dr2 = got.settings[S.sandbox][S.filesystem][S.denyRead];
-    assert.ok(dr2.includes(w.c.products.p1.mirror) && dr2.includes(join(w.copiesRoot, 'C-1')) && !dr2.includes(join(w.copiesRoot, 'C-2')));
+    assert.equal(b.copy, join(theirs.copies, 'C-2')); assert.equal(b.outbox, join(theirs.outboxes, 'worker', SID2));
+    assert.ok(dr2.includes(w.c.products.p1.mirror) && dr2.includes(w.mine.copies) && dr2.includes(w.mine.outboxes) && !dr2.includes(join(theirs.copies, 'C-2')));
+    assert.ok(!dr2.includes(theirs.copies) && !dr2.includes(theirs.outboxes), 'its own product\'s folders are not denied');
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });
 
@@ -351,4 +358,22 @@ test('#364 r2 c-b: a group is gone only on ESRCH; EPERM (there, not ours to sign
   assert.equal(groupThere(4243, () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }), false);
   assert.equal(groupThere(4243, () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }), true);
   assert.equal(groupThere(4243, () => { throw new Error('odd'); }), true);
+});
+
+test('L836: a product named as a role is refused before anything is made; a product with no copies folder yet makes nothing', async () => {
+  const w = world();
+  try {
+    w.c.products.Worker = w.c.products.p1; w.card.product = 'Worker';
+    const a = await w.start({ product: 'Worker' });
+    assert.equal(a.ok, false); assert.match(a.reason, /named as a role/);
+    assert.equal(existsSync(join(w.copiesRoot, 'Worker')), false); assert.equal(existsSync(join(w.outboxRoot, 'Worker')), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const v = world();
+  try {
+    v.c.products.p3 = v.c.products.p1; v.card.product = 'p3';
+    const a = await v.start({ product: 'p3' });
+    assert.equal(a.ok, false, 'setup has made no folders for p3'); assert.match(a.reason, /setup has made no folder/);
+    assert.equal(existsSync(join(v.copiesRoot, 'p3')), false, 'the start never makes a product folder');
+    assert.equal(existsSync(join(v.outboxRoot, 'p3')), false);
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
 });

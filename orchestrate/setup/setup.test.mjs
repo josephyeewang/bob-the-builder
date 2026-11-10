@@ -836,3 +836,24 @@ test('the CLI file runs: --help-less call with no args prints usage and exits 2'
 
 import { realpathSync } from 'node:fs';
 function realpathOf(p) { return realpathSync(p); }
+
+test('L836: each product has its own worker copies folder and outbox folder, made as the folders above them', async () => {
+  const { COPIES_CLEANUP_ACL, PRODUCT_OUTBOX_ROLES, outboxRootPath, workerCopiesPath } = await import('./layout.mjs');
+  const { RUNNER_ROLE_OF, runnerPlaces } = await import('../wiring/owner-status.mjs');
+  assert.deepEqual([...PRODUCT_OUTBOX_ROLES].sort(), [...new Set(Object.values(RUNNER_ROLE_OF))].sort(), 'the roles the worker runner starts');
+  const t = folderTable(cfg);
+  const row = (p) => t.find((r) => r.path === p);
+  const shape = (r) => r && [r.owner, r.mode, JSON.stringify(r.acl)];
+  for (const prod of cfg.products) {
+    const places = runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod });
+    assert.deepEqual(shape(row(places.copies)), ['owner', 0o755, JSON.stringify([COPIES_CLEANUP_ACL])], `${prod} copies`);
+    assert.deepEqual(shape(row(places.copies)), shape(row(workerCopiesPath(cfg))), `${prod} copies as the copies folder`);
+    assert.deepEqual(shape(row(places.outboxes)), shape(row(outboxRootPath(cfg))), `${prod} outboxes as the outbox root`);
+    for (const r of PRODUCT_OUTBOX_ROLES) {
+      assert.deepEqual(shape(row(join(places.outboxes, r))), shape(row(join(outboxRootPath(cfg), r))), `${prod} ${r} as the ${r} folder`);
+      assert.deepEqual(shape(row(join(places.outboxes, r))), ['owner', 0o750, JSON.stringify([ORCHESTRATE_READ_ACL])], `${prod} ${r}`);
+    }
+  }
+  // A product named as a role would share that role's outbox folder.
+  for (const r of ['worker', 'script', 'lead']) assert.throws(() => parseConfig({ ...RAW, products: ['alpha', r] }), /may not be named as a role/, r);
+});

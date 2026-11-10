@@ -248,7 +248,7 @@ export async function workerRunnerPass(ctx) {
       pid: a.pid, pid_start: a.pidStart, head: a.head, base: a.base, copy: a.copy, started_at: now };
     let wrong = null;
     try { checkSession(project(s), { uid, outboxRoot, realpath }); } catch (e) { wrong = e.message; }
-    if (!wrong) wrong = launchAnswerWrong(a, { sessionId: id, kind: l.kind, card: l.card, outboxRoot, copiesRoot });
+    if (!wrong) wrong = launchAnswerWrong(a, { sessionId: id, kind: l.kind, card: l.card, product: l.product, outboxRoot, copiesRoot });
     // The runner tells a reused process group number from its own only by the leader's start time (step-4 review M3).
     if (!wrong && !(a.pid === a.pgid && typeof a.pidStart === 'string' && a.pidStart)) wrong = `session ${id}'s start named no group leader with a start time`;
     if (!wrong) {

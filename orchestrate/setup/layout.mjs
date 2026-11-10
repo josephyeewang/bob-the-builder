@@ -57,6 +57,10 @@ export function parseConfig(raw) {
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
   }
+  // A product's outbox folder sits beside the role folders (L836), so no product may be named as a role.
+  if (products.some((p) => AI_ROLES.includes(p))) {
+    throw new Error('config: a product may not be named as a role (its outbox folder would be that role\'s)');
+  }
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
   }
@@ -157,6 +161,8 @@ export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
  * outbox is review's; were it the workers' user's, a worker could write that role's answer.
  */
 export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
+/** The roles the worker runner starts, whose outboxes sit in a folder per product (L836; wiring/owner-status.mjs RUNNER_ROLE_OF). */
+export const PRODUCT_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
@@ -216,6 +222,14 @@ export function folderTable(cfg) {
     ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
+    // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
+    // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the
+    // role folders above (the runner starts worker and script sessions).
+    ...cfg.products.flatMap((prod) => [
+      [join(workerCopiesPath(cfg), prod), 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
+      [join(outboxRootPath(cfg), prod), 'root', 0o755, `${prod}: its worker runner outboxes, one folder per role`],
+      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), prod, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
+    ]),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
       [p('products', prod), 'root', 0o755, `${prod}: its folders`],

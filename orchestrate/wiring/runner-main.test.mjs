@@ -158,3 +158,10 @@ test('#364 r2 n1, n4: deny entries and the config\'s own paths must be spelled a
     assert.throws(() => checkRunnerConfig(config('/x', { products: { p1: { repo: 'o/p1', mirror: v, render: { paths: { deny: DENY('/x') } } } } })), /mirror must be a full path in its simplest form/, `mirror ${v}`);
   }
 });
+
+test('L836: a product named as a role, or two products one letter case apart, would share a folder, so the config is refused', () => {
+  const p = (n) => ({ repo: `o/${n}`, mirror: `/x/${n}`, render: { paths: { deny: DENY('/x') } } });
+  for (const n of ['worker', 'Script', 'lead']) assert.throws(() => checkRunnerConfig(config('/x', { products: { [n]: p('a') } })), /named as a role/, n);
+  assert.throws(() => checkRunnerConfig(config('/x', { products: { Alpha: p('a'), alpha: p('b') } })), /same but for letter case/);
+  assert.doesNotThrow(() => checkRunnerConfig(config('/x', { products: { alpha: p('a'), beta: p('b') } })));
+});
