@@ -31,7 +31,8 @@ export function countApproval(s) {
 }
 
 export function env({ values = {}, answers = {} } = {}) {
-  const e = setup({ prefix: 'm2-' });
+  // The Record's own rules get the test's values too, so a go-free kind a test turns on is go-free at the ready move.
+  const e = setup({ prefix: 'm2-', values });
   const rules = fakeRules({ values: { timeouts: fullTimeouts(), ...CONFIG, ...values }, answers: { count_approval: countApproval, ...answers } });
   const alerts = [];
   const copies = makeTranscriptCopies({ root: join(e.base, 'copies') });
