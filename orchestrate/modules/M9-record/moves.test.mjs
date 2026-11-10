@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { FINAL_STATES, SCRIPT_ACTORS, STATES, timeoutFor } from '../../shared/record.mjs';
 import { readFileSync } from 'node:fs';
 import { parsePolicy } from '../M10-rules/policy.mjs';
-import { INTERNAL_MOVES, MOVES, moveActors } from './moves.mjs';
+import { CREATE_STATES, INTERNAL_MOVES, MOVES, moveActors } from './moves.mjs';
 import { HEAD, PRODUCT, fullTimeouts, iso, passingVerdict, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
@@ -189,4 +189,18 @@ test('every legal move succeeds for each listed actor when its condition holds',
     }
   }
   assert.ok(passed > 80, `${passed} legal moves`);
+});
+
+// #383 m1: the AI roles are skipped in the state-pair matrix above, so this pins every move that names one. A script
+// and a worker each hand in through their own outbox and move nothing else (L838): one grant more, made in both
+// tables, would otherwise pass every test. Nothing creates a document as either.
+test('#383 m1: worker and script name exactly one move each, card running → in_review, and create nothing', () => {
+  for (const role of ['script', 'worker']) {
+    const named = [];
+    for (const entity of Object.keys(STATES)) for (const from of STATES[entity]) for (const to of STATES[entity]) {
+      if ((moveActors(entity, from, to) ?? []).includes(role)) named.push([entity, from, to]);
+    }
+    assert.deepEqual(named, [['card', 'running', 'in_review']], role);
+    for (const [entity, by] of Object.entries(CREATE_STATES)) for (const [state, actors] of Object.entries(by)) assert.ok(!actors.includes(role), `${role} creates ${entity} ${state}`);
+  }
 });

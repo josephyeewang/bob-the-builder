@@ -206,19 +206,42 @@ export function disjoint({ rules, card, product, others, rec }) {
   return { ok: true };
 }
 
+// L875 m2: what is wrong with an undo card's id for check12, or null (see check12 below).
+function undoIdProblem(rec, card) {
+  if (typeof card.id !== 'string' || !card.id.trim()) {
+    return 'the undo\'s card names no id, so its own claim can\'t be told from another undo (pass { id, ...doc })';
+  }
+  // L882 c1: its own reason, so a caller's padding is told as that.
+  if (card.id.trim() !== card.id) return `the undo's card id ${JSON.stringify(card.id)} has spaces around it`;
+  let held;
+  try { held = rec.read('card', card.id); } catch { held = null; }
+  const doc = held && !held.corrupt ? held.doc : null;
+  const sameSource = JSON.stringify(doc?.source ?? null) === JSON.stringify(card.source ?? null);
+  if (doc && doc.kind === card.kind && doc.product === card.product && sameSource) return null;
+  return `the undo's card id ${card.id} names no card of its kind, product and source in the Record, `
+    + 'so its own claim can\'t be told from another undo';
+}
+
 /**
  * M4's launch check 12, as a port: the same answer the pass got (L852, #369 m3). Reviewers and auditors
- * (review-launch.mjs GATE_KIND) never start an undo, but the worker runner (wiring/runner-checks.mjs) asks it for editing,
- * undo and script sessions. For an undo the pass asks undo.mjs exactReverse first and hands its answer to startGate, so
+ * (review-launch.mjs GATE_KIND) never start an undo, but the worker runner's `checksFor` (wiring/runner-ports.mjs
+ * step 5; lane 4's, not built yet; L882 c4) is to ask it for editing, undo and script sessions. For an undo the pass asks undo.mjs exactReverse first and hands its answer to startGate, so
  * this port asks the same check, with the same `filesOf` (the files a merge commit changed), and refuses as the pass
  * does an undo that is not an exact reverse: given no `filesOf`, every undo is refused (the caller must pass the pass's
  * own). undo.mjs is loaded only when an undo asks: it imports the pass, which imports this file.
+ * `ctx.card` must carry its `id` ({ id, ...doc }; L863 m1): at launch the undo's own card is already claimed, and
+ * startGate tells it from another undo only by that id, so an undo with none is refused, never counted as running. The
+ * id must name the Record's own card of that kind, product and source (L875 m2): a blank one, or another card's, would
+ * still count the undo's own claim as another undo.
  */
 export function check12({ rules, rec, bandsNow, runningNow, filesOf }) {
   return async (ctx) => {
     let exact = false;
     if (ctx.kind === 'undo') {
+      const idWrong = ctx.card ? undoIdProblem(rec, ctx.card) : null;
+      if (idWrong) return refuse(idWrong);
       let e;
+      // No card: M4's port 12 refuses first (review-launch.mjs), so this is defence for another caller (L863 c3).
       try { e = ctx.card ? (await import('./undo.mjs')).exactReverse({ rec, card: ctx.card, filesOf }) : { ok: false, reason: 'it has no card' }; }
       catch (err) { e = { ok: false, reason: `the check could not be made (${err?.message ?? err})` }; }
       if (e?.ok !== true) return refuse(`it is not an exact reverse: ${e?.reason ?? 'no answer'}`);
