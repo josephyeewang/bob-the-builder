@@ -416,3 +416,26 @@ test('#364 r1 m3, m2: a start answered as running stays waiting with its claim; 
   assert.equal(r2.state.sessions[0].base, B);
   assert.equal(JSON.stringify(answers.at(-1)).includes(B), true, 'the answer names base');
 });
+
+test('#364 r2 n2: a start answered as running keeps its process group in the waiting row and every note; a stop asked for it names the group and signals nothing', { timeout: 10_000 }, async () => {   // L842: a stop that falls through to a signal fails, never hangs
+  const notes = []; const stops = [];
+  const mk = (start, now) => ({ uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, pending: new Map(), realpath: (p) => p, keep: () => {}, now,
+    ports: { start, groupGone: async () => false, stopGroup: async (s) => { stops.push(s); return { ok: true }; }, saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => false },
+    write: () => {}, note: (t) => notes.push(t) });
+  const req = [{ name: 'launch-S-1.json', body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' }, asked_at: new Date(T0).toISOString() } }];
+  const r = await workerRunnerPass({ ...mk(async () => ({ ok: false, running: true, pgid: 4001, reason: 'may run' }), T0), state: {}, requests: req });
+  const row = r.state.requests['S-1'];
+  assert.equal(row.state, 'waiting'); assert.equal(row.running, true); assert.equal(row.pgid, 4001); assert.equal(row.card, 'C-1');
+  assert.match(notes.join('\n'), /S-1 may have left claude running in process group 4001 \(may run\)/);
+  // A later pass (a new runner: nothing held) names the group, not "was on when the runner last stopped".
+  notes.length = 0;
+  const later = await workerRunnerPass({ ...mk(async () => { throw new Error('not again'); }, T0 + RUNNER_NOTE_EVERY_MS + 1), state: structuredClone(r.state), requests: [] });
+  assert.match(notes.join('\n'), /S-1 may have left claude running in process group 4001; it stays waiting/);
+  assert.doesNotMatch(notes.join('\n'), /was on when the runner last stopped/);
+  // A stop asked for it: the group is named, nothing is signalled, the claim stays.
+  notes.length = 0;
+  const st = await workerRunnerPass({ ...mk(async () => { throw new Error('not again'); }, T0 + 1000), state: structuredClone(later.state), requests: [{ name: 'stop-S-1.json', body: { stop: 'S-1' } }] });
+  assert.deepEqual(stops, []);
+  assert.equal(st.state.requests['S-1'].state, 'waiting'); assert.equal(st.state.requests['S-1'].pgid, 4001);
+  assert.match(notes.join('\n'), /a stop was asked for S-1, but its start may have left claude running in process group 4001.*not signalled/);
+});

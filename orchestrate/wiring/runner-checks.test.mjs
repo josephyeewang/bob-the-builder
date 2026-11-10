@@ -138,6 +138,6 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
-  assert.throws(() => checkRunnerConfig({ ...base, machineWide: 'mw' }), /machineWide/);
+  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w']) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), /machineWide must be a full path in its simplest form/, machineWide);   // the #364 r2 n4 class
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
 });
