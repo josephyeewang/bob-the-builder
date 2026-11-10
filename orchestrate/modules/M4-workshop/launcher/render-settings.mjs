@@ -14,6 +14,10 @@ import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
 
+// Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
+// case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
+export const apart = (a, b) => { const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
+
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
 // and the Write and Edit tools none but the outbox (where the verdict is written, through Write, which the hooks judge).
@@ -164,7 +168,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     const w = runnerWallDirs(paths.workerRunner);
     if (!w.ok) return w;
     const own = [paths.outbox, paths.copy, paths.notes, paths.hooksDir, paths.snapshot, paths.node, paths.bobFolder].filter((x) => typeof x === 'string');
-    if (w.dirs.some((dir) => own.some((x) => inside(x, dir) || inside(dir, x)))) return refuse('the worker runner\'s folders must be apart from the session\'s own folders (outbox, copy, notes, hooks, rules, node, Bob)');
+    if (w.dirs.some((dir) => own.some((x) => !apart(x, dir)))) return refuse('the worker runner\'s folders must be apart from the session\'s own folders (outbox, copy, notes, hooks, rules, node, Bob)');
     runnerDirs = w.dirs;
   }
   const denyPaths = [...(d.secrets ?? []), d.claudeHome, d.ssh, d.gh, d.robotKeys, d.record, ...(d.otherCopies ?? []), ...(d.proposals ?? [])].filter(Boolean);
@@ -183,6 +187,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);
+  // The Write(...) rules here and below are unmatched on claude 2.1.322: it warns that only Edit(path) rules meet
+  // file permission checks, and Edit(...) covers every file-writing tool. Kept in case a later version matches them
+  // (a capability note: recheck on each pinned upgrade).
   deny.push(`Write(/${ob}/.*)`, `Edit(/${ob}/.*)`, `Write(/${ob}/**/.*)`, `Edit(/${ob}/**/.*)`);
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
@@ -197,7 +204,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     walls.push(tt, `${tt}/**`);
     const hc = wallPath(paths.reviewAgainConfig);
     if (!hc || paths.reviewAgainConfig.endsWith('/')) return refuse('the Front Door\'s settings need the owner\'s tap handler\'s config file (reviewAgainConfig) as a plain absolute path, spelled as it resolves');
-    if (hc === tt || inside(hc, tt)) return refuse('the tap handler\'s config must sit outside the taps folder');
+    if (!apart(hc, tt)) return refuse('the tap handler\'s config must sit outside the taps folder');
     deny.push(`Edit(/${abs(hc)})`, `Write(/${abs(hc)})`);
     walls.push(hc);
   }
@@ -222,7 +229,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   let notesArg = '';
   if (!noteInOutbox(profile.compactKind, profile.outbox)) {
     if (paths.notes === undefined) return refuse(`a ${role}'s compaction note is kept outside the outbox, and no notes folder was given`);
-    if (inside(paths.notes, paths.outbox) || inside(paths.outbox, paths.notes)) return refuse('the notes folder must be apart from the outbox');
+    if (!apart(paths.notes, paths.outbox)) return refuse('the notes folder must be apart from the outbox');
     notesArg = ` --notes ${paths.notes}`;
   }
   // Only a worker, the writer and a script card's session (L760: the Dispatcher counts a script card as writing its
@@ -276,6 +283,102 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   return { ok: true, settings };
 }
 
+// The sandbox keys a role file may hold: the ones the renderer writes (#410 r1 m3). Any other one, such as an allow list
+// under filesystem, network.allowUnixSockets or enableWeakerNestedSandbox, could widen what the shell reaches.
+const ROLE_SANDBOX_KEYS = Object.freeze({
+  '': [S.sandboxEnabled, S.failIfUnavailable, S.allowUnsandboxedCommands, S.network, S.filesystem],
+  [S.network]: [S.allowedDomains, S.strictAllowlist],
+  [S.filesystem]: [S.denyRead, S.denyWrite],
+});
+// The machine-wide (managed) file's sandbox block: an allow-list of keys, each with its one safe value (#410 r2 M1,
+// L894). Every other key is refused, at the top level, under network and under filesystem. A capability note, checked
+// against claude 2.1.322's own code: it reads managed sandbox keys that widen the sandbox or turn it off
+// (enabledPlatforms, read from the managed tier only, where a list without this platform switches the sandbox off and
+// cancels the role's failIfUnavailable; allowAppleEvents, network.allowMachLookup, the proxy ports,
+// autoAllowBashIfSandboxed, enableWeakerNetworkIsolation, failIfUnavailable: false, filesystem.allowWrite and more).
+// Recheck this list on every pinned upgrade: a later version may add keys, and one it adds is refused until listed here.
+const isTrue = (v) => v === true;
+const isFalse = (v) => v === false;
+const isBool = (v) => typeof v === 'boolean';
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const block = () => true; // a sub-block, checked as its own part below
+const isTextList = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+// An empty allowedDomains narrows (a hardened file may write it beside allowManagedDomainsOnly); any domain in it widens (#410 r3 m2).
+const isEmptyList = (v) => Array.isArray(v) && v.length === 0;
+const MANAGED_SANDBOX = Object.freeze({
+  '': { [S.sandboxEnabled]: isTrue, [S.failIfUnavailable]: isTrue, [S.allowUnsandboxedCommands]: isFalse, [S.network]: block, [S.filesystem]: block },
+  [S.network]: { deniedDomains: isTextList, [S.strictAllowlist]: isTrue, allowManagedDomainsOnly: isBool, [S.allowedDomains]: isEmptyList },
+  [S.filesystem]: { [S.denyRead]: isTextList, [S.denyWrite]: isTextList },
+});
+/** Why a settings file's sandbox block may widen the shell's reach, or null. */
+function sandboxKeysProblem(obj, machineWide) {
+  const sb = obj?.[S.sandbox];
+  if (sb === undefined) return null;
+  const who = machineWide ? 'machine-wide' : 'the role file\'s';
+  if (!sb || typeof sb !== 'object' || Array.isArray(sb)) return `${who} sandbox block is not an object`;
+  if (machineWide) {
+    if (sb[S.sandboxEnabled] === false) return 'machine-wide settings switch the sandbox off';
+    for (const [part, safe] of Object.entries(MANAGED_SANDBOX)) {
+      const block = part ? sb[part] : sb;
+      if (block === undefined) continue;
+      if (!isObj(block)) return `${who} sandbox ${part} is not an object`;
+      const extra = Object.keys(block).filter((k) => !Object.hasOwn(safe, k));
+      if (extra.length) return `${who} sandbox${part ? ` ${part}` : ''} holds ${extra.join(', ')}; only ${Object.keys(safe).join(', ')} may be there`;
+      const bad = Object.keys(block).filter((k) => !safe[k](block[k]));
+      if (bad.length) return `${who} sandbox${part ? ` ${part}` : ''} sets ${bad.join(', ')} to a value that is not its safe one`;
+    }
+    return null;
+  }
+  for (const [part, known] of Object.entries(ROLE_SANDBOX_KEYS)) {
+    const block = part ? sb[part] : sb;
+    if (block === undefined) continue;
+    if (!isObj(block)) return `${who} sandbox ${part} is not an object`;
+    const extra = Object.keys(block).filter((k) => !known.includes(k));
+    if (extra.length) return `${who} sandbox${part ? ` ${part}` : ''} holds ${extra.join(', ')}; only ${known.join(', ')} may be there`;
+  }
+  return null;
+}
+
+/**
+ * The shell's write wall between sessions (L880, L881). The sandbox lets a shell write only its working folder (the
+ * code copy), a per-user temp folder and the added folders, so a session's own outbox must be the only added folder
+ * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
+ * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused). The only other added
+ * folder may be the Bob folder, read-only to the tools and walled from the shell. The outbox is the one every
+ * hook is told (--outbox). → the reason, or null.
+ */
+function ownFoldersProblem(obj) {
+  const p = obj[S.permissions] ?? {};
+  if (!Object.hasOwn(p, S.additionalDirectories)) return null;
+  const dirs = p[S.additionalDirectories];
+  const beyond = 'the role file adds folders beyond the session\'s own outbox and the Bob folder';
+  if (!Array.isArray(dirs)) return `${beyond} (its added folders are not a list)`;
+  if (!dirs.length) return null;
+  const outboxes = new Set();
+  for (const list of Object.values(obj[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      if (typeof h?.[H.command] !== 'string') continue;
+      // One spelling only: ` --outbox <path>`, at most once in a hook (a second, or `--outbox=`, could be the one read).
+      const words = h[H.command].match(/--outbox\b/g) ?? [];
+      const w = h[H.command].match(/ --outbox (\S+)/);
+      if (words.length > 1 || (words.length === 1 && !w)) return `${beyond} (a hook names its outbox in another spelling)`;
+      if (w) outboxes.add(w[1]);
+    }
+  }
+  if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
+  const [outbox] = outboxes;
+  if (wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
+  if (dirs[0] !== outbox || dirs.length > 2) return beyond;
+  if (dirs.length === 2) {
+    const bob = dirs[1];
+    const deny = p[S.deny] ?? [];
+    const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
+    if (wallPath(bob) !== bob || !apart(bob, outbox)
+      || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
+  }
+  return null;
+}
+
 /**
  * Every lock-down field a loaded settings file must (or must not) hold. Run on the rendered file
  * after reading it back from disk, and (as `machineWide: true`) on the machine-wide file, where an
@@ -287,15 +390,15 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
   if (sb && sb[S.allowUnsandboxedCommands] === true) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings allow unsandboxed commands`);
   for (const k of REFUSED_SETTINGS) if (obj && Object.hasOwn(obj, k)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold ${k}`);
+  const widen = sandboxKeysProblem(obj, machineWide);
+  if (widen) return refuse(widen);
   if (machineWide) {
     // The machine-wide file may add deny rules and hooks, never allow, ask, extra hosts or folders,
-    // a permission mode, variables, or a sandbox switched off (round 2 MIN-5).
+    // a permission mode or variables (round 2 MIN-5); its sandbox block is MANAGED_SANDBOX's allow-list above.
     if (p?.[S.allow]?.length || p?.[S.ask]?.length) return refuse('machine-wide settings hold allow or ask rules');
     if (p && Object.hasOwn(p, S.defaultMode)) return refuse('machine-wide settings set a permission mode');
     if (p && Object.hasOwn(p, S.additionalDirectories)) return refuse('machine-wide settings add folders');
     if (obj && Object.hasOwn(obj, S.env)) return refuse('machine-wide settings set variables');
-    if (sb && sb[S.sandboxEnabled] === false) return refuse('machine-wide settings switch the sandbox off');
-    if (sb?.[S.network]?.[S.allowedDomains]?.length) return refuse('machine-wide settings add allowed hosts');
     return { ok: true };
   }
   if (!sb || sb[S.sandboxEnabled] !== true) return refuse('sandbox is not on');
@@ -305,6 +408,8 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (!p || p[S.ask]?.length) return refuse('role settings hold ask rules');
   if ((p[S.allow] ?? []).some((r) => !/^Bash\(.+\)$/.test(r) || BAD_COMMAND.test(r.slice(5, -1)))) return refuse('an allow rule is not one exact command');
   if (profile && p[S.defaultMode] !== profile.mode) return refuse('permission mode differs from the profile');
+  const folders = ownFoldersProblem(obj);
+  if (folders) return refuse(folders);
   for (const list of Object.values(obj[S.hooks] ?? {})) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
       if (typeof h?.[H.command] !== 'string' || !h[H.command].endsWith(HOOK_FAILS_CLOSED)) return refuse('a hook command does not exit 2 when it fails to run');
