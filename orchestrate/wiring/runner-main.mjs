@@ -111,6 +111,7 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {
     start: startPort(c, startDeps(c, { stopped, log })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
+    // No Record fact reader is exported yet (lane 2's), so an outbox holding a file stays open (runner-ports.mjs drainedPort).
     outboxDrained: drainedPort(),
     size: sizePort(),
     ...over,

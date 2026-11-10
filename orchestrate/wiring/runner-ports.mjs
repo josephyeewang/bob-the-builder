@@ -46,7 +46,8 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants, fstatSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { spawn as childSpawn } from 'node:child_process';
 import { join } from 'node:path';
 import { RUNNER_ROLE_OF } from './owner-status.mjs';
@@ -87,10 +88,33 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
   };
 }
 
-/** outboxDrained(session) → true when nothing is left in the outbox (or it is gone), else false. */
-export function drainedPort({ list = readdirSync } = {}) {
+/**
+ * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else false. Intake
+ * keeps every hand-in (push and M6 gather read them from the outbox), so an empty folder is not the sign: each file
+ * must have the Record's own `intake-applied-<session>-<name>` fact (M11 outbox-intake.mjs), naming this session and
+ * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
+ * A file with no such fact, a fact with another sha256 or still in flight (applying, waiting, starting), a file that is
+ * not a plain one, or a Record that can't be read: not drained. No files, or the outbox gone: drained.
+ * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
+ * review-runner-main.mjs readCardFile answers for a card. None is exported for facts yet (lane 2's), so by default
+ * every read fails and an outbox holding a file stays open: it fails safe, never closing one the Record has not taken.
+ */
+export const INTAKE_DONE = Object.freeze(['applied', 'refused', 'interrupted']);
+const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
+function fileSha256(p) {
+  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
+}
+export function drainedPort({ list = readdirSync, readFact = noFactReader, hashOf = fileSha256 } = {}) {
   return (s) => {
-    try { return list(s.outbox).length === 0; } catch (e) { return e?.code === 'ENOENT'; }
+    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
+    for (const name of names) {
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
+      let f; try { f = readFact(`intake-applied-${s.id}-${name}`); } catch { return false; }
+      const d = f?.ok === true ? f.doc : null;
+      if (!d || d.session !== s.id || d.name !== name || !INTAKE_DONE.includes(d.state) || d.sha256 !== hash) return false;
+    }
+    return true;
   };
 }
 

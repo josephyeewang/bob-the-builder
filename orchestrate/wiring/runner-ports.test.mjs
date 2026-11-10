@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
@@ -42,17 +43,38 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('step 5: an outbox is drained only when nothing is in it (a dot file counts) or it is gone; one that can\'t be read is not', () => {
+test('L835: an outbox is drained once every file in it has the Record\'s done intake fact with its sha256, or it is empty or gone', () => {
   const d = tempDir('orch-rports-');
   try {
     const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
-    const drained = drainedPort();
-    assert.equal(drained({ outbox: o }), true);
+    const s = { id: SID, outbox: o };
+    const facts = new Map();
+    const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
+    const fact = (name, over = {}) => facts.set(`intake-applied-${SID}-${name}`, { session: SID, name, state: 'applied', sha256: createHash('sha256').update(readFileSync(join(o, name))).digest('hex'), ...over });
+    const drained = drainedPort({ readFact });
+    assert.equal(drained(s), true, 'empty: nothing to take');
+    writeFileSync(join(o, 'bundle-C-1.json'), '{"a":1}');
+    assert.equal(drained(s), false, 'a file the Record has no fact for');
+    fact('bundle-C-1.json');
+    assert.equal(drained(s), true, 'the file is kept (push reads it), and the Record took it');
     writeFileSync(join(o, '.half'), 'x');
-    assert.equal(drained({ outbox: o }), false);
+    assert.equal(drained(s), false, 'a dot file with no fact counts');
+    rmSync(join(o, '.half'));
+    for (const state of ['refused', 'interrupted']) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), true, state); }
+    for (const state of ['applying', 'waiting', 'starting', undefined]) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
+    fact('bundle-C-1.json', { sha256: 'f'.repeat(64) }); assert.equal(drained(s), false, 'another sha256: the file changed after intake took it');
+    fact('bundle-C-1.json', { session: 'other' }); assert.equal(drained(s), false, 'a fact naming another session');
+    fact('bundle-C-1.json', { name: 'x.json' }); assert.equal(drained(s), false, 'a fact naming another file');
+    fact('bundle-C-1.json');
+    assert.equal(drainedPort({ readFact: () => ({ ok: false, reason: 'its file is not JSON' }) })(s), false, 'an unreadable fact');
+    assert.equal(drainedPort({ readFact: () => { throw new Error('EACCES'); } })(s), false, 'a Record that throws');
+    assert.equal(drainedPort()(s), false, 'no fact reader wired: an outbox holding a file stays open');
+    symlinkSync(join(o, 'bundle-C-1.json'), join(o, 'report-C-1.md')); fact('bundle-C-1.json');
+    facts.set(`intake-applied-${SID}-report-C-1.md`, { ...facts.get(`intake-applied-${SID}-bundle-C-1.json`), name: 'report-C-1.md' });
+    assert.equal(drained(s), false, 'a link is not a plain file');
     rmSync(o, { recursive: true });
-    assert.equal(drained({ outbox: o }), true, 'gone: nothing left to take');
-    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); } })({ outbox: o }), false);
+    assert.equal(drained(s), true, 'gone: nothing left to take');
+    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), false);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
