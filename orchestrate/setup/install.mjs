@@ -107,21 +107,33 @@ export function updaterConfigFor(io, cfg) {
  * without plan_reviewer would make the runner refuse every plan review on the Mini. When the review user can't be read the
  * map can't be checked, and that is said, never passed (L737 m2). Null, or what to put right (never quoting the file).
  */
-export function runnerUidsProblem(io, uids) {
+export function runnerUidsProblem(io, uids) { return runnerUids(io, uids).why; }
+
+/**
+ * runnerUidsProblem's answer with `unknownOnly`: true when the one thing wrong is a key no role is called, which the runner
+ * does not read as a role (check-install says so as a WARNING). A flag, never a match on the message, which quotes the
+ * keys as typed. A key no role is called that carries review's id is not harmless: the runner counts it as a second role
+ * sharing the review user and refuses every review (M9 reviewUid reads the whole map), so that FAILS.
+ */
+function runnerUids(io, uids) {
+  const said = (why) => ({ why, unknownOnly: false });
   const fix = 'add each as "<role>": <its Mac user id> (every role the runner starts names review\'s)';
-  const why = uidsProblem(uids, { plan: true }); if (why) return `review.json: ${why}; ${fix}`;
+  const why = uidsProblem(uids, { plan: true }); if (why) return said(`review.json: ${why}; ${fix}`);
   const unknown = Object.keys(uids).filter((k) => !KNOWN_ROLES.includes(k));
   const extra = unknown.length ? ` (it also names ${unknown.join(', ')}, which no role is called)` : '';
   const ids = new Set(RUNNER_ROLES.map((r) => uids[r]));
-  if (ids.size !== 1) return `review.json: ${RUNNER_ROLES.join(', ')} must all name the one review user's id${extra}`;
+  if (ids.size !== 1) return said(`review.json: ${RUNNER_ROLES.join(', ')} must all name the one review user's id${extra}`);
   const known = Object.fromEntries(Object.entries(uids).filter(([k]) => KNOWN_ROLES.includes(k)));   // a misspelt key is named below, never read as a role
-  for (const r of RUNNER_ROLES) { const bad = reviewUserProblem(known, r); if (bad) return `review.json: ${r}: ${bad}; every role the runner starts names review's id, which no other role names${extra}`; }
+  for (const r of RUNNER_ROLES) { const bad = reviewUserProblem(known, r); if (bad) return said(`review.json: ${r}: ${bad}; every role the runner starts names review's id, which no other role names${extra}`); }
   const root = Object.keys(uids).filter((k) => uids[k] === 0);
-  if (root.length) return `review.json: ${root.join(', ')} may not be root (0); name the owner's id${extra}`;
+  if (root.length) return said(`review.json: ${root.join(', ')} may not be root (0); name the owner's id${extra}`);
   const review = readUser(io, 'review');
-  if (!review.exists) return `review.json: couldn't read the review user (${review.error ?? 'there is no Mac user called review'}), so the map can't be checked against it; run users-folders first, then this again`;
-  if (uids[RUNNER_ROLES[0]] !== review.uid) return `review.json: ${RUNNER_ROLES.join(', ')} must name ${review.uid}, review's id${extra}`;
-  return unknown.length ? `review.json: it names ${unknown.join(', ')}, which no role is called; take ${unknown.length > 1 ? 'them' : 'it'} out or fix the spelling` : null;
+  if (!review.exists) return said(`review.json: couldn't read the review user (${review.error ?? 'there is no Mac user called review'}), so the map can't be checked against it; run users-folders first, then this again`);
+  if (uids[RUNNER_ROLES[0]] !== review.uid) return said(`review.json: ${RUNNER_ROLES.join(', ')} must name ${review.uid}, review's id${extra}`);
+  const sharing = unknown.filter((k) => uids[k] === review.uid);
+  if (sharing.length) return said(`review.json: it names ${sharing.join(', ')}, which no role is called, with review's id ${review.uid}; the runner reads that as another role sharing the review user and refuses every review; take ${sharing.length > 1 ? 'them' : 'it'} out or fix the spelling`);
+  if (!unknown.length) return { why: null, unknownOnly: false };
+  return { why: `review.json: it names ${unknown.join(', ')}, which no role is called; take ${unknown.length > 1 ? 'them' : 'it'} out or fix the spelling`, unknownOnly: true };
 }
 
 /**
@@ -133,11 +145,12 @@ export function runnerUidsProblem(io, uids) {
  */
 export function planReviewerOnlyMissing(io, uids, installRoot) {
   if (!uids || typeof uids !== 'object' || (Number.isInteger(uids[PLAN_REVIEW_ROLE]) && uids[PLAN_REVIEW_ROLE] >= 0) || uidsProblem(uids) !== null) return null;
-  const rest = runnerUidsProblem(io, { ...uids, [PLAN_REVIEW_ROLE]: uids[RUNNER_ROLES[0]] });
-  if (rest !== null) return { fail: `${rest} (it also leaves out ${PLAN_REVIEW_ROLE})` };
+  const rest = runnerUids(io, { ...uids, [PLAN_REVIEW_ROLE]: uids[RUNNER_ROLES[0]] });
+  if (rest.why !== null && !rest.unknownOnly) return { fail: `${rest.why} (it also leaves out ${PLAN_REVIEW_ROLE})` };
+  const also = rest.unknownOnly ? `. Also, ${rest.why.replace(/^review\.json: /, '')}` : '';
   return { warn: `the copy's review.json leaves out ${PLAN_REVIEW_ROLE}, so the runner refuses every plan review (reviews and audits still run). `
     + `Re-running install does not change it (the copy is kept, and every update carries its review.json forward). To put it right: add "${PLAN_REVIEW_ROLE}": <review's id> `
-    + `to the uids of your checked review.json, then sudo install -o root -g wheel -m 0644 <that file> ${installRoot}/${RUNNER_CONFIG}, then check-install again` };
+    + `to the uids of your checked review.json, then sudo install -o root -g wheel -m 0644 <that file> ${installRoot}/${RUNNER_CONFIG}, then check-install again${also}` };
 }
 
 /**
@@ -236,10 +249,10 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   if (rc !== null) {
     const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
     const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);
-    const why = old?.warn ? null : old?.fail ?? runnerUidsProblem(io, rc.uids);
-    // A key no role is called, with every real key right, is harmless to the runner: a WARNING, so the jobs still load.
-    const onlyUnknown = why !== null && /^review\.json: it names .*, which no role is called; /.test(why);
-    if (old?.warn || onlyUnknown) out.push({ ok: true, warn: true, what, why: old?.warn ?? why }); else item(why === null, what, why);
+    // A key no role is called, with every real key right, is a WARNING, so the jobs still load: the runner does not read it
+    // as a role (unless it carries review's id, which runnerUids FAILS).
+    const now = old?.warn || old?.fail ? null : runnerUids(io, rc.uids);
+    if (old?.warn || now?.unknownOnly) out.push({ ok: true, warn: true, what, why: old?.warn ?? now.why }); else item((old?.fail ?? now.why) === null, what, old?.fail ?? now.why);
   }
   for (const n of RUNNER_NAMES) if (rc && typeof rc[n] === 'string') { let here = true; try { io.lstatReal(rc[n]); } catch { here = false; } item(here, `review.json's ${n} exists in the copy`, `${rc[n]} is missing`); }
   return out;

@@ -26,6 +26,7 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { runnerUidsProblem } from './install.mjs';
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
+import { reviewUid as runnerReviewUid } from '../modules/M9-record/outbox.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -315,11 +316,27 @@ test('L737 M1: an install made before the plan reviewer → WARNING (the jobs st
   writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, bogus: 1 } })); chmodSync(f, 0o644);
   const extra = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
   assert.equal(extra?.warn, true, JSON.stringify(extra)); assert.match(extra.why, /it names bogus, which no role is called/);
+  r = w.run(['check-install']); assert.equal(r.code, 0, r.text); assert.match(r.text, /WARNING {2}review\.json names .* it names bogus, which no role is called/);
   r = w.run(['daemons', 'unload']); assert.equal(r.code, 0, r.text);
   r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text);
+  // The same extra key carrying review's id is not harmless: the runner (M9 reviewUid, the whole map) reads it as another
+  // role sharing the review user and refuses every review, so it FAILS (self-review of 9d38a2c, M1).
+  const R = good.uids.reviewer;
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, typo: R } })); chmodSync(f, 0o644);
+  const shared = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(shared.ok, false, JSON.stringify(shared)); assert.notEqual(shared.warn, true);
+  assert.match(shared.why, new RegExp(`it names typo, which no role is called, with review's id ${R}; the runner reads that as another role sharing the review user`));
+  assert.match(runnerReviewUid({ ...good.uids, typo: R }).reason ?? '', /shared with typo/, 'the runner\'s own rule refuses that map');
+  r = w.run(['daemons', 'load']); assert.notEqual(r.code, 0, 'a map the runner would refuse blocks the load');
+  // An old map lacking plan_reviewer AND naming a bogus key: one WARNING carrying both, the plan_reviewer steps first.
+  const { plan_reviewer: _drop, ...noPlan } = good.uids; void _drop;
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...noPlan, bogus: 1 } })); chmodSync(f, 0o644);
+  const both = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(both.warn, true, JSON.stringify(both)); assert.match(both.why, /^the copy's review\.json leaves out plan_reviewer, .* check-install again\. Also, it names bogus, which no role is called; take it out/);
   // A negative plan_reviewer is as missing as none: the same WARNING.
   writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, plan_reviewer: -1 } })); chmodSync(f, 0o644);
-  assert.equal(checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what))?.warn, true);
+  const neg = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(neg?.warn, true); assert.match(neg.why, /leaves out plan_reviewer/);
 });
 
 test('L737 m1: a runner role sharing an id with another role, or any role naming root, is refused at install, as the runner would refuse it later', async () => {
