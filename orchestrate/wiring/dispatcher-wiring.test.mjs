@@ -41,7 +41,7 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 const PORTS_NOT_WIRED = Object.freeze(['board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
   'hostLock', 'launch', 'leads', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'probe', 'replyToLead', 'restartFrontDoor', 'resume',
   'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
-const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork']);
+const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'saveWork', 'sealRoot']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below).
 const PORTS_WIRED = Object.freeze(['approvals', 'hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
@@ -251,7 +251,7 @@ const BAD_GROUPS = [
   ['a listing the tick never reads', () => rest([], { notWired: ['lanuch'], build: () => ({}) }), /no tick step reads these ports: lanuch$/],
   ['neither answered nor listed', () => rest(['resume']), /nothing answers or lists these ports, which the tick needs: resume$/],
   ['no cleanup at all', () => rest(['cleanup']), /nothing answers or lists these ports, which the tick needs: cleanup$/],
-  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.mirrorFor, cleanup\.git, cleanup\.saveWork, cleanup\.copiesRoot$/],
+  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.mirrorFor, cleanup\.git, cleanup\.saveWork, cleanup\.copiesRoot, cleanup\.sealRoot$/],
   ['a port file that is async, so answers nothing yet', () => rest(['cleanup'], { notWired: [], build: async () => ({ cleanup: {} }) }), /nothing answers or lists these ports, which the tick needs: cleanup$/],
 ];
 for (const [name, groups, why] of BAD_GROUPS) {
@@ -264,19 +264,44 @@ for (const [name, groups, why] of BAD_GROUPS) {
 test('the seam: the cleanup group follows the same rules, by its own list', () => {
   assert.deepEqual([...NOT_WIRED_CLEANUP].sort(), [...CLEANUP_NOT_WIRED].sort());
   assert.equal(cleanupProblem(workerPorts({}).cleanup), null, 'as it stands');
+  // A folder must refuse when read, not be a function that refuses when called: cleanupPass reads a folder it can't use
+  // as nothing to do (m-C), so a function standing in for sealRoot would skip the sweep in silence.
+  for (const k of ['copiesRoot', 'sealRoot']) assert.throws(() => workerPorts({}).cleanup[k], { message: notWiredText(`cleanup.${k}`) }, k);
   const cleanup = (changes) => {
     const c = Object.getOwnPropertyDescriptors(workerPorts({}).cleanup);
     return Object.defineProperties({}, { ...c, ...changes });
   };
   assert.match(cleanupProblem(cleanup({ mirrorFor: { enumerable: true, value: () => 'real' } })), /still listed as not wired: cleanup\.mirrorFor$/);
   assert.match(cleanupProblem(cleanup({ copiesRoot: { enumerable: true, value: '/real/folder' } })), /still listed as not wired: cleanup\.copiesRoot$/);
+  assert.match(cleanupProblem(cleanup({ sealRoot: { enumerable: true, value: '/real/seals' } })), /still listed as not wired: cleanup\.sealRoot$/);
   assert.match(cleanupProblem({}), new RegExp(`still listed as not wired: ${CLEANUP_PORTS.map((k) => `cleanup\\.${k}`).join(', ')}$`), 'gone is not wired');
   assert.match(cleanupProblem(cleanup({ extra: { enumerable: true, value: 1 } })), /no tick step reads these ports: cleanup\.extra$/);
 });
 
+// tick.mjs without its comments, so a comment can neither add a port read nor hide one (audit #127 r2, cosmetic).
+const tickCode = () => readFileSync(TICK, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:"'`\\])\/\/.*$/gm, '$1');
+
+test('audit #127 r2 m-A: the tick reads its ports only as p.<name>, so the pin below sees every read', () => {
+  // Any other way to read one (p?.x, p['x'], const { x = default } = p, a copy of p handed on) would let a port the
+  // wiring never answers fall back to its default in silence. The one bare `p` is where the tick names its ports.
+  const code = tickCode().replace(/\.\.\./g, '   ');
+  const bare = [...code.matchAll(/(?<![\w$.])p\b(?!\s*\.\s*[A-Za-z_$])/g)].map((m) => code.slice(Math.max(0, m.index - 30), m.index + 1).replace(/\s+/g, ' ').trim());
+  assert.equal(bare.length, 1, `read each port as p.<name>; found a bare p at: ${bare.join(' | ')}`);
+  assert.match(bare[0], /clock = \(\) => now, ports: p$/, 'the tick\'s own parameter list');
+});
+
+test('audit #127 r2 m-C: the cleanup group lists exactly what cleanupPass reads, less what the tick gives every step', () => {
+  const src = readFileSync(join(here, '..', 'modules', 'M11-dispatcher', 'cleanup.mjs'), 'utf8');
+  const params = src.match(/export async function cleanupPass\(\{([^}]*)\}\)/)?.[1];
+  assert.ok(params, 'cleanupPass takes one object of named parameters');
+  const read = params.split(',').map((x) => x.trim().split(/\s|=/)[0]).filter((x) => x && !['rec', 'rules', 'now', 'alert'].includes(x));
+  assert.deepEqual([...CLEANUP_PORTS].sort(), read.sort());
+  assert.match(tickCode(), /cleanupPass\(\{ rec, rules, now, \.\.\.p\.cleanup, alert \}\)/, 'the tick gives cleanupPass the group and only those four besides');
+});
+
 test('R-0b-162 A: the tick reads exactly the pinned ports, and the wiring answers each one that is not wired by refusing', async () => {
-  const src = readFileSync(TICK, 'utf8');
-  const reads = [...new Set([...src.matchAll(/(?<!\w)p\.(\w+)/g)].map((m) => m[1]))].sort();
+  const code = tickCode().replace(/\.\.\./g, '   ');
+  const reads = [...new Set([...code.matchAll(/(?<![\w$.])p\.(\w+)/g)].map((m) => m[1]))].sort();
   assert.deepEqual(reads, [...PORTS_NOT_WIRED, ...PORTS_WIRED, ...NOT_PORTS].sort(), 'a new port in tick.mjs must be pinned here');
   assert.deepEqual([...TICK_PORTS].sort(), [...PORTS_NOT_WIRED, ...PORTS_WIRED, 'alert', 'cleanup'].sort(), 'what the start insists on is what the tick reads');
   const w = world();
