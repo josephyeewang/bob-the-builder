@@ -157,7 +157,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1~baseline-${SID}`)] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -328,8 +328,8 @@ test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apar
   try {
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
-    const spare = join(w.mine.copies, `C-1~baseline-${SID}`);
-    assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}~baseline.json`) });
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}..baseline.json`) });
     const preps = w.calls.filter((c) => c[0] === 'prepare').map((c) => c[1]);
     assert.equal(preps.length, 2); assert.deepEqual(preps[1].card, preps[0].card, 'the same card and commit'); assert.equal(preps[1].dest, join(spare, 'copy'));
     const [own, theirs] = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
@@ -344,9 +344,9 @@ test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apar
   // Another commit than the session's copy: refused, and nothing is left.
   {
     let r; let x1;
-    const v = world({ prepare: async (x) => { mkdirSync(x.dest); return { ok: true, dest: x.dest, head: x.dest.endsWith(`~baseline-${SID}/copy`) ? 'f'.repeat(40) : HEAD }; },
+    const v = world({ prepare: async (x) => { mkdirSync(x.dest); return { ok: true, dest: x.dest, head: x.dest.endsWith(`..baseline-${SID}/copy`) ? 'f'.repeat(40) : HEAD }; },
       checksFor: (x) => { x1 = x; return {}; }, launchFn: async () => { r = await x1.throwaway(); return { ok: false, reason: 'stop here' }; } });
-    try { await v.start(); assert.equal(r.ok, false); assert.match(r.reason, /holds another commit than the session's copy/); assert.equal(existsSync(join(v.mine.copies, `C-1~baseline-${SID}`)), false); } finally { rmSync(v.d, { recursive: true, force: true }); }
+    try { await v.start(); assert.equal(r.ok, false); assert.match(r.reason, /holds another commit than the session's copy/); assert.equal(existsSync(join(v.mine.copies, `C-1..baseline-${SID}`)), false); } finally { rmSync(v.d, { recursive: true, force: true }); }
   }
   // #369 r2 m3: main moving while the throwaway is made refuses nothing there (its setup files come from main, trusted).
   {
@@ -361,8 +361,8 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
   let t; let x0;
   const logs = [];
   const w = world({ log: (s) => logs.push(s), checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
-  const old = join(w.mine.copies, 'C-1~baseline'); const earlier = join(w.mine.copies, 'C-1~baseline-S-0');
-  const other = join(w.mine.copies, 'C-10~baseline-S-7');
+  const old = join(w.mine.copies, 'C-1..baseline-S-9'); const earlier = join(w.mine.copies, 'C-1..baseline-S-0');
+  const other = join(w.mine.copies, 'C-10..baseline-S-7');
   for (const f of [join(old, 'copy'), join(earlier, 'copy', 'ro'), other]) mkdirSync(f, { recursive: true });
   writeFileSync(join(earlier, 'copy', 'ro', 'f'), 'x'); chmodSync(join(earlier, 'copy', 'ro'), 0o555); chmodSync(join(earlier, 'copy'), 0o555);
   try {
@@ -372,7 +372,7 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
     // A folder made read-only inside the throwaway itself is removed by done() too.
     mkdirSync(join(t.copy, 'ro')); writeFileSync(join(t.copy, 'ro', 'f'), 'x'); chmodSync(join(t.copy, 'ro'), 0o555);
     await t.done();
-    assert.equal(existsSync(join(w.mine.copies, `C-1~baseline-${SID}`)), false);
+    assert.equal(existsSync(join(w.mine.copies, `C-1..baseline-${SID}`)), false);
     assert.deepEqual(logs, []);
   } finally { chmodSync(w.copiesRoot, 0o700); rmSync(w.d, { recursive: true, force: true }); }
   // Self-review m1: a link inside a throwaway is never followed; the read-only folder it points to outside is unchanged.
@@ -380,7 +380,7 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
     const d = tempDir('orch-rports-');
     try {
       const out = join(d, 'outside'); mkdirSync(join(out, 'sub'), { recursive: true }); chmodSync(join(out, 'sub'), 0o555); chmodSync(out, 0o555);
-      const spare = join(d, 'C-1~baseline-S-0'); mkdirSync(join(spare, 'ro'), { recursive: true }); writeFileSync(join(spare, 'ro', 'f'), 'x');
+      const spare = join(d, 'C-1..baseline-S-0'); mkdirSync(join(spare, 'ro'), { recursive: true }); writeFileSync(join(spare, 'ro', 'f'), 'x');
       symlinkSync(out, join(spare, 'ro', 'link')); chmodSync(join(spare, 'ro'), 0o555);
       const fs = { rm: rmSync, chmodTree };
       assert.equal(removeAll(fs, spare), true);
@@ -390,17 +390,17 @@ test('#369 r2 m1: a throwaway left by an earlier start of the card (one made rea
   }
   // One that can't be removed: told once (after a second try), left, and the start still goes on under the session's own name.
   const logs2 = []; let t2; let x2;
-  const fails = (p) => p.includes('~baseline');
+  const fails = (p) => p.includes('..baseline');
   const v = world({ log: (s) => logs2.push(s), checksFor: (x) => { x2 = x; return {}; }, launchFn: async (x) => { t2 = await x2.throwaway(); return { ok: true, started: await x.start() }; },
     fs: { rm: (p, o) => { if (fails(p) && !p.endsWith('.json')) throw Object.assign(new Error('busy'), { code: 'ENOTEMPTY' }); return rmSync(p, o); } } });
-  mkdirSync(join(v.mine.copies, 'C-1~baseline-S-0'));
+  mkdirSync(join(v.mine.copies, 'C-1..baseline-S-0'));
   try {
     const a = await v.start();
     assert.equal(a.ok, true, a.reason); assert.equal(t2.ok, true, t2.reason);
-    assert.equal(t2.copy, join(v.mine.copies, `C-1~baseline-${SID}`, 'copy'));
-    assert.ok(logs2.some((l) => /C-1~baseline-S-0 can't be removed \(ENOTEMPTY\); it is left until this card's next start/.test(l)), logs2.join('\n'));
+    assert.equal(t2.copy, join(v.mine.copies, `C-1..baseline-${SID}`, 'copy'));
+    assert.ok(logs2.some((l) => /C-1..baseline-S-0 can't be removed \(ENOTEMPTY\); it is left until this card's next start/.test(l)), logs2.join('\n'));
     await t2.done();
-    assert.ok(logs2.some((l) => new RegExp(`C-1~baseline-${SID} can't be removed`).test(l)), logs2.join('\n'));
+    assert.ok(logs2.some((l) => new RegExp(`C-1..baseline-${SID} can't be removed`).test(l)), logs2.join('\n'));
   } finally { rmSync(v.d, { recursive: true, force: true }); }
 });
 
@@ -643,4 +643,29 @@ test('#378 r1 M1: productWallGap takes a folder above as a deny, and no list as 
   assert.match(productWallGap(all(['/c/q']), P), /shell may read \/o\/q$/);
   assert.match(productWallGap({}, P), /shell may read/);
   assert.match(productWallGap(null, P), /shell may read/);
+});
+
+test('L889: the baseline\'s throwaway settings pass the real renderer: its folder names keep to the plain path letters', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  const got = [];
+  let t; let x0;
+  const w = world({ walled: (x) => { const r = walledLaunchSettings(x); got.push(r); return r; },
+    checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
+    deny: { proposals: ['/w/p1/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(t?.ok, true, t?.reason);
+    assert.equal(got.length, 2, 'the session\'s settings and the baseline\'s');
+    for (const r of got) assert.equal(r.ok, true, r.reason);
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.equal(got[1].settings.permissions.additionalDirectories[0], join(spare, 'outbox'));
+    assert.ok(/^[A-Za-z0-9._/-]+$/.test(spare) && /^[A-Za-z0-9._/-]+$/.test(t.settingsFile), 'plain path letters only');
+    await t.done();
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });
