@@ -225,8 +225,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     if (inside(paths.notes, paths.outbox) || inside(paths.outbox, paths.notes)) return refuse('the notes folder must be apart from the outbox');
     notesArg = ` --notes ${paths.notes}`;
   }
-  // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
-  const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
+  // Only a worker, the writer and a script card's session (L760: the Dispatcher counts a script card as writing its
+  // files) change files in a code copy; every other role writes its outbox only.
+  const copyArg = ['worker', 'writer', 'script'].includes(role) ? ` --copy ${paths.copy}` : '';
   // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
   // Kept on purpose as the general guard (L121 cosmetic): today every such kind is a `-compact-` kind (report-compact-
   // for the reviewer, scout, writer, thinking role and scripts), which the compaction rule alone already keeps from

@@ -16,7 +16,7 @@ import { recordPlanFile } from './review-runner-main.mjs';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
 const MAIN = 'e'.repeat(40);
 const T0 = Date.parse('2026-11-06T12:00:00Z');
 const MIN = 60_000;
@@ -355,7 +355,10 @@ test('L703 end to end: the Dispatcher asks through the requests folder, the runn
   await runnerPass(w.ctx);
   assert.equal(w.starts.length, 1);
   assert.deepEqual(d.planReviewsRunning().map((r) => [r.card, r.session_id]), [['C-7', 'P-1']], 'the tick counts it');
-  assert.deepEqual(read(), { ok: true });
+  assert.deepEqual(read(), { ok: true, started_at: new Date(w.clock.t).toISOString() }, 'working, from its reviewer\'s start (#335 r1 m1)');
+  // Only its own reviewer's start counts: the same card asked about another plan, or by another request, gets none.
+  assert.deepEqual(d.planReviewAnswer({ card: 'C-7', fingerprint: 'f'.repeat(64), session: s.session }), { ok: true });
+  assert.deepEqual(d.planReviewAnswer({ card: 'C-7', fingerprint: fp, session: 'other-request' }), { ok: true });
   // plan-go asks once per plan; were it asked again, nothing more starts.
   assert.equal(d.startPlanReview({ card: 'C-7', fingerprint: fp, key: `C-7-${fp}` }).session, s.session);
   await runnerPass(w.ctx);
@@ -519,13 +522,29 @@ test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 
   const bp = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
   const fa = two('C-3', 'app');
   const fb = two('C-4', 'p2');
-  assert.equal(a.startPlanReview({ card: 'C-3', fingerprint: fa, key: `C-3-${fa}` }).ok, true);
-  assert.equal(bp.startPlanReview({ card: 'C-4', fingerprint: fb, key: `C-4-${fb}` }).ok, true);
+  const sa = a.startPlanReview({ card: 'C-3', fingerprint: fa, key: `C-3-${fa}` });
+  const sb = bp.startPlanReview({ card: 'C-4', fingerprint: fb, key: `C-4-${fb}` });
+  assert.equal(sa.ok && sb.ok, true);
   const r = await runnerPass(w.ctx);
   assert.equal(w.starts.length, 4, 'exactly one more starts');
   assert.equal(r.started.length, 1);
   const waiting = r.started[0].card === 'C-3' ? 'C-4' : 'C-3';
   refusedFor(r, new RegExp(`4 plan reviewers already run \\(cap 4\\); card ${waiting}'s waits`));
+  // #294 r3 m1: the waiting plan's Dispatcher reads it as waiting for a slot; the started one's as plainly working.
+  const [wp, wf, ws, sp, sf, ss] = waiting === 'C-3' ? [a, fa, sa, bp, fb, sb] : [bp, fb, sb, a, fa, sa];
+  // #335 r1 M1: it names the plan reviewers holding the slots, each with its start.
+  const slotAnswer = wp.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session });
+  assert.equal(slotAnswer.waiting, 'slot');
+  assert.deepEqual(slotAnswer.holders.map((h) => h.card).sort(), ['C-10', 'C-11', 'C-12', r.started[0].card].sort());
+  assert.ok(slotAnswer.holders.every((h) => h.started_at === new Date(Date.parse(h.started_at)).toISOString()), JSON.stringify(slotAnswer.holders));
+  // #335 r1 m1: the started one's says when its reviewer started.
+  const startedAnswer = sp.planReviewAnswer({ card: r.started[0].card, fingerprint: sf, session: ss.session });
+  assert.deepEqual(startedAnswer, { ok: true, started_at: new Date(w.clock.t).toISOString() });
+  // Only that very card and plan count: the same session asked about another plan is plainly working (self-review m1).
+  assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: 'f'.repeat(64), session: ws.session }), { ok: true });
+  // A status that can't be trusted (here stale) changes the wording only: plainly working, never a throw or a refusal.
+  const late = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t + 60 * 60_000 });
+  assert.deepEqual(late.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true });
   assert.ok(caps.includes('app') && caps.includes('p2'), 'the cap is the card\'s own product\'s');
   // It waits, pass after pass, never told and never given up on.
   for (let i = 0; i < MAX_FAILED_STARTS + 2; i++) {
@@ -542,7 +561,29 @@ test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 
   w.end('P-1');
   const y = await runnerPass(w.ctx);
   assert.deepEqual(y.started.map((s) => s.card), [waiting]);
+  assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true, started_at: new Date(w.clock.t).toISOString() }, 'started: no longer waiting for a slot');
   assert.equal(w.starts.length, 5);
+});
+
+// #335 r1 m2: a try that failed after waiting at the cap carries no waiting_since, so its plan drops off plans_waiting and
+// its Dispatcher reads it as plainly working, not as waiting for a slot (the failure is the runner's to tell).
+test('#335 r1 m2: a plan that waited at the cap, then failed a retry, is no longer read as waiting for a slot', async () => {
+  let cap = 1;
+  const w = await ready({ planReviewCap: () => { if (cap === null) throw new Error('cap gone'); return cap; } });
+  const two = (id) => { w.cards.set(id, card({ product: 'app' })); return fingerprintOf(id, w.cards.get(id)); };
+  w.ask({ card: 'C-10', fingerprint: two('C-10') });
+  await runnerPass(w.ctx);
+  assert.equal(w.starts.length, 1);
+  const a = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
+  const fp = two('C-3');
+  const s = a.startPlanReview({ card: 'C-3', fingerprint: fp, key: `C-3-${fp}` });
+  await runnerPass(w.ctx);
+  assert.equal(a.planReviewAnswer({ card: 'C-3', fingerprint: fp, session: s.session }).waiting, 'slot');
+  cap = null;
+  w.clock.t += RETRY_MS;
+  await runnerPass(w.ctx);
+  assert.deepEqual(a.planReviewAnswer({ card: 'C-3', fingerprint: fp, session: s.session }), { ok: true });
+  assert.equal(w.starts.length, 1);
 });
 
 // #294 self-review m1: a start the runner can't follow (it gave a process that is not claude) still holds its cap slot

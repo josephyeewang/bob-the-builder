@@ -19,9 +19,8 @@ import { decide, kindIn } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
 import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 
-// The roles M4 launches. `script` is an outbox role too (a plain script's reports), but M4 starts no session for it, so
-// it has no profile and no hook; M9 alone judges its files.
-const LAUNCHED = AI_ROLES.filter((r) => r !== 'script');
+// The roles M4 launches: every AI role. A script card's session is one since L760, with its own profile and hook.
+const LAUNCHED = AI_ROLES;
 // A kind the table lists for a role that its design leaves out until something does what the kind's text promises
 // (L151 M-1, L167 c-4: the Front Door's state- and request-).
 const notYet = (role, kind) => (NOT_YET[role] ?? []).includes(kind);
@@ -97,7 +96,7 @@ test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s i
     }
   }
   // Every (role, kind) pair in the table was reached as an allowed hand-in.
-  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => r !== 'script' && !notYet(r, k)).map((r) => `${r}:${k}`));
+  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => !notYet(r, k)).map((r) => `${r}:${k}`));
   for (const p of pairs) assert.ok(swept.includes(p), `${p} was swept`);
 });
 

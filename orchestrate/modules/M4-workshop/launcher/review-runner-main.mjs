@@ -14,7 +14,8 @@
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
-//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
+//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review;
+//                                                   since L760 that includes "script", the workers' user's id
 //     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/ and docs/verdict/)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
 //     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
