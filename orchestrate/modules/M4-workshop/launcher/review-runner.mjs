@@ -49,7 +49,8 @@
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read, offers }
 //                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps;
-//                       `offers`: [{ session_id, card, role, head }], the sessions a tap would set aside now, L733)
+//                       `offers`: [{ session_id, card, role, head }], the sessions a tap would set aside now, each
+//                       passed by the tap loop's own test at the end of the pass, so none is for an old head; L733, #307)
 //   state.json   0600   the runner's own memory: running sessions, tries per card, head and role, request ids seen,
 //                       and what has kept a review from going ahead (`refused_streaks`, `refused_more`,
 //                       `unread_requests`, `no_verdict`), each told from a day on as a hold in the status (R-0b-171)
@@ -127,17 +128,15 @@ export const isClaudeCommand = (cmd, bin) => typeof cmd === 'string' && typeof b
 const keyOf = (card, tree, role) => `${card}:${tree}:${role}`;
 
 /**
- * The "review again" offers open now (L733), for the Front Door: one per held attempt that allows a tap, the same test
- * the tap loop uses (held, tap, its session). An attempt that does not name its card, role and head is left out: an
- * offer the Front Door can't show is no offer. Sorted by session, so the same state gives the same list.
+ * The candidates for "review again" offers (L733): one per held attempt that allows a tap (held, tap, its session),
+ * sorted by session, so the same state gives the same list. Each is then put through the tap loop's own test
+ * (tapCheck) before it is offered, and card, role and head come from its launch record (#307 r1 M1, m1, m2).
  */
 export function tapOffers(state) {
   const out = [];
   for (const a of Object.values(state?.attempts ?? {})) {
-    if (a?.held !== true || a.tap !== true) continue;
-    const { session_id, card, role, head } = a;
-    if (![session_id, card, role, head].every((v) => typeof v === 'string' && v)) continue;
-    out.push({ session_id, card, role, head });
+    if (a?.held !== true || a.tap !== true || typeof a.session_id !== 'string' || !a.session_id) continue;
+    out.push({ session_id: a.session_id });
   }
   return out.sort((x, y) => (x.session_id < y.session_id ? -1 : x.session_id > y.session_id ? 1 : 0));
 }
@@ -472,6 +471,9 @@ export async function runnerPass(ctx) {
   const now = ctx.now();
   const newId = ctx.newId ?? randomUUID;
   const result = { ok: true, error: null, started: [], refused: [], stopped: [], alerts: [], holds: [], setAside: [] };
+  // The "review again" offers, each checked by the tap loop's own test late in the pass; a pass that stops before then
+  // lists none, never one it has not checked (#307 r1 M1, m1).
+  let offers = [];
   let installed = null;
   try { const c = await ctx.installedCommit?.(); installed = typeof c === 'string' && HEX40.test(c) ? c : null; } catch { installed = null; }
   // Who we are and where we write come first: a runner that is not review, or a folder that is not review's, writes nothing.
@@ -505,7 +507,7 @@ export async function runnerPass(ctx) {
       running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
-      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [], offers: tapOffers(state) };
+      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [], offers };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
     if (st.ok) writeWhole(P.state, state, 0o600);
@@ -849,6 +851,34 @@ export async function runnerPass(ctx) {
   // hold, so the next request may start a new session. Taps come only from Joe's own Mac user (the port reads files
   // owned by the owner's uid, in a folder only the owner writes), never from requests/, the Record or the Dispatcher:
   // the workers' Mac user writes those. A tap with a `key` is read once.
+  // Whether a tap on session `sid` would set it aside now: the tap loop's one test, which the offers use too (#307 r1 m1).
+  // The card is read as it is now (#307 r1 M1): a tap on a session whose card has moved to a newer head, or has left
+  // review, would set it aside with no new review to follow, so it is refused, and the reason says why.
+  // → { ok: true, doc, k, a } | { ok: false, reason }
+  const tapCheck = async (sid) => {
+    const bad = (reason) => ({ ok: false, reason });
+    if (typeof sid !== 'string' || !SESSION_ID.test(sid)) return bad('that is not a session id');
+    if (!rl.ok) return bad('the launch records could not be read');
+    if (state.running.some((r) => r.session_id === sid)) return bad('that session is still running');
+    const doc = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
+    if (!doc) return bad(rl.refused.some((b) => b.sid === sid) ? 'its launch record fails its checks; that needs the builder, not a new review' : 'the runner launched no such session');
+    let c; try { c = await ctx.readCard(doc.card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
+    if (!c?.ok) return bad(c?.missing === true ? `card ${doc.card} is no longer in the Record, so no new review would start` : `card ${doc.card} could not be read${c?.reason ? ` (${String(c.reason).slice(0, 200)})` : ''}, so whether a new review would start can't be known`);
+    if (c.doc?.head !== doc.head) return bad(`card ${doc.card} has moved on to head ${String(c.doc?.head ?? 'none').slice(0, 7)} since this session's ${doc.head.slice(0, 7)}, and the new head gets its own review`);
+    if (!needsRole(c.doc, doc.role)) return bad(`card ${doc.card} no longer needs a ${doc.role} (it is ${c.doc?.state ?? 'in no state'}), so no new review would start`);
+    const k = keyOf(doc.card, doc.tree ?? doc.head, doc.role);
+    const a = state.attempts[k];
+    const held = a?.held === true && a.tap === true && a.session_id === sid;
+    if (!held) return bad('only a session that ended without handing in anything can be set aside');
+    const e = runnerEnded({ root: P.ended, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: sid });
+    if (!e.ok || e.ended.verdict_sha256 !== 'none') return bad(`only a session that ended without handing in anything can be set aside (${e.ok ? 'its ended record names a verdict file' : e.reason})`);
+    const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid, uid });
+    if (!walls.ok) return bad(`its outbox fails its checks, so what it holds can't be known (${walls.reason}); that needs the builder`);
+    const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid }));
+    if (left.fails) return bad(`its outbox holds a failing verdict, and a fail is never set aside (${left.said})`);
+    if (!left.empty) return bad(`only a session that ended without handing in anything can be set aside (${left.said})`);
+    return { ok: true, doc, k, a };
+  };
   let taps = [];
   let tapsRead = false;
   try { const t = await ctx.setAsideByJoe?.(); taps = Array.isArray(t) ? t : []; tapsRead = true; } catch (e) { fail(`Joe's "review again" taps could not be read (${e?.message ?? e})`); }
@@ -874,22 +904,9 @@ export async function runnerPass(ctx) {
       const by = String(typeof t?.key === 'string' ? t.key : sid);
       tapsRefused.push({ id: `tap-refused-${createHash('sha256').update(by).digest('hex').slice(0, 24)}`, sid: String(sid).slice(0, 80), text: `${text}. Nothing was set aside, so no new review starts from that tap.` });
     };
-    if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { no('that is not a session id'); continue; }
-    if (!rl.ok) { no('the launch records could not be read'); continue; }
-    if (state.running.some((r) => r.session_id === sid)) { no('that session is still running'); continue; }
-    const doc = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
-    if (!doc) { no(rl.refused.some((b) => b.sid === sid) ? 'its launch record fails its checks; that needs the builder, not a new review' : 'the runner launched no such session'); continue; }
-    const k = keyOf(doc.card, doc.tree ?? doc.head, doc.role);
-    const a = state.attempts[k];
-    const held = a?.held === true && a.tap === true && a.session_id === sid;
-    if (!held) { no('only a session that ended without handing in anything can be set aside'); continue; }
-    const e = runnerEnded({ root: P.ended, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: sid });
-    if (!e.ok || e.ended.verdict_sha256 !== 'none') { no(`only a session that ended without handing in anything can be set aside (${e.ok ? 'its ended record names a verdict file' : e.reason})`); continue; }
-    const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid, uid });
-    if (!walls.ok) { no(`its outbox fails its checks, so what it holds can't be known (${walls.reason}); that needs the builder`); continue; }
-    const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid }));
-    if (left.fails) { no(`its outbox holds a failing verdict, and a fail is never set aside (${left.said})`); continue; }
-    if (!left.empty) { no(`only a session that ended without handing in anything can be set aside (${left.said})`); continue; }
+    const ck = await tapCheck(sid);
+    if (!ck.ok) { no(ck.reason); continue; }
+    const { doc, k, a } = ck;
     try {
       writeLaunch(P.aside, sid, { session_id: sid, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), set_aside_at: iso(now), by: 'joe' });
     } catch (e) { if (e?.code !== 'EEXIST') { fail(`session ${sid} could not be set aside (${e?.code ?? e?.message})`); continue; } }
@@ -1271,6 +1288,38 @@ export async function runnerPass(ctx) {
     state.running.push({ card, head, tree, role, session_id: sid, pid: r.pid, started_at: iso(now) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
   }
+  // Attempts no request can use again are dropped (#307 r1 M1), so the memory and its offers don't grow for good: one
+  // whose card is gone, merged or closed, and one whose tree is no longer the tree of the card's head (a newer push
+  // superseded it). One running, or whose card or tree can't be read now, is kept. The launch records still hold every
+  // start, so dropping an attempt never lets a second session start on the same card, tree and role.
+  const byCard = new Map();
+  for (const k of Object.keys(state.attempts)) {
+    const [card, tree, role] = k.split(':');
+    if (!REVIEW_ROLES.includes(role) || !CARD_ID.test(card ?? '')) continue;
+    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) continue;
+    if (!byCard.has(card)) byCard.set(card, []);
+    byCard.get(card).push({ k, tree });
+  }
+  for (const [card, list] of byCard) {
+    let c; try { c = await ctx.readCard(card); } catch { continue; }
+    let drop;
+    if (c?.ok !== true) drop = c?.missing === true;
+    else if (c.doc?.state === 'merged' || c.doc?.state === 'closed') drop = true;
+    else {
+      if (typeof c.doc?.head !== 'string' || !HEX40.test(c.doc.head)) continue;
+      let now_tree; try { now_tree = await ctx.treeOf(card, c.doc.head); } catch { continue; }
+      if (typeof now_tree !== 'string' || !HEX40.test(now_tree)) continue;
+      for (const { k, tree } of list) if (tree !== now_tree && tree !== c.doc.head) delete state.attempts[k];
+      continue;
+    }
+    if (drop) for (const { k } of list) delete state.attempts[k];
+  }
+  // The offers, each passed by tapCheck now (#307 r1 M1, m1). Card, role and head come from the session's launch record,
+  // so an attempt held from before #307, which names none of them, is offered too (r1 m2).
+  for (const cand of tapOffers(state)) {
+    const ck = await tapCheck(cand.session_id);
+    if (ck.ok) offers.push({ session_id: cand.session_id, card: ck.doc.card, role: ck.doc.role, head: ck.doc.head });
+  }
   return finish();
 }
 
@@ -1340,8 +1389,10 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (!Number.isFinite(at) || !Array.isArray(s.running)) throw new Error('the review runner\'s status is not what the runner writes');
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
+  // #307 r1 c1: an offer missing a field is dropped, and counted, so a broken one is never silent.
+  const offerList = Array.isArray(s.offers) ? s.offers.filter((o) => o !== null && typeof o === 'object' && !Array.isArray(o) && ['session_id', 'card', 'role', 'head'].every((f) => typeof o[f] === 'string' && o[f])) : [];
   return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
     installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null,
     taps_read: Array.isArray(s.taps_read) ? s.taps_read.filter((k) => typeof k === 'string') : [],
-    offers: Array.isArray(s.offers) ? s.offers.filter((o) => o && typeof o === 'object' && ['session_id', 'card', 'role', 'head'].every((f) => typeof o[f] === 'string' && o[f])).map(({ session_id, card, role, head }) => ({ session_id, card, role, head })) : [] };
+    offers: offerList.map(({ session_id, card, role, head }) => ({ session_id, card, role, head })), offers_dropped: (Array.isArray(s.offers) ? s.offers.length : 0) - offerList.length };
 }

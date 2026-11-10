@@ -1414,18 +1414,18 @@ test('L733 planted: the status lists each open "review again" offer, and only th
   assert.deepEqual(w.status().offers, []);
 });
 
-test('L733: tapOffers takes only held attempts that allow a tap and name what they are for; readReviewStatus keeps only whole offers', async () => {
+test('L733: tapOffers takes the held attempts that allow a tap, by session; readReviewStatus keeps only whole offers', async () => {
   const full = { held: true, tap: true, session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) };
   const attempts = {
     a: full,
     b: { ...full, session_id: 'S-1' },
     c: { ...full, session_id: 'S-3', tap: false },
     d: { ...full, session_id: 'S-4', held: false },
-    e: { ...full, session_id: 'S-5', head: undefined },
+    // #307 r1 m2: one held from before #307 names no card, role or head; it is still a candidate (the pass fills them in).
+    e: { held: true, tap: true, session_id: 'S-5' },
     f: { ...full, session_id: '' },
   };
-  assert.deepEqual(tapOffers({ attempts }).map((o) => o.session_id), ['S-1', 'S-2'], 'sorted by session');
-  assert.deepEqual(tapOffers({ attempts: { a: full } }), [{ session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) }], 'only the four fields');
+  assert.deepEqual(tapOffers({ attempts }).map((o) => o.session_id), ['S-1', 'S-2', 'S-5'], 'sorted by session');
   assert.deepEqual(tapOffers({}), []);
   const w = await ready();
   const file = join(w.root, 'status.json');
@@ -1439,7 +1439,111 @@ test('L733: tapOffers takes only held attempts that allow a tap and name what th
   const o = { session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) };
   assert.deepEqual(read([o, { ...o, extra: 1 }]), [o, o], 'only the four fields are passed on');
   assert.deepEqual(read([o, null, 7, 'S-1', [o], { ...o, card: 3 }, { ...o, head: '' }]), [o]);
+  // #307 r1 c1: what was dropped is counted, not silent.
+  const s = { ...base, written_at: new Date(T0).toISOString(), offers: [o, null, { ...o, head: '' }] };
+  writeFileSync(file, JSON.stringify(s));
+  assert.equal(readReviewStatus({ file, now: T0, uid: ME }).offers_dropped, 2);
   for (const bad of [undefined, null, 'x', 5, { a: 1 }]) assert.deepEqual(read(bad), [], `no list: ${JSON.stringify(bad)}`);
+});
+
+// #307 r1 M1 (probe A): an offer lasts only while its head is the card's head. A push moves the card on: the old
+// session's offer goes, its attempt is dropped, and a tap on it is refused and told once, never set aside quietly.
+test('#307 r1 M1 planted: a push drops the old head\'s offer and attempt; a tap on it is refused and told once', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-1']);
+  // The push: C-1 moves to HEAD2, and its own reviewer starts.
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 });
+  w.heads.set('C-1', HEAD2);
+  w.ask({ head: HEAD2 });
+  let r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started.map((x) => x.session_id), ['S-2']);
+  assert.deepEqual(w.status().offers, [], 'the old head is no offer');
+  const state = () => JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.ok(!Object.keys(state().attempts).some((k) => k.includes(TREE)), `the old tree's attempt is dropped: ${Object.keys(state().attempts)}`);
+  w.clock.t += 30 * 24 * 3600_000;
+  w.end('S-2');
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-2'], 'only the new head\'s');
+  // Joe taps the old one: refused, told once, nothing set aside.
+  w.taps.push({ session_id: 'S-1', key: 'k-old' });
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, []);
+  refusedFor(r, /review again" for session S-1: card C-1 has moved on to head bbbbbbb since this session's aaaaaaa, and the new head gets its own review/);
+  assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 1);
+});
+
+test('#307 r1 M1 planted: a card that merged, closed or left the Record drops its attempts and offers', async () => {
+  for (const gone of [{ state: 'merged' }, { state: 'closed' }, null]) {
+    const w = await ready();
+    w.ask();
+    await runnerPass(w.ctx);
+    w.end('S-1');
+    await runnerPass(w.ctx);
+    assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-1']);
+    if (gone) w.cards.set('C-1', { ...w.cards.get('C-1'), ...gone });
+    else w.ctx.readCard = (c) => (c === 'C-1' ? { ok: false, missing: true } : { ok: true, doc: w.cards.get(c) });
+    await runnerPass(w.ctx);
+    assert.deepEqual(w.status().offers, [], JSON.stringify(gone));
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).filter((k) => k.startsWith('C-1:')), [], JSON.stringify(gone));
+  }
+  // A card that can't be read now keeps its attempt, and offers nothing it could not check.
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  w.ctx.readCard = () => { throw new Error('the Record is busy'); };
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers, []);
+  assert.ok(Object.keys(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).some((k) => k.startsWith('C-1:')), 'kept');
+});
+
+// A card that no longer needs the role (sent back to its worker, same head) is no offer, and a tap on it is refused.
+test('#307 r1 M1 planted: a card that no longer needs a reviewer is not offered, and a tap on it is refused', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  w.cards.set('C-1', { ...w.cards.get('C-1'), state: 'running' });
+  w.taps.push({ session_id: 'S-1', key: 'k-1' });
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, []);
+  refusedFor(r, /review again" for session S-1: card C-1 no longer needs a reviewer \(it is running\), so no new review would start/);
+  assert.deepEqual(w.status().offers, []);
+});
+
+// #307 r1 m1 (probe B): an offer passes the tap loop's own test, so a session whose outbox now holds a fail is no offer.
+test('#307 r1 m1 planted: a session whose outbox holds a file is not offered', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-1']);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'late.md'), failing(), { mode: 0o644 });
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers, []);
+});
+
+// #307 r1 m2 (probe C): an attempt held from before #307 names no card, role or head; the offer takes them from the
+// session's launch record.
+test('#307 r1 m2 planted: an offer held from before #307 is listed, from its launch record', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const file = join(w.root, 'state.json');
+  const st = JSON.parse(readFileSync(file, 'utf8'));
+  for (const a of Object.values(st.attempts)) { delete a.card; delete a.role; delete a.head; }
+  writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer', head: HEAD }]);
 });
 
 test('L736 m2 planted: 60 refused taps in one pass are all told: the first each with its cause, the rest in one line', async () => {
