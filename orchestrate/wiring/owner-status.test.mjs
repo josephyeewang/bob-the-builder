@@ -38,7 +38,12 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
   assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
-  assert.deepEqual(world(doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null })] })).ports.sessions().map((x) => x.kind), ['script']);
+  // L767: a script session has its own outbox, <root>/script/<id>, and intake tags its hand-ins 'script'.
+  const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/script/s1`, ...more })] });
+  assert.deepEqual(world(scriptDoc()).ports.sessions().map((x) => x.kind), ['script']);
+  assert.deepEqual(world(scriptDoc()).ports.outboxSessions().map((x) => [x.role, x.outbox]), [['script', `${ROOT}/script/s1`]]);
+  assert.throws(() => world(scriptDoc({ outbox: `${ROOT}/worker/s1` })).ports.sessions(), /not a script outbox/, 'a script under the worker folder');
+  assert.throws(() => world(doc({ sessions: [session('s1', { outbox: `${ROOT}/script/s1` })] })).ports.sessions(), /not a worker outbox/, 'a worker under the script folder');
   assert.deepEqual(world(doc({ sessions: [session('s1', { size: { ...SIZE, tokens: null } })] })).ports.probe({ id: 's1' }).size.tokens, null, 'readSize\'s "none yet" is a full size');
 });
 

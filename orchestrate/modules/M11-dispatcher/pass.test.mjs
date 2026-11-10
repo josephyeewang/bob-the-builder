@@ -1999,3 +1999,15 @@ test('L744 2: a pauseLead that answers ok:false is told once and not counted as 
   await w.pass(3);
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
 });
+
+test('L767: a script card\'s outbox is <root>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+  const ok = world([card('C-2', { kind: 'script' })]);
+  ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');
+  const wrong = world([card('C-2', { kind: 'script' })]);
+  const r = await wrong.pass();
+  assert.deepEqual(r.started, []); assert.match(r.refused.map(([, x]) => x).join('\n'), /is not a script outbox/);
+  const editing = world([card('C-2')]);
+  editing.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.match((await editing.pass()).refused.map(([, x]) => x).join('\n'), /is not a worker outbox/);
+});

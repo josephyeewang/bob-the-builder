@@ -14,7 +14,7 @@
 // An answer is trusted only when the same status agrees with it; until then the ask keeps waiting (the outcome is not
 // known, so it never answers { ok: false }):
 //   - launch ok: the request is 'started' (or since 'stopped'), and every field is what this runner must make:
-//     sessionId the asked one, outbox <outboxRoot>/worker/<id>, copy <copiesRoot>/<card>, pid and pgid real, pid_start
+//     sessionId the asked one, outbox <outboxRoot>/<role>/<id> (worker, or script for a script card: L767), copy <copiesRoot>/<card>, pid and pgid real, pid_start
 //     a non-empty string, head a commit id, signin and configDir non-empty. The session it started is listed while
 //     'started' (and may be after), and the listing agrees: card, product, kind, pgid, signin, config_dir and outbox.
 //     launch ok: false: the request is 'refused'.
@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
-import { RUNNER_KINDS, live, readOwnerStatus } from './owner-status.mjs';
+import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
 export const NO_COPY_KINDS = Object.freeze(['review', 'audit', 'readonly', 'lead', 'front_door']);
@@ -90,7 +90,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
         const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
-          && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
+          && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
