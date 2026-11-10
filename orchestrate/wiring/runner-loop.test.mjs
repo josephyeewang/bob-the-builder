@@ -232,13 +232,29 @@ test('#362 r1 M2: the leader\'s start time is read in UTC, so a time zone change
   assert.equal(leaderStart(4242, { run: () => 'not a time\n' }), null, 'text in no shape is null');
 });
 
+test('#394 r1 m1: the leader is checked again just before SIGKILL: one reused in the SIGTERM wait gets nothing, one that can\'t be told about is not signalled', async () => {
+  const G = { pgid: 4242, pid: 4242, pid_start: S0 };
+  const run = async (laterStart) => {
+    const sent = []; let reads = 0;
+    const p = processGroupPorts({ kill: (g, sig) => { if (sig !== 0) sent.push(sig); }, probe: { kill: () => {}, pidStart: () => (reads++ === 0 ? S0 : laterStart) }, sleep: async () => {}, waitMs: 1000 });
+    let r; try { r = await p.stopGroup(G); } catch (e) { r = { threw: e.message }; }
+    return { r, sent };
+  };
+  assert.deepEqual(await run(S1), { r: { ok: true, how: 'already gone' }, sent: ['SIGTERM'] }, 'a new leader on the number: no SIGKILL');
+  const t = await run(null);
+  assert.deepEqual(t.sent, ['SIGTERM'], 'can\'t tell: no SIGKILL');
+  assert.equal(t.r.ok, false); assert.match(t.r.reason, /start time can't be read/);
+  const same = await run(S0);
+  assert.deepEqual(same.sent, ['SIGTERM', 'SIGKILL'], 'the same leader still there: SIGKILL');
+});
+
 test('L850 X1: groupGone compares start times with M9 startDiffers: an old raw value, a new one, a different one, a null read', () => {
   const sent = [];
   const at = (now, there = true) => processGroupPorts({ kill: (g, sig) => { sent.push(sig); if (!there) throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, probe: { kill: () => {}, pidStart: () => now } });
   const G = { pgid: 4242, pid: 4242, pid_start: S0 };
   // The same start: the runner's group, alive.
   assert.equal(at(S0).groupGone(G), false, 'a new value, the same');
-  // A start recorded before L830 (ps's UTC lstart text) is the same instant, not another start: alive.
+  // A start recorded before L850 X1 (ps's UTC lstart text) is the same instant, not another start: alive.
   assert.equal(at(S0).groupGone({ ...G, pid_start: 'Tue Nov 10 10:00:00 2026' }), false, 'an old raw value of the same start');
   assert.equal(at(S0).groupGone({ ...G, pid_start: 'Tue Nov 10 09:00:00 2026' }), true, 'an old raw value of another start: reused');
   // Another start: the number was used again, the runner's group is gone.

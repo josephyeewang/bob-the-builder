@@ -105,7 +105,12 @@ export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep
   };
   const stopGroup = async (s) => {
     if (groupGone(s)) return { ok: true, how: 'already gone' };
-    const r = await stopProcessGroup({ pgid: s.pgid, kill, alive: (p) => !signalGone(p), sleep, waitMs });
+    // The leader is checked again just before SIGKILL (#394 r1 m1, the L842 class): a group that ended in the SIGTERM wait,
+    // its number taken by a new leader, reads as gone and gets nothing. One that can't be told about is not signalled.
+    let wentInWait = false;
+    const killChecked = (g, sig) => { if (sig === 'SIGKILL' && groupGone(s)) { wentInWait = true; return; } return kill(g, sig); };
+    const r = await stopProcessGroup({ pgid: s.pgid, kill: killChecked, alive: (p) => !signalGone(p), sleep, waitMs });
+    if (wentInWait) return { ok: true, how: 'already gone' };
     if (r?.how === 'SIGKILL') for (let t = 0; t < killWaitMs && !signalGone(s.pgid); t += 100) await sleep(100);
     return r;
   };
