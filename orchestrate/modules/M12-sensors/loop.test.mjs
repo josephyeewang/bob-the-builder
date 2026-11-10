@@ -109,6 +109,20 @@ test('L617/L619: with no App client yet, a merged PR still reads as merged; its 
   assert.ok(gh.calls.every(([, path]) => !path.includes('/check-runs')), 'the fine-grained client is never asked for check runs');
 });
 
+test('L728 (#287 r1 M1): a checks read that fails, with no App client or one GitHub refuses, is told; that part is marked not known', async () => {
+  const refused = { get: async () => ({ status: 401, json: { message: 'refused' } }) };
+  for (const [checksGh, why] of [[null, /check runs not known \(checks failed \(check runs are not known: they need an App's client/], [refused, /check runs not known \(checks failed \(check runs answered 401\)\)/]]) {
+    const { rec } = world();
+    const r = await sensorsPass({ rec, ports: ports(T0, { gh: recordedGh({ open: [{ number: REC.merged }] }), checksGh }), now: () => new Date(T0) });
+    const id = `pr-${REC.merged}`;
+    assert.equal(fact(rec, id).state, 'closed', 'the rest of the reading is kept');
+    assert.deepEqual([r.wrote[id].ok, r.wrote[id].unknown, r.wrote[id].not_known], [true, false, ['checks_at_head']]);
+    const lines = r.problems.filter((p) => p.startsWith(`${id}: check runs not known`));
+    assert.equal(lines.length, 1, JSON.stringify(r.problems));
+    assert.match(lines[0], why);
+  }
+});
+
 test('PLANT an uppercase CLOSED from GitHub is stored as closed', async () => {
   const { rec } = world();
   const real = REC.answers[`/pulls/${REC.merged}`];

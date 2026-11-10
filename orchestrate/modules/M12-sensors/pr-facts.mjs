@@ -16,11 +16,13 @@
 // read as never closed).
 //   files(number)    → [{ filename, status, additions, deletions, previous_filename? }]
 //   checks(sha)      → [{ name, status, conclusion, output_summary? }]; a throw here alone gives checks_at_head: null
-//                      (not known) and keeps the rest (L619: check runs need an App's client, L617, L627)
+//                      (not known) with its cause in checks_reason, and keeps the rest (L619: check runs need an App's
+//                      client, L617, L627). The loop tells each such reading (L728, #287 r1 M1).
 //   threads(number)  → [{ resolved, author, body, path? }]
 //   behindBy(number) → integer commits behind base
 
 import { makePrepare } from './escape.mjs';
+import { makeMasker } from './mask.mjs';
 import { validPath } from './history.mjs';
 import { PR_FACT } from '../M11-dispatcher/merges.mjs';
 
@@ -49,11 +51,13 @@ async function readPr(gh, number, observed_at, prepare) {
   // checks_at_head: null means NOT KNOWN (the check runs could not be read), never "no checks"; [] means GitHub listed
   // none. Only this read is kept apart (L619): without an App's client every check read fails, and blanking the whole fact
   // for it would hide every merge from M11. Any other failed read still makes the whole reading unknown.
-  let checks = null;
+  // The cause is kept (masked, cut to 200 characters), so a checks read that keeps failing is told, never silent.
+  let checks = null; let checksReason = null;
   try {
     const c = await gh.checks(pr.head_sha);
     if (Array.isArray(c)) checks = c;
-  } catch { /* not known */ }
+    else checksReason = 'the check runs answer is not a list';
+  } catch (e) { checksReason = makeMasker().maskSecrets(String(e?.message ?? e ?? 'the check runs read failed')).text.slice(0, 200); }
   const st = typeof pr.state === 'string' ? pr.state.toLowerCase() : null;
   const merged = pr.merged === true;
   const changed = files.map((f) => ({
@@ -81,6 +85,7 @@ async function readPr(gh, number, observed_at, prepare) {
     },
     checks_at_head: checks === null ? null : checks.map((c) => ({ name: prepare(c.name, 'check-name'), status: c.status, conclusion: c.conclusion ?? null,
       ...(c.output_summary ? { summary: prepare(c.output_summary, 'check-output') } : {}) })),
+    ...(checks === null ? { checks_reason: checksReason } : {}),
     unresolved_threads: threads.filter((t) => !t.resolved).map((t) => ({ author: prepare(t.author, 'commit-author'),
       body: prepare(t.body, 'review-thread'), ...(t.path ? { path: keepPath(t.path) } : {}) })),
     behind_main: behind,

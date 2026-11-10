@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter } from './facts.mjs';
-import { writePrFact } from './pr-facts.mjs';
+import { prFact, writePrFact } from './pr-facts.mjs';
 import { FAKE } from './fakes.mjs';
 
 const fakeGh = {
@@ -47,10 +47,21 @@ test('L619: a checks-only failure writes checks_at_head null (not known) and kee
     assert.deepEqual([d.state, d.merged, d.merge_commit_sha, d.head_sha], ['closed', true, 'c'.repeat(40), 'b'.repeat(40)]);
     assert.equal(d.behind_main, 4);
     assert.equal(d.unresolved_threads.length, 1);
+    assert.match(d.checks_reason, /answered 403|not a list/, 'the cause is kept (L728, #287 r1 M1)');
   }
   const rec = memoryRecord();
   await writePrFact(makeFactWriter(rec), { ...merged, checks: async () => [] }, 7);
   assert.deepEqual(rec.read('fact', 'pr-7').doc.checks_at_head, [], 'GitHub listing none stays an empty list');
+  assert.equal(Object.hasOwn(rec.read('fact', 'pr-7').doc, 'checks_reason'), false, 'a reading that is known has no checks_reason');
+  // A cause carrying a token-shaped string is masked before it is kept: by pr-facts itself (the reading, before any
+  // writer), and so in the record too (where the fact writer's own masking is the second layer).
+  const throws = { ...merged, checks: async () => { throw new Error(`refused for ${FAKE.github}`); } };
+  const raw = (await prFact(throws, 7)).checks_reason;
+  assert.match(raw, /^refused for /);
+  assert.equal(raw.includes(FAKE.github), false, 'masked in the reading itself');
+  const leak = memoryRecord();
+  await writePrFact(makeFactWriter(leak), throws, 7);
+  assert.equal(leak.read('fact', 'pr-7').doc.checks_reason.includes(FAKE.github), false);
 });
 
 test('L619: any other failed read still blanks the whole fact', async () => {

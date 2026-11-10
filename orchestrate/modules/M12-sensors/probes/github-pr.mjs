@@ -9,9 +9,12 @@
 // CHECK RUNS NEED A GITHUB APP (L617, L627). GitHub offers no Checks permission on fine-grained tokens, only to GitHub
 // Apps, so `checks` reads with `checksGh`: a client holding an App's installation token. On a product that is the
 // read-only watcher App (Checks and Metadata, read), the same one the watch job uses (L627): the robot stays off a
-// product until B7, so it never holds write there during the watch week. `gh` keeps everything else. Until the App exists `checksGh` is absent and `checks` throws, so the
-// reading is unknown, never "no checks"; a 403 from a token that can't see check runs throws the same way. Never pass
-// the fine-grained client as `checksGh`, and no classic token.
+// product until B7, so it never holds write there during the watch week. `gh` keeps everything else. Until the App
+// exists `checksGh` is absent and `checks` throws, so the reading is unknown, never "no checks"; a 403 from a token that
+// can't see check runs throws the same way, and the Sensors pass tells each one. Never pass the fine-grained client as
+// `checksGh`, and no classic token. The same-client check below only catches the very same object: a second wrapper
+// round the fine-grained client gets past it (#287 r1 m1). The wiring, which builds checksGh from the App's token, is
+// the real guard, and its test must show that.
 //
 // Which pull requests: every open one (GitHub's list), plus every PR a merge in the record still waits on (a merging or
 // refused merge needs a reading after it changed, even once GitHub shows the PR closed; M11 merges.mjs). At most
