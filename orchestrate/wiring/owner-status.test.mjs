@@ -7,7 +7,8 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRoleClash } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRole, productRoleClash } from './owner-status.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
@@ -38,6 +39,9 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
   assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
+  // L895 m2: RUNNER_ROLE_OF maps onto PRODUCT_OUTBOX_ROLES, and its guard refuses a role off that list.
+  for (const r of PRODUCT_OUTBOX_ROLES) assert.equal(productRole(r), r);
+  for (const r of ['lead', 'reviewer', 'front_door', 'Worker', '']) assert.throws(() => productRole(r), /is not one of PRODUCT_OUTBOX_ROLES/, r);
   // L767, L836: a script session has its own outbox, <root>/<product>/script/<id>, and intake tags its hand-ins 'script'.
   const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/p/script/s1`, ...more })] });
   assert.deepEqual(world(scriptDoc()).ports.sessions().map((x) => x.kind), ['script']);

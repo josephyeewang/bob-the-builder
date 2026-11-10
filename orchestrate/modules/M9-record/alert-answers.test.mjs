@@ -169,7 +169,7 @@ test('L130: the outbox store-error mark is written only after the refusal alert 
   for (const mode of LOST) {
     const s = sink(mode);
     const env = open(s, { faultAt: 'readback_wrong' });
-    const tag = { role: 'worker', sessionId: 'S-1' };
+    const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1' };
     const f = outboxFile(env, 'worker', 'S-1', 'report-throws.md', 'body');
     for (let i = 0; i < 2; i++) assert.match(env.record.applyOutbox(tag, f).reason, /store error.*tried again/);
     assert.equal(s.of('refused').length, 2, `${mode}: lost, so told again on the next try`);

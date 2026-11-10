@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, fstatSync, linkSync, lstatSync, readFileSync, realpathSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
+import { PRODUCT, setup, product, readyCard, runCard, outboxFile, launch, runnerLaunch, runnerEndedRecord, runnerAsideRecord, CLEAN_CHECKLIST, HEAD, HEAD2, UID, put, must } from './fixtures.test-helper.mjs';
 import { headReviews, reviewUserProblem, runnerEnded, runnerFinalized, runnerLaunchFor, runnerLaunches, sessionVerdict, verdictFromFile } from './outbox.mjs';
 
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
@@ -17,7 +17,7 @@ function inReview({ treeOf } = {}) {
   readyCard(env, 'C-1');
   runCard(env, 'C-1');
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }));
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
   // A reviewer's pass carries a clean checklist unless the test says otherwise (M9 PASSES, L69).
   const withList = (f) => (f.pass === true && !('checklist' in f) ? { ...f, checklist: CLEAN_CHECKLIST } : f);
   const hdr = (fields, over = {}) => `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: env.record.read('card', 'C-1').rev, fields: withList(fields), ...over })}\n`;
@@ -28,7 +28,7 @@ test('L44 planted: a verdict file in a worker\'s outbox is refused at intake', (
   const { env, hdr } = inReview();
   runnerLaunch(env, 'C-1', 'R-1');
   const f = outboxFile(env, 'worker', 'S-1', 'verdict-forged.md', hdr({ head: HEAD, pass: true }));
-  refused(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, f), /verdict- is not listed for worker/);
+  refused(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, f), /verdict- is not listed for worker/);
   // Even through the review view, the worker's folder is the worker's: the tag is the folder, never the file's say.
   refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'S-1', card: 'C-1' }, f), /no outbox folder for reviewer S-1/);
   assert.equal(env.record.list('verdict').length, 0);
@@ -448,7 +448,7 @@ test('L70 planted: a hard-linked failing verdict, or a failing auditor\'s hard-l
   const { env: e3 } = inReview();
   const wf = outboxFile(e3, 'worker', 'S-9', 'handin-9.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'in_review', to_state: 'running' })}\n`);
   linkSync(wf, join(e3.base, 'second'));
-  const r = e3.record.applyOutbox({ role: 'worker', sessionId: 'S-9', card: 'C-1' }, wf);
+  const r = e3.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-9', card: 'C-1' }, wf);
   assert.equal(r.ok, false);
   assert.match(String(r.reason ?? r.error ?? JSON.stringify(r)), /more than one name/);
   // And review's own verdict file may not be writable by others.
