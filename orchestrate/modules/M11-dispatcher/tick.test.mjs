@@ -587,6 +587,16 @@ export { rec };
   assert.equal(await main([config], { self, now: T0 + 3 * MIN, log: (s) => logs.push(s) }), 0);
   assert.equal(mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at ?? null, null, 'cleared once the config is fixed');
   logs.length = 0;
+  // L802: a deadline over the pass's own sum is refused by the reader, and nothing runs; the sum itself is taken.
+  const high = L.path('high.json');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS + 1 }));
+  const before = mod.seen.length;
+  assert.equal(await main([high], { self, now: T0 + 4 * MIN, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.join('\n'), new RegExp(`runDeadlineMs may be at most ${RUN_DEADLINE_MS} \\(this job's own limit\\)`));
+  assert.equal(mod.seen.length, before, 'no pass ran');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS }));
+  assert.equal(await main([high], { self, now: T0 + 5 * MIN, log: () => {} }), 0);
+  logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
   const rel = L.path('rel.json');

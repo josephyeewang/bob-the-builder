@@ -66,8 +66,8 @@ export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !==
   ...APP_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
-// #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. Nothing
-// stops the Dispatcher's config from setting a longer one, so setup must not: a healthy pass would then read as stuck.
+// #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. A
+// longer one would make a healthy pass read as stuck, so M11's readConfig refuses one (L802), and so does setup.
 export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
