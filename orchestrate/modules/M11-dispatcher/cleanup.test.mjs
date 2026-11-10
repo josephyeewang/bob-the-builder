@@ -1,7 +1,8 @@
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS } from './cleanup.mjs';
@@ -420,4 +421,19 @@ test('L367: a launch stamped far ahead does not outrank a later launch', () => {
   // L412 m3: launches that can't be read never read as none.
   const broken = Object.create(rec, { list: { value: (e) => { if (e === 'launch') throw new Error('the launches could not be read'); return rec.list(e); } } });
   assert.throws(() => namedCopy(broken, 'C-1'), /the launches could not be read/);
+});
+
+// L744 3: a copies folder that is missing is nothing to do; one that can't be read fails the step, never "no copies".
+test('L744 3: cleanupPass reads a missing copies folder as nothing to do, and fails on one it cannot read', { skip: process.getuid?.() === 0 ? 'root reads any folder' : false }, async () => {
+  const dir = tempDir('m11-l744-');
+  const args = (copiesRoot) => ({ rec: recWith(), rules: R, now: T0, copiesRoot, sealRoot: null, mirrorFor: () => null, alert: fakeAlert() });
+  assert.deepEqual(await cleanupPass(args(join(dir, 'none'))), []);
+  const shut = join(dir, 'copies');
+  mkdirSync(join(shut, 'C-1'), { recursive: true });
+  chmodSync(shut, 0o000);
+  try {
+    await assert.rejects(cleanupPass(args(shut)), /the copies folder could not be read \(EACCES\)/);
+  } finally { chmodSync(shut, 0o755); }
+  const file = join(dir, 'a-file'); writeFileSync(file, 'x');
+  await assert.rejects(cleanupPass(args(file)), /the copies folder could not be read \(ENOTDIR\)/);
 });
