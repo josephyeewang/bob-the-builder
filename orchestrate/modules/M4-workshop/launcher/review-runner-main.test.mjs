@@ -810,3 +810,9 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   assert.match((await prepareReviewCopy({ mirror: gd, card: 'C-1', head: 'HEAD', dest: lost })).reason, /not 40 hex/);
   assert.match((await prepareReviewCopy({ mirror: gd, card: '../x', head, dest: lost })).reason, /not a card id/);
 });
+
+test('L738 re-merge: the real ports hand the runner its finalize and handedIn (a missing one would skip the finding check unseen)', () => {
+  const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: process.getuid() }, recordRoot: '/x', recordUid: process.getuid(), mirror: '/m', claudeBin: '/c', ownerHome: '/h', ownerUid: process.getuid() };
+  const p = realPorts(c, {});
+  for (const k of ['finalize', 'handedIn']) assert.equal(typeof p[k], 'function', `${k} is wired`);
+});
