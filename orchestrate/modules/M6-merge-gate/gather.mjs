@@ -26,7 +26,7 @@ import { carryOver } from '../M10-rules/carry-over.mjs';
 import { checkExactReverse } from '../M10-rules/exact-reverse.mjs';
 import { RULES_PATH } from '../M10-rules/reader.mjs';
 import { COMPARE_FILE_LIMIT, notRead } from '../M10-rules/git-view.mjs';
-import { approveNeeded, goCheck, ROW_FILE } from '../M2-approvals/go.mjs';
+import { approveNeeded, goCheck, ROW_FILE, rowFile } from '../M2-approvals/go.mjs';
 import { approvalStands } from '../M2-approvals/schedule.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { activeKind } from '../M2-approvals/kinds.mjs';
@@ -195,7 +195,7 @@ export async function threads(gh, owner, repo, pr) {
 // go checked read a row the same way. → the parsed row, or null when it is missing or can't be parsed; a failed read throws.
 export async function readRowAt(gh, base, id, head) {
   let j;
-  try { j = await json(gh, `${base}/contents/${encodeURIComponent(`docs/blueprint/rows/${id}.yaml`).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
+  try { j = await json(gh, `${base}/contents/${encodeURIComponent(rowFile(id)).replace(/%2F/g, '/')}?ref=${head}`); } catch (e) { if (e?.status === 404) return null; throw e; }
   if (j?.encoding !== 'base64') return null;
   try { return parseYaml(Buffer.from(j.content, 'base64').toString('utf8'), `${id}.yaml`); } catch { return null; }
 }

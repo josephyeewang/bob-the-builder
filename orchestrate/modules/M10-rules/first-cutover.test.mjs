@@ -74,6 +74,9 @@ test('each missing or wrong piece is named', () => {
   const cases = [
     // The Workshop's one key from the rules file (L601, L612): with it gone, the start gate shuts every push.
     [swap(FIRST, '  vercel_project: sample-app\n', ''), 'product.vercel_project is missing (M4 reads it)'],
+    // L719 m4 (L612): an empty project is not missing, but the start gate shuts on it for good, so the fit check says no.
+    [swap(FIRST, '  vercel_project: sample-app\n', "  vercel_project: ''\n"), 'M4: product.vercel_project must name the Vercel project'],
+    [swap(FIRST, '  vercel_project: sample-app\n', '  vercel_project: []\n'), 'M4: product.vercel_project must name the Vercel project'],
     [swap(FIRST, 'product:\n  cutover_stage: first\n', ''), 'product.cutover_stage must say first'],
     [swap(FIRST, 'cutover_stage: first', 'cutover_stage: second'), 'product.cutover_stage must say first'],
     // The one "on" switch (L204-b, L209): missing, another word, another case, a trailing space or another type is off.

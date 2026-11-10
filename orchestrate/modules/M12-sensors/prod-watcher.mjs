@@ -11,8 +11,13 @@
 //   3. setting-changed     a production env variable added, removed or updated (id, key, target, type, update time;
 //                          never a value), or a project setting changed (build-skip command, build/install/output
 //                          commands, root directory, framework, Node version, production branch, linked repo, domain
-//                          auto-assign, production domains). The alert names the setting, never its value;
-//   4. no-stage            the product's rules entry has no stage, so the strict rule is in use (supported.mjs).
+//                          auto-assign, system-variable access, production domains). The alert names the setting,
+//                          never its value;
+//   4. no-stage            the product's rules entry has no stage, so the strict rule is in use (supported.mjs);
+//   5. system-vars-off     Vercel's "Enable access to System Environment Variables" box (autoExposeSystemEnvs) is not
+//                          on, or Vercel did not report it. Checked on every pass, the first included, and cleared once
+//                          it is on (L716, #277 r1 Minor 1, 2): with it off the build-skip line sees no branch and skips
+//                          every production build, and a skipped build raises nothing here.
 // A cancelled build (the build-skip refused it) or a failed one is never READY and raises nothing.
 //
 // The FIRST pass only records a baseline (every deployment already there counts as seen; settings fingerprinted), so
@@ -81,9 +86,11 @@ async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, al
     return result !== false;
   };
   // A clear GitHub lost shows in the pass's answer, as a raise's does. One with nothing to clear does not show.
+  // Answers whether the clear went through (or had nothing to clear): not when GitHub lost it (L143).
   const clear = async (kind, subject, note) => {
     const result = await alerts.clear({ key: `${product}|${kind}|${subject}`, note });
     if (result !== 'none') out.push({ kind, subject, result });
+    return result !== false;
   };
   let deps; let live; let env; let settings;
   try {
@@ -98,6 +105,15 @@ async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, al
     return out;
   }
   await clear('watcher-cannot-read', 'vercel', 'The production watcher can read Vercel again.');
+  // Vercel's API reference types the field boolean, but its own example shows the text "false" (#277 r1): accept both.
+  const sv = settings.autoExposeSystemEnvs;
+  if (sv === true || sv === 'true') await clear('system-vars-off', 'vercel', 'Vercel\'s system environment variables are on again.');
+  else {
+    const off = sv === false || sv === 'false';
+    await raise('system-vars-off', 'vercel', off ? 'Vercel system variables are off: every production build is skipped' : 'Vercel did not report its system-variables setting: production builds may all be skipped',
+      `${off ? 'The Vercel setting "Enable access to System Environment Variables" (Settings, Environment Variables) is off.' : 'Vercel\'s answer did not say whether "Enable access to System Environment Variables" (Settings, Environment Variables) is on, so it is not known to be on.'} With it off, the build-skip line sees no branch and skips every production build, and nothing else says so. Tick the box on the dashboard.`,
+      off ? 'off' : 'not-reported');
+  }
   const { stage, fallback } = resolveStage(rulesEntry);
   const judge = (d) => isSupported(d, { stage, mainFirstParent, evidence });
 
@@ -130,6 +146,10 @@ async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, al
   // The baseline saved: the new prints, except a change whose alert was lost keeps its old print (or stays absent).
   const keepEnv = { ...ep }; const keepSp = { ...sp };
   const keepOld = (to, k, old) => { if (old === undefined) delete to[k]; else to[k] = old; };
+  // Old-value alerts whose clear GitHub lost: tried again each pass (L143), never holding the baseline (L152 m1).
+  const unclear = new Set();
+  const clearOld = async (subject, note) => { if (!(await clear('setting-changed', subject, note))) unclear.add(subject); };
+  for (const subject of prev?.unclear ?? []) await clearOld(subject, 'The project setting changed again.');
   if (prev) {
     for (const eid of new Set([...Object.keys(prev.env ?? {}), ...Object.keys(ep)])) {
       const a = prev.env?.[eid]; const b = ep[eid];
@@ -138,14 +158,24 @@ async function watch({ vercel, rulesEntry, mainFirstParent, evidence, writer, al
       if (!(await raise('setting-changed', `env:${eid}:${b?.print ?? 'gone'}`, `production setting ${(b ?? a).key} ${what}`, `Production environment variable ${(b ?? a).key} was ${what}. (Its value is never read.)`))) keepOld(keepEnv, eid, a);
     }
     for (const k of new Set([...Object.keys(prev.settings ?? {}), ...Object.keys(sp)])) {
-      if (prev.settings?.[k] === sp[k]) continue;
-      if (!(await raise('setting-changed', `project:${k}:${sp[k] ?? 'gone'}`, `project setting ${k} changed`, `The project setting ${k} changed in Vercel. If nobody meant to, check it on the dashboard.`))) keepOld(keepSp, k, prev.settings?.[k]);
+      const was = prev.settings?.[k];
+      if (was === sp[k]) continue;
+      // The alert's key holds the new value's print, so the old value's alert is cleared first: a later return to that
+      // value is then told again, even if Joe closed its issue (L716, #277 r1 M1; M13 reopens a cleared condition, L371).
+      // A lost raise keeps the old print, so the next pass raises again (L143); a lost clear is kept in `unclear`.
+      // A return to a value whose own clear GitHub has still lost (#277 r2 m1): its old issue is open, so a raise now would
+      // land on it and tell nothing, and the retry would later close it while the value stands. Keep the old print: the
+      // pass whose retry clears it then sees the change again and raises it as new. This comes before the old value's
+      // clear (#285 r1 n1): the old value is still the baseline, so its issue stays open while the field waits.
+      if (unclear.has(`project:${k}:${sp[k] ?? 'gone'}`)) { keepOld(keepSp, k, was); continue; }
+      if (was !== undefined) await clearOld(`project:${k}:${was}`, `The project setting ${k} changed again.`);
+      if (!(await raise('setting-changed', `project:${k}:${sp[k] ?? 'gone'}`, `project setting ${k} changed`, `The project setting ${k} changed in Vercel. If nobody meant to, check it on the dashboard.`))) keepOld(keepSp, k, was);
     }
   }
 
   // A baseline that isn't saved is a silent watcher: with none, every pass is a first pass and alerts on nothing (L393).
   const put = writer.put(id, { kind: 'fact.prod-watch', product, stage, live: live?.uid ?? null, newest_supported: newest?.uid ?? null,
-    env: keepEnv, settings: keepSp, seen: [...seen].slice(-SEEN_KEEP), baseline: !prev });
+    env: keepEnv, settings: keepSp, unclear: [...unclear].slice(-SEEN_KEEP), seen: [...seen].slice(-SEEN_KEEP), baseline: !prev });
   if (wasSaved(put)) await clear('watcher-cannot-save', 'baseline', 'The production watcher can save what it saw again.');
   else await raise('watcher-cannot-save', 'baseline', 'the production watcher cannot save what it saw', `The Record refused what the production watcher saw (${String(put?.reason ?? 'no reason given').slice(0, 200)}). Production is not being watched properly until it can save it.`, 'cannot-save');
   return out;
