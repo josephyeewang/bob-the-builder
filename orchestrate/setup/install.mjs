@@ -33,7 +33,6 @@ import { parseRobot } from './robot-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { readUser } from './users-folders.mjs';
 import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
-import { parseRobot } from './robot-setup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
