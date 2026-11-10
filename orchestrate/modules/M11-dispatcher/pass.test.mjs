@@ -508,6 +508,14 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   b.refuseLaunch(() => ({ ok: true, base: 'b'.repeat(40) }));
   await b.pass();
   assert.equal(b.rec.read('launch', b.sessions[0].id).doc.base, 'b'.repeat(40));
+  // #384 m2: a base that is no commit id is never recorded as the copy's start; the launch is refused and told.
+  for (const bad of ['main', 'B'.repeat(40), 7, { sha: 'b'.repeat(40) }]) {
+    const m = world([card('C-4')]);
+    m.refuseLaunch(() => ({ ok: true, base: bad }));
+    await m.pass();
+    assert.equal(m.rec.read('launch', m.sessions[0].id), null, String(bad));
+    assert.match(m.calls.alerts.join('\n'), /launch was not recorded \(the launch named a malformed base commit\); its merge will be refused/, String(bad));
+  }
   // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));

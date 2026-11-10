@@ -12,7 +12,8 @@ export const intakeFactId = (product, name) => `intake-applied-proposals-file-${
  * The states of an outbox file's intake fact (intake-applied-<session>-<name>) that mean the intake is done with the
  * file for now (L852): applied, refused, interrupted (it may have run; the next pass told it), and waiting (a held
  * plan file with no launch record, or a read-only request queued on a refusal: it waits on something outside the
- * session). The one list: the Lead's restart (lead-restart.mjs leadInFlight) and the runner's drain (wiring) both read it.
+ * session). The one list: the Lead's restart (lead-restart.mjs leadInFlight) reads it, and so will the runner's drain
+ * when it lands (#388; L863 c2).
  */
 // Read only to its importers: its own add, delete and clear throw, so no importer changes the list by mistake (a
 // deliberate Set.prototype.add.call still could: a frozen Set's contents are not frozen).
