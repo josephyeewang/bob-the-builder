@@ -379,7 +379,7 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     if (fresh.length) {
       // Quoted, so a name can't read as part of the sentence (plain() keeps each on one line), and the new ones first, so
       // the cap never hides a name this notice is for (#403 r3 m2, m3).
-      const q = (list) => listed(list.map((n) => `"${plain(n, 120).replace(/"/g, "'")}"`));
+      const q = (list) => listed(list.map((n) => `"${plain(n, 120).replace(/["\u201C-\u201F\u2033\u2036\uFF02\u00AB\u00BB]/g, "'")}"`));
       const old = names.filter((n) => had.includes(n));
       const shown = old.length ? `new since the last notice ${q(fresh)}; still there from before ${q(old)}` : q(fresh);
       const mine = rec.list('product').map((x) => x?.id).filter((x) => typeof x === 'string').sort();

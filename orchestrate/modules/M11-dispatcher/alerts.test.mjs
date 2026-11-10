@@ -733,12 +733,41 @@ test('#217 r1 M3: a new fact that replaces an entry while its send is out is sti
   assert.equal(queue(real).length, 0);
 });
 
-test('#403 r3: a held retry writes the mark that went out; its own when the text is what went out, or when none was kept', () => {
+test('#403 r3, r4 M1: a held retry writes the mark that went out; when none was kept, its own only for the same text', () => {
   const A = { fact: 'f', fields: { n: 'A' } };
   const B = { fact: 'f', fields: { n: 'B' } };
   assert.equal(heldMark({ text: 'b', mark: B, delivered_text: 'a', delivered_mark: A }), A, 'replaced: what went out');
-  assert.equal(heldMark({ text: 'a', mark: B, delivered_text: 'a', delivered_mark: A }), B, 'the same text: its own, newer mark');
-  assert.equal(heldMark({ text: 'b', mark: B, delivered_text: 'a' }), B, 'held before delivered_mark was kept');
+  assert.equal(heldMark({ text: 'a', mark: B, delivered_text: 'a', delivered_mark: A }), A, 'the same text can hide other names: still what went out');
+  assert.equal(heldMark({ text: 'a', mark: B, delivered_text: 'a' }), B, 'held before delivered_mark was kept, the same text');
+  assert.equal(heldMark({ text: 'b', mark: B, delivered_text: 'a' }), null, 'held before delivered_mark was kept, the text changed: no mark');
+});
+
+test('#403 r4 m2: a replacement queued while the send is out, then a refused mark: the retry writes only the mark that went out', async () => {
+  const real = recWith([]);
+  let refusing = true;
+  const written = [];
+  const rec = Object.create(real);
+  Object.defineProperty(rec, 'write', { value: (x) => {
+    if (x.entity === 'fact' && x.id === 'stop-m-9' && refusing) return { ok: false, reason: 'busy' };
+    const r = real.write(x);
+    if (r?.ok && x.entity === 'fact' && x.id === 'stop-m-9') written.push(x.doc?.n);
+    return r;
+  } });
+  const tell = (text, n, now) => tellThen(outbox(rec, now), text, { fact: 'stop-m-9', fields: { n, told_at: new Date(now).toISOString() }, kind: 'k' });
+  tell('refused: fact A', 'A', T0);
+  const p = held();
+  const sending = sendAlerts(rec, p.port, T0, { sendMs: 5_000, budgetMs: 5_000, later: true });
+  await tickOver();
+  assert.deepEqual(p.got, ['refused: fact A']);
+  tell('refused: fact B', 'B', T0);
+  p.open();
+  (await sending).settle();
+  const entry = queue(real).find((x) => x.text === 'refused: fact B');
+  assert.equal(entry?.delivered_text, 'refused: fact A');
+  assert.equal(entry?.delivered_mark?.fields?.n, 'A', 'what is kept is the mark that went out, not the replacement\'s');
+  refusing = false;
+  await sendAlerts(rec, () => true, T0 + MIN, { sendMs: 50 });
+  assert.equal(written[0], 'A', 'the retry writes A, the only fact told so far');
 });
 
 test('#403 r3: a replacing entry carries no delivered_mark key when the held one had none', () => {
@@ -755,8 +784,8 @@ test('#403 r3: a replacing entry carries no delivered_mark key when the held one
   assert.ok(!('delivered_mark' in e), JSON.stringify(e));
 });
 
-test('#403 r3 m2: plain() puts a space for every control character, separator, and direction or zero-width mark', () => {
-  for (const c of ['\n', '\r', '\t', '\v', '\f', '\u0085', '\u001b', '\u2028', '\u2029', '\u200B', '\u200E', '\u202E', '\u2066', '\u061C', '\uFEFF']) {
+test('#403 r3 m2, r4 c1: plain() puts a space for every control character, separator, and invisible format character', () => {
+  for (const c of ['\n', '\r', '\t', '\v', '\f', '\u0085', '\u001b', '\u2028', '\u2029', '\u200B', '\u200E', '\u202E', '\u2066', '\u061C', '\uFEFF', '\u206A', '\uFFF9', '\u180E', '\u{E0001}', '\u00AD', '\u115F', '\u3164']) {
     assert.equal(plain(`a${c}b`), 'a b', JSON.stringify(c));
   }
   assert.equal(plain('plain words, kept'), 'plain words, kept');

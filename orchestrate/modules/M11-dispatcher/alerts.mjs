@@ -245,7 +245,7 @@ export const ALERT_LIST_MAX = 50;
 // Every control character, line and paragraph separator, zero-width and direction mark becomes a space, so text from
 // outside (a folder's name) can't start a line of its own or turn the words around it (#403 r3 m2). Emoji joined by a
 // zero-width joiner show as their parts: alert text is plain operational words.
-export const plain = (v, n = 200) => String(v).replace(/[\p{Cc}\p{Zl}\p{Zp}\u200B-\u200F\u202A-\u202E\u2060-\u2069\u061C\uFEFF]+/gu, ' ').slice(0, n);
+export const plain = (v, n = 200) => String(v).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u3164\uFFA0]+/gu, ' ').slice(0, n);
 // What is left off is counted, a capped name or an item that isn't text alike (L408 m1): no list reads shorter than it is.
 export const listed = (list) => {
   const names = list.filter((x) => typeof x === 'string').slice(0, ALERT_LIST_MAX).map((x) => plain(x));
@@ -300,8 +300,10 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
 // loses its hold and goes out once instead of leaving unsent (L533). `delivered_mark` is the mark that went out with it:
 // the retry writes that one, never the replacing entry's, so a mark never says more was told than was sent (#403 r3 M1). A pass is one process, so nothing in memory can cap
 // a queue write refused as well: the entry is then sent each round, which the alert channel turns into an edit of one issue.
-/** The mark a held entry's retry writes: its own when its text is what went out, else the one that went out (#403 r3 M1). */
-export const heldMark = (e) => (e.text === e.delivered_text || e.delivered_mark === undefined ? e.mark : e.delivered_mark);
+/** The mark a held entry's retry writes: always the one that went out, even when the text is the same, since one text
+ * can stand for different marks (names behind "and N more"). An entry held before it was kept writes its own only when
+ * its text is what went out, else none, and is told again (#403 r3 M1, r4 M1). */
+export const heldMark = (e) => (e.delivered_mark !== undefined ? e.delivered_mark : e.text === e.delivered_text ? e.mark : null);
 export const holdsDelivered = (e, now) => {
   if (!e.delivered_at) return false;
   const at = pastTime(e.delivered_at, now);
@@ -422,8 +424,7 @@ export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budge
       if (!entriesOf(d).some((x) => x.id === e.id)) continue;
       // Held, delivered within the day: nothing is sent, and the mark that went out with it is tried again when the round
       // settles. Not the entry's own mark: a site may have replaced the text since, and that mark is written only once
-      // its own text is delivered (#403 r3 M1). The same text as went out makes its own mark true, the newer one; an
-      // entry held before delivered_mark was kept has only its own.
+      // its own text is delivered (#403 r3 M1, r4 M1).
       if (holdsDelivered(e, now)) { done.push([{ ...e, mark: heldMark(e), retry: true }, true, null]); if (!later) settle(); continue; }
       // The count of dropped alerts rides on the next copy sent; the copy keeps what it carried, so a second
       // copy, in this round or one alongside it, carries only what none still out carries.
