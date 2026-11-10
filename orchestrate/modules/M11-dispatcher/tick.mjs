@@ -389,9 +389,10 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
 export async function runTick({ lockFile, lock = takePassLock, ...args }) {
   const l = lock(lockFile, { now: args.now });
   // A lock left by a dead pass: the last run was killed (the run deadline, the watchdog in main.mjs, a
-  // crash) before it finished. Joe is told, once a day (L38); this pass runs as usual.
-  if (l.ok && l.broke) {
-    try { holdAlert({ rec: args.rec, cause: 'run-late', text: `the last Dispatcher pass (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this pass runs as usual`, alert: outbox(args.rec, args.now), now: args.now }); }
+  // crash) before it finished. Joe is told, once a day (L38); this pass runs as usual. Told on a refusal too: a late taker
+  // can link in after this pass broke the dead lock, and that holder has nothing to tell (L800 M-A). One cause, so once a day.
+  if (l.broke) {
+    try { holdAlert({ rec: args.rec, cause: 'run-late', text: `the last Dispatcher pass (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; ${l.ok ? 'this pass runs as usual' : 'another pass holds the lock now'}`, alert: outbox(args.rec, args.now), now: args.now }); }
     catch { /* the record is unwritable: the pass itself will fail and tell */ }
   }
   if (!l.ok) {

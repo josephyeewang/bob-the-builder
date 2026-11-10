@@ -1680,3 +1680,18 @@ test('L785 m1: runTick tells a moved, not-put-back live lock (moved_live) once a
   await runTick({ lockFile: '/unused', lock: moved, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
   assert.equal(told(), 1, 'once a day');
 });
+
+// L800 M-A: a pass that broke a dead lock and then lost the place to a late taker is refused, and the holder never saw the
+// dead lock: the refusal's `broke` is told, under the same cause as the holder's tell, so it is still once a day.
+test('L800 M-A: runTick tells a broken dead lock carried on a refusal, once a day with the holder\'s tell', async () => {
+  const w = world([account(), usage()]);
+  const told = () => (w.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /the last Dispatcher pass \(taken T-dead\) was stopped before it finished/.test(e.text));
+  const lost = () => ({ ok: false, reason: 'another pass runs (pid 7)', broke: { pid: 999, taken_at: 'T-dead' } });
+  assert.equal((await runTick({ lockFile: '/unused', lock: lost, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
+  assert.deepEqual(told().map((e) => e.text.endsWith('another pass holds the lock now')), [true], 'told on the refusal');
+  const held = () => ({ ok: true, broke: { pid: 999, taken_at: 'T-dead' }, release() {} });
+  await runTick({ lockFile: '/unused', lock: held, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  // The holder's pass sends what is queued, so count what was sent as well as what is still queued.
+  const said = [...told().map((e) => e.text), ...w.calls.alerts.filter((t) => /the last Dispatcher pass \(taken T-dead\) was stopped/.test(t))];
+  assert.equal(said.length, 1, `one cause: the holder's tell the same day is not a second one: ${said.join(' | ')}`);
+});

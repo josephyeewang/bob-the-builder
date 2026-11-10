@@ -591,6 +591,42 @@ test('L771 Minor 1: two takers over one dead lock: only one breaks it and holds;
   rmSync(f, { force: true });
 });
 
+// L800 M-A (audit #336 r2 probe Q2): B breaks the dead lock D; before B links again, A (which never saw D) finds the place
+// empty and links; B's link then finds A and refuses. A has nothing to tell, so B's refusal must carry the break.
+test('L800 M-A: a taker that broke a dead lock and then lost the place to a late taker still carries `broke`', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  const DEAD = { pid: 999, taken_at: new Date(at - 60e3).toISOString() };
+  const isDead = (p) => p === DEAD.pid;
+  const lateTaker = (pid) => {
+    // At B's re-read of its moved file the place is empty: A arrives then and links.
+    let a = null; const orig = fs.readFileSync;
+    fs.readFileSync = function (p, ...r) { if (String(p).endsWith(`.${pid}.dead`) && !a) a = takePassLock(f, { pid: 5001, now: at, dead: isDead }); return orig.call(this, p, ...r); };
+    syncBuiltinESMExports();
+    return { get a() { return a; }, undo() { fs.readFileSync = orig; syncBuiltinESMExports(); } };
+  };
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let late = lateTaker(5002); let b;
+  try { b = takePassLock(f, { pid: 5002, now: at, dead: isDead }); } finally { late.undo(); }
+  assert.deepEqual([late.a?.ok, late.a?.broke], [true, null], 'A holds and never saw D');
+  assert.equal(b.ok, false, b.reason);
+  assert.deepEqual([b.broke?.pid, b.broke?.taken_at], [DEAD.pid, DEAD.taken_at], 'the refusal carries the break');
+  late.a.release();
+  // The round's own take passes it through, as LOCK_REFUSED or code 0.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  late = lateTaker(process.pid); let r;
+  try { r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => (isDead(p) ? 'dead' : 'ours') }); } finally { late.undo(); }
+  assert.equal(late.a?.ok, true);
+  assert.deepEqual([r.ok, r.broke?.pid], [false, DEAD.pid], r.line);
+  late.a.release();
+  // A refusal with no break carries none.
+  writeFileSync(f, JSON.stringify({ pid: 5001, taken_at: new Date(at).toISOString() }), { mode: 0o600 });
+  const plain = takePassLock(f, { pid: 5002, now: at, dead: isDead });
+  assert.deepEqual([plain.ok, 'broke' in plain], [false, false]);
+  rmSync(f, { force: true });
+});
+
 // L785 m1: a round whose take moved a live lock and could not put it back (two rounds may run) tells Joe, once a day.
 test('L785 m1: robot-main tells a moved, not-put-back live lock through the held alert', async () => {
   const w = world();
@@ -616,6 +652,30 @@ test('L785 m1: robot-main tells a moved, not-put-back live lock through the held
   assert.equal(moves, 1, 'the take moved a lock');
   assert.equal(code, 3, logs.join('\n'));
   assert.ok(queued(readRecord(w)).some((t) => /two robot job rounds may be running at once/.test(t)), JSON.stringify(queued(readRecord(w))));
+  // L800 m-1: under its own cause, never the late-round one, so a late tell already held that day can't silence it.
+  const entries = readRecord(w).read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+  assert.equal(entries.find((e) => /two robot job rounds may be running at once/.test(e.text))?.mark?.fact, HOLD_FACT('robot-lock-moved'), JSON.stringify(entries));
+});
+
+// L800 M-A: the round broke the dead lock, then a late round of ours linked into the place: this round exits 0 (another round
+// runs) and still tells the stopped round, as the holder never saw it.
+test('L800 M-A: robot-main tells a dead lock it broke even when a late round took the place', async () => {
+  const w = world();
+  const f = lockOf(w);
+  writeFileSync(f, JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }), { mode: 0o600 });
+  let late = null; const orig = fs.readFileSync;
+  fs.readFileSync = function (p, ...r) {
+    if (String(p).startsWith(`${f}.`) && String(p).endsWith('.dead') && !late) late = takePassLock(f, { pid: process.pid, dead: () => false });
+    return orig.call(this, p, ...r);
+  };
+  syncBuiltinESMExports();
+  const logs = []; let code;
+  try { code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => ({ sent: 0 }), fetchFn: fakeGitHubFetch(w.fake) } }); }
+  finally { fs.readFileSync = orig; syncBuiltinESMExports(); }
+  assert.equal(late?.ok, true, 'the late round holds');
+  assert.equal(code, 0, logs.join('\n'));
+  assert.ok(queued(readRecord(w)).some((t) => /the last robot job round \(taken T-dead\) was stopped before it finished; another round holds the lock now/.test(t)), JSON.stringify(queued(readRecord(w))));
+  late.release();
 });
 
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────

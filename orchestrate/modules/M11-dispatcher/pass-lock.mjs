@@ -34,37 +34,40 @@ export function pidDead(pid) {
 }
 
 /**
- * Takes the lock. Returns { ok: true, release, broke } or { ok: false, reason, held? }: `held` is the live holder's lock as read
+ * Takes the lock. Returns { ok: true, release, broke } or { ok: false, reason, held?, moved_live?, broke? } (`broke` once
+ * this taker broke a dead lock, whether or not it then holds; L800 M-A): `held` is the live holder's lock as read
  * (L754), so a caller never reads the file a second time, when it may be gone or another's. `dead(pid)` is for tests.
  */
 export function takePassLock(file, { pid = process.pid, now = Date.now(), dead = pidDead } = {}) {
-  // `broke` is the dead pass's lock when this one broke it, so the caller can tell Joe.
+  // `broke` is the dead pass's lock when this one broke it, so the caller can tell Joe. It rides on a refusal too: a late
+  // taker can link into the gap after the break, and then it holds with nothing to tell (L800 M-A).
   let broke = null;
+  const refuse = (r) => (broke ? { ...r, broke } : r);
   for (let attempt = 0; attempt < 2; attempt++) {
     const mine = `${file}.${pid}.new`;
     try { unlinkSync(mine); } catch { /* none left from a crash */ }
     let fd;
-    try { fd = openSync(mine, 'wx', 0o600); } catch (e) { return { ok: false, reason: `could not take the pass lock: ${e.code}` }; }
+    try { fd = openSync(mine, 'wx', 0o600); } catch (e) { return refuse({ ok: false, reason: `could not take the pass lock: ${e.code}` }); }
     try { writeSync(fd, JSON.stringify({ pid, taken_at: new Date(now).toISOString() })); } finally { closeSync(fd); }
     let linked = null;
     try { linkSync(mine, file); linked = true; } catch (e) { linked = e; }
     try { unlinkSync(mine); } catch { /* the lock itself is kept */ }
     if (linked !== true) {
-      if (linked?.code !== 'EEXIST') return { ok: false, reason: `could not take the pass lock: ${linked?.code ?? linked}` };
+      if (linked?.code !== 'EEXIST') return refuse({ ok: false, reason: `could not take the pass lock: ${linked?.code ?? linked}` });
       let held;
       // A lock gone between the link and the read was released (or broken) just then: try the link again, never "unreadable".
       try { held = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
         if (e?.code === 'ENOENT') continue;
-        return { ok: false, reason: 'the pass lock is unreadable; another pass may run' };
+        return refuse({ ok: false, reason: 'the pass lock is unreadable; another pass may run' });
       }
-      if (!dead(held?.pid)) return { ok: false, reason: `another pass runs (pid ${held?.pid})`, held };
+      if (!dead(held?.pid)) return refuse({ ok: false, reason: `another pass runs (pid ${held?.pid})`, held });
       const moved = `${file}.${pid}.dead`;
       try { unlinkSync(moved); } catch { /* none left from a crash */ }
       try { renameSync(file, moved); } catch (e) {
         // Another taker moved it first: try the link again. `held` was judged dead and a dead holder never releases, so
         // only a breaker moved it: the dead lock was broken, and whichever taker holds tells it (L785 M1).
         if (e?.code === 'ENOENT') { broke = held; continue; }
-        return { ok: false, reason: 'could not break a dead pass lock' };
+        return refuse({ ok: false, reason: 'could not break a dead pass lock' });
       }
       let was = null; try { was = JSON.parse(readFileSync(moved, 'utf8')); } catch { /* checked below */ }
       if (was?.pid !== held?.pid || was?.taken_at !== held?.taken_at) {
@@ -77,9 +80,9 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
         else { try { unlinkSync(moved); } catch { /* gone */ } }
         const who = was ? `pid ${was.pid}` : 'a lock that could not be read';
         // The holder put back is judged like any holder read, so a caller's `dead` sees it (robot-main's exit code; self-review Minor 1).
-        if (back) { if (was) dead(was.pid); return { ok: false, reason: `another pass runs (${who})`, held: was }; }
-        return { ok: false, reason: third ? `another pass runs (${who}); its lock was moved while breaking a dead one and a third took the place`
-          : `another pass runs (${who}); its lock was moved while breaking a dead one and could not be put back (it is at ${moved})`, held: was, moved_live: true };
+        if (back) { if (was) dead(was.pid); return refuse({ ok: false, reason: `another pass runs (${who})`, held: was }); }
+        return refuse({ ok: false, reason: third ? `another pass runs (${who}); its lock was moved while breaking a dead one and a third took the place`
+          : `another pass runs (${who}); its lock was moved while breaking a dead one and could not be put back (it is at ${moved})`, held: was, moved_live: true });
       }
       try { unlinkSync(moved); } catch { /* the dead lock is out of place either way */ }
       broke = held;
@@ -93,5 +96,5 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
       },
     };
   }
-  return { ok: false, reason: 'the pass lock was taken again while breaking it' };
+  return refuse({ ok: false, reason: 'the pass lock was taken again while breaking it' });
 }
