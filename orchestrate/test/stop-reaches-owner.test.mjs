@@ -5,13 +5,14 @@
 // not kept (see store.mjs recoverOrStop); robot-wiring.test.mjs runs its path. This uses the real store and real delivery.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fakeAlert } from './fake-alert.test-helper.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { deliverAlertsPass } from '../modules/M13-ledger/alert-channel.mjs';
 import { openRecordWithStore } from '../modules/M9-record/writer.mjs';
-import { readUnsent } from '../modules/M9-record/unsent.mjs';
+import { UNSENT, readUnsent } from '../modules/M9-record/unsent.mjs';
+import { openStore } from '../modules/M9-record/store.mjs';
 import { PRODUCT, UID, setup } from '../modules/M9-record/fixtures.test-helper.mjs';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -49,6 +50,10 @@ test('L583: recovery_stopped reaches the owner through the delivery pass, with t
     const issues = [...gh.issues.values()].filter((x) => /recovery_stopped/.test(x.body));
     assert.equal(issues.length, 1);
     assert.match(issues[0].body, /recovery stopped/);
+    // L732 m1: the store's path is cut and the words fenced, as every store alert's are.
+    assert.match(issues[0].body, /&lt;path&gt;/, 'the path is cut (then escaped inside the fence)');
+    assert.doesNotMatch(issues[0].body, /\/var\/|\/private\/|\/Users\/|orch-stopped-/, 'no local path reaches the issue');
+    assert.match(issues[0].body, /<outside-text[^>]*>[^]*recovery stopped[^]*<\/outside-text>/, 'fenced');
     assert.equal(kept(env).length, 0, 'delivered, so no longer waiting');
     tryWrite(opened(env));
     assert.equal(kept(env).length, 0, 'a delivered line still holds for the day');
@@ -95,4 +100,42 @@ test('L583: a stop carries its type and reason on the error, for a job that has 
     // L724: its key is the error code and the part of the store, never the message or the whole path.
     assert.equal(err?.stop?.key, 'EACCES:tmp');
   } finally { restore(); }
+});
+
+// L732 m2: the fault L724 was about names a temp file whose name is new on every start. Its daily line and its stop key are
+// the error code and the part of the store, so two starts in a day keep one line; the next day keeps one more.
+test('L732: a recovery fault on a temp name that changes each start keeps one line a day, under EACCES:tmp', () => {
+  const env = setup({ prefix: 'orch-stopped-', extra: { alert: fakeAlert({ answer: false }) } });
+  const open = () => openRecordWithStore({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: fakeAlert({ answer: false }), now: () => env.clock.t, faultAt: 'recover_fails' });
+  const reasons = [];
+  for (let i = 0; i < 3; i++) {
+    const r = tryWrite(open());
+    assert.match(r, /recovery stopped: EACCES: permission denied, open '.*\/tmp\/\d+-w-[0-9a-f]+\.json'/);
+    reasons.push(r);
+  }
+  assert.equal(new Set(reasons).size, 3, 'the reason really changes on each start');
+  const lines = () => readFileSync(join(env.root, UNSENT), 'utf8').split('\n').filter((l) => l.includes('recovery_stopped'));
+  assert.equal(kept(env).length, 1, 'one line for the day, though every reason differed');
+  assert.match(lines()[0], /"cap_key":"recovery_stopped:EACCES:tmp"/, 'kept under the code and the place, not the temp name');
+  env.clock.t += DAY + 1;
+  tryWrite(open());
+  assert.equal(kept(env).length, 2, 'the next day keeps one more');
+});
+
+test('L732: the stop a recovery fault raises carries the stable key, not the temp name', () => {
+  const env = setup({ prefix: 'orch-stopped-', extra: { alert: fakeAlert({ answer: false }) } });
+  const store = openStore({ root: env.root, ownerUid: UID, alert: () => false, now: () => env.clock.t, faultAt: 'recover_fails' });
+  let err;
+  try { store.transaction(() => {}); } catch (e) { err = e; }
+  assert.equal(err?.stop?.type, 'recovery_stopped');
+  assert.equal(err.stop.key, 'EACCES:tmp');
+  assert.match(err.stop.reason, /\/tmp\/\d+-w-/);
+});
+
+test('L732: a recovery stop is a refused write, never a throw out of the Record (the round goes on)', () => {
+  const env = setup({ prefix: 'orch-stopped-', faultAt: 'recover_fails', extra: { alert: fakeAlert({ answer: false }) } });
+  let r;
+  assert.doesNotThrow(() => { r = env.record.write({ actor: 'dispatcher', entity: 'fact', id: 'probe', expectRev: 0, doc: { x: 1 } }); });
+  assert.equal(r?.ok, false);
+  assert.match(r.reason, /^store error: recovery stopped: EACCES: .*writes stop until the owner fixes it$/);
 });

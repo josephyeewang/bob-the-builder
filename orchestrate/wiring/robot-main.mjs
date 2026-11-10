@@ -83,8 +83,9 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     wired = await mod.wire(config, { now, log, ...wireOpts });
   } catch (e) {
     log(`robot: not started: ${e.message}`);
-    // A store that won't open has no alert queue, so this is told here, once per reason (L587).
-    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel, log });
+    // A store that won't open has no alert queue, so this is told here: one issue per fault, a comment once a day while it
+    // lasts (L587, L724, L732).
+    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel, log, now });
     dog?.terminate();
     return 1;
   }

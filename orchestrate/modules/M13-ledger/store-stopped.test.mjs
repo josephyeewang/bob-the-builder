@@ -106,3 +106,46 @@ test('L724: a fault the store keeps for the delivery pass is not told here too',
   assert.equal(gh.issues.size, 0);
   assert.match(logs[0], /told by the delivery pass/);
 });
+
+// L732 m3: the issue left open after a fix hides the same fault coming back unless a start says so again. A start that
+// finds it open comments once a day while the fault lasts, counting the opening itself.
+test('L732: a fault still there while its issue is open is told again as a comment, at most once a day', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const HOUR = 3600e3;
+  const gh = fakeIssues({ now: () => new Date(t) });
+  const at = (extra) => run({ gh, owner: 'owner-login' }, { now: () => t, ...extra });
+  const pathStop = { ...stop, reason: "the store's diary.jsonl is a link, not a plain file (/Users/someone/orch/store)" };
+  assert.equal((await at({ stop: pathStop })).r, 'opened');
+  assert.match(gh.issues.get(1).body, /^Opened at 2026-11-09T08:00:00\.000Z\.$/m);
+  t += HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'already open', 'the opening counts as the day\'s notice');
+  t += 24 * HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'reminded');
+  const c = gh.issues.get(1).comments;
+  assert.equal(c.length, 1);
+  assert.match(c[0], /^Still stopped \(store_layout\): <outside-text source="log-line">.*&lt;path&gt;.*<\/outside-text>$/);
+  assert.doesNotMatch(c[0], /\/Users\//);
+  for (let i = 0; i < 3; i++) { t += HOUR; assert.equal((await at({ stop: pathStop })).r, 'already open', 'once a day'); }
+  t += 24 * HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'reminded');
+  assert.equal(gh.issues.get(1).comments.length, 2);
+  assert.equal(gh.issues.size, 1, 'never a second issue');
+});
+
+test('L732: a look that fails before a comment says nothing more, and a refused comment is logged', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const gh = fakeIssues({ now: () => new Date(t) });
+  await run({ gh, owner: 'owner-login' }, { now: () => t });
+  t += 30 * 3600e3;
+  const blind = { ...gh, latestOwnComment: async () => false, lastAnswer: 'HTTP 502' };
+  const a = await run({ gh: blind, owner: 'owner-login' }, { now: () => t });
+  assert.equal(a.r, 'already open');
+  assert.match(a.logs.join('\n'), /comments could not be read: HTTP 502/);
+  const noRead = { ...gh, read: async () => false };
+  assert.equal((await run({ gh: noRead, owner: 'owner-login' }, { now: () => t })).r, 'already open');
+  const refused = { ...gh, comment: async () => false, lastAnswer: 'HTTP 403' };
+  const b = await run({ gh: refused, owner: 'owner-login' }, { now: () => t });
+  assert.equal(b.r, 'not told');
+  assert.match(b.logs.join('\n'), /could not be told: HTTP 403/);
+  assert.equal(gh.issues.get(1).comments.length, 0);
+});

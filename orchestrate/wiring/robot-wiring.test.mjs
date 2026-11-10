@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
@@ -27,6 +27,8 @@ import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
 import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
+import { UNSENT, readUnsent } from '../modules/M9-record/unsent.mjs';
+import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -115,20 +117,29 @@ test('L587: a store that won\'t open is told once per reason through the channel
   assert.match(bare.logs, /could not be told: .*R-0b-02/);
 });
 
-// L724: a recovery that stops writes does not stop the start (a store write never throws), so the round runs and its own
-// deliver pass sends the store's kept line. The start's stop path, and its issue, is only for a store that won't open.
-test('L724: a Record whose recovery stopped still starts the round, and the stop path opens no issue', async () => {
+// L724, L732 m2: a recovery that stops writes does not stop the start (a store write never throws), so the round runs and
+// the store keeps its line for the deliver pass. The start's stop path, and its issue, is only for a store that won't open.
+// Opening the store sets tmp/ back to 755 and recovers once, so this happens after the open, just before the round's first
+// write (the heartbeat's held alert): a torn diary line, as a writer killed mid-append leaves, makes that write recover
+// again, and the recovery stops at tmp/, which it may not list.
+test('L724: a Record whose recovery stopped still starts the round, keeps one line, and the stop path opens no issue', async () => {
   const w = world();
   assert.equal(boot(w).code, 0);
   const tmp = join(w.config.recordRoot, 'tmp');
   const gh = fakeIssues();
   const logs = [];
-  chmodSync(tmp, 0o000);
+  let shut = 0;
+  const hold = (args) => { appendFileSync(join(w.config.recordRoot, 'diary.jsonl'), '{"torn'); chmodSync(tmp, 0o000); shut++; return holdAlert(args); };
   try {
-    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } });
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { hold, stopChannel: { gh, owner: 'owner-login' } } });
+    assert.equal(shut, 1, 'the round reached its first write');
     assert.notEqual(code, 1, logs.join('\n'));
     assert.doesNotMatch(logs.join('\n'), /robot: not started/);
-    assert.equal(gh.issues.size, 0);
+    assert.match(logs.join('\n'), /the Dispatcher-late alert could not be queued/, 'the write was refused: recovery really stopped');
+    const kept = readUnsent(w.config.recordRoot).filter((x) => x.event.type === 'recovery_stopped');
+    assert.equal(kept.length, 1, 'one line kept for the deliver pass');
+    assert.match(readFileSync(join(w.config.recordRoot, UNSENT), 'utf8'), /"cap_key":"recovery_stopped:EACCES:tmp"/, 'kept under the fault\'s stable key');
+    assert.equal(gh.issues.size, 0, 'the start\'s stop path is not used for it');
   } finally { chmodSync(tmp, 0o755); }
 });
 
