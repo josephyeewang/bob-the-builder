@@ -84,8 +84,9 @@ export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
  * plan-review fact from the last PLAN_START_HOLD_MS: a start marked but never confirmed (it may have started), or a
  * request whose answer is not in yet (`planReviewAnswer` says it works; a read that throws counts it too). An answer,
  * or an end without one, is not running. `except` is the card being started now. Only `product`'s cards: a Dispatcher
- * runs one product and may read only its plans' answers (another product's are counted by its own Dispatcher, and by
- * the runner's list once started). → [{ id, card }] (id: the request).
+ * runs one product and may read only its plans' answers, so another product's asked-for ones are not counted here: this
+ * count is a first wall only. The review runner keeps the cap itself across every product's requests (L735 M1), so two
+ * Dispatchers each under it can't put it over between them. → [{ id, card }] (id: the request).
  */
 export async function plansAwaitingAnswer({ rec, now, product, planReviewAnswer, except = null }) {
   const prefix = PLAN_REVIEW_FACT('');
