@@ -11,11 +11,22 @@ const products = ['test-product', 'second-product'];
 const pause = (p) => `{"product":"${p}","state":"paused","until":null,"tz":null}`;
 
 test('L26 planted: a product not on the list is refused, and the push says so', () => {
-  const r = checkOutboxFile('state-20261103-0915-kq.json', pause('Test-Product'), { products });
+  const r = checkOutboxFile('state-20261103-0915-kq.json', pause('third-product'), { products });
   assert.equal(r.ok, false);
   assert.equal(intakePush('state-20261103-0915-kq.json', r), 'Not filed: that product is not on the product list. Say it again.');
   assert.equal(checkOutboxFile('state-20261103-0915-kq.json', pause('test-product'), { products: [] }).ok, false, 'an empty list admits nothing');
   assert.equal(checkOutboxFile('state-20261103-0915-kq.json', pause('test-product'), { products }).ok, true);
+});
+
+// L878 m3: the front door asks the runner's one product form (shared/product-paths.mjs), so a name the runner can't
+// make folders for is refused here, even when the list names it.
+test('L878 m3: a product name outside the shared form is refused, listed or not', () => {
+  for (const bad of ['Test-Product', 'my_app', 'my.app', 'a'.repeat(65), '-app']) {
+    const r = checkOutboxFile('state-20261103-0915-kq.json', pause(bad), { products: [bad] });
+    assert.equal(r.ok, false, bad);
+    assert.match(r.reason, /no valid product name/, bad);
+  }
+  assert.equal(checkOutboxFile('state-20261103-0915-kq.json', pause('a'.repeat(64)), { products: ['a'.repeat(64)] }).ok, true);
 });
 
 test('L26 planted: a reused id is refused, whether the seen ids come as a Set or a list', () => {
@@ -47,9 +58,9 @@ test('L26 + round 6 M-1 + L151: "Confirmed" only for an idea; a state- or reques
 });
 
 test('0b-8 audit round 6 minors 1 and 3: a skipped or mis-passed check is never confirmed', () => {
-  const f = outboxFile('state', '20261103-0915-ka', { product: 'Test-Product', state: 'paused' });
+  const f = outboxFile('state', '20261103-0915-ka', { product: 'test-product', state: 'paused' });
   assert.equal(intakePush(f.name, checkOutboxFile(f.name, f.text)), 'Not filed: the Mini could not check the product list and the file ids. Say it again.');
-  assert.equal(intakePush(f.name, checkOutboxFile(f.name, f.text, { products: ['Test-Product'] })).startsWith('Not filed'), true, 'seen ids missing');
+  assert.equal(intakePush(f.name, checkOutboxFile(f.name, f.text, { products: ['test-product'] })).startsWith('Not filed'), true, 'seen ids missing');
   const g = outboxFile('state', '20261103-0915-kb', { product: 'test', state: 'paused' });
   assert.match(checkOutboxFile(g.name, g.text, { products: 'test-product,second-product', seenIds: [] }).reason, /wrong form/, 'a string is not a list');
   assert.match(checkOutboxFile(g.name, g.text, { products, seenIds: {} }).reason, /wrong form/, 'an object is not a list');

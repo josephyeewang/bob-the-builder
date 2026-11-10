@@ -27,6 +27,7 @@ import { makeMasker } from '../M12-sensors/mask.mjs';
 import { stripControls } from '../M12-sensors/escape.mjs';
 import { checkTimeZone } from './timezone.mjs';
 import { MODE_REQUESTS } from './sort.mjs';
+import { PRODUCT } from '../../shared/product-paths.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea', 'ask-request']);
 export const ASK_REQUESTS = Object.freeze(['research', 'undo']);
@@ -36,7 +37,7 @@ export const REQUESTS = Object.freeze(['resume', 'wrapup', 'rotate', ...MODE_REQ
 // name into the record's diary (0b-8 audit round 3 M-2).
 export const OUTBOX_ID = /^\d{8}-\d{4}-[a-z]{2}$/;
 const ID = OUTBOX_ID;
-const PRODUCT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+// The product form is the runner's one (shared/product-paths.mjs; L878 m3): lower case, digits and -, at most 64.
 // A key's NAME: capitals with an underscore (STRIPE_KEY), never a key-ID shape (round 2 minor 6: AKIA…).
 const KEY_NAME = /^[A-Z][A-Z0-9]*_[A-Z0-9_]{1,62}$/;
 const KEY_ID = /^(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[A-Z0-9]{12,}$/;
