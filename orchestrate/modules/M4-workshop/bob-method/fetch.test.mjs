@@ -72,7 +72,24 @@ test('R-0b-141: the pinned commit\'s method files land read only in the folder, 
   const again = await fetchBobMethod({ ...w, address: s.src });
   assert.equal(again.ok, true, again.reason);
   assert.equal(again.fetched, false, 'a folder already at the pin is left as it is');
+  // Loosened by hand: the bytes match, but it is rewritten read only, never kept (review of #316, m1).
+  chmodSync(join(w.folder, 'build-protocol-core.md'), 0o666); chmodSync(w.folder, 0o777);
+  const loose = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(loose.ok, true, loose.reason);
+  assert.equal(loose.fetched, true, 'a loosened folder is rewritten');
+  assert.equal(statSync(join(w.folder, 'build-protocol-core.md')).mode & 0o777, 0o444);
+  assert.equal(statSync(w.folder).mode & 0o777, 0o555);
+  // A mirror others can write is refused: a planted pack could map the pin to other bytes (m2).
+  chmodSync(join(w.mirror, 'objects'), 0o777);
+  assert.match((await fetchBobMethod({ ...w, address: s.src })).reason, /the Bob mirror: .*objects can be written by others/);
 });
+
+// The Lead's real rendered settings, with one proposals folder (an empty list is refused, L746).
+function leadSettings(folder) {
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: folder,
+    deny: { secrets: [], otherCopies: [], proposals: ['/w/proposals'] } };
+  return renderRoleSettings({ role: 'lead', profile: DESIGN_PROFILES.lead, paths, productionFiles: [], proposalOutboxes: ['/w/proposals'] });
+}
 
 test('R-0b-141: SKILL.md stays unreadable: the folder never holds one, a planted one is taken out, and the Lead\'s settings deny reading any', async () => {
   const s = source();
@@ -88,9 +105,7 @@ test('R-0b-141: SKILL.md stays unreadable: the folder never holds one, a planted
   assert.deepEqual(checkBobFolder({ folder: w.folder, manifest: r0.manifest, settings: denyFor(w.folder) }), { ok: true });
   // The Lead is given the folder, can't write it, and is denied reading any SKILL.md anywhere.
   const abs = w.folder.replace(/^\/+/, '');
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: w.folder,
-    deny: { secrets: [], otherCopies: [], proposals: [] } };
-  const lead = renderRoleSettings({ role: 'lead', profile: DESIGN_PROFILES.lead, paths, productionFiles: [], proposalOutboxes: [] });
+  const lead = leadSettings(w.folder);
   assert.equal(lead.ok, true, lead.reason);
   const deny = lead.settings[S.permissions][S.deny];
   assert.ok(deny.includes('Read(//**/SKILL.md)'), 'no SKILL.md is readable');
@@ -122,11 +137,31 @@ test('R-0b-141: nothing from the caller\'s environment reaches git, and only git
   assert.match(seen, /ARGS .*fetch/, 'the fetch went through the wrapped git');
   assert.ok(!seen.includes(PLANTED) && !/TOKEN=/.test(seen), 'no token in git\'s environment');
   assert.doesNotMatch(seen, /extraheader/i, 'no header');
-  assert.match(seen, /GIT_CONFIG_VALUE_\d+=$/m, 'the credential helper is set empty');
+  const helper = seen.match(/^GIT_CONFIG_KEY_(\d+)=credential\.helper$/m);
+  assert.ok(helper, 'the credential helper is set');
+  assert.match(seen, new RegExp(`^GIT_CONFIG_VALUE_${helper[1]}=$`, 'm'), 'and set empty');
   for (const a of [s.src, `https://u:${PLANTED}@github.com/o/r.git`, 'https://user@github.com/o/r.git', 'http://github.com/o/r.git', 'https://example.com/o/r.git', 'git@github.com:o/r.git']) {
     assert.match((await fetchBobMethod({ ...w, localAddress: false, address: a })).reason, /public repository's https address/, a);
   }
   assert.ok(GITHUB_ADDRESS.test('https://github.com/owner/repo.git'));
+  for (const a of ['https://github.com/../r.git', 'https://github.com/./r.git', 'https://github.com/o/...git']) assert.equal(GITHUB_ADDRESS.test(a), false, a);
+});
+
+test('R-0b-141 (review of #316, m5): the real path, with localAddress off, hands git the github.com address and no other', async () => {
+  const s = source();
+  const pin = s.commit(BASE);
+  const w = world({ pin });
+  const address = 'https://github.com/o/r.git';
+  const log = join(tmp(), 'args.log');
+  const realGit = spawnSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const wrap = join(tmp(), 'git-swap');
+  // Offline: the wrapper swaps the github.com address for the local source, after logging what it was handed.
+  writeFileSync(wrap, `#!/bin/sh\necho "ARGS $*" >> '${log}'\nfor a; do shift; [ "$a" = '${address}' ] && a='${s.src}'; set -- "$@" "$a"; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const r = await fetchBobMethod({ ...w, localAddress: false, address, gitBin: wrap });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.fetched, true);
+  const fetches = readFileSync(log, 'utf8').split('\n').filter((l) => / fetch /.test(` ${l} `));
+  assert.ok(fetches.length >= 1 && fetches.every((l) => l.includes(address) && !l.includes(s.src)), fetches.join(' | '));
 });
 
 test('R-0b-141: each refusal gives its own reason and writes nothing', async () => {
@@ -158,4 +193,15 @@ test('R-0b-141: the pattern reader takes exact paths and dir/** only', () => {
   assert.deepEqual(methodPatterns(['a.md', 'd/**']).patterns, [{ exact: 'a.md' }, { under: 'd' }]);
   for (const bad of [[], null, [7], ['d/*'], ['**'], ['a/../b'], ['d/**/x']]) assert.equal(methodPatterns(bad).ok, false, JSON.stringify(bad));
   assert.match(pickFiles(Buffer.from(`100644 blob ${'a'.repeat(40)}\tx.md\0`), [{ exact: 'y.md' }]).reason, /has no y\.md/);
+});
+
+// Review of #316, m6: check 13 against the Lead's real rendered settings. It reads the deny rule as Edit(/abs/**), while
+// render-settings writes Edit(//abs/**), so this stays a todo until lane 2's deny-form fix lands.
+test('R-0b-141: check 13 takes the folder under the Lead\'s real rendered settings', { todo: 'lane 2: checkBobFolder deny form' }, async () => {
+  const s = source();
+  const w = world({ pin: s.commit(BASE) });
+  const r = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(r.ok, true, r.reason);
+  const lead = leadSettings(w.folder);
+  assert.deepEqual(checkBobFolder({ folder: w.folder, manifest: r.manifest, settings: lead.settings }), { ok: true });
 });

@@ -37,7 +37,7 @@ const refuse = (reason) => ({ ok: false, reason });
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
 const HEX40 = /^[0-9a-f]{40}$/;
 // The public repository's https address, with no name or token in it.
-export const GITHUB_ADDRESS = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+export const GITHUB_ADDRESS = /^https:\/\/github\.com\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/(?!\.\.?\.git$)[A-Za-z0-9_.-]+\.git$/;
 export const PIN_REF = 'refs/orchestrate/bob-pin';
 const GIT_MS = 300_000;
 
@@ -102,15 +102,39 @@ function listFolder(root) {
   return out;
 }
 
-/** Does `folder` hold exactly the manifest's files, as plain files with those bytes? */
-export function folderMatches(folder, manifest) {
+/** Does `folder` hold exactly the manifest's files, as plain files with those bytes, read only (0444 files, 0555
+ *  folders) and, when `owner` is given, all the owner's? A loosened folder is rewritten, never kept (review of #316). */
+export function folderMatches(folder, manifest, owner) {
   try {
     if (!lstatSync(folder).isDirectory()) return false;
     const have = listFolder(folder);
     if (have.size !== Object.keys(manifest).length) return false;
     for (const [rel, p] of have) if (!p || manifest[rel] !== sha256(readFileSync(p))) return false;
-    return true;
+    const modesOk = (d) => {
+      const st = lstatSync(d);
+      if ((st.mode & 0o777) !== 0o555 || (owner !== undefined && st.uid !== owner)) return false;
+      for (const n of readdirSync(d)) {
+        const c = join(d, n); const cs = lstatSync(c);
+        if (cs.isDirectory()) { if (!modesOk(c)) return false; } else if ((cs.mode & 0o777) !== 0o444 || (owner !== undefined && cs.uid !== owner)) return false;
+      }
+      return true;
+    };
+    return modesOk(folder);
   } catch { return false; }
+}
+
+// The mirror and every object in it are the owner's and shut to others, so nobody else can plant a pack that maps the
+// pin's id to other bytes (cat-file does not re-hash on read; review of #316).
+function mirrorProblem(mirror, owner) {
+  const walk = (d) => {
+    const bad = ownFolderProblem(d, owner); if (bad) return bad;
+    for (const n of readdirSync(d)) {
+      const c = join(d, n); const st = lstatSync(c);
+      if (st.isDirectory()) { const b = walk(c); if (b) return b; } else if (st.uid !== owner || (st.mode & 0o022)) return `${c} is not the orchestrate user's alone`;
+    }
+    return null;
+  };
+  return ownFolderProblem(mirror, owner) ?? walk(join(mirror, 'objects'));
 }
 
 function ownFolderProblem(dir, owner) {
@@ -156,6 +180,8 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
     if (!st) await initMirror(mirror);
     const mc = checkMirror(mirror);
     if (!mc.ok) return refuse(`the Bob mirror: ${mc.reason}`);
+    const mp = mirrorProblem(mirror, owner);
+    if (mp) return refuse(`the Bob mirror: ${mp}`);
 
     const have = await git(['cat-file', '-e', `${pin}^{commit}`], { ...g, purpose: 'bob-have' });
     if (have.code !== 0) {
@@ -178,11 +204,12 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
     const manifest = {};
     for (const f of picked.files) manifest[f.path] = sha256(blobs.blobs.get(f.oid));
 
-    if (folderMatches(folder, manifest)) return { ok: true, commit: pin, manifest, fetched: false };
+    if (folderMatches(folder, manifest, owner)) return { ok: true, commit: pin, manifest, fetched: false };
 
     const tag = `${process.pid}-${now()}`;
     const fresh = join(dirname(folder), `.${basename(folder)}.new-${tag}`);
     mkdirSync(fresh, { mode: 0o755 });
+    let old = null;
     try {
       const dirs = new Set();
       for (const f of picked.files) {
@@ -193,15 +220,16 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
       }
       for (const d of [...dirs].sort((a, b) => b.length - a.length)) chmodSync(d, 0o555);
       chmodSync(fresh, 0o555);
-      let old = null;
-      try { lstatSync(folder); old = join(dirname(folder), `.${basename(folder)}.old-${tag}`); renameSync(folder, old); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      try { lstatSync(folder); old = join(dirname(folder), `.${basename(folder)}.old-${tag}`); renameSync(folder, old); } catch (e) { if (e.code !== 'ENOENT') throw e; old = null; }
       renameSync(fresh, folder);
       if (old) removeTree(old);
     } catch (e) {
       removeTree(fresh);
+      // A swap that failed half way puts the old folder back (review of #316).
+      if (old) { try { lstatSync(folder); } catch { try { renameSync(old, folder); } catch { /* told below */ } } }
       return refuse(`the Bob folder could not be written: ${e.message}`);
     }
-    if (!folderMatches(folder, manifest)) return refuse('the Bob folder does not read back as the pinned files');
+    if (!folderMatches(folder, manifest, owner)) return refuse('the Bob folder does not read back as the pinned files');
     return { ok: true, commit: pin, manifest, fetched: true };
   } catch (e) {
     return refuse(`the Bob fetch stopped: ${String(e?.message ?? e).slice(0, 300)}`);
