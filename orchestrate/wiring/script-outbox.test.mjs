@@ -37,14 +37,14 @@ test('L767: a script hand-in of a report- reaches outboxPlace under its own fold
   assert.equal(UID, process.getuid());
 });
 
-test('L767: a handin- from a script is refused (only a worker moves a card to in_review), and the card stays running', () => {
+test('L767, L838: a script hands in its own claimed card through handin- (as a worker does), and the card goes to in_review', () => {
   const { env, ports } = scriptWorld();
   const [s] = ports.outboxSessions();
   const tag = { role: s.role, sessionId: s.sessionId, card: s.card };
   const file = outboxFile(env, 'script', 'S-1', 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`);
   const r = env.record.applyOutbox(tag, file);
-  assert.equal(r.ok, false); assert.match(r.reason, /handin- is not listed for script/);
-  assert.equal(env.record.read('card', 'C-1').doc.state, 'running');
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'in_review');
   // The same file under the worker's folder is not this session's: a script can't borrow the worker's tag.
   const asWorker = outboxFile(env, 'worker', 'S-1', 'handin-2.md', 'x\n');
   assert.equal(outboxPlace({ outboxRoot: env.outRoot, tag, file: asWorker }).ok, false);

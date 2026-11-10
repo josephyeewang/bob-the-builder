@@ -26,7 +26,7 @@ const TABLE = {
   writer: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
   front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
   thinking: { model: 'main', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['report-', 'idea-'], auto_resume: false },
-  script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
+  script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-', 'handin-'], auto_resume: false },
   plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], outbox_files: ['answer.txt'], auto_resume: false, context: 'context.plan_reviewer' },
   explore: { model: 'per_task', effort: 'as_asked', tools: [], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false },
 };
