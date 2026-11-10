@@ -3,11 +3,11 @@
 // why orchestrate can't read it. Same stand-in Mac as the other setup tests. PLANT tests break one thing each.
 
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { COPIES_CLEANUP_ACL, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, dispatcherKeys, folderTable, mirrorPath, parseConfig, sealRootPath } from './layout.mjs';
 import { aclEntries } from './users-folders.mjs';
-import { checkDispatcherKeys, foldersAbove, guardedFolder } from './dispatcher-check.mjs';
+import { checkDispatcherKeys, dispatcherKeysOn, foldersAbove, guardedFolder } from './dispatcher-check.mjs';
 import { checkInstall, parseInstallConfig } from './install.mjs';
 import { main } from './setup.mjs';
 import { WORKER_CONFIG_KEYS } from '../wiring/dispatcher-wiring.mjs';
@@ -68,12 +68,18 @@ test('L748: on the real chmod and ls, the copies entry round-trips exactly, and 
   assert.match(aclEntries(w.mac, `${dir}/card-1`).entries[0], /^user:orchestrate inherited allow .*\bdelete_child\b/);
 });
 
-test('L748: dispatcherKeys names the four Dispatcher keys, the very ones the wiring reads, from the one place', () => {
+test('L748, L763: dispatcherKeys names the five Dispatcher keys, the very ones the wiring reads, from the one place', () => {
   const cfg = parseConfig(RAW);
-  const k = dispatcherKeys(cfg);
+  const k = dispatcherKeys(cfg, { hostLockUid: 65001 });
   assert.deepEqual(Object.keys(k).sort(), [...WORKER_CONFIG_KEYS].sort());
-  assert.deepEqual(k, { reviewRoot: `${BASE}/review`, mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), hostLockPath: LOCK });
-  assert.throws(() => dispatcherKeys(parseConfig({ ...RAW, hostLockPath: undefined })), /hostLockPath is not set/);
+  assert.deepEqual(k, { reviewRoot: `${BASE}/review`, mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), hostLockPath: LOCK, hostLockUid: 65001 });
+  assert.throws(() => dispatcherKeys(parseConfig({ ...RAW, hostLockPath: undefined }), { hostLockUid: 65001 }), /hostLockPath is not set/);
+  // host.lock's owner is the owner's Mac user id, read on this Mac: none is never a key.
+  assert.throws(() => dispatcherKeys(cfg), /the owner sam is not a user on this Mac, so host\.lock's owner \(hostLockUid\) can't be named/);
+  // On the stand-in Mac, dispatcherKeysOn reads it from the owner's own record.
+  const w = world();
+  assert.equal(dispatcherKeysOn(w.mac, w.cfg).hostLockUid, 65001);
+  assert.throws(() => dispatcherKeysOn(w.mac, parseConfig({ ...RAW, owner: 'nobody2', hostLockPath: '/Users/nobody2/host.lock' })), /the owner nobody2 is not a user on this Mac/);
 });
 
 test('L748: hostLockPath is a full path in the owner\'s own home; anything else is refused', () => {
@@ -84,11 +90,12 @@ test('L748: hostLockPath is a full path in the owner\'s own home; anything else 
   }
 });
 
-test('L748: dispatcher-keys prints the four keys as JSON; with no hostLockPath it is a PROBLEM, exit 1; it never changes anything', () => {
+test('L748: dispatcher-keys prints the five keys as JSON; with no hostLockPath it is a PROBLEM, exit 1; it never changes anything', () => {
   const w = world();
   const before = w.mac.log.length;
   const r = w.run(['dispatcher-keys']); assert.equal(r.code, 0, r.text);
-  assert.deepEqual(JSON.parse(r.text), dispatcherKeys(w.cfg));
+  assert.deepEqual(JSON.parse(r.text), dispatcherKeysOn(w.mac, w.cfg));
+  assert.equal(JSON.parse(r.text).hostLockUid, 65001);
   assert.equal(w.mac.log.length, before);
   const w2 = world({ raw: { ...RAW, hostLockPath: undefined } });
   const r2 = w2.run(['dispatcher-keys']); assert.equal(r2.code, 1); assert.match(r2.text, /PROBLEM {2}config: hostLockPath is not set/);
@@ -118,6 +125,56 @@ test('L748 r1 M2: host.lock in a folder macOS guards → the Terminal read PASSe
   assert.equal(guardedFolder('/Users/sam/Desktopx/host.lock'), false);
 });
 
+// The stand-in Mac with host.lock's folder at `folder` (made, sam's, 0755) and no host.lock in it.
+function missingIn(folder, { make = folder } = {}) {
+  const lock = `${folder}/host.lock`;
+  const w = world({ raw: { ...RAW, hostLockPath: lock }, lock: false });
+  mkdirSync(w.mac.at(make), { recursive: true });
+  for (const d of foldersAbove(`${make}/x`).filter((x) => x.startsWith('/Users/sam/'))) { chmodSync(w.mac.at(d), 0o755); w.mac.owners.set(d, { uid: 65001, gid: 20 }); }
+  return w;
+}
+
+test('L763 r1 M1: host.lock missing in a folder macOS guards → the job line is NOT TRIED, never a clean PASS', () => {
+  for (const folder of ['/Users/sam/Library/CloudStorage/Dropbox/99.0 Claude Sync', '/Users/sam/Desktop', '/Users/sam/Documents/a']) {
+    const w = missingIn(folder);
+    const res = checkDispatcherKeys(w.mac, w.cfg);
+    assert.equal(res.length, 3, `${folder}: ${JSON.stringify(res)}`);
+    assert.equal(res[1].ok, true, folder); assert.match(res[1].what, /is not there, which the Dispatcher reads as no host claimed/);
+    assert.equal(res[2].ok, false, folder); assert.equal(res[2].notTried, true, `planted: the missing branch returning before the guarded test PASSes here (${folder})`);
+    assert.match(res[2].why, /is not there now, and would be .* refused the read \("Operation not permitted"\), not told "no such file"/);
+  }
+  // Missing outside the guarded folders: the job line PASSes, as for a file that is there.
+  const plain = checkDispatcherKeys(missingIn('/Users/sam/Sync Folder').mac, missingIn('/Users/sam/Sync Folder').cfg);
+  assert.deepEqual(failing(plain), []); assert.equal(plain.length, 3); assert.match(plain[2].what, /the Dispatcher's own background job can read host\.lock/);
+  // Missing, as the owner without root: the read is NEEDS ROOT, and a guarded place is still NOT TRIED (it needs no read).
+  const w = missingIn('/Users/sam/Library/CloudStorage/Dropbox');
+  w.mac.as = 65001;
+  const res = checkDispatcherKeys(w.mac, w.cfg);
+  assert.ok(res.some((r) => r.skip && /is not there/.test(r.what)), JSON.stringify(res));
+  assert.ok(res.some((r) => r.notTried), JSON.stringify(res));
+  // A folder that is not there is a wrong path, told, never "no host".
+  const gone = world({ raw: { ...RAW, hostLockPath: '/Users/sam/No Such/host.lock' }, lock: false });
+  const g = lockRow(checkDispatcherKeys(gone.mac, gone.cfg));
+  assert.equal(g.ok, false); assert.match(g.why, /its folder \/Users\/sam\/No Such is not there, so the path is wrong/);
+});
+
+test('L763 r1 m1: the guarded test reads the real path with the disk\'s own case, and another volume is guarded too', (t) => {
+  // The config spells the folder in other case; the disk holds Library/CloudStorage. Mac disks ignore case (the test's too).
+  const w = missingIn('/Users/sam/library/cloudStorage/Dropbox', { make: '/Users/sam/Library/CloudStorage/Dropbox' });
+  if (!existsSync(w.mac.at('/Users/sam/library/cloudStorage/Dropbox'))) { t.skip('this disk minds case, so the other spelling is simply another folder'); return; }
+  const res = checkDispatcherKeys(w.mac, w.cfg);
+  assert.equal(res[2].notTried, true, `planted: a test on the path as typed PASSes here (${JSON.stringify(res)})`);
+  assert.match(res[2].why, /would be \/Users\/sam\/Library\/CloudStorage\/Dropbox\/host\.lock/);
+  // The same with the file there.
+  writeFileSync(w.mac.at('/Users/sam/Library/CloudStorage/Dropbox/host.lock'), 'host: mini\n'); chmodSync(w.mac.at('/Users/sam/Library/CloudStorage/Dropbox/host.lock'), 0o644);
+  w.mac.owners.set('/Users/sam/library/cloudStorage/Dropbox/host.lock', { uid: 65001, gid: 20 });
+  const there = checkDispatcherKeys(w.mac, w.cfg);
+  assert.equal(there[2].notTried, true, JSON.stringify(there)); assert.match(there[2].why, /is really \/Users\/sam\/Library\/CloudStorage\/Dropbox\/host\.lock/);
+  // The regex alone ignores case too, and covers a link from the home to another volume (its real path is under /Volumes).
+  for (const p of ['/Users/sam/library/cloudstorage/x', '/Users/sam/DESKTOP/host.lock', '/Volumes/USB Disk/host.lock', '/Volumes/share']) assert.equal(guardedFolder(p), true, p);
+  for (const p of ['/Volumes', '/Users/sam/Sync Folder/host.lock', '/Users/sam/volumes/x']) assert.equal(guardedFolder(p), false, p);
+});
+
 test('L748 PLANT: a folder above host.lock orchestrate can\'t go into → "folder permissions", naming the folder', () => {
   const w = world(); chmodSync(w.mac.at('/Users/sam'), 0o750);
   const row = lockRow(checkDispatcherKeys(w.mac, w.cfg));
@@ -128,7 +185,7 @@ test('L748 PLANT: a folder above host.lock orchestrate can\'t go into → "folde
 test('L748 PLANT: host.lock not readable by others → "file permissions"', () => {
   const w = world(); chmodSync(w.mac.at(LOCK), 0o600);
   const row = lockRow(checkDispatcherKeys(w.mac, w.cfg));
-  assert.equal(row.ok, false); assert.match(row.why, /file permissions: host\.lock itself doesn't let orchestrate read it/);
+  assert.equal(row.ok, false); assert.match(row.why, /file permissions: host\.lock itself is mode 600, which doesn't let orchestrate read it \(it must be readable by others, mode o\+r, for example 644\)/);
 });
 
 test('L748 PLANT: permissions allow it but macOS refuses the read → "macOS privacy protection", with what to do', () => {

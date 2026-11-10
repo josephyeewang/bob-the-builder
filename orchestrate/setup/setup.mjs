@@ -37,8 +37,8 @@
 
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { ROOT_CONFIG_PATH, dispatcherKeys, parseConfig } from './layout.mjs';
-import { checkDispatcherKeys } from './dispatcher-check.mjs';
+import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
+import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -159,7 +159,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     return code;
   }
   if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg), out);
-  if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeys(cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
+  if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
