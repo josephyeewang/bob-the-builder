@@ -26,7 +26,8 @@
 //   - a stop is sent only to a group shown to be the runner's by that rule, so a reused number is never signalled;
 //   - the stop waits RUNNER_TERM_WAIT_MS for SIGTERM (signal 0 alone between, so the wait is not spent on ps), then
 //     sends SIGKILL and waits up to RUNNER_KILL_WAIT_MS for the group to go (review m2), all inside RUNNER_PORT_MS.
-// The start, save, pause, drain and size ports come in a later step; a loop without them is refused.
+// The start, save, pause, drain and size ports are runner-ports.mjs's (step 5), joined by runner-main.mjs; a loop
+// without them is refused.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';

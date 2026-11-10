@@ -1,8 +1,8 @@
 // Part C, runner step 3: one pass of the owner-side worker runner (owner-ports.mjs, owner-status.mjs's contract). The
 // runner is a LaunchAgent of the owner's user. Each pass it reads the requests the Dispatcher wrote, acts on them, checks
 // its sessions, and writes its one status file. Every outside effect is a port, so the tests run on fakes; the real
-// ports (starting claude through walledLaunchSettings, process groups, M4 save-work, the Lead's wrap-up) are joined in
-// a later step, as review-runner-main.mjs does for the review runner.
+// ports are runner-loop.mjs's (process groups) and runner-ports.mjs's (the start through walledLaunchSettings, M4
+// save-work, the Lead's wrap-up, the drain and the size), joined in runner-main.mjs (step 5).
 //
 // The runner's memory (`state`) is the one source for the status. `keep(state)` keeps it (in a file only the runner reads)
 // and is called before every status write, so a runner that dies mid-pass never comes back with a status ahead of its
