@@ -1666,3 +1666,19 @@ test('L596 O7: a Lead whose send throws, not a rules error, is skipped by name, 
   assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
   assert.ok(w.calls.alerts.some((a) => /the Lead L-B \(product p1\) was skipped this pass: the pane is gone/.test(a)), w.calls.alerts.join(' | '));
 });
+
+// L761: a refused save of the deaths already counted (outage.mjs countedRefused) is told to Joe, once, then daily.
+test('L761: a refused save of the counted dead sessions is told once, then daily', async () => {
+  const gone = (id, c) => ({ id, card: c, alive: false, ended: true, lastWriteAt: T0 - 10 * MIN });
+  const live = (id, c) => ({ id, card: c, alive: true, ended: false, lastWriteAt: T0 - MIN });
+  const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' })],
+    { over: { board: () => [gone('S-1', 'C-1'), live('S-2', 'C-2'), live('S-3', 'C-2'), live('S-4', 'C-2')] } });
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'outage_counted' ? { ok: false, reason: 'planted refusal' } : w.rec.write(x)) } });
+  const pass = () => tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  const told = () => w.calls.alerts.filter((a) => /dead sessions already counted toward an outage could not be saved \(planted refusal\)/.test(a));
+  const r = await pass();
+  assert.equal(r.steps.outage.result.countedRefused, 'planted refusal');
+  assert.equal(told().length, 1, w.calls.alerts.join(' | '));
+  await pass();
+  assert.equal(told().length, 1, 'once a day');
+});
