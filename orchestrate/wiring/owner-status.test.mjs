@@ -2,10 +2,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
+import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
@@ -112,7 +113,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
   const partial = [{ tokens: 1 }, { ...SIZE, compactions: undefined }, { ...SIZE, turnEnded: 'no' }, { ...SIZE, tokens: '1' }, { ...SIZE, compactions: 0.5 }, { ...SIZE, endedAt: 'x' }, { ...SIZE, openTools: 0 }];
   for (const size of partial) assert.throws(() => world(doc({ sessions: [session('s1', { size })] })).ports.probe({ id: 's1' }), /no full size/, JSON.stringify(size));
   for (const activity of [{}, { state: 'nonsense' }, { state: null }, { state: 'Active' }]) assert.throws(() => world(doc({ sessions: [session('s1', { activity })] })).ports.probe({ id: 's1' }), /no activity state the tracker gives/, JSON.stringify(activity));
-  for (const state of ['active', 'idle', 'waiting_input', 'blocked', 'exited']) assert.equal(world(doc({ sessions: [session('s1', { activity: { state } })] })).ports.probe({ id: 's1' }).activity.state, state);
+  for (const state of Object.values(State)) assert.equal(world(doc({ sessions: [session('s1', { activity: { state } })] })).ports.probe({ id: 's1' }).activity.state, state);
   assert.throws(() => world().ports.probe({ id: 'nope' }), /not in the worker runner's status/);
   assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: undefined, outboxRoot: ROOT }), /uid is not known/);
   for (const outboxRoot of [undefined, '', 'out']) assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: OWNER, outboxRoot }), /outbox root is not known/, String(outboxRoot));
@@ -196,4 +197,20 @@ test('#324 r1 m1, m4, c1, c2: a status that contradicts itself is not known; a l
   assert.throws(() => readOwnerStatus({ file: FILE, now: NaN, uid: OWNER, outboxRoot: ROOT }), /clock gave no time/);
   assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NaN, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(doc()) }), realpath: (p) => p, writeRequest: () => {}, holds: () => true }).sessions(), /clock gave no time/);
   for (const file of ['status.json', 'runner/status.json', '', undefined]) assert.throws(() => readOwnerStatus({ file, now: NOW, uid: OWNER, outboxRoot: ROOT }), /status file is not a full path/, String(file));
+});
+
+test('#324 r2 M1: a stop the Dispatcher asked for is never a death: the flag is set when the runner acts, so a stop that timed out and then died leaves no row', () => {
+  // The stop timed out (stopGroup answered ok: false, may still run): the session is live, flag set, and stays on the board.
+  const asked = doc({ sessions: [session('s1', { stop_requested: true })], requests: { s1: { state: 'started' } } });
+  assert.deepEqual(world(asked, { holds: () => true }).ports.board().map((r) => r.id), ['s1'], 'still running: on the board');
+  // Then it dies, the claim still held: no dead row, so no per-card dead alert and no false outage in a mass stop.
+  for (const state of ['started', 'stopped']) {
+    const died = doc({ sessions: [session('s1', { alive: false, ended: true, stop_requested: true, last_write_at: NOW - 3_600_000 })], requests: { s1: { state } } });
+    assert.deepEqual(world(died, { holds: () => true }).ports.board(), [], state);
+  }
+  // The header names that order: set when acted on, before acting, at the latest in the first write that shows it not live.
+  const head = readFileSync(new URL('./owner-status.mjs', import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).join(' ').replace(/\s*\/\/\s*/g, ' ');
+  assert.match(head, /stop_requested: true once the runner acts on a stop it was asked for \(a stop request or stopGroup\), written before it acts, and at the latest in the same write that first shows the session not live; it stays true even if the stop fails or times out/);
+  assert.doesNotMatch(head, /confirmed a stop|A stop that failed leaves it false/);
+  assert.match(head, /marks a session that ends on its own 'stopped' once it is no longer live/);
 });
