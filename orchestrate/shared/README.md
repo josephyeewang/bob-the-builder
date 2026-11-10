@@ -72,6 +72,7 @@ rec.lapseClaims(now);
 - **Only plain scripts call `write`**, under their own actor name (`SCRIPT_ACTORS`). AI sessions never do: the Dispatcher hands their outbox files to `applyOutbox`, tagged with the session's role.
 - **Every write is "only if unchanged since read"**: pass the `rev` you read (`0` to create). A mismatch is refused. Each accepted write leaves one diary line; a refused one leaves none.
 - `write` and `applyOutbox` never throw; any failure is `{ ok: false, reason }`.
+- **Reading a document**: `read` never throws, so `rec.read(e, id)?.doc ?? null` reads a failed store as "no document". Where the two must differ (a mark, a keep rule, an "already done" check), use `record-read.mjs`: `readDoc(rec, entity, id)` answers `{ state: 'found', doc, rev }`, `{ state: 'absent' }` or `{ state: 'failed', reason }` and never throws; `docOrThrow(rec, entity, id, what)` gives the doc, `null` when absent, and throws `RecordReadError` when the read failed (L781, L791). New code should not keep its own corrupt check; use `record-read.mjs`.
 - The names (`SCRIPT_ACTORS`, `AI_ROLES`, `ENTITIES`, `STATES`, `FINAL_STATES`, `REQUIRED_FIELDS`, `WAIT_FIELDS`) are defined once, here.
 - Tests: `memoryRecord()` keeps the rev check and the diary only. The real Store Writer (M9) adds the legal state moves and who may change what, so code that passes on the fake can still be refused by the real one.
 
