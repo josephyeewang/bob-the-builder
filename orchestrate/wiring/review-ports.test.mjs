@@ -227,7 +227,7 @@ test('A2: a review uid that is the Dispatcher\'s own or the workers\' stops the 
   const config = reviewConfig(temp());
   const me = process.getuid();
   assert.throws(() => reviewRunner({ config, now: Date.now, selfUid: me }), /config: reviewUid is the Dispatcher's own user/);
-  assert.throws(() => reviewRunner({ config: { ...config, ownerUid: me }, now: Date.now, selfUid: SELF }), /config: reviewUid is the workers' user \(ownerUid\)/);
+  assert.throws(() => reviewRunner({ config: { ...config, ownerUid: me }, now: Date.now, selfUid: SELF }), /config: reviewUid is the Record owner's \(ownerUid\)/);
   assert.doesNotThrow(() => reviewRunner({ config: { ...config, ownerUid: me + 1 }, now: Date.now, selfUid: SELF }));
   // With no stand-in, the Dispatcher's own user is this process's (main.mjs passes none).
   assert.throws(() => reviewRunner({ config, now: Date.now }), /Dispatcher's own user/);
