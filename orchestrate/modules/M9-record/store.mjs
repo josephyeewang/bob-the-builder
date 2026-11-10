@@ -45,7 +45,9 @@ const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
 // A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
 const KEPT_BACK_TEXT_MAX = 300;
 
-const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails', 'unsent_fails']);
+const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails', 'unsent_fails', 'recover_fails']);
+// `recover_fails` (L732): recovery fails on a temp name that is new each time (a pid and a random part), as a failed restore
+// of one document would, so a test can show the fault keeps one stable key.
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test. `cutback_fails` fails the cut-back too.
 // `unsent_fails` makes every append to the unsent file fail as a full disk does (ENOSPC), for the held-in-memory path (L620).
 
@@ -108,7 +110,13 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   const send = (event) => { try { return alert(event) !== false; } catch { return false; } };
   // Told once per process, and only once delivered: a lost one is sent again the next time it comes up (L135).
   const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return true; if (!send(stamp(event))) return false; told.add(k); return true; };
-  const stopFor = (type, reason, key = reason) => { tellOnce({ type, reason }, key); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true }); };
+  // `lost` runs when the alert was not delivered. `stop` names the fault for a job whose start this ends: with no store open,
+  // that job has nothing else to tell the owner from (L587, M13 store-stopped.mjs). Its `key` is the fault's stable name,
+  // what the issue is found by, never the reason's changing words (L724).
+  const stopFor = (type, reason, key = reason, lost = () => {}) => { if (!tellOnce({ type, reason }, key)) lost(); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true, stop: { type, reason, key } }); };
+  // Where in the store a failing path is, by its first part (tmp, docs, diary.jsonl, ...): a temp name carries a pid and a
+  // random part, so the whole path would be a new fault each start and each day (L724).
+  const placeOf = (p) => (typeof p !== 'string' ? 'no path' : p === root ? 'the store folder' : p.startsWith(`${root}/`) ? p.slice(root.length + 1).split('/')[0] : 'outside the store');
   function layoutProblem() {
     const kind = (p) => {
       let st; try { st = lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'none' : `unreadable (${e?.code ?? e})`; }
@@ -227,6 +235,12 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
     // Delivered at once: the mark still goes in, or the next open would tell it again (L620 m2). It has no event and an
     // outcome readUnsent never resends; a mark that can't be written means told again, never not told.
     try { appendUnsent(`${JSON.stringify({ outcome: 'told_at_once', ...mark })}\n`); } catch { markedHere.push(mark); /* a later open tells it again */ }
+  }
+  // A stop found again by every write (L583): the send is still tried each time, and one line a day is kept for delivery.
+  function keepDaily(event, key) {
+    const at = now();
+    const capKey = `${event.type}:${key}`;
+    if (!linesInDay(at).some((x) => x.cap_key === capKey)) keep(stamp(event), { cap_key: capKey, at: new Date(at).toISOString() });
   }
   // An alert the Record's own queue would not take (L545), kept here because this needs no Record write. Each line kept
   // is one GitHub issue, and a site tells again every pass, so the file is also the cap: its lines say what was kept in
@@ -399,6 +413,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   }
 
   function recover() {
+    if ((typeof faultAt === 'string' ? faultAt : faultAt?.step) === 'recover_fails') { const p = join(P.tmp, `${process.pid}-w-${Math.random().toString(16).slice(2, 10)}.json`); throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES', path: p }); }
     const report = { cut: 0, rolledForward: [], restored: [], quarantined: [], skipped: [], tempsRemoved: 0 };
     // 1. A torn last line (no newline, or not JSON) is cut.
     const all = readFileSync(P.diary);
@@ -469,7 +484,15 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   // Any failure inside recovery stops the store with an alert that names it, once, rather than a raw error on every write
   // (round 9 M6, m2).
   function recoverOrStop() {
-    try { return recover(); } catch (e) { throw e?.store ? e : stopFor('recovery_stopped', `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`, `${e?.code}:${e?.path}`); }
+    try { return recover(); } catch (e) {
+      if (e?.store) throw e;
+      const reason = `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`;
+      // The fault's stable name: its error code and the part of the store it is in, never the message or the whole path.
+      const key = `${e?.code ?? 'no code'}:${placeOf(e?.path)}`;
+      // Kept, as this path has no other way out in production (L583). A store_layout stop is not: the fault may be the folder
+      // or the unsent file itself, so nothing is written, and every later start finds it and tells it (robot-main.mjs).
+      throw stopFor('recovery_stopped', reason, key, () => keepDaily({ type: 'recovery_stopped', reason }, key));
+    }
   }
   function transaction(fn) {
     { const bad = layoutProblem(); if (bad) throw stopFor('store_layout', bad); }

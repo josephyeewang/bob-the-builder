@@ -147,13 +147,16 @@ test('L467: the plan-go step gets the same deadline as its product, so a short o
   assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
 });
 
+// The rows a plan-go card's pass test is set from (L698): one row whose test is the cards' own, so none is rewritten.
+const PLAN_ROWS = async () => ({ 'R-1': { id: 'R-1', done_when: 'tests pass' } });
+
 test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
   const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
   const started = [];
   const seen = [];
   const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
   const stateDir = join(tempDir('m11-approvals-'), 'm2');
-  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
+  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
     planReviewAnswer: async (x) => { seen.push(x); return { ok: true }; } };
   const open = world([account(), usage(), card('C-3', plan), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
   const held = await open.pass(0, { rules, ports: planPorts });
@@ -180,7 +183,7 @@ test('L688: plan reviewers seen only in the review status count toward the read-
     const started = [];
     const stateDir = join(tempDir('m11-approvals-'), 'm2');
     const w = world([account(), usage(), card('C-3', plan)]);
-    await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-new' }; }, planReviewAnswer: async () => ({ ok: true }), ...over } });
+    await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-new' }; }, planReviewAnswer: async () => ({ ok: true }), ...over } });
     return { started, alerts: w.calls.alerts.join(' | ') };
   };
   const three = await go({ planReviewsRunning: () => reviewers(3) });
@@ -216,7 +219,7 @@ test('L726 M1 planted: 3 plan reviewers running, a cap of 4 and 3 Tier-1 cards w
     const stateDir = join(tempDir('m11-approvals-'), 'm2');
     const w = world([account(), usage(), card('C-3', plan('3')), card('C-4', plan('4')), card('C-5', plan('5')), ...facts]);
     await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planReviewsRunning: () => reviewers(running), planReviewAnswer: answer,
-      startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
+      planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
     return { started, alerts: w.calls.alerts.join(' | '), w };
   };
   const one = await go();
@@ -225,7 +228,7 @@ test('L726 M1 planted: 3 plan reviewers running, a cap of 4 and 3 Tier-1 cards w
   // The next pass, before the runner has started it: the asked-for one still counts, so nothing more starts.
   const started = [];
   await one.w.pass(1, { rules, ports: { approvals: () => [{ product: 'p2', stateDir: join(tempDir('m11-approvals-'), 'm2') }], planReviewsRunning: () => reviewers(3),
-    planReviewAnswer: async () => ({ ok: true }), startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
+    planReviewAnswer: async () => ({ ok: true }), planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
   assert.deepEqual(started, [], 'asked for, not yet answered: it counts');
   // Two running: two start, never three.
   assert.equal((await go({ running: 2 })).started.length, 2);
@@ -586,6 +589,16 @@ export { rec };
   // Fixed: the hold goes, so a deadline lowered again is told afresh.
   assert.equal(await main([config], { self, now: T0 + 3 * MIN, log: (s) => logs.push(s) }), 0);
   assert.equal(mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at ?? null, null, 'cleared once the config is fixed');
+  logs.length = 0;
+  // L802: a deadline over the pass's own sum is refused by the reader, and nothing runs; the sum itself is taken.
+  const high = L.path('high.json');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS + 1 }));
+  const before = mod.seen.length;
+  assert.equal(await main([high], { self, now: T0 + 4 * MIN, log: (s) => logs.push(s) }), 1);
+  assert.match(logs.join('\n'), new RegExp(`runDeadlineMs may be at most ${RUN_DEADLINE_MS} \\(this job's own limit\\)`));
+  assert.equal(mod.seen.length, before, 'no pass ran');
+  writeFileSync(high, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS }));
+  assert.equal(await main([high], { self, now: T0 + 5 * MIN, log: () => {} }), 0);
   logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);

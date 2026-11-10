@@ -6,27 +6,34 @@
 //   <base>/install-work/             made and removed by the install: `bootstrap/` (the updater's three files) and `seed/`
 //                                    (the copy's own items: bin/node, updater.json, review.json and the extras)
 //
+// `add-to-install` (planAddToInstall) puts the pinned Claude Code and the hooks into a copy that is already installed, in
+// place: no update, no flip, no job touched. See that function.
+//
 // Root never runs code from a folder anyone else writes. The updater is run from `bootstrap/`, a root-owned copy of its
 // three files (review-updater.mjs, install-check.mjs, safe-git.mjs: the set the updater's test pins), with a node that
 // is a root-owned copy of the one running this command. The updater then writes the real copy from `main` on GitHub.
 // The files copied in come from this repository's checkout, which the person running the install has chosen to trust.
 // All constants (names, layout, the script paths) are imported from the launcher's own modules; none is repeated here.
 
-import { dirname, join, posix } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { dirname, join, posix, relative } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { MUST_KEEP, RUNNER_NAMES, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { installHooks, pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
 import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { parseConfig } from './layout.mjs';
+import { COPY_CLAUDE_CODE as CLAUDE_CODE, COPY_HOOKS as HOOKS, parseConfig } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
 import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 import { readUser } from './users-folders.mjs';
+import { pinProblem } from './review-config.mjs';   // a cycle (review-config reads installPaths): both are used only when called
+import { parseRobot } from './robot-setup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
@@ -107,6 +114,32 @@ export function updaterConfigFor(io, cfg) {
 }
 
 /**
+ * The runner config, read and checked: it must name this copy, the copy's own code by its place from main, and every other path
+ * inside one of the `carried` top-level items. Adds to `problems`; never quotes the file. → { rc, rcText }.
+ */
+function readRunnerConfig(io, cfg, { readSource, carried, problems }) {
+  const P = installPaths(cfg);
+  let rc; let rcText = null;
+  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
+  let parsed = false;
+  if (rcText !== null) { try { rc = JSON.parse(rcText); parsed = true; } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
+  // null, 0, false and "" are JSON too, and a test for truth would let them skip every check below (#243 r1 Minor 1).
+  if (parsed && (rc === null || typeof rc !== 'object')) { problems.push(`the runner config ${cfg.runnerConfig} must be one JSON object`); rc = undefined; }
+  if (rc && rc.installRoot !== io.at(P.installRoot)) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
+  if (rc) { const why = runnerUidsProblem(io, rc.uids); if (why) problems.push(why); }   // L726: the role-to-user map, for an install and an add alike
+  const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
+  const inCopy = io.at(P.installRoot);
+  for (const n of names) {
+    if (RUNNER_MODULES.includes(n)) {   // the wiring and the budget module are the copy's own code files from main, never extras (#82)
+      const rel = rc[n].startsWith(`${inCopy}/`) ? rc[n].slice(inCopy.length + 1) : null;
+      const why = rel === null ? `is not inside ${inCopy}` : copyModuleProblem(rel);
+      if (why) problems.push(`the runner config's ${n} (${rc[n]}) ${why}; name it ${inCopy}/modules/... (the first update would refuse it)`);
+    } else if (!carried.some((c) => rc[n] === `${inCopy}/${c}` || rc[n].startsWith(`${inCopy}/${c}/`))) problems.push(`the runner config's ${n} (${rc[n]}) is not inside any of the extras the copy carries, so the first update would refuse it`);
+  }
+  return { rc, rcText };
+}
+
+/**
  * L726: the runner config's role-to-user map (`uids`), written by hand, must name every role the runner checks
  * (M4's uidsProblem with the plan reviewer asked for: the design table and RUNNER_ROLES), and every role the runner starts
  * must name the one `review` user, review's own uid. Each runner role also passes M9's reviewUserProblem, the rule the runner
@@ -172,20 +205,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
     if (why) problems.push(`${P.installRoot}: ${why}. Nothing was changed`);
     return { ops, problems, installed: !why };
   }
-  let rc; let rcText = null;
-  try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
-  if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
-  if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
-  if (rc && typeof rc === 'object') { const why = runnerUidsProblem(io, rc.uids); if (why) problems.push(why); }
-  const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
-  const inCopy = io.at(P.installRoot);
-  for (const n of names) {
-    if (RUNNER_MODULES.includes(n)) {   // the wiring and the budget module are the copy's own code files from main, never extras (#82)
-      const rel = rc[n].startsWith(`${inCopy}/`) ? rc[n].slice(inCopy.length + 1) : null;
-      const why = rel === null ? `is not inside ${inCopy}` : copyModuleProblem(rel);
-      if (why) problems.push(`the runner config's ${n} (${rc[n]}) ${why}; name it ${inCopy}/modules/... (the first update would refuse it)`);
-    } else if (!cfg.extras.some((e) => rc[n] === `${inCopy}/${posix.basename(e)}` || rc[n].startsWith(`${inCopy}/${posix.basename(e)}/`))) problems.push(`the runner config's ${n} (${rc[n]}) is not inside any of the extras the copy carries, so the first update would refuse it`);
-  }
+  const { rcText } = readRunnerConfig(io, cfg, { readSource, carried: cfg.extras.map((e) => posix.basename(e)), problems });
   // Everything root would copy in is checked NOW, before any root step (L149 m4, m6): a linked program or a node root may not run
   // used to fail only after the install had made its folders and run the updater.
   const nodeWhy = io.nodeBinProblem(cfg.nodeBin); if (nodeWhy) problems.push(`nodeBin ${cfg.nodeBin}: ${nodeWhy}. Leave nodeBin out of the config to use the node running this command`);
@@ -218,6 +238,83 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
     if (r.status !== 0) throw new Error(`the updater's first run failed (exit ${r.status}): ${String(r.stderr).trim().slice(-300)}`);
   }), op(`rm -rf ${P.work}`, () => io.rm(P.work)));
   return { ops, problems, installed: false };
+}
+
+const fingerprint = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const ADDING = '.adding';
+
+/**
+ * Puts the pinned Claude Code and the hook scripts into the copy that is installed now, adds both to the updater's `keep`, and
+ * replaces the copy's review.json with the prepared runner config, checked as `install` checks it (L573). The review runner refuses a program or hook folder outside the copy, and the install carries extras only on its
+ * first run. Writes only in the real folder (never through the link, so a flip can't redirect it): `claude-code/`, `hooks/`,
+ * `updater.json` and `review.json`. Everything is made under a temporary name first and review.json goes last, so a cut-off
+ * run leaves the copy working, and a second run finishes it. No update, no flip, no launchctl, no job file: what the
+ * watch-only job runs stays byte for byte as it was.
+ * The hooks come from the copy's own modules, so they match it. `keep` carries them across an update as they are: when an
+ * update changes a hook, launch check 7 refuses by name until this runs again.
+ */
+export function planAddToInstall(io, cfg, { pin, sha256, readSource }) {
+  const P = installPaths(cfg);
+  const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
+  if (cur.missing) return { ops: [], problems: [`${P.installRoot} is not installed yet: run install first. Nothing was changed`], installed: false };
+  const why = cur.problem ?? (cur.link ? null : 'is a plain folder, not the link the updater flips');
+  if (why) return { ops: [], problems: [`${P.installRoot}: ${why}. Nothing was changed`], installed: false };
+
+  const copy = join(P.install, relative(realpathSync(io.at(P.install)), cur.real));   // the real folder, by its own name: the link can't redirect a step
+  const inCopy = io.at(P.installRoot);
+  const source = pinnedBinary(cfg.base, pin);
+  const hookSource = join(copy, 'modules/M4-workshop/hooks');
+  const problems = [];
+  // The pin the role tool lists were checked on, as review-config asks (#243 audit m1): found here, not when the runner starts.
+  const pinWhy = pinProblem(pin); if (pinWhy) problems.push(pinWhy);
+  // The fingerprint is refused here when it is missing or malformed, by a caller that skipped parsing too (#243 audit c2):
+  // every refusal comes before any change, never only at the copy step.
+  const shaOk = typeof sha256 === 'string' && /^[0-9a-f]{64}$/.test(sha256);
+  if (!shaOk) problems.push('add-to-install needs --sha256: the pinned program\'s fingerprint, 64 lower-case hex characters');
+  const link = linkProblem(io, io.at(source));
+  if (link) problems.push(`the pinned program ${source} ${link}`);
+  else if (shaOk && fingerprint(readFileSync(io.at(source))) !== sha256) problems.push(`the pinned program ${source} does not have the fingerprint given`);
+  let keep = null; let scripts = [];
+  try { keep = readUpdaterConfig(io.at(join(copy, UPDATER_CONFIG))); } catch (e) { problems.push(`the copy's ${UPDATER_CONFIG} was refused: ${e.message}`); }
+  try { scripts = io.list(hookSource); } catch { /* reported below */ }
+  if (!scripts.length) problems.push(`the copy has no hook scripts at ${hookSource}`);
+  const { rc, rcText } = readRunnerConfig(io, cfg, { readSource, carried: [CLAUDE_CODE, HOOKS], problems });
+  if (rc && typeof rc === 'object') {
+    const want = { pin, claudeBin: pinnedBinary(inCopy, pin), hooksDir: join(inCopy, HOOKS) };
+    for (const [k, v] of Object.entries(want)) if (rc[k] !== v) problems.push(`the runner config's ${k} must be ${v}`);
+    // The copy is here to look in: a wiring or budget it does not hold would pass the plan and fail only after every step (#243 r1 Minor 2).
+    for (const n of RUNNER_MODULES) {
+      if (typeof rc[n] !== 'string' || !rc[n].startsWith(`${inCopy}/`)) continue;   // its form was refused above
+      let st = null; try { st = io.lstatReal(io.at(join(copy, rc[n].slice(inCopy.length + 1)))); } catch { /* missing */ }
+      if (!st?.isFile()) problems.push(`the runner config's ${n} (${rc[n]}) is not a file in the copy`);
+    }
+  }
+  if (problems.length) return { ops: [], problems, installed: false };
+
+  const temp = (n) => join(copy, `${n}${ADDING}`);
+  const made = join(temp(CLAUDE_CODE), pin, 'claude');
+  const updater = { ...keep, keep: [...new Set([...keep.keep, CLAUDE_CODE, HOOKS])] };
+  const newFile = (n, text) => [op(`write ${temp(n)}`, () => io.write(temp(n), text, 0o644)), ...rootOwned(io, temp(n), 0o644)];
+  const swapIn = (n) => [
+    op(`rm -rf ${join(copy, n)}`, () => io.rm(join(copy, n))),
+    op(`rename ${temp(n)} → ${join(copy, n)}`, () => io.rename(temp(n), join(copy, n))),
+  ];
+  const ops = [
+    op(`rm -rf ${copy}/*${ADDING}   (leftovers of a cut-off run)`, () => { for (const n of [CLAUDE_CODE, HOOKS, UPDATER_CONFIG, RUNNER_CONFIG]) io.rm(temp(n)); }),
+    op(`mkdir ${dirname(made)}`, () => { io.mkdir(temp(CLAUDE_CODE), 0o755); io.mkdir(dirname(made), 0o755); }),
+    op(`copy ${source} → ${made}`, () => {
+      io.copyFile(io.at(source), made, 0o755);
+      if (fingerprint(readFileSync(io.at(made))) !== sha256) throw new Error(`the copy at ${made} does not have the fingerprint given`);
+    }),
+    op(`set owner and mode of ${temp(CLAUDE_CODE)}`, () => ownTree(io, temp(CLAUDE_CODE))),
+    op(`copy the hook scripts of ${hookSource} → ${temp(HOOKS)}`, () => { installHooks(io.at(temp(HOOKS)), io.at(hookSource)); ownTree(io, temp(HOOKS)); }),
+    ...newFile(UPDATER_CONFIG, `${JSON.stringify(updater, null, 1)}\n`),
+    ...newFile(RUNNER_CONFIG, rcText),
+    ...swapIn(CLAUDE_CODE), ...swapIn(HOOKS),
+    op(`rename ${temp(UPDATER_CONFIG)} → ${join(copy, UPDATER_CONFIG)}`, () => io.rename(temp(UPDATER_CONFIG), join(copy, UPDATER_CONFIG))),
+    op(`rename ${temp(RUNNER_CONFIG)} → ${join(copy, RUNNER_CONFIG)}   (last: it names the two above)`, () => io.rename(temp(RUNNER_CONFIG), join(copy, RUNNER_CONFIG))),
+  ];
+  return { ops, problems: [], installed: true };
 }
 
 /** The real first run: a child process, no shell, the paths as arguments. */
