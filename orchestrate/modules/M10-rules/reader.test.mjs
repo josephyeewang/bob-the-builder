@@ -254,7 +254,13 @@ test('an unknown product, and a malformed products list, deny', () => {
   const one = (product) => JSON.stringify([{ product, owner: 'o', repo: 'r', joe_github_id: 1 }]);
   for (const bad of ['App', 'my_app', 'my.app', 'a'.repeat(65)]) {
     writeFileSync(f, one(bad));
-    assert.throws(() => readProducts(f), /a product name is lower-case letters, digits and -/, bad);
+    // L878 m1: and the error names the refused name itself.
+    assert.throws(() => readProducts(f), (e) => /a product name is lower-case letters, digits and -/.test(e.message) && e.message.includes(JSON.stringify(bad)), bad);
+  }
+  // L878 m2: a name that is not a string is refused before the form is asked.
+  for (const bad of [123, null]) {
+    writeFileSync(f, one(bad));
+    assert.throws(() => readProducts(f), /products.json entry needs product, owner, repo/, String(bad));
   }
   for (const role of ['worker', 'script', 'lead']) {
     writeFileSync(f, one(role));
