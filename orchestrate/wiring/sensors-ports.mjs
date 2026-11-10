@@ -47,9 +47,14 @@ import { ACCOUNT_NAMES } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_VERSION } from './owner-answer.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { knownDoc } from '../modules/M12-sensors/facts.mjs';
 
-/** The `stored` reader over a Record: the usage fact it holds for the account, or null. Never throws. */
-export const storedUsage = (rec) => (account) => { try { return rec.read('fact', USAGE_FACT(account))?.doc ?? null; } catch { return null; } };
+/**
+ * The `stored` reader over a Record: the usage fact it holds for the account, or null when it holds none. A failed read
+ * throws (L781, audit #283 r4 M-1): M9's read answers `{ corrupt: true }` rather than throw, and taking that as none would
+ * drop the marks a forged low reading is held to.
+ */
+export const storedUsage = (rec) => (account) => knownDoc(rec.read('fact', USAGE_FACT(account)), `the stored usage for ${account}`);
 const SOURCE = 'claude /usage';
 
 // Two of the owner's rounds (5 minutes each): a file older than that means the owner's job stopped writing. Not a copy of
