@@ -274,14 +274,16 @@ test('L765: a refused outage end stays in the outage, decides nothing and return
   const base = recWith([...cards(), ['fact', OUTAGE_FACT, { id: 'o-1', state: 'open', told_id: 'o-1', dead: [{ id: 'S1', card: 'C-1' }], healthy_passes: 1 }]]);
   let refuse = true;
   const rec = Object.create(base, { write: { value: (w) => (refuse && w.kind === 'outage_end' ? { ok: false, reason: 'planted refusal' } : base.write(w)) } });
-  const step = () => outageStep({ rec, rules: R, board: [live('S2', 'C-2')], now: T0, healthy: true, alert: fakeAlert() });
-  const r = step();
+  const step = (board) => outageStep({ rec, rules: R, board, now: T0, healthy: true, alert: fakeAlert() });
+  // S3 dies in the refused pass: it is held with the outage's dead, though it then leaves the board.
+  const r = step([gone('S3', 'C-3'), live('S2', 'C-2')]);
   assert.deepEqual(r, { outage: true, ended: false, restart: [], asks: [], endRefused: 'planted refusal' });
   assert.equal(rec.read('fact', OUTAGE_FACT).doc.state, 'open');
+  assert.deepEqual(rec.read('fact', OUTAGE_FACT).doc.dead.map((d) => d.id), ['S1', 'S3'], 'the new death is held');
   refuse = false;
-  const r2 = step();
+  const r2 = step([live('S2', 'C-2')]);
   assert.equal(r2.ended, true, 'tried again next pass');
-  assert.deepEqual(r2.asks, ['C-1'], 'the held session is decided once the end is saved');
+  assert.deepEqual(r2.asks.sort(), ['C-1', 'C-3'], 'the held sessions are decided once the end is saved');
   assert.equal(r2.endRefused, undefined);
 });
 

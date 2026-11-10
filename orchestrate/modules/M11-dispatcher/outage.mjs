@@ -21,7 +21,8 @@
 // pass, to try again. The list is written only when it changes; a refused write is returned as `countedRefused`
 // (they would be counted again next pass, as before L759).
 // A refused end (L765): the Record still holds the outage open, so this pass stays in it (nothing restarts, no card is
-// decided) and the end is tried again next pass; the refusal is returned as `endRefused`, for tick.mjs to tell Joe.
+// decided; its new deaths are held and an undelivered outage alert is retold, as on any outage pass) and the end is
+// tried again next pass; the refusal is returned as `endRefused`, for tick.mjs to tell Joe.
 
 import { KEYS, need, minutes } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
@@ -55,9 +56,13 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
 
   if (open) {
     const passes = healthy ? (cur.doc.healthy_passes ?? 0) + 1 : 0;
+    let endRefused;
     if (resume || passes >= HEALTHY_PASSES) {
       const ew = write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: dead.map(deathKey) }, 'outage_end');
-      if (!ew?.ok) return { outage: true, ended: false, restart: [], asks: [], endRefused: ew?.reason ?? 'refused' };
+      // Refused (L765), the pass goes on as one inside the outage: its new deaths are held, an undelivered alert retold.
+      if (!ew?.ok) endRefused = ew?.reason ?? 'refused';
+    }
+    if (!endRefused && (resume || passes >= HEALTHY_PASSES)) {
       // Sessions that died in the outage left the board; they are decided now, with the newly dead.
       const held = (cur.doc.dead ?? []).filter((d) => !dead.some((s) => s.id === d.id));
       return { outage: false, ended: true, ...decide(rec, [...held, ...dead]) };
@@ -66,7 +71,7 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     write({ ...cur.doc, healthy_passes: passes, dead: [...(cur.doc.dead ?? []), ...more] }, 'outage_pass');
     // An outage whose alert the queue refused is told each pass until delivered (L130); the mark names the outage.
     if (cur.doc.told_id !== cur.doc.id) tellThen(alert, cur.doc.alert_text ?? `running sessions stopped at once (${cur.doc.id}); nothing is restarted until you say resume`, { fact: OUTAGE_FACT, fields: { told_id: cur.doc.id }, kind: 'outage_told' });
-    return { outage: true, ended: false, restart: [], asks: [] };
+    return { outage: true, ended: false, restart: [], asks: [], ...(endRefused ? { endRefused } : {}) };
   }
   const counted = new Set(Array.isArray(cur?.doc?.counted_dead) ? cur.doc.counted_dead : []);
   const fresh = dead.filter((s) => !counted.has(deathKey(s)));

@@ -1695,6 +1695,8 @@ test('L765: a refused outage end is told once, then daily', async () => {
   const r = await pass(T0);
   assert.equal(r.steps.outage.result.endRefused, 'planted refusal');
   assert.equal(r.steps.outage.result.outage, true, 'still in the outage');
+  assert.deepEqual([r.steps.outage.result.acted, r.steps.outage.result.restart, r.steps.outage.result.asks], [[], [], []], 'nothing restarted or asked');
+  assert.equal(rec.read('card', 'C-1').doc.state, 'running', 'the held card is not touched');
   assert.equal(told().length, 1, w.calls.alerts.join(' | '));
   await pass(T0 + 60 * MIN);
   assert.equal(told().length, 1, 'not again within the day');
