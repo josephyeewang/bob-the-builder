@@ -10,6 +10,7 @@ import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_A
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
@@ -303,7 +304,7 @@ test('round 3 MIN-2: a production file the rules list but the role file does not
 });
 
 test('L746 (audit R-0b-148 slice 1, m1): an empty proposals list is refused for every role but a reviewer or auditor', () => {
-  for (const role of ['worker', 'lead']) {
+  for (const role of Object.keys(DESIGN_PROFILES).filter((r) => !REVIEW_ROLES.includes(r))) {
     const r = render(role, { proposalOutboxes: [], paths: { ...PATHS, deny: { ...PATHS.deny, proposals: [] } } });
     assert.equal(r.ok, false, role);
     assert.equal(r.reason, 'the rules\' proposals folders are an empty list, so nothing would deny them', role);
@@ -313,5 +314,5 @@ test('L746 (audit R-0b-148 slice 1, m1): an empty proposals list is refused for 
   // A non-empty list on the deny list still renders, and its folder is denied.
   const ok = render('worker');
   assert.equal(ok.ok, true, ok.reason);
-  assert.ok(ok.settings[S.permissions][S.deny].some((d) => d.includes('/w/proposals')));
+  for (const rule of ['Read(//w/proposals/**)', 'Edit(//w/proposals/**)']) assert.ok(ok.settings[S.permissions][S.deny].includes(rule), rule);
 });

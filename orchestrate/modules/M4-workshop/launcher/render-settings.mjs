@@ -70,8 +70,8 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
  * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session runs as
- * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required for every role but a
- * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
+ * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for
+ * every role but a reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
 export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
