@@ -52,7 +52,7 @@ import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
-import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { outbox, dropCause, writeFrom, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -109,6 +109,19 @@ export function appProblem(c, { none = null } = {}) {
  * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
  * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
  */
+/**
+ * The told mark of the queued copy whose mark names `fact`, written onto that fact as delivery would write it (L746 m-B).
+ * Nothing queued for it is nothing to mark. → whether the fact now carries the mark; never throws.
+ */
+export function markToldByBeat(rec, fact) {
+  try {
+    const e = (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).find((x) => x?.mark?.fact === fact);
+    if (!e) return true;
+    const base = rec.read('fact', fact)?.doc ?? null;
+    return writeFrom(rec, fact, base, { ...(base ?? {}), ...(e.mark.fields ?? {}) }, e.mark.kind ?? 'alert_told')?.ok === true;
+  } catch { return false; }
+}
+
 export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken } = {}) {
   let p = null;
   return () => (p ??= Promise.resolve()
@@ -296,8 +309,12 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     // Told per alert (L730 m4): only what the Dispatcher alert itself answered counts, not whether every alert went out.
     const answer = beaten?.told?.dispatcher;
     const toldByBeat = typeof answer === 'string' && answer !== 'suppressed';
-    if (late && toldByBeat && !dropCause(rec, HOLD_FACT(LATE_CAUSE(late.since)))) {
-      log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
+    if (late && toldByBeat) {
+      const fact = HOLD_FACT(LATE_CAUSE(late.since));
+      // L746 m-B: the heartbeat's tell is the tell, so the hold is marked told now, as delivery would have marked it; the
+      // daily count then starts from it, and Joe closing that issue is answered the next day, not in a minute.
+      if (!markToldByBeat(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: it may be told again within a day');
+      if (!dropCause(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
     }
     if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
     if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});

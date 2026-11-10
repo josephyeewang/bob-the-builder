@@ -805,3 +805,25 @@ test('L730 m4: one alert GitHub lost does not make the Dispatcher alert not told
   assert.ok([...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)));
   assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'told by its own alert: not queued too');
 });
+
+// L746 m-B (probe R2-289-A): the heartbeat's own tell marks the hold told, so Joe closing that issue during a lasting stop
+// is answered the next day (the daily repeat, L730 m3), not by a new issue a minute later.
+test('L746 m-B: Joe closes the heartbeat Dispatcher alert; the next round tells nothing new; a day later it is told again', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let t = T730;
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  const open = () => [...gh.issues.values()].filter((i) => i.state === 'open' && !/mini_alive_at:/.test(i.body ?? ''));
+  await passes.heartbeat(); await passes.deliver();
+  const issue = [...gh.issues.values()].find((i) => /heartbeat red: dispatcher/.test(i.title));
+  assert.ok(issue, 'round 1 opens the heartbeat issue');
+  assert.deepEqual(queued(rec), [], 'and the queued copy is dropped');
+  Object.assign(issue, { state: 'closed', closed_by: { type: 'User', login: 'owner-login' } });
+  const n = gh.issues.size;
+  for (let i = 0; i < 3; i += 1) { t += MIN; await passes.heartbeat(); await passes.deliver(); }
+  assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'told within the day: nothing queued');
+  assert.equal(gh.issues.size, n, 'no new issue in the minutes after Joe closed it');
+  assert.deepEqual(open().map((i) => i.title), [], 'nothing open');
+  t += 24 * 60 * MIN; await passes.heartbeat(); await passes.deliver();
+  assert.ok(open().length >= 1, 'a day later the lasting stop is told again');
+});
