@@ -477,7 +477,9 @@ test('L735 m1-r2 planted: a file put first under the plan\'s request name is sai
   assert.equal(mine.ok, true, mine.reason);
   assert.deepEqual(ask(), { ok: true, session: mine.session }, 'its own request, still waiting: asked');
   const bytes = readFileSync(name);
-  for (const [junk, re] of [['not json', /it holds another request/], [`${bytes.toString()} `, /it holds another request/], [JSON.stringify({ ...JSON.parse(bytes), request_id: 'other-1' }), /it holds another request/]]) {
+  for (const [junk, re] of [['not json', /it holds another request/], [`${bytes.toString()} `, /it holds another request/], [JSON.stringify({ ...JSON.parse(bytes), request_id: 'other-1' }), /it holds another request/],
+    // The same size, one byte apart.
+    [bytes.toString().replace(/"card":"C-7"/, '"card":"C-8"'), /it holds another request/]]) {
     unlinkSync(name);
     writeFileSync(name, junk, { mode: 0o644 });
     const r = ask();
