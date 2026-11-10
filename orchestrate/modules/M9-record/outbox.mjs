@@ -41,7 +41,11 @@
 // it sits in. A session folder holding more than one verdict file counts none (one verdict per session, D12), so a row
 // can't pick the file the intake refused. The Merge Gate (M6 gather.mjs) and the record's verdict rule call it.
 //
-//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }
+//   verdictFields(header) → { ok, card, head, pass, notes, checklist, material } | { ok: false, reason }; a file saying
+//     `pass: true` or `material: 0` must hold only findings it can read, none of them Material (L432, L452).
+//   FINDING_LABELS, the keys finalize may add to a finding (M5 findings.mjs, L469); holdsLabel(notes)
+//   verdictContent(header) → the sha256 of the header with those labels left out. headReviews refuses a file with
+//     labels and no record from the runner, and a file whose content is not the one that record names (L469).
 //   verdictFromFile({ outboxRoot, uids, row }) →
 //     { ok, verdict: { role, session_id, card, head, pass, checklist, material, created_by, outbox_uid, source_key } } | { ok: false, reason }
 //
@@ -62,8 +66,10 @@
 // failing verdict covers every head with the same tree (the launch record names it), so an amend with no code change
 // can't buy a new roll. A launch record that fails its checks refuses only the card it belongs to.
 //
-//   ENDED_FOLDER, endedFolderOf(launchesRoot), ASIDE_FOLDER, asideFolderOf(launchesRoot)   beside the launch records
+//   ENDED_FOLDER, endedFolderOf(launchesRoot), ASIDE_FOLDER, asideFolderOf(launchesRoot), FINALIZED_FOLDER,
+//     finalizedFolderOf(launchesRoot)   beside the launch records
 //   runnerEnded({ root, uids | uid, role, card, head, sessionId }) → { ok, ended } | { ok: false, none, reason }
+//   runnerFinalized({ root, uids | uid, role, card, head, sessionId }) → { ok, finalized } | { ok: false, none, reason }
 //   runnerAside({ root, uids | uid, card, role?, head?, sessionId }) → { ok, aside } | { ok: false, none, reason }
 //   headReviews({ launches, outboxRoot, uids, card, head, tree? }) →
 //     { ok, sessions: [{ role, session_id, head, tree, aside, ended, silent, verdict | null, problem | null }], skipped }
@@ -74,7 +80,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, FINDING_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -210,6 +216,9 @@ export const endedFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)
 export const ASIDE_FOLDER = 'set-aside';
 /** The runner's set-aside records folder (L69): sessions Joe set aside with "review again", beside the launch records. */
 export const asideFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)), ASIDE_FOLDER);
+export const FINALIZED_FOLDER = 'finalized';
+/** The runner's records of the verdict files finalize labelled (L469): what each says, beside the launch records. */
+export const finalizedFolderOf = (launchesRoot) => join(dirname(String(launchesRoot)), FINALIZED_FOLDER);
 // What an ended record says of the verdict file (L69 point 2): its sha256 when the session ended, `none` when it left no
 // file, `refused` when the file it left could not be counted, `never_ran` when the start failed and claude never ran
 // (L71 point 2: the launch record is kept, so a file that shows up later still counts).
@@ -249,6 +258,20 @@ export function runnerEnded({ root, uids, uid, role, card, head, sessionId, fsta
   if (!Number.isFinite(Date.parse(d.ended_at ?? ''))) return no(`the ended record of session ${sessionId} has no ended_at`);
   if (typeof d.verdict_sha256 !== 'string' || !ENDED_VERDICT.test(d.verdict_sha256)) return no(`the ended record of session ${sessionId} does not say what verdict file it ended with`);
   return { ok: true, ended: d };
+}
+
+/** The runner's record of the verdict file finalize labelled for a session (L469), read with every check a launch record gets. */
+export function runnerFinalized({ root, uids, uid, role, card, head, sessionId, fstat } = {}) {
+  const no = (reason, none = false) => ({ ok: false, reason, none });
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
+  const u = reviewUidOf(uids, uid);
+  if (!u.ok) return no(u.reason);
+  const r = runnerRecord('finalized', root, u.uid, sessionId, fstat);
+  if (!r.ok) return r.none ? no(`the runner has no record of finalizing session ${sessionId}`, true) : no(r.reason);
+  const d = r.doc;
+  if (d.role !== role || d.card !== card || d.head !== head) return no(`the finalized record of session ${sessionId} is for another role, card or head`);
+  if (!/^[0-9a-f]{64}$/.test(d.content_sha256 ?? '')) return no(`the finalized record of session ${sessionId} names no verdict file`);
+  return { ok: true, finalized: d };
 }
 
 /**
@@ -292,6 +315,7 @@ export function headReviews({ launches, outboxRoot, uids, card, head, tree, fsta
   const uid = uids[REVIEW_ROLES[0]];
   const endedRoot = endedFolderOf(launches);
   const asideRoot = asideFolderOf(launches);
+  const finalizedRoot = finalizedFolderOf(launches);
   const trees = HEX40.test(tree ?? '') ? [tree]
     : [...new Set(rl.launches.filter((l) => l.doc.card === card && l.doc.head === head && l.doc.tree).map((l) => l.doc.tree))];
   // A bad record: whose card is it? Its own bytes first; then its session's ended record or verdict file.
@@ -340,6 +364,12 @@ export function headReviews({ launches, outboxRoot, uids, card, head, tree, fsta
     else if (!v.ok) s.problem = v.none ? 'its verdict file is gone since the session ended' : v.reason;
     else if (v.verdict.sha256 !== want) s.problem = 'its verdict file changed after the session ended; only the version written by the end counts, and it is gone';
     else s.verdict = v.verdict;
+    // Finalize may add labels and nothing else (L469): a file it labelled says what the session wrote, or it is refused.
+    if (s.verdict) {
+      const m = runnerFinalized({ root: finalizedRoot, uid, role: d.role, card, head: d.head, sessionId: d.session_id, fstat });
+      const bad = m.ok ? (m.finalized.content_sha256 !== s.verdict.content_sha256 && 'finalize changed more than its label') : ((!m.none || holdsLabel(s.verdict.notes)) && `its findings are labelled, but ${m.reason}`);
+      if (bad) { s.problem = bad; s.verdict = null; }
+    }
   }
   return { ok: true, sessions, skipped };
 }
@@ -455,8 +485,32 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   return { ok: true, key, kind, spec, header, body: nl < 0 ? '' : text.slice(nl + 1), sha256, realpath: real, owner_uid: owner };
 }
 
-/** A verdict file's header, checked: the one reading of what a verdict says, for the intake and for every later read. */
+const readableFinding = (n) => !!n && typeof n === 'object' && !Array.isArray(n) && FINDING_LEVELS.includes(n.level);
+export const FINDING_LABELS = Object.freeze(['quote_found', 'quote_note']);
+export const holdsLabel = (notes) => Array.isArray(notes) && notes.some((n) => n && typeof n === 'object' && FINDING_LABELS.some((k) => Object.hasOwn(n, k)));
+
+/** What a verdict says, labels left out: the same for the file the session wrote and the file finalize labelled (L469). */
+export function verdictContent(h) {
+  const unlabelled = (n) => (n && typeof n === 'object' && !Array.isArray(n) ? Object.fromEntries(Object.entries(n).filter(([k]) => !FINDING_LABELS.includes(k))) : n);
+  const fields = Array.isArray(h.fields?.notes) ? { ...h.fields, notes: h.fields.notes.map(unlabelled) } : h.fields;
+  return createHash('sha256').update(JSON.stringify({ ...h, fields })).digest('hex');
+}
+
+/**
+ * A verdict file's header, checked: the one reading of what a verdict says, for the intake and for every later read. A
+ * Material finding is a fail whatever the file says, so a file that says otherwise is refused, not read as a pass (L432).
+ * A file that says it passed is taken only when every finding in it is one this can read: a shape not fully known never
+ * counts as a pass (L452).
+ */
 export function verdictFields(h) {
+  const v = verdictShape(h);
+  if (!v.ok || (v.pass !== true && v.material !== 0)) return v;
+  if (v.notes !== null && !(Array.isArray(v.notes) && v.notes.every(readableFinding))) return { ok: false, reason: 'it lists a finding this can\'t read, yet says pass: true or material: 0' };
+  if (v.notes?.some((n) => n.level === 'material')) return { ok: false, reason: 'it lists a Material finding, yet says pass: true or material: 0' };
+  return v;
+}
+
+function verdictShape(h) {
   const no = (reason) => ({ ok: false, reason });
   if (!h || typeof h !== 'object' || Array.isArray(h) || h.entity !== 'verdict') return no('the header is not a verdict\'s');
   const fields = h.fields ?? {};
@@ -501,7 +555,7 @@ export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head }
     if (!v.ok) return no(v.reason);
     if (v.card !== card) return { ...no(`the verdict names card ${v.card}, not ${card}`), card: v.card };
     if (v.head !== head) return no(`the verdict names head ${v.head.slice(0, 7)}, not ${String(head).slice(0, 7)}`);
-    return { ok: true, verdict: { ...v, role, session_id: sessionId, outbox_uid: f.owner_uid, source_key: f.key, sha256: f.sha256 } };
+    return { ok: true, verdict: { ...v, role, session_id: sessionId, outbox_uid: f.owner_uid, source_key: f.key, sha256: f.sha256, content_sha256: verdictContent(f.header) } };
   } catch (e) { return no(`the verdict could not be read (${e?.code ?? e?.message ?? e})`); }
 }
 
