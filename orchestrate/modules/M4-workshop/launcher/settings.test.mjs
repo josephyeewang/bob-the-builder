@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny } from './render-settings.mjs';
+import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
@@ -378,4 +378,26 @@ test('L751: checkRunnerWall passes a rendered worker file with real runner folde
   assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner, realpath: (p) => `/private${p}` }).reason ?? '', /not its real path/, 'a linked spelling, as /tmp for /private/tmp');
   assert.match(checkRunnerWall({ settings: r.settings, workerRunner: { ...runner, requestsDir: join(d, 'gone') } }).reason ?? '', /is missing/);
   assert.match(checkRunnerWall({ settings: r.settings, workerRunner: null }).reason ?? '', /not a plain absolute path/);
+});
+
+// L763 (#320 m1): every rule is needed. Drop any single one, for either folder, and the check refuses (plant Q5: every -> some).
+test('L763: checkRunnerWall refuses when any one runner-wall rule is dropped', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
+  const r = render('worker', { paths: { ...PATHS, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  const without = (pick, rule) => { const s = structuredClone(r.settings); const o = pick(s); o.list.splice(0, o.list.length, ...o.list.filter((x) => x !== rule)); return s; };
+  const tools = (s) => ({ list: s[S.permissions][S.deny] });
+  const read = (s) => ({ list: s[S.sandbox][S.filesystem][S.denyRead] });
+  const write = (s) => ({ list: s[S.sandbox][S.filesystem][S.denyWrite] });
+  const { dirs } = runnerWallDirs(runner);
+  assert.equal(dirs.length, 2);
+  let n = 0;
+  for (const dir of dirs) {
+    for (const rule of runnerWallDeny(dir)) { n++; assert.match(checkRunnerWall({ settings: without(tools, rule), workerRunner: runner }).reason ?? '', /does not deny the tools/, rule); }
+    n++; assert.match(checkRunnerWall({ settings: without(read, dir), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyRead ${dir}`);
+    for (const rule of runnerWallShell(dir)) { n++; assert.match(checkRunnerWall({ settings: without(write, rule), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyWrite ${rule}`); }
+  }
+  assert.equal(n, 12, 'three tool rules, one read and two write rules, for each of the two folders');
 });
