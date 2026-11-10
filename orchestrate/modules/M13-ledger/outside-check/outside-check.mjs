@@ -42,8 +42,8 @@
 // Endpoint shapes assumed from GitHub's REST docs, 29 Oct 2026 (Principle 9: void on an API change).
 
 import { createHash } from 'node:crypto';
-import { appendFileSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { appendFileSync, readFileSync, realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { resolveStage, isSupported } from './supported.mjs';
 import { SLOTS, GUARD } from './workflow.mjs';
 
@@ -321,7 +321,12 @@ export async function runOne(check, slot, { products, api, pinned, docsLane, ack
   return { line: `${label} / ${check}: ${r.ok ? 'ok' : 'FAIL'} ${r.code}`, ok: r.ok, label };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a link such as an installed copy (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so argv[1] is resolved before the two are compared.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) {
   const [check, slotArg] = process.argv.slice(2);
   let products = [];
   try { products = JSON.parse(process.env.PRODUCTS || '[]'); } catch { products = null; }

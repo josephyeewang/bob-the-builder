@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
@@ -82,8 +82,9 @@ test('the folder table: parents first, exact modes and owners, one outbox root w
   // L71 / L90 M1: the outbox root is root's 0755; reviewer/ and auditor/ are review's; every other role's is the workers' user's
   assert.deepEqual([by('outboxes').owner, by('outboxes').mode], ['root', 0o755]);
   assert.equal(by('review-outbox'), undefined);
-  for (const r of REVIEW_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['review', 0o755, []]);
-  assert.deepEqual([...WORKER_ROLES].sort(), AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)).sort());
+  // L758: and the plan reviewer's, which the review runner starts as review too.
+  for (const r of RUNNER_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['review', 0o755, []]);
+  assert.deepEqual([...WORKER_ROLES].sort(), AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)).sort());
   assert.ok(WORKER_ROLES.includes('worker') && WORKER_ROLES.includes('lead'));
   for (const r of WORKER_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['owner', 0o750, [ORCHESTRATE_READ_ACL]]);
 });
