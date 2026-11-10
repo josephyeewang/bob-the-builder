@@ -15,6 +15,8 @@ const FIXTURE = readFileSync(join(here, 'fixtures/policy.yaml'), 'utf8');
 const C = 'c'.repeat(40); const B = 'b'.repeat(40); const R = 'a'.repeat(40);
 const pol = (edit = (t) => t) => { const r = parsePolicy(edit(FIXTURE)); assert.ok(r.ok, r.reason); return r.policy; };
 const set = (key, from, to) => (t) => { assert.ok(t.includes(from), `fixture has ${from}`); return t.replace(from, to); };
+// A state's start rule set on the parsed policy: parsePolicy refuses an unknown one (S4), and these prove the engine does too.
+const withStart = (state, start) => { const p = pol(); return { ...p, product_state_rules: { ...p.product_state_rules, [state]: { ...p.product_state_rules[state], start } } }; };
 
 // 10:00 and 03:00 New York time on an ordinary day (EDT, UTC-4).
 const AT_10 = Date.parse('2026-10-14T14:00:00Z');
@@ -72,10 +74,12 @@ test('start_session: roles (MAT-11)', () => {
   assert.equal(start(w, { role: 'auditor' }).decision, 'allow');
   for (const role of ['explore', 'learning', 'nobody']) assert.equal(start(w, { role }).decision, 'deny', role);
   assert.match(start(w, { role: 'script' }).reason, /script profile is off/);
-  const on = world({ policies: { app: pol(set('', 'script: none', 'script: 2.1.300')) } });
+  const on = world({ policies: { app: pol(set('', 'script: none', 'script: 2.1.316')) } });
   assert.equal(start(on, { role: 'script' }).decision, 'allow');
-  const pinMoved = world({ policies: { app: pol((t) => set('', 'script: none', 'script: 2.1.300')(t).replace('pin: 2.1.300', 'pin: 2.1.301')) } });
+  const pinMoved = world({ policies: { app: pol((t) => set('', 'script: none', 'script: 2.1.316')(t).replace('pin: 2.1.316', 'pin: 2.1.317')) } });
   assert.equal(start(pinMoved, { role: 'script' }).decision, 'deny', 'a pin change switches script off (and the tool list expires)');
+  const oneMoved = world({ policies: { app: pol((t) => t.replace('pin: 2.1.316', 'pin: 2.1.317')) } });
+  assert.match(start(oneMoved).reason, /re-check the list/, 'one product, pin not the checked version: no role starts, and the reason says why');
   assert.equal(start(w, { tier: 3 }).decision, 'deny');
   assert.equal(start(w, { editing: 'yes' }).decision, 'deny');
 });
@@ -101,7 +105,7 @@ test('the file\'s state rules can only tighten (MAT-8)', () => {
   const tight = world({ policies: { app: pol(set('', 'away:\n    start: within_caps', 'away:\n    start: none')) } });
   tight.states.app = { state: 'away' };
   assert.equal(start(tight).decision, 'deny');
-  const odd = world({ policies: { app: pol(set('', 'start: editing_cap_1', 'start: whenever')) } });
+  const odd = world({ policies: { app: withStart('light', 'whenever') } });
   odd.states.app = { state: 'light' };
   assert.match(start(odd).reason, /not a known rule/);
 });
@@ -200,7 +204,7 @@ test('start_session while paused: an exact-reverse undo starts, nothing else doe
   const noStarts = world({ policies: { app: pol(set('', 'start: within_caps', 'start: none')) } });
   assert.equal(start(noStarts, undo).decision, 'allow');
   assert.match(start(noStarts).reason, /no starts/);
-  const unknown = world({ states: { app: { state: 'paused' } }, policies: { app: pol(set('', 'start: none', 'start: sometimes')) } });
+  const unknown = world({ states: { app: { state: 'paused' } }, policies: { app: withStart('paused', 'sometimes') } });
   assert.match(start(unknown, undo).reason, /not a known rule/);
   // Every other state keeps its answer: the undo in active, away and light starts as before.
   for (const state of ['active', 'away', 'light']) assert.equal(start(world({ states: { app: { state } } }), undo).decision, 'allow', state);
@@ -245,8 +249,8 @@ test('start_session takes its state answer from push_branch and merge, in every 
       const undoMay = pushUndo && docsMerge(reverseOf);
       assert.equal(undoOk, knownStart && undoMay, `undo, ${where}`);
       // A normal edit's start reads only the start rule. Where the two rules disagree (an unknown tier1_merge, or
-      // `undo_only` beside a start rule other than `none`), it still starts though its merge would be refused: a
-      // file that pairs them so is refused by parsePolicy once both keys are checked there (the lead's to-do, L220).
+      // `undo_only` beside a start rule other than `none`), it still starts though its merge would be refused. An unknown
+      // value is refused by parsePolicy; that pairing is not checked by parsePolicy yet (SAFETY-ROADMAP).
       const paired = TIER1_MERGE_RULES.includes(mergeRule) && (startRule === 'none') === (mergeRule === 'undo_only');
       assert.equal(ok(start(w)), knownStart && startRule !== 'none' && pushNormal && (!paired || docsMerge()), `normal edit, ${where}`);
       if (knownStart && !undoMay) undoDeniedByMerge++;
@@ -299,7 +303,7 @@ test('Mac-wide values take the strictest product (MAT-10, R-0b-18)', () => {
 });
 
 test('must-match values: a pin, model, account or home-zone mismatch stops every start (MAT-10, R2-M5(b))', () => {
-  for (const [from, to, why] of [['pin: 2.1.300', 'pin: 2.1.301', /pin mismatch/], ['main: claude-opus-5-5', 'main: other-model', /models.main mismatch/],
+  for (const [from, to, why] of [['pin: 2.1.316', 'pin: 2.1.317', /pin mismatch/], ['main: claude-opus-5-5', 'main: other-model', /models.main mismatch/],
     ['current: sample-org', 'current: other-org', /accounts.current mismatch/], ['tz: America/New_York', 'tz: Europe/London', /accounts.joe.tz mismatch/]]) {
     const w = world({ policies: { app: pol(), other: pol(set('', from, to)) } });
     assert.match(start(w).reason, why);
@@ -313,6 +317,34 @@ test('one product with no usable rules stops every start on the Mac (MAT-10)', (
   assert.match(start(w).reason, /rules unusable for other/);
   assert.equal(w.rules.get('caps.editing_per_mac'), undefined);
   assert.equal(w.rules.get('caps.rounds', { product: 'app' }), 3, 'a per-product value of a healthy product still reads');
+});
+
+test('L696 M1: the rows lane takes a card\'s rows from its own row files as well as card.rows', () => {
+  const w = world();
+  const push = (doc, files, rows) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', ...(rows ? { rows } : {}), doc: { lane: 'lead', ...doc } }, files });
+  const own = { files: ['src/a.mjs', 'docs/blueprint/rows/R-1.yaml'] };
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml')]).decision, 'allow', 'no rows field: the row file in its files is its row');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml', 'added')], []).decision, 'allow');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-2.yaml')], ['R-2']).decision, 'allow', 'card.rows still counts');
+  assert.match(push(own, [file('docs/blueprint/rows/R-2.yaml')]).reason, /out of lane/, 'a row in neither is not its own');
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml', 'removed')]).decision, 'deny', 'removing its own row is still out of lane');
+  // Both paths the card's own rows: only the status rule (engine.mjs, added or modified) refuses these (audit #266 m1-r3).
+  const two = { files: ['docs/blueprint/rows/R-1.yaml', 'docs/blueprint/rows/R-3.yaml'] };
+  for (const how of ['renamed', 'copied']) {
+    assert.match(push(two, [file('docs/blueprint/rows/R-1.yaml', how, { previous_path: 'docs/blueprint/rows/R-3.yaml' })]).reason, /out of lane/, `a ${how} row file, both its rows the card's own`);
+    assert.match(push(own, [file('docs/blueprint/rows/R-1.yaml', how, { previous_path: 'docs/blueprint/rows/R-3.yaml' })], ['R-3']).reason, /out of lane/, `a ${how} row file, its old row from card.rows`);
+  }
+  assert.equal(push(own, [file('docs/blueprint/rows/R-1.yaml'), file('docs/blueprint/rows/R-2.yaml')], ['R-2']).decision, 'allow', 'rows and files together: the union, not one or the other (audit #266 m1-r2)');
+  assert.match(push(own, [file('docs/blueprint/rows/r-1.yaml')]).reason, /out of lane/, 'a row path whose case differs from the card\'s file is refused, never allowed');
+  assert.match(push({ files: ['src/a.mjs', 'docs/research/R-1.yaml'] }, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'a file that is not a row file adds no row');
+  assert.match(push({}, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'neither rows nor files: every row path is refused, as before');
+  // A daily card is go-free (L704): nothing compares its rows with a go, so the row files it lists add no row.
+  const daily = (files) => w.rules.may('push_branch', { product: 'app', card: { id: 'C-1', kind: 'lead_daily_card', doc: { lane: 'lead', ...own } }, files });
+  assert.match(daily([file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, 'a daily card may not push its listed row file');
+  assert.equal(daily([file('docs/blueprint/today.md')]).decision, 'allow', 'its own blueprint files still push');
+  for (const files of [undefined, 'docs/blueprint/rows/R-1.yaml', [7, null, 'docs/blueprint/rows/R-1.yml', 'x/docs/blueprint/rows/R-1.yaml']]) {
+    assert.match(push({ files }, [file('docs/blueprint/rows/R-1.yaml')]).reason, /out of lane/, JSON.stringify(files));
+  }
 });
 
 test('push_branch: lanes (MIN-1, R2-m7, R3-m5)', () => {

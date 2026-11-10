@@ -98,13 +98,14 @@ const ACTOR = 'merge_gate';
 const SHA = /^[0-9a-f]{40}$/;
 const short = (s) => String(s ?? '').slice(0, 7);
 
-export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, reason, openTooLong = false, fields = {} } = {}) {
+export function settleMerge({ record, alert = () => false, now }, id, { pr = null, reason, openTooLong = false, fields = {} } = {}) {
   const iso = () => new Date(typeof now === 'function' ? now() : now).toISOString();
   const m = record.read('merge', id);
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };
   if (m.doc.state !== 'checking' && m.doc.state !== 'merging') return { ok: false, reason: `merge ${id} is ${m.doc.state}, not checking or merging` };
   const write = (entity, cur, fields) => record.write({ actor: ACTOR, entity, id: cur.id, expectRev: cur.rev, doc: { ...cur.doc, ...fields }, kind: 'merge_outcome' });
-  const told = (r, what) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, to: what, reason: r.reason }); return r.ok; };
+  // `cardId`: the write refused was the card's, so the line names it (L408 MAT-1): the merge itself may well have moved.
+  const told = (r, what, cardId) => { if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: id, ...(cardId ? { card: cardId } : {}), to: what, reason: r.reason }); return r.ok; };
 
   if (pr && pr.merged !== true && pr.state !== 'closed' && !openTooLong) return { ok: false, reason: `merge ${id}'s outcome is not known yet: PR ${m.doc.pr} is still open` };
   if (pr?.merged === true && SHA.test(pr.merge_commit_sha ?? '') && pr.head_sha === m.doc.judged_head) {
@@ -113,7 +114,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
     if (!told(write('merge', cur, { state: 'merged', merge_commit: pr.merge_commit_sha, merged_at: iso() }), 'merged')) return { ok: false, reason: 'the move to merged was refused' };
     const card = m.doc.card ? record.read('card', m.doc.card) : null;
     if (card?.doc?.state === 'merging') {
-      if (told(write('card', card, { state: 'merged', merge_commit: pr.merge_commit_sha }), 'merged') && card.doc.kind === 'exact_reverse') markReverted({ record, alert }, card.id);
+      if (told(write('card', card, { state: 'merged', merge_commit: pr.merge_commit_sha }), 'merged', card.id) && card.doc.kind === 'exact_reverse') markReverted({ record, alert }, card.id);
     }
     return { ok: true, outcome: 'merged', card: m.doc.card ?? null };
   }
@@ -126,7 +127,7 @@ export function settleMerge({ record, alert = () => {}, now }, id, { pr = null, 
   return { ok: true, outcome: 'refused', card: putBack(record, m.doc.card, why, told) };
 }
 
-export function reconcileMerge({ record, alert = () => {}, now }, id, { pr, factId } = {}) {
+export function reconcileMerge({ record, alert = () => false, now }, id, { pr, factId } = {}) {
   const iso = () => new Date(typeof now === 'function' ? now() : now).toISOString();
   const m = record.read('merge', id);
   if (!m?.doc || m.corrupt) return { ok: false, reason: `merge ${id} can't be read` };
@@ -159,6 +160,6 @@ function putBack(record, cardId, why, told) {
   const r = at('verified');
   if (r.ok) return { id: card.id, to: 'verified' };
   const r2 = at('in_review');
-  told(r2, 'in_review');
+  told(r2, 'in_review', card.id);
   return r2.ok ? { id: card.id, to: 'in_review' } : null;
 }

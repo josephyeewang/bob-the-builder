@@ -43,14 +43,7 @@ const bad = (check, where, what) => problems.push(`  ✗ [${check}] ${where}: ${
 
 // Sections of session-read files that another session owns and has not fixed yet (checks 4 and 5 only).
 // Each entry: file, the heading that starts the skipped section (to the next "## " heading), or '*' for the whole file.
-const DEFAULT_SKIP = [
-  // 2026-10-29: the NEW steps and the startup steps are being rewritten by the ORCHESTRATE session (D-032). Its paths
-  // in the NEW steps are already fixed, so only its "Appendix K" wording waits.
-  { file: 'build-protocol-core.md', heading: '## MODE: NEW', checks: ['stubs'] },
-  // 2026-10-29: build-protocol.md Part II (the NEW steps in full) has two Bob commands in a form that fails from a
-  // project (the merge-guard test command and `scripts/coherence-check.sh <docs-dir>`); same owner.
-  { file: 'build-protocol.md', heading: '## PART II', checks: ['Bob paths'] },
-];
+const DEFAULT_SKIP = [];
 // --skip FILE replaces the list with a JSON array of the same shape (the self-tests use it, so they keep working
 // when an entry above is deleted).
 const si = args.indexOf('--skip');

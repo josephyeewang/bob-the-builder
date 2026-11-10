@@ -4,10 +4,13 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSync } from 'node:fs';
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
-import { RULES_MISSING_FACT } from './pass.mjs';
+import { leadLaunchHead } from '../../shared/record.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
+import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { REVIEW_HOLD_FACT } from './review-requests.mjs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { tick, runTick, signedInAccount, actOnDead, approvalsStep, approvalsAlertText, STEPS, STEP_DEADLINE_MS, ACCOUNT_FACT, LAST_PASS_FACT, STEP_ERROR_FACT } from './tick.mjs';
@@ -17,7 +20,10 @@ import { PR_FACT } from './merges.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
+import { goFingerprint } from '../M2-approvals/go.mjs';
 
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
@@ -51,7 +57,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle,
     // The launcher starts the session the claim names (L72), as M4's does.
-    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD }; },
+    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: ({ card }) => { calls.reviewers.push(card); return { ok: true, requestId: `Q-${++n}` }; },
     filesOf: filesOfCommits,
@@ -75,7 +81,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'pass', 'limits', 'merges', 'waits', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -110,16 +116,67 @@ test('L221 MAT-1: one real runTick turns on a product its rules file names, writ
   assert.equal(w.calls.alerts.length, 1);
 });
 
+test('L450: the plan-go step hands the tick\'s replyToLead on: a declined plan reaches its Lead', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const replies = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const fp = goFingerprint({ record: w.rec, product: 'p2' }, 'C-3');
+  assert.equal(fp.ok, true, fp.reason);
+  seed(w.rec, 'ask', 'go-C-3', { kind: 'go_t2', product: 'p2', card: 'C-3', title: 'C-3', state: 'answered', fingerprint: fp.fingerprint, created_at: iso(T0 - MIN), answer: { approves: false, choice: 'Not now' } });
+  // recWith seeds a card as a script; a Lead's session wrote this plan.
+  const rec = Object.create(w.rec, { diary: { value: (...x) => [...w.rec.diary(...x), { actor: 'lead:L-1', writes: [{ entity: 'card', id: 'C-3', doc: { files: ['changed'] } }] }] } });
+  await tick({ rec, rules, now: T0, ports: { ...w.ports, approvals: () => [{ product: 'p2', stateDir }], replyToLead: async (x) => { replies.push(x); return { ok: true }; } } });
+  assert.equal(replies.length, 1, w.calls.alerts.join(' | '));
+  assert.match(replies[0].text, /declined the plan for card C-3/);
+});
+
+test('L467: the plan-go step gets the same deadline as its product, so a short one stops the calls and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 2, files: ['src/a.mjs'], done_when: 'tests pass' };
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const calls = [];
+  const w = world([account(), usage(), card('C-3', plan)]);
+  const planRows = async (x) => { calls.push(x); return {}; };
+  await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows, approvalsProductMs: 1_000 } });
+  assert.deepEqual(calls, []);
+  assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
+});
+
+test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
+  const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
+  const started = [];
+  const seen = [];
+  const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
+  const stateDir = join(tempDir('m11-approvals-'), 'm2');
+  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
+    planReviewAnswer: async (x) => { seen.push(x); return { ok: true }; } };
+  const open = world([account(), usage(), card('C-3', plan), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
+  const held = await open.pass(0, { rules, ports: planPorts });
+  assert.equal(held.steps['plan-go'].ok, true, held.steps['plan-go'].error);
+  assert.equal(started.length, 0, 'an outage holds it');
+  assert.ok(open.calls.alerts.some((t) => /no plan reviewer could start for card C-3.*outage: nothing starts/.test(t)), open.calls.alerts.join(' | '));
+  const w = world([account(), usage(), card('C-3', plan)]);
+  await w.pass(0, { rules, ports: planPorts });
+  assert.equal(started.length, 1, w.calls.alerts.join(' | '));
+  assert.equal(started[0].lead, 'plan-review');
+  await w.pass(1, { rules, ports: planPorts });
+  assert.equal(started.length, 1);
+  assert.equal(seen[0].session, 'S-review');
+});
+
 test('L221: the approvals step runs before the main pass and during an outage; it is not in `complete`', async () => {
   const order = [];
   const w = world([account(), usage(), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
   const ports = { ...w.ports, approvals: () => { order.push('approvals'); return []; }, launch: async (x) => { order.push('launch'); return w.ports.launch(x); } };
   const r = await w.pass(0, { ports });
   assert.equal(r.steps.approvals.ok, true, r.steps.approvals.error);
-  assert.deepEqual(order, ['approvals'], 'it ran with the outage open');
-  // Before `pass`: its index is just before it in STEPS, and Object.keys(steps) is the run order.
+  assert.deepEqual(order, ['approvals', 'approvals'], 'it ran with the outage open, and plan-go after it');
+  // Before `pass`: Object.keys(steps) is the run order.
   const keys = Object.keys(r.steps);
-  assert.equal(keys.indexOf('approvals') + 1, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('approvals') + 2, keys.indexOf('pass'));
+  assert.equal(keys.indexOf('plan-go') + 1, keys.indexOf('pass'));
   // A failing approvals step does not stop the dropping of rules values already told (not in `complete`).
   const src = readFileSync(fileURLToPath(new URL('./tick.mjs', import.meta.url)), 'utf8');
   assert.match(src, /const complete = \['stops', 'undo-starts', 'pass', 'limits', 'merges'\]/);
@@ -131,7 +188,7 @@ test('L221: a missing approvals port fails the step (loud); one product failing 
   assert.equal(r.steps.approvals.ok, false);
   assert.match(r.steps.approvals.error, /the approvals port is missing/);
   assert.ok(w.calls.alerts.some((a) => /Dispatcher's approvals step failed: the approvals port is missing/.test(a)));
-  for (const s of STEPS.filter((x) => x !== 'approvals')) assert.equal(r.steps[s].ok, true, s);
+  for (const s of STEPS.filter((x) => !['approvals', 'plan-go'].includes(x))) assert.equal(r.steps[s].ok, true, s);
 
   // Per product: one throws, one hangs past its deadline, one runs. Each gets its own try and deadline.
   const ran = [];
@@ -662,6 +719,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     { over: {
       sessions: () => running,
       stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
+      mainSha: async () => 'a'.repeat(40),
       outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
       leads: () => [{ lead, outboxNames: readdirSync(outbox), questionOpen: false,
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
@@ -681,6 +739,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     assert.deepEqual(r2.steps.leads.result, [['L-1', 'restarted']], `${band}: ${JSON.stringify(r2.steps.leads.result)}`);
     assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'done');
     assert.equal(starts.length, 1);
+    assert.ok(leadLaunchHead(w.rec, 'L-2'), `${band}: the restarted Lead has no launch record, so its plans would be refused`);
   }
 });
 
@@ -943,6 +1002,24 @@ test('L47: a send that hangs delays no safety act and loses no alert', async () 
   assert.equal(sent.filter((x) => /signed-in account/.test(x)).length, 1, sent.join(' | '));
   assert.ok(w.rec.read('fact', 'stop-S-X').doc.told_at);
   assert.deepEqual(w.rec.read('fact', 'unsent-alerts').doc.entries, []);
+});
+
+// #219 audit M-1: a start whose outbox is wrong is stopped, on the undo path and on the normal one alike. Both are told
+// through the tick's own ports: a stop port left behind would keep every such card claimed for nothing.
+test('#219 M-1: the tick gives both start paths the stop port and the outbox root', async () => {
+  const run = async (entries) => {
+    const stopped = [];
+    const w = world([account(), usage(), ...entries], { over: {
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
+      outboxRoot: '/no-such-outbox-root' } });
+    await w.pass();
+    return stopped;
+  };
+  // A normal card reaches only the pass's own starts.
+  assert.deepEqual(await run([card('C-1')]), ['C-1']);
+  // An undo is tried by the undo start and, given back, by the pass: stopped once each.
+  assert.deepEqual(await run(undoEntries('U-1')), ['U-1', 'U-1']);
 });
 
 // Audit 0b-6 r5 MAT-1: the watchdog starts before the wiring loads, so a wiring that never finishes
@@ -1231,4 +1308,361 @@ test('L329: a step error whose told_at is unreadable or an hour ahead is told ag
     sessions: () => { throw new Error('no session list'); } } });
   await w.pass(0);
   assert.equal(w.calls.alerts.filter((t) => /stops step failed/.test(t)).length, 0);
+});
+
+test('L354 step ok: the queued copy leaves first and the told fields go; a refused drop keeps the error for the next tick, and says so', async () => {
+  const failed = async () => {
+    let boom = true;
+    const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+    await w.pass();
+    boom = false;
+    queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  // The channel is down, so the copy is still queued when the step comes back.
+  const at = (w, rec, min) => tick({ rec, rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, alert: () => false } });
+  const a = await failed();
+  const log = [];
+  await at(a, writeLog(a.rec, log), 1);
+  assertDropFirst(log, `step_ok:${STEP_ERROR_FACT('outage')}`);
+  const cleared = a.rec.read('fact', STEP_ERROR_FACT('outage')).doc;
+  assert.deepEqual([cleared.error, cleared.told_cause, cleared.told_at], [null, undefined, undefined]);
+  const b = await failed();
+  const r = await at(b, writeLog(b.rec, [], { refuseDrop: true }), 1);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, 'board unreadable', 'held');
+  assert.match(r.steps.outage.note, /could not be dropped.*next pass/);
+  await at(b, b.rec, 2);
+  assert.equal(b.rec.read('fact', STEP_ERROR_FACT('outage')).doc.error, null, 'the next tick clears it');
+});
+
+test('L449: a step\'s refused drop reaches the tick\'s reports, named by its step, so main can log it', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; } } });
+  await w.pass();
+  boom = false;
+  queueFor(w.rec, STEP_ERROR_FACT('outage'), 'told_at', iso(T0), T0);
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + MIN, ports: { ...w.ports, alert: fakeAlert({ answer: false }) } });
+  assert.ok(r.reports.some((l) => /^outage: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a review hold\'s refused drop reaches the tick\'s reports, named by its step', async () => {
+  const w = world([account(), usage()]);
+  const fact = REVIEW_HOLD_FACT('r1');
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { told_at: iso(T0), absent_since: iso(T0 - 2 * 60 * MIN) }, kind: 'hold_alert' });
+  const r = await tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0, ports: { ...w.ports, alert: fakeAlert({ answer: false }), reviewAlerts: () => [] } });
+  assert.ok(r.reports.some((l) => /^limits: the queued alert for .* could not be dropped/.test(l)), r.reports.join(' | '));
+});
+
+test('L449: a refused drop in each step that clears reaches the tick\'s reports, named by its step', async () => {
+  const dropped = /the queued alert for .* could not be dropped/;
+  const refusedTick = (w, min, ports = {}) => tick({ rec: writeLog(w.rec, [], { refuseDrop: true }), rules: rulesWith({}, allow), now: T0 + min * MIN, ports: { ...w.ports, ...ports } });
+  // The channel is down where a step runs after the tick's first send, so the copy is still queued when it clears.
+  const said = (r, step) => r.reports.some((l) => l.startsWith(`${step}: `) && dropped.test(l));
+
+  const stops = world([account(), usage(), card('C-1')]);
+  await stops.pass(0);
+  const sid = stops.sessions[0].id;
+  change(stops.rec, 'card', 'C-1', { state: 'cancelled' });
+  queueFor(stops.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+  const r1 = await refusedTick(stops, 1);
+  assert.ok(said(r1, 'stops'), r1.reports.join(' | '));
+
+  const undo = world([account(), usage(), ...undoEntries('U-1')]);
+  await undo.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }) });
+  queueFor(undo.rec, UNDO_HELD_FACT('U-1'), 'told_at', iso(T0), T0);
+  const r2 = await refusedTick(undo, 1);
+  assert.ok(said(r2, 'undo-starts'), r2.reports.join(' | '));
+
+  const pause = world([account(), usage()]);
+  change(pause.rec, 'product', 'p1', { state: 'paused' });
+  queueFor(pause.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+  const r3 = await refusedTick(pause, 0, { alert: fakeAlert({ answer: false }) });
+  assert.ok(said(r3, 'pass'), r3.reports.join(' | '));
+
+  const phone = world([account(), usage()]);
+  for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) assert.equal(phone.rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc: { value: true, observed_at: iso(T0) } }).ok, true);
+  queueFor(phone.rec, FD_RESTART_FACT, 'told', true, T0);
+  const r4 = await refusedTick(phone, 0, { alert: fakeAlert({ answer: false }), frontDoorAlive: () => true });
+  assert.ok(said(r4, 'phone'), r4.reports.join(' | '));
+});
+
+test('L449: main logs each failure report of a tick that ran', async () => {
+  // The channel stays down: the tick's first send would deliver the queued copy, and then no drop is left to refuse.
+  const L = installedLayout('m11-main-report-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const wiring = L.path('wiring/wiring.mjs');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  writeFileSync(wiring, `import { recWith, rulesWith, writeLog, queueFor, T0 } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { fakeAlert } from ${JSON.stringify(join(here, '../../test/fake-alert.test-helper.mjs'))};
+const fact = ${JSON.stringify(STEP_ERROR_FACT('outage'))};
+const real = recWith([['fact', fact, { error: 'it failed' }]]);
+queueFor(real, fact, 'told_at', 'x', T0);
+export async function wire() {
+  const noop = () => [];
+  return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(L.base)}, sealRoot: ${JSON.stringify(L.base)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(L.base, 'pass.lock') }));
+  const logs = [];
+  const code = await main([config], { self, now: T0, log: (s) => logs.push(s) });
+  assert.equal(code, 0, logs.join(' | '));
+  assert.ok(logs.some((l) => /^dispatcher: [a-z-]+: the queued alert for .* could not be dropped/.test(l)), logs.join(' | '));
+});
+
+test('L354 item 3: a mark landing as a step clears does not outlive the clear', async () => {
+  let boom = true;
+  const w = world([account(), usage()], { over: { board: () => { if (boom) throw new Error('board unreadable'); return []; }, alert: () => false } });
+  await w.pass();
+  boom = false;
+  const fact = STEP_ERROR_FACT('outage');
+  await tick({ rec: lateMark(w.rec, 'step_ok', fact, { told_cause: 'board unreadable', told_at: iso(T0) }), rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  const doc = w.rec.read('fact', fact).doc;
+  assert.deepEqual([doc.error, doc.told_cause, doc.told_at], [null, undefined, undefined]);
+});
+
+test('L424: the tick asks the reviewEnded port before a review session\'s verdict is taken', async () => {
+  const dir = tempDir('m11-tick-verdict-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'not read past the ended check\n');
+  const asked = [];
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+    reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  await w.pass();
+  assert.deepEqual(asked, ['R-1']);
+  assert.equal(w.rec.read('fact', `intake-applied-R-1-${name}`), null);
+});
+
+test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, on its own fact', async () => {
+  const dir = tempDir('m11-tick-notes-');
+  const name = 'verdict-R-1.md';
+  writeFileSync(join(dir, name), 'waits\n');
+  const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
+  const w = world([account(), usage()], { over: { outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
+    intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
+  const lines = () => w.rec.diary().filter((d) => d.kind === 'note' && /outbox|intake/.test(d.id ?? '')).map((d) => d.id);
+  for (let min = 0; min < 50; min++) await w.pass(min);
+  assert.equal(lines().length, 1, JSON.stringify(w.rec.diary().slice(-6)));
+  await w.pass(25 * 60);
+  assert.equal(lines().length, 2, 'a day later');
+});
+
+// A Lead for the tick's `leads` port, with a real outbox folder for the file checks.
+function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000, rules } = {}) {
+  const outbox = tempDir('m11-tick-lead-');
+  if (hand) writeFileSync(join(outbox, HANDOFF_NAME('L-1')), hand);
+  const sent = [];
+  const state = { product, tokens, endedAt: T0 };
+  const entry = (lead, to, size) => ({ lead, outboxNames: readdirSync(outbox), questionOpen: false, size,
+    send: async (t) => { to.push(t); return { outcome: 'sent' }; }, stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-9' }) });
+  const w = world([account(), usage()], { over: {
+    mainSha: async () => 'a'.repeat(40),
+    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
+    leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
+      entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
+  }, ...(rules ? { rules } : {}) });
+  return { ...w, sent, outbox, state };
+}
+const untouched = /missing or over the cap/;
+
+// A rules stand-in with no values for one product, as a product missing from the rules reads on the real engine.
+const rulesWithout = (product) => {
+  const base = rulesWith({}, allow);
+  const hide = (f) => (k, o) => (o?.product === product ? undefined : f(k, o));
+  return Object.create(base, { get: { value: hide(base.get) }, num: { value: hide(base.num) } });
+};
+
+for (const [name, product, why] of [
+  ['no product', null, /lead L-1 \(handoff-L-1\.md, no product named\) could not be checked: the session names no product/],
+  ['an empty product', '', /could not be checked: the session names no product/],
+  ['a product the rules don\'t have', 'gone', /\(handoff-L-1\.md, product gone\) could not be checked: .*context\.handoff_cap\.role/],
+]) {
+  test(`L584 M1: a handoff from a session with ${name} is told to the owner with its true cause, daily, and clears once it can be checked`, async () => {
+    const w = leadsWorld({ hand: 'the hand-off', product, rules: rulesWithout('gone') });
+    const r = await w.pass(0);
+    assert.deepEqual(r.steps.leads.result, [['L-1', `waiting: outbox file ${HANDOFF_NAME('L-1')} not used yet`]]);
+    const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked'));
+    assert.equal(told().length, 1);
+    assert.match(told()[0], why);
+    assert.equal(readdirSync(w.outbox).length, 1, 'the file is kept');
+    await w.pass(5);
+    assert.equal(told().length, 1, 'once inside the day');
+    await w.pass(24 * 60 + 5);
+    assert.equal(told().length, 2, 'told again a day on');
+    w.state.product = 'p1';
+    const fixed = await w.pass(24 * 60 + 10);
+    assert.equal(fixed.steps.intake.result[0].refused, undefined, 'the file is checked again');
+    await w.pass(2 * 24 * 60 + 20);
+    assert.equal(told().length, 2, 'not told once it can be checked');
+  });
+}
+
+test('L584 M1: after WRAP the Lead and the owner hear the true cause, not "missing or over the cap"', async () => {
+  const w = leadsWorld({ product: null });
+  await w.pass(0);
+  assert.match(w.sent[0], /^WRAP/);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  w.state.endedAt = T0 + 2 * MIN;
+  const r = await w.pass(3);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 're-asked']]);
+  assert.match(w.sent[1], /Your handoff was not used \(could not be checked: the session names no product/);
+  assert.doesNotMatch(w.sent[1], untouched);
+  w.state.endedAt = T0 + 5 * MIN;
+  await w.pass(6);
+  const gave = w.calls.alerts.find((a) => a.includes('did not hand in a usable handoff'));
+  assert.match(gave, /could not be checked: the session names no product/);
+  assert.doesNotMatch(gave, untouched);
+});
+
+test('L584: the tick passes the vet, so an oversize handoff is refused and the Lead hears its size', async () => {
+  const w = leadsWorld();
+  await w.pass(0);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'x'.repeat(33_000));
+  w.state.endedAt = T0 + 2 * MIN;
+  const r = await w.pass(3);
+  assert.match(r.steps.intake.result[0].refused, /8250 tokens, over the 8000 cap/);
+  assert.match(w.sent[1], /Your handoff was not used \(the handoff is about 8250 tokens/);
+  assert.equal(w.calls.alerts.filter((a) => a.includes('outbox file')).length, 0, 'a file the Lead can rewrite is not the owner\'s yet');
+});
+
+for (const [name, bad, why] of [
+  ['no product', { sessionId: 'L-B' }, /the Lead L-B \(no product named\) was skipped this pass: it names no product/],
+  ['an empty product', { sessionId: 'L-B', product: '' }, /the Lead L-B \(no product named\) was skipped/],
+  ['a product missing the key', { sessionId: 'L-B', product: 'gone' }, new RegExp(`the Lead L-B \\(product gone\\) was skipped this pass: .*${K.leadSoft}`)],
+]) {
+  test(`L584 M2: a Lead with ${name} is told by name, and the healthy Lead behind it still runs`, async () => {
+    const w = leadsWorld({ bad, rules: rulesWithout('gone'), tokens: 999_999 });
+    const r = await w.pass(0);
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    assert.equal(r.steps.leads.result[0][0], 'L-B');
+    assert.match(r.steps.leads.result[0][1], /^skipped: /);
+    assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+    assert.ok(w.calls.alerts.some((a) => why.test(a)), w.calls.alerts.join(' | '));
+    assert.ok(w.calls.alerts.some((a) => a.includes('the Lead L-1 is at 999999 tokens')), 'the healthy Lead\'s own hard-line alert');
+    assert.ok(!w.calls.alerts.some((a) => a.includes('leads step failed')));
+    await w.pass(5);
+    assert.equal(w.calls.alerts.filter((a) => a.includes('the Lead L-B')).length, 1, 'once a day');
+  });
+}
+
+test('L584 M2: a healthy Lead whose new session did not start is still retried behind a bad Lead', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B' } });
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: RESTART_FACT('L-1'), expectRev: 0, doc: { phase: 'start_failed', reasks: 0 }, kind: 'lead_start_failed' });
+  const r = await w.pass(0);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'restarted']);
+});
+
+test('L584 M2: a skipped Lead that can\'t be told fails the step, so it is told that way, and the Lead behind it still ran', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B' } });
+  const good = w.rec;
+  const rec = Object.create(good, { read: { value: (e, id) => { if (e === 'fact' && id === 'hold-lead-skipped-L-B') throw new Error('no read'); return good.read(e, id); } } });
+  const r = await tick({ rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(r.steps.leads.ok, false);
+  assert.match(r.steps.leads.error, /a skipped Lead could not be told \(L-B: no read\)/);
+  assert.equal(w.sent.length, 1, 'the healthy Lead got its WRAP');
+});
+
+test('L596 m-b: an oversize handoff before WRAP holds nothing: the Lead gets its WRAP, and a rewrite restarts it', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  const r = await w.pass(0);
+  assert.match(r.steps.intake.result[0].refused, /over the 8000 cap/);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 'WRAP sent']]);
+  assert.match(w.sent[0], /under 8000 tokens/);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  w.state.endedAt = T0 + 2 * MIN;
+  const again = await w.pass(3);
+  assert.deepEqual(again.steps.leads.result, [['L-1', 'restarted']]);
+});
+
+test('L596 m-b: a Lead that leaves the file oversize hears its size, and the owner hears the give-up', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  await w.pass(0);
+  w.state.endedAt = T0 + 2 * MIN;
+  await w.pass(3);
+  assert.match(w.sent[1], /Your handoff was not used \(the handoff is about 10000 tokens, over the 8000 cap\)/);
+  w.state.endedAt = T0 + 5 * MIN;
+  await w.pass(6);
+  assert.ok(w.calls.alerts.some((a) => /the Lead L-1 did not hand in a usable handoff .*10000 tokens/.test(a)), w.calls.alerts.join(' | '));
+});
+
+test('L596 m-b: another file still in flight holds the WRAP, though the handoff can be rewritten', async () => {
+  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  writeFileSync(join(w.outbox, '.half-written'), 'x');
+  const r = await w.pass(0);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 'waiting: outbox file .half-written not used yet']]);
+});
+
+test('L596 m-a: once the Lead has given up, the daily line says so, and that a restart needs a person', async () => {
+  const w = leadsWorld({ product: null });
+  await w.pass(0);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  for (const [end, at] of [[2, 3], [5, 6]]) { w.state.endedAt = T0 + end * MIN; await w.pass(at); }
+  assert.match(w.calls.alerts.find((a) => a.includes('could not be checked: the session names')), /a Lead's restart waits on it/, 'before the give-up');
+  assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'gave_up');
+  const gave = w.calls.alerts.find((a) => a.includes('did not hand in a usable handoff'));
+  assert.match(gave, /it keeps running, and a restart now needs a person/);
+  await w.pass(24 * 60 + 10);
+  const last = w.calls.alerts.filter((a) => a.includes('could not be checked: the session names')).at(-1);
+  assert.match(last, /the Lead has given up on its restart and keeps running, so a restart now needs a person/);
+  assert.doesNotMatch(last, /restart waits on it/);
+});
+
+test('L596 m-f: a Lead with a bad id, or none, is told, and is never run as a session', async () => {
+  for (const [bad, name] of [[{ sessionId: 'bad id!', product: 'p1' }, /the Lead bad id! \(product p1\)/], [{ product: 'p1' }, /the Lead with no session id \(product p1\)/]]) {
+    const w = leadsWorld({ bad });
+    const r = await w.pass(0);
+    assert.equal(r.steps.leads.ok, true, r.steps.leads.error);
+    assert.match(r.steps.leads.result[0][1], /^skipped: its session id is missing/);
+    assert.ok(w.calls.alerts.some((a) => name.test(a) && /session id is missing/.test(a)), w.calls.alerts.join(' | '));
+    assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+    assert.equal(w.rec.read('fact', RESTART_FACT('undefined')), null, 'no session called undefined');
+  }
+});
+
+test('L596 m-f: two Leads with bad ids are each told', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'bad id!', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], lead: { sessionId: 'also bad!', product: 'p1' } }, ...leads()];
+  await w.pass(0);
+  for (const id of ['bad id!', 'also bad!']) assert.ok(w.calls.alerts.some((a) => a.includes(`the Lead ${id} `)), id);
+});
+
+test('L596 O1: a throw while reading what a Lead has in flight skips that Lead alone', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], outboxNames: null }, leads()[1]];
+  const r = await w.pass(0);
+  assert.match(r.steps.leads.result[0][1], /^skipped: /);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+});
+
+test('L596 O3: a file that can\'t be checked is told afresh if it comes back the same day, once it had gone', async () => {
+  const w = leadsWorld({ hand: 'the hand-off', product: null, tokens: 100 });
+  const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked')).length;
+  await w.pass(0);
+  assert.equal(told(), 1);
+  await w.pass(5);
+  assert.equal(told(), 1, 'once inside the day');
+  rmSync(join(w.outbox, HANDOFF_NAME('L-1')));
+  await w.pass(10);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off, again');
+  await w.pass(15);
+  assert.equal(told(), 2);
+});
+
+test('L596 O7: a Lead whose send throws, not a rules error, is skipped by name, and the Lead behind it runs', async () => {
+  const w = leadsWorld({ bad: { sessionId: 'L-B', product: 'p1' } });
+  const leads = w.ports.leads;
+  w.ports.leads = () => [{ ...leads()[0], send: async () => { throw new Error('the pane is gone'); } }, leads()[1]];
+  const r = await w.pass(0);
+  assert.match(r.steps.leads.result[0][1], /^skipped: the pane is gone/);
+  assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
+  assert.ok(w.calls.alerts.some((a) => /the Lead L-B \(product p1\) was skipped this pass: the pane is gone/.test(a)), w.calls.alerts.join(' | '));
 });

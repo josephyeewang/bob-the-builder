@@ -1,11 +1,14 @@
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { leadRestartStep, leadInFlight, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
+import { leadRestartStep, leadInFlight, recordLeadLaunch, handoffVet, estimateTokens, RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { KEYS as K } from './keys.mjs';
-import { rulesWith, recWith, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, change, T0, MIN, iso, withAlerts } from './fixtures.test-helper.mjs';
+import { rulesFromText } from '../M10-rules/from-text.mjs';
+import { leadLaunchHead } from '../../shared/record.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 
 const R = rulesWith(); // soft 250k, hard 400k, handoff cap 8,000 tokens
@@ -19,19 +22,20 @@ function world() {
   mkdirSync(outbox);
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';
-  const rec = recWith();
+  let rec = recWith();
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,
     send: async (t) => { calls.sent.push(t); return { outcome }; },
     stopSession: async () => { calls.stops += 1; return over.stopFails ? { ok: false, reason: 'still running' } : { ok: true }; },
     startLead: async (x) => { calls.starts.push(x); return over.startFails ? { ok: false, reason: 'no' } : { ok: true, sessionId: 'L-2' }; },
+    mainSha: over.mainSha ?? (async () => 'a'.repeat(40)),
   }));
   // The pass's own intake, with the handoff vet, over the Lead's real outbox folder.
-  const intake = (min = 3) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID }], wait: async () => {},
-    alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet: handoffVet(R) });
+  const intake = (min = 3, { product = 'p', vet = handoffVet(R) } = {}) => intakePass({ rec, now: T0 + min * MIN, sessions: [{ sessionId: SID, role: 'lead', outbox, uid: UID, product: product ?? undefined }], wait: async () => {},
+    alert: (t) => calls.alerts.push(t), note: () => {}, startReadonly: () => ({ ok: true }), replyToLead: () => {}, vet });
   const handIn = (bytes) => writeFileSync(join(outbox, HANDOFF_NAME(SID)), 'x'.repeat(bytes));
-  return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; } };
+  return { rec, calls, step, intake, handIn, outbox, refuse: (o) => { outcome = o; }, useRec: (r) => { rec = r; } };
 }
 const phase = (rec) => rec.read('fact', RESTART_FACT(SID))?.doc?.phase ?? 'none';
 
@@ -39,10 +43,53 @@ test('m8: the handoff estimate is ceil(bytes / 4); 31,000 bytes is accepted and 
   assert.equal(estimateTokens('abcde'), 2);
   assert.equal(estimateTokens('é'), 1); // 2 utf-8 bytes
   const vet = handoffVet(R);
-  assert.equal(vet({ kind: 'handoff-', text: 'x'.repeat(31_000) }), null);
-  assert.match(vet({ kind: 'handoff-', text: 'x'.repeat(33_000) }), /8250 tokens, over the 8000 cap/);
-  assert.equal(vet({ kind: 'handoff-', text: 'x'.repeat(32_000) }), null); // exactly the cap
-  assert.equal(vet({ kind: 'wish-', text: 'x'.repeat(99_000) }), null);
+  const session = { product: 'p' };
+  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(31_000) }), null);
+  assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(33_000) }), /8250 tokens, over the 8000 cap/);
+  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(32_000) }), null); // exactly the cap
+  assert.equal(vet({ session, kind: 'wish-', text: 'x'.repeat(99_000) }), null);
+});
+
+// On the real engine a per-product key read with no product is missing, so these read real rules text, with no stand-in
+// (L564, L115). Every value differs from the test rules', so a value from anywhere else fails.
+const REAL = rulesFromText({ p: `${readFileSync(new URL('../M10-rules/fixtures/policy.yaml', import.meta.url), 'utf8')}
+context:
+  lead:
+    soft: 150000
+    hard: 300000
+  handoff_cap:
+    role: 4000
+` });
+
+test('L564: the Lead step reads each context line for its product, from real rules text', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(149_000), 0, { rules: REAL }), 'under the soft line');
+  assert.equal(await w.step(ended(351_000), 1, { rules: REAL }), 'WRAP sent');
+  assert.match(w.calls.sent[0], /under 4000 tokens/);
+  assert.match(w.calls.alerts[0], /past 300000 \+ 50000: its compaction did not happen/);
+});
+
+test('L564: the handoff check reads the cap for the session\'s product, and a session with no product is refused, its file kept', async () => {
+  const vet = handoffVet(REAL);
+  const session = { product: 'p' };
+  assert.equal(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_000) }), null);
+  assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(16_004) }), /4001 tokens, over the 4000 cap/);
+  assert.throws(() => vet({ session: {}, kind: 'handoff-', text: 'x' }), /names no product, so context\.handoff_cap\.role/);
+  assert.throws(() => vet({ session: { product: 'nobody' }, kind: 'handoff-', text: 'x' }), /context\.handoff_cap\.role/);
+  // Through intake, as production calls it: a session with no product gets "could not be checked", and the file waits.
+  const w = world();
+  w.handIn(100);
+  const [r] = await w.intake(3, { product: null, vet });
+  assert.match(r.refused, /^could not be checked/);
+  assert.equal(readdirSync(w.outbox).length, 1);
+});
+
+test('L584 m1: a Lead told about the hard line mid-turn still gets its WRAP at the finished turn', async () => {
+  const w = world();
+  assert.equal(await w.step(midTurn(451_000), 0), 'mid-turn');
+  assert.equal(w.calls.alerts.length, 1);
+  assert.equal(await w.step(ended(452_000, 1), 1), 'WRAP sent');
+  assert.match(w.calls.sent[0], /^WRAP: /);
 });
 
 test('M18: 260k at a finished turn with nothing in flight -> WRAP; the handoff applied -> restarted on it', async () => {
@@ -192,7 +239,7 @@ test('the lines come from the rules', async () => {
   const w = world();
   assert.equal(await w.step(ended(160_000), 1, { rules: rulesWith({ [K.leadSoft]: 150_000 }) }), 'WRAP sent');
   await assert.rejects(() => world().step(ended(1), 1, { rules: rulesWith({ [K.leadSoft]: undefined }) }), /context\.lead\.soft/);
-  assert.throws(() => handoffVet(rulesWith({ [K.handoffCapRole]: undefined }))({ kind: 'handoff-', text: '' }), /handoff_cap/);
+  assert.throws(() => handoffVet(rulesWith({ [K.handoffCapRole]: undefined }))({ session: { product: 'p' }, kind: 'handoff-', text: '' }), /handoff_cap/);
   assert.equal(readdirSync(w.outbox).length, 0);
 });
 
@@ -239,8 +286,8 @@ test('audit MIN-13: a handoff that was refused or not recorded never stops the o
   const base = { read: (...a) => w2.rec.read(...a), list: (...a) => w2.rec.list(...a), meta: (...a) => w2.rec.meta(...a), write: (a) => w2.rec.write(a) };
   const missing = { ...base, list: (e) => (e === 'handoff' ? [] : w2.rec.list(e)) };
   const lookalike = { ...base, meta: (e, id) => (e === 'handoff' ? { ...w2.rec.meta(e, id), createdBy: `learning:${SID}` } : w2.rec.meta(e, id)) };
-  const run = (rec) => leadRestartStep({ rec, rules: R, now: T0 + 3 * MIN, lead: { sessionId: SID }, size: ended(265_000, 3), inFlight: null,
-    send: async () => ({ outcome: 'sent' }), stopSession: async () => { w2.calls.stops += 1; return { ok: true }; }, startLead: async () => { w2.calls.starts.push(1); return { ok: true }; }, alert: () => {} });
+  const run = (rec) => leadRestartStep({ rec, rules: R, now: T0 + 3 * MIN, lead: { sessionId: SID, product: 'p' }, size: ended(265_000, 3), inFlight: null,
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => { w2.calls.stops += 1; return { ok: true }; }, startLead: async () => { w2.calls.starts.push(1); return { ok: true, sessionId: 'L-2' }; }, mainSha: async () => 'a'.repeat(40), alert: fakeAlert() });
   assert.equal(await run(missing), 'handoff not recorded yet');
   assert.equal(await run(lookalike), 'handoff not recorded yet', 'a handoff another role wrote is not the Lead\'s');
   assert.equal(w2.calls.stops, 0);
@@ -309,4 +356,205 @@ test('r5 MAT-2: a hard-line alert that fails is told on the next pass, once', as
     await w.step(midTurn(462_000), 3, { alert });
     assert.equal(sent.filter((t) => /compaction did not happen/.test(t)).length, 1, sent.join(' | '));
   }
+});
+
+// R-0b-170 (L460): every Lead start leaves a launch record naming main as it was before the start.
+const launches = (rec) => rec.list('launch').map((l) => l.doc);
+
+test('R-0b-170: a restarted Lead has a launch record naming main read before the start', async () => {
+  const w = world();
+  const order = [];
+  const mainSha = async (x) => { order.push(['main', x.product, w.calls.starts.length]); return 'b'.repeat(40); };
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  assert.equal(await w.step(ended(261_000, 2), 2, { mainSha }), 'restarted');
+  assert.deepEqual(order, [['main', 'p', 0]], 'read once, before the start');
+  const [l] = launches(w.rec);
+  assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.product], ['L-2', 'lead', null, 'b'.repeat(40), null, 'p']);
+  assert.equal(leadLaunchHead(w.rec, 'L-2').head, 'b'.repeat(40));
+  assert.equal(w.calls.alerts.length, 0);
+});
+
+test('R-0b-170: a start that failed and was tried again leaves one launch record, from the try that worked', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  await w.step(ended(261_000, 2), 2, { startFails: true });
+  assert.deepEqual(launches(w.rec), []);
+  assert.equal(await w.step(null, 3, { mainSha: async () => 'c'.repeat(40) }), 'restarted');
+  assert.deepEqual(launches(w.rec).map((l) => l.head), ['c'.repeat(40)]);
+});
+
+test('R-0b-170: main unreadable at the start: the Lead still starts, no record is written, and the owner is told why its plans will wait', async () => {
+  for (const mainSha of [async () => { throw new Error('GitHub is down'); }, async () => null, async () => 'not a sha']) {
+    const w = world();
+    await w.step(ended(260_000), 1);
+    w.handIn(1000);
+    await w.intake();
+    assert.equal(await w.step(ended(261_000, 2), 2, { mainSha }), 'restarted');
+    assert.deepEqual(launches(w.rec), []);
+    assert.equal(w.calls.alerts.length, 1);
+    assert.match(w.calls.alerts[0], /the Lead L-2 started with no launch record, so its plans will be refused: the main commit could not be read/);
+  }
+});
+
+test('L490 m5: main unreadable at a start is tried again each pass for that session, quietly, until the record is written', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  const down = async () => { throw new Error('GitHub is down'); };
+  await w.step(ended(261_000, 2), 2, { mainSha: down });
+  assert.deepEqual(launches(w.rec), []);
+  const next = (min, mainSha) => leadRestartStep({ rec: w.rec, rules: R, now: T0 + min * MIN, lead: { sessionId: 'L-2', product: 'p' }, size: ended(1000, min), alert: fakeAlert(), inFlight: null, mainSha,
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-3' }) });
+  const lines = w.rec.diary().length;
+  await next(3, down);
+  await next(4, down);
+  assert.deepEqual(launches(w.rec), []);
+  assert.equal(w.rec.diary().length, lines, 'still unreadable: nothing moved, so nothing is written');
+  await next(5, async () => 'c'.repeat(40));
+  assert.deepEqual(launches(w.rec).map((l) => [l.session_id, l.head]), [['L-2', 'c'.repeat(40)]]);
+  await next(6, async () => 'd'.repeat(40));
+  assert.equal(launches(w.rec).length, 1, 'written once');
+});
+
+test('L494 Minor 6: a retry mark that can\'t be cleared adds no second launch record, and is told once a day', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  await w.step(ended(261_000, 2), 2, { mainSha: async () => { throw new Error('down'); } });
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'lead_launch_pending' ? { ok: false, reason: 'turned down' } : w.rec.write(x)) } });
+  const owner = fakeAlert();
+  const next = (min) => withAlerts(rec, T0 + min * MIN, owner, (alert) => leadRestartStep({ rec, rules: R, now: T0 + min * MIN, lead: { sessionId: 'L-2', product: 'p' }, size: ended(1000, min), alert, inFlight: null, mainSha: async () => 'c'.repeat(40),
+    send: async () => ({ outcome: 'sent' }), stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-3' }) }));
+  for (let min = 3; min < 9; min++) await next(min);
+  assert.equal(launches(w.rec).length, 1);
+  const told = owner.texts.map((t) => t?.text ?? t);
+  assert.equal(told.filter((t) => /the Lead L-2 has a launch record, but its retry mark could not be cleared \(turned down\)/.test(t)).length, 1, told.join(' | '));
+});
+
+test('L494 Minor 6: a retry that can\'t be saved is told, as nothing will try again', async () => {
+  const w = world();
+  await w.step(ended(260_000), 1);
+  w.handIn(1000);
+  await w.intake();
+  const rec = Object.create(w.rec, { write: { value: (x) => (x.kind === 'lead_launch_pending' ? { ok: false, reason: 'turned down' } : w.rec.write(x)) } });
+  w.useRec(rec);
+  await w.step(ended(261_000, 2), 2, { mainSha: async () => { throw new Error('down'); } });
+  assert.equal(w.calls.alerts.filter((t) => /the Lead L-2 has no launch record, and its retry could not be saved, so nothing will try again \(turned down\)/.test(t?.text ?? t)).length, 1, JSON.stringify(w.calls.alerts));
+});
+
+test('L490 m5: a Lead that was never marked is not given a launch record by a pass', async () => {
+  const w = world();
+  await w.step(ended(1000), 1);
+  assert.deepEqual(launches(w.rec), []);
+});
+
+test('L490 m5: a start that names no session has its own cause and is told, whatever it answered', () => {
+  for (const sessionId of [undefined, null, 'not a session!']) {
+    const w = world();
+    const alert = fakeAlert();
+    recordLeadLaunch({ rec: w.rec, now: T0, alert, sessionId, head: 'a'.repeat(40) });
+    assert.equal(alert.texts.length, 1);
+    assert.equal(alert.calls?.[0]?.[1]?.mark?.fact ?? 'hold-lead-launch-no-session', 'hold-lead-launch-no-session');
+    assert.match(alert.texts[0].text ?? alert.texts[0], /^a Lead started with no launch record, so its plans will be refused: the start named no session/);
+  }
+});
+
+test('R-0b-170: recordLeadLaunch refuses a start that named no session, and says so', () => {
+  const w = world();
+  const alert = fakeAlert();
+  const r = recordLeadLaunch({ rec: w.rec, now: T0, alert, sessionId: undefined, head: 'a'.repeat(40) });
+  assert.equal(r.ok, false);
+  assert.deepEqual(launches(w.rec), []);
+  assert.equal(alert.texts.length, 1);
+});
+
+// L329: the ask's time is read through the shared pastTime; one that can't be read, or lies an hour ahead, counts as
+// long ago (the wait ends), and the wait for the handoff has a 24 h cap.
+test('L329: an ask time unreadable or an hour ahead ends the wait: re-asked, not "waiting for the handoff" for ever', async () => {
+  for (const [label, bad] of [['unreadable', 'garbage'], ['an hour ahead', iso(T0 + 62 * MIN)]]) {
+    const w = world();
+    assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+    change(w.rec, 'fact', RESTART_FACT(SID), { sent_at: bad });
+    // No turn time either, so only the ask's own time can end the wait.
+    assert.equal(await w.step({ ...ended(260_000, 0), endedAt: null }, 2), 're-asked', label);
+  }
+});
+
+test('L329: a Lead that never answers the WRAP is re-asked after a day, then given up on and the owner told', async () => {
+  const w = world();
+  const DAY = 24 * 60;
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-asked');
+  assert.match(w.calls.sent.at(-1), /not used \(no answer within a day of the ask\)/);
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY - 1), 'waiting for the handoff');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.filter((a) => /did not hand in a usable handoff after a second ask \(no answer within a day of the ask\)/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  assert.equal(w.calls.stops, 0, 'never stopped without a handoff');
+});
+
+test('L355 m5: a Lead with no size reading, or never at a finished turn, a day after the ask is given up on and the owner told', async () => {
+  const DAY = 24 * 60;
+  for (const [label, size, why] of [
+    ['no size', null, 'its size could not be read for a day after the ask'],
+    ['mid-turn', midTurn(260_000), 'it did not finish a turn within a day of the ask'],
+  ]) {
+    const w = world();
+    assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+    assert.equal(await w.step(size, 1 + DAY - 1), label, `${label}: still waiting within the day`);
+    assert.equal(await w.step(size, 1 + DAY), 'gave up; the old Lead keeps running', label);
+    assert.equal(w.calls.alerts.filter((a) => a.includes(`did not hand in a usable handoff within a day of the ask (${why})`)).length, 1, w.calls.alerts.join(' | '));
+    assert.equal(await w.step(size, 1 + DAY + 1), 'gave_up', `${label}: told once`);
+    assert.equal(w.calls.alerts.length, 1);
+    assert.equal(w.calls.stops, 0, 'never stopped');
+    assert.equal(w.calls.sent.length, 1, 'nothing sent but the WRAP');
+  }
+  // After the re-ask, the same cap; the alert says a second ask was sent.
+  const w = world();
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-asked');
+  assert.equal(await w.step(null, 1 + 2 * DAY), 'gave up; the old Lead keeps running');
+  assert.match(w.calls.alerts.at(-1), /after a second ask \(its size could not be read for a day after the ask\)/);
+  // An ask time that can't be read counts as long ago (L329).
+  const u = world();
+  assert.equal(await u.step(ended(260_000, 0), 1), 'WRAP sent');
+  change(u.rec, 'fact', RESTART_FACT(SID), { sent_at: 'garbage' });
+  assert.equal(await u.step(midTurn(260_000), 2), 'gave up; the old Lead keeps running');
+});
+
+test('L355 m5: a give-up after no finished turn whose alert was not queued is told on the next pass with the same words', async () => {
+  const w = world();
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  assert.equal(await w.step(null, 1 + 24 * 60, { answer: () => false }), 'gave up; the old Lead keeps running');
+  assert.equal(w.calls.alerts.length, 0);
+  assert.equal(await w.step(null, 2 + 24 * 60), 'gave_up');
+  assert.deepEqual(w.calls.alerts, [`the Lead ${SID} did not hand in a usable handoff within a day of the ask (its size could not be read for a day after the ask); it keeps running, and a restart now needs a person`]);
+});
+
+test('L359: a re-ask the Lead keeps refusing is told from the first refusal, then daily, and cleared once sent', async () => {
+  const DAY = 24 * 60;
+  const w = world();
+  const told = () => w.calls.alerts.filter((a) => /the second ask could not be sent since/.test(a)).length;
+  assert.equal(await w.step(ended(260_000, 0), 1), 'WRAP sent');
+  w.refuse('busy');
+  assert.equal(await w.step(ended(260_000, 0), 1 + DAY), 're-ask not sent (busy)');
+  assert.equal(told(), 1, 'told at the first refusal');
+  assert.match(w.calls.alerts.at(-1), new RegExp(`since ${iso(T0 + (1 + DAY) * MIN)} \\(busy\\)`));
+  assert.equal(await w.step(ended(260_000, 0), 2 + DAY), 're-ask not sent (busy)');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY - 1), 're-ask not sent (busy)');
+  assert.equal(told(), 1, 'quiet within the day');
+  assert.equal(await w.step(ended(260_000, 0), 1 + 2 * DAY), 're-ask not sent (busy)');
+  assert.equal(told(), 2, 'again a day on, counted from the first refusal');
+  w.refuse('sent');
+  assert.equal(await w.step(ended(260_000, 0), 2 + 2 * DAY), 're-asked');
+  const doc = w.rec.read('fact', RESTART_FACT(SID)).doc;
+  assert.equal(doc.reask_refused_since, null, 'cleared once sent');
+  assert.equal(doc.reask_refused_told, null);
+  assert.equal(w.calls.stops, 0);
 });

@@ -26,6 +26,7 @@ export const GO_EMPTY_LINE = 'Approve with no text to go';
 export const LAPSE_MS = 12 * 3600_000;
 export const MERGE_APPROVE_MS = 24 * 3600_000;
 export const URGENT_REPUSH_MS = 2 * 3600_000;
+export const GO_REPUSH_MS = 24 * 3600_000;
 // A window fires at the first pass at or after its time; a pass this much later is a missed window (the Mini was down),
 // which is not replayed (round 1 m2: the "caught up" push on return covers it, R-0b-76).
 export const WINDOW_GRACE_MS = 60 * 60_000;

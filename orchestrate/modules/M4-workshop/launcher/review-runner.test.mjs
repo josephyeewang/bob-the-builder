@@ -300,7 +300,7 @@ test('L66: the launch record\'s owner check, through a stat port: a record anoth
   assert.match(all.refused[0].reason, /not owned by the review user/);
 });
 
-test('L68 planted: the card\'s revision moves between a verdict and its intake: nothing starts again, and Joe is told once the Record has had its time', async () => {
+test('L68 planted: the card\'s revision moves between a verdict and its intake: nothing starts again, and a hold is listed once the Record has had its time', async () => {
   const w = await ready();
   let rev = 4;
   w.ctx.readCard = (c) => (w.cards.has(c) ? { ok: true, doc: w.cards.get(c), rev } : { ok: false });
@@ -316,7 +316,8 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
   let r = await runnerPass(w.ctx);
   assert.equal(r.alerts.length, 0, r.alerts.map((a) => a.text).join(' | '));
   assert.match(w.ended('S-1').ended.verdict_sha256, /^[0-9a-f]{64}$/, 'the file the session ended with');
-  // Within the wait, nothing is told; after it, the Record not having taken it is told once. Nothing starts again.
+  // Within the wait, nothing is held; after it, the Record not having taken it is a hold (L315: the Dispatcher tells it
+  // while it lasts). Nothing starts again.
   w.ask();
   r = await runnerPass(w.ctx);
   refusedFor(r, /already started for card C-1 at aaaaaaa \(or a head with the same tree\); one start per head and tree/);
@@ -325,12 +326,13 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
   w.ask();
   r = await runnerPass(w.ctx);
   refusedFor(r, /one start per head/);
-  assert.ok(r.alerts.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict the Record has not taken \(the Record holds no verdict of session S-1\)\. Nothing starts again/.test(a.text)), r.alerts.map((a) => a.text).join(' | '));
+  assert.ok(r.status.holds.some((a) => /reviewer for card C-1 at aaaaaaa handed in a verdict the Record has not taken \(the Record holds no verdict of session S-1\)\. Nothing starts again/.test(a.text)), JSON.stringify(r.status.holds));
   w.clock.t += RETRY_MS;
   w.ask();
   r = await runnerPass(w.ctx);
   refusedFor(r, /one start per head/);
-  assert.equal(r.alerts.length, 0, 'told once');
+  assert.equal(r.status.holds.length, 1, 'one hold, still listed');
+  assert.equal(r.alerts.length, 0);
   // A Record that can't be read is told the same way, and starts nothing either.
   w.ctx.verdictTaken = () => { throw new Error('the Record is not its owner\'s alone'); };
   for (let i = 0; i < MAX_FAILED_STARTS + 1; i++) { w.clock.t += INTAKE_WAIT_MS; w.ask(); refusedFor(await runnerPass(w.ctx), /one start per head/); }
@@ -341,7 +343,7 @@ test('L68 planted: the card\'s revision moves between a verdict and its intake: 
   x.clock.t += INTAKE_WAIT_MS; x.ask();
   r = await runnerPass(x.ctx);
   refusedFor(r, /one start per head/);
-  assert.equal(r.alerts.length, 0);
+  assert.deepEqual([r.alerts.length, r.status.holds.length], [0, 0]);
 });
 
 test('L68: every session the runner launched is marked ended: when it ends, or by the sweep once it is lost track of', async () => {
@@ -576,7 +578,7 @@ test('L65 planted m-3: the runner starts nothing while the review user is an adm
     assert.match(r.error, /review user is an admin/);
     assert.equal(w.starts.length, 0);
     assert.equal(w.status().ok, false);
-    assert.ok(w.status().alerts.some((a) => /admin Mac user/.test(a.text)));
+    assert.ok(w.status().holds.some((a) => /admin Mac user/.test(a.text)));
     // The request waits for a pass that may start it.
     assert.equal(readdirSync(w.requests).length, 1);
   }
@@ -1298,7 +1300,7 @@ test('L412 m2 planted: a verdict the Record has not taken is told though its end
   writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'verdict-S-1.md'), `${JSON.stringify({ entity: 'verdict', card: 'C-1', expectRev: 4, fields: { head: HEAD, pass: true } })}\n`, { mode: 0o644 });
   w.end('S-1');
   await runnerPass(w.ctx);
-  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).alerts.filter((a) => /has not taken/.test(a.text)).length; };
+  const told = async () => { w.ask(); return (await runnerPass(w.ctx)).status.holds.filter((a) => /has not taken/.test(a.text)).length; };
   assert.equal(await told(), 0, 'inside the wait');
   editState(w, (s) => { for (const a of Object.values(s.attempts)) delete a.ended_at; });
   assert.equal(await told(), 0, 'no ended time: nothing has ended');
@@ -1334,7 +1336,7 @@ test('L329: a verdict the Record has not taken, from a session whose end time is
     w.clock.t += MIN;
     w.ask();
     const r = await runnerPass(w.ctx);
-    assert.ok(r.alerts.some((a) => /handed in a verdict the Record has not taken/.test(a.text)), `${what}: ${r.alerts.map((a) => a.text).join(' | ')}`);
+    assert.ok(r.status.holds.some((a) => /handed in a verdict the Record has not taken/.test(a.text)), `${what}: ${r.status.holds.map((a) => a.text).join(' | ')}`);
   }
 });
 

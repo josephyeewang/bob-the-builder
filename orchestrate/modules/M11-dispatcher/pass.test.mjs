@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../../shared/test-tmp.mjs';
 import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
@@ -9,6 +11,8 @@ import { KEYS as K } from './keys.mjs';
 import { makeRules } from '../../shared/rules.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { outbox, isQueued } from './alerts.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { REFUSED_FACT, tellRefused, watchWrites } from './refused-writes.mjs';
 import { change, parkOnLimit, rulesWith, realEngine, recWith, seed, usageFact, undoEntries, filesOfCommits, T0, MIN, H, iso, withAlerts, setClock } from './fixtures.test-helper.mjs';
 
 // Each step runs as the tick runs it: its alerts are queued, then sent once it is done (alerts.mjs, L47).
@@ -45,13 +49,15 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40) }; },
-    stopGroup: async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    outboxRoot: extra.outboxRoot,
+    stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
     hostLock: extra.hostLock ?? (() => extra.host ?? null),
     pauseLead: extra.pauseLead ?? (({ product }) => { calls.pauses.push([product, [...calls.stops]]); }),
     startsOff: extra.startsOff ?? null,
     filesOf: extra.filesOf ?? filesOfCommits,
+    failureLog: extra.failureLog,
     alert: (t) => calls.alerts.push(t),
   });
   const setCard = (id, patch) => change(rec, 'card', id, patch);
@@ -496,12 +502,172 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   const l = w.rec.read('launch', sid).doc;
   assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
-  // a launcher that names no head: the session runs, the record refuses the launch, Joe is told
+  // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
   await v.pass();
   assert.equal(v.rec.read('launch', v.sessions[0].id), null);
   assert.match(v.calls.alerts.join('\n'), /launch was not recorded .*head.*merge will be refused/);
+});
+
+test('L204-a: every start writes its session record, with its own attempt number', async () => {
+  // An earlier session of C-1: this start is the card's second, so its push gets its own record line. Another card's
+  // session does not count.
+  const w = world([card('C-1'), ['session', 'S-old', { state: 'preparing', role: 'worker', product: 'p1', card: 'C-1' }],
+    ['session', 'S-other', { state: 'preparing', role: 'worker', product: 'p1', card: 'C-8' }]]);
+  await w.pass();
+  const sid = w.sessions[0].id;
+  const s = w.rec.read('session', sid).doc;
+  assert.deepEqual([s.state, s.role, s.product, s.card, s.branch, s.outbox, s.attempt, s.pid, s.pid_start, s.launched_at],
+    ['preparing', 'worker', 'p1', 'C-1', 'card/c-1', `/outbox-root/worker/${sid}`, 'a2', 1001, 'start-1', iso(T0)]);
+  assert.equal(w.calls.alerts.length, 0);
+});
+
+test('L72: a launcher that answers with a session the claim does not name starts nothing and is told', async () => {
+  const w = world([card('C-2')]);
+  let sid;
+  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, sessionId: 'S-SOMEONE-ELSE', outbox: '/outbox-root/worker/S-SOMEONE-ELSE' }; });
+  const r = await w.pass();
+  assert.deepEqual(r.started, []);
+  assert.deepEqual(r.refused, [['C-2', 'launcher: it started a session the claim does not name']]);
+  const c = w.rec.read('card', 'C-2').doc;
+  assert.deepEqual([c.state, c.claim?.session_id], ['claimed', sid], 'the card stays claimed');
+  for (const id of [sid, 'S-SOMEONE-ELSE']) for (const entity of ['session', 'launch']) assert.equal(w.rec.read(entity, id), null, `${entity} ${id}`);
+  assert.match(w.calls.alerts.join('\n'), new RegExp(`card C-2: the launcher answered with session S-SOMEONE-ELSE, not the claimed ${sid}; the card stays claimed`));
+});
+
+// The outboxes a launcher must not be believed about: each is refused, however it is wrong (#219 audit M-1, m-1).
+const WRONG_OUTBOXES = [
+  ['missing', () => undefined, /was not named/],
+  ['not a full path', (sid) => `outbox/worker/${sid}`, /is not a full path/],
+  ['another session\'s, such as an older attempt\'s', () => '/outbox-root/worker/SOME-OTHER-SESSION', /is not this session's own folder/],
+  ['climbing out', (sid) => `/outbox-root/worker/${sid}/../../../etc`, /is not a plain path/],
+  ['climbing back to the same name', (sid) => `/outbox-root/worker/x/../${sid}`, /is not a plain path/],
+  ['the reviewer\'s', (sid) => `/outbox-root/reviewer/${sid}`, /is not a worker outbox/],
+  ['the top of the disk', () => '/', /is not a plain path/],
+];
+
+for (const [name, outbox, why] of WRONG_OUTBOXES) {
+  test(`#219 M-1: an outbox that is ${name} is refused: the session is stopped, the claim given back, the owner told`, async () => {
+    const w = world([card('C-2')]);
+    let sid;
+    w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, outbox: outbox(x.sessionId) }; });
+    const r = await w.pass();
+    assert.deepEqual(r.started, []);
+    assert.deepEqual(w.calls.stops, [sid], 'the session is stopped');
+    assert.deepEqual(w.sessions, []);
+    const c = w.rec.read('card', 'C-2').doc;
+    assert.deepEqual([c.state, c.claim ?? null], ['ready', null], 'the claim is given back');
+    assert.equal(w.rec.read('session', sid), null, 'no session record, so nothing can push from it');
+    assert.equal(w.rec.read('launch', sid), null, 'no launch record, so nothing can merge from it');
+    assert.match(r.refused.map(([, x]) => x).join('\n'), why);
+    const said = w.calls.alerts.join('\n');
+    assert.match(said, why);
+    assert.match(said, new RegExp(`card C-2: session ${sid} was refused: the outbox its launcher named .*it was stopped and the card went back to ready`));
+  });
+}
+
+test('#219 r2 m-4: the stop of a refused session names the account it started in, the same two fields as a running session', async () => {
+  const w = world([card('C-2')]); let asked = null;
+  w.refuseLaunch(() => ({ ok: true, outbox: '/', signin: 'acct-2', configDir: '/cfg/acct-2' }));
+  await w.pass(0, { stopGroup: async (s) => { asked = s; return { ok: true }; } });
+  assert.deepEqual([asked?.signin, asked?.config_dir], ['acct-2', '/cfg/acct-2']);
+});
+
+test('#219 M-1: a wrong outbox whose session can\'t be stopped keeps the card claimed, so no second session starts, and says so', async () => {
+  const w = world([card('C-2')]);
+  let sid;
+  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, outbox: '/' }; });
+  const r = await w.pass(0, { stopGroup: async () => ({ ok: false, reason: 'permission' }) });
+  assert.deepEqual(r.started, []);
+  const c = w.rec.read('card', 'C-2').doc;
+  assert.deepEqual([c.state, c.claim?.session_id], ['claimed', sid]);
+  assert.match(w.calls.alerts.join('\n'), /it could not be stopped \(permission\), so the card stays claimed and cannot start twice/);
+  assert.equal(w.rec.read('session', sid), null);
+  // A stop that throws, or never answers, is no stop either: the claim stays.
+  const v = world([card('C-3')]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(0, { stopGroup: async () => { throw new Error('gone wrong'); } });
+  assert.equal(v.rec.read('card', 'C-3').doc.state, 'claimed');
+  assert.match(v.calls.alerts.join('\n'), /could not be stopped \(gone wrong\)/);
+});
+
+test('#219 M-1: a stopped session whose claim can\'t be given back says so', async () => {
+  const w = world([card('C-2')]);
+  w.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  const rec = { ...w.rec, ready: w.rec.ready, list: w.rec.list, read: w.rec.read, write: w.rec.write, meta: w.rec.meta, claim: w.rec.claim, release: () => ({ ok: false, reason: 'the store refused' }) };
+  await w.pass(0, { rec });
+  assert.match(w.calls.alerts.join('\n'), /it was stopped, but its claim could not be given back \(the store refused\); it lapses at claims.unlaunched_min/);
+});
+
+test('#219 M-1: with the outbox root known, the real folder must be the session\'s own, through any link', async () => {
+  const root = realpathSync(tempDir('orch-pass-outbox-'));
+  mkdirSync(join(root, 'worker'), { recursive: true });
+  // Good: the folder is really there.
+  const w = world([card('C-1')]);
+  w.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
+  assert.deepEqual((await w.pass(0, { outboxRoot: root })).started, ['C-1']);
+  assert.deepEqual(w.calls.alerts, []);
+  // The right name, but outside the root.
+  const v = world([card('C-2')]);
+  v.refuseLaunch((x) => { const d = join(root, 'elsewhere', 'worker', x.sessionId); mkdirSync(d, { recursive: true }); return { ok: true, outbox: d }; });
+  assert.deepEqual((await v.pass(0, { outboxRoot: root })).started, []);
+  assert.match(v.calls.alerts.join('\n'), /is not inside the outbox root/);
+  // The right name in the right place, but a link to another session's folder.
+  const u = world([card('C-3')]);
+  const older = join(root, 'worker', 'older-attempt');
+  mkdirSync(older);
+  u.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
+  assert.deepEqual((await u.pass(0, { outboxRoot: root })).started, []);
+  assert.match(u.calls.alerts.join('\n'), /is not inside the outbox root/);
+  // Named, but not there.
+  const t = world([card('C-4')]);
+  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'worker', x.sessionId) }));
+  assert.deepEqual((await t.pass(0, { outboxRoot: root })).started, []);
+  assert.match(t.calls.alerts.join('\n'), /could not be read \(ENOENT\)/);
+});
+
+test('#219 m-2: a record not written and a wrong outbox are two causes: one told today does not hide the other', async () => {
+  const wrong = /was refused: the outbox its launcher named/;
+  const noRecord = /its session record was not written/;
+  const says = (w, re) => w.calls.alerts.filter((a) => re.test(a)).length;
+  const refuseRecord = (w) => w.refuseLaunch((x) => {
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }).ok, true);
+    return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` };
+  });
+  // Told once a day however often it repeats.
+  const w = world([card('C-1')]);
+  w.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await w.pass();
+  await w.pass(1);
+  assert.equal(says(w, wrong), 1);
+  // A record refused the same day is a different failure, told though the outbox was told within the day. The session
+  // itself is good, so it runs on; only its push is lost.
+  refuseRecord(w);
+  assert.deepEqual((await w.pass(2)).started, ['C-1']);
+  assert.equal(says(w, noRecord), 1);
+  // And the other way round: a record told today does not hide a wrong outbox.
+  const v = world([card('C-2'), ['fact', 'hold-session-record-C-2', { text: 'earlier', told_at: iso(T0) }]]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(1);
+  assert.equal(says(v, wrong), 1);
+});
+
+test('#219 m-2: a later good start clears each cause, so a failure that comes back is told at once', async () => {
+  const told = { text: 'earlier', told_at: iso(T0) };
+  const w = world([card('C-1'), ['fact', 'hold-session-outbox-C-1', told], ['fact', 'hold-session-record-C-1', told]]);
+  assert.deepEqual((await w.pass(1)).started, ['C-1']);
+  for (const f of ['hold-session-outbox-C-1', 'hold-session-record-C-1']) assert.equal(w.rec.read('fact', f).doc.told_at, null, f);
+  // A start refused for its outbox leaves the record's mark alone: nothing about the record was shown to be good.
+  const v = world([card('C-2'), ['fact', 'hold-session-record-C-2', told]]);
+  v.refuseLaunch(() => ({ ok: true, outbox: undefined }));
+  await v.pass(1);
+  assert.equal(v.rec.read('fact', 'hold-session-record-C-2').doc.told_at, iso(T0));
+  // A record refused leaves the outbox cleared: that outbox was good.
+  const u = world([card('C-3'), ['fact', 'hold-session-outbox-C-3', told]]);
+  u.refuseLaunch((x) => { u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }); return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` }; });
+  await u.pass(1);
+  assert.equal(u.rec.read('fact', 'hold-session-outbox-C-3').doc.told_at, null);
 });
 
 test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
@@ -564,7 +730,7 @@ test('L130: a no-account limit wait whose alert was not queued waits on Joe, and
   assert.deepEqual([w.rec.read('card', 'N').doc.wait.who, w.rec.read('card', 'N').doc.wait.what], ['joe', LIMIT_NO_ACCOUNT]);
   assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, undefined, 'not marked told');
   const alerts = [];
-  const waits = (min) => withAlerts(w.rec, T0 + min * MIN, (x) => alerts.push(x), (alert) => retellWaits({ rec: w.rec, alert }));
+  const waits = (min) => withAlerts(w.rec, T0 + min * MIN, (x) => alerts.push(x), (alert) => retellWaits({ rec: w.rec, alert, now: T0 + min * MIN }));
   await waits(32);
   await waits(33);
   assert.equal(alerts.filter((a) => /does not say which account/.test(a)).length, 1, alerts.join(' | '));
@@ -650,7 +816,7 @@ test('audit 0b-6 r2 MAT-7: a session whose probe, stop or save throws does not e
   const sessions = w.sessions.filter((s) => s.id === a || s.id === b);
   const stops = [];
   const alerts = [];
-  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
   // Pass 1: A's probe throws; B is cancelled and idle.
   let r = await dispatcherPass({ ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
@@ -929,7 +1095,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', OUTAGE_FACT, { state: 'open' }], ...undoEntries('U-1')]);
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(launched, []);
   assert.deepEqual(r.started, []);
   assert.ok(r.notes.includes('outage: nothing starts'));
@@ -938,7 +1104,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const cur = rec.read('fact', OUTAGE_FACT);
   rec.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: cur.rev, doc: { state: 'ended' } });
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
 });
 
@@ -949,7 +1115,7 @@ test('L199: at editing cap 0 the undo start starts one undo per product; the sec
   const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
   const launched = [];
   const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
-    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
     filesOf: filesOfCommits, alert: fakeAlert() });
   const r = await ask([]);
   assert.deepEqual(r.started, ['U-1']);
@@ -1002,7 +1168,7 @@ function usageInto(rec) {
 test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
   const run = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
+    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
   const r = await run(0);
   assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
@@ -1126,7 +1292,7 @@ test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale
   let down = true;
   const sent = [];
   const at = (min, rules) => dispatcherPass({ rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
     alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
   const told = () => sent.filter((t) => /your undo \(card U-1\) is waiting/.test(t)).length;
@@ -1186,7 +1352,7 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
       const alert = Object.assign((t, o) => (refuseCardTell && /^card C-1/.test(t) ? false : real(t, o)), { queues: true });
       await dispatcherPass0({ rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
         stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert });
-      retellWaits({ rec: w.rec, alert });
+      retellWaits({ rec: w.rec, alert, now });
     });
   };
   await tick(0);
@@ -1267,10 +1433,13 @@ test('audit #153 MAT-1, L329: a since an hour ahead of the pass still lets each 
 
 // ---- L324: a told time that lies ahead (a clock that went back, a bad write) or can't be read is due, never "told
 // recently". Before, each of these sites trusted it: a refused undo with a future told_at was told 0 times in 10 days.
-const BAD_TOLD = (now) => [['future', iso(now + 3 * 24 * H)], ['unreadable', 'garbage']];
+// L339 m3: also just past the 60 s margin, and a number (ISO text is the only readable form). Each is told; 59 s
+// ahead is within the margin, reads as now, and stays quiet.
+const BAD_TOLD = (now) => [['future', iso(now + 3 * 24 * H)], ['unreadable', 'garbage'], ['61 s ahead', iso(now + 61_000)], ['a number', now - MIN]];
+const TOLD_CASES = (now) => [...BAD_TOLD(now).map(([l, v]) => [l, v, true]), ['59 s ahead', iso(now + 59_000), false]];
 
 test('L324: a failed stop whose told time is ahead or unreadable is told again on the next pass', async () => {
-  for (const [label, bad] of BAD_TOLD(T0 + 2 * MIN)) {
+  for (const [label, bad, due] of TOLD_CASES(T0 + 2 * MIN)) {
     const f = world([card('C-3')]);
     await f.pass(0);
     const sid = f.sessions[0].id;
@@ -1283,12 +1452,12 @@ test('L324: a failed stop whose told time is ahead or unreadable is told again o
     assert.equal(told(), 1, label);
     change(f.rec, 'fact', STOP_FACT(sid), { told_at: bad });
     await dispatcherPass({ ...base, now: T0 + 2 * MIN });
-    assert.equal(told(), 2, label);
+    assert.equal(told(), due ? 2 : 1, label);
   }
 });
 
 test('L324: usage unread for over a day, its told time ahead or unreadable, is told again on the next pass', async () => {
-  for (const [label, bad] of BAD_TOLD(T0 + 25 * H)) {
+  for (const [label, bad, due] of TOLD_CASES(T0 + 25 * H + MIN)) {
     const w = world([], { usage: null });
     const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
     await w.pass(0);
@@ -1296,12 +1465,12 @@ test('L324: usage unread for over a day, its told time ahead or unreadable, is t
     assert.equal(told(), 1, label);
     change(w.rec, 'fact', UNKNOWN_FACT, { told_at: bad });
     await w.pass(25 * 60 + 1);
-    assert.equal(told(), 2, label);
+    assert.equal(told(), due ? 2 : 1, label);
   }
 });
 
 test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told again on the next pass', async () => {
-  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+  for (const [label, bad, due] of TOLD_CASES(T0 + MIN)) {
     const w = world();
     w.setProduct('p1', 'paused');
     const alert = fakeAlert();
@@ -1312,12 +1481,12 @@ test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told a
     assert.equal(alerts().length, 1, label);
     change(w.rec, 'fact', PAUSE_FACT('p1'), { told_at: bad });
     await at(1);
-    assert.equal(alerts().length, 2, label);
+    assert.equal(alerts().length, due ? 2 : 1, label);
   }
 });
 
 test('L324: a held undo, its told time ahead or unreadable, is told again on the next pass (was: 0 times in 10 days)', async () => {
-  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+  for (const [label, bad, due] of TOLD_CASES(T0 + MIN)) {
     const w = world([...undoEntries('U-1')]);
     const rules = rulesWith({}, { start_session: { decision: 'deny', reason: 'the product waits' } });
     const told = () => w.calls.alerts.filter((a) => /your undo \(card U-1\) is waiting/.test(a)).length;
@@ -1325,14 +1494,14 @@ test('L324: a held undo, its told time ahead or unreadable, is told again on the
     assert.equal(told(), 1, label);
     change(w.rec, 'fact', UNDO_HELD_FACT('U-1'), { told_at: bad });
     await w.pass(1, { rules });
-    assert.equal(told(), 2, label);
+    assert.equal(told(), due ? 2 : 1, label);
     await w.pass(2, { rules });
-    assert.equal(told(), 2, `${label}: then quiet within the day`);
+    assert.equal(told(), due ? 2 : 1, `${label}: then quiet within the day`);
   }
 });
 
 test('L324: missing rule values, their told time ahead or unreadable, are told again on the next pass', async () => {
-  for (const [label, bad] of BAD_TOLD(T0 + MIN)) {
+  for (const [label, bad, due] of TOLD_CASES(T0 + MIN)) {
     const rec = recWith();
     const alert = fakeAlert();
     const alerts = alert.texts;
@@ -1341,8 +1510,8 @@ test('L324: missing rule values, their told time ahead or unreadable, are told a
     assert.equal(alerts.length, 1, label);
     change(rec, 'fact', RULES_MISSING_FACT, { told_at: bad });
     await tell(T0 + MIN);
-    assert.equal(alerts.length, 2, label);
-    assert.match(alerts[1], /no value for a:/);
+    assert.equal(alerts.length, due ? 2 : 1, label);
+    if (due) assert.match(alerts[1], /no value for a:/);
   }
 });
 
@@ -1356,7 +1525,7 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
     ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
   const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
   await at(T0 + 25 * H);
   assert.equal(isQueued(w.rec, fact), true, 'told: queued, not yet sent');
@@ -1367,35 +1536,149 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   assert.equal(w.rec.read('fact', fact)?.doc?.told_at ?? null, null);
 });
 
+// L355 m2: a stop_wanted write is written in two places, the first wanting and the restart of a start time that can't be
+// read. Neither answer is read in stopPass: a refusal of either reaches the owner through the tick's watched Record, the
+// same way as the rest of stop_record, once a day while it lasts.
+test('L355 m2: stop_wanted refused at the first wanting and at a restart: the owner is told, then told again a day on', async () => {
+  const stopRefused = (w) => {
+    const rec = { ...w.rec, base: w.rec.base ?? w.rec, write: (x) => (x.kind === 'stop_wanted' ? { ok: false, reason: 'busy' } : w.rec.write(x)) };
+    return watchWrites(rec);
+  };
+  const told = fakeAlert();
+  const passAndTell = async (w, min) => {
+    const watched = stopRefused(w);
+    await w.pass(min, { rec: watched.rec });
+    await withAlerts(w.rec, T0 + min * MIN, told, (alert) => tellRefused({ rec: w.rec, alert, now: T0 + min * MIN, refused: watched.refused, taken: watched.taken, ran: () => true }));
+    return watched;
+  };
+  // The first wanting.
+  let w = world([card('C-1')]);
+  await w.pass(0);
+  let sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  w.probes.set(sid, busy);
+  let seen = await passAndTell(w, 1);
+  assert.deepEqual(seen.refused.get('stop_record').map((x) => [x.kind, x.id]), [['stop_wanted', STOP_FACT(sid)]]);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)), null, 'nothing stored');
+  assert.equal(told.texts.length, 1);
+  assert.match(told.texts[0], new RegExp(`^the Dispatcher: a session stop could not be recorded: ${STOP_FACT(sid)} \\(busy\\)`));
+  // Quiet the same day, told again a day on.
+  await passAndTell(w, 2);
+  assert.equal(told.texts.length, 1, 'once for the day');
+  await passAndTell(w, 25 * 60);
+  assert.equal(told.texts.length, 2, 'again a day on');
+  // The restart of a start time that can't be read.
+  w = world([card('C-1')]);
+  await w.pass(0);
+  sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  w.probes.set(sid, busy);
+  await w.pass(1);
+  change(w.rec, 'fact', STOP_FACT(sid), { since: 'garbage' });
+  const was = w.rec.read('fact', STOP_FACT(sid)).doc;
+  told.texts.length = 0;
+  seen = await passAndTell(w, 2);
+  assert.deepEqual(seen.refused.get('stop_record').map((x) => [x.kind, x.id]), [['stop_wanted', STOP_FACT(sid)]]);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, was.since, 'the stored time is unchanged: the refusal is what the owner reads');
+  assert.equal(told.texts.length, 1);
+  assert.match(told.texts[0], /a session stop could not be recorded/);
+});
+
 test('L324: a wanted stop whose since is ahead or unreadable is restarted from now and forced one grace later, not waited out for ever', async () => {
-  for (const label of ['future', 'unreadable']) {
+  for (const [label, bad] of [['future', iso(T0 + 30 * 24 * H)], ['unreadable', 'garbage'], ['61 s ahead', iso(T0 + 2 * MIN + 61_000)], ['a number', T0]]) {
     const w = world([card('C-1')]);
     await w.pass(0);
     const sid = w.sessions[0].id;
     w.setCard('C-1', { state: 'cancelled' });
     w.probes.set(sid, busy);
     await w.pass(1);
-    change(w.rec, 'fact', STOP_FACT(sid), { since: label === 'future' ? iso(T0 + 30 * 24 * H) : 'garbage' });
+    change(w.rec, 'fact', STOP_FACT(sid), { since: bad });
     await w.pass(2);
     assert.equal(w.calls.stops.length, 0, `${label}: not stopped at once over a bad field`);
     assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, iso(T0 + 2 * MIN), `${label}: restarted from now`);
     await w.pass(4);
     assert.deepEqual(w.calls.stops, [sid], `${label}: forced one grace later`);
     assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.hard, true);
-    assert.match(w.rec.read('fact', `stop-note-${sid}`).doc.text, /without a safe point after 2 min \(cancel\)/);
+    // Cosmetic (L339): the note says the count is from a restart, so it does not understate the wait.
+    assert.match(w.rec.read('fact', `stop-note-${sid}`).doc.text, /without a safe point after 2 min counted from a restart \(its start time could not be read, so it waited longer\) \(cancel\)/);
   }
 });
 
+test('L339 m3: a wanted stop whose since is 59 s ahead is within the margin: kept as written, not restarted', async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.setCard('C-1', { state: 'cancelled' });
+  w.probes.set(sid, busy);
+  await w.pass(1);
+  const near = iso(T0 + 2 * MIN + 59_000);
+  change(w.rec, 'fact', STOP_FACT(sid), { since: near });
+  await w.pass(2);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.since, near);
+  assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.restarted, undefined);
+});
+
 test('L324: an unknown-usage start that is ahead or unreadable counts as over a day: told at once', async () => {
-  for (const [label, bad] of [['future', iso(T0 + 30 * 24 * H)], ['unreadable', 'garbage']]) {
+  for (const [label, bad, due] of [['future', iso(T0 + 30 * 24 * H), true], ['unreadable', 'garbage', true], ['61 s ahead', iso(T0 + MIN + 61_000), true],
+    ['a number', T0, true], ['59 s ahead (within the margin: now, not over a day)', iso(T0 + MIN + 59_000), false]]) {
     const w = world([], { usage: null });
     const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
     await w.pass(0);
     assert.equal(told(), 0, label);
     change(w.rec, 'fact', BAND_FACT, { unknown_since: bad });
     await w.pass(1);
-    assert.equal(told(), 1, label);
+    assert.equal(told(), due ? 1 : 0, label);
   }
+});
+
+test('L350: a new unknown-usage stretch whose start is short or corrupt is told at once, not read as the old stretch', async () => {
+  for (const bad of ['2', '2026', T0 + 1]) {
+    const w = world([], { usage: null });
+    const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+    await w.pass(0);
+    await w.pass(25 * 60);
+    assert.equal(told(), 1, `${bad}: the first stretch told`);
+    change(w.rec, 'fact', BAND_FACT, { unknown_since: bad });
+    await w.pass(25 * 60 + 1);
+    assert.equal(told(), 2, `${bad}: a new stretch, told at once`);
+    await w.pass(25 * 60 + 2);
+    assert.equal(told(), 2, `${bad}: then quiet`);
+  }
+});
+
+test('L355 m6: an unknown-usage stretch recorded with no start is told, not read as just started every pass', async () => {
+  // No start: counted from when the band was decided (the first pass), so told once that is over a day old.
+  let w = world([], { usage: null });
+  const told = (x) => x.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+  await w.pass(0);
+  change(w.rec, 'fact', BAND_FACT, { unknown_since: null });
+  await w.pass(60);
+  assert.equal(told(w), 0, 'within the day of its decided time');
+  await w.pass(25 * 60);
+  assert.equal(told(w), 1, 'counted from the decided time: told');
+  await w.pass(25 * 60 + 1);
+  assert.equal(told(w), 1, 'then quiet');
+  // No start and no decided time: counts as old enough, told at the next pass, quiet, then again a day on.
+  w = world([], { usage: null });
+  await w.pass(0);
+  change(w.rec, 'fact', BAND_FACT, { unknown_since: '', decided_at: null });
+  await w.pass(1);
+  assert.equal(told(w), 1, 'neither time: told at once');
+  await w.pass(2);
+  assert.equal(told(w), 1, 'then quiet');
+  await w.pass(25 * 60);
+  assert.equal(told(w), 2, 'again a day on');
+});
+
+test('L339 m2: an unknown-usage start stored as a number is told once, then daily, not every pass', async () => {
+  const w = world([], { usage: null });
+  const told = () => w.calls.alerts.filter((a) => /usage has been unreadable for over a day/.test(a)).length;
+  await w.pass(0);
+  change(w.rec, 'fact', BAND_FACT, { unknown_since: T0 });
+  for (let m = 1; m <= 4; m += 1) await w.pass(m);
+  assert.equal(told(), 1, 'once in 4 passes (was: every pass)');
+  await w.pass(1 + 24 * 60);
+  assert.equal(told(), 2, 'again a day on');
 });
 
 // L386 m1: all seven of dispatcherPass's asks go through askJoe, so none loses a refused copy from the pass's notes.
@@ -1429,4 +1712,248 @@ test('L343: a limit wait put on the owner whose tell could not keep its since sa
   assert.deepEqual(w.rec.read('card', 'R').doc.wait.what, LIMIT_NO_RUN);
   assert.ok(out.notes.some((n) => /^card R: this card's tell could not be kept with its wait \(busy\)/.test(n)), JSON.stringify(out.notes));
   assert.ok(w.calls.alerts.some((x) => /card R: .*could not be kept with its wait \(busy\)/.test(x)), JSON.stringify(w.calls.alerts));
+});
+
+// L354: at each clear site the queued alert leaves before the clear is written, by the order the writes really ran in;
+// a drop that fails is told, and the clear waits for the next pass where there is one.
+test('L354 stop dropped: the queued copy leaves first; a refused drop is in the notes and the stop still drops', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.probes.set(sid, busy);
+    w.setUsage(RED, T0 + MIN);
+    await w.pass(1);
+    w.setUsage(GREEN, T0 + 2 * MIN);
+    queueFor(w.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(2, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `stop_dropped:${STOP_FACT(sid)}`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'dropped');
+    assert.equal(r.notes.some((n) => /could not be dropped.*cleared anyway/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 stop done: the queued copy leaves first; a refused drop is in the notes and the stop still stands', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.setCard('C-1', { state: 'cancelled' });
+    queueFor(w.rec, STOP_FACT(sid), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `stop_done:${STOP_FACT(sid)}`);
+    assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 pause cleared: the queued copy leaves first; a refused drop holds the clear for the next pass, and says so', async () => {
+  const failed = async () => {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+    w.setProduct('p1', 'active');
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    return w;
+  };
+  const a = await failed();
+  const log = [];
+  await a.pass(1, { rec: writeLog(a.rec, log) });
+  assertDropFirst(log, `pause_cleared:${PAUSE_FACT('p1')}`);
+  assert.equal(a.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'cleared');
+  const b = await failed();
+  const r = await b.pass(1, { rec: writeLog(b.rec, [], { refuseDrop: true }) });
+  assert.equal(b.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'held');
+  assert.ok(r.notes.some((n) => /could not be dropped.*next pass/.test(n)), r.notes.join(' | '));
+  await b.pass(2);
+  assert.equal(b.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'cleared', 'the next pass clears it');
+});
+
+test('L354 pause asked: the queued copy leaves first; a refused drop is in the notes and the ask is still recorded', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `pause_lead:${PAUSE_FACT('p1')}`);
+    assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+    assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.reason, undefined, 'the failure\'s reason does not outlive it');
+    // A drop that worked: the old failure's told fields left with it. One refused: its alert can still go out and mark.
+    if (!refuseDrop) assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.told_at, undefined);
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L449: a refused drop at pause asked reaches the log and one alert, and is not told again within a day', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+  const rec = writeLog(w.rec, [], { refuseDrop: true });
+  const logged = [];
+  const dropTold = () => w.calls.alerts.filter((t) => /could not be dropped/.test(typeof t === 'string' ? t : t.text));
+  const run = async (min) => {
+    const pf = w.rec.read('fact', PAUSE_FACT('p1'));
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: PAUSE_FACT('p1'), expectRev: pf.rev, doc: { ...pf.doc, state: 'failed', at: iso(T0 + min * MIN) }, kind: 'pause_lead_failed' }).ok, true);
+    queueFor(w.rec, PAUSE_FACT('p1'), 'told_at', iso(T0), T0);
+    await w.pass(min, { rec, failureLog: (l) => logged.push(l) });
+  };
+  await run(1);
+  assert.equal(logged.filter((l) => /could not be dropped/.test(l)).length, 1, logged.join(' | '));
+  assert.equal(dropTold().length, 1);
+  await run(60);
+  await run(23 * 60);
+  assert.equal(logged.filter((l) => /could not be dropped/.test(l)).length, 3, 'the log hears every one');
+  assert.equal(dropTold().length, 1);
+  await run(25 * 60);
+  assert.equal(dropTold().length, 2);
+});
+
+test('L449 m3: a told mark landing on a fact whose read had no told fields does not outlive pause cleared', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); } });
+  change(w.rec, 'fact', PAUSE_FACT('p1'), { told_at: undefined, told_cause: undefined });
+  w.setProduct('p1', 'active');
+  await w.pass(1, { rec: lateMark(w.rec, 'pause_cleared', PAUSE_FACT('p1'), { told_at: iso(T0), told_cause: 'c' }) });
+  const doc = w.rec.read('fact', PAUSE_FACT('p1')).doc;
+  assert.deepEqual([doc.state, doc.told_at ?? null, doc.told_cause ?? null], ['cleared', null, null], JSON.stringify(doc));
+});
+
+test('L449 m1, m2: a fold clear with nothing to clear writes nothing; one with a copy queued writes, so a mark on its way conflicts', async () => {
+  const fact = 'hold-waits-p1-paused';
+  const w = world([]);
+  const log = [];
+  await w.pass(0, { rec: writeLog(w.rec, log) });
+  await w.pass(1, { rec: writeLog(w.rec, log) });
+  assert.deepEqual(log.filter((l) => l.startsWith('hold_cleared:')), []);
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  await w.pass(2, { rec: writeLog(w.rec, log) });
+  assertDropFirst(log, `hold_cleared:${fact}`);
+  assert.equal(w.rec.read('fact', fact).doc.told_at, null);
+});
+
+test('L449 m1, m2: a refused-write clear with nothing to clear writes nothing; one with a copy queued writes, even with no fact yet', () => {
+  const fact = REFUSED_FACT('park');
+  const w = world([]);
+  const log = [];
+  const run = (min) => tellRefused({ rec: writeLog(w.rec, log), alert: fakeAlert(), now: T0 + min * MIN, refused: new Map(), ran: () => true });
+  run(0);
+  run(1);
+  assert.deepEqual(log.filter((l) => l.endsWith(fact)), []);
+  queueFor(w.rec, fact, 'told_at', iso(T0), T0);
+  run(2);
+  assertDropFirst(log, `write_refused_cleared:${fact}`);
+  assert.equal(w.rec.read('fact', fact).doc.told_at, null);
+});
+
+test('L354 undo started: the queued copy leaves first; a refused drop is in the notes and the hold still clears', async () => {
+  for (const refuseDrop of [false, true]) {
+    const w = world([...undoEntries('U-1')]);
+    await w.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }) });
+    queueFor(w.rec, UNDO_HELD_FACT('U-1'), 'told_at', iso(T0), T0);
+    const log = [];
+    const r = await w.pass(1, { rec: writeLog(w.rec, log, { refuseDrop }) });
+    assertDropFirst(log, `undo_started:${UNDO_HELD_FACT('U-1')}`);
+    assert.equal(w.rec.read('fact', UNDO_HELD_FACT('U-1')).doc.reason, null);
+    assert.equal(r.notes.some((n) => /could not be dropped/.test(n)), refuseDrop, r.notes.join(' | '));
+  }
+});
+
+test('L354 fold over: the queued copy leaves first, and a late mark is cleared; a refused drop holds the clear and says so', async () => {
+  const over = async (refuseDrop) => {
+    const w = world([card('C-1', { changed_at: iso(T0 - 2 * 24 * H) })]);
+    setClock(w.rec, T0); w.setProduct('p1', 'paused');
+    const fact = 'hold-waits-p1-paused';
+    const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
+      ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
+    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
+    await at(w.rec, T0 + 25 * H);
+    assert.equal(isQueued(w.rec, fact), true);
+    assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: { told_at: iso(T0) } }).ok, true);
+    setClock(w.rec, T0 + 26 * H); w.setProduct('p1', 'active');
+    const log = [];
+    const r = await at(writeLog(w.rec, log, { refuseDrop }), T0 + 26 * H + MIN);
+    return { w, fact, log, r };
+  };
+  const a = await over(false);
+  assertDropFirst(a.log, `hold_cleared:${a.fact}`);
+  assert.equal(a.w.rec.read('fact', a.fact).doc.told_at, null);
+  const b = await over(true);
+  assert.equal(b.log.includes(`hold_cleared:${b.fact}`), false, 'held');
+  assert.ok(b.r.notes.some((n) => /could not be dropped.*next pass/.test(n)), b.r.notes.join(' | '));
+});
+
+test('L354 item 4: a late mark survives a write that only changes other fields; the same mark does not survive a clear', async () => {
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const sid = w.sessions[0].id;
+  w.probes.set(sid, busy);
+  w.setUsage(RED, T0 + MIN);
+  await w.pass(1);
+  const f = STOP_FACT(sid);
+  // A mark lands after the pass has read the stop, while its since is rewritten.
+  const before = w.rec.read('fact', f);
+  w.rec.write({ actor: 'dispatcher', entity: 'fact', id: f, expectRev: before.rev, doc: { ...before.doc, since: 'unreadable' } });
+  let fired = false;
+  const late = { ...w.rec, read: (e, id) => {
+    const got = w.rec.read(e, id);
+    if (!fired && e === 'fact' && id === f && got?.doc?.since === 'unreadable') {
+      fired = true;
+      return got;
+    }
+    if (fired === true && e === 'fact' && id === f) { fired = 'done'; change(w.rec, 'fact', f, { told_at: iso(T0) }); return w.rec.read(e, id); }
+    return got;
+  } };
+  await w.pass(2, { rec: late });
+  assert.equal(fired, 'done');
+  assert.equal(w.rec.read('fact', f).doc.told_at, iso(T0), 'the rewrite of since kept the mark');
+  assert.notEqual(w.rec.read('fact', f).doc.since, 'unreadable');
+  w.setUsage(GREEN, T0 + 3 * MIN);
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', f).doc.state, 'dropped');
+});
+
+test('L354 item 3: a mark landing as a clear is written does not outlive the clear', async () => {
+  const told = { told_at: iso(T0), told_cause: 'c' };
+  const check = async (w, fact, kind, min) => {
+    await w.pass(min, { rec: lateMark(w.rec, kind, fact, told) });
+    const doc = w.rec.read('fact', fact).doc;
+    assert.equal(doc.told_at ?? null, null, `${kind}: ${JSON.stringify(doc)}`);
+  };
+  const parked = async () => {
+    const w = world([card('C-1')]);
+    await w.pass(0);
+    const sid = w.sessions[0].id;
+    w.probes.set(sid, busy);
+    w.setUsage(RED, T0 + MIN);
+    await w.pass(1);
+    return { w, sid };
+  };
+  const a = await parked();
+  a.w.setUsage(GREEN, T0 + 2 * MIN);
+  await check(a.w, STOP_FACT(a.sid), 'stop_dropped', 2);
+  const b = world([card('C-1')]);
+  await b.pass(0);
+  const sid = b.sessions[0].id;
+  b.setCard('C-1', { state: 'cancelled' });
+  await check(b, STOP_FACT(sid), 'stop_done', 1);
+  const down = async () => {
+    const w = world([]);
+    w.setProduct('p1', 'paused');
+    await w.pass(0, { pauseLead: () => { throw new Error('Lead not reachable'); }, alert: () => false });
+    return w;
+  };
+  const c = await down();
+  c.setProduct('p1', 'active');
+  await check(c, PAUSE_FACT('p1'), 'pause_cleared', 1);
+  await check(await down(), PAUSE_FACT('p1'), 'pause_lead', 1);
+  const u = world([...undoEntries('U-1')]);
+  await u.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }), alert: () => false });
+  await check(u, UNDO_HELD_FACT('U-1'), 'undo_started', 1);
 });

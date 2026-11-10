@@ -4,8 +4,9 @@
 // no upstream source was available to port.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GO_FREE, goFreeKinds, goFreeOn, readyCheck, rootOf } from './ready.mjs';
+import { GO_FREE, goFreeKinds, goFreeOn, goNeeded, readyCheck, rootOf } from './ready.mjs';
 import { PRODUCT, fingerprintFor, must, plan, product, put, readyCard, rulesFor, seed, setup } from './fixtures.test-helper.mjs';
+import { STATES, CARD_KINDS } from '../../shared/record-names.mjs';
 
 // An in-memory view: cards by id, gos, the product state, and who created each card.
 function view({ cards = {}, gos = [], productState = 'active', creators = {} } = {}) {
@@ -101,7 +102,7 @@ test('the product: paused (or no product record) starts nothing; light and away 
 
 test('a dependency that is missing, unreadable, or not yet merged blocks', () => {
   const cases = [[undefined, /does not exist/], ['corrupt', /unreadable/]];
-  for (const s of ['draft', 'ready', 'claimed', 'running', 'in_review', 'verified', 'approved', 'merging', 'waiting', 'reverted']) cases.push([card({ state: s }), new RegExp(`is ${s}, not merged`)]);
+  for (const s of ['draft', 'ready', 'claimed', 'running', 'in_review', 'verified', 'approved', 'merging', 'waiting']) cases.push([card({ state: s }), new RegExp(`is ${s}, not merged`)]);
   for (const [dep, pattern] of cases) {
     const d = card({ depends_on: ['C-0'] });
     const r = check('C-1', d, withGo(d, dep === undefined ? {} : { 'C-0': dep }));
@@ -111,13 +112,64 @@ test('a dependency that is missing, unreadable, or not yet merged blocks', () =>
   }
 });
 
-test('a dependency that will never merge (cancelled, no answer, failed) waits on the owner', () => {
-  for (const s of ['cancelled', 'closed_no_answer', 'failed']) {
+test('a dependency that will never merge (cancelled, no answer, failed, reverted) waits on the owner, never quietly', () => {
+  for (const s of ['cancelled', 'closed_no_answer', 'failed', 'reverted', 'a state nobody knows', undefined]) {
     const d = card({ depends_on: ['C-0'] });
     const r = check('C-1', d, withGo(d, { 'C-0': card({ state: s }) }));
     assert.equal(r.ok, false);
     assert.equal(r.joe, true, s);
+    assert.equal(r.waiting, undefined, s);
     assert.match(r.reason, /the owner decides/);
+  }
+});
+
+test('L490: every card state is one of the three things to a card that depends on it', () => {
+  const says = (s) => {
+    const d = card({ depends_on: ['C-0'] });
+    const r = check('C-1', d, withGo(d, { 'C-0': card({ state: s }) }));
+    return r.ok ? 'done' : r.waiting ? 'waits' : r.joe ? 'told' : 'unknown';
+  };
+  const table = Object.fromEntries(STATES.card.map((s) => [s, says(s)]));
+  assert.deepEqual(table, { draft: 'waits', ready: 'waits', claimed: 'waits', running: 'waits', in_review: 'waits', verified: 'waits', approved: 'waits', merging: 'waits', merged: 'done', closed: 'done', waiting: 'waits', failed: 'told', cancelled: 'told', closed_no_answer: 'told', reverted: 'told' });
+});
+
+test('L595: an undo card is ready on a paused product; nothing else is, and an unreadable product still refuses', () => {
+  const er = card({ kind: 'exact_reverse' });
+  const creators = { 'C-1': 'dispatcher' };
+  const at = (productState, who = creators) => check('C-1', er, view({ cards: { 'C-1': er }, creators: who, productState }));
+  assert.deepEqual(at('paused'), { ok: true });
+  const none = at(null);
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /no product record/);
+  assert.match(at('paused', { 'C-1': 'lead:L-1' }).reason, /made by lead:L-1 needs the owner's go/, 'the wrong creator still needs a go');
+  // A record that is there but can't be read refuses too (#252 r1 m1): the exception needs it readable, not just present.
+  const withProduct = (doc) => { const v = view({ cards: { 'C-1': er }, creators, productState: 'paused' }); return { ...v, get: (e, id) => (e === 'product' ? doc : v.get(e, id)) }; };
+  for (const doc of [{ id: PRODUCT, corrupt: true }, { id: PRODUCT, doc: {} }, { id: PRODUCT, doc: { state: 7 } }]) {
+    const r = check('C-1', er, withProduct(doc));
+    assert.equal(r.ok, false, JSON.stringify(doc));
+  }
+  assert.match(check('C-1', er, withProduct({ id: PRODUCT, corrupt: true })).reason, /its record can't be read/);
+  // Every other card kind stays held on a paused product (#252 r1 m2).
+  for (const kind of CARD_KINDS.filter((k) => k !== 'exact_reverse')) {
+    const c = card({ kind });
+    assert.match(check('C-1', c, withGo(c, {}, { productState: 'paused' })).reason, /is paused; no work starts/, kind);
+  }
+  const script = card({ kind: 'script' });
+  assert.match(check('C-1', script, withGo(script, {}, { productState: 'paused' })).reason, /is paused; no work starts/);
+  const norule = check('C-1', er, view({ cards: { 'C-1': er }, creators, productState: 'paused' }), rulesFor({ 'product_state_rules.paused.start': undefined }));
+  assert.match(norule.reason, /the rules say nothing about starting work in a paused product/);
+});
+
+test('L490 m7: a product that can only be read as paused is not an ordinary wait; a paused one is', () => {
+  const d = card();
+  const withProduct = (doc) => { const v = withGo(d); return { ...v, get: (e, id) => (e === 'product' ? doc : v.get(e, id)) }; };
+  const paused = check('C-1', d, withProduct({ id: PRODUCT, doc: { state: 'paused' } }));
+  assert.equal(paused.waiting, true);
+  for (const [doc, why] of [[{ id: PRODUCT, corrupt: true }, /its record can't be read/], [{ id: PRODUCT, doc: {} }, /its record can't be read/], [null, /no product record/]]) {
+    const r = check('C-1', d, withProduct(doc));
+    assert.equal(r.ok, false);
+    assert.equal(r.waiting, false);
+    assert.match(r.reason, why);
   }
 });
 
@@ -217,4 +269,38 @@ test('the ready list: a dependency closing makes a card appear; reverting makes 
   seed(env, 'product', PRODUCT, { state: 'active' });
   must(put(env.record, 'dispatcher', 'card', 'E', { state: 'claimed', claim: { kind: 'tab', claim_id: 'T-1', host: 'mac-a' } }));
   assert.deepEqual(ids(), []);
+});
+
+test('L450: a go-free kind by the wrong creator is an ordinary card, ok only on the owner\'s go for this plan', () => {
+  const d = card({ kind: 'exact_reverse' });
+  const creators = { 'C-1': 'lead:L-1' };
+  const at = (gos, who = creators) => check('C-1', d, view({ cards: { 'C-1': d }, gos, creators: who }));
+  assert.deepEqual(at([], { 'C-1': 'dispatcher' }), { ok: true }, 'the right creator needs no go');
+  const none = at([]);
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /made by lead:L-1 needs the owner's go/);
+  assert.match(none.reason, /fingerprint [0-9a-f]{12}/);
+  assert.deepEqual(at([goFor('C-1', d)]).ok, true, 'the owner\'s go on this plan lets it run');
+  const other = at([goFor('C-1', { ...d, what: 'x', done_when: 'another plan' })]);
+  assert.equal(other.ok, false, 'a go for another plan does not');
+  assert.match(other.reason, /made by lead:L-1 needs the owner's go/);
+});
+
+test('L443: goNeeded is exactly the case the go check refuses', () => {
+  const rules = { flag: () => true, get: () => undefined };
+  const d = card({ kind: 'exact_reverse' });
+  const allowed = view({ cards: { 'C-1': d }, creators: { 'C-1': 'dispatcher' } });
+  assert.deepEqual(goNeeded({ id: 'C-1', doc: d }, allowed, rules, d.product), { needed: false });
+  const wrong = view({ cards: { 'C-1': d }, creators: { 'C-1': 'lead:L-1' } });
+  const asked = goNeeded({ id: 'C-1', doc: d }, wrong, rules, d.product);
+  assert.equal(asked.needed, true);
+  assert.equal(asked.root.id, 'C-1');
+  assert.match(asked.reason, /made by lead:L-1 needs the owner's go/);
+  const plain = card({});
+  const none = goNeeded({ id: 'C-1', doc: plain }, view({ cards: { 'C-1': plain } }), rules, plain.product);
+  assert.equal(none.needed, true);
+  assert.match(none.reason, /no go from the owner/);
+  const fix = card({ fix_of: 'C-gone' });
+  const lost = goNeeded({ id: 'C-2', doc: fix }, view({ cards: { 'C-2': fix } }), rules, fix.product);
+  assert.deepEqual([lost.needed, lost.root], [true, null]);
 });

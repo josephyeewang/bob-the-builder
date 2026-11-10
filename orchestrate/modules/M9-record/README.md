@@ -14,7 +14,7 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 | `lock.mjs` | The store lock, and the one "is this process dead?" check: gone means no such process, or a different start time (a reused pid). A process of another user counts as alive. |
 | `moves.mjs` | Every legal state move and who may make it. Anything not listed is refused. |
 | `permissions.mjs` | Who may create each entity and change which fields; which card kinds each creator may make. |
-| `ready.mjs` | The one ready rule, used by both the move into `ready` and the ready list. |
+| `ready.mjs` | The one ready rule, used by both the move into `ready` and the ready list. A state with `start: none` holds every card but an undo (`exact_reverse`), which still needs a readable product record and the right creator (L595). |
 | `outbox.mjs` | Reads an AI session's outbox file as hostile: no links, the role's owner, 256 KB at most, a kind its role may send; one name in a worker's outbox (a second name in review's own stores is no fault, L70: it can't change review's bytes, while review's files may not be writable by others). A review session's outbox folder that is gone is a refusal, never a silence (L71). |
 | `*.test.mjs` | The tests. `*.test-helper.mjs` are shared set-up, not tests. |
 | `write-sites.test.mjs` | L112: reads every non-test module for its Record writes and checks each against `permissions.mjs`, so a row the real code needs cannot be missing while module tests pass on a record that allows everything. Writes another lane is fixing are printed on a named pending list, never skipped. |
@@ -31,6 +31,12 @@ A session's claim ends three ways:
 
 Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
 
+## Plan files
+
+A plan file makes draft cards (R-0b-170, L460). `plan-<name>.json` from a Lead goes through `plan-cards.mjs`: every card is checked first, then all are written in one diary line, or none. `plan_sha256` is the hash of the file and `main_commit` the head on the Lead's newest launch record, so neither can be typed: anything under those names in the plan is ignored, and a `roadmap-` file may not set them. The Record takes only the bytes M11's plan check read (`checked_sha256`). A later plan may change only draft cards, never a card's module or depends_on, and a card it leaves out stays as it was and is named in the answer.
+
+Once a card has a `plan_sha256`, only a plan file can change its plan; a roadmap file trying to is refused (L490). A card's `brief` is frozen once it leaves draft. A plan changes only `ordinary` cards.
+
 ## Facts: families and who may change them
 
 Every fact id belongs to one role's family (`FACT_FAMILIES` in `permissions.mjs`, lead call L74). An entry ending in `-` or `.` is a prefix; any other entry is that one id. A role creates a fact only in its own family, and no two roles' families overlap (`familyOverlaps()`, tested). A fact is changed only by the role that created it (the store keeps who wrote a document's first diary line). A reader that takes a fact as proof uses `factFrom(role, entry, family)`: the id must be in that role's family AND written by that role. The fact's `type` alone is never proof, since any role can write any type into its own family. Nothing that gates reads a workshop fact as proof.
@@ -39,7 +45,7 @@ A card's `attempts` holds counts kept across moves: `reviewer_starts` and `revie
 
 ## Why our own store, not Claude Code's task list
 
-Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312 (the version installed that day; the project pins 2.1.300), 29 Oct 2026; this note is void at its next release, so check again then. Until it can, the claims stay in this store.
+Claude Code has a native task list. We checked whether it could hold the claims: tests 3 (a claim on a stale read is refused), 4 (eight processes race, one wins) and 9 (a dead owner's claim is broken) cannot be expressed in it, so they were not run against it. Checked on Claude Code 2.1.312 (the version installed that day; the pin was then 2.1.300), 29 Oct 2026. Not re-checked on 2.1.316, the pin since 5 Nov (L572), so it is void until someone does; nothing reads it at run time. Until it can, the claims stay in this store.
 
 ## What the tests cover, and what they don't
 

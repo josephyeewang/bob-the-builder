@@ -110,16 +110,24 @@ export async function openDecision(ctx, id) {
 // answered ask (L135). Before, both ignored the alert's answer, so a lost alert left the pull request open with
 // nothing to retry it, and Joe never told.
 export async function closeDecisionPr(ctx, id, doc) {
-  if (!activeKind(doc.kind)?.decision_pr || !Number.isSafeInteger(doc.pr)) return true;
+  const failed = await closePr(ctx, doc);
+  if (failed === null) return true;
+  try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: failed }) !== false; } catch { return false; }
+}
+// Does this ask have a pull request of its own to close?
+export const hasDecisionPr = (doc) => activeKind(doc.kind)?.decision_pr === true && Number.isSafeInteger(doc.pr);
+// One try at the close, telling nobody. → null when there is none to close or it closed, else why not.
+export async function closePr(ctx, doc) {
+  if (!hasDecisionPr(doc)) return null;
   // A client that throws before it returns a promise (a bug, a missing method) is a failed close too, never a stopped
   // pass: retryClose runs this every pass, so a throw here would stop every push (L142 m4).
   let c;
   try { c = await ctx.gh.patch(`/repos/${ctx.owner}/${ctx.repo}/pulls/${doc.pr}`, { state: 'closed' }); } catch (e) { c = { status: String(e?.message ?? e) }; }
-  if (c?.status === 200) return true;
-  try { return ctx.alert({ type: 'decision_pr_not_closed', ask: id, pr: doc.pr, reason: String(c?.status) }) !== false; } catch { return false; }
+  return c?.status === 200 ? null : String(c?.status);
 }
-// The mark on an answered decision whose close is still due. It is written with the answer, before the close, so a
-// crash between the two leaves it too; schedule.mjs schedulePass retries the close and takes it off (L135).
+// The mark on a decision whose close is still due. On an answer it is written with the answer, before the close, so a
+// crash between the two leaves it too (L135); on a withdrawn ask it is written with the withdrawal (L477). schedule.mjs
+// schedulePass retries the close and takes it off.
 export const CLOSE_DUE = 'pr_close_due';
 
 export async function readDecision(ctx, id) {

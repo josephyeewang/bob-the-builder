@@ -45,6 +45,19 @@ setTimeout(() => { require('node:fs').writeSync(2, 'dispatcher: the pass was blo
   return w;
 }
 
+/**
+ * Warnings the store holds in this process's memory (a full disk) die when it exits: their lines are tried once more,
+ * in case the disk has room again (#260 r2 M1 b; the store's heldHere writes back what the disk takes). Any still held
+ * stay in the store's held flag, which the robot's delivery pass tells; the log says so too. Never throws.
+ */
+export function flushHeld(rec, log) {
+  try {
+    const h = rec?.heldHere?.();
+    if (h?.error) log(`dispatcher: what the store holds in memory could not be read: ${h.error}`);
+    else if (h?.held?.length || h?.dropped) log(`dispatcher: ${h.held.length} warning(s) the store could not write${h.dropped ? ` and ${h.dropped} lost count(s)` : ''} are held in this process only and end with it; the held flag tells the robot's alert pass`);
+  } catch (e) { log(`dispatcher: the store's held warnings could not be tried again: ${e?.message ?? e}`); }
+}
+
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
 const SELF = realOf(fileURLToPath(import.meta.url));
 
@@ -102,9 +115,13 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     // A refused alert is logged (L130 m12): the late pass is otherwise silent.
     try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
+    flushHeld(wired.rec, log);
     return 2;
   }
   if (!r.ran) log(`dispatcher: ${r.reason}`);
+  // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
+  for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
+  flushHeld(wired.rec, log);
   return 0;
 }
 

@@ -80,11 +80,13 @@ import { codeFileProblem, openJobJson, readByDescriptor, readChangedProblem } fr
 import { readAccountFile, ACCOUNT_FILE } from './accounts.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
+import { cardBranch } from '../git/branch.mjs';
 import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
 import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
+import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -224,12 +226,13 @@ function recordFolderProblem(d, recordUid) {
 // One document of the Record, read only: a plain file of the Record's owner that no one else writes, never a link.
 function readRecordFile(p, recordUid, entity, id, missing) {
   let fd;
-  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
+  try { fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return { ok: false, ...(e?.code === 'ENOENT' ? { missing: true } : {}), reason: e?.code === 'ENOENT' ? missing : `it can't be read (${e?.code ?? e})` }; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1 || st.uid !== recordUid || st.mode & 0o022 || st.size > MAX_CARD_BYTES) return { ok: false, reason: 'its file is not the Record\'s own plain file' };
     const d = JSON.parse(readFileSync(fd, 'utf8'));
-    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, reason: `its file is not a ${entity} document` };
+    // An id that isn't the one asked for is no such document: on a disk that ignores case, `c-1` opens the file of `C-1`.
+    if (d?.entity !== entity || d?.id !== id || !d.doc || typeof d.doc !== 'object') return { ok: false, ...(d?.entity === entity && typeof d.id === 'string' && d.id !== id ? { missing: true } : {}), reason: `its file is not a ${entity} document` };
     return { ok: true, doc: d.doc, rev: Number.isInteger(d.rev) ? d.rev : null };
   } catch { return { ok: false, reason: 'its file is not JSON' }; } finally { closeSync(fd); }
 }
@@ -259,12 +262,18 @@ export function holdersOf(dir, { runFn = run } = {}) {
 
 /** A card from the Record, read only: docs/card/<id>.json, with its revision (`rev`). */
 export function readCardFile({ recordRoot, recordUid, card }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, missing: true, reason: 'not a card id' };
   for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'card')]) {
     const bad = recordFolderProblem(d, recordUid);
     if (bad) return { ok: false, reason: bad };
   }
-  return readRecordFile(join(recordRoot, 'docs', 'card', `${card}.json`), recordUid, 'card', card, 'no such card');
+  // The exact name, before anything opens it: on a disk that ignores case, `c-1` would open `C-1.json`, and a ruined
+  // file then counts as a read failure for every spelling of it.
+  const dir = join(recordRoot, 'docs', 'card');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the card folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${card}.json`)) return { ok: false, missing: true, reason: 'no such card' };
+  return readRecordFile(join(dir, `${card}.json`), recordUid, 'card', card, 'no such card');
 }
 
 /**
@@ -372,11 +381,11 @@ export function reviewCopyPath(c, sessionId) {
  * back, as for a worker's copy (worker-copy.mjs). A folder already there is refused, never reused. → { ok } | { ok: false, reason }
  */
 export async function prepareReviewCopy({ mirror, card, head, dest }) {
-  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'not a card id' };
   if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
   try { lstatSync(dest); return { ok: false, reason: `${dest} is there already` }; } catch { /* good */ }
   mkdirSync(dest, { mode: 0o700 });
-  const branch = `card/${card.toLowerCase()}`;
+  const branch = cardBranch(card);
   const opts = (purpose) => ({ gitDir: join(dest, '.git'), workTree: dest, cwd: dest, purpose, timeoutMs: 120_000 });
   try {
     // Born on a branch name nothing fetches into: git refuses to fetch into the branch a folder is on, and a plain
@@ -414,6 +423,15 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    // The Dispatcher's own rules key, for how long a request may go unrenewed (R-0b-171). The key is per product; a request
+    // that names no card has none, so it takes the longest. With no budget module it throws, and the runner then ends
+    // nothing on silence; no review starts then either, and each refusal says so.
+    requestGapMs: (product) => {
+      const gap = (p) => minutes(budget.rules, KEYS.inReviewNoReviewerMin, { product: p });
+      if (product) return gap(product);
+      const listed = budget.rec.list('product');
+      return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
+    },
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });

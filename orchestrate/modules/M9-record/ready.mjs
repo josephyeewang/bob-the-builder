@@ -4,7 +4,9 @@
 // on is merged, is work the owner never agreed to. Every move into `ready` and the ready list call this one function, so the
 // two can't drift. It fails closed: anything missing or unreadable is "not ready", with the reason.
 //
-//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason }
+//   readyCheck(card, view, { rules, product }) → { ok: true } | { ok: false, reason, waiting? }
+//     waiting: the ordinary wait for a dependency that can still merge, or a paused product to resume, which nobody has
+//     to act on. Set only when the wait can end by itself; anything else is said, so a card never sits quietly (L490).
 //     card = { id, doc }; view = { get(entity, id) → { id, doc } | corrupt | null, list(entity), createdBy(entity, id) }
 //
 // A card may start when all of these hold:
@@ -17,6 +19,7 @@
 
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { mayCreateKind } from './permissions.mjs';
+import { OPEN_CARD_STATES } from '../../shared/record.mjs';
 
 const MAX_CHAIN = 64;
 
@@ -76,36 +79,57 @@ function depsCheck(card, view) {
     const d = view.get('card', id);
     if (!d) return { ok: false, reason: `dependency ${id} does not exist` };
     if (d.corrupt) return { ok: false, reason: `dependency ${id} is unreadable` };
-    // A dependency that will never merge (cancelled, no answer, failed) can't be waited out: the card waits on the owner.
-    if (['cancelled', 'closed_no_answer', 'failed'].includes(d.doc.state)) return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
-    if (d.doc.state !== 'merged' && d.doc.state !== 'closed') return { ok: false, reason: `dependency ${id} is ${d.doc.state}, not merged` };
+    if (d.doc.state === 'merged' || d.doc.state === 'closed') continue;
+    if (OPEN_CARD_STATES.includes(d.doc.state)) return { ok: false, waiting: true, reason: `dependency ${id} is ${d.doc.state}, not merged` };
+    // Any other state will never merge (failed, cancelled, closed with no answer, reverted; L490): it can't be waited
+    // out, so the card waits on the owner.
+    return { ok: false, joe: true, reason: `dependency ${id} is ${d.doc.state}; the owner decides what happens to this card` };
   }
   return { ok: true };
 }
 
 function productCheck(card, view, rules, product) {
   const p = view.get('product', card.doc.product);
-  const state = p && !p.corrupt && typeof p.doc?.state === 'string' ? p.doc.state : 'paused';
+  const readable = Boolean(p) && !p.corrupt && typeof p.doc?.state === 'string';
+  const state = readable ? p.doc.state : 'paused';
   const start = rules.get(`product_state_rules.${state}.start`, { product });
   if (typeof start !== 'string' || !start) return { ok: false, reason: `the rules say nothing about starting work in a ${state} product` };
-  if (start === 'none') return { ok: false, reason: `product ${card.doc.product} is ${state}${p ? '' : ' (no product record)'}; no work starts` };
+  // An undo is never held by the product's state: pausing is often the moment the owner wants one, and M10 and M11's
+  // start gate already let it through, so this check alone was stopping it (L595). A record that can't be read still refuses.
+  if (start === 'none' && readable && card.doc.kind === 'exact_reverse') return { ok: true };
+  // Only a state read off the record can be waited out: a missing or unreadable record is said (L490 m7).
+  if (start === 'none') return { ok: false, waiting: readable, reason: `product ${card.doc.product} is ${state}${readable ? '' : p ? ' (its record can\'t be read)' : ' (no product record)'}; no work starts` };
   return { ok: true };
 }
 
-function goCheck(card, view, rules, product) {
+// Does this card still want the owner's go? The one definition (L443): `needed` is exactly the case where the go check
+// below refuses, so nothing that raises a go can disagree with what ready enforces.
+//   → { needed: false, go? } | { needed: true, root, reason }   root is null when the fix chain can't be followed
+// A fix card's `root` is another card: it runs on that card's go, and only the root is ever asked for one.
+export function goNeeded(card, view, rules, product) {
   const kind = card.doc.kind;
+  // A go-free kind made by the wrong creator isn't refused outright (L450): it is an ordinary card, ok on the owner's go.
+  let wrong = null;
   if (goFreeKinds(rules, product).includes(kind)) {
     const creator = view.createdBy('card', card.id);
-    if (creator && mayCreateKind(creator, kind)) return { ok: true };
-    return { ok: false, reason: `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go` };
+    if (creator && mayCreateKind(creator, kind)) return { needed: false };
+    wrong = `a ${kind} card made by ${creator ?? 'an unknown writer'} needs the owner's go`;
   }
   const r = rootOf(card, view);
-  if (!r.ok) return r;
+  const root = r.ok ? r.root : null;
+  const reasonOf = (why) => (wrong ? `${wrong}: ${why}` : why);
+  if (!r.ok) return { needed: true, root, reason: reasonOf(r.reason) };
   const d = card.doc;
-  const fp = planFingerprint({ product: d.product, card_id: r.root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
-  if (!fp.ok) return { ok: false, reason: `plan can't be fingerprinted: ${fp.reason}` };
-  const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === r.root.id);
-  return go ? { ok: true, go: go.id } : { ok: false, reason: `no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})` };
+  const fp = planFingerprint({ product: d.product, card_id: root.id, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
+  if (!fp.ok) return { needed: true, root, reason: reasonOf(`plan can't be fingerprinted: ${fp.reason}`) };
+  const go = view.list('go').find((g) => g.doc?.plan_fingerprint === fp.sha256 && g.doc?.product === d.product && g.doc?.card_id === root.id);
+  return go ? { needed: false, go: go.id } : { needed: true, root, reason: reasonOf(`no go from the owner matches this plan (fingerprint ${fp.sha256.slice(0, 12)})`) };
+}
+
+function goCheck(card, view, rules, product) {
+  const n = goNeeded(card, view, rules, product);
+  if (n.needed) return { ok: false, reason: n.reason };
+  return n.go ? { ok: true, go: n.go } : { ok: true };
 }
 
 export function readyCheck(card, view, { rules, product }) {

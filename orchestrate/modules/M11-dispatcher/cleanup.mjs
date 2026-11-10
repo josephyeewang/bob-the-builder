@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
 import { git as safeGit } from '../M4-workshop/git/safe-git.mjs';
 import { readBundleHeader } from '../M4-workshop/git/push.mjs';
+import { cardBranch } from '../M4-workshop/git/branch.mjs';
 import { isProtectedName } from '../M4-workshop/launcher/worker-copy.mjs';
 import { PR_FACT, workerLaunches } from './merges.mjs';
 import { note } from './moves.mjs';
@@ -176,7 +177,7 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   const own = ownCopy(copy, copiesRoot, card, named);
   if (!own.ok) return done('refused', [own.reason]);
 
-  const branch = `card/${card.toLowerCase()}`;
+  const branch = cardBranch(card);
   const reasons = [];
   // A fresh bundle, always, inside the lock-down; this also covers a worker that died with none.
   mkdirSync(sealRoot, { recursive: true, mode: 0o700 });

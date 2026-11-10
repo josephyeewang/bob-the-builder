@@ -13,6 +13,7 @@ import { lstatSync, readdirSync, rmSync, mkdirSync, writeFileSync, realpathSync 
 import { join, resolve, sep, dirname, isAbsolute } from 'node:path';
 import { git, gitOk, checkMirror } from '../git/safe-git.mjs';
 import { CLAUDE_NAMES, fold } from '../git/push-refusals.mjs';
+import { cardBranch } from '../git/branch.mjs';
 
 // Names Claude reads settings, skills or tool servers from. Compared after `fold` (NFKC, case
 // round-trip, invisible characters removed), because a Mac's disk treats `.Claude` as `.claude`.
@@ -69,18 +70,20 @@ const isProtectedPath = (path) => path.split('/').some(isProtectedName);
 
 /**
  * Prepares one worker's copy.
- *   product      the rules' product entry: { repo: 'owner/name', mirror: '<folder>' }
+ *   product      the product's place from the wiring (products.json and this Mac's config, not the rules; L568):
+ *                { repo: 'owner/name', mirror: '<folder>' }
  *   card         { id, repo, commit, branch }   (from the record)
  *   dest         the new folder for this copy; must not exist
  *   lastBundle   on a restart, the card's last bundle file (else null)
  * Returns { ok: true, dest, head, removed, restored } or { ok: false, reason }.
  */
 export async function prepareWorkerCopy({ product, card, dest, lastBundle = null }) {
+  // The reason text predates L568 and a test pins it: the place comes from the wiring, not the rules (L719 c4).
   if (!product?.repo || !product?.mirror) return refuse('product has no repo or mirror in the rules');
   if (!card || card.repo !== product.repo) return refuse(`card repo "${card?.repo}" is not the product's repo "${product.repo}"`);
   if (!CARD.test(String(card.id))) return refuse('bad card id');
   if (!SHA.test(String(card.commit))) return refuse('card commit is not a full commit id');
-  const branch = `card/${String(card.id).toLowerCase()}`;
+  const branch = cardBranch(card.id);
   if (card.branch && card.branch !== branch) return refuse(`card branch "${card.branch}" is not ${branch}`);
   try { lstatSync(dest); return refuse('copy folder already exists'); } catch { /* good */ }
 
