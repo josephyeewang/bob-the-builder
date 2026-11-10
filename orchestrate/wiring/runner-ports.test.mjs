@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -53,6 +53,9 @@ test('L835: an outbox is drained once every file in it has the Record\'s done in
     const fact = (name, over = {}) => facts.set(`intake-applied-${SID}-${name}`, { session: SID, name, state: 'applied', sha256: createHash('sha256').update(readFileSync(join(o, name))).digest('hex'), ...over });
     const drained = drainedPort({ readFact });
     assert.equal(drained(s), true, 'empty: nothing to take');
+    // The one set of used states (L852): a file lead-restart counts as used, and only those, counts as taken here.
+    const lr = readFileSync(new URL('../modules/M11-dispatcher/lead-restart.mjs', import.meta.url), 'utf8').match(/!\[([^\]]*)\]\.includes\(used\)/);
+    assert.deepEqual([...INTAKE_DONE].sort(), JSON.parse(`[${lr[1].replaceAll("'", '"')}]`).sort());
     writeFileSync(join(o, 'bundle-C-1.json'), '{"a":1}');
     assert.equal(drained(s), false, 'a file the Record has no fact for');
     fact('bundle-C-1.json');
@@ -60,8 +63,8 @@ test('L835: an outbox is drained once every file in it has the Record\'s done in
     writeFileSync(join(o, '.half'), 'x');
     assert.equal(drained(s), false, 'a dot file with no fact counts');
     rmSync(join(o, '.half'));
-    for (const state of ['refused', 'interrupted']) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), true, state); }
-    for (const state of ['applying', 'waiting', 'starting', undefined]) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
+    for (const state of ['refused', 'interrupted', 'waiting']) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), true, state); }
+    for (const state of ['applying', 'starting', 'told', undefined]) { fact('bundle-C-1.json', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
     fact('bundle-C-1.json', { sha256: 'f'.repeat(64) }); assert.equal(drained(s), false, 'another sha256: the file changed after intake took it');
     fact('bundle-C-1.json', { session: 'other' }); assert.equal(drained(s), false, 'a fact naming another session');
     fact('bundle-C-1.json', { name: 'x.json' }); assert.equal(drained(s), false, 'a fact naming another file');

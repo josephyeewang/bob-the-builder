@@ -93,13 +93,16 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
  * keeps every hand-in (push and M6 gather read them from the outbox), so an empty folder is not the sign: each file
  * must have the Record's own `intake-applied-<session>-<name>` fact (M11 outbox-intake.mjs), naming this session and
  * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
- * A file with no such fact, a fact with another sha256 or still in flight (applying, waiting, starting), a file that is
+ * A file with no such fact, a fact with another sha256 or still in flight (applying, starting), a file that is
  * not a plain one, or a Record that can't be read: not drained. No files, or the outbox gone: drained.
  * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
  * review-runner-main.mjs readCardFile answers for a card. None is exported for facts yet (lane 2's), so by default
  * every read fails and an outbox holding a file stays open: it fails safe, never closing one the Record has not taken.
  */
-export const INTAKE_DONE = Object.freeze(['applied', 'refused', 'interrupted']);
+// The states lead-restart.mjs leadInFlight counts as used (L852): `interrupted` is told once and kept, and `waiting` is a
+// request held by a refusal, which may wait a week. Lane 2 is to export this one set with readFactFile; until then this
+// is its copy, pinned equal to lead-restart's by runner-ports.test.mjs.
+export const INTAKE_DONE = Object.freeze(['applied', 'refused', 'interrupted', 'waiting']);
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
