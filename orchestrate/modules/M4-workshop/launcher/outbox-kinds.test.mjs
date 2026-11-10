@@ -19,9 +19,8 @@ import { decide, kindIn } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
 import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 
-// The roles M4 launches. `script` is an outbox role too (a plain script's reports), but M4 starts no session for it, so
-// it has no profile and no hook; M9 alone judges its files.
-const LAUNCHED = AI_ROLES.filter((r) => r !== 'script');
+// The roles M4 launches: every AI role. A script card's session is one since L760, with its own profile and hook.
+const LAUNCHED = AI_ROLES;
 // A kind the table lists for a role that its design leaves out until something does what the kind's text promises
 // (L151 M-1, L167 c-4: the Front Door's state- and request-).
 const notYet = (role, kind) => (NOT_YET[role] ?? []).includes(kind);

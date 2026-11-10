@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny } from './render-settings.mjs';
+import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, bobFolderDeny } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
@@ -374,6 +374,38 @@ test('L751: under macOS\'s sandbox, a worker\'s shell write to the runner\'s sta
 });
 
 // Review of #320 M1, M2: the launch-time check of the runner wall: present in the role file, and spelled as real paths.
+// L760: a script card's session is walled as a worker is: secrets, proposals, the Bob folder and the worker runner's
+// folders, checked through checkRunnerWall; and nothing a reviewer has.
+test('L760: the script profile renders with the worker\'s walls, passes checkRunnerWall, and holds nothing of a reviewer\'s', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
+  assert.equal(checkProfile('script', DESIGN_PROFILES.script).ok, true);
+  assert.deepEqual(DESIGN_PROFILES.script.outbox, ['report-']);
+  const r = render('script', { paths: { ...PATHS, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
+  const w = render('worker', { paths: { ...PATHS, workerRunner: runner } });
+  const deny = r.settings[S.permissions][S.deny];
+  const fs = r.settings[S.sandbox][S.filesystem];
+  for (const dir of ['/w/secrets', '/w/proposals', '/h/.ssh', '/w/keys', '/w/record', '/w/copy2']) {
+    for (const t of ['Read', 'Edit']) assert.ok(deny.includes(`${t}(/${dir}/**)`), `${t} ${dir}`);
+    assert.ok(fs[S.denyRead].includes(dir), `the shell may not read ${dir}`);
+  }
+  for (const rule of bobFolderDeny('/w/bob')) assert.ok(deny.includes(rule), rule);
+  assert.ok(fs[S.denyWrite].includes('/w/bob'), 'the shell may not write the Bob folder');
+  // Every deny the worker has, the script has too, but for the shell and install walls of a role with a shell.
+  for (const rule of w.settings[S.permissions][S.deny]) if (!/^Bash\(/.test(rule)) assert.ok(deny.includes(rule), `the worker's ${rule}`);
+  assert.ok(!JSON.stringify(r.settings).includes('/r/'), 'no review runner or review outbox folder');
+  assert.equal(hasShell(DESIGN_PROFILES.script), false, 'no shell');
+  assert.equal(r.settings[S.permissions][S.allow].some((x) => /^Bash/.test(x)), false, 'no shell rule');
+  // Without the proposals folders, or with an empty list, it is refused like a worker.
+  assert.equal(render('script', { proposalOutboxes: undefined }).ok, false);
+  assert.equal(render('script', { proposalOutboxes: [], paths: { ...PATHS, deny: { ...PATHS.deny, proposals: [] } } }).ok, false);
+  // M10's published script.json lists Workflow: still refused here, as on the never-list.
+  assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
+});
+
 test('L751: checkRunnerWall passes a rendered worker file with real runner folders, and refuses a missing wall or a linked spelling', () => {
   const d = realpathSync(tmp());
   const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };

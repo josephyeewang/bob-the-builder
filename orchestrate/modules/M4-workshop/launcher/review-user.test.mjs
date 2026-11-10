@@ -11,7 +11,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const SELF = 501;
 const REVIEW = 503;
-const UIDS = { lead: SELF, worker: SELF, writer: SELF, incident: SELF, scout: SELF, front_door: SELF, thinking: SELF, learning: SELF, reviewer: REVIEW, auditor: REVIEW };
+const UIDS = { lead: SELF, worker: SELF, writer: SELF, incident: SELF, scout: SELF, front_door: SELF, thinking: SELF, learning: SELF, script: SELF, reviewer: REVIEW, auditor: REVIEW };
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
 // A fake lstat: each path answers as a plain folder owned by `uid` with `mode`, unless `over[path]` says otherwise.
