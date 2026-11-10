@@ -103,6 +103,10 @@ Every name, path and layout rule comes from the launcher's own modules (`install
 **The Dispatcher's lines: check-dispatcher (L748).** The config's `hostLockPath` is the full path of the owner's `host.lock`,
 in the owner's home (`/Users/<owner>/...`; spaces are fine). check-dispatcher says:
 - the review runner's folder holds its `launches` folder (the runner makes it on its first run; the Dispatcher won't start without it);
+- with a `dispatcher` entry, the `dispatcher.json` the job reads (the copy's, or the base's until there is a copy) names
+  `outboxRoot` and `copiesRoot` as exactly the top roots (L871). A missing key, another path, or a product's own folder
+  under the root (every outbox or copy would be looked for one level too deep) FAILs, by name. An
+  existing `dispatcher.json` without them won't start the Dispatcher until `dispatcher-config` is run again;
 - host.lock is the owner's (not orchestrate's), one plain file with one name, no bigger than the Dispatcher reads
   (`HOST_LOCK_MAX` in `wiring/worker-ports.mjs`), and `orchestrate` can read it. As root it reads it as `orchestrate`;
   without sudo that line is NEEDS ROOT. When the read fails it says why, in plain words: a folder above it `orchestrate`
@@ -211,9 +215,18 @@ optional `runDeadlineMs` of at most the Dispatcher's default (`RUN_DEADLINE_MS` 
 judges it by). Each path is full and written plainly, outside the install. The entry needs `hostLockPath` too.
 Every other key of the Dispatcher's config setup writes itself, from the layout: the copy and its wiring, the lock
 (`<base>/home/orchestrate/dispatcher.lock`, in orchestrate's home, which only it can write), the Record (`<base>/products/<product>/store`,
-owned by `orchestrate`, whose uid is `ownerUid`), the review runner's requests folder, status file, user and log, and the five
+owned by `orchestrate`, whose uid is `ownerUid`), the review runner's requests folder, status file, user and log, and the
 keys `dispatcher-keys` prints (among them `hostLockUid`, the owner's Mac user id: the Dispatcher reads host.lock only when the
 file it opened is the owner's).
+`outboxRoot` and `copiesRoot` (L871) are the TOP `<base>/outboxes` and `<base>/worker-copies`, the folders `users-folders`
+makes, never a product's own folder under them: the Dispatcher's pass and undo-starts look for a session's outbox at
+`<outboxRoot>/<product>/<role>/<session>`, and cleanup for a copy at `<copiesRoot>/<product>/<card>`
+(`shared/product-paths.mjs`). Their values come from `layout.mjs` (`dispatcherKeys`), the one place. A key setup writes that
+its own wiring (`wiring/dispatcher-wiring.mjs` beside it) doesn't take is refused, never dropped (the Dispatcher refuses to
+start on an unknown key). **An existing `dispatcher.json` without the two keys won't start the Dispatcher until
+`dispatcher-config` is run again**; check-dispatcher says exactly that. When a `dispatcher.json` differs from what
+`dispatcher-config` writes, `dispatcher-config`'s own check, `daemons place` and `load`, and `daemons check` name the keys
+that are missing or other than setup's (the first five).
 
 | Command | What it does | Root? |
 |---|---|---|

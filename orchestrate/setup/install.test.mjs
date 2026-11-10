@@ -15,15 +15,15 @@ import { NODE, RUNNER_CONFIG, STAMP, UPDATER_CONFIG } from '../modules/M4-worksh
 import { MUST_KEEP, readUpdaterConfig } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
-import { ROOT_CONFIG_PATH } from './layout.mjs';
+import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, workerCopiesPath } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
-import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
+import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, keysDiffer, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
 import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
-import { dispatcherKeysOn } from './dispatcher-check.mjs';
+import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { checkInstall, planAddToInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
@@ -1372,6 +1372,77 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
   assert.notEqual(config.hostLockUid, config.ownerUid, 'host.lock is the owner\'s, not the Dispatcher\'s');
 });
 
+test('L871: the Dispatcher config names the TOP outbox and copies roots, from the layout\'s own helpers; a key the wiring does not take is refused, never dropped', async () => {
+  const w = await world({ dispatcher: true });
+  const at = (p) => w.mac.at(p);
+  const { config } = dispatcherConfigFor(w.mac, w.cfg);
+  assert.equal(config.outboxRoot, at(outboxRootPath(w.cfg))); assert.equal(config.copiesRoot, at(workerCopiesPath(w.cfg)));
+  // The very folders users-folders makes (folderTable), not a product's folder under them.
+  const table = new Set(folderTable(w.cfg).map((r) => r.path));
+  assert.ok(table.has(outboxRootPath(w.cfg)) && table.has(workerCopiesPath(w.cfg)));
+  // Setup's own wiring, if it took fewer keys (it does not take the two): told by name, nothing written.
+  const older = CONFIG_KEYS.filter((k) => k !== 'outboxRoot' && k !== 'copiesRoot');
+  assert.deepEqual(dispatcherConfigFor(w.mac, w.cfg, { keys: older }), { config: null, problems: ['the Dispatcher\'s wiring doesn\'t take the config keys outboxRoot, copiesRoot that setup writes (this setup\'s own wiring, wiring/dispatcher-wiring.mjs beside it, is from another version: use setup and its wiring from one checkout)'] });
+  // No path to either root is built by hand in the Dispatcher's setup files: the layout's helpers are the one place.
+  for (const f of ['dispatcher-setup.mjs', 'dispatcher-check.mjs']) {
+    const src = readFileSync(new URL(`./${f}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /['"`/]outboxes['"`/]|['"`/]worker-copies['"`/]/, `${f} names a root's folder itself`);
+  }
+});
+
+test('L871: keysDiffer names each key that is missing, other or extra', () => {
+  const want = dispatcherConfigText({ a: '/x', b: 1, outboxRoot: '/b/outboxes' });
+  assert.equal(keysDiffer(want, want), ': its keys are in another order or spacing');
+  assert.equal(keysDiffer(dispatcherConfigText({ a: '/y', b: 1, zz: 2 }), want), ': outboxRoot is missing (setup writes "/b/outboxes"); a is "/y", not "/x"; "zz" is not a key setup writes');
+  assert.equal(keysDiffer('not json', want), '');
+  assert.equal(keysDiffer('[1]', want), '');
+});
+
+test('L871 PLANT check-dispatcher: the job\'s dispatcher.json without a root, with another root, or with a product\'s own folder FAILs by name; load refuses', async () => {
+  const w = await dWorld();
+  const f = copyConfig(w); const good = readFileSync(f, 'utf8');
+  const put = (edit) => { const c = JSON.parse(good); edit(c); chmodSync(f, 0o644); rmSync(f); writeFileSync(f, dispatcherConfigText(c)); chmodSync(f, 0o644); };
+  const O = w.mac.at(`${BASE}/outboxes`); const C = w.mac.at(`${BASE}/worker-copies`);
+  const rowOf = (key) => checkDispatcherKeys(w.mac, w.cfg).find((r) => r.what.endsWith(`(the Dispatcher's ${key})`));
+  for (const key of ['outboxRoot', 'copiesRoot']) assert.deepEqual(rowOf(key), { ok: true, what: `${BASE}/install/orchestrate/dispatcher.json names ${key === 'outboxRoot' ? 'the top outbox root' : 'the workers\' top copies root'} ${key === 'outboxRoot' ? O : C} as ${key} (the Dispatcher's ${key})` });
+  const cases = [
+    ['outboxRoot', (c) => { delete c.outboxRoot; }, 'it has no outboxRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
+    ['copiesRoot', (c) => { delete c.copiesRoot; }, 'it has no copiesRoot, so an existing dispatcher.json without it won\'t start the Dispatcher until dispatcher-config is run again (an older setup wrote it)'],
+    ['outboxRoot', (c) => { c.outboxRoot = C; }, `it names ${JSON.stringify(C)}, not ${O}; run dispatcher-config`],
+    ['copiesRoot', (c) => { c.copiesRoot = `${C}/alpha`; }, `it names ${C}/alpha, product alpha's own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config`],
+    ['outboxRoot', (c) => { c.outboxRoot = `${O}/beta`; }, `it names ${O}/beta, product beta's own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config`],
+  ];
+  for (const [key, edit, why] of cases) {
+    put(edit);
+    assert.equal(rowOf(key).why, why, why);
+    const other = key === 'outboxRoot' ? 'copiesRoot' : 'outboxRoot'; assert.equal(rowOf(other).ok, true, `only ${key} is named`);
+    const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.ok(cd.text.includes(why), `check-dispatcher says: ${why}`);
+    const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, new RegExp(`dispatcher\\.json is not the config this setup writes now: ${key} is `), 'load names the key');
+  }
+  // Once there is a copy, the job reads the copy's file: with it gone, the row FAILs on it, never passes on the base's (review m1).
+  chmodSync(f, 0o644); rmSync(f);
+  assert.deepEqual(rowOf('outboxRoot'), { ok: false, what: `${BASE}/install/orchestrate/dispatcher.json names the top outbox root ${O} as outboxRoot (the Dispatcher's outboxRoot)`, why: `${BASE}/install/orchestrate/dispatcher.json can't be read (the job reads the copy's); run dispatcher-config, then install again if the copy does not keep it` });
+  // Before there is a copy, the base file is the one read.
+  const w0 = await world({ dispatcher: true }); assert.equal(w0.run(['dispatcher-config']).code, 0);
+  const r0 = checkDispatcherKeys(w0.mac, w0.cfg).find((r) => r.what.endsWith('(the Dispatcher\'s outboxRoot)'));
+  assert.equal(r0.what.startsWith(`${D_SRC} names`), true, r0.what); assert.equal(r0.ok, true, r0.why);
+});
+
+test('L871 review M1: with the job loaded, dispatcher-config writes the roots into a dispatcher.json an older setup wrote without them', async () => {
+  const w = await dPlaced();
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text);
+  const strip = (f) => { const c = JSON.parse(readFileSync(f, 'utf8')); delete c.outboxRoot; delete c.copiesRoot; chmodSync(f, 0o644); rmSync(f); writeFileSync(f, dispatcherConfigText(c)); chmodSync(f, 0o644); };
+  strip(w.mac.at(D_SRC)); strip(copyConfig(w));
+  const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.match(cd.text, /won't start the Dispatcher until dispatcher-config is run again/);
+  const dc = w.run(['dispatcher-config']); assert.equal(dc.code, 0, dc.text);
+  const want = dispatcherConfigText(dispatcherConfigFor(w.mac, w.cfg).config);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), want); assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), want);
+  assert.equal(w.run(['check-dispatcher']).code, 0);
+  // Any other check-dispatcher FAIL still stops it while the job is loaded: only the root rows are left out.
+  rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true }); strip(w.mac.at(D_SRC));
+  const dc2 = w.run(['dispatcher-config']); assert.equal(dc2.code, 1, dc2.text); assert.match(dc2.text, /check-dispatcher FAILs \(the review runner's folder/);
+});
+
 test('Dispatcher config: install refuses until dispatcher-config wrote it; then the copy carries it, the updater keeps it; place, load, check pass; twice does nothing', async () => {
   const w0 = await world({ dispatcher: true });
   const early = w0.run(['install']); assert.equal(early.code, 1, early.text); assert.match(early.text, /run dispatcher-config first/);
@@ -1396,7 +1467,7 @@ test('Dispatcher config: install refuses until dispatcher-config wrote it; then 
 test('Dispatcher config: changed later, dispatcher-config rewrites both files; a copy made before the Dispatcher was set up says to install again', async () => {
   const w = await dPlaced();
   w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 600000 }; w.cfg = parseInstallConfig(w.raw);
-  const ck0 = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck0.code, 1, ck0.text); assert.match(ck0.text, /not the config this setup writes now \(run dispatcher-config\)/);
+  const ck0 = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck0.code, 1, ck0.text); assert.match(ck0.text, /not the config this setup writes now: runDeadlineMs is missing \(setup writes 600000\) \(run dispatcher-config\)/);   // by name (L871)
   const r = w.run(['dispatcher-config']); assert.equal(r.code, 0, r.text); assert.match(r.text, /all 2 items PASS/);
   assert.equal(JSON.parse(readFileSync(copyConfig(w), 'utf8')).runDeadlineMs, 600000);
   // An install from before: its updater's keep has no dispatcher.json.
