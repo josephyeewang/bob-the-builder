@@ -2488,6 +2488,7 @@ const { createHash } = __bob_node_crypto;
 Object.defineProperties(__bob_e, {
   TIER1_BAR: { get: () => TIER1_BAR, enumerable: true },
   canonicalJson: { get: () => canonicalJson, enumerable: true },
+  UNPRINTED: { get: () => UNPRINTED, enumerable: true },
   cleanPath: { get: () => cleanPath, enumerable: true },
   foldKey: { get: () => foldKey, enumerable: true },
   matchForm: { get: () => matchForm, enumerable: true },
@@ -2533,6 +2534,7 @@ function canonicalJson(v) {
 // (audit-pr133 m-2 and the pre-existing case, L289): over 4096 characters, a leading `~` (a home folder), any `:` (a
 // drive letter, and the Finder shows `:` as `/`), and a path that is only spaces.
 // Returns the path in NFC with any leading "./" taken off, or null.
+// Exported as the one rule for a character no screen should be trusted to show (M2's question box too, L798).
 const UNPRINTED = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
 function shapeClean(p) {
   if (typeof p !== 'string' || !p || p.length > 4096 || !p.isWellFormed()) return null;

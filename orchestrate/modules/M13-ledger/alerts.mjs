@@ -36,7 +36,9 @@
 // Injected GitHub client for one product repo (a fake in tests):
 //   open({ title, body, assignee, labels }) → number      edit(number, body)      close(number, text), text null to say nothing
 //   comment(number, text) → { at } (GitHub's time for it, when it gives one)
-//   read(number) → { open, body, ours, closedByOwner }, null when the issue is gone, false when GitHub refused the read.
+//   read(number) → { open, body, ours, closedByOwner, created_at }, null when the issue is gone, false when GitHub refused
+//     the read. created_at: GitHub's time the issue was opened, or null.
+//   lastServerTime: GitHub's own time on its latest answer (its Date header), in ms, or null (L768)
 //     ours: the robot wrote it. closedByOwner: GitHub shows a person other than the robot closed it.
 //   findOpen(test) → the number of a robot's open issue whose last line passes test, null when there is none
 //   latestOwnComment(number, since) → the robot's latest comment since that time, as { at, body }, or null
@@ -75,6 +77,20 @@ export const lastLine = (body) => String(body ?? '').trimEnd().split('\n').at(-1
 /** A findOpen test for a fixed marker: the marker has to be the whole last line. */
 export const lineIs = (marker) => (line) => line === marker;
 
+/**
+ * The robot's clock against GitHub's (L768). A client's `lastServerTime` is GitHub's own time on its latest answer (its
+ * Date header), in ms, or null when GitHub gave none. clockAhead → how far the robot's clock `t` is ahead of it, in ms,
+ * or null when not known. A "told again once a day" check counts the day by GitHub's times, so a fast clock neither
+ * tells the owner on every pass nor silences the daily reminder (L801 M1: holding it back silenced every reminder for as
+ * long as the clock stayed wrong). A clock more than CLOCK_AHEAD_MS ahead is said in one log line per round while it
+ * stays so (each round makes its own makeAlerts).
+ */
+export const CLOCK_AHEAD_MS = 5 * 60_000;
+export const clockAhead = (gh, t) => { const g = gh?.lastServerTime; return Number.isFinite(g) && Number.isFinite(t) ? t - g : null; };
+export const clockTooFast = (gh, t) => (clockAhead(gh, t) ?? 0) > CLOCK_AHEAD_MS;
+/** GitHub's time now, in ms: the robot's `t` less how far it is ahead; the robot's own when it is behind or GitHub gave no Date header. */
+export const githubNow = (gh, t) => t - Math.max(0, clockAhead(gh, t) ?? 0);
+
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
 
 /** Whether raise's answer means the alert went out: not when GitHub lost it (false). */
@@ -97,7 +113,7 @@ function stateOf(body, id, s, t) {
   return /^<!-- (orch:alert|alert-key) /.test(line) ? null : { status: null, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE, lost: true };
 }
 
-export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
+export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }), log = (s) => process.stderr.write(`${s}\n`) }) {
   let trouble = null; // why the Record refused a cache write since the last report
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
@@ -105,7 +121,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
-  const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return p === null ? t : new Date(p).toISOString(); };
+  // With no readable time it is GitHub's time now (L801 self-review m1): a fast robot stamp would read as ahead, so due every pass.
+  const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return new Date(p ?? githubNow(gh, Date.parse(t))).toISOString(); };
 
   // Keeps where the issue is. `behind`: GitHub already showed the Record out of date, so an earlier write was refused too.
   const cache = (id, s, key, issue, status, behind) => {
@@ -144,6 +161,19 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return await gh.edit(n, bodyOf(id, { ...next, told: toldAt(c?.at, t) }, text, t)) !== false;
   }
 
+  // One log line per round (this makeAlerts) while the robot's clock is over CLOCK_AHEAD_MS ahead of GitHub's, however
+  // many alerts the round raises (L787, L801, r2 m1): each round makes a new makeAlerts, so a wrong clock is said once
+  // a round, and within a round again only after it has been right. A log that throws holds nothing up.
+  let clockSaid = false;
+  const sayClock = (t) => {
+    const ahead = clockAhead(gh, t);
+    if (ahead === null) return;
+    if (!clockTooFast(gh, t)) { clockSaid = false; return; }
+    if (clockSaid) return;
+    clockSaid = true;
+    try { log(`alerts: this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's; daily reminders are counted by GitHub's time. Set the clock right.`); } catch { /* nothing held up */ }
+  };
+
   // The condition holds now. Returns what happened: opened | updated | changed | reminded (the 24 h comment) | suppressed
   // (the owner closed it), or false when GitHub lost it (L143), and then the next pass tries again.
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
@@ -171,8 +201,10 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       at = await looked(id, s, t);
       if (at === false) return false;
     }
+    sayClock(Date.parse(t));   // after a GitHub answer, so its time is this pass's; on every path, not only the quiet one
     if (!at) {
-      const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
+      // The told stamp is GitHub's time, as every later one is (toldAt keeps a comment's own time): one clock counts the day.
+      const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: new Date(githubNow(gh, Date.parse(t))).toISOString(), cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
       if (!ISSUE(issue)) return false;
       cache(id, s, key, issue, 'open', false);
       return 'opened';
@@ -199,7 +231,11 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (owedNow) return tell(still, 'reminded');
       // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
       // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
-      const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
+      // The day is counted by GitHub's time (L768, L801 M1). The told stamps are GitHub's too: the opening's is stamped by
+      // GitHub's time, and toldAt keeps each comment's own time from GitHub. So a robot clock ahead of GitHub's, by minutes
+      // or by days, neither tells on every pass nor holds a reminder back. With no Date header (GitHub always sends one)
+      // the robot's clock counts, as before L768. A clock over CLOCK_AHEAD_MS ahead is logged once while it stays so (sayClock, above).
+      const told = stillWaiting({ now: githubNow(gh, Date.parse(t)), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
       if (told.did !== 'quiet') return told.answer;
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
     })();
@@ -289,25 +325,28 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 
 // A fake GitHub issue client that records every call but its reads (tests, and the owner's dry runs). With no `now` its
 // comments carry no time, so latestOwnComment finds none; a test of the 24 h limit passes its clock. close is the robot's
-// and ownerCloses the owner's.
-export function fakeIssues({ now = null } = {}) {
+// and ownerCloses the owner's. `serverNow` is GitHub's clock (lastServerTime, an issue's created_at); with none given,
+// GitHub's time is not known, as when an answer has no Date header.
+export function fakeIssues({ now = null, serverNow = null } = {}) {
   const issues = new Map();
   const calls = [];
   const spoken = [];
-  const said = (i, body) => { if (now) spoken.push({ i, at: now().toISOString(), body }); };
+  const gNow = serverNow ?? now;
+  const said = (i, body) => { if (gNow) spoken.push({ i, at: gNow().toISOString(), body }); };
   let n = 0;
   return {
     calls, issues,
-    async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [] }); calls.push(['open', n]); return n; },
+    get lastServerTime() { return serverNow ? +serverNow() : null; },
+    async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [], created_at: serverNow ? serverNow().toISOString() : null }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
-    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: now?.().toISOString() }; },
+    async comment(i, text) { issues.get(i).comments.push(text); said(i, text); calls.push(['comment', i]); return { at: gNow?.().toISOString() }; },
     async close(i, text) { const x = issues.get(i); x.closed = true; x.byOwner = false; if (text != null) { x.comments.push(text); said(i, text); } calls.push(['close', i]); },
     // Strict, as GitHub would be (#98 r1 m2, Principle 10): asking about something that is not an issue number is a
     // caller's bug, so it throws rather than answering "gone".
     async read(i) {
       if (!Number.isSafeInteger(i) || i <= 0) throw new Error(`fakeIssues.read: not an issue number: ${JSON.stringify(i)}`);
       const x = issues.get(i);
-      return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true } : null;
+      return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true, created_at: x.created_at } : null;
     },
     async findOpen(test) { for (const [k, x] of issues) if (!x.closed && x.ours !== false && test(lastLine(x.body))) return k; return null; },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
