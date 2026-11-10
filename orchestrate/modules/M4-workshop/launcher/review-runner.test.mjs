@@ -1552,7 +1552,7 @@ test('#307 self-review m1 planted: a tap read while the card can\'t be read is k
   w.ctx.setAsideByJoe = () => [{ session_id: 'S-1', key: 'k-1' }];
   let r = await runnerPass(w.ctx);
   assert.deepEqual(r.setAside, []);
-  refusedFor(r, /review again" for session S-1: card C-1 could not be read, so whether a new review would start can't be known yet; it is read again next pass/);
+  refusedFor(r, /review again" for session S-1: card C-1 could not be read, so whether a new review would start can't be known yet; it is read again each pass/);
   assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 0, 'not told for a moment\'s failure');
   assert.ok(!w.status().taps_read.includes('k-1'), 'the tap is not marked read');
   w.ctx.readCard = readCard;
@@ -1600,6 +1600,90 @@ test('#307 self-review c2 planted: pruning skips a running session, and a pruned
   const r = await runnerPass(w.ctx);
   assert.deepEqual(r.started, []);
   refusedFor(r, /one start per head and tree/);
+});
+
+// #307 r2 M1 (L806): pruning trims the memory and decides nothing. A tree that comes back after its attempt was dropped
+// (P1: a push, a pass, a revert; P4: the card reads closed for one pass) is offered again, and a tap lets it be reviewed.
+test('#307 r2 M1 planted: a tree that comes back after its attempt was pruned keeps its "review again" (P1 revert, P4 closed for a pass)', async () => {
+  const back = async (bounce) => {
+    const w = await ready();
+    w.ask();
+    await runnerPass(w.ctx);
+    w.end('S-1');
+    await runnerPass(w.ctx);
+    const keys = () => Object.keys(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts);
+    await bounce(w);
+    assert.ok(!keys().includes(`C-1:${TREE}:reviewer`), `pruned: ${keys()}`);
+    w.cards.set('C-1', { ...w.cards.get('C-1'), state: 'in_review', head: HEAD });
+    w.heads.set('C-1', HEAD);
+    await runnerPass(w.ctx);
+    assert.deepEqual(w.status().offers, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer', head: HEAD }], 'offered again');
+    w.taps.push({ session_id: 'S-1', key: 'k-1' });
+    w.ask();
+    const r = await runnerPass(w.ctx);
+    assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }]);
+    assert.deepEqual(r.started.map((x) => [x.session_id, x.head]), [['S-2', HEAD]]);
+    // Once set aside, and with S-2 now the start for that tree, a second tap on S-1 is refused.
+    w.taps.push({ session_id: 'S-1', key: 'k-2' });
+    refusedFor(await runnerPass(w.ctx), /review again" for session S-1: /);
+  };
+  await back(async (w) => { w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 }); w.heads.set('C-1', HEAD2); await runnerPass(w.ctx); });
+  await back(async (w) => { w.cards.set('C-1', { ...w.cards.get('C-1'), state: 'closed' }); await runnerPass(w.ctx); });
+});
+
+test('#307 r2 M1: with no attempt, a session that a later start on its tree replaced is not offered, and a tap on it is refused', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  w.taps.push({ session_id: 'S-1', key: 'k-1' });
+  w.ask();
+  await runnerPass(w.ctx);          // S-1 set aside, S-2 starts
+  w.end('S-2');
+  await runnerPass(w.ctx);
+  // Drop every attempt, as a prune would: the records alone decide.
+  const file = join(w.root, 'state.json');
+  const st = JSON.parse(readFileSync(file, 'utf8'));
+  st.attempts = {};
+  writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-2']);
+  w.taps.push({ session_id: 'S-1', key: 'k-2' });
+  refusedFor(await runnerPass(w.ctx), /review again" for session S-1: that session is already set aside/);
+  // Even with its set-aside record gone, S-2's start on the same tree is the one that counts.
+  unlinkSync(join(w.root, 'set-aside', 'S-1.json'));
+  w.taps.push({ session_id: 'S-1', key: 'k-3' });
+  refusedFor(await runnerPass(w.ctx), /review again" for session S-1: a later session already started for this card, tree and role/);
+});
+
+// #307 r2 m1: a tap whose card stays unreadable gives one refused line, not one a pass, and a day on it is a hold.
+test('#307 r2 m1 planted: a tap that waits on an unreadable card is listed once, and held after a day', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  w.ctx.readCard = () => { throw new Error('the Record is busy'); };
+  w.ctx.setAsideByJoe = () => [{ session_id: 'S-1', key: 'k-1' }];
+  let lines = 0;
+  for (let i = 0; i < 80; i++) {
+    w.clock.t += 20 * 60_000;
+    const r = await runnerPass(w.ctx);
+    lines += r.refused.filter((x) => /review again" for session S-1/.test(x.reason)).length;
+  }
+  assert.equal(lines, 1, 'one line for the tap');
+  assert.ok(w.status().holds.some((h) => h.id === 'tap-unreadable' && /1 of Joe's "review again" taps \(session S-1\) have waited a day or more/.test(h.text)), JSON.stringify(w.status().holds));
+  // Before a day, no hold.
+  const v = await ready();
+  v.ask();
+  await runnerPass(v.ctx);
+  v.end('S-1');
+  await runnerPass(v.ctx);
+  v.ctx.readCard = () => { throw new Error('the Record is busy'); };
+  v.ctx.setAsideByJoe = () => [{ session_id: 'S-1', key: 'k-1' }];
+  for (let i = 0; i < 3; i++) await runnerPass(v.ctx);
+  assert.ok(!v.status().holds.some((h) => h.id === 'tap-unreadable'));
 });
 
 // #307 r1 m1 (probe B): an offer passes the tap loop's own test, so a session whose outbox now holds a fail is no offer.

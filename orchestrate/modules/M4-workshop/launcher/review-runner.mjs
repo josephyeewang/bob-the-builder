@@ -84,6 +84,10 @@ export const MAX_PENDING = 200;
 // with many of those as well can still cut the oldest.
 export const TAPS_TOLD_EACH = 10;
 const KEEP_SEEN = 500;
+// How far back the offers look for a session whose attempt was pruned (#307 r2 M1): a tree a push left and a revert
+// brings back is offered again within this. A tap needs no offer and has no window: tapCheck rebuilds its right from the
+// records whenever it comes.
+const OFFER_REBUILD_MS = 30 * 24 * 60 * 60_000;
 const KEEP_LIST = 50;
 // A review request refused for a day is a hold (R-0b-171). One no request has renewed is over, or it would be told for
 // ever with nothing asking: after this long, or two of the Dispatcher's gaps between requests if that is longer, so a
@@ -865,6 +869,7 @@ export async function runnerPass(ctx) {
     if (state.running.some((r) => r.session_id === sid)) return bad('that session is still running');
     const doc = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
     if (!doc) return bad(rl.refused.some((b) => b.sid === sid) ? 'its launch record fails its checks; that needs the builder, not a new review' : 'the runner launched no such session');
+    if (!isHead(doc.head) || !REVIEW_ROLES.includes(doc.role)) return bad('that session reviewed no head, so it has no "review again"');
     const c = await cardOf(doc.card);
     if (c?.ok !== true && c?.missing === true) return bad(`card ${doc.card} is no longer in the Record, so no new review would start`);
     if (c?.ok !== true) return { ok: false, retry: true, reason: `card ${doc.card} could not be read, so whether a new review would start can't be known yet` };
@@ -876,8 +881,18 @@ export async function runnerPass(ctx) {
     if (!needsRole(c.doc, doc.role)) return bad(`card ${doc.card} no longer needs a ${doc.role} (it is ${c.doc?.state ?? 'in no state'}), so no new review would start`);
     const k = keyOf(doc.card, doc.tree ?? doc.head, doc.role);
     const a = state.attempts[k];
-    const held = a?.held === true && a.tap === true && a.session_id === sid;
-    if (!held) return bad('only a session that ended without handing in anything can be set aside');
+    if (a !== undefined) {
+      const held = a?.held === true && a.tap === true && a.session_id === sid;
+      if (!held) return bad('only a session that ended without handing in anything can be set aside');
+    } else {
+      // No attempt (pruned, or never kept): the right is rebuilt from the records, the one source (#307 r2 M1, L806). The
+      // session is the start that counts for its card, tree and role, and is not set aside; the ended record and the
+      // outbox are read below as for any tap. Pruning only trims the memory; it never decides a tap.
+      if (asideIds.has(sid)) return bad('that session is already set aside');
+      const tree = doc.tree ?? doc.head;
+      const other = rl.launches.some(({ doc: d }) => d.session_id !== sid && d.card === doc.card && d.role === doc.role && (d.tree ?? d.head) === tree && !asideIds.has(d.session_id) && !stillNeverRan(d));
+      if (other) return bad('a later session already started for this card, tree and role; only the newest one can be set aside');
+    }
     const e = runnerEnded({ root: P.ended, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: sid });
     if (!e.ok || e.ended.verdict_sha256 !== 'none') return bad(`only a session that ended without handing in anything can be set aside (${e.ok ? 'its ended record names a verdict file' : e.reason})`);
     const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid, uid });
@@ -885,7 +900,7 @@ export async function runnerPass(ctx) {
     const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid }));
     if (left.fails) return bad(`its outbox holds a failing verdict, and a fail is never set aside (${left.said})`);
     if (!left.empty) return bad(`only a session that ended without handing in anything can be set aside (${left.said})`);
-    return { ok: true, doc, k, a };
+    return { ok: true, doc, k, a: a ?? { failures: 0 } };
   };
   let taps = [];
   let tapsRead = false;
@@ -895,6 +910,9 @@ export async function runnerPass(ctx) {
   const tapsSeen = new Set(Array.isArray(state.taps_seen) ? state.taps_seen : []);
   if (tapsRead) state.taps_seen = taps.map((t) => t?.key).filter((key) => typeof key === 'string' && tapsSeen.has(key));
   const tapsRefused = [];
+  // Taps waiting on a card or tree that can't be read, by key: kept only while the tap is still listed.
+  const tapRetry = {};
+  for (const [key, v] of Object.entries(state.tap_retry ?? {})) if (!tapsRead || taps.some((t) => t?.key === key)) tapRetry[key] = v;
   for (const t of taps) {
     if (typeof t?.key === 'string') {
       if (tapsSeen.has(t.key)) continue;
@@ -914,12 +932,17 @@ export async function runnerPass(ctx) {
     };
     const ck = await tapCheck(sid);
     if (!ck.ok && ck.retry && typeof t?.key === 'string') {
-      // Not used up: the key is unread again, so the tap is read next pass (#307 self-review m1).
+      // Not used up: the key is unread again, so the tap is read next pass (#307 self-review m1). One refused line per tap,
+      // not per pass, and from a day on a hold (#307 r2 m1).
       tapsSeen.delete(t.key);
       state.taps_seen = state.taps_seen.filter((x) => x !== t.key);
-      result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${ck.reason}; it is read again next pass` });
+      if (!tapRetry[t.key]) {
+        tapRetry[t.key] = { since: iso(now), sid: String(sid).slice(0, 80) };
+        result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${ck.reason}; it is read again each pass` });
+      }
       continue;
     }
+    if (typeof t?.key === 'string') delete tapRetry[t.key];
     if (!ck.ok) { no(ck.reason); continue; }
     const { doc, k, a } = ck;
     try {
@@ -929,6 +952,9 @@ export async function runnerPass(ctx) {
     state.attempts[k] = { failures: a.failures ?? 0, set_aside: [...(a.set_aside ?? []), sid].slice(-KEEP_LIST) };
     result.setAside.push({ session_id: sid, card: doc.card, role: doc.role });
   }
+  state.tap_retry = tapRetry;
+  const longWait = Object.values(tapRetry).filter((v) => now - (pastTime(v.since, now) ?? now) >= STILL_WAITING_MS);
+  if (longWait.length) hold('tap-unreadable', `${longWait.length} of Joe's "review again" taps (session${longWait.length === 1 ? '' : 's'} ${longWait.slice(0, 5).map((v) => v.sid).join(', ')}${longWait.length > 5 ? ', …' : ''}) have waited a day or more, because the card or the tree of its head can't be read; each is read again every pass`);
   // Every refused tap is told (L736 m2): the first ones each with its cause, the rest in one line, all marked told.
   const untold = tapsRefused.filter((x) => !state.told.includes(x.id));
   for (const x of untold.slice(0, TAPS_TOLD_EACH)) alert(x.id, x.text);
@@ -1303,11 +1329,11 @@ export async function runnerPass(ctx) {
     state.running.push({ card, head, tree, role, session_id: sid, pid: r.pid, started_at: iso(now) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
   }
-  // Attempts no request can use again are dropped (#307 r1 M1), so the memory and its offers don't grow for good: one
-  // whose card is gone, merged or closed, and one whose tree is no longer the tree of the card's head (a newer push
-  // superseded it). One running, one still counting failed starts, or one whose card or tree can't be read now, is kept.
-  // The launch records still hold every start, so dropping an attempt never lets a second session start on the same
-  // card, tree and role.
+  // The memory is trimmed (#307 r1 M1), so it doesn't grow for good: an attempt whose card is gone, merged or closed, or
+  // whose tree is no longer the tree of the card's head (a newer push superseded it), is dropped. One running, one still
+  // counting failed starts (kept for good, whatever its card), or one whose card or tree can't be read now, is kept.
+  // Trimming decides nothing: the launch records still hold every start, so no second session starts on the same card,
+  // tree and role, and a tap's right is rebuilt from the records when its attempt is gone (#307 r2 M1).
   const byCard = new Map();
   for (const k of Object.keys(state.attempts)) {
     const [card, tree, role] = k.split(':');
@@ -1335,7 +1361,13 @@ export async function runnerPass(ctx) {
   }
   // The offers, each passed by tapCheck now (#307 r1 M1, m1). Card, role and head come from the session's launch record,
   // so an attempt held from before #307, which names none of them, is offered too (r1 m2).
-  for (const cand of tapOffers(state)) {
+  const rebuilt = rl.ok ? newestFirst(rl.launches, now).map((l) => l.doc)
+    .filter((d) => REVIEW_ROLES.includes(d.role) && isHead(d.head) && state.attempts[keyOf(d.card, d.tree ?? d.head, d.role)] === undefined && !asideIds.has(d.session_id)
+      && (pastTime(d.launched_at, now) ?? -Infinity) >= now - OFFER_REBUILD_MS)
+    .filter((d, i, all) => all.findIndex((x) => x.card === d.card && x.role === d.role && (x.tree ?? x.head) === (d.tree ?? d.head)) === i)
+    .map((d) => ({ session_id: d.session_id })) : [];
+  const candidates = [...tapOffers(state), ...rebuilt].filter((x, i, all) => all.findIndex((y) => y.session_id === x.session_id) === i);
+  for (const cand of candidates) {
     const ck = await tapCheck(cand.session_id);
     if (ck.ok) offers.push({ session_id: cand.session_id, card: ck.doc.card, role: ck.doc.role, head: ck.doc.head });
   }
