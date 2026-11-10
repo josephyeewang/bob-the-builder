@@ -108,8 +108,8 @@ export async function writeReading(writer, which, probe, { now = () => new Date(
   return writer.put(FACTS[which], { kind: VALUE_KINDS[which], value: v === true || v === false ? v : null, observed_at });
 }
 
-// exit: the worker's exit result, { account, resets_at, source }. A hit is always written, even with no readable reset
-// time (L97 M-3). M11 resumes a card only on a hit observed after the card's run began (the wait's run_started, which
+// exit: the worker's exit result, { account, resets_at, source }. A hit is written even with no readable reset time
+// (L97 M-3), except in the two refusals below; the caller must retry or log an `ok: false`, or the hit is lost. M11 resumes a card only on a hit observed after the card's run began (the wait's run_started, which
 // M9 sets from the claim; MAT-1), with a reset time that has passed; a hit with no reset time puts the card on Joe. A
 // reset time already more than PAST_SLACK_MS before the hit is unreadable too (#78 r2 m-3: "resets 1am" read at 11pm as
 // today's 1am would resume the card a minute later, hit again, and loop every pass). One more than a week after the hit
@@ -119,8 +119,11 @@ export async function writeReading(writer, which, probe, { now = () => new Date(
 // is kept so a second worker hitting the limit does not throw away the time the first one learned, or the card would
 // wait for good (lane 3 review of r2). Otherwise resets_at is null, so yesterday's past reset never resumes a card early.
 // A newer readable time always wins over the kept one.
-// Only a hit that names no known account is refused: there is no fact id to write it under. A writer with no get()
-// cannot apply the keep rule, so it is refused outright (#78 r2 m-4), never silently skipped.
+// Refused (ok: false, nothing written): a hit that names no known account, as there is no fact id to write it under;
+// and a hit with no readable reset time while the stored hit can't be read (L781), as the keep rule can't be applied and
+// writing null could throw away a reset time still ahead. M11 then sees no hit for the run and, after
+// usage_unknown_max_min, tells it as limit_no_hit. A writer with no get() cannot apply the keep rule, so it throws
+// (#78 r2 m-4), never silently skipped.
 export const PAST_SLACK_MS = 10_000;
 export async function writeLimitHit(writer, exit, { now = () => new Date() } = {}) {
   if (typeof writer?.get !== 'function') throw new Error('writeLimitHit needs a fact writer with get() (the keep rule reads the stored hit)');
