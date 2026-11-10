@@ -9,7 +9,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -384,4 +384,74 @@ test('L836: a product named as a role is refused before anything is made; a prod
     assert.equal(existsSync(join(v.copiesRoot, 'p3')), false, 'the start never makes a product folder');
     assert.equal(existsSync(join(v.outboxRoot, 'p3')), false);
   } finally { rmSync(v.d, { recursive: true, force: true }); }
+});
+
+test('#378 r1 M1: product B added while a product A session runs: B\'s start is refused until A\'s settings are shown to deny B, or A has ended', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  let got;
+  const w = world({ walled: (x) => { const r = walledLaunchSettings(x); got = r; return r; } });
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
+    deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
+  w.c.products.p1.render = render('p1');
+  try {
+    // 1. Product A (p1) alone: its session starts, and its settings know nothing of a p2.
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const A = { id: SID, product: 'p1' };
+    // 2. Product B (p2) is added: setup makes its folders, the config gains it.
+    for (const f of [join(w.copiesRoot, 'p2'), join(w.outboxRoot, 'p2', 'worker'), join(w.outboxRoot, 'p2', 'script')]) mkdirSync(f, { recursive: true });
+    const c2 = { ...w.c, products: { ...w.c.products, p2: { repo: 'o/p2', mirror: join(w.d, 'mirror-p2'), render: render('p2') } } };
+    const SB = SID.replace('0f', '3f');
+    const startB = (live) => { w.card.claim.session_id = SB; w.card.product = 'p2'; return startPort(c2, w.deps)({ card: 'C-3', kind: 'editing', product: 'p2', sessionId: SB, live }); };
+    const leftB = () => [existsSync(join(w.copiesRoot, 'p2', 'C-3')), existsSync(join(w.outboxRoot, 'p2', 'worker', SB)), existsSync(join(w.settingsDir, `${SB}.json`))];
+    const r = await startB([A]);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, new RegExp(`session ${SID} \\(product p1\\) started before product p2's folders were on its deny list \\(its shell may read ${join(w.copiesRoot, 'p2')}\\)`));
+    assert.deepEqual(leftB(), [false, false, false], 'nothing is made');
+    // Read and Edit are checked as well as the shell: a settings file whose shell denies p2 but whose Read does not.
+    const f = join(w.settingsDir, `${SID}.json`);
+    const s = JSON.parse(readFileSync(f, 'utf8'));
+    s[S.sandbox][S.filesystem][S.denyRead].push(join(w.copiesRoot, 'p2'), join(w.outboxRoot, 'p2'));
+    writeFileSync(f, JSON.stringify(s));
+    assert.match((await startB([A])).reason, /its Read may reach/);
+    s[S.permissions][S.deny].push(`Read(/${join(w.copiesRoot, 'p2')}/**)`, `Read(/${join(w.outboxRoot, 'p2')}/**)`);
+    writeFileSync(f, JSON.stringify(s));
+    assert.match((await startB([A])).reason, /its Edit may reach/);
+    // A session that can't be told about holds B's start too: its settings gone or not JSON, or no product named.
+    rmSync(f);
+    assert.match((await startB([A])).reason, /settings can't be read \(ENOENT\)/);
+    assert.match((await startB([{ id: SID }])).reason, /names no product/);
+    // A start still waiting from an earlier run whose settings were never written started no claude with them.
+    const b0 = await startB([{ ...A, unstarted: true }]);
+    assert.equal(b0.ok, true, b0.reason);
+    // 3. Once A has ended (no longer live), B starts; a live session of B's own product is not asked.
+    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`));
+    const b = await startB([{ id: SID.replace('0f', '4f'), product: 'p2' }]);
+    assert.equal(b.ok, true, b.reason);
+    // A p1 session started with p2 in the config denies p2 whole, so a later p2 start goes ahead while it runs.
+    const SA2 = SID.replace('0f', '5f');
+    w.card.claim.session_id = SA2; w.card.product = 'p1';
+    const a2 = await startPort(c2, w.deps)({ card: 'C-5', kind: 'editing', product: 'p1', sessionId: SA2 });
+    assert.equal(a2.ok, true, a2.reason);
+    assert.equal(productWallGap(got.settings, { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') }), null);
+    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`));
+    const b2 = await startB([{ id: SA2, product: 'p1' }]);
+    assert.equal(b2.ok, true, b2.reason);
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
+});
+
+test('#378 r1 M1: productWallGap takes a folder above as a deny, and no list as none', () => {
+  const P = { copies: '/c/q', outboxes: '/o/q' };
+  const all = (dirs) => ({ [S.sandbox]: { [S.filesystem]: { [S.denyRead]: dirs } }, [S.permissions]: { [S.deny]: dirs.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } });
+  assert.equal(productWallGap(all(['/c/q', '/o/q']), P), null);
+  assert.equal(productWallGap(all(['/c', '/o/']), P), null, 'a folder above');
+  assert.match(productWallGap(all(['/c/qq', '/o/q']), P), /shell may read \/c\/q$/, 'a longer name is not above');
+  assert.match(productWallGap(all(['/c/q', '/o/q']), { copies: '/c/qq', outboxes: '/o/qq' }), /shell may read \/c\/qq$/, 'nor a shorter one');
+  assert.match(productWallGap(all(['/c/q']), P), /shell may read \/o\/q$/);
+  assert.match(productWallGap({}, P), /shell may read/);
+  assert.match(productWallGap(null, P), /shell may read/);
 });

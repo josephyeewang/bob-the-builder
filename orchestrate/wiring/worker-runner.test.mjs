@@ -439,3 +439,19 @@ test('#364 r2 n2: a start answered as running keeps its process group in the wai
   assert.equal(st.state.requests['S-1'].state, 'waiting'); assert.equal(st.state.requests['S-1'].pgid, 4001);
   assert.match(notes.join('\n'), /a stop was asked for S-1, but its start may have left claude running in process group 4001.*not signalled/);
 });
+
+test('#378 r1 M1, m3: a start is told the other live sessions (listed, and an earlier run\'s waiting starts, marked unstarted); a waiting row names its product; a product setup makes no folder for is refused', async () => {
+  let seen; let row;
+  const w = world({ startAnswer: (x) => { seen = x.live; row = structuredClone(w.kept.at(-1)?.requests?.[x.sessionId]);
+    w.n += 1; return { ok: true, pid: 4000 + w.n, pidStart: `start-${w.n}`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; } });
+  await w.pass([launchReq('S-1')]);
+  assert.deepEqual(seen, [], 'the first start: none');
+  w.state = { ...w.state, requests: { ...w.state.requests, 'S-8': { state: 'waiting', at: T0, card: 'C-8', product: 'p2' } } };
+  await w.pass([launchReq('S-2', { product: 'p3' })]);
+  assert.deepEqual(seen, [{ id: 'S-1', product: 'p1' }, { id: 'S-8', product: 'p2', unstarted: true }]);
+  assert.equal(row.state, 'waiting'); assert.equal(row.product, 'p3');
+  seen = undefined;
+  await w.pass([launchReq('S-3', { product: 'Alpha' })]);
+  assert.equal(seen, undefined, 'not started');
+  assert.equal(w.state.requests['S-3'].state, 'refused');
+});
