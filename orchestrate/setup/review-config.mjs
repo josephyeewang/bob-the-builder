@@ -1,6 +1,6 @@
 // The review runner's config file (review.json), built rather than typed (L709, SAFETY-ROADMAP "the full review.json").
 //
-//   node setup.mjs review-config --pin <x.y.z> --input <owner's file> --out <file> [--dry-run]     (not as root)
+//   node setup.mjs review-config --pin <x.y.z> --input <owner's file> --out <file> [--for-install] [--dry-run]   (not as root)
 //
 // Every field the runner reads (review-runner-main.mjs CONFIG_FIELDS) has exactly ONE source, named in SOURCES below:
 //   setup  from the setup config (layout.mjs, install.mjs) and the Mac's own user records: the folders, the copy's paths, the uids
@@ -12,11 +12,21 @@
 // The input file may hold only the owner's fields: a setup field in it is refused, so a typed value can never stand in for
 // one setup knows.
 //
-// The file written is then read back with the runner's own readConfig, the same check the runner makes at daemon start
-// (m-5 included: the pin must be the one the role tool lists were checked on). If it refuses, the file is removed and
-// nothing is left to install. It is written as the person's own file (never as root): root takes no orders from a file
-// in a home folder. Putting it in place is a separate root step (README): `sudo install -o root -g wheel -m 0644
-// /dev/stdin /Library/orchestrate-review.json < <the file>`, then install or add-to-install reads it as root's own.
+// The pin is checked first (m-5: it must be the one the role tool lists were checked on, M10 TOOLS_CHECKED), so a dry run
+// refuses what the real run refuses (L731 m1). The whole file is then read back with the runner's own readConfig, the same
+// check the runner makes at daemon start, on a new file beside --out; only once it passes is it renamed onto --out. A
+// refused run leaves whatever --out held before (L731 m2). It is written as the person's own file (never as root): root
+// takes no orders from a file in a home folder. Putting it in place is a separate root step (README): `sudo install -o
+// root -g wheel -m 0644 /dev/stdin <runnerConfig> < <the file>`.
+//
+// Two forms, for the two root steps that read it (L731 M1):
+//   --for-install  for a first `install`. It leaves out claudeBin and hooksDir (INSTALL_LATER): on a first install the
+//                  copy carries only the setup config's extras, and install refuses a path outside them. The full file is
+//                  still built and read back first, so every field written is one the runner takes; the runner refuses
+//                  the shorter file by name (claudeBin) until add-to-install has run.
+//   (plain)        for add-to-install (L573), which puts the pinned Claude Code and the hooks into the copy at exactly the
+//                  places this file names (COPY_CLAUDE_CODE/<pin>/claude, COPY_HOOKS) and installs this file last.
+// So the order is: review-config --for-install, install; then review-config, add-to-install (README).
 
 import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix } from 'node:path';
@@ -26,8 +36,8 @@ import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { REVIEW_ROLES } from '../shared/review-roles.mjs';
-import { SNAPSHOT_FILE } from '../modules/M10-rules/snapshot.mjs';
-import { bobPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, workerCopiesPath } from './layout.mjs';
+import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
+import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, bobPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 
 // The one source of each field. The test holds the keys equal to CONFIG_FIELDS.
@@ -41,8 +51,8 @@ export const SOURCES = Object.freeze({
 });
 // What the owner's input file holds: exactly these keys, each required. `product` picks the Record (recordRoot).
 export const OWNER_INPUT = Object.freeze(['product', 'machineWide', 'rules']);
-// The hooks folder inside the copy: the place add-to-install copies the hook scripts to (L573).
-export const COPY_HOOKS = 'hooks';
+// What --for-install leaves out (L731 M1): the two places add-to-install fills, which a first install can't carry.
+export const INSTALL_LATER = Object.freeze(['claudeBin', 'hooksDir']);
 // The wiring, beside the runner in the copy (review-runner-main.mjs: the copy's own .mjs file, never a copy item).
 const WIRING = posix.join(posix.dirname(SCRIPTS.runner), 'review-wiring.mjs');
 const RULE_LISTS = Object.freeze({ production: ['env_files', 'programs', 'hosts'], secrets: ['paths'] });
@@ -67,7 +77,7 @@ export function setupFields(cfg, { pin, userOf }) {
     installRoot: P.installRoot, root: P.reviewRoot, outboxRoot: outboxRootPath(cfg), reviewHome: homeOf(cfg, 'review'),
     uids, recordUid: orch.uid, mirror: mirrorPath(cfg), hooksDir: join(P.installRoot, COPY_HOOKS), accountCopy: P.accountCopy,
     ownerHome: owner.home, ownerUid: owner.uid, ownerTaps: ownerTapsPath(cfg), wiring: join(P.installRoot, WIRING),
-    snapshot: join(P.reviewRoot, SNAPSHOT_FILE), bobFolder: bobPath(cfg),
+    snapshot: join(P.reviewRoot, REVIEW_SNAPSHOT_FILE), bobFolder: bobPath(cfg),
     // What a review session may not read: the robot keys, the private data and the owner's home folder (a Mac home is
     // readable by the staff group, which review is in). The workers' copies are denied whole by review-settings itself.
     deny: [keysPath(cfg), privatePath(cfg), owner.home],
@@ -78,6 +88,9 @@ export function setupFields(cfg, { pin, userOf }) {
 
 /** The fields --pin gives. */
 export const pinFields = (cfg, pin) => ({ pin, claudeBin: pinnedBinary(installPaths(cfg).installRoot, pin) });
+/** Null, or why --pin is refused: the runner's own m-5 rule (readConfig), checked here too so a dry run refuses it alike. */
+export const pinProblem = (pin) => (pin === TOOLS_CHECKED.claude_code ? null
+  : `--pin is ${String(pin).slice(0, 20)}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
 
 /** The owner's fields, from their input file's parsed value: every key required, no other key allowed. → { fields, problems } */
 export function ownerFields(cfg, input) {
@@ -111,13 +124,13 @@ export function ownerFields(cfg, input) {
   }
   if (problems.length) return { fields: null, problems };
   const rules = { production: Object.fromEntries(RULE_LISTS.production.map((k) => [k, [...input.rules.production[k]]])), secrets: { paths: [...input.rules.secrets.paths] } };
-  return { fields: { recordRoot: join(cfg.base, 'products', input.product, 'store'), machineWide: input.machineWide, rules }, problems };
+  return { fields: { recordRoot: storePath(cfg, input.product), machineWide: input.machineWide, rules }, problems };
 }
 
 /** The whole config: { config, problems }. Each field from its one source (SOURCES), in CONFIG_FIELDS' order. */
 export function buildReviewConfig(cfg, { pin, input, userOf }) {
-  const s = setupFields(cfg, { pin, userOf }); const o = ownerFields(cfg, input);
-  const problems = [...s.problems, ...o.problems];
+  const s = setupFields(cfg, { pin, userOf }); const o = ownerFields(cfg, input); const pinWhy = pinProblem(pin);
+  const problems = [...(pinWhy ? [pinWhy] : []), ...s.problems, ...o.problems];
   if (problems.length) return { config: null, problems };
   const from = { setup: s.fields, pin: pinFields(cfg, pin), owner: o.fields };
   const config = {};
@@ -138,36 +151,49 @@ export function readInput(file, { lstat = lstatSync, read = readFileSync } = {})
   try { return JSON.parse(read(file, 'utf8')); } catch { throw new Error(`the input file ${file} is not valid JSON`); }   // never the parser's message: it quotes the file
 }
 
-/** Writes `text` to `out` through a new file beside it and one rename, so a cut-off run leaves the old file or the new. */
-function writeOut(out, text) {
-  const tmp = join(dirname(out), `.${basename(out)}.writing-${process.pid}`);
+/** The new file beside `out` that writeOut fills and checks before the rename. */
+export const writingName = (out) => join(dirname(out), `.${basename(out)}.writing-${process.pid}`);
+/**
+ * Writes `checkText` to a new file beside `out`, runs `check` on it, then (when `text` differs) puts `text` in it, and
+ * renames it onto `out` (L731 m2). A cut-off or refused run leaves `out` as it was and no new file. `check` throws to refuse;
+ * its error is marked `refused`, so the caller tells a refusal from a write that failed.
+ */
+function writeOut(out, { text, checkText = text }, check) {
+  const tmp = writingName(out);
+  const put = (t, flags) => { const fd = openSync(tmp, constants.O_WRONLY | flags | constants.O_NOFOLLOW, 0o644); try { writeSync(fd, t); fsyncSync(fd); } finally { closeSync(fd); } };
   rmSync(tmp, { force: true });
-  const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-  try { writeSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(tmp, out);
+  try {
+    put(checkText, constants.O_CREAT | constants.O_EXCL);
+    try { check(tmp); } catch (e) { throw Object.assign(new Error(e?.message ?? String(e)), { refused: true }); }
+    if (text !== checkText) put(text, constants.O_TRUNC);
+    renameSync(tmp, out);
+  } catch (e) { rmSync(tmp, { force: true }); throw e; }
 }
 
 /**
  * The command. `userOf`, `check` (the runner's readConfig, with its ports) and `write` are ports for a test. → exit code:
  * 0 written and read back, 1 a problem (nothing left at `out`), 2 usage.
  */
-export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, dry }, { euid, userOf, out, err, check = (f) => readConfig(f), write = writeOut, readIn = readInput }) {
+export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, dry, forInstall = false }, { euid, userOf, out, err, check = (f) => readConfig(f), write = writeOut, readIn = readInput }) {
   if (euid === 0) { err('refused: review-config reads your own input file and writes your own copy, so it runs without sudo. Root reads the result only once you have put it in place (README).'); return 2; }
   if (!absPath(outFile) || (basename(outFile) === RUNNER_CONFIG && dirname(outFile).startsWith(installPaths(cfg).install))) { err('refused: --out must be a full path of your own (not the installed copy\'s review.json)'); return 2; }
   let input; try { input = readIn(inputFile); } catch (e) { err(`PROBLEM  ${e.message}`); err('nothing was written.'); return 1; }
   const built = buildReviewConfig(cfg, { pin, input, userOf });
   for (const p of built.problems) err(`PROBLEM  ${p}`);
   if (built.problems.length) { err('nothing was written.'); return 1; }
-  const text = `${JSON.stringify(built.config, null, 1)}\n`;
+  const json = (c) => `${JSON.stringify(c, null, 1)}\n`;
+  const full = json(built.config);
+  const text = forInstall ? json(Object.fromEntries(Object.entries(built.config).filter(([k]) => !INSTALL_LATER.includes(k)))) : full;
   const left = Object.entries(SOURCES).filter(([, s]) => s === 'later').map(([k]) => k);
-  if (dry) { out(text.trimEnd()); out(`dry run: nothing written. Left out (no source yet): ${left.join(', ')}.`); return 0; }
-  try { write(outFile, text); } catch (e) { err(`PROBLEM  ${outFile} could not be written (${e?.code ?? e?.message ?? 'error'})`); return 1; }
-  try { check(outFile); } catch (e) {
-    try { rmSync(outFile, { force: true }); } catch { /* reported below */ }
-    err(`PROBLEM  the review runner would refuse it: ${e.message}`); err(`${outFile} was removed; nothing is left to install.`); return 1;
+  const leftNow = forInstall ? `${left.join(', ')}; and, for the first install, ${INSTALL_LATER.join(' and ')} (add-to-install's)` : left.join(', ');
+  if (dry) { out(text.trimEnd()); out(`dry run: nothing written. Left out (no source yet): ${leftNow}.`); return 0; }
+  try { write(outFile, { text, checkText: full }, check); } catch (e) {
+    if (e?.refused) { err(`PROBLEM  the review runner would refuse it: ${e.message}`); err(`nothing was written; ${outFile} is as it was.`); return 1; }
+    err(`PROBLEM  ${outFile} could not be written (${e?.code ?? e?.message ?? 'error'}); it is as it was.`); return 1;
   }
-  out(`written: ${outFile}, and the review runner's own check takes it.`);
+  out(`written: ${outFile}, and the review runner's own check takes it${forInstall ? ` (checked whole, then written without ${INSTALL_LATER.join(' and ')})` : ''}.`);
   out(`Left out (no source yet): ${left.join(', ')}. Until they are, launch checks 12 and 13 refuse every review.`);
   out(`Next: sudo install -o root -g wheel -m 0644 /dev/stdin <the runnerConfig path in your setup config> < ${outFile}`);
+  out(forInstall ? 'Then: install. After it, run review-config again without --for-install, put that file in place the same way, and run add-to-install.' : 'Then: add-to-install (it puts the pinned Claude Code and the hooks where this file names them).');
   return 0;
 }

@@ -598,7 +598,7 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M4-workshop/': { files: 7, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor), save-work (saveWork); R-0b-147 review-walls-proof; L601 required-keys, lead to place' },
   'modules/M6-merge-gate/': { files: 4, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624)' },
   'modules/M9-record/': { files: 1, why: 'L86: required-keys, lead to place' },
-  'modules/M10-rules/': { files: 3, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text: lead to place (the hook rules snapshot is reached through setup review-config, L709)' },
+  'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
   'modules/M11-dispatcher/': { files: 6, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake, R-0b-128 part 2 proposal-route, R-0b-135 research-intake' },
   'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
   'modules/M13-ledger/': { files: 2, why: 'L237: alert-channel.mjs through lane 3 deliverAlertsPass (alerts.mjs is reached since #184, L428); R-0b-77 waiting' },

@@ -4,13 +4,16 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
-import { OWNER_INPUT, SOURCES, buildReviewConfig, ownerFields, pinFields, reviewConfigCommand, setupFields } from './review-config.mjs';
+import { INSTALL_LATER, OWNER_INPUT, SOURCES, buildReviewConfig, ownerFields, pinFields, pinProblem, reviewConfigCommand, setupFields, writingName } from './review-config.mjs';
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { REVIEW_ROLES } from '../shared/review-roles.mjs';
-import { parseConfig } from './layout.mjs';
-import { parseArgs } from './setup.mjs';
+import { COPY_CLAUDE_CODE, COPY_HOOKS, REVIEW_SNAPSHOT_FILE, folderTable, parseConfig, storePath } from './layout.mjs';
+import { planInstall } from './install.mjs';
+import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
+import { SNAPSHOT_FILE } from '../modules/M10-rules/snapshot.mjs';
+import { main, parseArgs } from './setup.mjs';
 
 const PIN = TOOLS_CHECKED.claude_code;
 const me = process.getuid();
@@ -26,10 +29,10 @@ function world() {
   // The runner's own readConfig, with its ports pointed at this folder (the walls stop at `top`; no access lists here).
   const check = (f) => readConfig(f, { top: base, acl: () => null });
   const input = () => ({ product: 'acme', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: ['/srv/acme/.env'], programs: ['vercel'], hosts: ['api.example.com'] }, secrets: { paths: [] } } });
-  const run = ({ pin = PIN, give = input(), dry = false, euid = me, outFile = join(base, 'out', 'review.json') } = {}) => {
+  const run = ({ pin = PIN, give = input(), dry = false, forInstall = false, euid = me, outFile = join(base, 'out', 'review.json'), useCheck = check } = {}) => {
     const inFile = join(base, 'out', 'input.json'); writeFileSync(inFile, typeof give === 'string' ? give : JSON.stringify(give));
     const lines = { out: [], err: [] };
-    const code = reviewConfigCommand(cfg, { pin, input: inFile, out: outFile, dry }, { euid, userOf, out: (s) => lines.out.push(s), err: (s) => lines.err.push(s), check });
+    const code = reviewConfigCommand(cfg, { pin, input: inFile, out: outFile, dry, forInstall }, { euid, userOf, out: (s) => lines.out.push(s), err: (s) => lines.err.push(s), ...(useCheck ? { check: useCheck } : {}) });
     return { code, ...lines, outFile, text: existsSync(outFile) ? readFileSync(outFile, 'utf8') : null };
   };
   return { top, base, cfg, users, userOf, check, input, run, done: () => rmSync(top, { recursive: true, force: true }) };
@@ -67,7 +70,8 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     assert.equal(c.hooksDir, join(B, 'install/orchestrate/hooks'));
     assert.equal(c.wiring, join(B, 'install/orchestrate/modules/M4-workshop/launcher/review-wiring.mjs'));
     assert.equal(c.root, join(B, 'review'));
-    assert.equal(c.snapshot, join(B, 'review/rules-snapshot.json'));
+    assert.equal(c.snapshot, join(B, 'review', REVIEW_SNAPSHOT_FILE));
+    assert.notEqual(REVIEW_SNAPSHOT_FILE, SNAPSHOT_FILE, 'M4\'s runner snapshot and M10\'s signed snapshot are two formats: never one file name (L731 M2)');
     assert.equal(c.outboxRoot, join(B, 'outboxes'));
     assert.equal(c.recordRoot, join(B, 'products/acme/store'));
     assert.equal(c.recordUid, me + 2);
@@ -122,14 +126,21 @@ test('the input file may not set a field setup or the pin gives, nor any field t
   } finally { w.done(); }
 });
 
-test('m-5: a pin other than the one the tool lists were checked on is refused by the runner\'s check, and the file is removed', () => {
+test('m-5: a pin other than the one the tool lists were checked on is refused, the dry run too (L731 m1), and nothing is written', () => {
   const w = world();
   try {
+    const moved = new RegExp(`--pin is 2\\.1\\.999, but the role tool lists were checked on Claude Code ${PIN.replaceAll('.', '\\.')}`);
     const r = w.run({ pin: '2.1.999' });
     assert.equal(r.code, 1);
-    assert.match(r.err.join('\n'), new RegExp(`pin is 2\\.1\\.999, but the role tool lists were checked on Claude Code ${PIN.replaceAll('.', '\\.')}`));
-    assert.match(r.err.join('\n'), /was removed; nothing is left to install/);
+    assert.match(r.err.join('\n'), moved);
+    assert.match(r.err.join('\n'), /nothing was written/);
     assert.equal(r.text, null);
+    for (const forInstall of [false, true]) {
+      const d = w.run({ pin: '2.1.999', dry: true, forInstall });
+      assert.equal(d.code, 1, 'the dry run refuses what the real run refuses'); assert.match(d.err.join('\n'), moved); assert.deepEqual(d.out, []);
+    }
+    assert.equal(pinProblem(PIN), null);
+    assert.equal(buildReviewConfig(w.cfg, { pin: '2.1.317', input: w.input(), userOf: w.userOf }).config, null);
     assert.deepEqual(readdirSync(join(w.base, 'out')).filter((n) => n !== 'input.json'), [], 'no temporary file left');
     // readConfig itself, at daemon start: the same file with the checked pin passes, a moved pin does not.
     const ok = w.run(); assert.equal(ok.code, 0);
@@ -146,6 +157,98 @@ test('a wall the runner would refuse removes the file too: the review folder mis
     assert.equal(r.code, 1);
     assert.match(r.err.join('\n'), /the review runner would refuse it: config: root: .* is missing/);
     assert.equal(r.text, null);
+  } finally { w.done(); }
+});
+
+test('L731 m2: a refused run keeps the file --out held before, and leaves no new file beside it', () => {
+  const w = world();
+  try {
+    const good = w.run(); assert.equal(good.code, 0);
+    rmSync(join(w.base, 'review'), { recursive: true });
+    for (const forInstall of [false, true]) {
+      const r = w.run({ forInstall });
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /is as it was/);
+      assert.equal(r.text, good.text, 'the earlier good file is kept, byte for byte');
+      assert.equal(existsSync(writingName(r.outFile)), false, 'no new file left beside it');
+    }
+  } finally { w.done(); }
+});
+
+test('L731 m3: with no check passed in, the runner\'s own readConfig is the check', () => {
+  const w = world();
+  try {
+    // The setup's real default, readConfig(file) with its real ports: with the runner's folder gone it refuses, so a
+    // default that checks nothing would be seen writing the file.
+    rmSync(join(w.base, 'review'), { recursive: true });
+    const r = w.run({ useCheck: null });
+    assert.equal(r.code, 1, r.out.join('\n'));
+    assert.match(r.err.join('\n'), /the review runner would refuse it: config: /);
+    assert.equal(r.text, null);
+  } finally { w.done(); }
+});
+
+test('L731 m3: setup.mjs main runs review-config with the runner\'s own readConfig, and passes --for-install on', () => {
+  const w = world();
+  try {
+    // A Mac stand-in for main: the setup config, and the user records dscl would answer.
+    const io = {
+      euid: () => me,
+      readConfig: () => JSON.stringify({ base: w.base, owner: 'joe', products: ['acme', 'beta'] }),
+      run: (bin, args) => {
+        const u = w.users[String(args[2]).replace('/Users/', '')];
+        return u ? { status: 0, stdout: `UniqueID: ${u.uid}\nPrimaryGroupID: 20\nNFSHomeDirectory: ${u.home}\n`, stderr: '' } : { status: 56, stdout: '', stderr: '' };
+      },
+    };
+    const inFile = join(w.base, 'out', 'input.json'); writeFileSync(inFile, JSON.stringify(w.input()));
+    const outFile = join(w.base, 'out', 'main.json');
+    const go = (extra = []) => { const lines = []; const code = main(['review-config', '--config', '/x/setup.json', '--pin', PIN, '--input', inFile, '--out', outFile, ...extra], { io, out: (x) => lines.push(x), err: (x) => lines.push(x) }); return { code, text: lines.join('\n') }; };
+    let r = go(['--for-install']);
+    assert.equal(r.code, 0, r.text);
+    const c = JSON.parse(readFileSync(outFile, 'utf8'));
+    assert.equal(Object.hasOwn(c, 'claudeBin') || Object.hasOwn(c, 'hooksDir'), false, '--for-install reached the command');
+    rmSync(outFile);
+    rmSync(join(w.base, 'review'), { recursive: true });
+    r = go();
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, /the review runner would refuse it: config: root: /, 'main\'s check is readConfig itself');
+    assert.equal(existsSync(outFile), false);
+  } finally { w.done(); }
+});
+
+test('L731 M1: --for-install builds the file a first install takes; the plain file is for add-to-install', () => {
+  const w = world();
+  try {
+    const full = w.run(); assert.equal(full.code, 0);
+    const first = w.run({ forInstall: true, outFile: join(w.base, 'out', 'first.json') });
+    assert.equal(first.code, 0, first.err.join('\n'));
+    assert.match(first.out.join('\n'), /checked whole, then written without claudeBin and hooksDir/);
+    assert.match(first.out.join('\n'), /Then: install\. After it, run review-config again without --for-install/);
+    const a = JSON.parse(full.text); const b = JSON.parse(first.text);
+    assert.deepEqual(INSTALL_LATER, ['claudeBin', 'hooksDir']);
+    for (const k of INSTALL_LATER) assert.equal(Object.hasOwn(b, k), false, k);
+    for (const k of INSTALL_LATER) delete a[k];
+    assert.deepEqual(b, a, 'every other field is the full file\'s, read back whole');
+    // Install's own plan, on a fresh Mac (no copy yet), reading each file as the runner config.
+    const io = { at: (p) => p, rootUid: 0, nodeBinProblem: () => null };
+    const plan = (file) => planInstall(io, { ...w.cfg, runnerConfig: file, extras: [], nodeBin: '/usr/local/bin/node', address: 'https://example.invalid/o/r.git', gitBin: '/usr/bin/git' }, { readSource: (f) => readFileSync(f, 'utf8'), runUpdater: () => ({ status: 0 }) });
+    const p1 = plan(first.outFile);
+    assert.deepEqual(p1.problems, [], 'install takes the --for-install file');
+    assert.ok(p1.ops.length > 0, 'and plans its steps');
+    const p2 = plan(full.outFile);
+    assert.deepEqual(p2.problems.map((p) => /the runner config's (claudeBin|hooksDir) .* is not inside any of the extras/.exec(p)?.[1]), ['claudeBin', 'hooksDir'], 'the plain file is not for a first install');
+    // The two places the plain file names are the ones add-to-install fills: one spelling each.
+    assert.equal(JSON.parse(full.text).claudeBin, join(w.base, 'install/orchestrate', COPY_CLAUDE_CODE, PIN, 'claude'));
+    assert.equal(pinnedBinary('/r', PIN), join('/r', COPY_CLAUDE_CODE, PIN, 'claude'), 'M4 pinnedBinary still spells the folder as layout does');
+    assert.equal(JSON.parse(full.text).hooksDir, join(w.base, 'install/orchestrate', COPY_HOOKS));
+  } finally { w.done(); }
+});
+
+test('L731 m4: the Record\'s folder is spelled once (layout storePath), for the folder table and the runner alike', () => {
+  const w = world();
+  try {
+    assert.equal(JSON.parse(w.run().text).recordRoot, storePath(w.cfg, 'acme'));
+    assert.ok(folderTable(w.cfg).some((r) => r.path === storePath(w.cfg, 'acme') && r.owner === 'orchestrate'));
   } finally { w.done(); }
 });
 
@@ -175,4 +278,6 @@ test('setup.mjs: review-config needs --pin, --input and --out, and those flags b
   assert.throws(() => parseArgs(['review-config', '--pin', 'latest', '--input', '/a', '--out', '/b']), /--pin must be a version/);
   assert.throws(() => parseArgs(['check', '--input', '/a']), /only for review-config/);
   assert.throws(() => parseArgs(['install', '--pin', PIN]), /--pin is only for review-config/);
+  assert.equal(parseArgs(['review-config', '--pin', PIN, '--input', '/a', '--out', '/b', '--for-install']).forInstall, true);
+  assert.throws(() => parseArgs(['install', '--for-install']), /--for-install is only for review-config/);
 });

@@ -108,6 +108,16 @@ export const bobPath = (cfg) => join(cfg.base, 'bob');
 export const reviewCopiesPath = (cfg) => join(cfg.base, 'review-copies');
 export const workerCopiesPath = (cfg) => join(cfg.base, 'worker-copies');
 export const outboxRootPath = (cfg) => join(cfg.base, 'outboxes');
+/** A product's Record (the folder table's `products/<prod>/store`, and the runner's recordRoot). */
+export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store');
+// The rules snapshot the review runner writes for its sessions' hooks (M4 hooks/snapshot.mjs writeSnapshot: written_at,
+// hash, rules), in the runner's own folder. Its own name (L731 M2): M10's signed snapshot (snapshot.mjs SNAPSHOT_FILE) is
+// another format, not placed yet, and must never share a file name with this one.
+export const REVIEW_SNAPSHOT_FILE = 'review-rules-snapshot.json';
+// The two items add-to-install puts into the installed copy (L573): the pinned Claude Code (CLAUDE_CODE/<pin>/claude,
+// hooks-check.mjs pinnedBinary) and the hook scripts. One spelling each, for review-config and add-to-install alike.
+export const COPY_CLAUDE_CODE = 'claude-code';
+export const COPY_HOOKS = 'hooks';
 
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
@@ -167,7 +177,7 @@ export function folderTable(cfg) {
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
       [p('products', prod), 'root', 0o755, `${prod}: its folders`],
-      [p('products', prod, 'store'), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
+      [storePath(cfg, prod), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
