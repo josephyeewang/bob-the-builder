@@ -669,6 +669,24 @@ test('L600 PR 1: with the robot App named, the real deliver pass sends the round
   assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
 });
 
+// L727: a store that won't open is told through the robot App's own channel, with nothing injected.
+test('L727: with the robot App named, a stopped store is told through robotChannel, once, in the alert repository', async () => {
+  const w = withKey(world({ extra: APP }));
+  assert.equal(boot(w).code, 0);
+  const diary = join(w.config.recordRoot, 'diary.jsonl');
+  rmSync(diary);
+  mkdirSync(diary);
+  const gh = appGitHub(w);
+  for (let i = 0; i < 2; i++) {
+    const logs = [];
+    assert.equal(await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn: gh.fetchFn } }), 1, logs.join('\n'));
+  }
+  const stops = [...gh.issues.values()].filter((i) => /Record has stopped: store_layout/.test(i.title));
+  assert.equal(stops.length, 1, 'the second start finds the open issue');
+  assert.equal(stops[0].assignees?.[0], APP.alertOwner);
+  assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
+});
+
 test('L600 PR 1: a refused mint fails the deliver pass, told and kept in the queue, and is not asked again that round', async () => {
   const w = withKey(world({ extra: APP }));
   const gh = appGitHub(w, { mintStatus: 401 });
