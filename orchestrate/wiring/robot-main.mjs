@@ -20,7 +20,7 @@
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
 // keeps its lock, as M11 does for a late pass: the process exits, and the next start breaks the dead lock and says so.
 
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
@@ -79,16 +79,19 @@ export function pidState(pid, { kill = (p, s) => process.kill(p, s) } = {}) {
  * { ok: false, code, line }. Code 0 only for a readable lock held by a live process of this user, taken within the
  * longest a round may run; every other refusal is LOCK_REFUSED.
  */
-export function takeRoundLock(file, { now, maxHeldMs, state = pidState, read = (f) => readFileSync(f, 'utf8') }) {
+export function takeRoundLock(file, { now, maxHeldMs, state = pidState }) {
   let seen = null;
   const l = takePassLock(file, { now, dead: (pid) => { seen = state(pid); return seen === 'dead'; } });
   if (l.ok) return { ok: true, lock: l };
   if (seen === 'ours') {
-    let takenAt = NaN; try { takenAt = Date.parse(JSON.parse(read(file))?.taken_at ?? ''); } catch { /* unreadable now */ }
+    // The holder takePassLock read (L754): never a second read, which could find the lock released or taken by another.
+    const takenAt = Date.parse(l.held?.taken_at ?? '');
     const held = now - takenAt;
     if (Number.isFinite(takenAt) && held >= -60_000 && held <= maxHeldMs) return { ok: false, code: 0, line: `robot: ${l.reason}` };
     const why = Number.isFinite(takenAt) ? (held < -60_000 ? 'its time is in the future' : `it has been held ${Math.round(held / 60e3)} minutes, longer than any round may run`) : 'it has no readable time';
-    return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}` };
+    // A pid of ours that lives on past any round is a reused pid, or a stuck round: the lock is never broken on its own,
+    // so the line says how to clear it (L754).
+    return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}; if no robot round is running (check pid ${l.held?.pid} is not one), delete ${file}` };
   }
   const cause = seen === 'foreign' ? `${l.reason}, a process that is not this job's user's` : l.reason;
   return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}` };

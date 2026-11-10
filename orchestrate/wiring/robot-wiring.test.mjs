@@ -8,8 +8,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
@@ -19,12 +20,12 @@ import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES } from './robot-wiring.mjs';
-import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
+import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState } from './robot-main.mjs';
+import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState, takeRoundLock } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -293,6 +294,8 @@ test('L740: every lock the round cannot take exits 3 and names the lock and the 
   // Ours and alive, but held longer than any round may run (a reused pid, or a round that outlived its watchdog).
   writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() - 3 * 60 * 60e3).toISOString() }));
   refused(await run(w.configFile), /held 180 minutes, longer than any round may run/);
+  // L754 (#312 Minor): the lock is never broken on its own, so the line says how to clear it, with its path.
+  refused(await run(w.configFile), new RegExp(`if no robot round is running \\(check pid ${process.pid} is not one\\), delete ${lockOf(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
   // Ours and alive, with no readable time, or one in the future.
   writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
   refused(await run(w.configFile), /no readable time/);
@@ -491,4 +494,33 @@ test('audit #150 P21: the wired heartbeat reads the lock file its config names: 
   rmSync(w.config.dispatcherLockFile);
   await passes.heartbeat().catch(() => {});
   assert.equal(lateQ().length, 1, 'no holder');
+});
+
+// L754 (#312 Minors): the holder read once. A round of ours that releases its lock while this one looks is still exit 0
+// (before, a second read found it gone: exit 3 "no readable time"); and a lock is never seen half-written.
+test('L754: a holder that releases while the round looks is still a running round of ours (exit 0); a lock appears whole', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date(at).toISOString() }));
+  const r = takeRoundLock(f, { now: at + 1000, maxHeldMs: 60e3, state: () => { rmSync(f, { force: true }); return 'ours'; } });
+  assert.deepEqual([r.ok, r.code], [false, 0], r.line);
+  assert.match(r.line, /another pass runs/);
+  const held = takePassLock(f, { pid: 4242, now: at });
+  assert.equal(held.ok, true);
+  const b = takePassLock(f, { pid: 4343, now: at, dead: () => false });
+  assert.deepEqual([b.ok, b.held?.pid, b.held?.taken_at], [false, 4242, new Date(at).toISOString()], 'the holder as read is handed back');
+  const st = lstatSync(f);
+  assert.deepEqual([st.nlink, st.mode & 0o777], [1, 0o600], 'one name, 0600');
+  assert.deepEqual(readdirSync(dirname(f)).filter((n) => n.endsWith('.new')), [], 'no file of its own is left');
+  held.release();
+  assert.equal(existsSync(f), false);
+  // The lock path itself is never created empty and written after (a reader in between saw "unreadable"): only linked.
+  const opened = []; const real = fs.openSync;
+  fs.openSync = (path, ...rest) => { opened.push(String(path)); return real(path, ...rest); };
+  syncBuiltinESMExports();
+  try { const t = takePassLock(f, { pid: 4444, now: at }); assert.equal(t.ok, true); t.release(); }
+  finally { fs.openSync = real; syncBuiltinESMExports(); }
+  assert.ok(opened.length >= 1, 'the take was seen');
+  assert.ok(!opened.includes(f), `the lock is linked into place, never opened to be written: ${opened.join(', ')}`);
 });
