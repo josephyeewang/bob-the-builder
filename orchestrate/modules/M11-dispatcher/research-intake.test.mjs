@@ -246,6 +246,7 @@ test('L736 M1 planted: researchCopyPass never pushes or sends on a card whose as
     assert.deepEqual(w.alerts.filter((t) => t.startsWith('stale')), []);
     // Told, then left quietly (self-review m7).
     assert.deepEqual(await w.pass(w.T + RETRY_MS * 4), []);
+    assert.deepEqual(await w.pass(w.T + 2 * DAY), [], 'days later too');
     assert.equal(w.calls.length, 0, 'never pushed');
     assert.equal(w.alerts.filter((t) => t.includes(`was not used: the ask was ${state}`)).length, 1, w.alerts.join(' | '));
     assert.equal(w.rec.read('card', w.card).doc.state, 'ready', 'left where it is');
