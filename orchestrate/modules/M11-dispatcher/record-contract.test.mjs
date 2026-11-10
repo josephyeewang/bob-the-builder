@@ -148,7 +148,7 @@ async function inReview(w) {
   await w.pass();
   const [l] = w.launched;
   must(put(w.rec, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
-  must(w.rec.applyOutbox({ role: 'worker', sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
+  must(w.rec.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'in_review');
   return l;
 }

@@ -8,7 +8,7 @@
 // one takes) fails too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, outboxFile, product, readyCard, runCard, seed, plan, put, must, iso, PRODUCT } from './fixtures.test-helper.mjs';
+import { setup, outboxFile, outboxTag, product, readyCard, runCard, seed, plan, put, must, iso, PRODUCT } from './fixtures.test-helper.mjs';
 import { recWith, parkOnLimit, setClock } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
 
@@ -28,7 +28,7 @@ test('L129 M-1: the stand-in and the real applyOutbox agree on every name and ro
     const names = [...Object.keys(OUTBOX_KINDS).flatMap((k) => [`${k}X${++n}.md`, `${k}X${++n}.json`, `${k}compact-X${++n}.md`]), ...EXTRA];
     for (const name of names) {
       const p = outboxFile(env, role, sid, name, 'plain text body\n');
-      const tag = { role, sessionId: sid, card: 'C-1' };
+      const tag = outboxTag(role, sid, { card: 'C-1' });
       const real = env.record.applyOutbox(tag, p);
       const f = fake.applyOutbox(tag, p);
       cases += 1;
