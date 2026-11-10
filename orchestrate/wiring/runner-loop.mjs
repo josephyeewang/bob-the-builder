@@ -29,14 +29,16 @@
 //   - the stop waits RUNNER_TERM_WAIT_MS for SIGTERM (signal 0 alone between, so the wait is not spent on ps), then
 //     sends SIGKILL and waits up to RUNNER_KILL_WAIT_MS for the group to go (review m2). With the leader check's ps
 //     (at most RUNNER_PS_MS) all of it fits inside RUNNER_PORT_MS.
-// The leader's start time is read by leaderStart, the runner's one reader of it: ps in UTC and the C locale (#362 r1
-// M2), so a time zone change on the Mac never makes a live group read as reused. The start port records it the same way.
+// The leader's start time is read by leaderStart, which is M9 lock.mjs startTime (L850 X1): ps in UTC and the C locale
+// (#362 r1 M2), as UTC ISO, so a time zone change on the Mac never makes a live group read as reused. The start port
+// records it the same way, and groupGone compares with M9's startDiffers, the one comparison of two start times. A start
+// recorded before L830 is ps's UTC lstart text: it is read as the same instant (lstartIso), never as another start.
 // The start, save, pause, drain and size ports come in a later step; a loop without them is refused.
 
 import { execFileSync } from 'node:child_process';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { realProbe } from '../modules/M9-record/lock.mjs';
+import { START_ISO, lstartIso, realProbe, startDiffers, startTime } from '../modules/M9-record/lock.mjs';
 import { stopProcessGroup } from '../modules/M11-dispatcher/pass.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
 import { readRequest, writeStatus } from './runner-files.mjs';
@@ -53,18 +55,15 @@ if (RUNNER_TICK_MS + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('
 if (RUNNER_PS_MS + RUNNER_TERM_WAIT_MS + RUNNER_KILL_WAIT_MS + 1_000 >= RUNNER_PORT_MS) throw new Error('the stop\'s ps and waits must leave room inside RUNNER_PORT_MS');
 
 /**
- * A process's start time as ps prints it in UTC and the C locale, or null (#362 r1 M2): the one reader the runner records
- * and compares with, so the Mac's time zone or language never changes the string for the same process.
+ * A process's start time in UTC ISO, or null: M9's startTime (L850 X1) within RUNNER_PS_MS, the one reader the runner
+ * records and compares with, so the Mac's time zone or language never changes it for the same process.
  */
 export function leaderStart(pid, { run = execFileSync } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  try {
-    const out = run('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: RUNNER_PS_MS,
-      env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } });
-    const t = String(out).trim();
-    return t || null;
-  } catch { return null; }
+  return startTime(pid, { run, timeoutMs: RUNNER_PS_MS });
 }
+// A recorded start time in the one shape: UTC ISO, or the UTC lstart text a runner recorded before L830 (the same instant).
+const recordedStart = (v) => (typeof v === 'string' && START_ISO.test(v) ? v : lstartIso(v));
 const runnerProbe = Object.freeze({ kill: realProbe.kill, pidStart: leaderStart });
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -88,13 +87,17 @@ export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep
   const groupGone = (s) => {
     if (!Number.isInteger(s?.pgid) || s.pgid <= 1) throw new Error('no process group');
     if (s.pid !== s.pgid || typeof s.pid_start !== 'string' || !s.pid_start) throw new Error('no group leader start time, so a reused number can\'t be told from the runner\'s group');
+    const recorded = recordedStart(s.pid_start);
+    if (!recorded) throw new Error('the group leader\'s recorded start time is in no shape it can be compared in, so a reused number can\'t be told from the runner\'s group');
     // The leader's number used again by another process: the runner's group is gone, whatever signal 0 says.
     // (A leader that has exited says nothing: the rest of its group may still run, and signal 0 below tells.)
     let there = true; try { probe.kill(s.pid); } catch (e) { if (e?.code === 'ESRCH') there = false; else if (e?.code !== 'EPERM') throw e; }
     if (there) {
+      // A read that fails or is in another shape tells nothing: the group is gone only if signal 0 says so, and else it
+      // can't be told (never read as reused, never signalled).
       const now = probe.pidStart(s.pid);
-      if (typeof now !== 'string' || !now) { if (signalGone(s.pgid)) return true; throw new Error('the group leader\'s start time can\'t be read'); }
-      if (now !== s.pid_start) return true;
+      if (typeof now !== 'string' || !START_ISO.test(now)) { if (signalGone(s.pgid)) return true; throw new Error('the group leader\'s start time can\'t be read'); }
+      if (startDiffers(recorded, now)) return true;
     }
     return signalGone(s.pgid);
   };
