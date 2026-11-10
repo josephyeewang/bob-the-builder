@@ -52,7 +52,7 @@
 // `now` stays the pass's one time for the age rules. The caller runs a pass at least every RUNNER_STATUS_EVERY_MS (L769).
 
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
-import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, USED_UP, checkSession } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
@@ -69,8 +69,8 @@ export const STATUS_SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'ca
 const VERBS = Object.freeze(['stop', 'launch', 'stopGroup', 'saveWork', 'pauseLead']);
 const NAME = /^(stop|launch|stopGroup|saveWork|pauseLead)-([A-Za-z0-9._-]{1,140})\.json$/;
 const NONCE = /^[a-f0-9]{16}$/;
-// The product rule is M10's, as owner-asks.mjs checks it before asking.
-const productName = (p) => typeof p === 'string' && p.length <= 64 && PRODUCT_NAME.test(p);
+// The product rule is setup's (shared/product-paths.mjs PRODUCT, #378 r1 m3), as owner-asks.mjs checks it before asking.
+const productName = (p) => typeof p === 'string' && PRODUCT.test(p);
 
 const late = (ms) => new Promise((resolve) => { const t = setTimeout(() => resolve({ late: true }), ms); t.unref?.(); });
 /** A port's answer within ms, or { late: true }; a throw is { threw: message }. */
@@ -221,10 +221,15 @@ export async function workerRunnerPass(ctx) {
     if (typeof l.card !== 'string' || !CARD_ID.test(l.card) || l.card.startsWith('.') || !productName(l.product)) return refuse('the launch names no card or product the runner takes');
     // One session per card's copy (#358 r1 m4): a live listed one, or a start that may be on, holds it.
     if (state.sessions.some((s) => s.card === l.card && isLive(s)) || Object.values(state.requests).some((r) => r.state === 'waiting' && r.card === l.card)) return refuse(`card ${l.card} already has a session the runner started, or a start still on`);
-    state.requests[id] = { state: 'waiting', at: now, card: l.card }; flush();
+    state.requests[id] = { state: 'waiting', at: now, card: l.card, product: l.product }; flush();
+    // The other live sessions (#378 r1 M1): the listed ones, and the waiting starts of an earlier run (this run's own
+    // starts are made from this config, so they deny every product in it). One not known to have reached claude is
+    // marked so: no settings file then means no claude was started with it.
+    const live = [...state.sessions.filter(isLive).map((s) => ({ id: s.id, product: s.product })),
+      ...Object.entries(state.requests).filter(([q, r]) => q !== id && r?.state === 'waiting' && !pending.has(q)).map(([q, r]) => ({ id: q, product: r.product, unstarted: true }))];
     // The start is held across passes: one still on after portMs is settled by a later pass (step 0), never lost.
     const p = { key: k.key, id, l, done: false, a: undefined };
-    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id }))
+    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(id, p);
     await Promise.race([p.on, late(portMs)]);

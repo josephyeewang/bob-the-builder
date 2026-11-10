@@ -200,7 +200,10 @@ test('#378 m4: launchAnswerWrong itself refuses a flat, another product\'s or a 
   assert.equal(launchAnswerWrong(good, ask), null);
   for (const outbox of ['/o/worker/S-1', '/o/p2/worker/S-1', '/o/p1/script/S-1', '/o/p1/worker/S-2']) assert.match(launchAnswerWrong({ ...good, outbox }, ask), /another outbox/, outbox);
   for (const copy of ['/c/C-1', '/c/p2/C-1', '/c/p1/C-2']) assert.match(launchAnswerWrong({ ...good, copy }, ask), /another copy/, copy);
-  assert.match(launchAnswerWrong({ ...good, outbox: '/o/worker/worker/S-1' }, { ...ask, product: 'worker' }), /another outbox/, 'a product named as a role');
+  assert.match(launchAnswerWrong({ ...good, outbox: '/o/worker/worker/S-1' }, { ...ask, product: 'worker' }), /outbox can't be named: product worker is named as a role/, 'a product named as a role');
+  // A name setup makes no folder for is said as such (#378 r1 m3), never as another outbox.
+  assert.match(launchAnswerWrong({ ...good, outbox: '/o/Alpha/worker/S-1' }, { ...ask, product: 'Alpha' }), /outbox can't be named: not a product name setup makes/);
+  assert.match(launchAnswerWrong(good, { ...ask, card: '.x' }), /copy can't be named: not a card that names one plain folder/);
   // The reason names the place that is wrong (#378 m6): a copies root that is not a path is the copy's fault.
   assert.match(launchAnswerWrong(good, { ...ask, copiesRoot: undefined }), /another copy/);
   assert.match(launchAnswerWrong(good, { ...ask, outboxRoot: undefined }), /another outbox/);

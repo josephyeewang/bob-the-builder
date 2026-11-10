@@ -13,7 +13,7 @@
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
 // A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
-import { PRODUCT, productRoleClash } from '../shared/product-paths.mjs';
+import { PRODUCT, productRoleClash, runnerPlaces } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
@@ -228,10 +228,11 @@ export function folderTable(cfg) {
     // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
     // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the
     // role folders above (the runner starts worker and script sessions).
-    ...cfg.products.flatMap((prod) => [
-      [join(workerCopiesPath(cfg), prod), 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
-      [join(outboxRootPath(cfg), prod), 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
-      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), prod, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
+    // Named by the one rule the runner uses (shared/product-paths.mjs runnerPlaces, #378 r1 m1).
+    ...cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]).flatMap(([prod, at]) => [
+      [at.copies, 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
+      [at.outboxes, 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
+      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(at.outboxes, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
     ]),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.

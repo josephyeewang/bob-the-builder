@@ -14,8 +14,10 @@ import { AI_ROLES } from './record.mjs';
 export const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** True when a product name is an AI role's, in any letter case. */
 export const productRoleClash = (product) => typeof product === 'string' && AI_ROLES.some((r) => r.toLowerCase() === product.toLowerCase());
+// The card and session id characters (CARD_ID, SESSION_ID), with no leading `.` (#378 r1 c1): safe by itself.
+const PLAIN = /^(?!\.)(?!.*\.\.)[A-Za-z0-9._-]{1,200}$/;
 const plain = (what, n) => {
-  if (typeof n !== 'string' || !n || n.includes('/') || n.includes('..') || n.startsWith('.') || n.includes('\0')) throw new Error(`not a ${what} that names one plain folder`);
+  if (typeof n !== 'string' || !PLAIN.test(n)) throw new Error(`not a ${what} that names one plain folder`);
   return n;
 };
 

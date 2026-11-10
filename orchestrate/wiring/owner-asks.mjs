@@ -30,7 +30,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus, runnerCopy, runnerOutbox } from './owner-status.mjs';
 
@@ -39,8 +39,8 @@ export const NO_COPY_KINDS = Object.freeze(['review', 'audit', 'readonly', 'lead
 /** How often an ask reads the status while it waits, and when it stops waiting (past any tick limit). */
 export const ASK_POLL_MS = 2_000;
 export const ASK_GIVE_UP_MS = 600_000;
-// A product as a request file may name it: M10's product name (never a path), at most 64 characters.
-const productName = (p) => typeof p === 'string' && p.length <= 64 && PRODUCT_NAME.test(p);
+// A product as a request file may name it: setup's product name (shared/product-paths.mjs PRODUCT, #378 r1 m3), never a path.
+const productName = (p) => typeof p === 'string' && PRODUCT.test(p);
 const HEAD = /^[0-9a-f]{40}$/;
 const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'outbox', 'signin', 'configDir', 'copy']);
 
@@ -59,9 +59,10 @@ export function launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoo
   if (!realPid(a.pgid)) return 'the start named no process group';
   if (!name(a.pidStart)) return 'the start named no start time for its process';
   if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
-  let outbox; try { outbox = Object.hasOwn(RUNNER_ROLE_OF, kind) && typeof outboxRoot === 'string' ? runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }) : null; } catch { outbox = null; }
+  // A name the places can't be made from is said as such (#378 r1 m3), never as another outbox.
+  let outbox; try { outbox = Object.hasOwn(RUNNER_ROLE_OF, kind) && typeof outboxRoot === 'string' ? runnerOutbox({ outboxRoot, product, role: RUNNER_ROLE_OF[kind], sessionId }) : null; } catch (e) { return `the session's outbox can't be named: ${e.message}`; }
   if (!outbox || a.outbox !== outbox) return 'the start named another outbox than the session\'s own';
-  let copy; try { copy = typeof copiesRoot === 'string' ? runnerCopy({ copiesRoot, product, card }) : null; } catch { copy = null; }
+  let copy; try { copy = typeof copiesRoot === 'string' ? runnerCopy({ copiesRoot, product, card }) : null; } catch (e) { return `the card's copy can't be named: ${e.message}`; }
   if (!copy || a.copy !== copy) return 'the start named another copy than the card\'s';
   if (!name(a.signin) || !name(a.configDir)) return 'the start named no sign-in';
   return null;
