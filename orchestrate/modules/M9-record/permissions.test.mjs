@@ -3,8 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ENTITIES, REQUIRED_FIELDS, SCRIPT_ACTORS } from '../../shared/record.mjs';
-import { CARD_CREATORS, FACT_FAMILIES, PLAN_INPUTS, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
-import { draftPlanGrant } from './writer.mjs';
+import { CARD_CREATORS, FACT_FAMILIES, PLAN_INPUTS, WRITERS, draftFields, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { draftPlanGrant, grantedDoneWhenProblem } from './writer.mjs';
+import { GO_FREE } from './ready.mjs';
 import { HEAD, PRODUCT, iso, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
@@ -110,13 +111,36 @@ test('L729: the draft plan grant covers a write only when every changed plan inp
   assert.equal(draftPlanGrant('dispatcher', { state: 'ready', kind: 'ordinary' }, ['done_when']), false, 'past draft');
   assert.equal(draftPlanGrant('dispatcher', { state: 'draft', kind: 'lead_daily_card' }, ['done_when']), false, 'a go-free kind');
   assert.equal(draftPlanGrant('worker', draft, ['done_when']), false, 'a role with no grant');
+  // L731 M1: not on the Dispatcher's own kinds, which need no go (or, for a fix card, never change their plan).
+  for (const kind of ['exact_reverse', 'research_copy', 'fix']) assert.equal(draftPlanGrant('dispatcher', { state: 'draft', kind }, ['done_when']), false, kind);
+  assert.equal(draftPlanGrant('dispatcher', draft, []), false, 'no plan input is no grant (L731 c1)');
+  // The writer's own GO_FREE check: a grant with no draftKinds (the Lead's) still never covers a go-free kind here.
+  assert.equal(draftPlanGrant('lead', { state: 'draft', kind: 'lead_daily_card' }, ['done_when']), false, 'GO_FREE, whatever the table says');
+  // L731 m1: the bar it sets is text, and it is never removed.
+  assert.equal(grantedDoneWhenProblem({ done_when: 'R-1: tests pass' }), null);
+  for (const v of [{ nested: 'x' }, 42, '', '  ', null]) assert.match(grantedDoneWhenProblem({ done_when: v }), /as text/, JSON.stringify(v));
+  assert.match(grantedDoneWhenProblem({}), /may not be removed/);
+});
+
+// L731 M1: no draft-only grant covers a kind that reaches ready with no go, nor a fix card; a grant limited to some kinds
+// gives nothing where the kind is not known.
+test('L731: no card writer\'s draft grant covers a go-free kind or a fix card', () => {
+  for (const [name, row] of Object.entries(WRITERS.card)) {
+    if (!row.updateInDraft || !row.draftKinds) continue;
+    for (const kind of [...Object.keys(GO_FREE), 'fix']) assert.deepEqual(draftFields(name, kind), [], `${name} on ${kind}`);
+  }
+  assert.deepEqual(draftFields('dispatcher', 'ordinary'), ['done_when']);
+  assert.deepEqual(draftFields('dispatcher', undefined), []);
+  assert.ok(!fieldsAllowed('card', 'dispatcher', { state: 'draft' }).has('done_when'), 'no kind given, no grant');
+  for (const kind of ['exact_reverse', 'research_copy']) assert.ok(!fieldsAllowed('card', 'dispatcher', { state: 'draft', kind }).has('done_when'), kind);
+  assert.deepEqual(draftFields('lead', 'lead_daily_card'), PLAN_INPUTS, 'the Lead\'s grant is unchanged');
 });
 
 // L722 (L698 design b, L699): the Dispatcher may set a card's done_when while the card is a draft, and never after;
 // it gets no other plan input. Checked on the real Record, not only on the table.
 test('L722: the Dispatcher sets done_when on a draft card only; past draft, and for any other plan input, the Record refuses', () => {
-  assert.deepEqual([...fieldsAllowed('card', 'dispatcher', { state: 'draft' })].filter((f) => !WRITERS.card.dispatcher.update.includes(f)), ['done_when']);
-  for (const state of ['ready', 'running', 'waiting', 'merged']) assert.ok(!fieldsAllowed('card', 'dispatcher', { state }).has('done_when'), state);
+  assert.deepEqual([...fieldsAllowed('card', 'dispatcher', { state: 'draft', kind: 'ordinary' })].filter((f) => !WRITERS.card.dispatcher.update.includes(f)), ['done_when']);
+  for (const state of ['ready', 'running', 'waiting', 'merged']) assert.ok(!fieldsAllowed('card', 'dispatcher', { state, kind: 'ordinary' }).has('done_when'), state);
   const env = setup({ prefix: 'm9-perm-' });
   const card = (id, state) => { seed(env, 'card', id, { ...minimal('card', env), product: PRODUCT, kind: 'ordinary', round: 1, state, done_when: 'the Lead\'s words' }); return env.record.read('card', id); };
   const put = (cur, fields) => env.record.write({ actor: 'dispatcher', entity: 'card', id: cur.id, expectRev: cur.rev, doc: { ...cur.doc, ...fields } });
@@ -132,7 +156,25 @@ test('L722: the Dispatcher sets done_when on a draft card only; past draft, and 
   seed(env, 'card', 'C-daily', { ...minimal('card', env), product: PRODUCT, kind: 'lead_daily_card', round: 1, state: 'draft', done_when: 'x' });
   const daily = put(env.record.read('card', 'C-daily'), { done_when: 'R-1: tests pass' });
   assert.equal(daily.ok, false, 'a go-free draft the Dispatcher did not make');
-  assert.match(daily.reason, /may not change the plan of a lead_daily_card card/);
+  assert.match(daily.reason, FIELD_GATE, 'the field gate refuses it first since L731; draftPlanGrant refuses it too (L729 test)');
+  // L731 M1: the Dispatcher's own go-free drafts keep their bar; on the real Record, as the audit's probe ran it.
+  for (const kind of ['exact_reverse', 'research_copy']) {
+    seed(env, 'card', `C-${kind}`, { ...minimal('card', env), product: PRODUCT, kind, round: 1, state: 'draft', done_when: 'x' });
+    const w = put(env.record.read('card', `C-${kind}`), { done_when: 'R-1: tests pass' });
+    assert.equal(w.ok, false, `${kind}: a go-free draft keeps the bar it was made with`);
+    assert.match(w.reason, FIELD_GATE, kind);
+  }
+  // L731 m1: the bar is text, and never removed.
+  for (const [i, v] of [{ nested: 'x' }, 42, ''].entries()) {
+    const w = put(card(`C-shape-${i}`, 'draft'), { done_when: v });
+    assert.equal(w.ok, false, JSON.stringify(v));
+    assert.match(w.reason, /done_when must be the rows' pass tests as text/);
+  }
+  const gone = card('C-gone', 'draft');
+  const { done_when: _drop, ...without } = gone.doc;
+  const del = env.record.write({ actor: 'dispatcher', entity: 'card', id: gone.id, expectRev: gone.rev, doc: without });
+  assert.equal(del.ok, false, 'a removed done_when');
+  assert.match(del.reason, /done_when may not be removed/);
   for (const field of ['files', 'tier', 'plan_sha256', 'main_commit', 'brief']) {
     const c = card(`C-${field}`, 'draft');
     const w = put(c, { [field]: field === 'tier' ? 2 : field === 'brief' ? { goal: 'x' } : `v-${field}` });
