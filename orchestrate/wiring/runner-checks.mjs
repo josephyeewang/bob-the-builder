@@ -96,7 +96,10 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
     if (!path.split('/').some(isProtectedName)) continue;
     // Only a plain file of main's is put back (worker-copy.mjs restoreMainCopies refuses a link, 120000).
     if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return `main's ${path} is not a plain file (mode ${mode})`;
-    want.set(foldKey(path), { path, oid });
+    const k = foldKey(path);
+    // A name that can't be folded can't be compared, so it never shares a key (#369 merge review minor 1).
+    if (k === null) return `main's ${path} has a name that can't be compared`;
+    want.set(k, { path, oid });
   }
   const found = [];
   let seen = 0;
@@ -127,7 +130,9 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
   };
   try { walk(copy, ''); } catch (e) { return `the copy's setup files: ${e?.message ?? e}`; }
   for (const r of found) {
-    const w = want.get(foldKey(r));
+    const k = foldKey(r);
+    if (k === null) return `the copy's ${r} has a name that can't be compared`;
+    const w = want.get(k);
     if (!w) return `the copy holds ${r}, which main does not`;
     const b = await run(['cat-file', 'blob', w.oid], { gitDir: mirror, purpose: 'runner-check-2-blob', timeoutMs: 60_000 });
     if (b?.code !== 0) return `main's ${r} can't be read from the mirror`;

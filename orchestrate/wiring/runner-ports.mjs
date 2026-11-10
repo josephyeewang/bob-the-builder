@@ -357,10 +357,11 @@ export function startPort(c, deps = {}) {
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
         start: async () => {
           // Checks 1, 2, 3 and 8 once more (#369 M1, r1 m1 and m2): checks 4 and 11 ran the branch's own code.
+          // The product held back since the checks began (self-review m4: a refresher that died during the baseline), with
+          // or without a beforeStart (#369 merge review minor 2).
+          const h = deps.productHeld?.(product);
+          if (h) return refuse(h);
           if (beforeStart) {
-            // The product held back since the checks began (self-review m4: a refresher that died during the baseline).
-            const h = deps.productHeld?.(product);
-            if (h) return refuse(h);
             const p = await beforeStart(x);
             // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
             if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch, or can\'t be read)'}`);
