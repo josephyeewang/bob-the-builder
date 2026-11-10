@@ -9,7 +9,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -186,7 +186,7 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a launch check refusing', { launchFn: async () => ({ ok: false, reason: 'launch check 3 (outbox emptied): busy' }) }, /launch check 3/],
     ['a launch that throws', { launchFn: async () => { throw new Error('boom'); } }, /boom/],
     ['claude not spawned', { spawn: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); } }, /could not be spawned/],
-    ['no start time', { pidStartOf: () => null, kill: () => {} }, /start time could not be read/],
+    ['no start time', { pidStartOf: () => null, kill: () => {}, there: () => false }, /start time could not be read/],   // #364 r2 n3: no real group is signalled
   ];
   for (const [what, over, re] of after) {
     const w = world(over);
@@ -342,4 +342,13 @@ test('#364 r1 m3: a claude whose start time can\'t be read and whose group can\'
     assert.equal(a.ok, false); assert.equal(a.running, true); assert.equal(a.pgid, 4242);
     assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true }, 'nothing it made is removed while claude may run');
   } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#364 r2 c-b: a group is gone only on ESRCH; EPERM (there, not ours to signal) and any other error read as still there', () => {
+  const seen = [];
+  assert.equal(groupThere(4243, (g, s) => { seen.push([g, s]); }), true);
+  assert.deepEqual(seen, [[-4243, 0]], 'signal 0 to the group, never the leader alone');
+  assert.equal(groupThere(4243, () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }), false);
+  assert.equal(groupThere(4243, () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }), true);
+  assert.equal(groupThere(4243, () => { throw new Error('odd'); }), true);
 });

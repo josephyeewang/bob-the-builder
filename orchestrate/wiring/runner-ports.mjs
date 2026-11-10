@@ -110,7 +110,8 @@ export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up nee
  * → { ok: true, pid, pgid, pidStart } | { ok: false, reason }
  */
 export const SPAWN_KILL_WAIT_MS = 2_000;
-const groupThere = (g) => { try { process.kill(-g, 0); return true; } catch (e) { return e?.code !== 'ESRCH'; } };
+/** Is process group g there? Signal 0; only ESRCH shows it gone (EPERM: there, but not ours to signal). */
+export const groupThere = (g, signal = (x, s) => process.kill(x, s)) => { try { signal(-g, 0); return true; } catch (e) { return e?.code !== 'ESRCH'; } };
 export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = leaderStart, kill = (g, sig) => process.kill(-g, sig),
   there = groupThere, killWaitMs = SPAWN_KILL_WAIT_MS }) {
   const s = await spawnClaude(spawn, bin, args, { cwd, env });
@@ -163,7 +164,7 @@ function writeNew(file, text) {
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
  * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
- * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, launchFn,
+ * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
  * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1).
  */
@@ -171,7 +172,7 @@ export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
-    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, launchFn = launch,
+    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, ...(deps.fs ?? {}) };
@@ -216,7 +217,7 @@ export function startPort(c, deps = {}) {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
       const args = sessionArgs({ profile, settingsFile, sessionId, prompt });
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
-        start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}) }) });
+        start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) }) });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.
     if (l?.started?.running === true) return { ok: false, running: true, pgid: l.started.pgid, reason: l.started.reason };

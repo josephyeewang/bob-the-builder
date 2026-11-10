@@ -143,7 +143,8 @@ export async function workerRunnerPass(ctx) {
   for (const [id, r] of Object.entries(state.requests)) {
     if (r.state !== 'waiting' || (Number.isFinite(r.told) && now - r.told < RUNNER_NOTE_EVERY_MS)) continue;
     r.told = now;
-    note(pending.has(id) ? `the start of ${id} is still on; it stays waiting, so its claim stays` : `the start of ${id} was on when the runner last stopped; it stays waiting, so its claim stays until the owner is told`);
+    note(r.running === true ? `${mayRun(id, r.pgid)}; it stays waiting, so its claim stays until the owner is told`
+      : pending.has(id) ? `the start of ${id} is still on; it stays waiting, so its claim stays` : `the start of ${id} was on when the runner last stopped; it stays waiting, so its claim stays until the owner is told`);
   }
 
   // 1. The sessions as they are now. Ended is final (M1).
@@ -194,11 +195,17 @@ export async function workerRunnerPass(ctx) {
     // Only a launch never seen is cancelled. A 'waiting' one may have started before a pass that never finished, so it
     // is never marked used up here (stopSession would then free a claim whose session may run).
     if (!Object.hasOwn(state.requests, id)) { state.requests[id] = { state: 'cancelled', at: now }; return; }
+    // A start that may have left claude running (#364 r2 n2) is not signalled: its leader's start time was never read,
+    // so a reused group number can't be told from it, and a wrong kill would hit some other process of the owner's.
+    // The note names the group, so the owner can check and stop it by hand; the claim stays held.
+    const r = state.requests[id];
+    if (r.state === 'waiting' && r.running === true) { note(`a stop was asked for ${id}, but ${mayRun(id, r.pgid).replace(/^the start of \S+ /, 'its start ')}, which the runner can't tell from a reused number, so it is not signalled; the owner checks that group and stops it`); return; }
     const s = find(id);
     if (!s || !isLive(s)) return;
     await stopping(s);
   }
   // Set the flag and write it down before acting (L762); the stop's own outcome then settles alive and the request.
+  function mayRun(id, g) { return `the start of ${id} may have left claude running in process group ${g ?? 'unknown'}`; }
   async function stopping(s) {
     s.stop_requested = true; flush();
     const r = await wait(() => ports.stopGroup(s));
@@ -229,7 +236,12 @@ export async function workerRunnerPass(ctx) {
     if (state.requests[id]?.state !== 'waiting') return;
     const refuse = (reason) => { state.requests[id] = { state: 'refused', at: now }; answer(key, { ok: false, reason }); };
     // A start whose claude may still run (#364 r1 m3) is not refused: the request stays waiting, so its claim stays.
-    if (a?.ok === false && a.running === true) { note(`the start of ${id} may have left claude running (${a.reason}); it stays waiting, so its claim stays`); return; }
+    // Its process group is kept in the waiting row and named in every note (#364 r2 n2), so the owner can find it.
+    if (a?.ok === false && a.running === true) {
+      const g = Number.isInteger(a.pgid) && a.pgid > 1 ? a.pgid : null;
+      state.requests[id] = { ...state.requests[id], running: true, pgid: g, told: now };
+      note(`${mayRun(id, g)} (${a.reason}); it stays waiting, so its claim stays`); return;
+    }
     if (!a || a.threw || a.ok !== true) return refuse(failed(a, 'the start'));
     const s = { id, product: l.product, kind: l.kind, card: l.card, lead: null, role: RUNNER_ROLE_OF[l.kind], pgid: a.pgid, signin: a.signin, config_dir: a.configDir,
       bundle_files: [], outbox: a.outbox, uid, outbox_open: true, stop_requested: false, alive: true, ended: false,

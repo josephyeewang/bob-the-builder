@@ -21,40 +21,40 @@
 // read back, or a start the loop must refuse).
 
 import { mkdirSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
+import { fullPath } from './runner-job.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
 // The read-deny entries every product's sessions must have (#364 r1 M2): the Record, the keys, the sign-in and the home's.
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
-const fullPath = (p) => typeof p === 'string' && isAbsolute(p) && resolve(p) !== '/';
 // The product rule is M10's, as the pass and owner-asks.mjs check it.
 const productName = (p) => p.length <= 64 && PRODUCT_NAME.test(p);
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
   const fail = (why) => { throw new Error(`config: ${why}`); };
-  for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k]) || c[k] === '/') fail(`${k} must be a full path, not / itself`);
+  for (const k of ABS) if (!fullPath(c?.[k])) fail(`${k} must be a full path in its simplest form, not / itself`);
   for (const k of UIDS) if (!Number.isInteger(c[k]) || c[k] < 0) fail(`${k} must be a uid`);
-  if (typeof c.path !== 'string' || !c.path || c.path.split(':').some((p) => !isAbsolute(p))) fail('path must be full folders joined by ":"');
+  if (typeof c.path !== 'string' || !c.path || !c.path.split(':').every(fullPath)) fail('path must be full folders in their simplest form joined by ":"');
   if (!Number.isFinite(c.claimMs) || c.claimMs <= 0) fail('claimMs must be the claim timeout in ms');
   if (!c.products || typeof c.products !== 'object' || Array.isArray(c.products) || !Object.keys(c.products).length) fail('products must name at least one product');
   for (const [name, p] of Object.entries(c.products)) {
     if (!productName(name)) fail(`product ${JSON.stringify(name)} is not a product name`);
     if (typeof p?.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(p.repo)) fail(`product ${name}: repo must be owner/name`);
-    if (typeof p.mirror !== 'string' || !isAbsolute(p.mirror)) fail(`product ${name}: mirror must be a full path`);
+    if (!fullPath(p.mirror)) fail(`product ${name}: mirror must be a full path in its simplest form`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
     // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
     // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
     const d = p.render.paths.deny;
-    for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path, not / itself`);
-    if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths (the secrets, and the approvals and rules state)`);
+    for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path in its simplest form, not / itself`);
+    if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths in their simplest form (the secrets, and the approvals and rules state)`);
   }
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
