@@ -5,7 +5,9 @@ import { chmodSync, linkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { writeAnswer, ANSWER_FILE } from './owner-answer.mjs';
-import { readOwnerAnswer, sensorsPorts, ANSWER_STALE_MS } from './sensors-ports.mjs';
+import { readOwnerAnswer, sensorsPorts, storedUsage, ANSWER_STALE_MS } from './sensors-ports.mjs';
+import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
+import { memoryRecord } from '../shared/record.mjs';
 import { writeUsageFact, writeSignedInAccount } from '../modules/M12-sensors/state-facts.mjs';
 import { readFact, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
@@ -242,14 +244,19 @@ test('L728 m1: within one window a lower percent than one already seen is refuse
     assert.match(p.lastReason(), /session row went down/);
     put(H(41), W(61)); assert.ok(await p.readUsage('a'), 'higher is fine');
     put(H(41), W(61)); assert.ok(await p.readUsage('a'), 'the same is fine');
-    put(H(2, '2026-11-05T20:00:00.000Z'), W(61)); assert.ok(await p.readUsage('a'), 'a new 5-hour window starts low');
-    put(H(5, '2026-11-05T16:00:00.000Z'), W(61));
+    // L746 m-A (probe R2-283-B): a new window starts only once the old one has passed. This was "a new 5-hour window
+    // starts low" at 12:00 with the 15:00 window still open, which let a reset moved 90 s later through.
+    put(H(2, '2026-11-05T20:00:00.000Z'), W(61)); assert.equal(await p.readUsage('a'), null, 'a later reset while the window seen is open');
+    assert.match(p.lastReason(), /session row's reset time moved later while the window seen \(to 2026-11-05T15:00:00\.000Z\) is still open/);
+    put(H(5, '2026-11-05T15:01:30.000Z'), W(5, '2026-11-07T23:01:30.000Z')); assert.equal(await p.readUsage('a'), null, 'moved 90 s later');
+    assert.match(p.lastReason(), /reset time moved later/);
+    put(H(5, '2026-11-05T14:00:00.000Z'), W(61));
     assert.equal(await p.readUsage('a'), null);
     assert.match(p.lastReason(), /reset time moved back/);
     assert.equal(await p.readUsage('a'), null, 'a refused reading leaves no mark: the same one is refused again');
-    put(H(3, '2026-11-05T20:00:00.000Z'), W(10), 'weekly_scoped:Y'); assert.ok(await p.readUsage('a'), 'another row is its own window');
+    put(H(41), W(10), 'weekly_scoped:Y'); assert.ok(await p.readUsage('a'), 'another row is its own window');
     const fresh = ports(w.file);
-    put(H(1, '2026-11-05T20:00:00.000Z'), W(1)); assert.ok(await fresh.readUsage('a'), 'held in this process only (said in the header)');
+    put(H(1), W(1)); assert.ok(await fresh.readUsage('a'), 'with no stored fact (no `stored`), a new process has only its own marks');
   } finally { w.done(); }
 });
 
@@ -260,5 +267,42 @@ test('L728 m4: a reading with no weekly row or no reset time is handed on, and t
     const u = await p.readUsage('a');
     assert.deepEqual([u.h5.used_pct, u.week, u.source], [4, null, 'claude /usage']);
     assert.match(p.lastReason(), /no 5-hour reset time, no weekly row, so it stays unknown/);
+  } finally { w.done(); }
+});
+
+// L746 M-A (probe R2-283-A): each Sensors run is a new process, so the marks are the stored usage fact: run 2 refuses a
+// forged low reading that run 1's stored fact rules out; once the window seen has passed, a new one starts low.
+test('L746 M-A: a lower percent in the same window, read by the NEXT run, is refused through the stored usage fact', async () => {
+  const w = place();
+  const put = (h5, week, at = T0) => assert.equal(writeAnswer({ to: w.file, answer: answer({ observed_at: new Date(at).toISOString(), usage: { h5, week, week_from: 'weekly_all' } }) }).ok, true);
+  const H = (pct, r = '2026-11-05T15:00:00.000Z') => ({ used_pct: pct, resets_at: r });
+  const W = (pct, r = '2026-11-07T22:59:59.000Z') => ({ used_pct: pct, resets_at: r });
+  const rec = memoryRecord();
+  const run = (later = 0) => sensorsPorts({ file: w.file, ownerUid: UID, now: () => new Date(T0 + later), acl: noAcl, stored: storedUsage(rec) });
+  const pass = (p, later = 0) => sensorsPass({ rec, ports: { whoIsSignedIn: p.whoIsSignedIn, readUsage: p.readUsage, probes: {} }, now: () => new Date(T0 + later) });
+  try {
+    put(H(90), W(95));
+    await pass(run());
+    assert.equal(rec.read('fact', USAGE_FACT('a'))?.doc?.h5?.used_pct, 90, 'run 1 stores 90%');
+    put(H(5), W(5), T0 + 60_000);
+    const run2 = run(60_000);
+    assert.equal(await run2.readUsage('a'), null, 'run 2 (a new process) refuses 5% after the stored 90%');
+    assert.match(run2.lastReason(), /session row went down within one window \(5% after 90%\)/);
+    await pass(run(60_000));
+    assert.equal(rec.read('fact', USAGE_FACT('a'))?.doc?.h5?.used_pct, 90, 'the stored fact is not overwritten by the refused reading');
+    put(H(5, '2026-11-05T15:01:30.000Z'), W(96), T0 + 120_000);
+    const run3 = run(120_000);
+    assert.equal(await run3.readUsage('a'), null, 'L746 m-A across runs: a reset moved 90 s later is refused too');
+    assert.match(run3.lastReason(), /session row's reset time moved later/);
+    const later = 3.5 * 3600e3;   // 15:30: the 5-hour window seen has passed
+    put(H(5, '2026-11-05T20:00:00.000Z'), W(96), T0 + later);
+    const run4 = run(later);
+    const u = await run4.readUsage('a');
+    assert.deepEqual([u?.h5?.used_pct, u?.week?.used_pct], [5, 96], 'once the old window has passed, a new one starts low');
+    put(H(5, '2026-11-05T20:00:00.000Z'), W(50), T0 + later);
+    assert.equal(await run(later).readUsage('a'), null, 'the weekly row is held to the stored week, from the same row');
+    assert.equal(writeAnswer({ to: w.file, answer: answer({ observed_at: new Date(T0 + later).toISOString(), usage: { h5: H(5, '2026-11-05T20:00:00.000Z'), week: W(10), week_from: 'weekly_scoped:Y' } }) }).ok, true);
+    assert.equal((await run(later).readUsage('a'))?.week?.used_pct, 10, "another row's week is its own window: the stored weekly_all week does not hold it");
+    assert.equal(storedUsage({ read: () => { throw new Error('x'); } })('a'), null, 'a Record that throws is no mark, never a throw');
   } finally { w.done(); }
 });

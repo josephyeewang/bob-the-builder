@@ -2,7 +2,9 @@
 // `whoIsSignedIn` and `readUsage` ports, read from `<answer folder>/owner-answer.json` (written by owner-answer.mjs).
 //
 //   readOwnerAnswer({ file, ownerUid, now?, staleMs?, acl? }) → { ok: true, answer } | { ok: false, reason }
-//   sensorsPorts({ file, ownerUid, now?, staleMs? }) → { whoIsSignedIn, readUsage, lastReason }
+//   sensorsPorts({ file, ownerUid, now?, staleMs?, stored? }) → { whoIsSignedIn, readUsage, lastReason }
+//     stored(account) → the usage fact the Record holds for that account, or null (storedUsage(rec) builds it): the marks
+//                       the window checks compare with, so they hold across runs (L746 M-A). Left out, only this process's
 //     whoIsSignedIn() → { account, signed_in, observed_at?, reason? }: signed_in false only when the answer says plainly
 //                       that the named account is signed out; null (couldn't tell) with the reason for everything else
 //     readUsage(account) → { source, h5, week, week_from, observed_at } | null
@@ -26,9 +28,12 @@
 // account (the Dispatcher starts sessions on it); say signed in when not (a session start fails and the Dispatcher's own
 // checks catch it); or claim low usage, which lets Tier-1 work and new starts run past a real amber or red band until
 // the plan's limit itself stops them. Two checks narrow the last one: within one usage window (the same reset time, the
-// same row) a lower percent than one already seen is refused and said (L728 m1), and a locked file goes stale within
-// ANSWER_STALE_MS. Both are held in this process only; a restart forgets what it saw. It can't reach the Record, the
-// robot's key or merges: those are other users' files. Access lists on the folder and file are checked on every read
+// same row) a lower percent than one already seen is refused and said, and so is a reset time moved back or moved later
+// while the window seen is still open (L728 m1, L746 M-A and m-A); and a locked file goes stale within ANSWER_STALE_MS.
+// What was seen is the usage fact in the Record (`stored`), so it holds across runs, each of which is a new process; this
+// process's own marks are kept too. A refusal lasts until the window seen has passed (the weekly one can run for days):
+// the stored fact then ages and M11 reads usage as not known, which holds new starts back, never lets them run. The
+// owner's user can't reach the Record, the robot's key or merges: those are other users' files. Access lists on the folder and file are checked on every read
 // with M4's `aclProblem` (an access list can be added after setup's check ran); setup check checks the folder too.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
@@ -36,6 +41,11 @@ import { dirname } from 'node:path';
 import { ACCOUNT_NAMES } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_VERSION } from './owner-answer.mjs';
+import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+
+/** The `stored` reader over a Record: the usage fact it holds for the account, or null. Never throws. */
+export const storedUsage = (rec) => (account) => { try { return rec.read('fact', USAGE_FACT(account))?.doc ?? null; } catch { return null; } };
+const SOURCE = 'claude /usage';
 
 // Two of the owner's rounds (5 minutes each): a file older than that means the owner's job stopped writing. Not a copy of
 // the rules' stale_after_min (L728 m5): M11 applies that itself, counting from the answer's own time.
@@ -110,17 +120,29 @@ export function readOwnerAnswer({ file, ownerUid, now = () => new Date(), staleM
   return { ok: true, answer: a };
 }
 
-export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs = ANSWER_STALE_MS, acl = aclProblem }) {
+export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs = ANSWER_STALE_MS, acl = aclProblem, stored = null }) {
   let why = null;
   const seen = new Map();   // `${account}|${row}` → { resets: ms, pct }: the highest percent accepted in that window
-  // A lower percent than one already seen in the same window, or a reset time moved back while the window seen is
-  // still open, is refused (L728 m1). → a reason, or null. Marks are written only by commit(), once the reading passes.
+  // The marks a reading is held to: this process's, and the stored usage fact's (L746 M-A). The stored week row is the
+  // same row only when its source names it.
+  const marksOf = (account, row) => {
+    const out = []; const m = seen.get(`${account}|${row}`); if (m) out.push(m);
+    let d = null; try { d = typeof stored === 'function' ? stored(account) : null; } catch { d = null; }
+    const sw = row === 'session' ? d?.h5 : (d?.source === `${SOURCE} | week from ${row}` ? d?.week : null);
+    const r = Date.parse(sw?.resets_at ?? '');
+    if (sw && Number.isFinite(r) && Number.isFinite(sw.used_pct)) out.push({ resets: r, pct: sw.used_pct });
+    return out;
+  };
+  // A lower percent than one already seen in the same window, or a reset time moved back or later while the window seen
+  // is still open, is refused (L728 m1; L746 m-A: a new window starts only once the old one has passed). → a reason, or
+  // null. This process's marks are written only by commit(), once the reading passes; the stored one by the usage fact.
   const dropped = (account, row, w) => {
     const r = Date.parse(w?.resets_at ?? '');
-    const m = seen.get(`${account}|${row}`);
-    if (!w || !Number.isFinite(r) || !m) return null;
-    if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) return w.used_pct < m.pct ? `usage: the ${row} row went down within one window (${w.used_pct}% after ${m.pct}%), so it is refused` : null;
-    if (r < m.resets && m.resets > now().getTime()) return `usage: the ${row} row's reset time moved back while the window seen is still open, so it is refused`;
+    if (!w || !Number.isFinite(r)) return null;
+    for (const m of marksOf(account, row)) {
+      if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) { if (w.used_pct < m.pct) return `usage: the ${row} row went down within one window (${w.used_pct}% after ${m.pct}%), so it is refused`; continue; }
+      if (m.resets > now().getTime()) return `usage: the ${row} row's reset time moved ${r < m.resets ? 'back' : 'later'} while the window seen (to ${new Date(m.resets).toISOString()}) is still open, so it is refused`;
+    }
     return null;
   };
   const commit = (account, row, w) => {
@@ -159,7 +181,7 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       const gaps = [!h5 && 'no 5-hour row', h5 && !h5.resets_at && 'no 5-hour reset time', !week && 'no weekly row',
         week && !week.resets_at && 'no weekly reset time'].filter(Boolean);
       if (gaps.length) why = `usage: the report had ${gaps.join(', ')}, so it stays unknown`;
-      return { source: from ? `claude /usage | week from ${from}` : 'claude /usage', h5, week, week_from: from, observed_at: a.observed_at };
+      return { source: from ? `${SOURCE} | week from ${from}` : SOURCE, h5, week, week_from: from, observed_at: a.observed_at };
     },
     lastReason: () => why,
   };
