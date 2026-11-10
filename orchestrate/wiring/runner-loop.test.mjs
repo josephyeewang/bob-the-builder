@@ -23,7 +23,7 @@ function world() {
   w.gone = new Set();
   w.ports = {
     start: async (x) => { w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 7000 + w.n, pidStart: S0, pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
+      return { ok: true, pid: 7000 + w.n, pidStart: S0, pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid), stopGroup: async (s) => { w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => true,
   };
@@ -317,4 +317,21 @@ test('#358 r1 M1 through the loop: each write carries the clock at that write', 
   // At least one hung port's wait (portMs 30) lies between the first and last stamps. The ports may wait side by side, so
   // don't count on two waits in a row (CI saw 42 ms; L855).
   assert.ok(vat.at(-1) - vat[0] >= 25, `the stamps move with the clock: ${vat}`);
+});
+
+test('#364 self-review M1: a start still on when the stop comes is waited for and settled by a last tick that reads no request', async () => {
+  const w = world(); let n = 0; let release;
+  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, pid: 7001, pidStart: S0, pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, x.product, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.product}/${x.card}` }); });
+  w.ask(...launch('S-1'));
+  const state = await runRunner({ ...w.ctx({ portMs: 30 }), stopWhen: () => n >= 1, sleep: async () => { w.ask(...launch('S-2')); setTimeout(() => release(), 50); n += 1; } });
+  assert.deepEqual(state.sessions.map((s) => s.id), ['S-1']);
+  assert.deepEqual(loadMemory(w.memoryFile, { uid: UID }).sessions.map((s) => s.id), ['S-1'], 'the memory the next runner reads lists it');
+  assert.ok(existsSync(join(w.requestsDir, 'launch-S-2.json')), 'the last tick reads no request');
+  // One that does not end in time is noted, and stays waiting.
+  const v = world(); let m = 0;
+  v.ports.start = () => new Promise(() => {});
+  v.ask(...launch('S-1'));
+  const st = await runRunner({ ...v.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => m >= 1, sleep: async () => { m += 1; } });
+  assert.equal(st.requests['S-1'].state, 'waiting');
+  assert.ok(v.notes.some((t) => /still on when the worker runner stopped/.test(t)), v.notes.join('\n'));
 });

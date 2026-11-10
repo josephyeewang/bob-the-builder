@@ -1,7 +1,7 @@
 // Part C, runner step 2: the Dispatcher's async owner ports (owner-asks.mjs) against a fake runner that writes answers.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ASK_GIVE_UP_MS, NO_COPY_KINDS, ownerAsyncPorts } from './owner-asks.mjs';
+import { ASK_GIVE_UP_MS, NO_COPY_KINDS, launchAnswerWrong, ownerAsyncPorts } from './owner-asks.mjs';
 import { OWNER_PORTS } from './owner-ports.mjs';
 import { RUNNER_KINDS } from './owner-status.mjs';
 
@@ -9,8 +9,8 @@ const OWNER = 501; const T0 = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/state/status.json'; const ROOT = '/out'; const COPIES = '/copies';
 const st = ({ dir = false, mode = dir ? 0o755 : 0o644 } = {}) => ({ uid: OWNER, mode, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => false });
 const session = (id, more = {}) => ({ id, product: 'p1', kind: 'editing', card: 'C-1', lead: 'L', role: 'worker', pgid: 77, signin: 's', config_dir: '/cfg', bundle_files: [],
-  outbox: `${ROOT}/worker/${id}`, uid: OWNER, alive: true, ended: false, outbox_open: true, stop_requested: false, ...more });
-const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: '2026-11-09T12:00:01Z', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1` };
+  outbox: `${ROOT}/p1/worker/${id}`, uid: OWNER, alive: true, ended: false, outbox_open: true, stop_requested: false, ...more });
+const LAUNCHED = { ok: true, sessionId: 'S-1', pid: 4242, pidStart: '2026-11-09T12:00:01Z', pgid: 4242, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/S-1`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1` };
 
 // A fake runner: `script(n, w)` runs before the n-th status read and may change w.doc (the runner's next status).
 function world(script = () => {}, { giveUpMs = ASK_GIVE_UP_MS } = {}) {
@@ -41,7 +41,7 @@ test('L759 step 2: launch writes one request and answers the runner\'s started s
 test('L759 step 2: launch trusts no answer the rest of the status does not bear out; it waits, and its own limit answers timedOut', async () => {
   const wrong = [
     { requests: {} }, { requests: { 'S-1': { state: 'waiting' } } }, { requests: { 'S-1': { state: 'refused' } } },
-    { answer: { sessionId: 'S-2' } }, { answer: { outbox: `${ROOT}/worker/S-2` } }, { answer: { copy: `${COPIES}/C-2` } }, { answer: { copy: '/elsewhere/C-1' } },
+    { answer: { sessionId: 'S-2' } }, { answer: { outbox: `${ROOT}/p1/worker/S-2` } }, { answer: { copy: `${COPIES}/p1/C-2` } }, { answer: { copy: `${COPIES}/C-1` } }, { answer: { copy: `${COPIES}/p2/C-1` } }, { answer: { outbox: `${ROOT}/worker/S-1` } }, { answer: { outbox: `${ROOT}/p2/worker/S-1` } }, { answer: { copy: '/elsewhere/C-1' } },
     { answer: { pid: 1 } }, { answer: { pgid: 0 } }, { answer: { pid: '4242' } }, { answer: { pidStart: '' } }, { answer: { pidStart: 7 } }, { answer: { pidStart: 'Mon Nov  9 12:00:01 2026' } }, { answer: { pidStart: '2026-11-09 12:00:01' } },
     { answer: { head: 'main' } }, { answer: { head: 'A'.repeat(40) } }, { answer: { signin: '' } }, { answer: { configDir: null } },
     { answer: { base: 'main' } }, { answer: { base: 'B'.repeat(40) } }, { answer: { base: null } }, { answer: { base: '' } }, { answer: { base: ['b'.repeat(40)] } }, { answer: { head: ['a'.repeat(40)] } },
@@ -158,7 +158,7 @@ test('step 2 review M1, M2: an answer that contradicts the session its own statu
   assert.equal((await world(listed({ alive: false, ended: true }, 'stopped')).ports.launch(LAUNCH)).ok, true);
   assert.equal((await world(listed({ alive: false, ended: true, card: 'C-9' }, 'stopped'), { giveUpMs: 2_000 }).ports.launch(LAUNCH)).timedOut, true);
   // Unlisted, the answer alone is checked: its outbox must still be the one this runner makes.
-  const elsewhere = (i, x) => { listed(null, 'stopped')(i, x); x.doc.answers['launch-S-1'].outbox = `${ROOT}/worker/S-2`; };
+  const elsewhere = (i, x) => { listed(null, 'stopped')(i, x); x.doc.answers['launch-S-1'].outbox = `${ROOT}/p1/worker/S-2`; };
   assert.equal((await world(elsewhere, { giveUpMs: 2_000 }).ports.launch(LAUNCH)).timedOut, true, 'unlisted, wrong outbox');
   for (const card of ['../x', 'a/b', 'C..1', '.', '.hidden']) await assert.rejects(world().ports.launch({ ...LAUNCH, card }), /no card or product/, card);
   // stopGroup: no alive field is not gone (it is live by the status's own rule), and the group must be the one asked.
@@ -181,11 +181,11 @@ test('step 2 review c4: nothing after the request is written throws; a failing c
   assert.equal(r.timedOut, true); assert.deepEqual(writes, ['launch-S-1.json']);
 });
 
-test('L767: a script launch\'s answer names <root>/script/<id>; the worker folder is not trusted for it', async () => {
+test('L767, L836: a script launch\'s answer names <root>/<product>/script/<id>; the worker folder is not trusted for it', async () => {
   const SCRIPT = { ...LAUNCH, kind: 'script' };
   const at = (box) => (i, x) => { x.doc = { sessions: [session('S-1', { kind: 'script', role: 'script', lead: null, pgid: 4242, outbox: box })], requests: { 'S-1': { state: 'started' } }, answers: { 'launch-S-1': { ...LAUNCHED, outbox: box } } }; };
-  assert.equal((await world(at(`${ROOT}/script/S-1`)).ports.launch(SCRIPT)).outbox, `${ROOT}/script/S-1`);
-  assert.equal((await world(at(`${ROOT}/worker/S-1`), { giveUpMs: 2_000 }).ports.launch(SCRIPT)).timedOut, true);
+  assert.equal((await world(at(`${ROOT}/p1/script/S-1`)).ports.launch(SCRIPT)).outbox, `${ROOT}/p1/script/S-1`);
+  assert.equal((await world(at(`${ROOT}/p1/worker/S-1`), { giveUpMs: 2_000 }).ports.launch(SCRIPT)).timedOut, true);
 });
 
 test('#328 r1 c2 (P11): the ask stops at its limit by the clock too, not only by counting its reads', async () => {
@@ -195,4 +195,20 @@ test('#328 r1 c2 (P11): the ask stops at its limit by the clock too, not only by
   const r = await p.launch(LAUNCH);
   assert.equal(r.timedOut, true);
   assert.ok(reads <= 8, `${reads} reads: a minute of clock is six 10 s sleeps, whatever pollMs says`);
+});
+
+test('#378 m4: launchAnswerWrong itself refuses a flat, another product\'s or a role-named product\'s outbox or copy', () => {
+  const sid = 'S-1';
+  const ask = { sessionId: sid, kind: 'editing', card: 'C-1', product: 'p1', outboxRoot: '/o', copiesRoot: '/c' };
+  const good = { sessionId: sid, pid: 10, pgid: 10, pidStart: '2026-11-10T03:00:00Z', head: 'a'.repeat(40), outbox: '/o/p1/worker/S-1', copy: '/c/p1/C-1', signin: 'me', configDir: '/h/.claude' };
+  assert.equal(launchAnswerWrong(good, ask), null);
+  for (const outbox of ['/o/worker/S-1', '/o/p2/worker/S-1', '/o/p1/script/S-1', '/o/p1/worker/S-2']) assert.match(launchAnswerWrong({ ...good, outbox }, ask), /another outbox/, outbox);
+  for (const copy of ['/c/C-1', '/c/p2/C-1', '/c/p1/C-2']) assert.match(launchAnswerWrong({ ...good, copy }, ask), /another copy/, copy);
+  assert.match(launchAnswerWrong({ ...good, outbox: '/o/worker/worker/S-1' }, { ...ask, product: 'worker' }), /outbox can't be named: product worker is named as a role/, 'a product named as a role');
+  // A name setup makes no folder for is said as such (#378 r1 m3), never as another outbox.
+  assert.match(launchAnswerWrong({ ...good, outbox: '/o/Alpha/worker/S-1' }, { ...ask, product: 'Alpha' }), /outbox can't be named: not a product name setup makes/);
+  assert.match(launchAnswerWrong(good, { ...ask, card: '.x' }), /copy can't be named: not a card that names one plain folder/);
+  // The reason names the place that is wrong (#378 m6): a copies root that is not a path is the copy's fault.
+  assert.match(launchAnswerWrong(good, { ...ask, copiesRoot: undefined }), /another copy/);
+  assert.match(launchAnswerWrong(good, { ...ask, outboxRoot: undefined }), /another outbox/);
 });

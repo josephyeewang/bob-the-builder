@@ -7,14 +7,14 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRoleClash } from './owner-status.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
 const st = ({ uid = OWNER, mode = 0o755, dir = false, link = false, nlink = 1 } = {}) => ({ uid, mode, nlink, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => link });
 const SIZE = { tokens: 1200, compactions: 0, turnEnded: true, endedAt: null, openTools: [] };
 const session = (id, more = {}) => ({ id, product: 'p', kind: 'editing', card: `c-${id}`, lead: 'L', role: 'worker', pgid: 77, signin: 's', config_dir: '/cfg', bundle_files: [],
-  outbox: `${ROOT}/worker/${id}`, uid: OWNER, alive: true, ended: false, last_write_at: NOW - 1000, size: SIZE, activity: { state: 'active' }, outbox_open: true, stop_requested: false, ...more });
+  outbox: `${ROOT}/p/worker/${id}`, uid: OWNER, alive: true, ended: false, last_write_at: NOW - 1000, size: SIZE, activity: { state: 'active' }, outbox_open: true, stop_requested: false, ...more });
 const doc = (more = {}) => ({ written_at: new Date(NOW - 10_000).toISOString(), sessions: [session('s1')], requests: { s1: { state: 'started' } }, ...more });
 
 function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644 }), holds = () => true, text: forced, realpath = (p) => p } = {}) {
@@ -33,17 +33,17 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   assert.deepEqual(Object.keys(ports.sessions()[0]), ['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files']);
   assert.deepEqual(ports.board().slice(0, 3), [{ id: 's1', card: 'c-s1', alive: true, ended: false, lastWriteAt: NOW - 1000 }, { id: 's2', card: 'c-s2', alive: false, ended: true, lastWriteAt: NOW - 1000 }, { id: 's3', card: 'c-s3', ended: true, lastWriteAt: NOW - 1000 }], 'an alive the runner does not know is left out, never false');
   assert.deepEqual(ports.outboxSessions().map((s) => s.sessionId), ['s1', 's2', 's4'], 'an ended session stays listed while its outbox is open');
-  assert.deepEqual(ports.outboxSessions()[0], { sessionId: 's1', role: 'worker', outbox: `${ROOT}/worker/s1`, uid: OWNER, card: 'c-s1', product: 'p' });
+  assert.deepEqual(ports.outboxSessions()[0], { sessionId: 's1', role: 'worker', outbox: `${ROOT}/p/worker/s1`, uid: OWNER, card: 'c-s1', product: 'p' });
   assert.deepEqual(ports.probe({ id: 's1' }), { size: SIZE, activity: { state: 'active' } });
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
   assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
-  // L767: a script session has its own outbox, <root>/script/<id>, and intake tags its hand-ins 'script'.
-  const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/script/s1`, ...more })] });
+  // L767, L836: a script session has its own outbox, <root>/<product>/script/<id>, and intake tags its hand-ins 'script'.
+  const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/p/script/s1`, ...more })] });
   assert.deepEqual(world(scriptDoc()).ports.sessions().map((x) => x.kind), ['script']);
-  assert.deepEqual(world(scriptDoc()).ports.outboxSessions().map((x) => [x.role, x.outbox]), [['script', `${ROOT}/script/s1`]]);
-  assert.throws(() => world(scriptDoc({ outbox: `${ROOT}/worker/s1` })).ports.sessions(), /not a script outbox/, 'a script under the worker folder');
-  assert.throws(() => world(doc({ sessions: [session('s1', { outbox: `${ROOT}/script/s1` })] })).ports.sessions(), /not a worker outbox/, 'a worker under the script folder');
+  assert.deepEqual(world(scriptDoc()).ports.outboxSessions().map((x) => [x.role, x.outbox]), [['script', `${ROOT}/p/script/s1`]]);
+  assert.throws(() => world(scriptDoc({ outbox: `${ROOT}/p/worker/s1` })).ports.sessions(), /not a script outbox/, 'a script under the worker folder');
+  assert.throws(() => world(doc({ sessions: [session('s1', { outbox: `${ROOT}/p/script/s1` })] })).ports.sessions(), /not a worker outbox/, 'a worker under the script folder');
   // A closed script outbox gets only the shape check, so the root is checked on its own: a script folder elsewhere is refused.
   assert.throws(() => world(scriptDoc({ outbox: '/elsewhere/script/s1', outbox_open: false })).ports.sessions(), /not inside the outbox root/, 'a closed script outbox outside the root');
   assert.deepEqual(world(doc({ sessions: [session('s1', { size: { ...SIZE, tokens: null } })] })).ports.probe({ id: 's1' }).size.tokens, null, 'readSize\'s "none yet" is a full size');
@@ -98,7 +98,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
     [world(s1({ outbox: '/elsewhere/worker/x' })), /outbox that is not this session's own folder/],
     [world(s1({ outbox: '/elsewhere/worker/s1' })), /outbox that is not inside the outbox root/],
     [world(s1({ outbox: undefined })), /outbox that was not named/],
-    [world(doc(), { realpath: (p) => (p === `${ROOT}/worker/s1` ? '/elsewhere/worker/s1' : p) }), /outbox that is not inside the outbox root/],
+    [world(doc(), { realpath: (p) => (p === `${ROOT}/p/worker/s1` ? '/elsewhere/worker/s1' : p) }), /outbox that is not inside the outbox root/],
     [world(s1({ request: 'think-1' })), /read-only request/],
     [world(s1({ outbox_open: undefined })), /has no outbox_open/],
     [world(s1({ stop_requested: 'no' })), /has no stop_requested/],
@@ -125,9 +125,9 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
   assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: undefined, outboxRoot: ROOT }), /uid is not known/);
   for (const outboxRoot of [undefined, '', 'out']) assert.throws(() => readOwnerStatus({ file: FILE, now: NOW, uid: OWNER, outboxRoot }), /outbox root is not known/, String(outboxRoot));
   // m2: a closed outbox's folder is not looked up, so one cleared folder can't take every port down; its shape still is checked
-  const gone = (p) => { if (p !== ROOT) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return p; };
+  const gone = (p) => { if (p !== ROOT && p !== `${ROOT}/p`) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return p; };
   const closed = doc({ sessions: [session('s1'), session('s2', { alive: false, ended: true, outbox_open: false })], requests: { s1: { state: 'started' }, s2: { state: 'stopped' } } });
-  assert.deepEqual(ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NOW, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(closed) }), realpath: (p) => (p === `${ROOT}/worker/s1` ? p : gone(p)), writeRequest: () => {}, holds: () => true }).sessions().map((x) => x.id), ['s1']);
+  assert.deepEqual(ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NOW, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(closed) }), realpath: (p) => (p === `${ROOT}/p/worker/s1` ? p : gone(p)), writeRequest: () => {}, holds: () => true }).sessions().map((x) => x.id), ['s1']);
   assert.throws(() => world(doc({ sessions: [session('s1'), session('s2', { outbox_open: false, outbox: '/x/y' })] })).ports.sessions(), /outbox that is not this session's own folder/);
 });
 
@@ -225,4 +225,26 @@ test('#324 r2 M1: a stop the Dispatcher asked for is never a death: the flag is 
 test('#328 r2 n1 (L769): the runner rewrites its status every 15 s, well inside the age at which the Dispatcher calls it stale', () => {
   assert.equal(RUNNER_STATUS_EVERY_MS, 15_000);
   assert.ok(RUNNER_STATUS_EVERY_MS * 10 <= STATUS_STALE_MS, `${RUNNER_STATUS_EVERY_MS} ms is not well under ${STATUS_STALE_MS} ms`);
+});
+
+test('L836: an outbox is its product\'s, in its product\'s folder; a product named as a role has no outbox folder', () => {
+  assert.deepEqual(runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product: 'p' }), { copies: '/c/p', outboxes: '/o/p' });
+  assert.equal(runnerOutbox({ outboxRoot: '/o', product: 'p', role: 'worker', sessionId: 's1' }), '/o/p/worker/s1');
+  assert.equal(runnerCopy({ copiesRoot: '/c', product: 'p', card: 'C-1' }), '/c/p/C-1');
+  for (const product of ['worker', 'script', 'lead', 'reviewer']) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /named as a role/, product);
+  // Setup's name rule (#378 M1): a name in upper case, or with a dot or an underscore, has no folder setup makes; on the
+  // Mac's disk an upper-case name would reach the lower-case folder while its deny entries, spelled otherwise, match nothing.
+  for (const product of ['Script', 'LEAD', 'Alpha', 'p.1', 'p_1', '-p', 'a'.repeat(65)]) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /not a product name setup makes a folder for/, product);
+  assert.equal(productRoleClash('Worker'), true, 'the clash itself is still read in any letter case');
+  for (const product of ['', '../x', '.p', 'a/b', undefined, 'x'.repeat(65)]) assert.throws(() => runnerPlaces({ copiesRoot: '/c', outboxRoot: '/o', product }), /not a product name/, String(product));
+  // The status: an outbox under another product's folder, or straight under the root, is not this session's.
+  for (const outbox of [`${ROOT}/q/worker/s1`, `${ROOT}/worker/s1`]) {
+    assert.throws(() => world(doc({ sessions: [session('s1', { outbox })] })).ports.sessions(), /not inside the outbox root/, outbox);
+  }
+  // A closed outbox's folder is not looked up, so the place itself must say it is the product's (pp-status-flat).
+  for (const outbox of [`${ROOT}/q/worker/s1`, `${ROOT}/worker/s1`]) {
+    const closed = doc({ sessions: [session('s1', { outbox, alive: false, ended: true, outbox_open: false })], requests: { s1: { state: 'stopped' } } });
+    assert.throws(() => world(closed).ports.sessions(), /not inside the outbox root, in its product folder/, `closed ${outbox}`);
+  }
+  assert.throws(() => world(doc({ sessions: [session('s1', { product: 'worker', outbox: `${ROOT}/worker/worker/s1` })] })).ports.sessions(), /product the runner's folders can't hold/);
 });
