@@ -83,6 +83,12 @@ export const DEFAULT_PROPOSALS_PARENT = '/Users/Shared/orchestrate-proposals';
 export const proposalsParentOf = (cfg) => cfg.proposalsParent ?? DEFAULT_PROPOSALS_PARENT;
 /** The folder the owner writes review-again taps into (runner setting `ownerTaps`, runbook A6). */
 export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
+/**
+ * The owner's answer for the Sensors (L609, L614, L727): the owner's job (wiring/owner-answer.mjs, as the owner) writes
+ * its ANSWER_FILE (owner-answer.json) in it, 0644; orchestrate's Sensors read it (sensors-ports.mjs). The owner's, 0755: no
+ * group or other write, and orchestrate may list and read it. No access list. The file name is the wiring's, not setup's.
+ */
+export const ownerAnswerPath = (cfg) => join(cfg.base, 'owner-answer');
 /** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
 export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
 
@@ -148,6 +154,7 @@ export function folderTable(cfg) {
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
+    [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],
     [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
