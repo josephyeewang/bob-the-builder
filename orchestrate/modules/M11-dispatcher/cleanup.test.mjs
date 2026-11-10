@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, strayCause, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -509,23 +509,22 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   // #403 r1 m4: the folders that can be no product's are named to Joe in one notice and never moved. c-8 has a
   // product's shape and no product in this Record: most often another product's own folder (each product's Dispatcher
   // has its own Record), so it is kept and not told (self-review M1); p4 is a file, which is no copy.
-  const told = alerts.filter((a) => /can be no product's copies folder/.test(String(a?.text ?? a)));
+  const told = alerts.filter((a) => /n't belong to any product/.test(String(a?.text ?? a)));
   assert.equal(told.length, 1, JSON.stringify(alerts));
   const text = String(told[0]?.text ?? told[0]);
   // r2 m1: named by the Dispatcher's own product (every product's Dispatcher tells it, on purpose, L908).
-  assert.match(text, /^product p1, p2, p3's Dispatcher: the worker copies folder .* holds 3 folders that can be no product's copies folder, kept as they are and never looked inside: C-7, p3, worker\. Each is a card folder from before/);
-  assert.doesNotMatch(text.replace(/^product [^:]*: /, ''), /c-8|p2/);
+  assert.match(text, /^the Dispatcher for products p1, p2, p3: the worker copies folder .* holds 3 folders that don't belong to any product: C-7, p3, worker\. Each is a card folder from before/);
+  assert.doesNotMatch(text.replace(/^[^:]*: /, ''), /c-8|p2/);
   // r2 M1: no folder's product is confirmed and a link's target is never looked at, so no move or delete is advised:
   // the notice says not to, and the only move it names is the lead's, once the card's product is confirmed.
-  assert.match(text, /may hold a card's unpushed work, so do not move or delete them: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted/);
-  assert.equal(text.match(/delet|mov/gi).length, 4, 'no other move or delete words: ' + text);
-  assert.doesNotMatch(text, /by hand|check what is in|you (may|can)/i);
-  // Through holdAlert (marked told only once delivered), once per set of names (r2 m2): the mark names its own cause.
+  assert.match(text, /may hold a card's unpushed work, so do not move or delete them: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted\. Nothing else for you to do/);
+  const rest = ['do not move or delete them', 'the lead moves an old card folder', 'is never deleted'].reduce((t, ok) => t.replace(ok, ''), text);
+  assert.doesNotMatch(rest, /delet|\bmov|remov|\brm\b|by hand|check what is in|you (may|can)/i, 'no other move or delete words');
+  // Through tellThen (marked told only once delivered), with the names told (r2 m2): one fact, whatever the names.
   const call = alert.calls.find(([t]) => told[0] === t);
-  assert.equal(call[1].mark.fact, `hold-${strayCause(['C-7', 'p3', 'worker'])}`);
-  assert.ok(call[1].mark.fact.startsWith(`hold-${COPIES_NOT_PRODUCT_CAUSE}-`));
-  assert.equal(strayCause(['worker', 'C-7', 'p3']), strayCause(['C-7', 'p3', 'worker']), 'the order of the names is not a new set');
-  assert.notEqual(strayCause(['C-7', 'p3']), strayCause(['C-7', 'p3', 'worker']));
+  assert.equal(call[1].mark.fact, STRAY_FACT);
+  assert.equal(STRAY_FACT, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
+  assert.deepEqual(namesInMark(call[1].mark.fields), ['C-7', 'p3', 'worker']);
   assert.equal(call[1].mark.kind, 'hold_alert');
   assert.ok(existsSync(join(w.copiesRoot, 'C-7')) && existsSync(join(w.copiesRoot, 'c-8', 'x')), 'never moved');
   // A product folder that can't be read fails the step, as the copies folder does (L744 3).
@@ -559,29 +558,62 @@ test('#403 r1 A5, A6: a product read that throws, or a damaged product record, k
     assert.equal(told.length, 1, `${name}: told once`);
     assert.match(String(told[0]), /the worker copies of product p1 were not looked at this pass: its product record could not be read or is damaged\. The copies are kept and may hold unpushed work: do not delete them/, name);
     assert.equal(alert.calls.find(([t]) => t === told[0])[1].mark.fact, `hold-${COPIES_UNREAD_CAUSE}`, name);
-    assert.ok(!alert.texts.some((t) => /can be no product's/.test(String(t))), `${name}: never told as no product's`);
+    assert.ok(!alert.texts.some((t) => /n't belong to any product/.test(String(t))), `${name}: never told as no product's`);
   }
 });
 
-test('#403 r2 m2: the folders that can be no product\'s are told once per set of names, not daily', async () => {
+test('#403 r2 m2: the folders that belong to no product are told only when a name not told before is there, never daily', async () => {
   const w = world();
   mkdirSync(join(w.copiesRoot, 'C-7'));
-  const rec = recFor(w);
-  // Told three days ago for this same set: a told mark (the real outbox writes it on delivery; fakeAlert does not).
-  seed(rec, 'fact', `hold-${strayCause(['C-7'])}`, { text: 'earlier', told_at: iso(T0) });
-  const run = async (alert) => cleanupPass({ rec, rules: R, now: T0 + 3 * 24 * 60 * MIN, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot,
+  mkdirSync(join(w.copiesRoot, 'C-9'));
+  // Told for C-7 and C-9 three days ago: a told mark with the names (the real outbox writes it on delivery; fakeAlert does not).
+  const after = (names) => { const rec = recFor(w); seed(rec, 'fact', STRAY_FACT, { text: 'earlier', told_names: JSON.stringify(names), told_at: iso(T0) }); return rec; };
+  const run = async (rec, alert) => cleanupPass({ rec, rules: R, now: T0 + 3 * 24 * 60 * MIN, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot,
     mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
-  const strays = (alert) => alert.texts.filter((t) => /can be no product's copies folder/.test(String(t)));
+  const strays = (alert) => alert.texts.filter((t) => /n't belong to any product/.test(String(t)));
   const same = fakeAlert();
-  await run(same);
-  assert.deepEqual(strays(same), [], 'the same set, days later, is not told again');
-  // A new set is news: told, under its own cause.
+  await run(after(['C-7', 'C-9']), same);
+  assert.deepEqual(strays(same), [], 'the same names, days later, are not told again');
+  // One moved away by the lead: fewer names are no news.
+  rmSync(join(w.copiesRoot, 'C-9'), { recursive: true });
+  const fewer = fakeAlert();
+  await run(after(['C-7', 'C-9']), fewer);
+  assert.deepEqual(strays(fewer), [], 'fewer names are not told');
+  // A new name is news: told, naming them all, and marked with them all.
   mkdirSync(join(w.copiesRoot, 'worker'));
   const more = fakeAlert();
-  await run(more);
+  await run(after(['C-7', 'C-9']), more);
   assert.equal(strays(more).length, 1, JSON.stringify(more.texts));
-  assert.match(String(strays(more)[0]), /never looked inside: C-7, worker\./);
-  assert.equal(more.calls.find(([t]) => t === strays(more)[0])[1].mark.fact, `hold-${strayCause(['C-7', 'worker'])}`);
+  assert.match(String(strays(more)[0]), /don't belong to any product: C-7, worker\./);
+  const mark = more.calls.find(([t]) => t === strays(more)[0])[1].mark;
+  assert.equal(mark.fact, STRAY_FACT);
+  assert.deepEqual(namesInMark(mark.fields), ['C-7', 'worker']);
+  // A mark from before names were kept (or one that can't be read) holds none: told once more, even for C-7 alone.
+  rmSync(join(w.copiesRoot, 'worker'), { recursive: true });
+  for (const old of [{ text: 'earlier', told_at: iso(T0) }, { text: 'earlier', told_names: '{bad', told_at: iso(T0) }]) {
+    const rec = recFor(w);
+    seed(rec, 'fact', STRAY_FACT, old);
+    const a = fakeAlert();
+    await run(rec, a);
+    assert.equal(strays(a).length, 1, JSON.stringify(old));
+  }
+  // Named as "a Dispatcher" when the Record holds no product; one folder is worded as one.
+  const bare = fakeAlert();
+  await cleanupPass({ rec: recWith([]), rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert: bare });
+  assert.equal(strays(bare).length, 1, JSON.stringify(bare.texts));
+  assert.match(String(strays(bare)[0]), /^a Dispatcher: the worker copies folder .* holds a folder that doesn't belong to any product: C-7\. It is a card folder .* so do not move or delete it: /);
+});
+
+test('#403 r2: the folders that belong to no product are listed with a cap, each name on one line', async () => {
+  const w = world();
+  for (let i = 0; i < 55; i++) mkdirSync(join(w.copiesRoot, `C-${100 + i}`));
+  mkdirSync(join(w.copiesRoot, 'C-0\nsecond line'));  // sorts first, so it is shown
+  const alert = fakeAlert();
+  await cleanupPass({ rec: recFor(w), rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const told = alert.texts.filter((t) => /n't belong to any product/.test(String(t)));
+  assert.equal(told.length, 1);
+  assert.match(String(told[0]), /holds 56 folders that don't belong to any product: C-0 second line, C-100, .*, C-148 and 6 more\. Each is/);
+  assert.doesNotMatch(String(told[0]), /\n/, 'one line');
 });
 
 test('L836: cleanupCopy refuses a card or product that names no plain place, and a card of another product', async () => {
