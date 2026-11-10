@@ -269,7 +269,52 @@ test('join 10: a pass for another product neither opens nor pushes this product\
   const s = scheduled(t, { answer: () => true });
   fileAsk(t, 'find out how the top three rivals price their annual plan');
   t.ctx.product = 'other-app';
-  await s.pass();
+  const r = await s.pass();
+  assert.ok(r.events.every((e) => e.type !== 'research_step_failed'), JSON.stringify(r.events));
   assert.deepEqual(s.pushes, []);
   assert.equal(t.record.list('ask').length, 0);
+});
+
+test('join 10 (review of #313): with the approvals config bad, the research ask still opens and pushes', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  const rules = t.ctx.rules;
+  t.ctx.rules = Object.create(rules, { get: { value: (k, o) => (k === 'approvals.push_windows' ? undefined : rules.get(k, o)) } });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  const r = await s.pass();
+  assert.equal(r.ok, false);
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1]);
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at);
+});
+
+test('join 10 (review of #313): a research step that throws is told once a cause, the pass still ends, and a new failure after it cleared is told again', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  let bad = true;
+  t.ctx.record = Object.create(t.record, { list: { value: (e, ...x) => { if (e === 'report' && bad) throw new Error('planted read failure'); return t.record.list(e, ...x); } } });
+  const failed = () => t.alerts.filter((a) => a.type === 'research_step_failed');
+  const r = await s.pass();
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.events.some((e) => e.type === 'research_step_failed' && /planted read failure/.test(e.error)), JSON.stringify(r.events));
+  await s.pass();
+  assert.equal(failed().length, 1, 'once');
+  bad = false;
+  await s.pass();
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], 'pushed once it cleared');
+  bad = true;
+  fileAsk(t, 'find out what the second rival charges', '20261103-0916-rb');
+  await s.pass();
+  assert.equal(failed().length, 2, 'told again after it had cleared');
+});
+
+test('join 10 (review of #313): a mark the Record refuses is told once, not every pass', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  await s.pass();
+  t.ctx.record = Object.create(t.record, { write: { value: (w) => (w.entity === 'ask' && w.doc?.push_sent_at ? { ok: false, reason: 'planted refusal' } : t.record.write(w)) } });
+  fileAsk(t, 'find out what the second rival charges', '20261103-0916-rb');
+  await s.pass(); await s.pass();
+  assert.equal(t.alerts.filter((a) => a.type === 'approvals_write_refused').length, 1, JSON.stringify(t.alerts));
 });

@@ -20,8 +20,9 @@
 //     + unreadable: true, cause when a GitHub read threw (L205); the Merge Gate classes `cause`
 // ctx = { record, rules, product, now, alert, gh, owner, repo, stateDir, push }
 //   push(event) → true when the owner's phone was sent `event` ({ ask, card, kind, urgent, line?, view? }; `view` is a
-//   go's text from go-view.mjs goText, R-0b-138/139, or an owner-flagged undo's undoPushText, R-0b-140); anything else is
-//   "not sent", and the ask is tried again next pass.
+//   go's text from go-view.mjs goText, R-0b-138/139, or an owner-flagged undo's undoPushText, R-0b-140; a research ask's
+//   push carries card: null, kind 'research' and its brief's view, R-0b-136); anything else is "not sent", and the ask is
+//   tried again next pass.
 //
 // HELD DECISIONS (R-0b-53, round 1 M8). A decision ask that carries `modules` (the modules of the decided.yaml entries
 // its change touches) is not raised while any open card is on one of those modules. A card with no module is open on
@@ -284,23 +285,45 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
 async function researchAsks(ctx, once, events) {
   const r = openResearchAsks(ctx);
   for (const { id, push: view } of r.opened) {
-    if (typeof ctx.push !== 'function') { once.alert(id, { type: 'approvals_no_push', ask: id }); continue; }
-    let sent = false;
-    try { sent = (await ctx.push({ ask: id, card: null, kind: 'research', urgent: false, view })) === true; } catch { sent = false; }
-    if (!sent) { once.alert(id, { type: 'push_not_sent', ask: id }); continue; }
-    const m = markResearchPushSent(ctx, id);
-    // Sent but not marked: it goes again next pass (a second copy of a confirmation, never a lost one), and Joe is told.
-    if (!m.ok) { ctx.alert({ type: 'approvals_write_refused', ask: id, reason: m.reason }); continue; }
-    once.pushed(id);
-    events.push({ type: 'pushed', ask: id, kind: 'research' });
+    // One ask that throws never holds the others (review of #313).
+    try {
+      if (typeof ctx.push !== 'function') { once.alert(id, { type: 'approvals_no_push', ask: id }); continue; }
+      let sent = false;
+      try { sent = (await ctx.push({ ask: id, card: null, kind: 'research', urgent: false, view })) === true; } catch { sent = false; }
+      if (!sent) { once.alert(id, { type: 'push_not_sent', ask: id }); continue; }
+      const m = markResearchPushSent(ctx, id);
+      // Sent but not marked: it goes again next pass (a second copy of a confirmation, never a lost one), and Joe is told
+      // once per cause, then daily.
+      if (!m.ok) { once.alert(id, { type: 'approvals_write_refused', ask: id, reason: m.reason }); continue; }
+      once.pushed(id);
+      events.push({ type: 'pushed', ask: id, kind: 'research' });
+    } catch (e) { once.alert(id, { type: 'research_push_failed', ask: id, reason: String(e?.message ?? e) }); }
   }
 }
+
+// The research step, guarded: a throw (a Record list or read that fails) never stops the pass or its saved marks
+// (L515 m3), and is told once per cause, then daily, under its own mark, kept while the failure lasts (review of #313).
+const RESEARCH_STEP = 'research-step';
+async function researchStep(ctx, once, events) {
+  try { await researchAsks(ctx, once, events); return false; } catch (e) {
+    const reason = String(e?.message ?? e);
+    events.push({ type: 'research_step_failed', error: reason });
+    once.alert(RESEARCH_STEP, { type: 'research_step_failed', reason });
+    return true;
+  }
+}
+const waitingIds = (ctx, failed) => new Set([...askStore(ctx.record).asks().filter((a) => a.doc.state === 'open' || a.doc.state === 'pushed').map((a) => a.id), ...(failed ? [RESEARCH_STEP] : [])]);
 
 export async function schedulePass(ctx) {
   const events = [];
   const cfg = readConfig(ctx.rules, ctx.product);
   // A bad config holds the asks, not the owner's pause: the state step still runs and answers (L606 N4).
-  if (!cfg.ok) { configAlert(ctx, cfg.reason); events.push(...stateRequestStep(ctx)); return fail(cfg.reason, { events }); }
+  // Research asks need none of the config (no window, no GitHub), so they still open and push (review of #313).
+  if (!cfg.ok) {
+    configAlert(ctx, cfg.reason); events.push(...stateRequestStep(ctx));
+    const once = askOnce(ctx); once.save(waitingIds(ctx, await researchStep(ctx, once, events)));
+    return fail(cfg.reason, { events });
+  }
   configAlert(ctx, null);
   // A product whose rules file says it is on gets its record, once (L204-b, L209), after the config read (L221 m-3,
   // ratified): a product whose owner can't be asked is not started. Before the product read below, so the record the
@@ -349,10 +372,10 @@ export async function schedulePass(ctx) {
     else due = win !== null && !raisedThisRound(doc) && (since === null || since <= win.start);
     if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }
-  // A throw here (the Record's list, as the state step reads it too) never stops the pass or its saved marks (L515 m3).
-  try { await researchAsks(ctx, once, events); } catch (e) { events.push({ type: 'research_step_failed', error: String(e?.message ?? e) }); }
-  // Marks are kept only for asks still waiting to be pushed; re-read, since a push moved some on.
-  once.save(new Set(askStore(ctx.record).asks().filter((a) => a.doc.state === 'open' || a.doc.state === 'pushed').map((a) => a.id)));
+  const failed = await researchStep(ctx, once, events);
+  // Marks are kept only for asks still waiting to be pushed (and the research step's while it fails); re-read, since a
+  // push moved some on.
+  once.save(waitingIds(ctx, failed));
   return { ok: true, events };
 }
 
