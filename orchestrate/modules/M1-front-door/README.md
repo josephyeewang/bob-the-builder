@@ -92,9 +92,11 @@ R-0b-82's decision and handoff code sit here although the row is tagged M11 (lan
    no mode request and never says "Filed": it tells the owner to start it in their own session (audit kit-lane3 r1
    Minor 9). Wiring it also means turning the skill's step 3 back on.
 10. Research asks (R-0b-136). Lane 2's intake checks `ask-request-<id>.json` with `checkOutboxFile` and pushes
-   `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). Each
-   pass runs M2's `openResearchAsks(ctx)`, sends each `opened[].push` to the owner's phone, then calls
-   `markResearchPushSent(ctx, id)` for it; anything not marked is handed back next pass. R-0b-135, after it
+   `intakePush` like the other Front Door files, then hands it to the record's `applyOutbox` (kept as a report). M2's
+   schedule pass (`schedulePass`, run per product by the Dispatcher's approvals step) runs `openResearchAsks(ctx)`, sends
+   each `opened[].push` through the phone port as `{ ask, card: null, kind: 'research', urgent: false, view }`, then
+   calls `markResearchPushSent(ctx, id)` once the phone took it; anything not marked is handed back next pass, and a
+   push not sent is told once per ask and cause, then daily. R-0b-135, after it
    writes the research_copy card, calls M2's `landResearch(ctx, id)`. The owner's desktop session (Bob's method for
    "run research ask R-12") reads the brief and the file name to leave with M2's `researchBrief(record, id)`, then
    writes `research-R-12.md` to the proposals folder; how that session reads the record is the Lead's to place.

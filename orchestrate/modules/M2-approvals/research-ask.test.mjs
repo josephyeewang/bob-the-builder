@@ -16,6 +16,7 @@ import { fenceFor } from '../M11-dispatcher/proposals-intake.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { schedulePass } from './schedule.mjs';
 import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine, safeAlert } from './research-ask.mjs';
 
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
@@ -207,4 +208,146 @@ test('L163: a promise is no answer yet, so safeAlert counts it as lost and it is
   assert.equal(safeAlert({ alert: fakeAlert({ rejects: 'down later', delay: 1 }) }, late)({ type: 't' }), false, 'a promise that will reject');
   assert.equal(safeAlert({ alert: fakeAlert({ answer: () => Promise.resolve(true) }) }, late)({ type: 't' }), false, 'a promise, even a good one, is not an answer yet');
   assert.equal(late.n, 2);
+});
+
+// M1 join item 10 (R-0b-136): the production caller. M2's schedule pass, which the Dispatcher's approvals step runs for
+// each product every tick, opens the research asks and sends each push; nothing here calls openResearchAsks itself.
+function scheduled(t, phone) {
+  const pushes = [];
+  Object.assign(t.ctx, { stateDir: join(t.base, 'm2-state'),
+    push: phone === null ? undefined : async (e) => { const a = phone.answer(e); if (a === 'throws') throw new Error('the phone is down'); if (a === true) pushes.push(e); return a; } });
+  return { pushes, pass: () => schedulePass(t.ctx) };
+}
+const RESEARCH_PUSH_R1 = 'On your waiting list: research ask R-1 for sample-app: find out how the top three rivals price their annual plan. To run it, open a desktop session on the Mini and say "run research ask R-1".';
+
+test('join 10: the schedule pass opens the research ask, sends its push once, and it stays on "waiting on you"', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  const r = await s.pass();
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(s.pushes, [{ ask: 'R-1', card: null, kind: 'research', urgent: false, view: RESEARCH_PUSH_R1 }]);
+  assert.ok(r.events.some((e) => e.type === 'pushed' && e.ask === 'R-1' && e.kind === 'research'));
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at, 'marked sent');
+  assert.match(waitingLines(waitingItems(t.record))[0], /^ask R-1: waits on joe for "run research ask R-1" in a desktop session on the Mini: find out how/);
+  // Next passes: no second ask, no second push, and it still waits on the owner.
+  await s.pass(); await s.pass();
+  assert.equal(s.pushes.length, 1);
+  assert.equal(t.record.list('ask').length, 1);
+  assert.equal(waitingLines(waitingItems(t.record)).length, 1);
+  assert.deepEqual(t.alerts, []);
+});
+
+test('join 10: a push the phone did not take is not marked, is told once, and goes out on a later pass', async () => {
+  for (const answer of [false, 'throws', undefined]) {
+    const t = m2env();
+    const phone = { answer: () => answer };
+    const s = scheduled(t, phone);
+    fileAsk(t, 'find out how the top three rivals price their annual plan');
+    await s.pass(); await s.pass();
+    assert.equal(askStore(t.record).ask('R-1').doc.push_sent_at, undefined, `${answer}: not marked`);
+    assert.deepEqual(t.alerts.filter((a) => a.ask === 'R-1').map((a) => a.type), ['push_not_sent'], `${answer}: told once`);
+    phone.answer = () => true;
+    await s.pass();
+    assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], `${answer}: sent once the phone takes it`);
+    assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at);
+  }
+});
+
+test('join 10: with no phone channel the ask still waits on the owner, and Joe is told it could not be pushed', async () => {
+  const t = m2env();
+  const s = scheduled(t, null);
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  await s.pass(); await s.pass();
+  assert.equal(waitingLines(waitingItems(t.record)).length, 1);
+  assert.deepEqual(t.alerts.map((a) => [a.type, a.ask]), [['approvals_no_push', 'R-1']]);
+  assert.equal(askStore(t.record).ask('R-1').doc.push_sent_at, undefined);
+});
+
+test('join 10: a pass for another product neither opens nor pushes this product\'s research ask', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.product = 'other-app';
+  const r = await s.pass();
+  assert.ok(r.events.every((e) => e.type !== 'research_step_failed'), JSON.stringify(r.events));
+  assert.deepEqual(s.pushes, []);
+  assert.equal(t.record.list('ask').length, 0);
+});
+
+test('join 10 (review of #313): with the approvals config bad, the research ask still opens and pushes', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  const rules = t.ctx.rules;
+  t.ctx.rules = Object.create(rules, { get: { value: (k, o) => (k === 'approvals.push_windows' ? undefined : rules.get(k, o)) } });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  const r = await s.pass();
+  assert.equal(r.ok, false);
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1]);
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at);
+});
+
+test('join 10 (review of #313): a research step that throws is told once a cause, the pass still ends, and a new failure after it cleared is told again', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  let bad = true;
+  t.ctx.record = Object.create(t.record, { list: { value: (e, ...x) => { if (e === 'report' && bad) throw new Error('planted read failure'); return t.record.list(e, ...x); } } });
+  const failed = () => t.alerts.filter((a) => a.type === 'research_step_failed');
+  const r = await s.pass();
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.events.some((e) => e.type === 'research_step_failed' && /planted read failure/.test(e.error)), JSON.stringify(r.events));
+  await s.pass();
+  assert.equal(failed().length, 1, 'once');
+  bad = false;
+  await s.pass();
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], 'pushed once it cleared');
+  bad = true;
+  fileAsk(t, 'find out what the second rival charges', '20261103-0916-rb');
+  await s.pass();
+  assert.equal(failed().length, 2, 'told again after it had cleared');
+});
+
+test('join 10 (review of #313): a mark the Record refuses is told once, not every pass', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  await s.pass();
+  t.ctx.record = Object.create(t.record, { write: { value: (w) => (w.entity === 'ask' && w.doc?.push_sent_at ? { ok: false, reason: 'planted refusal' } : t.record.write(w)) } });
+  fileAsk(t, 'find out what the second rival charges', '20261103-0916-rb');
+  await s.pass(); await s.pass(); await s.pass();
+  assert.equal(t.alerts.filter((a) => a.type === 'approvals_write_refused').length, 1, JSON.stringify(t.alerts));
+  // r1 audit of #313, m-2: the phone took it once, so it is held, not pushed again each pass, while the mark is retried.
+  assert.equal(s.pushes.filter((e) => e.ask === 'R-2').length, 1, 'pushed once, then held');
+  t.ctx.record = t.record;
+  const r = await s.pass();
+  assert.ok(r.events.some((e) => e.type === 'push_marked' && e.ask === 'R-2'), JSON.stringify(r.events));
+  assert.ok(askStore(t.record).ask('R-2').doc.push_sent_at, 'marked once the Record takes it');
+  assert.equal(s.pushes.filter((e) => e.ask === 'R-2').length, 1, 'still one push');
+});
+
+// r1 audit of #313, m-3: research runs in its own guard ahead of the rest, so a failure later in the pass holds nothing.
+test('join 10 (r1 audit of #313): a failure later in the pass does not hold the research push', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.record = Object.create(t.record, { read: { value: (e, ...x) => { if (e === 'product') throw new Error('planted product read failure'); return t.record.read(e, ...x); } } });
+  await assert.rejects(s.pass(), /planted product read failure/);
+  assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], 'pushed before the failure');
+  t.ctx.record = t.record;
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at, 'and marked');
+});
+
+// Review of the r1 fixes: a refused mark plus a failure later in the pass is still held, and told once.
+test('join 10 (r1 audit of #313): a held push stays held, and is told once, when a later step fails every pass', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.record = Object.create(t.record, {
+    write: { value: (w) => (w.entity === 'ask' && w.doc?.push_sent_at ? { ok: false, reason: 'planted refusal' } : t.record.write(w)) },
+    read: { value: (e, ...x) => { if (e === 'product') throw new Error('planted product read failure'); return t.record.read(e, ...x); } },
+  });
+  for (let i = 0; i < 3; i++) await assert.rejects(s.pass(), /planted product read failure/);
+  assert.equal(s.pushes.length, 1, 'one push, then held');
+  assert.equal(t.alerts.filter((a) => a.type === 'approvals_write_refused').length, 1, JSON.stringify(t.alerts));
 });
