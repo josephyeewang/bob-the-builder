@@ -109,8 +109,12 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   // Told once per process, and only once delivered: a lost one is sent again the next time it comes up (L135).
   const tellOnce = (event, key = event.reason) => { const k = `${event.type}:${key}`; if (told.has(k)) return true; if (!send(stamp(event))) return false; told.add(k); return true; };
   // `lost` runs when the alert was not delivered. `stop` names the fault for a job whose start this ends: with no store open,
-  // that job has nothing else to tell the owner from (L587, M13 store-stopped.mjs).
-  const stopFor = (type, reason, key = reason, lost = () => {}) => { if (!tellOnce({ type, reason }, key)) lost(); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true, stop: { type, reason } }); };
+  // that job has nothing else to tell the owner from (L587, M13 store-stopped.mjs). Its `key` is the fault's stable name,
+  // what the issue is found by, never the reason's changing words (L724).
+  const stopFor = (type, reason, key = reason, lost = () => {}) => { if (!tellOnce({ type, reason }, key)) lost(); return Object.assign(new Error(`${reason}; writes stop until the owner fixes it`), { store: true, stop: { type, reason, key } }); };
+  // Where in the store a failing path is, by its first part (tmp, docs, diary.jsonl, ...): a temp name carries a pid and a
+  // random part, so the whole path would be a new fault each start and each day (L724).
+  const placeOf = (p) => (typeof p !== 'string' ? 'no path' : p === root ? 'the store folder' : p.startsWith(`${root}/`) ? p.slice(root.length + 1).split('/')[0] : 'outside the store');
   function layoutProblem() {
     const kind = (p) => {
       let st; try { st = lstatSync(p); } catch (e) { return e?.code === 'ENOENT' ? 'none' : `unreadable (${e?.code ?? e})`; }
@@ -480,7 +484,8 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
     try { return recover(); } catch (e) {
       if (e?.store) throw e;
       const reason = `recovery stopped: ${String(e?.message ?? e).slice(0, 300)}`;
-      const key = `${e?.code}:${e?.path}`;
+      // The fault's stable name: its error code and the part of the store it is in, never the message or the whole path.
+      const key = `${e?.code ?? 'no code'}:${placeOf(e?.path)}`;
       // Kept, as this path has no other way out in production (L583). A store_layout stop is not: the fault may be the folder
       // or the unsent file itself, so nothing is written, and every later start finds it and tells it (robot-main.mjs).
       throw stopFor('recovery_stopped', reason, key, () => keepDaily({ type: 'recovery_stopped', reason }, key));

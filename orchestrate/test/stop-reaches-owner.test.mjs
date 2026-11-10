@@ -43,7 +43,9 @@ test('L583: recovery_stopped reaches the owner through the delivery pass, with t
     const gh = fakeIssues();
     const r = await deliverAlertsPass({ rec: o.record, now: () => env.clock.t, recordRoot: env.root, product: PRODUCT, products: [PRODUCT],
       repos: { [PRODUCT]: 'acme/product-1' }, owner: 'owner-login', issuesFor: () => gh, lockWaitMs: 30 });
-    assert.equal(r.refused, undefined);
+    // The same unwritable tmp/ also means a warning may be held in another process's memory (#260, on main since this was
+    // written), so the round is not called clean; what it could send still goes.
+    assert.ok(r.refused === undefined || /tmp\/ folder can't be written/.test(r.refused), r.refused);
     const issues = [...gh.issues.values()].filter((x) => /recovery_stopped/.test(x.body));
     assert.equal(issues.length, 1);
     assert.match(issues[0].body, /recovery stopped/);
@@ -90,5 +92,7 @@ test('L583: a stop carries its type and reason on the error, for a job that has 
     try { opened(env).store.transaction(() => {}); } catch (e) { err = e; }
     assert.equal(err?.stop?.type, 'recovery_stopped');
     assert.match(err?.stop?.reason, /recovery stopped/);
+    // L724: its key is the error code and the part of the store, never the message or the whole path.
+    assert.equal(err?.stop?.key, 'EACCES:tmp');
   } finally { restore(); }
 });

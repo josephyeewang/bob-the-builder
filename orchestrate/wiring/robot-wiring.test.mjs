@@ -115,6 +115,23 @@ test('L587: a store that won\'t open is told once per reason through the channel
   assert.match(bare.logs, /could not be told: .*R-0b-02/);
 });
 
+// L724: a recovery that stops writes does not stop the start (a store write never throws), so the round runs and its own
+// deliver pass sends the store's kept line. The start's stop path, and its issue, is only for a store that won't open.
+test('L724: a Record whose recovery stopped still starts the round, and the stop path opens no issue', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const tmp = join(w.config.recordRoot, 'tmp');
+  const gh = fakeIssues();
+  const logs = [];
+  chmodSync(tmp, 0o000);
+  try {
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } });
+    assert.notEqual(code, 1, logs.join('\n'));
+    assert.doesNotMatch(logs.join('\n'), /robot: not started/);
+    assert.equal(gh.issues.size, 0);
+  } finally { chmodSync(tmp, 0o755); }
+});
+
 test('L587: a start that fails for any other reason is not told as a stopped Record', async () => {
   const w = world({ keyMode: 0o755 });
   const gh = fakeIssues();
