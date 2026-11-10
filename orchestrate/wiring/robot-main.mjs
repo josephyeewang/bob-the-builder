@@ -10,14 +10,17 @@
 // per pass per day), and the other passes still run. An alert the queue refuses ("could not be queued") is logged, never
 // dropped in silence (L130 m12, as M11 main.mjs). The queue is sent by the robot job's own last pass, `deliver` (L242,
 // robot-wiring.mjs), never by this file directly.
-// Exit 0 when the round ran or another round was running; 1 when the config or the wiring could not be loaded; 2 when the
-// round ran past its deadline. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
+// Exit 0 when the round ran or another round of this job was running; 1 when the config or the wiring could not be loaded; 2
+// when the round ran past its deadline; 3 when the lock could not be taken for any other reason (L740): its folder is
+// missing or not writable, the lock is unreadable, held by a process that is not this user's, or held longer than any
+// round may run. A round that can never take its lock then shows as a last exit that is not 0, which `daemons check`
+// fails on, never as a quiet 0 every minute. The log line names the lock and the cause. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
 // M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
 //
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
 // keeps its lock, as M11 does for a late pass: the process exits, and the next start breaks the dead lock and says so.
 
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { readConfig, startWatchdog, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
@@ -63,6 +66,34 @@ export async function runPasses({ rec, passes, now, passDeadlineMs = PASS_DEADLI
   return res;
 }
 
+export const LOCK_REFUSED = 3;
+
+/** How a pid in the lock answers a signal-0 probe: 'dead', 'ours' (this user's, alive), or 'foreign' (alive, not ours, or no pid). */
+export function pidState(pid, { kill = (p, s) => process.kill(p, s) } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return 'foreign';
+  try { kill(pid, 0); return 'ours'; } catch (e) { return e?.code === 'ESRCH' ? 'dead' : 'foreign'; }
+}
+
+/**
+ * Takes the robot's round lock (M11 takePassLock) and says what a refusal means (L740): { ok: true, lock } or
+ * { ok: false, code, line }. Code 0 only for a readable lock held by a live process of this user, taken within the
+ * longest a round may run; every other refusal is LOCK_REFUSED.
+ */
+export function takeRoundLock(file, { now, maxHeldMs, state = pidState, read = (f) => readFileSync(f, 'utf8') }) {
+  let seen = null;
+  const l = takePassLock(file, { now, dead: (pid) => { seen = state(pid); return seen === 'dead'; } });
+  if (l.ok) return { ok: true, lock: l };
+  if (seen === 'ours') {
+    let takenAt = NaN; try { takenAt = Date.parse(JSON.parse(read(file))?.taken_at ?? ''); } catch { /* unreadable now */ }
+    const held = now - takenAt;
+    if (Number.isFinite(takenAt) && held >= -60_000 && held <= maxHeldMs) return { ok: false, code: 0, line: `robot: ${l.reason}` };
+    const why = Number.isFinite(takenAt) ? (held < -60_000 ? 'its time is in the future' : `it has been held ${Math.round(held / 60e3)} minutes, longer than any round may run`) : 'it has no readable time';
+    return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}` };
+  }
+  const cause = seen === 'foreign' ? `${l.reason}, a process that is not this job's user's` : l.reason;
+  return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}` };
+}
+
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
 const SELF = realOf(fileURLToPath(import.meta.url));
 
@@ -84,9 +115,10 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     return 1;
   }
   const { rec, passes } = wired;
-  const l = takePassLock(config.lockFile, { now: now() });
-  if (!l.ok) { log(`robot: ${l.reason}`); dog?.terminate(); return 0; }
   const limit = config.runDeadlineMs ?? RUN_DEADLINE_MS;
+  const taken = takeRoundLock(config.lockFile, { now: now(), maxHeldMs: limit + WATCHDOG_MARGIN_MS + 60_000 });
+  if (!taken.ok) { log(taken.line); dog?.terminate(); return taken.code; }
+  const l = taken.lock;
   // One tell, with its refusal logged (L130 m12): a queue that answers false or throws is never silent.
   const tell = (what, text) => {
     try { if (hold({ rec, cause: 'robot-run-late', text, alert: outbox(rec, now()), now: now() }) === false) log(`robot: ${what} ${NOT_QUEUED}`); }

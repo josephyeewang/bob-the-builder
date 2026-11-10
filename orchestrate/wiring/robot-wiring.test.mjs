@@ -24,7 +24,7 @@ import { tick } from '../modules/M11-dispatcher/tick.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
+import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
@@ -236,12 +236,14 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
     const code = await main([cfg], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) }, ...opts.main });
     return { code, logs, delivered }; };
   // P7: a live holder (this test's own pid): exit 0, a log line, no pass runs, the lock is left as it was.
-  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
+  // (L740: the holder's time must be readable and inside the longest a round may run, or it is refused, exit 3.)
+  const liveAt = new Date().toISOString();
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: liveAt }));
   let r = await run();
   assert.equal(r.code, 0);
   assert.ok(r.logs.some((l) => /robot: another pass runs \(pid \d+\)/.test(l)), r.logs.join('\n'));
   assert.equal(r.delivered, 0, 'no pass ran under another round\'s lock');
-  assert.match(readFileSync(lockOf(w), 'utf8'), /T-live/);
+  assert.equal(JSON.parse(readFileSync(lockOf(w), 'utf8')).taken_at, liveAt);
   // P5: a dead holder: its lock is broken, the stopped round is told, and this round runs.
   writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }));
   r = await run();
@@ -257,6 +259,55 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
   assert.ok(logs.some((l) => /the round did not finish within 300 ms/.test(l)));
   assert.ok(queued(readRecord(slow)).includes('a robot job round did not finish within 300 ms and was stopped; the next round starts in a minute'));
   assert.equal(existsSync(slow.config.lockFile), true, 'the late round keeps its lock');
+});
+
+test('L740: every lock the round cannot take exits 3 and names the lock and the cause; only a current round of ours exits 0', async () => {
+  const w = world();
+  const run = async (cfg) => { const logs = []; let delivered = 0;
+    const code = await main([cfg], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => { delivered += 1; return { sent: 0 }; }, fetchFn: fakeGitHubFetch(w.fake) } });
+    return { code, logs, delivered }; };
+  const refused = (r, cause, file = lockOf(w)) => {
+    assert.equal(r.code, LOCK_REFUSED, r.logs.join('\n'));
+    assert.equal(r.delivered, 0, 'no pass ran');
+    const line = r.logs.find((l) => l.startsWith('robot: cannot take its lock '));
+    assert.ok(line, r.logs.join('\n'));
+    assert.ok(line.includes(file), `names the lock: ${line}`);
+    assert.match(line, cause);
+  };
+  // Audit A1: the lock's folder does not exist (ENOENT). Never a quiet exit 0.
+  const gone = join(dirname(w.configFile), 'no-such-folder', 'robot.lock');
+  const cfgGone = join(dirname(w.configFile), 'robot-gone.json');
+  writeFileSync(cfgGone, JSON.stringify({ ...JSON.parse(readFileSync(w.configFile, 'utf8')), lockFile: gone }), { mode: 0o600 });
+  refused(await run(cfgGone), /could not take the pass lock: ENOENT/, gone);
+  // A lock that can't be read.
+  writeFileSync(lockOf(w), 'not json');
+  refused(await run(w.configFile), /unreadable/);
+  // Audit A2: a planted lock naming a live process that is not this user's (pid 1, launchd/init).
+  if (pidState(1) === 'foreign') {
+    writeFileSync(lockOf(w), JSON.stringify({ pid: 1, taken_at: new Date().toISOString() }));
+    refused(await run(w.configFile), /another pass runs \(pid 1\), a process that is not this job's user's/);
+  }
+  // A lock with no pid at all.
+  writeFileSync(lockOf(w), JSON.stringify({ taken_at: new Date().toISOString() }));
+  refused(await run(w.configFile), /not this job's user's/);
+  // Ours and alive, but held longer than any round may run (a reused pid, or a round that outlived its watchdog).
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() - 3 * 60 * 60e3).toISOString() }));
+  refused(await run(w.configFile), /held 180 minutes, longer than any round may run/);
+  // Ours and alive, with no readable time, or one in the future.
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
+  refused(await run(w.configFile), /no readable time/);
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() + 10 * 60e3).toISOString() }));
+  refused(await run(w.configFile), /in the future/);
+  // Every refusal left the lock as it was found.
+  assert.match(readFileSync(lockOf(w), 'utf8'), new RegExp(String(process.pid)));
+  rmSync(lockOf(w));
+});
+
+test("L740: pidState: this user's live pid is ours, a pid that is gone is dead, any other answer is foreign", () => {
+  assert.equal(pidState(process.pid), 'ours');
+  assert.equal(pidState(deadPid()), 'dead');
+  assert.equal(pidState(5, { kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); } }), 'foreign');
+  for (const p of [undefined, null, 0, -1, 1.5, '7']) assert.equal(pidState(p), 'foreign', String(p));
 });
 
 test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logged and kept with the failure; the later passes still run', async () => {
