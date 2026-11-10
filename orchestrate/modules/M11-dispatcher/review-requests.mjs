@@ -71,10 +71,15 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid() 
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
     try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, text); } finally { closeSync(fd); }
-    try { linkSync(tmp, final); } catch (e) {
-      if (!same || e?.code !== 'EEXIST') throw e;
-      const why = ownRequest(final, text, uid);
-      return why ? { ok: false, reason: `another file stands under this plan's request name, so the request was not written (${why}); the runner can't be asked until it is gone` } : { ok: true, exists: true };
+    // A file the runner takes away between the link and the read is no intruder: the link is tried once more (#294
+    // self-review m2).
+    for (let tries = 0; ; tries += 1) {
+      try { linkSync(tmp, final); break; } catch (e) {
+        if (!same || e?.code !== 'EEXIST') throw e;
+        const why = ownRequest(final, text, uid);
+        if (why === GONE && tries === 0) continue;
+        return why ? { ok: false, reason: `another file stands under this plan's request name, so the request was not written (${why === GONE ? 'it went while it was read' : why}); the runner can't be asked until it is gone` } : { ok: true, exists: true };
+      }
     }
   } catch (e) {
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
@@ -83,9 +88,10 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid() 
 }
 
 // Why the file under a request's name is not this very request, or null when it is: read by descriptor, never a link.
+const GONE = Symbol('gone');
 function ownRequest(file, text, uid) {
   let fd;
-  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return `it can't be opened (${e?.code ?? e?.message})`; }
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return e?.code === 'ENOENT' ? GONE : `it can't be opened (${e?.code ?? e?.message})`; }
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) return 'it is not a plain file';
