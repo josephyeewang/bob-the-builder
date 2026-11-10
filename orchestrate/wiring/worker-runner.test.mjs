@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_STATUS_EVERY_MS, ownerSyncPorts, readOwnerStatus } from './owner-status.mjs';
 import { ownerAsyncPorts } from './owner-asks.mjs';
-import { RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
 
 const OWNER = 501; const ROOT = '/outboxes'; const COPIES = '/copies'; const FILE = '/runner/status.json';
 const T0 = Date.parse('2026-11-09T12:00:00Z'); const MIN = 60_000; const CLAIM = 10 * MIN;
@@ -43,7 +43,8 @@ function world({ startAnswer, stopAnswer, gone = new Set(), drained = () => true
     writeRequest: (n, t) => w.asked.push({ name: n, body: JSON.parse(t) }) });
   return w;
 }
-const launchReq = (sid, more = {}, at = T0) => ({ name: `launch-${sid}.json`, body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: sid, ...more }, asked_at: new Date(at).toISOString() } });
+// Each session its own card (#358 r1 m4: one session per card), S-n on C-n.
+const launchReq = (sid, more = {}, at = T0) => ({ name: `launch-${sid}.json`, body: { launch: { card: sid.replace(/^S/, 'C'), kind: 'editing', product: 'p1', sessionId: sid, ...more }, asked_at: new Date(at).toISOString() } });
 
 test('step 3: a launch asked through owner-asks starts once, is listed, and the ask trusts the answer the runner wrote', async () => {
   const w = world();
@@ -210,7 +211,9 @@ test('self-review M1: an ended session is final; a process group number used aga
 
 test('self-review M2: a start answer the reader would refuse is never listed; it is stopped, then refused once its group is gone', async () => {
   const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/script/S-1` },
-    'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 } };
+    'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 },
+    'no start time (step-4 review M3)': { pidStart: '' }, 'a leader not its group\'s (step-4 review M3)': { pgid: 4002 },
+    'no commit (#358 r1 m1)': { head: 'not-a-sha' }, 'another card\'s copy (#358 r1 m1)': { copy: '/somewhere/else' } };
   for (const [what, more] of Object.entries(bad)) {
     const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more }) });
     await w.pass([launchReq('S-1')]);
@@ -255,11 +258,14 @@ test('self-review M4: the status is written after each session and each request,
   assert.ok(RUNNER_PORT_MS < RUNNER_STATUS_EVERY_MS);
   const w = world();
   await w.pass([launchReq('S-1'), launchReq('S-2')]);
-  w.ports.groupGone = () => new Promise(() => {}); // a port that hangs
-  const n = w.writes.length; const t = Date.now();
-  await w.pass([launchReq('S-3')]);
-  // 2 session checks, the launch's 'waiting' write, its answer, and the last: 5 writes, each read whole.
-  assert.equal(w.writes.length - n, 5);
+  // Ports that hang: every port wait is followed by a write before the next port is asked (step-4 review M4).
+  const at = []; const hang = (name) => () => { at.push([name, w.writes.length]); return new Promise(() => {}); };
+  w.ports.groupGone = hang('groupGone'); w.ports.size = hang('size'); w.ports.outboxDrained = hang('outboxDrained'); w.ports.saveWork = hang('saveWork');
+  const t = Date.now();
+  await w.pass([launchReq('S-3'), { name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(at.map((x) => x[0]), ['groupGone', 'size', 'groupGone', 'size', 'saveWork']);
+  for (let i = 1; i < at.length; i += 1) assert.ok(at[i][1] > at[i - 1][1], `a write between ${at[i - 1][0]} and ${at[i][0]}`);
+  assert.ok(w.writes.length > at.at(-1)[1], 'and after the last');
   assert.ok(Date.now() - t < 1000, 'each hung port is given up after portMs');
 });
 
@@ -287,4 +293,98 @@ test('self-review m1, m3, m6, c3: a session stays listed while an answer naming 
   assert.deepEqual([u.stops, u.read().answers[`stopGroup-S-2-${N1}`].ok], [[], false]);
   await u.pass([stopReq('S-2', N2, u.now, { pgid: 4001 })]);
   assert.equal(u.read().answers[`stopGroup-S-2-${N2}`].ok, true);
+});
+
+test('#358 r1 M1: each write is stamped when it is made, no two writes are further apart than one port wait, and step 0 writes after each settle', async () => {
+  // The clock moves on during the pass; each write carries the time it was made.
+  const w = world(); let t = T0;
+  await w.pass([launchReq('S-1'), launchReq('S-2')], { clock: () => (t += 1000) });
+  const at = w.writes.map((d) => Date.parse(d.written_at));
+  assert.ok(new Set(at).size === at.length && at.every((x, i) => i === 0 || x > at[i - 1]), `written_at moves on: ${at}`);
+  // Every port hangs: the widest gap between writes is one port wait (portMs 50), whatever the number of sessions.
+  const v = world();
+  await v.pass([launchReq('S-1'), launchReq('S-2'), launchReq('S-3')]);
+  const times = []; const hang = () => new Promise(() => {});
+  v.ports.groupGone = hang; v.ports.size = hang; v.ports.stopGroup = hang; v.ports.start = hang;
+  const t0 = Date.now();
+  await v.pass([stopReq('S-1', N1, v.now), launchReq('S-4')], { write: (d) => { times.push(Date.now()); v.writes.push(d); v.status = d; } });
+  const gaps = [times[0] - t0, ...times.slice(1).map((x, i) => x - times[i])];
+  assert.ok(Math.max(...gaps) < 50 * 1.9, `the widest gap is one port wait: ${gaps}`);
+  // Step 0: starts that answered wrong are each stopped (a port wait or two), with a write after each.
+  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.card}` }))) });
+  await u.pass([launchReq('S-1'), launchReq('S-2'), launchReq('S-3')]);
+  go.forEach((f) => f()); await new Promise((r) => setImmediate(r));
+  const settledAt = [];
+  u.ports.stopGroup = async (s) => { settledAt.push(u.writes.length); u.gone.add(s.pgid); return { ok: true }; };
+  await u.pass();
+  assert.equal(settledAt.length, 3);
+  // A start settled right is in a written status before the first session is checked.
+  let go2; const q = world(); const real = q.ports.start; q.ports.start = (x) => new Promise((r) => { go2 = () => r(real(x)); });
+  await q.pass([launchReq('S-1')]); go2(); await new Promise((r) => setImmediate(r));
+  let listed; q.ports.groupGone = async () => { listed = q.status.sessions.map((x) => x.id); return false; };
+  await q.pass();
+  assert.deepEqual(listed, ['S-1'], 'written after the settle');
+  for (let i = 1; i < settledAt.length; i += 1) assert.ok(settledAt[i] > settledAt[i - 1], 'a write between one settle and the next');
+});
+
+test('#358 r1 m2: a replay of a request dated ahead of the clock is still refused a day on', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const save = { name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(T0 + CLOCK_SKEW_MS).toISOString() } };
+  await w.pass([save]);
+  // A day after it was seen, but not yet a day after its own date.
+  w.now = T0 + RUNNER_KEEP_USED_UP_MS + 5; await w.pass();
+  w.now += 5; await w.pass([save]);
+  assert.deepEqual(w.saves, ['S-1']);
+  assert.match(w.notes.join('\n'), /saveWork-S-1-0123456789abcdef.json was answered before/);
+});
+
+test('#358 r1 m3, #362 r1 M1: a keep that fails just after a start settled leaves the start held, so the next pass lists it and a stop reaches it', async () => {
+  const w = world(); let failed = false;
+  const keep = (m) => { if (!failed && m.requests?.['S-1']?.state === 'started') { failed = true; throw new Error('EIO'); } w.kept.push(m); w.state = m; };
+  await assert.rejects(w.pass([launchReq('S-1')], { keep }), /EIO/);
+  assert.equal(w.state.requests['S-1'].state, 'waiting', 'the memory last kept');
+  assert.equal(w.pending.size, 1, 'and the start is still held');
+  await w.pass([stopReq('S-1', N1, w.now)]);
+  assert.deepEqual([w.read().sessions.map((x) => [x.id, x.alive]), w.stops.map((x) => x.id), w.pending.size], [[['S-1', false]], ['S-1'], 0]);
+  assert.equal(w.started.length, 1, 'started once');
+  // The same for a start settled by step 0 (one that answered after the runner's limit).
+  let go; const v = world(); const real = v.ports.start; v.ports.start = (x) => new Promise((r) => { go = () => r(real(x)); });
+  let vf = false;
+  const vkeep = (m) => { if (!vf && m.requests?.['S-1']?.state === 'started') { vf = true; throw new Error('EIO'); } v.kept.push(m); v.state = m; };
+  await v.pass([launchReq('S-1')]);
+  go(); await new Promise((r) => setImmediate(r));
+  await assert.rejects(v.pass([], { keep: vkeep }), /EIO/);
+  assert.equal(v.pending.size, 1, 'still held after step 0\'s keep failed');
+  await v.pass();
+  assert.deepEqual([v.read().sessions.map((x) => x.id), v.pending.size], [['S-1'], 0]);
+});
+
+test('#358 r1 m4: a second launch for a card with a live session, or a start still on, is refused', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1'), launchReq('S-2', { card: 'C-1' })]);
+  assert.deepEqual([w.started, w.read().answers['launch-S-2'].ok], [['S-1'], false]);
+  assert.match(w.read().answers['launch-S-2'].reason, /card C-1 already has a session/);
+  const v = world(); v.ports.start = () => new Promise(() => {});
+  await v.pass([launchReq('S-1')]); await v.pass([launchReq('S-2', { card: 'C-1' })]);
+  assert.equal(v.read().requests['S-2'].state, 'refused', 'a start still waiting holds the card too');
+  // Once the first has ended, the card can start again.
+  w.gone.add(4001); await w.pass([launchReq('S-3', { card: 'C-1' })]);
+  assert.deepEqual(w.started, ['S-1', 'S-3']);
+});
+
+test('#358 r1 m6: a start still on is noted again, at most every RUNNER_NOTE_EVERY_MS', async () => {
+  const w = world(); w.ports.start = () => new Promise(() => {});
+  await w.pass([launchReq('S-1')]);
+  const n = () => w.notes.filter((x) => /start of S-1 is still on/.test(x)).length;
+  assert.equal(n(), 1);
+  w.now += MIN; await w.pass(); assert.equal(n(), 1, 'not every pass');
+  w.now += RUNNER_NOTE_EVERY_MS; await w.pass(); assert.equal(n(), 2, 'but again after the note interval');
+});
+
+test('#358 r1 m7: a stopGroup whose pgid is not the listed number (a string included) is refused', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  await w.pass([stopReq('S-1', N1, w.now, { pgid: '4001' })]);
+  assert.deepEqual([w.stops, w.read().answers[`stopGroup-S-1-${N1}`].ok], [[], false]);
 });
