@@ -110,7 +110,7 @@ function stateOf(body, id, s, t) {
   return /^<!-- (orch:alert|alert-key) /.test(line) ? null : { status: null, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE, lost: true };
 }
 
-export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }) }) {
+export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new Date(), masker = makeMasker(), writer = makeFactWriter(rec, { actor, now, masker }), log = (s) => process.stderr.write(`${s}\n`) }) {
   let trouble = null; // why the Record refused a cache write since the last report
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
@@ -212,13 +212,17 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (owedNow) return tell(still, 'reminded');
       // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
       // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
-      // A clock too far ahead of GitHub's can't count the 24 h (L768): the issue is kept up to date, and not told again.
-      if (clockTooFast(gh, Date.parse(t))) return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
+      // A clock too far ahead of GitHub's can't count the 24 h (L768): the issue is kept up to date, and not told again;
+      // a reminder it holds back says so in one log line (L787), so the quiet is never unexplained.
+      const fast = clockTooFast(gh, Date.parse(t));
       // The robot's clock counts the day here: the footer's told time is mostly its own stamp, so the two agree, and the
       // check above keeps it within CLOCK_AHEAD_MS of GitHub's. With no Date header from GitHub that check can't run, and
       // the count is as before L768 (GitHub always sends one).
-      const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
-      if (told.did !== 'quiet') return told.answer;
+      const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => (fast ? 'held' : tell(still, 'reminded')) });
+      if (told.did !== 'quiet' && !fast) return told.answer;
+      if (fast && told.did !== 'quiet') {
+        try { log(`alerts: issue #${at.n}'s daily reminder is held: this computer's clock is ${Math.round(clockAhead(gh, Date.parse(t)) / 60_000)} minutes ahead of GitHub's, so the day can't be counted. Set the clock right.`); } catch { /* a log that throws holds nothing up */ }
+      }
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
     })();
     if (at.f.old && answer !== false) cache(id, s, key, at.n, 'open', true);

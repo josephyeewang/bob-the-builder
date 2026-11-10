@@ -1107,13 +1107,19 @@ test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minute
     let t = Date.parse('2026-11-03T08:00:00Z');
     const robot = { now: () => new Date(t + aheadMin * 60000) };
     const gh = fakeIssues({ now: robot.now, serverNow: () => new Date(t) });
-    const alerts = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: robot.now });
-    return { gh, alerts, tick: (min) => { t += min * 60000; } };
+    const lines = [];
+    const alerts = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: robot.now, log: (s) => lines.push(s) });
+    return { gh, alerts, lines, tick: (min) => { t += min * 60000; } };
   };
   const far = make(3 * 24 * 60);
   assert.equal(await far.alerts.raise(standing), 'opened');
+  far.tick(60);
+  assert.equal(await far.alerts.raise(standing), 'updated');
+  assert.deepEqual(far.lines, [], 'L787: no reminder due, so nothing held and nothing logged');
   for (let i = 0; i < 5; i++) { far.tick(25 * 60); assert.equal(await far.alerts.raise(standing), 'updated', 'not known, so not told'); }
   assert.equal(comments(far.gh), 0);
+  assert.equal(far.lines.length, 5, 'L787: each held reminder logs one line');
+  assert.match(far.lines[0], /^alerts: issue #1's daily reminder is held: this computer's clock is 4320 minutes ahead of GitHub's/);
   const near = make(3);
   await near.alerts.raise(standing);
   near.tick(2 * 60);
@@ -1121,6 +1127,7 @@ test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minute
   near.tick(23 * 60);
   assert.equal(await near.alerts.raise(standing), 'reminded');
   assert.equal(comments(near.gh), 1);
+  assert.deepEqual(near.lines, [], 'a clock within the limit logs nothing');
   const edge = make(4);
   await edge.alerts.raise(standing);
   edge.tick(24 * 60 - 2);
