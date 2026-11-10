@@ -157,8 +157,9 @@ const namedOf = (fresh, { all = false } = {}) => {
   return `; refused this pass: ${shown}${!all && once.length > REFUSED_LIST_MAX ? ` and ${once.length - REFUSED_LIST_MAX} more` : ''}`;
 };
 // #367 r2 m3: the check write below is refused on purpose, and the Record tells that refusal as any other (its `refused`
-// alert, "changed since read ... expected 9007199254740991"). The error says so, so Joe doesn't read it as a lost write.
-const PROBE_NOTE = '; the Record\'s "refused" alert for this list at version 9007199254740991 is this check, not a lost write';
+// alert). Its reason varies: the tamper found in this process, "changed since read ... expected 9007199254740991" in a new
+// one, or a store error. The error names the fact instead, so Joe doesn't read that alert as a lost write (self-review m1).
+const probeNote = (fact) => `; the Record's "refused" alert for fact ${fact} this pass, whatever its reason, is this check, not a lost write`;
 
 function tellCause(args) {
   const { rec, cause, fresh } = args;
@@ -176,14 +177,14 @@ function tellCause(args) {
   const why = cur.reason ?? 'corrupt';
   try { rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: Number.MAX_SAFE_INTEGER, doc: {}, kind: 'write_refused_kept' }); } catch { /* the read below says */ }
   const again = rec.read('fact', fact);
-  if (again?.corrupt) throw new Error(`its kept list could not be read (${why}) or restored, so this pass's refusals are not kept${namedOf(fresh, { all: true })}${PROBE_NOTE}`);
+  if (again?.corrupt) throw new Error(`its kept list could not be read (${why}) or restored, so this pass's refusals are not kept${namedOf(fresh, { all: true })}${probeNote(fact)}`);
   const how = again ? 'it was restored from the Record\'s diary' : 'no list was on record, so it starts again';
   try { tellKept(args, again, how); } catch (e) {
-    throw new Error(`its kept list could not be read (${why}); ${how}, then ${e?.message ?? e}${namedOf(fresh)}${PROBE_NOTE}`);
+    throw new Error(`its kept list could not be read (${why}); ${how}, then ${e?.message ?? e}${namedOf(fresh)}${probeNote(fact)}`);
   }
   // #367 r2 c2: "kept with it" only when this pass refused something.
   const keptNow = onceOf(fresh).length ? ', and this pass\'s refusals are kept with it' : '';
-  throw new Error(`its kept list could not be read (${why}); ${how}${keptNow}${namedOf(fresh)}${PROBE_NOTE}`);
+  throw new Error(`its kept list could not be read (${why}); ${how}${keptNow}${namedOf(fresh)}${probeNote(fact)}`);
 }
 
 function tellKept({ rec, alert, now, cause, fresh, taken, ran }, cur) {

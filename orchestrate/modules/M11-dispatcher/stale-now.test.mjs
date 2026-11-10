@@ -636,7 +636,7 @@ test('#367 r2 m1, m2, m3 planted: a list that stays corrupt names every refusal 
   assert.match(msg, /could not be read \(bad bytes\) or restored, so this pass's refusals are not kept/);
   for (const id of ids) assert.ok(msg.includes(`${id} (r)`), `${id} is named`);
   assert.doesNotMatch(msg, /more/, 'none is only counted');
-  assert.match(msg, /"refused" alert for this list at version 9007199254740991 is this check, not a lost write/);
+  assert.match(msg, /"refused" alert for fact hold-write-refused-park this pass, whatever its reason, is this check, not a lost write/);
   // c2: with no refusal this pass, a restored list's error does not say they are kept.
   const b = keptWorld(['C-1']);
   assert.equal(b.tell(b.rec, T0, new Map([['park', [b.item('C-1')]]])), 'told');
@@ -647,7 +647,8 @@ test('#367 r2 m1, m2, m3 planted: a list that stays corrupt names every refusal 
     return b.rec.read(e, id);
   } });
   assert.throws(() => tellRefused({ rec: once, alert: b.alert, now: T0 + H, refused: new Map(), ran: () => true }),
-    (e) => /it was restored from the Record's diary/.test(e.message) && !/kept with it/.test(e.message) && !/refused this pass/.test(e.message));
+    (e) => /it was restored from the Record's diary/.test(e.message) && !/kept with it/.test(e.message) && !/refused this pass/.test(e.message)
+      && /is this check, not a lost write/.test(e.message));
 });
 
 test('#367 r1 m3 planted: a kept list that reads corrupt when its clear is due is told, never cleared over', () => {
