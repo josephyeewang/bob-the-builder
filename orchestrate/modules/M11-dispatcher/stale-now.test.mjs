@@ -595,6 +595,35 @@ test('#367 r1 M1 planted: on a real store, a corrupt kept list keeps and names t
   assert.match(text, /C-2 \(why C-2\)/);
 });
 
+test('#367 r1 self-review m1, m2 planted: the restore write is never taken; a list that was not on record starts again; a later throw still names the refusals', () => {
+  // The kept list reads corrupt once, and then is not there: no {} fact is written, and C-2 is kept and named.
+  const a = keptWorld(['C-1', 'C-2']);
+  let first = true;
+  const writes = [];
+  const once = Object.create(a.rec);
+  Object.defineProperty(once, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && first) { first = false; return { id, entity: e, corrupt: true, reason: 'not a plain readable file' }; }
+    return a.rec.read(e, id);
+  } });
+  Object.defineProperty(once, 'write', { value: (x) => { const r = a.rec.write(x); writes.push([x.kind, x.expectRev, r?.ok === true]); return r; } });
+  assert.throws(() => tellRefused({ rec: once, alert: a.alert, now: T0, refused: new Map([['park', [a.item('C-2')]]]), ran: () => true }),
+    (e) => /no list was on record, so it starts again/.test(e.message) && /C-2 \(r\)/.test(e.message));
+  assert.deepEqual(writes[0], ['write_refused_kept', Number.MAX_SAFE_INTEGER, false], 'the restore write is refused');
+  assert.deepEqual(a.fact().doc.items.map((x) => x.id), ['C-2']);
+  // Restored, then the keep write is refused: the error still names this pass's refusal.
+  const b = keptWorld(['C-1', 'C-2']);
+  assert.equal(b.tell(b.rec, T0, new Map([['park', [b.item('C-1')]]])), 'told');
+  let corrupt = true;
+  const bad = Object.create(b.rec);
+  Object.defineProperty(bad, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && corrupt) { corrupt = false; return { id, entity: e, corrupt: true, reason: 'bad bytes' }; }
+    return b.rec.read(e, id);
+  } });
+  Object.defineProperty(bad, 'write', { value: (x) => (x?.kind === 'write_refused_kept' && x.expectRev !== Number.MAX_SAFE_INTEGER ? { ok: false, reason: 'refused for the test' } : b.rec.write(x)) });
+  assert.throws(() => tellRefused({ rec: bad, alert: b.alert, now: T0 + H, refused: new Map([['park', [b.item('C-2')]]]), ran: () => true }),
+    (e) => /it was restored from the Record's diary, then its list could not be kept \(refused for the test\)/.test(e.message) && /C-2 \(r\)/.test(e.message));
+});
+
 test('#367 r1 m3 planted: a kept list that reads corrupt when its clear is due is told, never cleared over', () => {
   const a = keptWorld();
   assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
