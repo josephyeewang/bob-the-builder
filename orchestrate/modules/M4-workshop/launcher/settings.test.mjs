@@ -3,13 +3,15 @@
 // The sandbox, network and compaction behaviour themselves are live checks (owner steps).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
+import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
@@ -300,4 +302,102 @@ test('round 3 MIN-2: a production file the rules list but the role file does not
   assert.equal(render('worker', { productionFiles: ['/p/settings.production'] }).reason, 'the rules list production files the role file does not deny: /p/settings.production');
   assert.equal(render('worker', { productionFiles: ['/w/secrets/settings.production', '/w/secrets'] }).ok, true, 'inside a denied folder, or the folder itself');
   assert.equal(render('worker', { productionFiles: ['/w/secretsX/settings.production'] }).ok, false, 'a folder whose name only starts the same');
+});
+
+// L751: the workers run as the worker runner's own Mac user, so its status and requests folders are walled off from them.
+const RUNNER = { requestsDir: '/u/runner/requests', statusFile: '/u/runner/state/status.json' };
+test('L751: every role the runner starts is denied the worker runner\'s requests and status folders; the Lead and review roles are not given them', () => {
+  for (const role of Object.keys(DESIGN_PROFILES).filter((r) => r !== 'lead' && !REVIEW_ROLES.includes(r))) {
+    const r = render(role, { paths: { ...PATHS, workerRunner: RUNNER } });
+    assert.equal(r.ok, true, `${role}: ${r.reason}`);
+    const deny = r.settings[S.permissions][S.deny];
+    const fs = r.settings[S.sandbox][S.filesystem];
+    for (const dir of ['/u/runner/requests', '/u/runner/state']) {
+      for (const tool of ['Read', 'Edit', 'Write']) assert.ok(deny.includes(`${tool}(/${dir}/**)`), `${role} ${tool} ${dir}`);
+      assert.deepEqual(runnerWallDeny(dir), ['Read', 'Edit', 'Write'].map((t) => `${t}(/${dir}/**)`), 'the shared helper writes the "//path" form');
+      assert.ok(fs[S.denyRead].includes(dir), `${role}: the shell may not read ${dir}`);
+      assert.ok(fs[S.denyWrite].includes(dir) && fs[S.denyWrite].includes(`${dir}/**`), `${role}: the shell may not write ${dir}`);
+    }
+  }
+  for (const role of ['lead', ...REVIEW_ROLES]) {
+    const r = render(role, { paths: { ...PATHS, workerRunner: RUNNER } });
+    assert.equal(r.ok, true, `${role}: ${r.reason}`);
+    assert.ok(!JSON.stringify(r.settings).includes('/u/runner'), `${role} is not a runner role`);
+  }
+  // Malformed paths, a top-level folder, or one holding the session's own outbox are refused, never rendered open.
+  for (const [wr, why] of [[{ requestsDir: '/u/runner/requests' }, /statusFile is not a plain absolute path/], [{ ...RUNNER, requestsDir: 'runner/requests' }, /requestsDir is not a plain/],
+    [{ ...RUNNER, statusFile: '/u/../status.json' }, /statusFile is not a plain/], [{ ...RUNNER, statusFile: '/status.json' }, /below a folder of their own/],
+    [{ ...RUNNER, requestsDir: '/w/copy' }, /apart from the session's own folders/], [{ ...RUNNER, requestsDir: `${PATHS.hooksDir}/requests` }, /apart from the session's own folders/], [{ ...RUNNER, requestsDir: PATHS.hooksDir }, /apart from the session's own folders/], [null, /requestsDir is not a plain/]]) {
+    assert.match(render('worker', { paths: { ...PATHS, workerRunner: wr } }).reason ?? '', why, JSON.stringify(wr));
+  }
+  // Both ways: a runner folder that holds one of the session's own folders is refused too.
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+});
+
+// The closest real check on this Mac (L751): macOS's own sandbox (Seatbelt, which Claude Code's shell sandbox runs on)
+// is given a profile built from the rendered denyWrite list, and a shell writes into the runner's folders and its own
+// outbox. The proof inside a real Claude session, with the rendered file, is pinned for the Mini.
+test('L751: under macOS\'s sandbox, a worker\'s shell write to the runner\'s status or requests folder is blocked; its outbox is not', {
+  skip: process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec') ? 'needs macOS sandbox-exec' : false,
+}, () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  const outbox = join(d, 'outbox');
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state'), outbox]) mkdirSync(p, { recursive: true });
+  const r = render('worker', { paths: { ...PATHS, outbox, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  const rules = r.settings[S.sandbox][S.filesystem][S.denyWrite].filter((p) => !/[*]/.test(p) && p.startsWith(d)).map((p) => `(deny file-write* (subpath "${p}"))`);
+  assert.equal(rules.length, 2, 'the runner folders, and only they, are on the denyWrite list as plain folders here');
+  const profile = `(version 1)(allow default)${rules.join('')}`;
+  const write = (file) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', 'printf forged > "$1"', 'sh', file], { encoding: 'utf8' });
+  for (const f of [runner.statusFile, join(runner.requestsDir, 'launch-forged.json')]) {
+    const w = write(f);
+    assert.notEqual(w.status, 0, `${f} was written`);
+    assert.equal(existsSync(f), false, `${f} exists`);
+  }
+  const ok = write(join(outbox, 'report-1.md'));
+  assert.equal(ok.status, 0, `control: the outbox write failed: ${ok.stderr}`);
+});
+
+// Review of #320 M1, M2: the launch-time check of the runner wall: present in the role file, and spelled as real paths.
+test('L751: checkRunnerWall passes a rendered worker file with real runner folders, and refuses a missing wall or a linked spelling', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
+  const r = render('worker', { paths: { ...PATHS, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
+  const bare = render('worker');
+  assert.match(checkRunnerWall({ settings: bare.settings, workerRunner: runner }).reason ?? '', /does not deny the tools/, 'a file rendered without the wall');
+  const noShell = structuredClone(r.settings);
+  noShell[S.sandbox][S.filesystem][S.denyWrite] = noShell[S.sandbox][S.filesystem][S.denyWrite].filter((p) => !p.startsWith(join(d, 'runner', 'state')));
+  assert.match(checkRunnerWall({ settings: noShell, workerRunner: runner }).reason ?? '', /does not deny the shell/);
+  const noRead = structuredClone(r.settings);
+  noRead[S.sandbox][S.filesystem][S.denyRead] = noRead[S.sandbox][S.filesystem][S.denyRead].filter((p) => !p.startsWith(join(d, 'runner')));
+  assert.match(checkRunnerWall({ settings: noRead, workerRunner: runner }).reason ?? '', /does not deny the shell/, 'the shell read wall too');
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner, realpath: (p) => `/private${p}` }).reason ?? '', /not its real path/, 'a linked spelling, as /tmp for /private/tmp');
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: { ...runner, requestsDir: join(d, 'gone') } }).reason ?? '', /is missing/);
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: null }).reason ?? '', /not a plain absolute path/);
+});
+
+// L763 (#320 m1): every rule is needed. Drop any single one, for either folder, and the check refuses (plant Q5: every -> some).
+test('L763: checkRunnerWall refuses when any one runner-wall rule is dropped', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
+  const r = render('worker', { paths: { ...PATHS, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  const without = (pick, rule) => { const s = structuredClone(r.settings); const o = pick(s); o.list.splice(0, o.list.length, ...o.list.filter((x) => x !== rule)); return s; };
+  const tools = (s) => ({ list: s[S.permissions][S.deny] });
+  const read = (s) => ({ list: s[S.sandbox][S.filesystem][S.denyRead] });
+  const write = (s) => ({ list: s[S.sandbox][S.filesystem][S.denyWrite] });
+  const { dirs } = runnerWallDirs(runner);
+  assert.equal(dirs.length, 2);
+  let n = 0;
+  for (const dir of dirs) {
+    for (const rule of runnerWallDeny(dir)) { n++; assert.match(checkRunnerWall({ settings: without(tools, rule), workerRunner: runner }).reason ?? '', /does not deny the tools/, rule); }
+    n++; assert.match(checkRunnerWall({ settings: without(read, dir), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyRead ${dir}`);
+    for (const rule of runnerWallShell(dir)) { n++; assert.match(checkRunnerWall({ settings: without(write, rule), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyWrite ${rule}`); }
+  }
+  assert.equal(n, 12, 'three tool rules, one read and two write rules, for each of the two folders');
 });
