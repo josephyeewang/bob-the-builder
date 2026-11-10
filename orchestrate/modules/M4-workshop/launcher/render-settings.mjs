@@ -18,7 +18,12 @@ import { inside } from '../hooks/lib.mjs';
 // case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
 // Both sides must be spelled as they resolve (wallPath), or they are not apart: `/w/x/../outbox` names the outbox,
 // and a spelling compare would call it apart (the apart path card). So `..`, `.`, a doubled or trailing slash fail closed.
-export const apart = (a, b) => { if (wallPath(a) !== a || wallPath(b) !== b) return false; const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
+// This compares text in its simplest form; it follows no symlink (the real-path walls are elsewhere).
+export const apart = (a, b) => {
+  if (wallPath(a) !== a || wallPath(b) !== b) return false;
+  const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()];
+  return !inside(x, y) && !inside(y, x);
+};
 
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
@@ -170,6 +175,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     const w = runnerWallDirs(paths.workerRunner);
     if (!w.ok) return w;
     const own = [paths.outbox, paths.copy, paths.notes, paths.hooksDir, paths.snapshot, paths.node, paths.bobFolder].filter((x) => typeof x === 'string');
+    // Say which folder is badly spelled, before apart refuses it as not apart (PR #420 review m1).
+    const odd = own.find((x) => wallPath(x) !== x);
+    if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);
     if (w.dirs.some((dir) => own.some((x) => !apart(x, dir)))) return refuse('the worker runner\'s folders must be apart from the session\'s own folders (outbox, copy, notes, hooks, rules, node, Bob)');
     runnerDirs = w.dirs;
   }

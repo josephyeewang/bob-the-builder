@@ -595,7 +595,8 @@ test('#410 r3 m1: apart is one rule, both ways, without regard to case; a shared
 // The apart path card: a `..` spelling that names the other folder is refused at each call site, though its letters look apart.
 test('apart path card: the runner folders refuse a session folder spelled through ..', () => {
   assert.equal(render('worker', { paths: { ...PATHS, workerRunner: RUNNER } }).ok, true);
-  assert.match(render('worker', { paths: { ...PATHS, notes: '/w/notes/../../u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/w/notes/../../u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /path "\/w\/notes\/\.\.\/\.\.\/u\/runner\/state\/notes" is not a plain absolute path, spelled as it resolves/);
+  for (const hooksDir of ['/w/hooks/', '/w//hooks', '/w/./hooks']) assert.match(render('worker', { paths: { ...PATHS, hooksDir, workerRunner: RUNNER } }).reason ?? '', /is not a plain absolute path, spelled as it resolves/, hooksDir);
 });
 test('apart path card: the notes folder spelled through .. into the outbox is refused', () => {
   assert.equal(render('lead').ok, true);
