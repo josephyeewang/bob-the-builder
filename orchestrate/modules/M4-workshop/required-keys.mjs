@@ -17,6 +17,8 @@ export const REQUIRED_KEYS = Object.freeze([
 // L568: repo, mirror and the outside check's workflow come from code, not the rules file, and left this list with their
 // reads (#237). Onboarded is the one "on" switch M2 reads too.
 export const OPTIONAL_KEYS = Object.freeze([
+  'bob.method_files',         // the Bob fetch (bob-method/fetch.mjs, R-0b-141): missing fetches nothing, so check 13 refuses the roles that read Bob
+  'bob.pin',                  // the same: missing, short or the placeholder fetches nothing
   'onboarding.state',         // anything but the exact word active is not onboarded: the push waits
   'product.allowed_binaries', // missing allows no images
   'product.default_branch',   // missing reads as main

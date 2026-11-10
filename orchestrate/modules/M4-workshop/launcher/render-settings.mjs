@@ -56,6 +56,9 @@ export function renderAllowRules(commands = {}) {
 
 const abs = (p) => `/${p.replace(/^\/+/, '')}`; // Claude's "//path" form needs one more slash
 const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
+/** The rules that keep the Bob folder read-only. The one source for both the renderer and launch check 13 (L750), so
+ *  the form check 13 looks for is the form written. */
+export const bobFolderDeny = (folder) => [`Edit(/${abs(folder)}/**)`, `Write(/${abs(folder)}/**)`];
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
@@ -115,7 +118,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
   }
-  if (paths.bobFolder) deny.push(`Edit(/${abs(paths.bobFolder)}/**)`, `Write(/${abs(paths.bobFolder)}/**)`);
+  if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
   const walls = [];
   if (REVIEW_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};

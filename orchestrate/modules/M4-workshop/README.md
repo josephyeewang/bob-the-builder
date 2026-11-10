@@ -34,6 +34,10 @@ See LANES.md for who builds this folder, and the build rows for what.
 
 The launch check (audit m3): the tracker's half is built (`ActivityTracker.beginLaunch`, tested); the wiring is the open item above.
 
+## Bob's method folder at the pinned commit (R-0b-141)
+
+`bob-method/fetch.mjs` `fetchBobMethod` puts the files the rules list (`bob.method_files`: exact paths, or a folder written `dir/**`) at the commit the rules pin (`bob.pin`) into the Bob folder, for the roles whose profile says `bobFolder` (the Lead, the workers, the reviewers and auditors, learning). It runs as the `orchestrate` user, never root, into a folder whose parent is that user's alone. It fetches the one commit by its id from the public repository's https address on github.com through safe-git, with no token: safe-git starts git from an empty environment with an empty credential helper, and no header is added. It writes the files straight from git's objects (0444 files, 0555 folders) and swaps the folder in by rename. It refuses a pin whose method files hold a SKILL.md, a skill or skills folder, or a link, so it agrees with launch check 13. It returns the manifest check 13 compares against (`bobManifest`). A folder already at the pin is left as it is. The Lead's settings already deny reading any `SKILL.md` and writing the folder (render-settings.mjs). **Not wired yet:** the call before each start belongs to the launcher's wiring, and the folder's place on the Mac to setup. Check 13 also still reads the deny rule in another form than render-settings writes it (lane 2's fix, above). The wiring must pass `owner` as the `orchestrate` user's id looked up by name, never the running process's own, and setup must place the folder and mirror where every folder above them is root's or that user's, shut to others (only the direct parent is checked here).
+
 ## The push script and git safety (0b-4: R-0b-45, 46, 47)
 
 `required-keys.mjs` lists the rules keys the module reads, for M10's first-cutover fit check (L601, L612: only `product.vercel_project` is required of the rules file); its test scans every non-test file here.
