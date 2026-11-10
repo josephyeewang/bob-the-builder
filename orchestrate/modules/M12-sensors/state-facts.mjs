@@ -9,8 +9,15 @@
 // The fact ids are M11's own (imported, not copied), and every fact passes the allow-list in fact-shapes.mjs.
 //
 // Ports (each may be async):
-//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source } | null
-//   whoIsSignedIn()     → the account name, or null when nobody is signed in or it can't be read
+//   readUsage(account)  → { h5: { used_pct, resets_at }, week: { used_pct, resets_at }, source, observed_at? } | null
+//   whoIsSignedIn()     → the account name, or { account, signed_in?, reason?, observed_at? }, or null when it can't be read
+// The account fact tells "nobody is signed in" apart from "couldn't tell" (L730, #289 r1 M1): signed_in is true (an
+// account of M4's), false (the port said plainly nobody is), or null (couldn't tell), and `reason` says why when it is
+// not true. A bare null or a name that isn't M4's is "couldn't tell", never "nobody". M11 reads a null account as
+// nobody either way, which is safe; the difference is what Joe is told.
+// A port that hands back an observed_at of its own is a relay of an earlier reading (the owner's answer, L728 M1): the
+// fact keeps the EARLIER of that time and the read's start, so a reading is never made younger by being passed on. An
+// observed_at that is there but not a time is refused, never replaced by the read time.
 //   probe()             → true | false | null (null = could not tell; M11 reads it as unknown)
 // The limit-hit writer takes the worker's exit result instead of a port: the worker learns the reset time, and the
 // Sensors write it (M9 lists limit-hit- under the sensors family, so the Sensors are its one writer).
@@ -28,20 +35,37 @@ import { writePrFact } from './pr-facts.mjs';
 const stamp = (now) => now().toISOString();
 export const accountOk = (a) => typeof a === 'string' && ACCOUNT_NAMES.includes(a);
 const timeOrNull = (t) => (typeof t === 'string' && Number.isFinite(Date.parse(t)) ? t : null);
+// The earlier of our stamp and the port's own time; undefined when the port's time is there but unreadable.
+const relayed = (ours, theirs) => {
+  if (theirs === undefined || theirs === null) return ours;
+  if (!timeOrNull(theirs)) return undefined;
+  return Date.parse(theirs) < Date.parse(ours) ? new Date(Date.parse(theirs)).toISOString() : ours;
+};
 
 export async function writeUsageFact(writer, readUsage, account, { now = () => new Date() } = {}) {
   if (!accountOk(account)) return { ok: false, reason: 'no known account to read usage for' };
-  const observed_at = stamp(now);
+  const started = stamp(now);
   const r = await readUsage(account);
   if (!r) return { ok: false, reason: `no usage reading for ${account}` };
+  const observed_at = relayed(started, r.observed_at);
+  if (!observed_at) return { ok: false, reason: `the usage reading for ${account} has an observed_at that is not a time` };
   const win = (w) => ({ used_pct: w?.used_pct ?? null, resets_at: w?.resets_at ?? null });
   return writer.put(USAGE_FACT(account), { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) });
 }
 
 export async function writeSignedInAccount(writer, whoIsSignedIn, { now = () => new Date() } = {}) {
-  const observed_at = stamp(now);
-  const a = await whoIsSignedIn();
-  return writer.put(ACCOUNT_FACT, { kind: 'fact.signed-in-account', account: accountOk(a) ? a : null, observed_at });
+  const started = stamp(now);
+  const got = await whoIsSignedIn();
+  const o = got && typeof got === 'object' ? got : { account: got };
+  const observed_at = relayed(started, got && typeof got === 'object' ? got.observed_at : undefined);
+  if (!observed_at) return { ok: false, reason: 'the signed-in account reading has an observed_at that is not a time' };
+  const said = typeof o.reason === 'string' && o.reason ? o.reason.slice(0, 200) : null;
+  let account = null; let signed_in = null; let reason;
+  if (got === null || got === undefined) reason = 'the account read gave no answer';
+  else if (o.signed_in === false) { signed_in = false; reason = said ?? 'nobody is signed in'; }
+  else if (accountOk(o.account) && o.signed_in !== null) { account = o.account; signed_in = true; reason = null; }
+  else reason = said ?? (o.account == null ? 'who is signed in could not be told' : 'the account read named no account of M4\'s');
+  return writer.put(ACCOUNT_FACT, { kind: 'fact.signed-in-account', account, signed_in, reason, observed_at });
 }
 
 // One writer per value fact, so each kind is written out in full (l25.test.mjs finds every kind by its literal name).

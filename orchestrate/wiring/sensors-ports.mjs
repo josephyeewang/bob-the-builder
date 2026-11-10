@@ -3,6 +3,13 @@
 //
 //   readOwnerAnswer({ file, ownerUid, now?, staleMs?, acl? }) → { ok: true, answer } | { ok: false, reason }
 //   sensorsPorts({ file, ownerUid, now?, staleMs? }) → { whoIsSignedIn, readUsage, lastReason }
+//     whoIsSignedIn() → { account, signed_in, observed_at?, reason? }: signed_in false only when the answer says plainly
+//                       that the named account is signed out; null (couldn't tell) with the reason for everything else
+//     readUsage(account) → { source, h5, week, week_from, observed_at } | null
+//
+// THE ANSWER'S OWN TIME (L728 M1). Both ports hand on the answer's observed_at, and state-facts.mjs stores the earlier of
+// it and its own read time. So M11's stale_after_min counts from when the owner's job asked Claude Code, never from
+// when this side read the file: a 14-minute-old answer read now is 16 minutes old two minutes later.
 //
 // Each port reads the file afresh and answers null for anything not known: a file that is missing, too old, from the
 // future, not the owner's, writable by others, or not the shape below. The Sensors loop writes null as unknown, and M11
@@ -10,14 +17,17 @@
 // gave null, for the pass's problem line ("says so", L611).
 //
 // A missing 5-hour row stays null, never 0% (L611): readUsage hands it on as null figures, and M11 refuses a reading
-// without an h5 percent.
+// without an h5 percent. The week is the highest weekly row (owner-answer.mjs), and `source` names that row.
 //
 // THE FILE IS A CLAIM (L614). The folder and file are the owner's user's, and work sessions may run as that user too.
 // The checks here stop a file from anyone else, one left writable to others, an old one and one dated ahead; they can't
-// stop the owner's user itself writing a false one. What a false file could still do, until the next real round
-// overwrites it (5 minutes): name the other set-up account (the Dispatcher starts sessions on it); say signed in when not
-// (a session start fails and the Dispatcher's own checks catch it); or claim low usage, which lets Tier-1 work and new
-// starts run past a real amber or red band until the plan's limit itself stops them. It can't reach the Record, the
+// stop the owner's user itself writing a false one. There is NO time bound on that: the user can rewrite the file every
+// round, or lock it (`chflags uchg`) so the real round can't overwrite it (L728). A false file can name the other set-up
+// account (the Dispatcher starts sessions on it); say signed in when not (a session start fails and the Dispatcher's own
+// checks catch it); or claim low usage, which lets Tier-1 work and new starts run past a real amber or red band until
+// the plan's limit itself stops them. Two checks narrow the last one: within one usage window (the same reset time, the
+// same row) a lower percent than one already seen is refused and said (L728 m1), and a locked file goes stale within
+// ANSWER_STALE_MS. Both are held in this process only; a restart forgets what it saw. It can't reach the Record, the
 // robot's key or merges: those are other users' files. Access lists on the folder and file are checked on every read
 // with M4's `aclProblem` (an access list can be added after setup's check ran); setup check checks the folder too.
 
@@ -27,12 +37,16 @@ import { ACCOUNT_NAMES } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { ANSWER_VERSION } from './owner-answer.mjs';
 
-export const ANSWER_STALE_MS = 15 * 60_000;     // the rules' stale_after_min (A8); an answer this old is unknown
+// Two of the owner's rounds (5 minutes each): a file older than that means the owner's job stopped writing. Not a copy of
+// the rules' stale_after_min (L728 m5): M11 applies that itself, counting from the answer's own time.
+export const ANSWER_STALE_MS = 10 * 60_000;
+export const SAME_WINDOW_MS = 60_000;            // reset times this close are one window (the server's times carry ms)
 export const ANSWER_AHEAD_MS = 2 * 60_000;       // clock drift allowed; later than this is refused as a future time
 const MAX_BYTES = 4096;
 const refuse = (reason) => ({ ok: false, reason });
 const isTime = (t) => typeof t === 'string' && Number.isFinite(Date.parse(t));
 const pct = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 100;
+const ROW = /^(weekly_all|weekly_scoped:[A-Za-z0-9._-]{1,40})$/;
 
 function shapeProblem(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return 'the answer is not an object';
@@ -43,16 +57,19 @@ function shapeProblem(a) {
   if (a.account !== null && !ACCOUNT_NAMES.includes(a.account)) return 'the answer names neither a nor b';
   if (![true, false, null].includes(a.signed_in)) return 'signed_in is not yes, no or not known';
   if (!isTime(a.observed_at)) return 'observed_at is not a time';
+  if (a.signed_in === true && a.account === null) return 'the answer says signed in but names no account';
   if (a.usage_reason !== undefined && typeof a.usage_reason !== 'string') return 'usage_reason is not text';
   if (a.usage === null) return null;
   if (!a.usage || typeof a.usage !== 'object' || Array.isArray(a.usage)) return 'usage is not an object';
-  if (Object.keys(a.usage).some((k) => k !== 'h5' && k !== 'week')) return 'usage has a window this reader does not know';
+  if (Object.keys(a.usage).some((k) => k !== 'h5' && k !== 'week' && k !== 'week_from')) return 'usage has a window this reader does not know';
+  if (a.usage.week_from != null && !(typeof a.usage.week_from === 'string' && ROW.test(a.usage.week_from))) return 'week_from is not a row this reader knows';
   for (const k of ['h5', 'week']) {
     const w = a.usage[k];
     if (w === null || w === undefined) continue;
     if (typeof w !== 'object' || !pct(w.used_pct)) return `the ${k} percent is not 0 to 100`;
     if (w.resets_at !== null && !isTime(w.resets_at)) return `the ${k} reset time is not a time`;
   }
+  if (a.usage.week && a.usage.week_from == null) return 'the week has no week_from';
   return null;
 }
 
@@ -89,12 +106,29 @@ export function readOwnerAnswer({ file, ownerUid, now = () => new Date(), staleM
   if (bad) return refuse(bad);
   const age = now().getTime() - Date.parse(a.observed_at);
   if (age < -ANSWER_AHEAD_MS) return refuse('the owner\'s answer is dated in the future');
-  if (age > staleMs) return refuse(`the owner's answer is ${Math.round(age / 60_000)} min old`);
+  if (age > staleMs) return refuse(`the owner's answer is ${Math.round(age / 60_000)} min old (the owner's job may be failing to write; see its log)`);
   return { ok: true, answer: a };
 }
 
 export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs = ANSWER_STALE_MS, acl = aclProblem }) {
   let why = null;
+  const seen = new Map();   // `${account}|${row}` → { resets: ms, pct }: the highest percent accepted in that window
+  // A lower percent than one already seen in the same window, or a reset time moved back while the window seen is
+  // still open, is refused (L728 m1). → a reason, or null. Marks are written only by commit(), once the reading passes.
+  const dropped = (account, row, w) => {
+    const r = Date.parse(w?.resets_at ?? '');
+    const m = seen.get(`${account}|${row}`);
+    if (!w || !Number.isFinite(r) || !m) return null;
+    if (Math.abs(r - m.resets) <= SAME_WINDOW_MS) return w.used_pct < m.pct ? `usage: the ${row} row went down within one window (${w.used_pct}% after ${m.pct}%), so it is refused` : null;
+    if (r < m.resets && m.resets > now().getTime()) return `usage: the ${row} row's reset time moved back while the window seen is still open, so it is refused`;
+    return null;
+  };
+  const commit = (account, row, w) => {
+    const r = Date.parse(w?.resets_at ?? '');
+    if (!w || !Number.isFinite(r)) return;
+    const k = `${account}|${row}`; const m = seen.get(k);
+    seen.set(k, m && Math.abs(r - m.resets) <= SAME_WINDOW_MS ? { resets: m.resets, pct: Math.max(m.pct, w.used_pct) } : { resets: r, pct: w.used_pct });
+  };
   const read = () => {
     const r = readOwnerAnswer({ file, ownerUid, now, staleMs, acl });
     why = r.ok ? null : r.reason;
@@ -103,9 +137,12 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
   return {
     whoIsSignedIn: async () => {
       const a = read();
-      if (!a) return null;
-      if (a.signed_in !== true) { why = a.signed_in === false ? `account ${a.account} is not signed in` : 'who is signed in is not known'; return null; }
-      return a.account;
+      if (!a) return { account: null, signed_in: null, reason: why };
+      if (a.signed_in !== true) {
+        why = a.signed_in === false ? `account ${a.account} is not signed in` : `who is signed in is not known (${a.usage_reason ?? 'no reason given'})`;
+        return { account: null, signed_in: a.signed_in, reason: why, observed_at: a.observed_at };
+      }
+      return { account: a.account, signed_in: true, observed_at: a.observed_at };
     },
     readUsage: async (account) => {
       const a = read();
@@ -113,8 +150,16 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
       if (a.signed_in !== true || a.account !== account) { why = `the owner's answer is not about a signed-in account ${account}`; return null; }
       if (!a.usage) { why = `usage: ${a.usage_reason ?? 'not read'}`; return null; }
       const w = (x) => (x ? { used_pct: x.used_pct, resets_at: x.resets_at } : null);
-      if (!a.usage.h5) why = 'usage: the report had no 5-hour row, so it stays unknown';
-      return { source: 'claude /usage', h5: w(a.usage.h5), week: w(a.usage.week) };
+      const h5 = w(a.usage.h5); const week = w(a.usage.week); const from = a.usage.week_from ?? null;
+      const down = dropped(account, 'session', h5) ?? (from ? dropped(account, from, week) : null);
+      if (down) { why = down; return null; }
+      commit(account, 'session', h5);
+      if (from) commit(account, from, week);
+      // A reading with a part missing is still handed on (M11 refuses it as unknown), with the reason (L728 m4).
+      const gaps = [!h5 && 'no 5-hour row', h5 && !h5.resets_at && 'no 5-hour reset time', !week && 'no weekly row',
+        week && !week.resets_at && 'no weekly reset time'].filter(Boolean);
+      if (gaps.length) why = `usage: the report had ${gaps.join(', ')}, so it stays unknown`;
+      return { source: from ? `claude /usage | week from ${from}` : 'claude /usage', h5, week, week_from: from, observed_at: a.observed_at };
     },
     lastReason: () => why,
   };
