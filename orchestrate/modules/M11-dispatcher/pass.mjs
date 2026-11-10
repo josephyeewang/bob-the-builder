@@ -165,6 +165,7 @@ const isUndo = (card) => card.kind === 'exact_reverse';
 const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
 // The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
 const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
+// A script session reports role 'script' (its M10 profile, startRole) and follows the worker's safe point (L759).
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
 // `base` is the doc the caller read: only what the caller changed is written, at the version read and again on a
@@ -766,6 +767,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
+    // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
     const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
