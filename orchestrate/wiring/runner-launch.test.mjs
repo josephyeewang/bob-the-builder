@@ -41,11 +41,15 @@ test('L759 step 2: an editing or undo launch gets worker settings that carry the
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('L757 / #320 M3: a script launch is refused until the script role has a design profile; any kind not the runner\'s is refused', () => {
+test('L757 / #320 M3: a script launch gets the script role\'s settings with the wall, once the script role has a design profile; any kind not the runner\'s is refused', () => {
   const { d, runner } = runnerDirs();
   try {
-    assert.equal(Object.hasOwn(DESIGN_PROFILES, 'script'), false, 'when lane 2 adds a script profile, this test changes to expect the wall');
-    assert.match(walledLaunchSettings(input('script', runner)).reason, /^not walled: no such role "script"/);
+    // Lane 2 has added the script profile, so a script launch is walled like a worker's (it was refused before).
+    assert.equal(Object.hasOwn(DESIGN_PROFILES, 'script'), true);
+    const sr = walledLaunchSettings(input('script', runner, { profile: DESIGN_PROFILES.script }));
+    assert.equal(sr.ok, true, sr.reason); assert.equal(sr.role, 'script');
+    assert.ok(sr.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir));
+    assert.match(walledLaunchSettings(input('script', runner)).reason, /^not walled: profile for script /, 'a worker profile for a script launch');
     // The profile must be the kind's role's (review m4): never another role's tools or mode.
     assert.match(walledLaunchSettings(input('editing', runner, { profile: DESIGN_PROFILES.lead })).reason, /^not walled: profile for worker /);
     assert.match(walledLaunchSettings(input('editing', runner, { profile: undefined })).reason, /^not walled: profile for worker is malformed/);
