@@ -111,8 +111,11 @@ const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-disp
 // `export { … } from`), by `import * as` / `import d, * as` / `export * from` its module, or by an `import()` of its
 // module named by a plain string or a backtick string with no `${}`, anywhere on a line, is a builder through it
 // (BUILT_THROUGH) or only writes the files it is given (USES_JOB_FILES), and must be on one list or the other. A name
-// may be written as a string (`{ "loginJobPlist" as lj }`) or with `\u` escapes. A line comment ends at LF, a lone CR,
-// U+2028 or U+2029, as in JavaScript. What the scan does not see:
+// may be written as a string (`{ "loginJobPlist" as lj }`), with `\u` / `\u{…}` escapes, or with `\x` escapes in a
+// quoted name. A line comment, and the hashbang line, end at LF, a lone CR, U+2028 or U+2029, as in JavaScript. What the
+// scan does not see:
+// - other spellings of a quoted name: an identity escape (`"\l…"`), a line continuation inside it, or a quoted name
+//   followed by `as` with no space (`"x"as y`);
 // - an `import()` whose name is built at run time (`${}`, `+`, `new URL(…)`); hiddenLoads refuses those unless
 //   CONFIG_IMPORTS lists them;
 // - a path spelled other than as the lists spell it (percent-encoded, another letter case, a `file:` URL), since paths
@@ -129,6 +132,8 @@ const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job file
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
  * from. An `import * as` or an `import()` of a builder's module brings in every function that module exports.
  */
+// A name in code, escapes and all (`\u006c`, `\u{6c}`), for the import shapes below (#352 r4 m1).
+const NAME = String.raw`(?:[\w$]|\\u\{[0-9a-fA-F]+\}|\\u[0-9a-fA-F]{4})+`;
 // A name as JavaScript reads it: `\uXXXX`, `\u{…}` and `\xXX` escapes decoded (#352 r3 M2).
 const unescaped = (s) => s.replace(/\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})/g, (_, a, b, c) => String.fromCodePoint(parseInt(a ?? b ?? c, 16)));
 function jobFileImports(text, r) {
@@ -140,11 +145,11 @@ function jobFileImports(text, r) {
     return from.startsWith('.') ? join(dirname(r), from).split(sep).join('/') : from;
   };
   const out = [];
-  for (const m of code.matchAll(/(?<![\w$.])(?:import|export)\s*(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*"#(\d+)"/g)) {
+  for (const m of code.matchAll(new RegExp(String.raw`(?<![\w$.])(?:import|export)\s*(?:${NAME}\s*,\s*)?\{((?:\\u\{[0-9a-fA-F]+\}|[^}])*)\}\s*from\s*"#(\d+)"`, 'g'))) {
     for (const name of m[1].split(',').map(nameOf)) if (Object.hasOwn(JOB_FILE_FNS, name)) out.push({ name, from: target(m[2]) });
   }
   const whole = [
-    ...code.matchAll(/(?<![\w$.])(?:import|export)\s*(?:[\w$]+\s*,\s*)?\*\s*(?:as\s+[\w$]+\s*)?from\s*"#(\d+)"/g),
+    ...code.matchAll(new RegExp(String.raw`(?<![\w$.])(?:import|export)\s*(?:${NAME}\s*,\s*)?\*\s*(?:as\s+${NAME}\s*)?from\s*"#(\d+)"`, 'g')),
     ...code.matchAll(/(?<![\w$.])import\s*\(\s*"#(\d+)"\s*[,)]/g),
   ];
   for (const m of whole) {
@@ -248,12 +253,13 @@ export function lex(text) {
     if (p.end) { out += '`'; prev = 'x'; word = ''; return; }
     out += '${'; subs.push(depth); depth += 1; prev = '{'; word = '';
   };
-  if (text.startsWith('#!')) { const e = text.indexOf('\n'); i = e < 0 ? text.length : e; }
+  // Where the line from `k` ends: at LF, a lone CR, U+2028 or U+2029, as in JavaScript (#352 r3 M1, r4 M1).
+  const lineEnd = (k) => { const e = text.slice(k).search(/[\n\r\u2028\u2029]/); return e < 0 ? text.length : k + e; };
+  if (text.startsWith('#!')) i = lineEnd(0);
   while (i < text.length) {
     const c = text[i];
     const d = text[i + 1];
-    // A line comment ends at any line terminator JavaScript knows: LF, a lone CR, U+2028 or U+2029 (#352 r3 M1).
-    if (c === '/' && d === '/') { const e = text.slice(i).search(/[\n\r\u2028\u2029]/); i = e < 0 ? text.length : i + e; continue; }
+    if (c === '/' && d === '/') { i = lineEnd(i); continue; }
     if (c === '/' && d === '*') {
       const e = text.indexOf('*/', i + 2);
       if (e < 0) throw new Error('an unterminated comment');
@@ -304,7 +310,7 @@ const callAt = (code, at) => {               // the call that starts at `at`, up
 /** The module names `code` imports when it loads: `import … from`, `export … from` and a bare `import '…'`. */
 function staticImports({ code, lits }) {
   const out = [];
-  for (const m of code.matchAll(/(?<![\w$.])(?:import|export)(?![\w$])(?:[^;"`]|"#\d+"(?=\s+as(?![\w$])))*?(?<![\w$])from\s*"#(\d+)"/g)) out.push(lits[+m[1]].v);
+  for (const m of code.matchAll(/(?<![\w$.])(?:import|export)(?![\w$])(?:[^;"`]|"#\d+"(?=\s*(?:as(?![\w$])|[,}])))*?(?<![\w$])from\s*"#(\d+)"/g)) out.push(lits[+m[1]].v);
   for (const m of code.matchAll(/(?<![\w$.])import\s*"#(\d+)"/g)) out.push(lits[+m[1]].v);
   return out;
 }
@@ -556,6 +562,12 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   assert.deepEqual(jobFileImports(`import { "\\u006coginJobPlist" as lj } from ${L};`, at), lj, 'an escaped string name');
   assert.deepEqual(jobFileImports(`import { \\u006coginJobPlist as lj } from ${L};`, at), lj, 'an escaped name');
   assert.deepEqual(staticImports(lex(`import { "x y" as z } from './a.mjs';\n// c\rimport './b.mjs';\n`)).sort(), ['./a.mjs', './b.mjs'], 'staticImports reads both');
+  // #352 r4 M1: the hashbang line ends where a line comment does; m1: a `\u{…}` escape in an unquoted name; c1.
+  for (const end of ['\r', '\u2028', '\u2029', '\r\n', '\n']) assert.deepEqual(jobFileImports(`#!/usr/bin/env node${end}import { loginJobPlist } from ${L};`, at), lj, `hashbang ${JSON.stringify(end)}`);
+  assert.deepEqual(jobFileImports(`import { \\u{6c}oginJobPlist as lj } from ${L};`, at), lj, 'a \\u{} escape');
+  assert.deepEqual(jobFileImports(`import d\\u{31}, { \\u{6c}oginJobPlist } from ${L};`, at), lj, 'escapes in both names');
+  assert.deepEqual(jobFileImports(`import * as \\u{6c}j from ${L};`, at), lj, 'an escaped namespace name');
+  assert.deepEqual(staticImports(lex(`export { "x" } from './a.mjs';\nexport { "a", "b" as "c" } from './b.mjs';\n`)).sort(), ['./a.mjs', './b.mjs'], 'quoted names before , and }');
   assert.deepEqual(jobFileImports(`import {\n  ROBOT_MAIN,\n  loginJobPlist as make,\n} from '../modules/M11-dispatcher/login-job.mjs?v=1';`, at), lj, 'over lines, with a query');
   // Each builder's jobs each start one script of the copy, read from the job file's start command.
   for (const [f, build] of Object.entries(JOB_BUILDERS)) assert.ok(build().length >= 1, `${f} builds a job file`);
