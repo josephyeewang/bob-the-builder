@@ -1,9 +1,9 @@
 // owner-answer.test.mjs — the owner's side (L609, L611): the /usage report read strictly, one answer, written whole.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseUsageReport, ownerAnswer, writeAnswer, ANSWER_FILE } from './owner-answer.mjs';
@@ -80,7 +80,7 @@ test('ownerAnswer: signed out, not known, no account or a refused report each sa
 });
 
 test('writeAnswer: written whole at 0644 into the owner\'s folder; refuses a folder others can write or someone else owns', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-owner-answer-'));
+  const dir = tempDir('orch-owner-answer-');
   try {
     chmodSync(dir, 0o755);
     const to = join(dir, ANSWER_FILE);

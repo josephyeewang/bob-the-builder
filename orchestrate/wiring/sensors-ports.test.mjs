@@ -1,9 +1,9 @@
 // sensors-ports.test.mjs — the `orchestrate` side (L609, L611, L614): the owner's answer is a claim, read strictly.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, linkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { writeAnswer, ANSWER_FILE } from './owner-answer.mjs';
 import { readOwnerAnswer, sensorsPorts, ANSWER_STALE_MS } from './sensors-ports.mjs';
 
@@ -14,7 +14,7 @@ const answer = (extra = {}) => ({ v: 1, account: 'a', signed_in: true, observed_
 const noAcl = () => null;
 
 function place(doc = answer(), { raw } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'orch-sensors-ports-'));
+  const dir = tempDir('orch-sensors-ports-');
   chmodSync(dir, 0o755);
   const file = join(dir, ANSWER_FILE);
   if (raw !== undefined) { writeFileSync(file, raw); chmodSync(file, 0o644); } else assert.equal(writeAnswer({ to: file, answer: doc }).ok, true);
