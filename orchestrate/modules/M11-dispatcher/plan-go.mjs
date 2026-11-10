@@ -279,7 +279,9 @@ function limited(ports) {
     const r = await guarded(async () => ({ value: await f() }), portMs);
     counted.ms += Date.now() - from;
     if ('value' in r) return r.value;
-    if (!/^it did not answer within /.test(r.reason)) throw new Error(`${name}: ${r.reason}`);
+    // Late is known by `timedOut` (guarded's own late answer), the wording only as a backstop (L755), so it is counted
+    // and told as a timeout whatever words it carries.
+    if (r.timedOut !== true && !/^it did not answer within /.test(r.reason ?? '')) throw new Error(`${name}: ${r.reason}`);
     counted.timeouts += 1;
     throw new TimedOut(`${name}: ${r.reason}`);
   };
