@@ -98,7 +98,7 @@ test('applyOutbox needs a known role and its session id', () => {
   const { rec, file } = outbox();
   assert.equal(rec.applyOutbox({ role: 'merge_gate', sessionId: 'S' }, 'f').ok, false);
   assert.equal(rec.applyOutbox({ role: 'worker' }, 'f').ok, false);
-  assert.equal(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-2.md')).ok, false, 'a worker tag with no product (L895 m1)');
+  assert.match(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-2.md')).reason, /tag names no product/, 'a worker tag with no product (L895 m1)');
   assert.equal(rec.applyOutbox({ role: 'worker', product: PROD, sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-1.md')).ok, true);
   assert.equal(rec.diary()[0].actor, 'worker:S-4');
 });

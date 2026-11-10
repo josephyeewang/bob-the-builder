@@ -1,6 +1,7 @@
 // outbox-product.test.mjs — L850-2: the outbox readers find a worker runner session's outbox in its product's folder,
 // <outboxRoot>/<product>/<role>/<sessionId> (L836), through the one definition (shared outboxFolders, on
-// shared/product-paths.mjs runnerOutbox). A tag with no product keeps reading the layout from before L836; nothing moves.
+// shared/product-paths.mjs runnerOutbox). A worker or script tag with no product is refused, never read from the layout
+// before L836 (L895 m1); every other role is read flat and may name no product.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -44,6 +45,12 @@ test('L895 m1: a worker or script tag with no product is refused, even for a fil
     assert.equal(w.ok, false, role); assert.match(w.reason, new RegExp(`a ${role} outbox is in its product's folder, and the tag names no product`));
     const r = env.record.applyOutbox(tag, flat);
     assert.equal(r.ok, false, role); assert.match(r.reason, /tag names no product/);
+    // Nor does the tag with its product find a file left in the flat folder.
+    mkdirSync(join(env.outRoot, PRODUCT, role, 'S-1'), { recursive: true });
+    assert.match(outboxPlace({ outboxRoot: env.outRoot, tag: { ...tag, product: PRODUCT }, file: flat }).reason, new RegExp(`not directly inside the ${role} outbox`), role);
+    // A product that is null reads as none; one that is empty or not a name is a bad tag, never the flat folder.
+    assert.match(outboxFolders({ outboxRoot: env.outRoot, tag: { ...tag, product: null } }).reason, /tag names no product/, role);
+    for (const p of ['', 7, false, {}]) assert.match(outboxFolders({ outboxRoot: env.outRoot, tag: { ...tag, product: p } }).reason, /bad outbox tag/, `${role} ${JSON.stringify(p)}`);
   }
   const lead = outboxFile(env, 'lead', 'L-1', 'think-1.md', 'a thought\n');
   assert.equal(outboxPlace({ outboxRoot: env.outRoot, tag: { role: 'lead', sessionId: 'L-1' }, file: lead }).ok, true);
