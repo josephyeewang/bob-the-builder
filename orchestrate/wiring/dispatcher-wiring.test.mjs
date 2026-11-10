@@ -175,6 +175,23 @@ test('A2: each review path must be absolute, and present', () => {
   assert.equal(checkConfig(w.config), w.config, 'the whole config passes');
 });
 
+// L805 m1: a host.lock owner that can't be right stops the start before anything is made: no approvals folder, no Record.
+test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals folders or opens the Record', async () => {
+  const me = process.getuid();
+  for (const [uid, re] of [[me, /config: hostLockUid is the Dispatcher's own user/], [0, /config: hostLockUid is root/], [undefined, /config: hostLockUid \(the owner's Mac user id/]]) {
+    const w = world({ extra: { hostLockUid: uid } });
+    if (uid === undefined) delete w.config.hostLockUid;
+    let fetched = 0;
+    await assert.rejects(wire(w.config, { log: () => {}, fetchFn: (...a) => { fetched++; return fakeGitHubFetch(w.fake)(...a); } }), re);
+    assert.equal(existsSync(w.config.approvalsStateDir), false, `planted: a check after approvalsDir leaves ${w.config.approvalsStateDir}`);
+    assert.equal(existsSync(w.config.recordRoot), false, 'the Record was not opened');
+    assert.equal(fetched, 0, 'GitHub was not read');
+  }
+  const rev = world({ extra: { hostLockUid: me + 7, reviewUid: me + 7 } });
+  await assert.rejects(wire(rev.config, { log: () => {}, fetchFn: fakeGitHubFetch(rev.fake) }), /config: hostLockUid is the review user/);
+  assert.equal(existsSync(rev.config.approvalsStateDir), false);
+});
+
 // L674: the review user is neither the Dispatcher's own user nor the workers' (ownerUid). In process, through wire().
 test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or the workers\', and starts with another', async () => {
   const me = process.getuid();
