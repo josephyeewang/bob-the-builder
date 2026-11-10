@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny } from './render-settings.mjs';
+import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
@@ -477,7 +477,7 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   }
   // Every role renders with this test's paths (L881 review m6): none drops out of the loop unseen.
   assert.deepEqual(rendered.sort(), Object.keys(DESIGN_PROFILES).sort());
-  // Each drift is refused at launch (check 0 runs checkSettings).
+  // Each drift is refused by checkSettings, which launch check 0 and every read-back run.
   const drift = (f) => { const c = structuredClone(s); f(c); return checkSettings(c, { profile: DESIGN_PROFILES.worker }); };
   const dirs = (c) => c[S.permissions][S.additionalDirectories];
   for (const [name, f] of [
@@ -494,11 +494,33 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     ['the outbox spelled with ..', (c) => { for (const h of Object.values(c[S.hooks]).flat().flatMap((m) => m[H.hooks])) h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/x/../outbox'); dirs(c)[0] = '/w/x/../outbox'; }],
     ['a hook naming its outbox twice', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox ${PATHS.outbox} --outbox /w/outbox-2`); }],
     ['a hook naming it as --outbox=', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox=${PATHS.outbox}`); }],
+    ['the Bob folder spelled with .., walls in that spelling', (c) => { const b = '/w/x/../bob'; dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); }],
+    ['only the Bob folder\'s /** shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => r !== `${PATHS.bobFolder}/**`); }],
+    ['only the Bob folder\'s Edit rule gone (Write kept)', (c) => { c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((r) => r !== bobFolderDeny(PATHS.bobFolder)[0]); }],
+    ['the Bob folder in other capitals of the outbox\'s parent', (c) => { const b = '/W'; dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); }],
     ['the Bob folder above the outbox', (c) => { dirs(c)[1] = '/w'; c[S.permissions][S.deny].push(...bobFolderDeny('/w')); c[S.sandbox][S.filesystem][S.denyWrite].push('/w', '/w/**'); }],
   ]) assert.match(drift(f).reason ?? '', /beyond the session's own outbox/, name);
   // Nothing in the sandbox's filesystem block but its two deny lists (L881 review M1): an allow list there would open
   // a sibling's outbox to the shell whatever the added folders say.
   for (const key of ['allowWrite', 'allowRead', 'somethingNew']) {
     assert.match(drift((c) => { c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), key);
+    // With no added folders at all, too (#410 r1 A11).
+    assert.match(drift((c) => { delete c[S.permissions][S.additionalDirectories]; c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), `${key}, no added folders`);
   }
+  // Any sandbox key the renderer does not write (#410 r1 m3).
+  assert.match(drift((c) => { c[S.sandbox].enableWeakerNestedSandbox = true; }).reason ?? '', /holds enableWeakerNestedSandbox/);
+  assert.match(drift((c) => { c[S.sandbox][S.network].allowUnixSockets = ['/var/run/x.sock']; }).reason ?? '', /network holds allowUnixSockets/);
+  // With no profile (#410 r1 A8: writeRoleSettings may be called without one), the wall is still checked.
+  const noProfile = structuredClone(s); noProfile[S.permissions][S.additionalDirectories].push('/w/outbox-2');
+  assert.match(checkSettings(noProfile).reason ?? '', /beyond the session's own outbox/);
+  // The machine-wide file (#410 r1 M1, launch check 10): its filesystem block holds deny lists only, and no setting that
+  // widens the sandbox (claude 2.1.322 takes a managed file's allowWrite into the shell's write list).
+  assert.equal(checkSettings({ [S.sandbox]: { [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } } }, { machineWide: true }).ok, true);
+  for (const [m, why] of [
+    [{ [S.sandbox]: { [S.filesystem]: { allowWrite: ['/w'] } } }, /machine-wide sandbox filesystem holds allowWrite/],
+    [{ [S.sandbox]: { [S.filesystem]: { allowRead: ['/w'] } } }, /holds allowRead/],
+    [{ [S.sandbox]: { [S.filesystem]: { somethingNew: 1 } } }, /holds somethingNew/],
+    [{ [S.sandbox]: { [S.network]: { allowUnixSockets: ['/s'] } } }, /network holds allowUnixSockets/],
+    [{ [S.sandbox]: { enableWeakerNestedSandbox: true } }, /holds enableWeakerNestedSandbox/],
+  ]) assert.match(checkSettings(m, { machineWide: true }).reason ?? '', why, JSON.stringify(m));
 });

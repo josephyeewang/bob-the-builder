@@ -279,6 +279,39 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   return { ok: true, settings };
 }
 
+// The sandbox keys a role file may hold: the ones the renderer writes (#410 r1 m3). Any other one, such as an allow list
+// under filesystem, network.allowUnixSockets or enableWeakerNestedSandbox, could widen what the shell reaches.
+const ROLE_SANDBOX_KEYS = Object.freeze({
+  '': [S.sandboxEnabled, S.failIfUnavailable, S.allowUnsandboxedCommands, S.network, S.filesystem],
+  [S.network]: [S.allowedDomains, S.strictAllowlist],
+  [S.filesystem]: [S.denyRead, S.denyWrite],
+});
+// The settings that widen the sandbox, refused in the machine-wide file (#410 r1 M1, m3: claude 2.1.322 takes a
+// managed file's sandbox.filesystem.allowWrite into the shell's write list). Its filesystem block holds deny lists only.
+const WIDENING = Object.freeze({ '': ['enableWeakerNestedSandbox'], [S.network]: ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding'] });
+/** Why a settings file's sandbox block may widen the shell's reach, or null. */
+function sandboxKeysProblem(obj, machineWide) {
+  const sb = obj?.[S.sandbox];
+  if (sb === undefined) return null;
+  const who = machineWide ? 'machine-wide' : 'the role file\'s';
+  if (!sb || typeof sb !== 'object' || Array.isArray(sb)) return `${who} sandbox block is not an object`;
+  for (const [part, known] of Object.entries(machineWide ? { [S.filesystem]: ROLE_SANDBOX_KEYS[S.filesystem] } : ROLE_SANDBOX_KEYS)) {
+    const block = part ? sb[part] : sb;
+    if (block === undefined) continue;
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return `${who} sandbox ${part} is not an object`;
+    const extra = Object.keys(block).filter((k) => !known.includes(k));
+    if (extra.length) return `${who} sandbox${part ? ` ${part}` : ''} holds ${extra.join(', ')}; only ${known.join(', ')} may be there`;
+  }
+  if (machineWide) {
+    for (const [part, keys] of Object.entries(WIDENING)) {
+      const block = part ? sb[part] : sb;
+      const held = keys.filter((k) => block && typeof block === 'object' && Object.hasOwn(block, k));
+      if (held.length) return `machine-wide sandbox${part ? ` ${part}` : ''} holds ${held.join(', ')}, which widens the sandbox`;
+    }
+  }
+  return null;
+}
+
 /**
  * The shell's write wall between sessions (L880, L881). The sandbox lets a shell write only its working folder (the
  * code copy), a per-user temp folder and the added folders, so a session's own outbox must be the only added folder
@@ -288,11 +321,6 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
  * hook is told (--outbox). → the reason, or null.
  */
 function ownFoldersProblem(obj) {
-  // The shell writes nowhere a sandbox allow list adds (L881 review M1): the role file's filesystem block holds the
-  // two deny lists and nothing else, so no allowWrite (or any key a later version adds) can open a sibling's outbox.
-  const fsKeys = Object.keys(obj[S.sandbox]?.[S.filesystem] ?? {});
-  const extra = fsKeys.filter((k) => k !== S.denyRead && k !== S.denyWrite);
-  if (extra.length) return `the role file's sandbox filesystem holds ${extra.join(', ')}; only its deny lists may be there`;
   const p = obj[S.permissions] ?? {};
   if (!Object.hasOwn(p, S.additionalDirectories)) return null;
   const dirs = p[S.additionalDirectories];
@@ -312,13 +340,15 @@ function ownFoldersProblem(obj) {
   }
   if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
   const [outbox] = outboxes;
-  if (!wallPath(outbox) || wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
+  if (wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
   if (dirs[0] !== outbox || dirs.length > 2) return beyond;
   if (dirs.length === 2) {
     const bob = dirs[1];
     const deny = p[S.deny] ?? [];
     const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
-    if (typeof bob !== 'string' || wallPath(bob) !== bob || inside(bob, outbox) || inside(outbox, bob)
+    // Apart without case too (#410 r1 m2): the Mac's disk ignores it, so refusing more is safe.
+    const [b, o] = [String(bob).toLowerCase(), outbox.toLowerCase()];
+    if (wallPath(bob) !== bob || inside(b, o) || inside(o, b)
       || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
   }
   return null;
@@ -335,6 +365,8 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (sb && Object.hasOwn(sb, S.excludedCommands)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold excludedCommands`);
   if (sb && sb[S.allowUnsandboxedCommands] === true) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings allow unsandboxed commands`);
   for (const k of REFUSED_SETTINGS) if (obj && Object.hasOwn(obj, k)) return refuse(`${machineWide ? 'machine-wide' : 'role'} settings hold ${k}`);
+  const widen = sandboxKeysProblem(obj, machineWide);
+  if (widen) return refuse(widen);
   if (machineWide) {
     // The machine-wide file may add deny rules and hooks, never allow, ask, extra hosts or folders,
     // a permission mode, variables, or a sandbox switched off (round 2 MIN-5).
