@@ -341,7 +341,7 @@ function doneFromRowsOnce(ctx, tell, c, rows, events) {
   // #295 r3 m1: a kind the Dispatcher may not set done_when on (permissions.mjs draftKinds) is told what fixes it,
   // before a write that can't be taken (so a Lead edit between read and write never hides it as 'changed').
   if (typeof c.doc.kind === 'string' && !draftFields('dispatcher', c.doc.kind).includes('done_when')) {
-    tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test can't be filled in from its rows on a ${short(c.doc.kind)} card; the Lead must write this card's pass tests (copy its rows' pass tests into the card) before a go can be asked`);
+    tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test can't be filled in from its rows on a ${short(c.doc.kind)} card; the Lead must write this card's pass tests before a go can be asked: its rows' pass tests in row-id order, each separated by a line of ---, exactly`);
     return false;
   }
   if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its version number)`); return false; }

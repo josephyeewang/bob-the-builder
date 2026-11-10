@@ -145,11 +145,29 @@ const stillRefused = (rec, k) => {
   return now === k.from || now === 'unreadable' || k.from === 'unreadable';
 };
 
+// This pass's refusals, named in the error a corrupt kept list raises (#367 r1 M1), so they are told now whatever the list.
+const namedOf = (fresh) => {
+  const once = [...new Map(fresh.map((x) => [keyOf(x), x])).values()];
+  if (!once.length) return '';
+  const shown = once.slice(-REFUSED_LIST_MAX).map((x) => `${aboutOf(x).id} (${x.reason})`).join('; ');
+  return `; refused this pass: ${shown}${once.length > REFUSED_LIST_MAX ? ` and ${once.length - REFUSED_LIST_MAX} more` : ''}`;
+};
+
 function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
   const fact = REFUSED_FACT(cause);
-  const cur = rec.read('fact', fact);
+  let cur = rec.read('fact', fact);
   // L797 self-review M1: a kept list the store reports corrupt is not "nothing kept"; the pass tells it (tick.mjs).
-  if (cur?.corrupt) throw new Error(`its kept list could not be read (${cur.reason ?? 'corrupt'})`);
+  // #367 r1 M1: nor may it drop this pass's refusals. A write makes the store restore the file from its diary; this one
+  // is always refused (a create, at rev 0, of a fact the diary has), so it changes nothing itself. The list is then read
+  // again, and if it reads, this pass goes on as any other, keeping this pass's refusals with the restored ones. Either
+  // way the error names them, so they are told this pass even when the list's daily tell is not due.
+  let corrupt = null;
+  if (cur?.corrupt) {
+    corrupt = cur.reason ?? 'corrupt';
+    try { rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: 0, doc: {}, kind: 'write_refused_kept' }); } catch { /* the read below says */ }
+    cur = rec.read('fact', fact);
+    if (cur?.corrupt) throw new Error(`its kept list could not be read (${corrupt}) or restored, so this pass's refusals are not kept${namedOf(fresh)}`);
+  }
   const { kept, over: keptOver, more: prior, unreadable } = keptOf(cur?.doc);
   if (!fresh.length && !kept.length && !keptOver.length && !prior && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
   // A write refused twice in a pass is one refusal, the latest (L366 m-A).
@@ -188,6 +206,7 @@ function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
     const w = writeFrom(rec, fact, c?.doc, { ...(c?.doc ?? {}), ...keep }, 'write_refused_kept');
     if (w?.ok !== true) throw new Error(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused`);
   }
+  if (corrupt) throw new Error(`its kept list could not be read (${corrupt}); it was restored from the Record's diary and this pass's refusals are kept with it${namedOf(fresh)}`);
   return r.did;
 }
 
