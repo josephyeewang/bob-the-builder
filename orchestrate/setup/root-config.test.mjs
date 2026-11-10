@@ -247,7 +247,7 @@ test('n2: the real io reads the fixed config strictly and its mkdir refuses a fo
 test('m8 and the table: the orchestrate entry on a worker outbox folder can list, read and clear (delete_child), nothing more; the proofs cover the outbox folders', () => {
   assert.deepEqual([...ORCHESTRATE_READ_ACL.perms].sort(), ['delete_child', 'directory_inherit', 'file_inherit', 'list', 'readattr', 'readextattr', 'readsecurity', 'search']);
   const names = proofList(cfg).map((p) => p.what).join('\n');
-  for (const d of ['outboxes', 'outboxes/reviewer', 'outboxes/auditor']) assert.ok(names.includes(P(d)), d);
+  for (const d of ['outboxes', 'outboxes/reviewer', 'outboxes/auditor', 'outboxes/plan_reviewer']) assert.ok(names.includes(P(d)), d);
 });
 
 test('L758: every role the review runner starts, the plan reviewer too, has a review-owned outbox folder the owner cannot write; no worker role is one of them', () => {

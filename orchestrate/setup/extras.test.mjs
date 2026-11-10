@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerTapsPath, parseConfig, proposalRows, proposalsParentOf } from './layout.mjs';
+import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerAnswerPath, ownerTapsPath, parseConfig, proposalRows, proposalsParentOf } from './layout.mjs';
 import { readSecretFromTty, realIo, writeNewFile } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
 import { READ_TROUBLE, WATCH_READS } from '../modules/M6-merge-gate/watch-only.mjs';
@@ -70,6 +70,39 @@ test('PLANT ownerTaps writable by others → check FAILs on its mode (the folder
   assert.match(failing(check(w.mac, cfg)).map((r) => `${r.what} ${r.why}`).join('\n'), /owner-taps .*mode is 775, want 755/);
   assert.equal(w.run(['users-folders']).code, 0);
   assert.deepEqual(failing(check(w.mac, cfg)), []);
+});
+
+// ───────────────────────────────────────────── the owner's answer folder (L727)
+
+test('L727: the table has the owner-answer folder: the owner\'s, 0755 (no group or other write), no access list, inside the base', () => {
+  const rows = folderTable(cfg).filter((r) => r.path === ownerAnswerPath(cfg));
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ owner: rows[0].owner, mode: rows[0].mode, acl: rows[0].acl }, { owner: 'owner', mode: 0o755, acl: [] });
+  assert.equal(ownerAnswerPath(cfg), `${cfg.base}/owner-answer`);
+});
+
+test('L727: users-folders makes the owner-answer folder for the owner; orchestrate may list and read it (others r-x); check passes', () => {
+  const w = world();
+  const st = statSync(w.mac.at(ownerAnswerPath(cfg)));
+  assert.equal(st.mode & 0o7777, 0o755);
+  assert.equal(st.mode & 0o022, 0, 'no group or other write');
+  assert.equal(st.mode & 0o005, 0o005, 'orchestrate (an other user) has read and search');
+  assert.equal(w.mac.owners.get(ownerAnswerPath(cfg)).uid, Number(w.mac.users.get('sam').UniqueID));
+  assert.deepEqual(failing(check(w.mac, cfg)), []);
+});
+
+test('PLANT L727: owner-answer writable by the group, or closed to orchestrate, or root\'s, or with an access list → check FAILs; users-folders puts the modes right', () => {
+  const w = world(); const d = ownerAnswerPath(cfg);
+  for (const [mode, want] of [[0o775, /owner-answer .*mode is 775, want 755/], [0o700, /owner-answer .*mode is 700, want 755/]]) {
+    chmodSync(w.mac.at(d), mode);
+    assert.match(failing(check(w.mac, cfg)).map((r) => `${r.what} ${r.why}`).join('\n'), want);
+    assert.equal(w.run(['users-folders']).code, 0); assert.deepEqual(failing(check(w.mac, cfg)), []);
+  }
+  const was = w.mac.owners.get(d); w.mac.owners.set(d, { uid: w.mac.rootUid, gid: 0 });
+  assert.match(failing(check(w.mac, cfg)).map((r) => `${r.what} ${r.why}`).join('\n'), /owner-answer .*owner is uid \d+, want \d+ \(owner\)/);
+  w.mac.owners.set(d, was);
+  assert.equal(w.mac.run('/bin/chmod', ['+a', 'user:orchestrate allow write', w.mac.at(d)]).status, 0);
+  assert.match(failing(check(w.mac, cfg)).map((r) => `${r.what} ${r.why}`).join('\n'), /owner-answer .*access list has an entry that is not wanted/);
 });
 
 test('PLANT an access-list entry on ownerTaps → check FAILs (the exact access-list compare)', () => {
