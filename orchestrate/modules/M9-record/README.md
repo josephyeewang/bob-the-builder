@@ -21,13 +21,13 @@ See LANES.md for who builds this folder, and the build rows (0b-2, R-0b-20..28) 
 
 ## Claims
 
-A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. It has two steps (lead call L72). `ready → claimed` names the session before it starts (`kind`, `session_id`, `host`, and `rules_rev`, the rules it was made under); the writer stamps `claimed_at`. `claimed → running` adds the process (`pid`, `pid_start`) and nothing else. A tab's claim carries `claim_id` in place of the session and does not change at running.
+A claim is a field on its card: set by `ready → claimed`, cleared when the card leaves claimed and running. It has two steps (lead call L72). `ready → claimed` names the session before it starts (`kind`, `session_id`, `host`, `machine`, the Mac's hardware id when one is read (L845), and `rules_rev`, the rules it was made under); the writer stamps `claimed_at`. `claimed → running` adds the process (`pid`, `pid_start`) and nothing else. A tab's claim carries `claim_id` in place of the session and does not change at running.
 
 A session's claim ends three ways:
 
 - **A release** by its holder.
 - **A lapse.** A claim that has no process yet and is older than `claims.unlaunched_min` (5 minutes when the rules don't say) goes back to ready. It lapses only once the caller's `stopSession(session_id)` says whatever started under that id is stopped, so the card can't run twice. With no `stopSession`, or one that does not answer true, the claim stays and the owner gets one alert a day.
-- **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one.
+- **A dead-owner break.** `breakIfDead` breaks only the claim it is given, and only when all three hold: the process is gone (pid and start time), its session ended or is gone, and there has been no activity for `claims.stuck_min` minutes. A claim with no process yet is never broken (it lapses instead). A claim from another Mac is never broken from this one: when the claim and this Mac both carry a machine id the id decides (a renamed Mac's claim is its own; another Mac with the same host name is not), otherwise the host name does (lock.mjs `onThisMachine`, the same test as locks; L845).
 
 Whether many dead claims at once mean an outage (hold them all) is the Dispatcher's rule, in M11, not this store's (L72). A tab's claim is never broken. Nothing writes its heartbeat yet, so the running limit alone ends it.
 

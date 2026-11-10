@@ -197,3 +197,19 @@ process.stdout.write(JSON.stringify(out));`;
   assert.deepEqual(JSON.parse(r.stdout), [null, null, 1, '2026-11-10T10:16:00Z', 2, '2026-11-10T10:16:00Z', 2],
     'no second ps within the wait after a failure; read again after it; then kept');
 });
+
+test('#389 r1: a failed machine id read is remembered for a while, then tried again; a read id is kept', () => {
+  const code = `import { machineId, OWN_RETRY_MS } from ${JSON.stringify(LOCK)};
+let t = 1000; let reads = 0;
+const now = () => t;
+const fail = () => { reads += 1; return null; };
+const good = () => { reads += 1; return 'ID-1'; };
+const out = [machineId({ read: fail, now })];
+t += 1; out.push(machineId({ read: good, now }), reads);
+t += OWN_RETRY_MS; out.push(machineId({ read: good, now }), reads);
+t += OWN_RETRY_MS; out.push(machineId({ read: () => 'ID-2', now }), reads);
+process.stdout.write(JSON.stringify(out));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), [null, null, 1, 'ID-1', 2, 'ID-1', 2]);
+});

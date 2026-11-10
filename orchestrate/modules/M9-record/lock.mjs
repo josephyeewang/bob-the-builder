@@ -8,7 +8,7 @@
 //   startTime(pid, { run?, timeoutMs? })       → the process's start time in UTC as "2026-11-10T10:16:00Z", or null
 //   pidStart(pid)                              → startTime(pid): the one start-time reader every recorder and checker uses
 //   startDiffers(recorded, now)                → true only when both are ISO start times and differ (a reused pid)
-//   machineId()                                → this Mac's hardware id (IOPlatformUUID), read once, or null when it can't be read
+//   machineId()                                → this Mac's hardware id (IOPlatformUUID), or null (a failed read is tried again after OWN_RETRY_MS)
 //   const lock = makeLock({ dir, host, machine, timeoutMs, onBroken })
 //   lock.acquire() → { nonce, broke }          // throws 'store busy' after timeoutMs
 //   lock.holds(nonce) → boolean                // re-read before the commit point
@@ -62,17 +62,23 @@ export function pidStart(pid) { return startTime(pid); }
 // This Mac's own id (L826, #364 r1 m5): a lock is "this machine's" when its host name or its machine id matches, so a
 // host name change after a crash (macOS renames on a name clash, or the owner renames the Mac) no longer leaves a dead
 // holder's lock unbreakable for ever. Only the Mac's hardware id (IOPlatformUUID) counts: a Linux machine-id is often
-// the same across containers and cloned machines, which would let one break a live holder's lock in another. Read once
-// per process (one ioreg, capped, the first time a lock or a holder check needs it); null falls back to the host name.
+// the same across containers and cloned machines, which would let one break a live holder's lock in another. machineId()
+// reads it (one ioreg, capped) when a lock or a holder check first needs it, keeps it, and tries a failed read again after
+// OWN_RETRY_MS; null falls back to the host name.
 export function readMachineId({ run = execFileSync } = {}) {
   try {
     const out = run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: START_PS_MS, env: { PATH: '/usr/sbin:/usr/bin:/bin', LC_ALL: 'C' } });
     return /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(String(out))?.[1] ?? null;
   } catch { return null; }
 }
-let ownMachine;
-export function machineId() {
-  if (ownMachine === undefined) ownMachine = readMachineId();
+// A failed read (ioreg slow or missing) is remembered for OWN_RETRY_MS, as ownPidStart does, then tried again; a read id is kept.
+let ownMachine = null;
+let machineFailedAt = -Infinity;
+export function machineId({ read = readMachineId, now = Date.now } = {}) {
+  if (ownMachine === null && now() - machineFailedAt >= OWN_RETRY_MS) {
+    ownMachine = read();
+    if (ownMachine === null) machineFailedAt = now();
+  }
   return ownMachine;
 }
 

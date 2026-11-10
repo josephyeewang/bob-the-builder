@@ -28,6 +28,7 @@ import { atSafePoint } from './transcript.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
+import { machineId } from '../M9-record/lock.mjs';
 import { move, waitOn, note } from './moves.mjs';
 import { waitOnJoe } from './joe-waits.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
@@ -736,7 +737,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // can't take the card. The Record stamps claimed_at; rules_rev is the rules the claim was made under.
     const sessionId = randomUUID();
     const rulesRev = may.rev ?? rules.rev;
-    const claimDoc = { kind: 'session', session_id: sessionId, host, ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
+    const claimDoc = { kind: 'session', session_id: sessionId, host, ...(machineId() == null ? {} : { machine: machineId() }), ...(rulesRev != null ? { rules_rev: rulesRev } : {}) };
     const claim = rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: rev, doc: { ...doc, state: 'claimed', claim: claimDoc }, kind: 'claim' });
     if (!claim.ok) { await refuse(`not claimed: ${claim.reason}`); continue; }
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
