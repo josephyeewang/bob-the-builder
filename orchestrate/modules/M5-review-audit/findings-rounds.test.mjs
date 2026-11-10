@@ -779,3 +779,33 @@ for (const [over, labels] of [[0, true], [1, false]]) {
     assert.equal(w.gate(), null);
   });
 }
+
+test('L738 re-merge planted: finalize leaves a file as written when it holds a finding it can\'t check, is for another card or head, or has a second verdict beside it', async () => {
+  const w = await world(tempDir('m5-refuse-'), { act: failing([noise2]) });
+  w.card.head = await w.commit('card/c-1', { 'chain/total.mjs': A_CHANGE });
+  await w.round(['reviewer', 'auditor']);
+  const f = w.file('auditor', 'S-2');
+  const mark = finalizeMark({ dir: join(w.root, 'finalized'), uid: ME, role: 'auditor', card: 'C-1', head: w.card.head, sessionId: 'S-2' });
+  // M5's finalize itself, with readers that would fail the test: each refusal comes before any file is read.
+  const unread = async () => { throw new Error('nothing is read before these checks'); };
+  const go = (o = {}) => finalize({ outboxRoot: w.outboxRoot, uids: UIDS, role: 'auditor', sessionId: 'S-2', card: 'C-1', head: w.card.head, readFile: unread, readBase: unread, owner: ME, mark, ...o });
+  rawVerdict({ path: f, head: w.card.head }, { pass: false, material: 1, notes: [noise2, 'a string'] });
+  let was = sha256(f);
+  const odd = await go();
+  assert.equal(odd.ok, false);
+  assert.match(odd.reason, /a finding can't be checked/);
+  assert.equal(sha256(f), was, 'left as written');
+  writeVerdict({ path: f, head: w.card.head, role: 'auditor' }, { pass: false, material: 1, findings: [noise2] });
+  was = sha256(f);
+  for (const other of [{ card: 'C-2' }, { head: 'b'.repeat(40) }]) {
+    const r = await go(other);
+    assert.match(r.reason ?? '', /another card or head/, JSON.stringify(other));
+    assert.equal(sha256(f), was);
+  }
+  const second = join(dirname(f), basename(f).replace(/^verdict-/, 'verdict-2'));
+  assert.notEqual(second, f);
+  writeFileSync(second, readFileSync(f), { mode: 0o644 });
+  const two = await go();
+  assert.match(two.reason ?? '', /more than one verdict file/);
+  assert.equal(sha256(f), was);
+});
