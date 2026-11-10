@@ -1966,6 +1966,26 @@ test('L698: a write the Record refuses is told loudly: once a day, nothing asked
   assert.equal(doc.state, 'draft');
 });
 
+test('#295 r3 m1 planted: a Lead-made card the Dispatcher may not set done_when on is told what fixes it, once a day', async () => {
+  const w = world();
+  card(w, 'A', { kind: 'lead_daily_card', done_when: 'free text' });
+  // #367 r1 m1: a write tried and refused counts too, so the check must come before the write (plant P2).
+  const base = w.t.record;
+  let tried = 0;
+  const record = Object.create(base, { write: { value: (x) => { if (x?.kind === 'done_when_from_rows') tried += 1; return base.write(x); } } });
+  const r1 = await pass(w, { planRows: async () => ROWS }, { record });
+  await pass(w, { planRows: async () => ROWS }, { record });
+  const told = w.sent.filter((s) => /card A could not be asked for a go/.test(s));
+  assert.equal(told.length, 1, w.sent.join(' | '));
+  assert.match(told[0], /its pass test can't be filled in from its rows on a lead_daily_card card; the Lead must write this card's pass tests before a go can be asked: its rows' pass tests in row-id order, each separated by a line of ---, exactly/);
+  assert.ok(!r1.events.some((e) => e.startsWith('done_when')), 'no write is taken');
+  assert.equal(tried, 0, 'no write is tried');
+  assert.ok(!/may not change/.test(told[0]), told[0]);
+  assert.equal(asks(w).length, 0);
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'free text');
+  assert.equal(w.t.record.read('card', 'A').doc.state, 'draft');
+});
+
 // L726 m4: a row with no pass test is named, and nothing is written.
 test('L726 m4 planted: a row with no done_when is named, the card keeps its text and nothing is asked', async () => {
   for (const bad of [{ done_when: undefined }, { done_when: '  ' }, { done_when: 7 }]) {

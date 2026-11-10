@@ -543,6 +543,105 @@ test('L352 MAT-1: a kept refusal whose target can\'t be read now, or could not b
   assert.equal(tellRefused({ rec: b.rec, alert: b.alert, now: T0 + 26 * H, refused: new Map(), taken: new Map([['park', new Set(['card/C-1'])]]), ran: () => true }).find(([c]) => c === 'park')[1], 'cleared');
 });
 
+test('L797 planted: a kept refusal whose target the store reports corrupt is still refused, and one refused while corrupt keeps that', () => {
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  // The store's own answer for a corrupt document (store.mjs read: { id, entity, corrupt: true, reason }).
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => (e === 'card' ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : a.rec.read(e, id)) });
+  assert.equal(a.tell(blind, T0 + 25 * H), 'told');
+  assert.equal(a.fact().doc.items.length, 1);
+  // Refused while corrupt, the card then read as it was: still refused.
+  const b = keptWorld();
+  const bBlind = Object.create(b.rec);
+  Object.defineProperty(bBlind, 'read', { value: (e, id) => (e === 'card' ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : b.rec.read(e, id)) });
+  const r = watchWrites(bBlind);
+  r.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 99, doc: { state: 'parked' }, kind: 'park_paused' });
+  const kept = r.refused.get('park') ?? [];
+  assert.equal(kept[0]?.from, 'unreadable', JSON.stringify(kept));
+});
+
+test('L797 self-review M1 planted: a kept list the store reports corrupt is told, never read as nothing kept', () => {
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => (e === 'fact' && id === REFUSED_FACT('park') ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : a.rec.read(e, id)) });
+  assert.throws(() => tellRefused({ rec: blind, alert: a.alert, now: T0 + 25 * H, refused: new Map(), ran: () => true }), /park: its kept list could not be read \(bad bytes\)/);
+  // Also on a pass whose steps did not all run, when nothing would be cleared.
+  assert.throws(() => tellRefused({ rec: blind, alert: a.alert, now: T0 + 26 * H, refused: new Map(), ran: () => false }), /park: its kept list could not be read/);
+  assert.equal(a.fact().doc.items.length, 1, 'the kept list is not cleared');
+});
+
+test('#367 r1 M1 planted: on a real store, a corrupt kept list keeps and names this pass\'s refusals, and the next pass lists both', () => {
+  const E = setup({ prefix: 'm11-stale-', probe: { kill() {}, pidStart: () => 'start' } });
+  product(E);
+  for (const id of ['C-1', 'C-2']) { readyCard(E, id); runCard(E, id, sessionClaim({ session_id: 'S-1' })); }
+  const alert = fakeAlert();
+  const fact = REFUSED_FACT('park');
+  const item = (id) => ({ entity: 'card', id, kind: 'park_paused', reason: `why ${id}`, from: JSON.stringify(['running', null, null]) });
+  const pass = (now, refused) => tellRefused({ rec: E.record, alert, now, refused, ran: () => true });
+  assert.deepEqual(pass(E.clock.t, new Map([['park', [item('C-1')]]])).find(([c]) => c === 'park'), ['park', 'told']);
+  assert.deepEqual(E.record.read('fact', fact).doc.items.map((x) => x.id), ['C-1']);
+  // The kept list's file is changed outside the Store Writer: the store reads it as corrupt.
+  writeFileSync(join(E.root, 'docs', 'fact', `${fact}.json`), 'not json');
+  assert.equal(E.record.read('fact', fact)?.corrupt, true);
+  assert.throws(() => pass(E.clock.t + H, new Map([['park', [item('C-2')]]])), (e) => /park: its kept list could not be read/.test(e.message) && /C-2 \(why C-2\)/.test(e.message));
+  // It was restored, and this pass's refusal is kept with the one kept before.
+  assert.deepEqual(E.record.read('fact', fact).doc.items.map((x) => x.id), ['C-1', 'C-2']);
+  // The next day's pass lists both.
+  assert.deepEqual(pass(E.clock.t + 25 * H, new Map()).find(([c]) => c === 'park'), ['park', 'told']);
+  const text = alert.texts.at(-1);
+  assert.match(text, /C-1 \(why C-1\)/);
+  assert.match(text, /C-2 \(why C-2\)/);
+});
+
+test('#367 r1 self-review m1, m2 planted: the restore write is never taken; a list that was not on record starts again; a later throw still names the refusals', () => {
+  // The kept list reads corrupt once, and then is not there: no {} fact is written, and C-2 is kept and named.
+  const a = keptWorld(['C-1', 'C-2']);
+  let first = true;
+  const writes = [];
+  const once = Object.create(a.rec);
+  Object.defineProperty(once, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && first) { first = false; return { id, entity: e, corrupt: true, reason: 'not a plain readable file' }; }
+    return a.rec.read(e, id);
+  } });
+  Object.defineProperty(once, 'write', { value: (x) => { const r = a.rec.write(x); writes.push([x.kind, x.expectRev, r?.ok === true]); return r; } });
+  assert.throws(() => tellRefused({ rec: once, alert: a.alert, now: T0, refused: new Map([['park', [a.item('C-2')]]]), ran: () => true }),
+    (e) => /no list was on record, so it starts again/.test(e.message) && /C-2 \(r\)/.test(e.message));
+  assert.deepEqual(writes[0], ['write_refused_kept', Number.MAX_SAFE_INTEGER, false], 'the restore write is refused');
+  assert.deepEqual(a.fact().doc.items.map((x) => x.id), ['C-2']);
+  // Restored, then the keep write is refused: the error still names this pass's refusal.
+  const b = keptWorld(['C-1', 'C-2']);
+  assert.equal(b.tell(b.rec, T0, new Map([['park', [b.item('C-1')]]])), 'told');
+  let corrupt = true;
+  const bad = Object.create(b.rec);
+  Object.defineProperty(bad, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && corrupt) { corrupt = false; return { id, entity: e, corrupt: true, reason: 'bad bytes' }; }
+    return b.rec.read(e, id);
+  } });
+  Object.defineProperty(bad, 'write', { value: (x) => (x?.kind === 'write_refused_kept' && x.expectRev !== Number.MAX_SAFE_INTEGER ? { ok: false, reason: 'refused for the test' } : b.rec.write(x)) });
+  assert.throws(() => tellRefused({ rec: bad, alert: b.alert, now: T0 + H, refused: new Map([['park', [b.item('C-2')]]]), ran: () => true }),
+    (e) => /it was restored from the Record's diary, then its list could not be kept \(refused for the test\)/.test(e.message) && /C-2 \(r\)/.test(e.message));
+});
+
+test('#367 r1 m3 planted: a kept list that reads corrupt when its clear is due is told, never cleared over', () => {
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  // The card moved, so the clear is due; the fact reads well at first and corrupt from the clear's own read on.
+  a.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: a.rec.read('card', 'C-1').rev, doc: { ...a.rec.read('card', 'C-1').doc, state: 'in_review' } });
+  let reads = 0;
+  let cleared = 0;
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && (reads += 1) > 2) return { id, entity: e, corrupt: true, reason: 'bad bytes' };
+    return a.rec.read(e, id);
+  } });
+  Object.defineProperty(blind, 'write', { value: (x) => { if (x?.kind === 'write_refused_cleared') cleared += 1; return a.rec.write(x); } });
+  assert.throws(() => tellRefused({ rec: blind, alert: a.alert, now: T0 + 25 * H, refused: new Map(), ran: () => true }), /park: its kept list could not be read \(bad bytes\)/);
+  assert.equal(cleared, 0, 'no clear is written over a list that could not be read');
+  assert.equal(a.fact().doc.items.length, 1);
+});
+
 test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t be read, is told as unreadable, not cleared', () => {
   for (const items of ['garbage', { a: 1 }, [{ entity: 'card', id: 'C-1' }]]) {
     const w = keptWorld();
