@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, tapOffers, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
+import { runnerPass, readReviewStatus, tapOffers, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, TAPS_TOLD_EACH, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { reviewPorts } from '../../M11-dispatcher/review-requests.mjs';
@@ -1377,13 +1377,14 @@ test('L725 planted: a refused tap is told once with its cause, through the Dispa
   w.ctx.setAsideByJoe = () => listing.slice();
   const r = await runnerPass(w.ctx);
   const told = r.alerts.filter((a) => /^tap-refused-/.test(a.id));
-  assert.deepEqual(told.map((a) => a.id).sort(), ['tap-refused-k-S-9', 'tap-refused-not a session']);
-  assert.match(told.find((a) => a.id === 'tap-refused-k-S-9').text, /Joe's "review again" for session S-9: the runner launched no such session\. Nothing was set aside/);
-  assert.match(told.find((a) => a.id === 'tap-refused-not a session').text, /that is not a session id/);
+  const idOf = (by) => `tap-refused-${createHash('sha256').update(by).digest('hex').slice(0, 24)}`;
+  assert.deepEqual(told.map((a) => a.id).sort(), [idOf('k-S-9'), idOf('not a session')].sort());
+  assert.match(told.find((a) => a.id === idOf('k-S-9')).text, /Joe's "review again" for session S-9: the runner launched no such session\. Nothing was set aside/);
+  assert.match(told.find((a) => a.id === idOf('not a session')).text, /that is not a session id/);
   // The Dispatcher reads them through its port, as it reads every runner alert.
   const ports = reviewPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
   const seen = ports.reviewAlerts().filter((a) => /^tap-refused-/.test(a.id));
-  assert.deepEqual(seen.map((a) => a.id).sort(), ['tap-refused-k-S-9', 'tap-refused-not a session']);
+  assert.deepEqual(seen.map((a) => a.id).sort(), [idOf('k-S-9'), idOf('not a session')].sort());
   assert.ok(seen.every((a) => typeof a.at === 'string' && !a.hold), JSON.stringify(seen));
   // Told once: the keyed tap is read once; the keyless one comes back each pass and is not told again.
   const again = await runnerPass(w.ctx);
@@ -1439,4 +1440,32 @@ test('L733: tapOffers takes only held attempts that allow a tap and name what th
   assert.deepEqual(read([o, { ...o, extra: 1 }]), [o, o], 'only the four fields are passed on');
   assert.deepEqual(read([o, null, 7, 'S-1', [o], { ...o, card: 3 }, { ...o, head: '' }]), [o]);
   for (const bad of [undefined, null, 'x', 5, { a: 1 }]) assert.deepEqual(read(bad), [], `no list: ${JSON.stringify(bad)}`);
+});
+
+test('L736 m2 planted: 60 refused taps in one pass are all told: the first each with its cause, the rest in one line', async () => {
+  const w = await ready();
+  // Two long keys that share their first 120 characters stay two alerts (L736 c1).
+  const long = 'k'.repeat(130);
+  const taps = [{ session_id: 'S-a', key: `${long}-a` }, { session_id: 'S-b', key: `${long}-b` }, ...Array.from({ length: 58 }, (_, i) => ({ session_id: `S-${100 + i}`, key: `k-${i}` }))];
+  w.ctx.setAsideByJoe = () => taps.slice();
+  const r = await runnerPass(w.ctx);
+  const each = r.alerts.filter((a) => /^tap-refused-[0-9a-f]{24}$/.test(a.id));
+  const more = r.alerts.filter((a) => /^tap-refused-more-/.test(a.id));
+  assert.equal(each.length, TAPS_TOLD_EACH);
+  assert.deepEqual(each.slice(0, 2).map((a) => /session (S-[ab])/.exec(a.text)[1]), ['S-a', 'S-b']);
+  assert.equal(more.length, 1);
+  assert.match(more[0].text, new RegExp(`^${60 - TAPS_TOLD_EACH} more of Joe's "review again" taps were refused this pass \\(sessions S-1\\d\\d, `));
+  // What the Dispatcher reads holds every one of them.
+  const ports = reviewPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
+  assert.equal(ports.reviewAlerts().filter((a) => /^tap-refused-/.test(a.id)).length, TAPS_TOLD_EACH + 1);
+  assert.equal(w.status().refused.filter((x) => /review again/.test(x.reason)).length, 50, 'the status keeps the last 50 causes');
+  // Told is told: the same 60 taps on the next pass tell nothing again (a keyed tap is read once, by its key).
+  w.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(w.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).map((a) => a.id), []);
+  // Taps with no key are read again each pass: the summarised ones are marked told too, so none is told a second time.
+  const k = await ready();
+  k.ctx.setAsideByJoe = () => Array.from({ length: TAPS_TOLD_EACH + 5 }, (_, i) => ({ session_id: `S-${200 + i}` }));
+  assert.equal((await runnerPass(k.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).length, TAPS_TOLD_EACH + 1);
+  k.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(k.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).map((a) => a.id), []);
 });

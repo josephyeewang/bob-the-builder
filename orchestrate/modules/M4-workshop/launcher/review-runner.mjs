@@ -75,6 +75,9 @@ export const STATUS_STALE_MS = 3 * 60_000;
 export const MAX_REQUEST_BYTES = 4096;
 export const MAX_STARTS_PER_PASS = 50;
 export const MAX_PENDING = 200;
+// At most this many refused taps are told one by one in a pass (L736 #306 m2); the rest are told in one line, so the
+// alert list (KEEP_LIST) never drops one untold.
+export const TAPS_TOLD_EACH = 10;
 const KEEP_SEEN = 500;
 const KEEP_LIST = 50;
 // A review request refused for a day is a hold (R-0b-171). One no request has renewed is over, or it would be told for
@@ -651,6 +654,7 @@ export async function runnerPass(ctx) {
   // still there, and the Front Door removes a tap once the status lists it in `taps_read`, so the list stays short.
   const tapsSeen = new Set(Array.isArray(state.taps_seen) ? state.taps_seen : []);
   if (tapsRead) state.taps_seen = taps.map((t) => t?.key).filter((key) => typeof key === 'string' && tapsSeen.has(key));
+  const tapsRefused = [];
   for (const t of taps) {
     if (typeof t?.key === 'string') {
       if (tapsSeen.has(t.key)) continue;
@@ -659,12 +663,14 @@ export async function runnerPass(ctx) {
     }
     const sid = t?.session_id;
     // A refused tap is told to Joe once, with its cause (L725): the tap is his, and a refusal only in the status would
-    // leave him waiting on a new review that never comes. Told once by the tap's key (a tap is read once by its key);
-    // a tap with no key, by its session.
+    // leave him waiting on a new review that never comes. Told once by a hash of the tap's key (a tap is read once by its
+    // key; the hash keeps two long keys apart, L736 c1). A tap with no key, by its session: only stand-ins in the tests
+    // give one, as the Front Door's listing keys every tap (L736 c2).
     const no = (reason) => {
       const text = `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${reason}`;
       result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: text });
-      alert(`tap-refused-${String(typeof t?.key === 'string' ? t.key : sid).slice(0, 120)}`, `${text}. Nothing was set aside, so no new review starts from that tap.`);
+      const by = String(typeof t?.key === 'string' ? t.key : sid);
+      tapsRefused.push({ id: `tap-refused-${createHash('sha256').update(by).digest('hex').slice(0, 24)}`, sid: String(sid).slice(0, 80), text: `${text}. Nothing was set aside, so no new review starts from that tap.` });
     };
     if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { no('that is not a session id'); continue; }
     if (!rl.ok) { no('the launch records could not be read'); continue; }
@@ -688,6 +694,14 @@ export async function runnerPass(ctx) {
     asideIds.add(sid);
     state.attempts[k] = { failures: a.failures ?? 0, set_aside: [...(a.set_aside ?? []), sid].slice(-KEEP_LIST) };
     result.setAside.push({ session_id: sid, card: doc.card, role: doc.role });
+  }
+  // Every refused tap is told (L736 m2): the first ones each with its cause, the rest in one line, all marked told.
+  const untold = tapsRefused.filter((x) => !state.told.includes(x.id));
+  for (const x of untold.slice(0, TAPS_TOLD_EACH)) alert(x.id, x.text);
+  const more = untold.slice(TAPS_TOLD_EACH);
+  if (more.length) {
+    alert(`tap-refused-more-${createHash('sha256').update(more.map((x) => x.id).join()).digest('hex').slice(0, 24)}`, `${more.length} more of Joe's "review again" taps were refused this pass (sessions ${more.slice(0, 10).map((x) => x.sid).join(', ')}${more.length > 10 ? ', and others' : ''}); each cause is in the review status's refused list. Nothing was set aside, so no new review starts from them.`);
+    state.told = [...state.told, ...more.map((x) => x.id)].slice(-KEEP_SEEN);
   }
 
   // Every request name, each pass (L66 starvation). A name that is not a request's is moved aside unread; the rest are
