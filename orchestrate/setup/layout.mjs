@@ -11,7 +11,7 @@
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
@@ -83,6 +83,12 @@ export const DEFAULT_PROPOSALS_PARENT = '/Users/Shared/orchestrate-proposals';
 export const proposalsParentOf = (cfg) => cfg.proposalsParent ?? DEFAULT_PROPOSALS_PARENT;
 /** The folder the owner writes review-again taps into (runner setting `ownerTaps`, runbook A6). */
 export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
+/**
+ * The owner's answer for the Sensors (L609, L614, L727): the owner's job (wiring/owner-answer.mjs, as the owner) writes
+ * its ANSWER_FILE (owner-answer.json) in it, 0644; orchestrate's Sensors read it (sensors-ports.mjs). The owner's, 0755: no
+ * group or other write, and orchestrate may list and read it. No access list. The file name is the wiring's, not setup's.
+ */
+export const ownerAnswerPath = (cfg) => join(cfg.base, 'owner-answer');
 /** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
 export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
 
@@ -122,8 +128,12 @@ export const COPY_HOOKS = 'hooks';
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
-/** The roles whose outbox folders the workers' Mac user owns: every AI role except the review roles (read from the shared lists). */
-export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)));
+/**
+ * The roles whose outbox folders the workers' Mac user owns: every AI role except the roles the review runner starts
+ * (RUNNER_ROLES: the review roles and the plan reviewer, L722). A role the runner starts writes as `review`, so its
+ * outbox is review's; were it the workers' user's, a worker could write that role's answer.
+ */
+export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
@@ -162,6 +172,7 @@ export function folderTable(cfg) {
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
+    [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],
     [bobPath(cfg), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
@@ -171,7 +182,7 @@ export function folderTable(cfg) {
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
     [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
-    ...REVIEW_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
+    ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [

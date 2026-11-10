@@ -265,11 +265,18 @@ function seal(bundle, sealRoot, card, now) {
 // lock means no other pass is using it, and the margin is far past any one pass.
 export const STALE_STAGING_MS = 60 * 60_000;
 
-/** Removes `.staging-*` folders in sealRoot older than STALE_STAGING_MS; never a link, never throws. */
+/**
+ * Removes `.staging-*` folders in sealRoot older than STALE_STAGING_MS; never a link. A missing seal folder is nothing to
+ * do; any other error reading it (EACCES and the rest) throws, so the cleanup step fails and the tick tells it, never read
+ * as "nothing to sweep" (L755, as L744 3 for copiesRoot). A folder that cannot be removed is tried again next pass.
+ */
 export function sweepStaging(sealRoot, now) {
   const gone = [];
   let names = [];
-  try { names = readdirSync(sealRoot).filter((n) => n.startsWith('.staging-')); } catch { return gone; }
+  try { names = readdirSync(sealRoot).filter((n) => n.startsWith('.staging-')); } catch (e) {
+    if (e?.code === 'ENOENT') return gone;
+    throw new Error(`the seal folder could not be read (${e?.code ?? e?.message ?? e})`);
+  }
   for (const n of names) {
     const p = join(sealRoot, n);
     const s = st(p);
@@ -284,7 +291,12 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
   const out = [];
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
   let names = [];
-  try { names = readdirSync(copiesRoot).filter((n) => !n.startsWith('.')); } catch { return out; }
+  // A missing copies folder is nothing to do; any other error (EACCES and the rest) fails the step, so the tick tells it,
+  // and is never read as "no copies" (L744 3).
+  try { names = readdirSync(copiesRoot).filter((n) => !n.startsWith('.')); } catch (e) {
+    if (e?.code === 'ENOENT') return out;
+    throw new Error(`the copies folder could not be read (${e?.code ?? e?.message ?? e})`);
+  }
   for (const card of names.sort()) {
     const doc = rec.read('card', card)?.doc;
     const mirror = doc ? mirrorFor(doc) : null;
