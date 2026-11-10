@@ -256,7 +256,7 @@ test('daemons load / list / check --only <job>: only that job is considered (the
   assert.doesNotMatch(ps(['watch-only']), /review-runner|review-updater|review-account/);   // its own problem here is only that no install exists
   assert.match(ps(undefined), /review-runner\.plist is not there/);                          // all jobs, as before
   const rep = checkDaemons(w.mac, w.cfg, ['watch-only']); assert.deepEqual(rep.map((r) => /watch-only/.test(r.what)), rep.map(() => true));
-  assert.equal(checkDaemons(w.mac, w.cfg).length, 11);   // two of them say the two jobs with a user have their log files
+  assert.equal(checkDaemons(w.mac, w.cfg).length, 12);   // two of them say the two jobs with a user have their log files; one is the half-written file row (r1 m1)
   const l = w.run(['daemons', 'list', '--only', 'watch-only']); assert.equal(l.code, 0, l.text); assert.equal(l.text.trim().split('\n').length, 1);
   assert.equal(planUnload(w.mac, w.cfg, ['watch-only']).problems.length, 0);
 });
