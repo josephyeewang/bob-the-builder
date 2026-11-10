@@ -36,7 +36,7 @@ test('LIVE GitHub (read-only, no token): the recorded pull request answers match
   try { first = await gh.get(`/repos/${owner}/${repo}/pulls/${REC.merged}`); } catch (e) { return t.skip(`GitHub not reachable (${e.message})`); }
   if (first.status === 403 || first.status === 429) return t.skip('GitHub rate limit for unauthenticated reads');
   if (first.status === 404) return t.skip('the repository is not public');
-  const reader = prReader({ gh, owner, repo });
+  const reader = prReader({ gh, checksGh: makeFetchGh({}), owner, repo }); // public check runs need no token; live, the watcher App's
   const pr = await reader.pr(REC.merged);
   const rec = REC.answers[`/pulls/${REC.merged}`];
   assert.deepEqual([pr.state, pr.merged, pr.merge_commit_sha, pr.head_sha, pr.base_ref], [rec.state, true, rec.merge_commit_sha, rec.head.sha, rec.base.ref]);
