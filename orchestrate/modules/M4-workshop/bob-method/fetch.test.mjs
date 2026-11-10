@@ -2,14 +2,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { fakeRules } from '../../../shared/rules.mjs';
 import { fetchBobMethod, methodPatterns, pickFiles, GITHUB_ADDRESS } from './fetch.mjs';
 import { checkBobFolder } from '../launcher/launch.mjs';
-import { renderRoleSettings } from '../launcher/render-settings.mjs';
+import { renderRoleSettings, bobFolderDeny } from '../launcher/render-settings.mjs';
 import { DESIGN_PROFILES } from '../launcher/role-profiles.mjs';
 import { SETTINGS as S } from '../launcher/settings-names.mjs';
 
@@ -50,7 +50,8 @@ function world({ pin, method = METHOD } = {}) {
   const rules = fakeRules({ values: { 'bob.pin': pin, 'bob.method_files': method } });
   return { rules, product: PRODUCT, folder: join(home, 'bob'), mirror: join(home, 'bob-mirror.git'), owner: ME, uid: ME, localAddress: true };
 }
-const denyFor = (folder) => { const abs = folder.replace(/^\/+/, ''); return { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } }; };
+// The rules render-settings writes (the shared helper since L750), so check 13 and this test can't drift apart.
+const denyFor = (folder) => ({ [S.permissions]: { [S.deny]: bobFolderDeny(folder) } });
 
 test('R-0b-141: the pinned commit\'s method files land read only in the folder, and check 13 takes them', async () => {
   const s = source();
@@ -195,13 +196,79 @@ test('R-0b-141: the pattern reader takes exact paths and dir/** only', () => {
   assert.match(pickFiles(Buffer.from(`100644 blob ${'a'.repeat(40)}\tx.md\0`), [{ exact: 'y.md' }]).reason, /has no y\.md/);
 });
 
-// Review of #316, m6: check 13 against the Lead's real rendered settings. It reads the deny rule as Edit(/abs/**), while
-// render-settings writes Edit(//abs/**), so this stays a todo until lane 2's deny-form fix lands.
-test('R-0b-141: check 13 takes the folder under the Lead\'s real rendered settings', { todo: 'lane 2: checkBobFolder deny form' }, async () => {
+// Review of #316, m6: check 13 against the Lead's real rendered settings (real since the L750 deny-form fix, #319).
+test('R-0b-141: check 13 takes the folder under the Lead\'s real rendered settings', async () => {
   const s = source();
   const w = world({ pin: s.commit(BASE) });
   const r = await fetchBobMethod({ ...w, address: s.src });
   assert.equal(r.ok, true, r.reason);
   const lead = leadSettings(w.folder);
   assert.deepEqual(checkBobFolder({ folder: w.folder, manifest: r.manifest, settings: lead.settings }), { ok: true });
+});
+
+// r1 audit of #316, m-2 (plant F1): a folder loosened alone, with every file still 0444, is rewritten, never kept.
+test('R-0b-141: a folder loosened alone (0777, files 0444) is rewritten read only', async () => {
+  const s = source();
+  const w = world({ pin: s.commit(BASE) });
+  assert.equal((await fetchBobMethod({ ...w, address: s.src })).ok, true);
+  chmodSync(join(w.folder, 'templates', 'deep'), 0o777);
+  const r = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.fetched, true, 'the loosened folder is not kept');
+  assert.equal(statSync(join(w.folder, 'templates', 'deep')).mode & 0o777, 0o555);
+});
+
+// r1 audit of #316, m-3 (plant F4): a swap whose second rename fails puts the old folder back, and refuses.
+test('R-0b-141: a failed second rename puts the old folder back and refuses', async () => {
+  const s = source();
+  const w = world({ pin: s.commit(BASE) });
+  assert.equal((await fetchBobMethod({ ...w, address: s.src })).ok, true);
+  chmodSync(w.folder, 0o755); writeFileSync(join(w.folder, 'extra.md'), 'x\n'); chmodSync(w.folder, 0o555);
+  let n = 0;
+  const rename = (a, b) => { n += 1; if (n === 2) throw Object.assign(new Error('planted: the second rename fails'), { code: 'EIO' }); renameSync(a, b); };
+  const r = await fetchBobMethod({ ...w, address: s.src, rename });
+  assert.match(r.reason ?? '', /could not be written: planted: the second rename fails/);
+  assert.equal(n, 3, 'the old folder is renamed back');
+  assert.equal(readFileSync(join(w.folder, 'extra.md'), 'utf8'), 'x\n', 'the old folder is back in place');
+  assert.deepEqual(readdirSync(join(w.folder, '..')).filter((x) => /^\.bob\.(old|new)-/.test(x)), [], 'nothing left beside it');
+});
+
+// r1 audit of #316, m-4: the new folder is in place, so a failed cleanup of the old one is a warning, and the fetch is ok.
+test('R-0b-141: a failed cleanup of the old folder after a good swap answers ok with a warning', async () => {
+  const s = source();
+  const p1 = s.commit(BASE);
+  const w = world({ pin: p1 });
+  assert.equal((await fetchBobMethod({ ...w, address: s.src })).ok, true);
+  const p2 = s.commit({ 'build-protocol-core.md': '# core v2\n' });
+  const remove = (p) => { if (/\.bob\.old-/.test(p)) throw Object.assign(new Error('planted: cannot remove'), { code: 'EPERM' }); };
+  const r = await fetchBobMethod({ ...w, rules: fakeRules({ values: { 'bob.pin': p2, 'bob.method_files': METHOD } }), address: s.src, remove });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.fetched, true);
+  assert.match(r.warning ?? '', /the old Bob folder .*\.bob\.old-.* could not be removed: planted: cannot remove/);
+  assert.equal(readFileSync(join(w.folder, 'build-protocol-core.md'), 'utf8'), '# core v2\n');
+  const clean = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(clean.warning, undefined, 'a clean fetch carries no warning');
+});
+
+// r1 audit of #316, m-1: an access list (ACL) can open a folder to others while its bits look shut. macOS only.
+test('R-0b-141: an access list on the folder above, on the mirror or on the Bob folder is refused or rewritten', {
+  skip: process.platform !== 'darwin' ? 'macOS access lists' : false,
+}, async () => {
+  const s = source();
+  const w = world({ pin: s.commit(BASE) });
+  const plus = (p) => { const r = spawnSync('/bin/chmod', ['+a', 'everyone allow add_file,add_subdirectory,delete_child', p], { encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
+  const clear = (p) => spawnSync('/bin/chmod', ['-N', p]);
+  const parent = join(w.folder, '..');
+  plus(parent);
+  assert.match((await fetchBobMethod({ ...w, address: s.src })).reason ?? '', /has an access list/);
+  clear(parent);
+  assert.equal((await fetchBobMethod({ ...w, address: s.src })).ok, true);
+  plus(join(w.mirror, 'objects'));
+  assert.match((await fetchBobMethod({ ...w, address: s.src })).reason ?? '', /the Bob mirror: .*has an access list/);
+  clear(join(w.mirror, 'objects'));
+  chmodSync(w.folder, 0o755); plus(w.folder); chmodSync(w.folder, 0o555);
+  const r = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.fetched, true, 'a Bob folder with an access list is rewritten, never kept');
+  assert.equal(spawnSync('/bin/ls', ['-lde', w.folder], { encoding: 'utf8' }).stdout.includes('allow'), false);
 });

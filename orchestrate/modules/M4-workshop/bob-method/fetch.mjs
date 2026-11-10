@@ -6,7 +6,8 @@
 // render-settings.mjs already adds the folder read-only and denies reading any SKILL.md. What was missing is the thing that
 // puts the pinned files there. This is it.
 //
-//   fetchBobMethod({ rules, product, folder, mirror, address, owner }) → { ok, commit, manifest, fetched } | { ok: false, reason }
+//   fetchBobMethod({ rules, product, folder, mirror, address, owner }) → { ok, commit, manifest, fetched, warning? } | { ok: false, reason }
+//   (`warning`: the new folder is in place but the old one could not be removed; the caller tells Joe once.)
 //
 // What it does:
 //   1. reads `bob.pin` (a full 40-character commit) and `bob.method_files` (exact paths, or a folder written `dir/**`) from
@@ -23,7 +24,11 @@
 //   5. returns the manifest { path: sha256 } that check 13 compares the folder against (the launcher's `bobManifest`).
 //      A folder that already holds exactly the pinned files is left as it is (`fetched: false`).
 //
-// Not here: the call at each start (the launcher's wiring, lanes 2 and 4) and the folder's place on the Mac (setup).
+// Folders, the mirror and the folders above them are refused when an access list (ACL) is on them (install-check's
+// aclProblem), since one can open them to others while the bits look shut.
+// Not here: the call at each start, before check 13, as the orchestrate user, with its refusal told through the
+// start-refused path (the Lead start is not on main yet; the lead pins the call site on R-0b-162, L754), and the
+// folder's place on the Mac (setup).
 // Capability note (Principle 9): fetching a commit by its id relies on GitHub serving any reachable commit to a plain
 // `git fetch <url> <id>`; checked 9 Nov 2026 against github.com with git 2.54.0.
 
@@ -32,6 +37,7 @@ import { basename, dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { git, checkMirror, initMirror } from '../git/safe-git.mjs';
 import { parseBatch } from '../launcher/review-updater.mjs';
+import { aclProblem } from '../launcher/install-check.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
@@ -104,7 +110,7 @@ function listFolder(root) {
 
 /** Does `folder` hold exactly the manifest's files, as plain files with those bytes, read only (0444 files, 0555
  *  folders) and, when `owner` is given, all the owner's? A loosened folder is rewritten, never kept (review of #316). */
-export function folderMatches(folder, manifest, owner) {
+export function folderMatches(folder, manifest, owner, { acl = aclProblem } = {}) {
   try {
     if (!lstatSync(folder).isDirectory()) return false;
     const have = listFolder(folder);
@@ -119,22 +125,34 @@ export function folderMatches(folder, manifest, owner) {
       }
       return true;
     };
-    return modesOk(folder);
+    if (!modesOk(folder)) return false;
+    // An access list (ACL) can open a folder to others while its bits look shut (r1 audit of #316, m-1).
+    return acl([folder, ...[...listDirs(folder)]]) === null;
   } catch { return false; }
+}
+
+function listDirs(root) {
+  const out = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const c = join(d, n); if (lstatSync(c).isDirectory()) { out.push(c); walk(c); } } };
+  walk(root);
+  return out;
 }
 
 // The mirror and every object in it are the owner's and shut to others, so nobody else can plant a pack that maps the
 // pin's id to other bytes (cat-file does not re-hash on read; review of #316).
-function mirrorProblem(mirror, owner) {
+function mirrorProblem(mirror, owner, acl) {
+  const seen = [mirror];
   const walk = (d) => {
     const bad = ownFolderProblem(d, owner); if (bad) return bad;
+    seen.push(d);
     for (const n of readdirSync(d)) {
       const c = join(d, n); const st = lstatSync(c);
       if (st.isDirectory()) { const b = walk(c); if (b) return b; } else if (st.uid !== owner || (st.mode & 0o022)) return `${c} is not the orchestrate user's alone`;
+      else seen.push(c);
     }
     return null;
   };
-  return ownFolderProblem(mirror, owner) ?? walk(join(mirror, 'objects'));
+  return ownFolderProblem(mirror, owner) ?? walk(join(mirror, 'objects')) ?? acl(seen);
 }
 
 function ownFolderProblem(dir, owner) {
@@ -159,7 +177,7 @@ function removeTree(p) {
  * repository's https address (`localAddress: true` lets a test name a local folder instead). `owner` is the orchestrate
  * user's uid; `uid` the running process's (a port for tests). Never throws.
  */
-export async function fetchBobMethod({ rules, product, folder, mirror, address, owner, uid = process.getuid?.(), localAddress = false, gitBin = 'git', now = Date.now } = {}) {
+export async function fetchBobMethod({ rules, product, folder, mirror, address, owner, uid = process.getuid?.(), localAddress = false, gitBin = 'git', now = Date.now, acl = aclProblem, rename = renameSync, remove = removeTree } = {}) {
   try {
     if (uid === 0) return refuse('the Bob fetch never runs as root');
     if (!Number.isInteger(owner) || uid !== owner) return refuse('the Bob fetch runs only as the orchestrate user');
@@ -172,7 +190,9 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
       return refuse('the Bob address must be the public repository\'s https address on github.com, with no name or token in it');
     }
     for (const p of [folder, mirror]) if (typeof p !== 'string' || !p.startsWith('/') || p.includes('/../') || p.endsWith('/..')) return refuse('the Bob folder and mirror must be absolute paths');
-    for (const dir of new Set([dirname(folder), dirname(mirror)])) { const bad = ownFolderProblem(dir, owner); if (bad) return refuse(bad); }
+    const parents = [...new Set([dirname(folder), dirname(mirror)])];
+    for (const dir of parents) { const bad = ownFolderProblem(dir, owner); if (bad) return refuse(bad); }
+    { const bad = acl(parents); if (bad) return refuse(bad); }
 
     const g = { gitDir: mirror, gitBin, timeoutMs: GIT_MS };
     let st = null;
@@ -180,7 +200,7 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
     if (!st) await initMirror(mirror);
     const mc = checkMirror(mirror);
     if (!mc.ok) return refuse(`the Bob mirror: ${mc.reason}`);
-    const mp = mirrorProblem(mirror, owner);
+    const mp = mirrorProblem(mirror, owner, acl);
     if (mp) return refuse(`the Bob mirror: ${mp}`);
 
     const have = await git(['cat-file', '-e', `${pin}^{commit}`], { ...g, purpose: 'bob-have' });
@@ -204,12 +224,13 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
     const manifest = {};
     for (const f of picked.files) manifest[f.path] = sha256(blobs.blobs.get(f.oid));
 
-    if (folderMatches(folder, manifest, owner)) return { ok: true, commit: pin, manifest, fetched: false };
+    if (folderMatches(folder, manifest, owner, { acl })) return { ok: true, commit: pin, manifest, fetched: false };
 
     const tag = `${process.pid}-${now()}`;
     const fresh = join(dirname(folder), `.${basename(folder)}.new-${tag}`);
     mkdirSync(fresh, { mode: 0o755 });
     let old = null;
+    let warning;
     try {
       const dirs = new Set();
       for (const f of picked.files) {
@@ -220,17 +241,19 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
       }
       for (const d of [...dirs].sort((a, b) => b.length - a.length)) chmodSync(d, 0o555);
       chmodSync(fresh, 0o555);
-      try { lstatSync(folder); old = join(dirname(folder), `.${basename(folder)}.old-${tag}`); renameSync(folder, old); } catch (e) { if (e.code !== 'ENOENT') throw e; old = null; }
-      renameSync(fresh, folder);
-      if (old) removeTree(old);
+      try { lstatSync(folder); old = join(dirname(folder), `.${basename(folder)}.old-${tag}`); rename(folder, old); } catch (e) { if (e.code !== 'ENOENT') throw e; old = null; }
+      rename(fresh, folder);
     } catch (e) {
-      removeTree(fresh);
+      remove(fresh);
       // A swap that failed half way puts the old folder back (review of #316).
-      if (old) { try { lstatSync(folder); } catch { try { renameSync(old, folder); } catch { /* told below */ } } }
+      if (old) { try { lstatSync(folder); } catch { try { rename(old, folder); } catch { /* told below */ } } }
       return refuse(`the Bob folder could not be written: ${e.message}`);
     }
-    if (!folderMatches(folder, manifest, owner)) return refuse('the Bob folder does not read back as the pinned files');
-    return { ok: true, commit: pin, manifest, fetched: true };
+    // The new folder is in place: a failed cleanup of the old one is a warning for the caller to tell, not a refusal
+    // (r1 audit of #316, m-4).
+    if (old) { try { remove(old); lstatSync(old); warning = `the old Bob folder ${old} could not be removed`; } catch (e) { if (e.code !== 'ENOENT') warning = `the old Bob folder ${old} could not be removed: ${e.message}`; } }
+    if (!folderMatches(folder, manifest, owner, { acl })) return refuse('the Bob folder does not read back as the pinned files');
+    return { ok: true, commit: pin, manifest, fetched: true, ...(warning ? { warning } : {}) };
   } catch (e) {
     return refuse(`the Bob fetch stopped: ${String(e?.message ?? e).slice(0, 300)}`);
   }
