@@ -97,8 +97,8 @@ export function processDead({ pid, pid_start: recorded } = {}, probe = realProbe
 
 // The one comparison of two start times (L830): true only when both are in the one shape and differ, so the pid was
 // reused. A value in any other shape (the local lstart recorded before L830, an unread one) can't be compared: false.
-// Every check of a recorded start time is to use it, never a copy of `!==`: lane 4 switches the runner's group check
-// (runner-loop.mjs groupGone) and leaderStart to startDiffers and startTime once this lands (L850 X1).
+// Every check of a recorded start time is to use it, never a copy of `!==`; the runner's group check (runner-loop.mjs
+// groupGone) and leaderStart use startDiffers and startTime (L850 X1).
 const comparable = (v) => typeof v === 'string' && START_ISO.test(v);
 export function startDiffers(recorded, now) { return comparable(recorded) && comparable(now) && now !== recorded; }
 
