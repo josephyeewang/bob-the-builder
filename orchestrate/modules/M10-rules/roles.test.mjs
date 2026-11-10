@@ -8,7 +8,7 @@ import { cpSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRoles, profileFor, TOOLS_CHECKED, NEVER_TOOLS, ROLE_FILES } from './roles.mjs';
-import { NEVER_TOOLS as M4_NEVER, DESIGN_PROFILES, checkProfile as m4Check } from '../M4-workshop/launcher/role-profiles.mjs';
+import { NEVER_TOOLS as M4_NEVER, DESIGN_PROFILES, PLAN_ANSWER_NAME, checkProfile as m4Check } from '../M4-workshop/launcher/role-profiles.mjs';
 import { checkInit } from '../M4-workshop/launcher/readback.mjs';
 import { parsePolicy } from './policy.mjs';
 
@@ -27,7 +27,7 @@ const TABLE = {
   front_door: { model: 'sonnet', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification', 'Skill'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['request-', 'state-', 'idea-', 'state-compact-', 'ask-request-'], auto_resume: false },
   thinking: { model: 'main', effort: 'medium', tools: ['Read', 'Glob', 'Grep', 'Write', 'AskUserQuestion', 'PushNotification'], permission_mode: 'acceptEdits', restricted_mode: true, outbox_kinds: ['report-', 'idea-'], auto_resume: false },
   script: { model: 'main', effort: 'per_row', tools: ['Read', 'Glob', 'Grep', 'Write', 'Workflow'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: ['report-'], auto_resume: false },
-  plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false, context: 'context.plan_reviewer' },
+  plan_reviewer: { model: 'main', effort: 'high', effort_floor: 'high', effort_max: 'xhigh', tools: ['Read', 'Glob', 'Grep', 'Write'], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], outbox_files: ['answer.txt'], auto_resume: false, context: 'context.plan_reviewer' },
   explore: { model: 'per_task', effort: 'as_asked', tools: [], permission_mode: 'dontAsk', restricted_mode: false, outbox_kinds: [], auto_resume: false },
 };
 
@@ -112,20 +112,44 @@ test('the subagent tool is refused under both its names, at the profile and at t
   assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
 });
 
-test('L683, L687: the plan reviewer reads and cannot write or hand anything in; a widened file is refused at load', () => {
+test('L683, L687, L722: the plan reviewer reads and writes one file, answer.txt in its own outbox, with no outbox kinds; a widened file is refused at load', () => {
   const ok = loadRoles(ROLES, { pin: PIN });
   assert.ok(ok.ok, ok.reason);
-  assert.deepEqual(ok.profiles.plan_reviewer.tools, ['Read', 'Glob', 'Grep']);
+  assert.deepEqual(ok.profiles.plan_reviewer.tools, ['Read', 'Glob', 'Grep', 'Write']);
   assert.deepEqual(ok.profiles.plan_reviewer.outbox_kinds, []);
-  for (const t of ['Bash', 'Write', 'Edit', 'AskUserQuestion', 'PushNotification']) {
+  assert.deepEqual(ok.profiles.plan_reviewer.outbox_files, [PLAN_ANSWER_NAME]);
+  // M10 and M4 say the same: the tools and the one file of M4's design profile (L710, #294).
+  assert.deepEqual(ok.profiles.plan_reviewer.tools, [...DESIGN_PROFILES.plan_reviewer.tools]);
+  assert.deepEqual(ok.profiles.plan_reviewer.outbox_files, [...DESIGN_PROFILES.plan_reviewer.files]);
+  for (const t of ['Bash', 'Edit', 'NotebookEdit', 'AskUserQuestion', 'PushNotification']) {
     const r = withEdit('plan_reviewer', (p) => ({ ...p, tools: [...p.tools, t] }));
     assert.equal(r.ok, false, t);
-    assert.match(r.reason, new RegExp(`plan_reviewer: a read-only role may not hold ${t}`), t);
+    assert.match(r.reason, new RegExp(`plan_reviewer: a one-file role may not hold ${t}`), t);
   }
-  // A kind the shared table lists for it would still be refused: a read-only role hands in nothing.
-  for (const k of ['verdict-', 'report-']) assert.equal(withEdit('plan_reviewer', (p) => ({ ...p, outbox_kinds: [k] })).ok, false, k);
+  // A write outside its own outbox: a path, a step up, an absolute path, or a name the hooks' rule refuses.
+  for (const f of ['../answer.txt', 'sub/answer.txt', '/tmp/answer.txt', '.answer.txt', 'answer.sh']) {
+    const r = withEdit('plan_reviewer', (p) => ({ ...p, outbox_files: [f] }));
+    assert.equal(r.ok, false, f);
+    assert.match(r.reason, /is not a plain name in its own outbox/, f);
+  }
+  // A second file, or another file in place of answer.txt, is refused.
+  for (const files of [[PLAN_ANSWER_NAME, 'notes.txt'], [PLAN_ANSWER_NAME, PLAN_ANSWER_NAME], ['notes.txt'], []]) {
+    const r = withEdit('plan_reviewer', (p) => ({ ...p, outbox_files: files }));
+    assert.equal(r.ok, false, JSON.stringify(files));
+    assert.match(r.reason, /a one-file role writes exactly answer\.txt/, JSON.stringify(files));
+  }
+  // Write with no file limit at all is refused.
+  const bare = withEdit('plan_reviewer', (p) => { const { outbox_files: _, ...rest } = p; return rest; });
+  assert.equal(bare.ok, false);
+  assert.match(bare.reason, /must list its outbox_files/);
+  // Only a one-file role names outbox_files.
+  const other = withEdit('scout', (p) => ({ ...p, outbox_files: [PLAN_ANSWER_NAME] }));
+  assert.equal(other.ok, false);
+  assert.match(other.reason, /scout: only a one-file role names outbox_files/);
+  // A kind the shared table lists for it would still be refused: it hands in its one file, never an outbox kind.
+  for (const k of ['verdict-', 'report-']) assert.match(withEdit('plan_reviewer', (p) => ({ ...p, outbox_kinds: [k] })).reason, /plan_reviewer: a one-file role hands in no outbox kinds/, k);
   assert.ok(ROLE_FILES.includes('plan_reviewer'), 'its file is one ROLE_FILES names');
-  // Its file without its ROLE_FILES line is an extra file, so loading refuses.
+  // Its ROLE_FILES line without its file is a missing file, so loading refuses.
   const dir = copyRoles();
   rmSync(join(dir, 'plan_reviewer.json'));
   assert.match(loadRoles(dir, { pin: PIN }).reason, /role files must be exactly/);

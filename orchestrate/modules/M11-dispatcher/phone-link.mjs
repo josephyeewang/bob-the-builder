@@ -67,6 +67,10 @@ const reading = (rec, id, now) => {
  * the session list; null = not known); `strayFrontDoor()` -> { ok, stopped, reason } (two accounts: stops a Front
  * Door left on another account; optional); `lastHandoff()` -> the Front Door's last handoff id or null;
  * `alert(text)`. `failureLog(line)` hears each failure report, for the log (L449). Returns the list of actions taken.
+ * Caller hazard for whoever wires these (L778): `frontDoorAlive`, `send` and `startMinibase` (and `lastHandoff` and
+ * `restartFrontDoor` on the stuck path) are called with no try, so a throw fails the whole phone step. A `startMinibase`
+ * that throws also never sets minibase_started_at, so it is tried again next pass with no 5-minute wait. A port must
+ * answer, not throw, for anything it can tell; `frontDoorAlive` must answer at once (a Promise reads as not known).
  */
 export async function phoneLinkStep({ rec, rules, now, send, restartFrontDoor, startMinibase, frontDoorAlive = () => null, strayFrontDoor = null, lastHandoff = () => null, alert, failureLog = () => {} }) {
   const stuckMs = minutes(rules, KEYS.frontDoorStuckMin);

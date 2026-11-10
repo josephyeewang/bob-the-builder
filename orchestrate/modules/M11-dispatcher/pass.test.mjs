@@ -851,6 +851,20 @@ test('audit 0b-6 r2 / L27: a running session of a kind the Dispatcher does not k
   assert.equal(w.rec.read('fact', STOP_FACT('X-1')).doc.reason, 'red');
 });
 
+test('L759 (m4): a script session follows the worker safe point, whether it reports role script or no role; only open tools hold its stop', async () => {
+  for (const role of ['script', undefined]) {
+    const w = world([card('C-1')], { usage: RED });
+    w.sessions.push({ id: 'S-1', product: 'p1', kind: 'script', card: 'C-1', ...(role ? { role } : {}) });
+    w.probes.set('S-1', busy);
+    let r = await w.pass(0);
+    assert.deepEqual(r.stopping, [['S-1', 'red']], `${role}: mid-tool waits`);
+    // Its turn has not ended (idle.size.turnEnded is false): the Lead's rule would wait; a worker's does not.
+    w.probes.set('S-1', idle);
+    r = await w.pass(1);
+    assert.deepEqual(r.stopped, [['S-1', 'red']], `${role}: no open tool is a safe point`);
+  }
+});
+
 test('audit 0b-6 r2 MAT-8 (P4): in amber a card with no tier sorts as Tier 1, ahead of Tier 2 and with the Tier-1 hold', async () => {
   const w = world([card('A2', { changed_at: iso(T0 - 60 * MIN) }), card('B0', { tier: undefined }), card('C1', { tier: 1 }), card('D0', { tier: undefined })], { usage: AMBER });
   const r = await w.pass();
@@ -1956,4 +1970,44 @@ test('L354 item 3: a mark landing as a clear is written does not outlive the cle
   const u = world([...undoEntries('U-1')]);
   await u.pass(0, { rules: rulesWith({}, { start_session: { decision: 'deny', reason: 'the product is paused' } }), alert: () => false });
   await check(u, UNDO_HELD_FACT('U-1'), 'undo_started', 1);
+});
+
+// L744 1: a launch answer marked timed out, in any words, is late: the card stays claimed and is never given back.
+test('L744 1: a launch that answers timed out in its own words keeps the card claimed, never back to ready', { timeout: 10_000 }, async () => {
+  const w = world([card('C-A')]);
+  const alert = fakeAlert();
+  const r = await dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
+    launch: async () => ({ ok: false, timedOut: true, reason: 'the launcher gave up waiting for claude' }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000 });
+  assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
+  assert.equal(w.rec.diary().filter((l) => l.kind === 'claim_release' && l.id === 'C-A').length, 0, 'not given back');
+  assert.ok(r.refused.some(([id, why]) => id === 'C-A' && /launcher: the launcher gave up waiting/.test(why)), JSON.stringify(r.refused));
+  assert.equal(alert.texts.filter((a) => /card C-A: the launcher the launcher gave up waiting for claude; the card stays claimed/.test(a)).length, 1, alert.texts.join(' | '));
+});
+
+// L744 2: what pauseLead answers is read: ok:false is a failure, told once like a throw, and not counted as asked.
+test('L744 2: a pauseLead that answers ok:false is told once and not counted as asked; a later plain answer is', async () => {
+  const w = world([]);
+  w.setProduct('p1', 'paused');
+  const no = () => ({ ok: false, reason: 'the Lead session is gone' });
+  await w.pass(0, { pauseLead: no });
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed');
+  await w.pass(1, { pauseLead: no });
+  assert.equal(w.calls.alerts.filter((a) => /the Lead of p1 could not be asked to hand off: the Lead session is gone/.test(a)).length, 1, w.calls.alerts.join(' | '));
+  await w.pass(2, { pauseLead: async () => ({ ok: false }) });
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'ok:false with no reason is a failure too');
+  await w.pass(3);
+  assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+});
+
+test('L767: a script card\'s outbox is <root>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+  const ok = world([card('C-2', { kind: 'script' })]);
+  ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');
+  const wrong = world([card('C-2', { kind: 'script' })]);
+  const r = await wrong.pass();
+  assert.deepEqual(r.started, []); assert.match(r.refused.map(([, x]) => x).join('\n'), /is not a script outbox/);
+  const editing = world([card('C-2')]);
+  editing.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.match((await editing.pass()).refused.map(([, x]) => x).join('\n'), /is not a worker outbox/);
 });

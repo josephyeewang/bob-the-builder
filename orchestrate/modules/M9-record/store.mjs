@@ -45,7 +45,9 @@ const KEPT_BACK_MAX = KEPT_BACK_STEPS.at(-1);
 // A held-back alert's text stays on the computer, cut to this, so the file still grows by a bounded amount (L553).
 const KEPT_BACK_TEXT_MAX = 300;
 
-const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails', 'unsent_fails']);
+const TEST_FAULTS = Object.freeze(['append_fails', 'cutback_fails', 'short_write', 'readback_wrong', 'rename_fails', 'unsent_fails', 'recover_fails']);
+// `recover_fails` (L732): recovery fails on a temp name that is new each time (a pid and a random part), as a failed restore
+// of one document would, so a test can show the fault keeps one stable key.
 // Not a kill: `append_fails` makes the diary append fail partway (a full disk), for the cut-back test. `cutback_fails` fails the cut-back too.
 // `unsent_fails` makes every append to the unsent file fail as a full disk does (ENOSPC), for the held-in-memory path (L620).
 
@@ -411,6 +413,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   }
 
   function recover() {
+    if ((typeof faultAt === 'string' ? faultAt : faultAt?.step) === 'recover_fails') { const p = join(P.tmp, `${process.pid}-w-${Math.random().toString(16).slice(2, 10)}.json`); throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES', path: p }); }
     const report = { cut: 0, rolledForward: [], restored: [], quarantined: [], skipped: [], tempsRemoved: 0 };
     // 1. A torn last line (no newline, or not JSON) is cut.
     const all = readFileSync(P.diary);

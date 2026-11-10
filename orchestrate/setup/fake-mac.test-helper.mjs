@@ -49,6 +49,7 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     sudoRules: new Set(),      // users a sudo rule names (`sudo -l -U` then says they may run sudo)
     nodeProblemText: null,      // a test sets this to make the node program look like one root must not run
     aclPrincipals: { orchestrate: 'daemon' },   // access-list names that exist only on the always-on Mac are stood in for by a real user here
+    privacyBlocked: new Set(),  // paths macOS's privacy protection refuses whatever the permissions say (a cloud folder): /bin/cat fails with EPERM
   };
   const at = (p) => join(prefix, p);
   mkdirSync(at('/Library/LaunchDaemons'), { recursive: true });
@@ -88,16 +89,17 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
     return { status: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? r.error?.message ?? '') };
   };
   // `sudo -n -u <user> <program> ...`: the unix rules (owner, group, other bits) applied to the stand-in's owners table.
-  // It knows /usr/bin/true, `/bin/test -w <path>` and `/bin/ls <path>`, which is all the proofs run. (An access list is not applied.)
+  // It knows /usr/bin/true, `/bin/test -w|-r|-x <path>`, `/bin/cat <path>` and `/bin/ls <path>`. (An access list lets a read through, never a write; `-x` and the folder walk of `cat` look at the mode bits only, never an access list.)
   const asUser = (who, [prog, ...rest]) => {
     const rec = mac.users.get(who);
     if (!rec) return { status: 1, stdout: '', stderr: `sudo: unknown user ${who}` };
     const uid = Number(rec.UniqueID); const gid = Number(rec.PrimaryGroupID);
     if (prog === '/usr/bin/true') return { status: 0, stdout: '', stderr: '' };
-    const can = (p, write) => {
+    const can = (p, write, exec = false) => {
       let st; try { st = lstatSync(at(p)); } catch { return false; }
       const o = mac.owners.get(p) ?? { uid: -1, gid: -1 };
-      const bits = write ? [0o200, 0o020, 0o002] : [0o400, 0o040, 0o004];
+      const bits = exec ? [0o100, 0o010, 0o001] : write ? [0o200, 0o020, 0o002] : [0o400, 0o040, 0o004];
+      if (exec) return !!(st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2]));
       if (st.mode & (o.uid === uid ? bits[0] : o.gid === gid ? bits[1] : bits[2])) return true;
       // An access list entry for this user (the real `ls -le` shows it) lets a read through; it never lets a write through here
       // (the setup only ever grants list/search/read), and the Mini's `orchestrate` is stood in for by a real user of this Mac.
@@ -107,6 +109,12 @@ export function fakeMac({ euid: as = 0, users = {}, admins = [] } = {}) {
       return new RegExp(`^\\s+\\d+: user:${principal} allow .*\\blist\\b`, 'm').test(shown);
     };
     if (prog === '/bin/test' && rest[0] === '-w') return { status: can(rest[1], true) ? 0 : 1, stdout: '', stderr: '' };
+    if (prog === '/bin/test' && rest[0] === '-r') return { status: can(rest[1], false) ? 0 : 1, stdout: '', stderr: '' };
+    if (prog === '/bin/test' && rest[0] === '-x') return { status: can(rest[1], false, true) ? 0 : 1, stdout: '', stderr: '' };
+    if (prog === '/bin/cat' && mac.privacyBlocked.has(rest[0])) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Operation not permitted` };
+    // A real open needs search (x) on every folder above the file: the stand-in checks that too, below the stand-in's own
+    // '/' (the throwaway prefix folder, private to this test process; the real '/' lets everyone search it).
+    if (prog === '/bin/cat') for (let d = dirname(rest[0]); d !== '/'; d = dirname(d)) if (!can(d, false, true)) return { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/cat') return can(rest[0], false) ? { status: 0, stdout: readFileSync(at(rest[0]), 'utf8'), stderr: '' } : { status: 1, stdout: '', stderr: `cat: ${rest[0]}: Permission denied` };
     if (prog === '/bin/ls') return can(rest[0], false) ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: `ls: ${rest[0]}: Permission denied` };
     if (prog === '/usr/bin/git' && rest[0] === 'config' && rest[1] === '--includes' && rest[2] === '--get-all' && rest[3] === 'safe.directory') {

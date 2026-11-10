@@ -15,7 +15,7 @@
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { SESSION_ID } from '../../../shared/record.mjs';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { PLAN_REVIEW_ROLE, REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { reviewUserProblem } from '../../M9-record/outbox.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 
@@ -29,8 +29,8 @@ const ownUid = () => (typeof process.getuid === 'function' ? process.getuid() : 
  * pass it, production never does, m-2) must be that user's. Every other role gets runAs null.
  */
 export function reviewUser({ role, uids, self = ownUid() }) {
-  if (!REVIEW_ROLES.includes(role)) return { ok: true, runAs: null };
-  const bad = uidsProblem(uids) ?? reviewUserProblem(uids, role);
+  if (!RUNNER_ROLES.includes(role)) return { ok: true, runAs: null };
+  const bad = uidsProblem(uids, { plan: role === PLAN_REVIEW_ROLE }) ?? reviewUserProblem(uids, role);
   if (bad) return refuse(bad);
   const own = uids[role];
   if (own !== self) return refuse(`a ${role} is started only by the review runner, running as the review user (uid ${own}), not uid ${self}`);
@@ -39,16 +39,19 @@ export function reviewUser({ role, uids, self = ownUid() }) {
 
 /**
  * m-1: the map must name the Mac user of every role in the design table, or a role left out could share the review
- * user without the shared-user check seeing it. Null, or what is missing.
+ * user without the shared-user check seeing it. Null, or what is missing. The plan reviewer (L691) is asked for only
+ * with `plan` (a plan reviewer's start), so a map from before it blocks plan reviews alone, never every reviewer and
+ * auditor start (L726 m3): no plan reviewer runs without its own entry, so none can share a user unseen.
  */
-export function uidsProblem(uids) {
+export function uidsProblem(uids, { plan = false } = {}) {
   if (!uids || typeof uids !== 'object') return 'no map of role to Mac user id is set';
-  const missing = Object.keys(DESIGN_PROFILES).filter((r) => !Number.isInteger(uids[r]) || uids[r] < 0);
+  const roles = [...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])].filter((r) => plan || r !== PLAN_REVIEW_ROLE);
+  const missing = roles.filter((r) => !Number.isInteger(uids[r]) || uids[r] < 0);
   return missing.length ? `the map of role to Mac user id leaves out ${missing.join(', ')}` : null;
 }
 
 export function reviewOutbox({ outboxRoot, role, sessionId }) {
-  if (!REVIEW_ROLES.includes(role)) throw new Error(`reviewOutbox: ${role} is not a review role`);
+  if (!RUNNER_ROLES.includes(role)) throw new Error(`reviewOutbox: ${role} is not a review role`);
   if (typeof outboxRoot !== 'string' || !outboxRoot.startsWith('/')) throw new Error('reviewOutbox: outboxRoot must be a full path');
   if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new Error('reviewOutbox: a session id is letters, digits and dashes, at most 128');
   return join(outboxRoot, role, sessionId);

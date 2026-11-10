@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeIssues } from './alerts.mjs';
-import { stopMarker, tellStoreStopped } from './store-stopped.mjs';
+import { stopMarker, storeWords, tellStoreStopped } from './store-stopped.mjs';
 
 const stop = { type: 'store_layout', reason: "the store's diary.jsonl is a link, not a plain file", key: "the store's diary.jsonl is a link, not a plain file" };
 const run = (channel, extra = {}) => {
@@ -105,4 +105,74 @@ test('L724: a fault the store keeps for the delivery pass is not told here too',
   assert.equal(r, 'kept');
   assert.equal(gh.issues.size, 0);
   assert.match(logs[0], /told by the delivery pass/);
+});
+
+// L732 m3: the issue left open after a fix hides the same fault coming back unless a start says so again. A start that
+// finds it open comments once a day while the fault lasts, counting the opening itself.
+test('L732: a fault still there while its issue is open is told again as a comment, at most once a day', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const HOUR = 3600e3;
+  const gh = fakeIssues({ now: () => new Date(t) });
+  const at = (extra) => run({ gh, owner: 'owner-login' }, { now: () => t, ...extra });
+  const pathStop = { ...stop, reason: "the store's diary.jsonl is a link, not a plain file (/Users/someone/orch/store)" };
+  assert.equal((await at({ stop: pathStop })).r, 'opened');
+  assert.match(gh.issues.get(1).body, /^Opened at 2026-11-09T08:00:00\.000Z\.$/m);
+  t += HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'already open', 'the opening counts as the day\'s notice');
+  t += 24 * HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'reminded');
+  const c = gh.issues.get(1).comments;
+  assert.equal(c.length, 1);
+  assert.match(c[0], /^Still stopped \(store_layout\): <outside-text source="log-line">.*&lt;path&gt;.*<\/outside-text>$/);
+  assert.doesNotMatch(c[0], /\/Users\//);
+  for (let i = 0; i < 3; i++) { t += HOUR; assert.equal((await at({ stop: pathStop })).r, 'already open', 'once a day'); }
+  t += 24 * HOUR;
+  assert.equal((await at({ stop: pathStop })).r, 'reminded');
+  assert.equal(gh.issues.get(1).comments.length, 2);
+  assert.equal(gh.issues.size, 1, 'never a second issue');
+});
+
+test('L732: a look that fails before a comment says nothing more, and a refused comment is logged', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const gh = fakeIssues({ now: () => new Date(t) });
+  await run({ gh, owner: 'owner-login' }, { now: () => t });
+  t += 30 * 3600e3;
+  const blind = { ...gh, latestOwnComment: async () => false, lastAnswer: 'HTTP 502' };
+  const a = await run({ gh: blind, owner: 'owner-login' }, { now: () => t });
+  assert.equal(a.r, 'already open');
+  assert.match(a.logs.join('\n'), /comments could not be read: HTTP 502/);
+  const noRead = { ...gh, read: async () => false };
+  assert.equal((await run({ gh: noRead, owner: 'owner-login' }, { now: () => t })).r, 'already open');
+  const refused = { ...gh, comment: async () => false, lastAnswer: 'HTTP 403' };
+  const b = await run({ gh: refused, owner: 'owner-login' }, { now: () => t });
+  assert.equal(b.r, 'not told');
+  assert.match(b.logs.join('\n'), /could not be told: HTTP 403/);
+  assert.equal(gh.issues.get(1).comments.length, 0);
+});
+
+test('L732 self-review: a quoted path with a space is cut whole, and a reason\'s own line can\'t pass for the opening', async () => {
+  const w = storeWords("EACCES: permission denied, open '/Users/someone/Library/Application Support/orch/tmp/1-w-a.json'");
+  assert.doesNotMatch(w, /Support|orch\/tmp|someone/);
+  assert.match(w, /open '&lt;path&gt;'/);
+  // Every character the outside-text cleaner turns into a line break (L783: U+2028 and U+2029 too, #250 audit m1).
+  for (const br of ['\n', '\r', '\r\n', '\u2028', '\u2029']) {
+    const name = JSON.stringify(br);
+    assert.doesNotMatch(storeWords(`a${br}Opened at 2099-01-01T00:00:00Z.${br}b`), /\n/, name);
+    let t = Date.parse('2026-11-09T08:00:00Z');
+    const gh = fakeIssues({ now: () => new Date(t) });
+    const planted = { ...stop, reason: `bad folder${br}Opened at 2099-01-01T00:00:00Z.${br}end` };
+    assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'opened', name);
+    t += 30 * 3600e3;
+    assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'reminded', `the planted date does not silence it: ${name}`);
+  }
+});
+
+test('L732 self-review: an issue closed between the search and the read gets no comment', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const gh = fakeIssues({ now: () => new Date(t) });
+  await run({ gh, owner: 'owner-login' }, { now: () => t });
+  t += 30 * 3600e3;
+  const closing = { ...gh, read: async (n) => ({ ...(await gh.read(n)), open: false }) };
+  assert.equal((await run({ gh: closing, owner: 'owner-login' }, { now: () => t })).r, 'already open');
+  assert.equal(gh.issues.get(1).comments.length, 0);
 });

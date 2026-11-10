@@ -165,6 +165,7 @@ const isUndo = (card) => card.kind === 'exact_reverse';
 const kindOf = (card) => (isUndo(card) ? 'undo' : card.kind === 'script' ? 'script' : 'editing');
 // The M10 profile a start is asked for: a script card runs the script profile, every other start a worker.
 const startRole = (kind) => (kind === 'script' ? 'script' : 'worker');
+// A script session reports role 'script' (its M10 profile, startRole) and follows the worker's safe point (L759).
 const roleOf = (s) => s.role ?? (s.kind === 'editing' || s.kind === 'script' ? 'worker' : s.kind);
 const factDoc = (rec, id) => rec.read('fact', id);
 // `base` is the doc the caller read: only what the caller changed is written, at the version read and again on a
@@ -359,7 +360,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
- *   filesOf(sha) -> [paths] | null   (the files a merge commit changed: an undo's exact-reverse check)
+ *   filesOf(sha) -> [paths]   (the files a merge commit changed: an undo's exact-reverse check; never null, it throws instead)
  *   alert(text)
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
@@ -503,7 +504,8 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
     if (pf?.doc?.state === 'asked') continue;
     if (running.some((s) => s.product === product && parkable(s))) continue;
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
-    const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; }, portDeadlineMs);
+    // The port's answer is read (L744 2): an ok:false is a failure, told like a throw, never counted as asked.
+    const asked = await guarded(async () => { const a = await pauseLead({ product }); return a?.ok === false ? { ok: false, reason: String(a.reason || 'the port said no') } : { ok: true }; }, portDeadlineMs);
     if (!asked.ok) {
       // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
       const cause = String(asked.reason).replace(/\d+/g, 'N');
@@ -724,7 +726,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
     const l = await guarded(() => launch({ card, kind, product, sessionId }), portDeadlineMs);
-    if (!l?.ok && l?.reason === `it did not answer within ${portDeadlineMs} ms`) {
+    // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
+    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);
       holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice (it lapses at claims.unlaunched_min once its session is stopped)`, alert, now });
       continue;
@@ -745,7 +748,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
     // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
     // must keep its card claimed or a second one would start.
-    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
+    // Under the role the session runs (L767: a script card's outbox is <root>/script/<id>).
+    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot, role: startRole(kind) });
     if (outboxWrong) {
       const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }), portDeadlineMs);
       const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
@@ -764,6 +768,7 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
+    // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
     const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }

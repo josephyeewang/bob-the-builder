@@ -2,13 +2,13 @@
 // the Merge Gate reads (refusal 5, through M9 `sessionVerdict` and `verdictFields`). It is one line of JSON naming the
 // card and the head reviewed. Its findings go in `fields.notes`, a list: the runner hands a failing verdict's notes to
 // the next round's prompt (review-runner.mjs `earlier`), and the finding-checker reads them (R-0b-145). Built here and
-// checked with M9's own reading, so the format the reviewer is told is the format the gate counts (M9 verdictFields).
+// checked with M9's own reading, so the format the reviewer is told is the format the gate counts.
 
 import { verdictFields } from '../M9-record/outbox.mjs';
-import { SESSION_ID, VERDICT_CHECKLIST, CHECKLIST_LEVELS } from '../../shared/record.mjs';
+import { SESSION_ID, VERDICT_CHECKLIST, CHECKLIST_LEVELS, FINDING_LEVELS } from '../../shared/record.mjs';
 
 export const REVIEW_ROLES_HERE = Object.freeze(['reviewer', 'auditor']);
-export const FINDING_LEVELS = Object.freeze(['material', 'minor', 'cosmetic']);
+export { FINDING_LEVELS };
 
 /** The file's one name in the session's folder; a second verdict file there means none counts. */
 export function verdictFileName(sessionId) {
@@ -60,7 +60,7 @@ export function verdictFormat({ role, card, head }) {
     'The file is JSON on one line, shaped like the example below, with your own values; nothing else may be added to it. The example only shows the shape: its pass, checklist and finding are made up, not a judgment of this change.',
     JSON.stringify(example),
     say,
-    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file, line or quote is not in the change is dropped as noise.`,
+    `"notes" lists every finding, worst first, each like ${JSON.stringify(finding)}. level is one of ${FINDING_LEVELS.join(', ')}. "quote_found" and "quote_note" are the runner's own labels: leave them off every finding, even one taken from an earlier round.${role === 'reviewer' ? ' "on" is the checklist line it is about.' : ''} Name the file, line and an exact quote wherever you can: a finding whose file or quote can't be found at the head you review, or where the change began, is labelled so the reader checks it. It stays in the verdict and still counts. For code the change removes, quote the removed line.`,
     `"head" stays exactly ${head}: a verdict for any other commit is not counted.`,
   ].join('\n');
 }
