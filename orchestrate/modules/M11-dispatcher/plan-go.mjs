@@ -73,6 +73,36 @@ const PLAN_LAST_CALL = 1.2;
 export const PLAN_SLOW_FACT = (card) => HOLD_FACT(`plan-slow-${card}`);
 export const PLAN_TURN_FACT = (card) => HOLD_FACT(`plan-turn-${card}`);
 export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The plan reviews the Dispatcher has asked for that may be running or about to (L726 M1), for the read-only limit: the
+ * review runner lists only the reviewers it has started, and it starts a request on its own next pass. One per card's
+ * plan-review fact from the last PLAN_START_HOLD_MS: a start marked but never confirmed (it may have started), or a
+ * request whose answer is not in yet (`planReviewAnswer` says it works; a read that throws counts it too). An answer,
+ * or an end without one, is not running. `except` is the card being started now. Only `product`'s cards: a Dispatcher
+ * runs one product and may read only its plans' answers (another product's are counted by its own Dispatcher, and by
+ * the runner's list once started). → [{ id, card }] (id: the request).
+ */
+export async function plansAwaitingAnswer({ rec, now, product, planReviewAnswer, except = null }) {
+  const prefix = PLAN_REVIEW_FACT('');
+  const out = [];
+  for (const f of rec.list('fact')) {
+    if (typeof f?.id !== 'string' || !f.id.startsWith(prefix)) continue;
+    const card = f.id.slice(prefix.length);
+    const d = f.doc ?? {};
+    if (card === except || typeof d.fingerprint !== 'string') continue;
+    let cp; try { cp = rec.read('card', card)?.doc?.product; } catch { cp = product; }
+    if (cp !== undefined && cp !== product) continue;
+    const hasSession = typeof d.session === 'string' && d.session !== '';
+    const at = pastTime(hasSession ? d.started_at : d.starting_at, now);
+    if (at === null || now - at >= PLAN_START_HOLD_MS) continue;
+    if (!hasSession) { out.push({ id: `starting-${card}`, card }); continue; }
+    let a;
+    try { a = await planReviewAnswer({ product, card, fingerprint: d.fingerprint, session: d.session }); } catch { a = { ok: true }; }
+    if (a?.ok === true && (a.answer === undefined || a.answer === null)) out.push({ id: d.session, card });
+  }
+  return out;
+}
 const PLAN_PORTS = ['startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha', 'replyToLead'];
 // The words every unwired port throws (wiring/dispatcher-wiring.mjs): told once per product, not once per card.
 const NOT_WIRED = /not wired yet: /;

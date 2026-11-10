@@ -35,7 +35,7 @@
 import { closeSync, constants, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { readReviewStatus, planAnswerFor, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
+import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
@@ -87,7 +87,9 @@ export function writePlanReviewRequest({ dir, card, fingerprint, key }) {
   if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
   if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) return { ok: false, reason: 'the plan names no fingerprint (64 hex)' };
   if (typeof key !== 'string' || !key) return { ok: false, reason: 'the start names no key' };
-  const id = createHash('sha256').update(key).digest('hex');
+  // The one id the runner takes for this plan (L726 m1): the key plan-go gives must be the card and plan it names.
+  const id = PLAN_REQUEST_ID(card, fingerprint);
+  if (key !== `${card}-${fingerprint}`) return { ok: false, reason: 'the start\'s key is not its card and plan' };
   const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true });
   return w.ok ? { ok: true, session: id } : w;
 }
@@ -163,7 +165,7 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
     // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list
     // never sees them. Throws when the status can't be trusted, so the tick counts them as at the cap, never as none.
-    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt }) => ({ card, session_id: sessionId, started_at: startedAt })),
+    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt, request_id: requestId }) => ({ card, session_id: sessionId, started_at: startedAt, ...(typeof requestId === 'string' ? { request_id: requestId } : {}) })),
     reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
     // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
     // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
