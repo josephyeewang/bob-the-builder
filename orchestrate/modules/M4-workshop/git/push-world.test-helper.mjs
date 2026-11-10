@@ -120,7 +120,8 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
   await gitOk(['fetch', '-q', '--update-head-ok', gh, 'refs/heads/main:refs/heads/main'], cg);
   await gitOk(['checkout', '-q', '-b', cardBranch(card), 'main'], cg);
 
-  const outbox = join(root, 'outboxes', 'worker', 'S-1');
+  // The session's own outbox, in its product's folder (L836: <outboxRoot>/<product>/<role>/<session id>).
+  const outbox = join(root, 'outboxes', product, 'worker', 'S-1');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
   const proposals = join(root, 'proposals'); // the product's proposals folder (rules proposals.outbox), the owner's own
   mkdirSync(proposals, { mode: 0o750 });

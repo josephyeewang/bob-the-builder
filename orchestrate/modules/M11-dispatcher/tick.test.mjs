@@ -349,7 +349,7 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   // The limits step reads the reviewer port for a card in review past its time (a claim with no session is M9's lapse now).
   const w = world([account(), usage(), card('C-9', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], {
     over: { board: thrower('board'), proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
-  mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
+  mkdirSync(join(w.ports.cleanup.copiesRoot, 'p1', 'C-9'), { recursive: true });   // L836: <copiesRoot>/<product>/<card>
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
   // An unreadable session list fails the stops and the undo starts too: neither acts on a guess.
@@ -1167,7 +1167,7 @@ test('#219 M-1: the tick gives both start paths the stop port and the outbox roo
   const run = async (entries) => {
     const stopped = [];
     const w = world([account(), usage(), ...entries], { over: {
-      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }),
       stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
       outboxRoot: '/no-such-outbox-root' } });
     await w.pass();

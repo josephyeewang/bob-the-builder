@@ -78,7 +78,7 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   await w.bundle();
   const outboxes = join(w.root, 'outboxes');
-  const older = join(outboxes, 'worker', 'S-old');
+  const older = join(outboxes, w.product, 'worker', 'S-old');
   mkdirSync(older, { mode: 0o700 });
   await w.bundle(undefined, older);
   const setOutbox = (outbox) => { const cur = w.record.read('session', 'S-1'); assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, outbox } }).ok, true); };
@@ -101,6 +101,18 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   assert.equal(await w.ghRefs(), before);
   rmSync(w.outbox);
   renameSync(link, w.outbox);
+  // L836: the right role and session in another product's folder, or the old flat place, is not this session's own.
+  for (const where of [['p2', 'worker'], ['worker']]) {
+    const other = join(outboxes, ...where, 'S-1');
+    mkdirSync(other, { recursive: true, mode: 0o700 });
+    await w.bundle(undefined, other);
+    setOutbox(other);
+    const r = await w.push({ outboxRoot: outboxes });
+    assert.equal(r.ok, false, where.join('/'));
+    assert.match(r.reason, /not inside the outbox root/, where.join('/'));
+    assert.equal(await w.ghRefs(), before);
+  }
+  setOutbox(w.outbox);
   const good = await w.push({ outboxRoot: outboxes });
   assert.equal(good.ok, true, good.reason);
 });

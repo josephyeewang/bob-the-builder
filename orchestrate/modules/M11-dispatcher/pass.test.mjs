@@ -602,10 +602,11 @@ test('#219 M-1: a stopped session whose claim can\'t be given back says so', asy
 
 test('#219 M-1: with the outbox root known, the real folder must be the session\'s own, through any link', async () => {
   const root = realpathSync(tempDir('orch-pass-outbox-'));
-  mkdirSync(join(root, 'worker'), { recursive: true });
+  // L836: the outboxes are <root>/<product>/<role>/<session id>.
+  mkdirSync(join(root, 'p1', 'worker'), { recursive: true });
   // Good: the folder is really there.
   const w = world([card('C-1')]);
-  w.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
+  w.refuseLaunch((x) => { const d = join(root, 'p1', 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
   assert.deepEqual((await w.pass(0, { outboxRoot: root })).started, ['C-1']);
   assert.deepEqual(w.calls.alerts, []);
   // The right name, but outside the root.
@@ -615,16 +616,23 @@ test('#219 M-1: with the outbox root known, the real folder must be the session\
   assert.match(v.calls.alerts.join('\n'), /is not inside the outbox root/);
   // The right name in the right place, but a link to another session's folder.
   const u = world([card('C-3')]);
-  const older = join(root, 'worker', 'older-attempt');
+  const older = join(root, 'p1', 'worker', 'older-attempt');
   mkdirSync(older);
-  u.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
+  u.refuseLaunch((x) => { const d = join(root, 'p1', 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
   assert.deepEqual((await u.pass(0, { outboxRoot: root })).started, []);
   assert.match(u.calls.alerts.join('\n'), /is not inside the outbox root/);
   // Named, but not there.
   const t = world([card('C-4')]);
-  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'worker', x.sessionId) }));
+  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'p1', 'worker', x.sessionId) }));
   assert.deepEqual((await t.pass(0, { outboxRoot: root })).started, []);
   assert.match(t.calls.alerts.join('\n'), /could not be read \(ENOENT\)/);
+  // L836: the right role and session, but in another product's folder, or the old flat place: not this session's own.
+  for (const [n, where] of [['C-5', ['p2', 'worker']], ['C-6', ['worker']]]) {
+    const o = world([card(n)]);
+    o.refuseLaunch((x) => { const d = join(root, ...where, x.sessionId); mkdirSync(d, { recursive: true }); return { ok: true, outbox: d }; });
+    assert.deepEqual((await o.pass(0, { outboxRoot: root })).started, [], n);
+    assert.match(o.calls.alerts.join('\n'), /is not inside the outbox root/, n);
+  }
 });
 
 test('#219 m-2: a record not written and a wrong outbox are two causes: one told today does not hide the other', async () => {

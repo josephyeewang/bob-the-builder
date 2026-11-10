@@ -9,7 +9,8 @@
 //       equal to the attempt's judged_head (no extra commit), and the copy's files match that head's
 //       tree (no uncommitted edit);
 //   (d) the bundle carries only refs/heads/<card branch>;
-//   (e) the folder is this card's copy.
+//   (e) the folder is this card's copy: <copiesRoot>/<product>/<card>, in the card's own product's folder (L836,
+//       shared/product-paths.mjs runnerCopy). A copy found in another product's folder is never touched.
 // Not proven -> the bundle is sealed (moved to an orchestrate-owned folder, read-only, sha256 in the
 // record) and rules.may('delete_copy') gives an ask, made by M2 (createAsk: only approvals writes asks, L74) as a
 // yes/no tap with purpose delete_copy (Yes = delete). Still in flight (PR open, merge not yet audited) -> the copy is
@@ -32,6 +33,7 @@ import { createAsk } from '../M2-approvals/binding.mjs';
 import { consumeAsk } from '../M2-approvals/ask-store.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
+import { runnerCopy, runnerPlaces } from '../../shared/product-paths.mjs';
 
 export const ASK_ID = (card) => `delete-copy-${card}`;
 export const CLEANUP_FACT = (card) => `cleanup-${card}`;
@@ -134,14 +136,19 @@ const sameFiles = (a, b) => a.size === b.size && [...a].every(([k, v]) => b.get(
  * branch, outbox})` (M4's lock-down save-work), `alert(text)`. Returns { result, reasons }.
  * result: 'kept' | 'deleted' | 'asked' | 'refused'.
  */
-export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot, mirror, git = safeGit, saveWork, alert }) {
+export async function cleanupCopy({ rec, rules, now, card, product, copiesRoot, sealRoot, mirror, git = safeGit, saveWork, alert }) {
   const done = (result, reasons = []) => {
     if (result !== 'kept') note(rec, CLEANUP_FACT(card), `${result}${reasons.length ? `: ${reasons.join('; ')}` : ''}`, { now });
     return { result, reasons };
   };
   if (!CARD.test(String(card))) return done('refused', ['bad card id']);
-  const copy = join(copiesRoot, card);
   const cardDoc = rec.read('card', card)?.doc;
+  // `product` is the folder the copy was found in (cleanupPass); the card must be that product's, or the folder is
+  // another product's and nothing here touches it (L836). It is kept, with no note: it is there on every pass, and a
+  // note each time would grow the Record for nothing (L836 self-review m1).
+  if (cardDoc && cardDoc.product !== product) return done('kept', [`the copy is in product ${product}'s folder, but the card is ${typeof cardDoc.product === 'string' ? `product ${cardDoc.product}'s` : 'no product\'s'}`]);
+  let copy;
+  try { copy = runnerCopy({ copiesRoot, product, card }); } catch (e) { return done('refused', [`the copy has no place: ${e?.message ?? e}`]); }
   // The copy the record names for the card is on its newest worker launch (`copy`, from the launch port): the card
   // itself has no copy field (L72 census), so no script could write one there.
   const named = cardDoc ? { ...cardDoc, copy: namedCopy(rec, card) } : null;
@@ -157,7 +164,7 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
     // A delete needs an answer M2 counted, as the undo tap does (audit MIN-5).
     const counted = answerCounts(rules, ask.doc, { approves: true });   // the one approval check (L81)
     if (!counted.ok) return done('refused', [`the delete answer was not counted: ${counted.reason}`]);
-    const own = ownCopy(copy, copiesRoot, card, named);
+    const own = ownCopy(copy, copiesRoot, card, named, product);
     consume(own.ok ? {} : { not_deleted: own.reason });
     if (!own.ok) return done('refused', [`Joe said delete, but ${own.reason}`]); // audit MIN-6
     rmSync(copy, { recursive: true, force: true });
@@ -174,7 +181,7 @@ export async function cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot,
   if (what === 'keep') return { result: 'kept', reasons: ['the card is still in flight'] };
 
   // (e) first: never bundle or seal a folder that is not this card's copy.
-  const own = ownCopy(copy, copiesRoot, card, named);
+  const own = ownCopy(copy, copiesRoot, card, named, product);
   if (!own.ok) return done('refused', [own.reason]);
 
   const branch = cardBranch(card);
@@ -241,14 +248,19 @@ export function namedCopy(rec, card) {
   return workerLaunches(rec, card)[0]?.doc?.copy ?? null;
 }
 
-/** (e) The folder is copiesRoot/<card>, a real folder, and the one the record names for the card (`named.copy`). */
-export function ownCopy(copy, copiesRoot, card, named) {
+/**
+ * (e) The folder is <copiesRoot>/<product>/<card> (L836), a real folder, and the one the record names for the card
+ * (`named.copy`).
+ */
+export function ownCopy(copy, copiesRoot, card, named, product) {
   const s = st(copy);
   if (!s) return { ok: false, reason: 'no copy folder' };
   if (s.isSymbolicLink() || !s.isDirectory()) return { ok: false, reason: 'the copy is not a real folder' };
   let real;
   try { real = realpathSync(copy); } catch { return { ok: false, reason: 'the copy folder is unreadable' }; }
-  if (real !== join(realpathSync(copiesRoot), card)) return { ok: false, reason: 'the copy folder is not this card\'s' };
+  let own;
+  try { own = runnerCopy({ copiesRoot: realpathSync(copiesRoot), product, card }); } catch { return { ok: false, reason: 'the copy folder is not this card\'s' }; }
+  if (real !== own) return { ok: false, reason: 'the copy folder is not this card\'s' };
   if (!named) return { ok: false, reason: 'the card is not in the record' };
   if (named.copy != null && resolve(named.copy) !== resolve(copy)) return { ok: false, reason: 'the record names another copy for this card' };
   return { ok: true };
@@ -286,7 +298,13 @@ export function sweepStaging(sealRoot, now) {
   return gone;
 }
 
-/** Every copy folder under copiesRoot, one at a time. `mirrorFor(cardDoc)` names the product's mirror. */
+/**
+ * Every copy folder under copiesRoot, one product's folder at a time (L836: <copiesRoot>/<product>/<card>), one copy at
+ * a time. `copiesRoot` is the root, not a product's folder: each product's own folder sits under it (#378 r1 m2).
+ * `mirrorFor(cardDoc)` names the product's mirror. A folder at the top that is no product's (a name the runner's
+ * folders can't hold, no product the Record holds, a link or a file) is listed as kept and never looked inside; a
+ * product folder that can't be read fails the step, as the copies folder does (L744 3).
+ */
 export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert }) {
   const out = [];
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
@@ -297,11 +315,27 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     if (e?.code === 'ENOENT') return out;
     throw new Error(`the copies folder could not be read (${e?.code ?? e?.message ?? e})`);
   }
-  for (const card of names.sort()) {
-    const doc = rec.read('card', card)?.doc;
-    const mirror = doc ? mirrorFor(doc) : null;
-    if (!mirror) { out.push([card, { result: 'kept', reasons: ['no record or mirror for this copy'] }]); continue; }
-    out.push([card, await cleanupCopy({ rec, rules, now, card, copiesRoot, sealRoot, mirror, git, saveWork, alert })]);
+  for (const product of names.sort()) {
+    let dir;
+    try { dir = runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies; } catch (e) { out.push([product, { result: 'kept', reasons: [`not a product's copies folder: ${e?.message ?? e}`] }]); continue; }
+    // Only a product the Record holds has a copies folder: a lower-case card folder of the old flat layout has a
+    // product's shape, and is never entered (L836 self-review m2).
+    let known = null;
+    try { known = rec.read('product', product); } catch { known = null; }
+    if (!known || known.corrupt) { out.push([product, { result: 'kept', reasons: ['not a product\'s copies folder: no product of that name'] }]); continue; }
+    const s = st(dir);
+    if (!s || s.isSymbolicLink() || !s.isDirectory()) { out.push([product, { result: 'kept', reasons: ['not a product\'s copies folder: not a real folder'] }]); continue; }
+    let cards;
+    try { cards = readdirSync(dir).filter((n) => !n.startsWith('.')); } catch (e) {
+      if (e?.code === 'ENOENT') continue;
+      throw new Error(`product ${product}'s copies folder could not be read (${e?.code ?? e?.message ?? e})`);
+    }
+    for (const card of cards.sort()) {
+      const doc = rec.read('card', card)?.doc;
+      const mirror = doc ? mirrorFor(doc) : null;
+      if (!mirror) { out.push([card, { result: 'kept', reasons: ['no record or mirror for this copy'] }]); continue; }
+      out.push([card, await cleanupCopy({ rec, rules, now, card, product, copiesRoot, sealRoot, mirror, git, saveWork, alert })]);
+    }
   }
   return out;
 }

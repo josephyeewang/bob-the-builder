@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -29,8 +29,9 @@ function world() {
   run(['push', '-q', mirror, 'main'], work);
   const B = run(['rev-parse', 'HEAD'], work);
   const copiesRoot = join(dir, 'copies');
-  mkdirSync(copiesRoot);
-  const copy = join(copiesRoot, 'C-1');
+  mkdirSync(join(copiesRoot, 'p1'), { recursive: true });
+  // The card's copy is in its own product's folder (L836: <copiesRoot>/<product>/<card>).
+  const copy = join(copiesRoot, 'p1', 'C-1');
   run(['clone', '-q', mirror, copy]);
   run(['checkout', '-q', '-b', 'card/c-1'], copy);
   writeFileSync(join(copy, 'b.txt'), 'two\n');
@@ -56,6 +57,8 @@ function recFor(w, { attempt = {}, pr = {}, card = {}, copy = w.copy } = {}) {
   return recWith([
     // A card names its product, as every real card does: the delete ask M2 makes carries it to count_approval (L81).
     ['card', 'C-1', { state: 'merged', product: 'p1', ...card }],
+    // The products whose copies folders the pass enters (L836 self-review m2: only a product the Record holds).
+    ['product', 'p1', { state: 'active' }], ['product', 'p2', { state: 'active' }], ['product', 'p3', { state: 'active' }],
     ...(copy ? [launchFor(copy)] : []),
     ...(attempt ? [['merge', 'M-1', { card: 'C-1', pr: 7, state: 'audited_ok', judged_head: w.H, merge_commit: w.M, changed_at: iso(T0 - 10 * MIN), ...attempt }]] : []),
     ...(pr ? [['fact', PR_FACT(7), { state: 'closed', merged: true, merge_commit_sha: w.M, head_sha: w.H, observed_at: iso(T0 - 5 * MIN), ...pr }]] : []),
@@ -76,7 +79,7 @@ async function clean(w, rec, over = {}) {
   const calls = [];
   const saveWork = over.saveWork ?? (async (a) => { calls.push(a); return locked(a); });
   const from = callLog.length;
-  const r = await cleanupCopy({ rec, rules: over.rules ?? R, now: T0, card: 'C-1', copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirror: w.mirror,
+  const r = await cleanupCopy({ rec, rules: over.rules ?? R, now: T0, card: 'C-1', product: over.product ?? 'p1', copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirror: w.mirror,
     git: guardedGit(w.copiesRoot), saveWork, alert: (t) => alerts.push(t) });
   // Every git call made, save-work's included: none has its working folder inside a copy, and only
   // save-work names a copy's repository.
@@ -306,34 +309,42 @@ test('hashing a copy without git matches git\'s own tree', async () => {
 
 test('cleanupPass goes through every copy folder and skips one with no record', async () => {
   const w = world();
-  mkdirSync(join(w.copiesRoot, 'C-9'));
+  mkdirSync(join(w.copiesRoot, 'p1', 'C-9'));
   const rec = recFor(w);
   const out = await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
     git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} });
   assert.deepEqual(out.map(([c, r]) => [c, r.result]), [['C-1', 'deleted'], ['C-9', 'kept']]);
-  assert.ok(existsSync(join(w.copiesRoot, 'C-9')));
+  assert.ok(existsSync(join(w.copiesRoot, 'p1', 'C-9')));
 });
 
 test('audit MIN-17: each copy-ownership check refuses on its own', () => {
   const dir = tempDir('m11-own-');
   const copiesRoot = join(dir, 'copies');
-  mkdirSync(join(copiesRoot, 'C-1'), { recursive: true });
-  mkdirSync(join(copiesRoot, 'C-2'));
-  const real = join(copiesRoot, 'C-1');
-  assert.deepEqual(ownCopy(real, copiesRoot, 'C-1', { copy: real }), { ok: true });
+  const p1 = join(copiesRoot, 'p1');
+  mkdirSync(join(p1, 'C-1'), { recursive: true });
+  mkdirSync(join(p1, 'C-2'));
+  const real = join(p1, 'C-1');
+  assert.deepEqual(ownCopy(real, copiesRoot, 'C-1', { copy: real }, 'p1'), { ok: true });
   // a link that resolves to the right folder is still refused: only the real folder is the copy
   const link = join(dir, 'link');
   symlinkSync(real, link);
-  assert.deepEqual(ownCopy(link, copiesRoot, 'C-1', { copy: link }), { ok: false, reason: 'the copy is not a real folder' });
+  assert.deepEqual(ownCopy(link, copiesRoot, 'C-1', { copy: link }, 'p1'), { ok: false, reason: 'the copy is not a real folder' });
   // a real folder that is another card's copy
-  assert.match(ownCopy(join(copiesRoot, 'C-2'), copiesRoot, 'C-1', {}).reason, /not this card's/);
-  assert.match(ownCopy(join(copiesRoot, 'C-2'), copiesRoot, 'C-1', { copy: join(copiesRoot, 'C-2') }).reason, /not this card's/);
+  assert.match(ownCopy(join(p1, 'C-2'), copiesRoot, 'C-1', {}, 'p1').reason, /not this card's/);
+  assert.match(ownCopy(join(p1, 'C-2'), copiesRoot, 'C-1', { copy: join(p1, 'C-2') }, 'p1').reason, /not this card's/);
   // the record names another copy, or has no card
-  assert.match(ownCopy(real, copiesRoot, 'C-1', { copy: join(copiesRoot, 'C-2') }).reason, /another copy/);
-  assert.match(ownCopy(real, copiesRoot, 'C-1', null).reason, /not in the record/);
-  assert.match(ownCopy(join(copiesRoot, 'C-9'), copiesRoot, 'C-9', {}).reason, /no copy folder/);
-  writeFileSync(join(copiesRoot, 'C-3'), 'a file');
-  assert.match(ownCopy(join(copiesRoot, 'C-3'), copiesRoot, 'C-3', {}).reason, /not a real folder/);
+  assert.match(ownCopy(real, copiesRoot, 'C-1', { copy: join(p1, 'C-2') }, 'p1').reason, /another copy/);
+  assert.match(ownCopy(real, copiesRoot, 'C-1', null, 'p1').reason, /not in the record/);
+  assert.match(ownCopy(join(p1, 'C-9'), copiesRoot, 'C-9', {}, 'p1').reason, /no copy folder/);
+  writeFileSync(join(p1, 'C-3'), 'a file');
+  assert.match(ownCopy(join(p1, 'C-3'), copiesRoot, 'C-3', {}, 'p1').reason, /not a real folder/);
+  // L836: the card's folder in another product's folder, the old flat place, or a product with no folder, is not its copy.
+  mkdirSync(join(copiesRoot, 'p2', 'C-1'), { recursive: true });
+  mkdirSync(join(copiesRoot, 'C-1'));
+  assert.match(ownCopy(join(copiesRoot, 'p2', 'C-1'), copiesRoot, 'C-1', {}, 'p1').reason, /not this card's/);
+  assert.match(ownCopy(real, copiesRoot, 'C-1', {}, 'p2').reason, /not this card's/);
+  assert.match(ownCopy(join(copiesRoot, 'C-1'), copiesRoot, 'C-1', {}, 'p1').reason, /not this card's/);
+  for (const product of [undefined, 'P1', '..', 'worker']) assert.match(ownCopy(real, copiesRoot, 'C-1', {}, product).reason, /not this card's/, String(product));
 });
 
 test('audit MIN-20 (C10): an old bundle, or one outside the staging folder, is not proof; the copy is kept and asked about', async () => {
@@ -455,4 +466,74 @@ test('L755: sweepStaging reads a missing seal folder as nothing to do, and fails
   } finally { chmodSync(seal, 0o755); }
   const file = join(dir, 'a-file'); writeFileSync(file, 'x');
   await assert.rejects(cleanupPass(args(file)), /the seal folder could not be read \(ENOTDIR\)/);
+});
+
+// L836: copies are <copiesRoot>/<product>/<card>. The pass walks each product's folder; a copy in another product's
+// folder, a folder at the top that is no product's, or a product folder that is a link, is never touched.
+test('L836: cleanupPass walks each product\'s folder and touches no copy outside its card\'s own product', { skip: process.getuid?.() === 0 ? 'root reads any folder' : false }, async () => {
+  const w = world();
+  // C-1 is product p1's; a folder of that name in p2's folder is not its copy.
+  mkdirSync(join(w.copiesRoot, 'p2', 'C-1'), { recursive: true });
+  writeFileSync(join(w.copiesRoot, 'p2', 'C-1', 'x'), 'p2');
+  mkdirSync(join(w.copiesRoot, 'C-7'));             // the old flat layout: no product's folder
+  mkdirSync(join(w.copiesRoot, 'c-8'));             // a flat card folder with a product's shape, but no product (m2)
+  writeFileSync(join(w.copiesRoot, 'c-8', 'x'), 'flat');
+  mkdirSync(join(w.copiesRoot, 'worker'));          // a role's name is no product's
+  mkdirSync(join(w.dir, 'elsewhere', 'C-1'), { recursive: true });
+  symlinkSync(join(w.dir, 'elsewhere'), join(w.copiesRoot, 'p3'));
+  writeFileSync(join(w.copiesRoot, 'p4'), 'a file');
+  const rec = recFor(w);
+  // m4: every copy handed to saveWork, and every ask made, is recorded, so p2's C-1 is shown never bundled nor asked.
+  const saved = [];
+  const saveWork = async (x, ...rest) => { saved.push(x); return locked(x, ...rest); };
+  const alerts = [];
+  const out = await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
+    git: guardedGit(w.copiesRoot), saveWork, alert: (a) => alerts.push(a) });
+  const by = (k) => out.filter(([c]) => c === k).map(([, r]) => r);
+  assert.deepEqual(out.map(([c, r]) => [c, r.result]), [['C-7', 'kept'], ['c-8', 'kept'], ['C-1', 'deleted'], ['C-1', 'kept'], ['p3', 'kept'], ['p4', 'kept'], ['worker', 'kept']]);
+  assert.match(by('C-1')[1].reasons.join(), /the copy is in product p2's folder, but the card is product p1's/);
+  assert.match(by('C-7')[0].reasons.join(), /not a product's copies folder/);
+  assert.match(by('c-8')[0].reasons.join(), /no product of that name/);
+  assert.equal(readFileSync(join(w.copiesRoot, 'c-8', 'x'), 'utf8'), 'flat', 'a flat folder is never entered');
+  const p2copy = join(w.copiesRoot, 'p2', 'C-1');
+  assert.ok(!JSON.stringify(saved).includes(p2copy), 'another product\'s folder is never bundled');
+  assert.ok(!JSON.stringify(alerts).includes(p2copy), 'nor asked about');
+  // m1: the mismatch is kept with no note, so it does not grow the Record on every pass.
+  assert.ok(!/p2's folder/.test(JSON.stringify(rec.read('fact', CLEANUP_FACT('C-1'))?.doc ?? null)), 'no note names it');
+  assert.match(by('worker')[0].reasons.join(), /named as a role/);
+  assert.match(by('p3')[0].reasons.join(), /not a real folder/);
+  assert.ok(!existsSync(w.copy), 'its own copy, proven, is deleted');
+  assert.equal(readFileSync(join(w.copiesRoot, 'p2', 'C-1', 'x'), 'utf8'), 'p2', 'another product\'s folder is untouched');
+  for (const p of ['C-7', 'worker', join('..', 'elsewhere', 'C-1')]) assert.ok(existsSync(join(w.copiesRoot, p)), p);
+  // A product folder that can't be read fails the step, as the copies folder does (L744 3).
+  chmodSync(join(w.copiesRoot, 'p2'), 0o000);
+  try {
+    await assert.rejects(cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror, git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} }),
+      /product p2's copies folder could not be read \(EACCES\)/);
+  } finally { chmodSync(join(w.copiesRoot, 'p2'), 0o755); }
+});
+
+test('L836: cleanupCopy refuses a card or product that names no plain place, and a card of another product', async () => {
+  const w = world();
+  const rec = recFor(w);
+  // A card whose own product names no folder the runner can hold has no copy place (product-paths runnerCopy).
+  for (const odd of ['..', 'Worker', 'P1']) {
+    const r = await clean(w, recFor(w, { card: { product: odd } }), { product: odd });
+    assert.equal(r.result, 'refused', odd);
+    assert.match(r.reasons.join(), /the copy has no place/, odd);
+  }
+  for (const [product, why] of [['P1', /the copy is in product P1's folder, but the card is product p1's/]]) {
+    const r = await clean(w, rec, { product });
+    assert.equal(r.result, 'kept', String(product));
+    assert.match(r.reasons.join(), why, String(product));
+  }
+  const noProduct = recFor(w, { card: { product: undefined } });
+  const r = await clean(w, noProduct, { product: '..' });
+  assert.match(r.reasons.join(), /the card is no product's/);
+  assert.ok(existsSync(w.copy), 'nothing was deleted');
+  const none = await cleanupCopy({ rec, rules: R, now: T0, card: 'C-1', copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirror: w.mirror, git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} });
+  assert.equal(none.result, 'kept', 'no product folder named: never the card\'s own by default');
+  assert.ok(existsSync(w.copy));
+  const bad = await cleanupCopy({ rec, rules: R, now: T0, card: '../C-1', product: 'p1', copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirror: w.mirror, git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} });
+  assert.deepEqual(bad.reasons, ['bad card id']);
 });

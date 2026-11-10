@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { workerOutboxProblem } from './session-outbox.mjs';
+import { workerOutboxProblem, outboxProblemFor } from './session-outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const SID = 'S-1';
@@ -57,4 +57,23 @@ test('L767: a script session\'s outbox is <root>/script/<session>; a role names 
   // The real folder must be under the same role it is named under: a script name linked to a worker folder is refused.
   symlinkSync(join(root, 'worker', 'S-2'), join(root, 'script', 'S-2'));
   assert.match(workerOutboxProblem(join(root, 'script', 'S-2'), 'S-2', { root, role: ['worker', 'script'] }), /not inside the outbox root/);
+});
+
+// L836: a session's outbox is in its own product's folder, <outboxRoot>/<product>/<role>/<session id>.
+test('L836: outboxProblemFor checks the outbox in the session\'s own product\'s folder', () => {
+  const root = realpathSync(tempDir('m4-outbox-product-'));
+  const SID = 'S-1';
+  for (const p of [['p1', 'worker', SID], ['p2', 'worker', SID], ['worker', SID], ['p1', 'script', SID]]) mkdirSync(join(root, ...p), { recursive: true });
+  const ask = (outbox, product, role) => outboxProblemFor(outbox, SID, { outboxRoot: root, product, ...(role ? { role } : {}) });
+  assert.equal(ask(join(root, 'p1', 'worker', SID), 'p1'), null);
+  assert.equal(ask(join(root, 'p1', 'script', SID), 'p1', ['worker', 'script']), null);
+  assert.match(ask(join(root, 'p2', 'worker', SID), 'p1'), /not inside the outbox root/, 'another product\'s folder');
+  assert.match(ask(join(root, 'worker', SID), 'p1'), /not inside the outbox root/, 'the old flat place');
+  assert.match(ask(join(root, 'p1', 'script', SID), 'p1'), /is not a worker outbox/, 'the role is still checked');
+  for (const product of [undefined, '', 'P1', '..', 'p1/x', 'worker', 'Script']) assert.match(ask(join(root, 'p1', 'worker', SID), product), /^has no product folder to be in \(/, String(product));
+  // c3: a root that is no full path is no place, never read against wherever the process runs.
+  for (const bad of ['', 'outboxes', './outboxes', 7]) assert.match(outboxProblemFor(join(root, 'p1', 'worker', SID), SID, { outboxRoot: bad, product: 'p1' }), /the outbox root is not a full path/, String(bad));
+  // With no root, the shape alone, as workerOutboxProblem.
+  assert.equal(outboxProblemFor(join(root, 'p2', 'worker', SID), SID, { product: 'p1' }), null);
+  assert.match(outboxProblemFor('worker/S-1', SID, { product: 'p1' }), /not a full path/);
 });

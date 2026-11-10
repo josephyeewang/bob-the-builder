@@ -49,7 +49,7 @@ import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { BRANCH, cardBranch } from './branch.mjs';
-import { WORKER_OUTBOX_ROLES, workerOutboxProblem } from './session-outbox.mjs';
+import { WORKER_OUTBOX_ROLES, outboxProblemFor } from './session-outbox.mjs';
 import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
@@ -302,8 +302,10 @@ async function messages(mirror, shas, names, about) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
- *   outboxRoot              the outboxes' root folder: a worker's outbox must really be <root>/worker/<session id>
- *                           (<root>/script/<session id> for a script card, L767)
+ *   outboxRoot              the outboxes' root folder, not a product's (each product's folder is under it, #378
+ *                           r1 m2): a worker's outbox must really be
+ *                           <root>/<product>/worker/<session id> (<root>/<product>/script/<session id> for a script
+ *                           card, L767; the product's own folder, L836 shared/product-paths.mjs)
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
@@ -329,7 +331,8 @@ export function createPushScript(deps) {
     if (typeof card !== 'string' || !CARD.test(card)) no('the launch record has a bad card id');
     if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
     // The record says role worker for a script card too (L759), so either runner role's folder is this session's own (L767).
-    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot, role: WORKER_OUTBOX_ROLES });
+    // In the session's own product's folder (L836: <root>/<product>/<role>/<id>).
+    const badOutbox = outboxProblemFor(outbox, sessionId, { outboxRoot, product, role: WORKER_OUTBOX_ROLES });
     if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }

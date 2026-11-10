@@ -608,7 +608,7 @@ test('a worker the real pass starts has the session record M4\'s push script rea
     launch: async (x) => {
       sid = x.sessionId;
       // The launcher makes the session's own outbox and says where it is (pass.mjs's launch port).
-      const box = join(root, 'outboxes', 'worker', x.sessionId);
+      const box = join(root, 'outboxes', P, 'worker', x.sessionId);   // L836: in the product's own folder
       mkdirSync(box, { recursive: true, mode: 0o700 });
       return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: undoSha(UNDO_ID), outbox: box };
     } });
