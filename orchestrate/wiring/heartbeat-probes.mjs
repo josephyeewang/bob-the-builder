@@ -13,8 +13,10 @@
 // Each reading counts only if Sensors made it (M11 sensorsFact), and is held to the same age limit as M11's reader of it:
 // the phone link's for the Front Door, usage.stale_after_min for the account and the usage.
 //
-// Account. `signed-in-account` holds a name or null. A current null is the Sensors' "nobody": `signedInProbe` can't tell
-// signed out from an unreadable answer, and M11 reads it as nobody too, so this reports signed out, not unknown.
+// Account. `signed-in-account` holds the account and `signed_in` (true, false, or null for "could not tell", with its
+// reason). Signed out is reported only when a current reading says signed_in false in so many words. An empty or missing
+// account in any other reading is not known (null), never signed out (L730, #289 r1 M1): an old-form fact with no
+// signed_in field, or a read that failed, cannot tell "nobody" from "unreadable".
 // `labels` turn a or b into the private config's label; an account with no label is shown as its letter.
 //
 // Usage. heartbeatOnce takes one window at a time, so it gets the fuller of the two.
@@ -29,6 +31,14 @@ const FUTURE_MS = 60_000;
 const current = (at, nowMs, maxMs) => {
   const seen = Date.parse(at ?? '');
   return Number.isFinite(seen) && seen <= nowMs + FUTURE_MS && nowMs - seen <= maxMs;
+};
+
+// The one reading of the account fact: the account signed in, 'out' when the reading says signed_in false in so many
+// words, or null (not known) for anything else (L730, #289 r1 M1).
+const whoOf = (d) => {
+  const named = typeof d?.account === 'string' && d.account !== '';
+  if (!named) return d?.signed_in === false ? 'out' : null;
+  return d.signed_in === false || d.signed_in === null ? null : { account: d.account };
 };
 
 export function heartbeatProbes({ rec, rules, now, labels = {} }) {
@@ -47,13 +57,14 @@ export function heartbeatProbes({ rec, rules, now, labels = {} }) {
       return d.value === true || d.value === false ? d.value : null;
     },
     account: async () => {
-      const d = reading();
-      if (!d) return null;
-      if (typeof d.account !== 'string' || !d.account) return { signedIn: false, login: null };
-      return { signedIn: true, login: Object.hasOwn(labels, d.account) ? labels[d.account] : d.account };
+      const who = whoOf(reading());
+      if (who === null) return null;
+      if (who === 'out') return { signedIn: false, login: null };
+      return { signedIn: true, login: Object.hasOwn(labels, who.account) ? labels[who.account] : who.account };
     },
     usage: async () => {
-      const account = reading()?.account;
+      // Only for an account the reading says is signed in (whoOf, as account() above).
+      const account = whoOf(reading())?.account;
       if (!account) return null;
       const r = readFact(sensorsFact(rec, USAGE_FACT(account)), { account, now: now(), staleMs: staleMs() });
       if (!r.ok) return null;

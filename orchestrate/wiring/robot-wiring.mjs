@@ -14,11 +14,12 @@
 //               deliver (L600). The pinned heartbeat issue and an alert for each red fact go there. What it says about
 //               the Mini comes from the Sensors' facts in the Record (heartbeat-probes.mjs, L604), never a probe of its
 //               own: a fact with no current reading is "not known", never a pass and never signed out. Without the App
-//               keys it is not wired and refuses. The late part runs first either way (L239): when the Dispatcher's last
-//               full pass is older than M13's DISPATCHER_LATE_MIN, or missing, Joe is told. Without the App that alert
-//               goes to the job's log and the Record's alert queue, and `deliver`, below, sends it in the same round;
-//               with the App, heartbeatOnce's own Dispatcher alert tells it, so it is logged but not queued again,
-//               unless the heartbeat failed or lost an alert on GitHub: then it is queued as well.
+//               keys it is not wired and refuses. The late part runs first either way (L239): when dispatcherLate() says
+//               the Dispatcher is late, Joe is told. That alert goes to the job's log and the Record's alert queue before
+//               any GitHub call (L730 m1), and `deliver`, below, sends it in the same round. With the App,
+//               heartbeatOnce's own Dispatcher alert, decided by the same dispatcherLate() answer (L730 m2), tells it,
+//               and the queued copy then leaves unsent. It stays queued when the heartbeat failed, when GitHub lost that
+//               one alert (told is per alert, L730 m4), or when Joe closed it while the stop lasts (L730 m3).
 //   caught-up   M13 caughtUpOnce. REAL: the idea issues are read with the read-only client, the ideas and the push
 //               request are written as the Ledger. See lastReturn() for what "the Mini came back" means here.
 //   watch       M12 watchOnce. Needs a Vercel client and M13 alerts: not wired, refuses.
@@ -55,7 +56,7 @@ import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/a
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { DISPATCHER_LATE_MIN, NOT_TOLD, heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
+import { DISPATCHER_LATE_MIN, heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
 import { makeAlerts } from '../modules/M13-ledger/alerts.mjs';
 import { heartbeatProbes } from './heartbeat-probes.mjs';
 import { deliverWith, githubIssues, repoProblem } from '../modules/M13-ledger/alert-channel.mjs';
@@ -200,7 +201,8 @@ export function lockHolder(file, { read = (f) => readFileSync(f, 'utf8'), dead =
  * pass's END) within M13's DISPATCHER_LATE_MIN, AND its pass lock not held by a live process; a live holder longer than
  * LIVE_PASS_MAX_MS is stuck, and counts as late too. Also late: no full pass on record (unless the first one is running),
  * or one more than 10 minutes in the future (heartbeat.mjs's own rule). → null when on time, else { since (ms | null), text }.
- * `since` keys the alert: each stop of the Dispatcher is told once (and again each day it lasts).
+ * `since` keys the alert: each stop of the Dispatcher is a new cause and a new heartbeat status, so it is told once, and
+ * again each day it lasts (holdAlert's once a day, when the heartbeat's own alert was closed by Joe or not told).
  */
 export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, holder = null }) {
   const held = holder?.live ? (holder.takenAt === null ? Infinity : nowMs - holder.takenAt) : null;
@@ -268,25 +270,35 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     const when = () => new Date(now());
     // "Rules readable": the product's rules were read and adopted (M10's `rules.adopted`, the engine's usable rules).
     const probes = { ...heartbeatProbes({ rec, rules, now }), rulesReadable: async () => rules.get('rules.adopted', { product: c.product }) !== undefined };
-    beat = () => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when }),
-      owner: c.alertOwner, probes, now: when });
+    // The pass's own dispatcherLate answer decides the heartbeat's Dispatcher line too: one rule for "late", so a live
+    // pass inside its run limit is never red there either (L730 m2; audit #137 M6).
+    beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when }),
+      owner: c.alertOwner, probes: { ...probes, dispatcherLate: async () => late }, now: when });
   }
   passes.heartbeat = async () => {
     const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
     if (late) log(`robot: alert: ${late.text}`);
-    // With the App, the heartbeat's own Dispatcher alert tells it. When the heartbeat failed, or lost an alert on GitHub,
-    // the late alert goes to the queue as well, so a broken App never leaves a stopped Dispatcher untold (L239).
-    let beaten = null; let failed = null;
-    if (beat) { try { beaten = await beat(); } catch (e) { failed = e; } }
-    const toldByBeat = Array.isArray(beaten?.red) && !beaten.red.includes(NOT_TOLD);
+    // The late alert is queued FIRST, before any GitHub call, so a heartbeat that hangs past the pass's time limit can't
+    // lose it (L730 m1). With the App, the heartbeat's own Dispatcher alert then tells it, and the queued copy leaves
+    // unsent, so it is not told twice (L239). When the heartbeat failed, lost that alert on GitHub, or found it closed by
+    // Joe while the stop lasts ('suppressed', L730 m3), the queued copy stays: a broken App never leaves a stopped
+    // Dispatcher untold, and holdAlert tells a lasting one again each day.
     let tell = null;
-    if (late && !toldByBeat) {
+    if (late) {
       // A refused alert is logged and kept with the pass's failure (audit #137 M1; L130 m12).
       if (hold({ rec, cause: LATE_CAUSE(late.since), text: late.text, alert: outbox(rec, now()), now: now() }) === false) {
         tell = 'the Dispatcher-late alert could not be queued';
         log(`robot: ${tell}`);
       }
-    } else if (!late && !dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    } else if (!dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    let beaten = null; let failed = null;
+    if (beat) { try { beaten = await beat(late); } catch (e) { failed = e; } }
+    // Told per alert (L730 m4): only what the Dispatcher alert itself answered counts, not whether every alert went out.
+    const answer = beaten?.told?.dispatcher;
+    const toldByBeat = typeof answer === 'string' && answer !== 'suppressed';
+    if (late && toldByBeat && !dropCause(rec, HOLD_FACT(LATE_CAUSE(late.since)))) {
+      log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
+    }
     if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
     if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
     return { red: beaten.red };

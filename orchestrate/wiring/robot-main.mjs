@@ -11,8 +11,8 @@
 // dropped in silence (L130 m12, as M11 main.mjs). The queue is sent by the robot job's own last pass, `deliver` (L242,
 // robot-wiring.mjs), never by this file directly.
 // Exit 0 when the round ran or another round was running; 1 when the config or the wiring could not be loaded; 2 when the
-// round ran past its deadline. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
-// M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
+// round ran past its deadline. Exit 1 reaches only the job's log: what tells the owner this job never starts is the outside
+// check, which sees the heartbeat go stale (a first-cutover checklist condition).
 //
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
 // keeps its lock, as M11 does for a late pass: the process exits, and the next start breaks the dead lock and says so.

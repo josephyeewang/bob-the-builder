@@ -28,6 +28,9 @@ import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
 import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
+import { sensorsPass } from '../modules/M12-sensors/loop.mjs';
+import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
+import { miniCheck } from '../modules/M1-front-door/trip.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(here, 'fake-github.test-helper.mjs');
@@ -645,7 +648,7 @@ test('L600 PR 2: with the robot App the heartbeat runs: its pinned issue in the 
   assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
 });
 
-test('L604 PR 2: the heartbeat tells a current Sensors reading, a current nobody as signed out, and an old one as not known', async () => {
+test('L604 PR 2 (L730 M1): a current Sensors reading is told; signed out only when the reading says so; an empty account and an old one are not known', async () => {
   const w = withKey(world({ extra: APP }));
   const gh = appGitHub(w);
   let t = Date.parse('2026-11-03T10:00:00Z');
@@ -659,9 +662,17 @@ test('L604 PR 2: the heartbeat tells a current Sensors reading, a current nobody
   await passes.heartbeat();
   assert.match(pinnedOf(gh).body, /signed-in account: b/);
   assert.match(pinnedOf(gh).body, /Front Door reachable from the phone: yes/);
-  // A current reading of nobody signed in: the signed-out fact, and its alert.
+  // Reversed in L730 (#289 r1 M1): a current empty account is not "nobody". It may be a read that failed, so it is not
+  // known: no signed-out fact, no alert.
   t += MIN; dispatcherPass();
   sense('signed-in-account', { account: null, observed_at: isoAt(t) });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /signed-in account: unknown/);
+  assert.equal(rec.read('fact', `signed-out-${P.replace(/[^A-Za-z0-9_-]/g, '-')}`)?.doc?.signed_out, undefined);
+  assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: signed-out/.test(i.title)), 'no signed-out alert');
+  // A current reading that says nobody is signed in, in so many words: the signed-out fact, and its alert.
+  t += MIN; dispatcherPass();
+  sense('signed-in-account', { account: null, signed_in: false, reason: 'nobody is signed in', observed_at: isoAt(t) });
   await passes.heartbeat();
   assert.equal(rec.read('fact', `signed-out-${P.replace(/[^A-Za-z0-9_-]/g, '-')}`)?.doc?.signed_out, true);
   assert.ok([...gh.issues.values()].some((i) => /heartbeat red: signed-out/.test(i.title)), 'the signed-out alert is raised');
@@ -697,4 +708,100 @@ test('L600 PR 2 (L239): with the robot App, a Dispatcher alert GitHub refuses is
   assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
   assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)), 'GitHub took no Dispatcher alert');
   assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'the late alert is queued for deliver');
+});
+
+// ── L730 (#289 r1): the audit's probes A-E, as tests ─────────────────────────────────────────────────────────────────
+
+const T730 = Date.parse('2026-11-03T10:00:00Z');
+const dPass = (rec, at) => assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+  doc: { at: isoAt(at), started_at: isoAt(at), steps: {} }, kind: 'full_pass' }).ok);
+const sensed = (rec, id, doc) => { const r = rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }); assert.ok(r.ok, `${id}: ${r.reason}`); };
+
+test('L730 m1 (probe A): a heartbeat that hangs on GitHub past the pass deadline still leaves the late Dispatcher queued', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const fetchFn = (url, init = {}) => (new URL(url).pathname.startsWith(`/repos/${ALERT_REPO}`) ? new Promise(() => {}) : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {} });
+  await runPasses({ rec, passes, now: () => Date.now(), passDeadlineMs: 1500 });
+  const q = queued(rec);
+  assert.ok(q.some((t) => /heartbeat pass failed: it did not finish/.test(t)), q.join(' | '));
+  assert.ok(q.some((t) => /the Dispatcher has no full pass on record/.test(t)), 'queued before any GitHub call');
+});
+
+test('L730 M2 (probe B): usage not known, everything else current: not known, never all green', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => T730, log: () => {} });
+  dPass(rec, T730);
+  sensed(rec, 'signed-in-account', { account: 'a', observed_at: isoAt(T730) });
+  sensed(rec, 'frontdoor-reachable', { value: true, observed_at: isoAt(T730) });
+  await passes.heartbeat();
+  const body = pinnedOf(gh).body;
+  assert.doesNotMatch(body, /All green/);
+  assert.doesNotMatch(body, /ok {4}usage/);
+  assert.match(body, /not known: usage/);
+});
+
+test('L730 M1 (probe C): a Sensors account read that fails is not known: no signed-out fact, no alert, and the trip check is not NO', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => T730, log: () => {} });
+  dPass(rec, T730);
+  const sp = await sensorsPass({ rec, now: () => new Date(T730), ports: { whoIsSignedIn: async () => { throw new Error('claude auth status timed out'); },
+    probes: { reachable: async () => true } } });
+  assert.equal(sp.wrote['signed-in-account'].unknown, true, 'Sensors itself calls it unknown');
+  await passes.heartbeat();
+  assert.equal(rec.read('fact', `signed-out-${P.replace(/[^A-Za-z0-9_-]/g, '-')}`)?.doc?.signed_out, undefined);
+  assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: signed-out/.test(i.title)), 'no signed-out alert');
+  assert.match(pinnedOf(gh).body, /signed-in account: unknown/);
+  const trip = miniCheck({ facts: makeFactWriter(rec, { actor: 'ledger' }), heartbeatProduct: P, now: () => new Date(T730) });
+  assert.notEqual(trip.items[1].state, 'red', JSON.stringify(trip.items[1]));
+});
+
+test('L730 m2 (probe D): a live Dispatcher pass inside its run limit is on time for the heartbeat too: no "dispatcher" red', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  writeFileSync(w.config.dispatcherLockFile, JSON.stringify({ pid: process.pid, taken_at: isoAt(T730 - 18 * MIN) }));
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => T730, log: () => {} });
+  dPass(rec, T730 - 20 * MIN);
+  assert.equal(dispatcherLate(rec, { nowMs: T730, holder: lockHolder(w.config.dispatcherLockFile) }), null);
+  const out = await passes.heartbeat();
+  assert.ok(!out.red.includes('dispatcher'), JSON.stringify(out.red));
+  assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)));
+  // #137 M6 stays fixed: the same pass stuck past its limit is late, in both.
+  writeFileSync(w.config.dispatcherLockFile, JSON.stringify({ pid: process.pid, taken_at: isoAt(T730 - LIVE_PASS_MAX_MS - MIN) }));
+  assert.ok((await passes.heartbeat()).red.includes('dispatcher'));
+});
+
+test('L730 m3 (probe E): Joe closes the Dispatcher alert while it still holds: the next day it is told again, through the queue', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let t = T730;
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  await passes.heartbeat();
+  const issue = [...gh.issues.values()].find((i) => /heartbeat red: dispatcher/.test(i.title));
+  assert.ok(issue);
+  assert.ok(!queued(rec).some((q) => /Dispatcher/.test(q)), 'told by the heartbeat: not queued too');
+  Object.assign(issue, { state: 'closed', closed_by: { type: 'User', login: 'owner-login' } });
+  t += 25 * 60 * MIN;
+  await passes.heartbeat();
+  assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'closed while it lasts: told again, once a day');
+  // The same day again: holdAlert's once a day, not every pass (the copy already waiting is the one told).
+  t += 10 * MIN;
+  await passes.heartbeat();
+  assert.equal(queued(rec).filter((q) => /the Dispatcher has no full pass on record/.test(q)).length, 1);
+});
+
+test('L730 m4: one alert GitHub lost does not make the Dispatcher alert not told', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // Only the front-door alert is refused; the Dispatcher alert goes through.
+  const fdPost = (init) => { try { return init.method === 'POST' && /heartbeat red: front-door/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (fdPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, now: () => T730, log: () => {} });
+  sensed(rec, 'frontdoor-reachable', { value: false, observed_at: isoAt(T730) });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
+  assert.ok([...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)));
+  assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'told by its own alert: not queued too');
 });

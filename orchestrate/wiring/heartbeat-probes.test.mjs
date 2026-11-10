@@ -20,6 +20,8 @@ const setUp = (facts = [], { labels } = {}) => {
 };
 const seen = (min = 0) => iso(T0 - min * MIN);
 const signedIn = (account = 'a', min = 0) => [ACCOUNT_FACT, { account, observed_at: seen(min) }];
+// A reading in the account fact's full form (state-facts writeSignedInAccount, L730): signed_in and its reason.
+const said = (fields, min = 0) => [ACCOUNT_FACT, { ...fields, observed_at: seen(min) }];
 const reach = (value, min = 0) => [FACTS.reachable, { value, observed_at: seen(min) }];
 const usage = (h5, week, min = 0) => [USAGE_FACT('a'), { account: 'a', observed_at: seen(min),
   h5: { used_pct: h5, resets_at: iso(T0 + 60 * MIN) }, week: { used_pct: week, resets_at: iso(T0 + 2880 * MIN) } }];
@@ -40,11 +42,19 @@ test('Front Door: a current reading is said, an old or undecided one is not know
   assert.equal(await setUp([reach(true, -5)]).frontDoorReachable(), null, 'a reading from the future');
 });
 
-test('account: a name is signed in, a current "nobody" is signed out, an old reading is not known', async () => {
+test('account: a name is signed in; signed out only when the reading says so; an empty account is otherwise not known', async () => {
   assert.deepEqual(await setUp([signedIn('b')]).account(), { signedIn: true, login: 'b' });
   assert.deepEqual(await setUp([signedIn('b')], { labels: { b: 'account B' } }).account(), { signedIn: true, login: 'account B' });
-  assert.deepEqual(await setUp([signedIn(null)]).account(), { signedIn: false, login: null });
+  assert.deepEqual(await setUp([said({ account: 'b', signed_in: true })]).account(), { signedIn: true, login: 'b' });
   assert.equal(await setUp([signedIn('a', STALE_MIN + 1)]).account(), null);
+  // L730 (#289 r1 M1, reversed): a current empty account is NOT signed out unless the reading says signed_in false.
+  assert.equal(await setUp([signedIn(null)]).account(), null, 'an old-form null (a failed read, or nobody): not known');
+  assert.equal(await setUp([signedIn('')]).account(), null, 'an empty name: not known');
+  assert.deepEqual(await setUp([said({ signed_in: false })]).account(), { signedIn: false, login: null }, 'signed_in false with no account field is said in so many words');
+  assert.equal(await setUp([said({ account: null, signed_in: null, reason: 'claude auth status timed out' })]).account(), null, 'could not tell');
+  assert.deepEqual(await setUp([said({ account: null, signed_in: false, reason: 'nobody is signed in' })]).account(), { signedIn: false, login: null });
+  assert.equal(await setUp([said({ account: 'a', signed_in: null })]).account(), null, 'a name with could-not-tell is not known');
+  assert.equal(await setUp([said({ account: 'a', signed_in: false })]).account(), null, 'a name with signed out contradicts itself: not known');
 });
 
 test('a reading Sensors did not make does not count: the account, the Front Door and usage, each on its own', async () => {
@@ -80,6 +90,8 @@ test('usage: the fuller window, for the account signed in; a stale or missing on
   assert.equal(await setUp([signedIn(), usage(80, 40, STALE_MIN + 1)]).usage(), null);
   assert.equal(await setUp([signedIn('b'), usage(80, 40)]).usage(), null, 'another account\'s reading');
   assert.equal(await setUp([usage(80, 40)]).usage(), null);
+  assert.equal(await setUp([said({ account: 'a', signed_in: null }), usage(80, 40)]).usage(), null, 'not known who is signed in: no usage');
+  assert.equal(await setUp([said({ account: 'a', signed_in: false }), usage(80, 40)]).usage(), null);
 });
 
 test('the Dispatcher\'s last good pass is its own fact, or nothing', async () => {
