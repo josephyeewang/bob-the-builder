@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
+import { apart, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { checkMachineWide } from './env-check.mjs';
@@ -544,7 +544,15 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   assert.equal(mw({ [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false,
     [S.network]: { [S.strictAllowlist]: true, deniedDomains: ['example.com'], allowManagedDomainsOnly: true }, [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } }).ok, true);
   for (const k of WIDENING_TOP) assert.match(mw({ [k]: true }).reason ?? '', new RegExp(`machine-wide sandbox holds ${k};`), k);
-  for (const k of [...WIDENING_NETWORK, S.allowedDomains]) assert.match(mw({ [S.network]: { [k]: [] } }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  for (const k of WIDENING_NETWORK) assert.match(mw({ [S.network]: { [k]: [] } }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  // allowedDomains: an empty list only (#410 r3 m2); one domain in it is refused.
+  assert.equal(mw({ [S.network]: { [S.allowedDomains]: [], allowManagedDomainsOnly: true } }).ok, true, 'an empty allowedDomains');
+  for (const v of [['example.com'], [''], 'x', null, {}]) assert.match(mw({ [S.network]: { [S.allowedDomains]: v } }).reason ?? '', new RegExp(`sets ${S.allowedDomains} to a value that is not its safe one`), JSON.stringify(v));
+  // A key that is only an Object property name is not on the list (#410 r3 c1).
+  for (const k of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.match(mw(JSON.parse(`{"${k}": {}}`)).reason ?? '', new RegExp(`machine-wide sandbox holds ${k};`), k);
+    assert.match(mw({ [S.network]: JSON.parse(`{"${k}": {}}`) }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  }
   for (const k of WIDENING_FILESYSTEM) assert.match(mw({ [S.filesystem]: { [k]: ['/w'] } }).reason ?? '', new RegExp(`machine-wide sandbox filesystem holds ${k};`), `filesystem ${k}`);
   // The audit's probe cases as written (r2 M1).
   for (const sb of [{ enabledPlatforms: [] }, { enabledPlatforms: ['linux'], [S.failIfUnavailable]: false }, { allowAppleEvents: true },
@@ -553,7 +561,7 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     { bwrapPath: '/x' }, { socatPath: '/x' }, { ignoreViolations: {} }, { tlsTerminate: true }, { [S.excludedCommands]: ['git'] }]) assert.equal(mw(sb).ok, false, JSON.stringify(sb));
   // Each allowed key only at its safe value.
   assert.match(mw({ [S.sandboxEnabled]: false }).reason ?? '', /switch the sandbox off/);
-  for (const [sb, k] of [[{ [S.sandboxEnabled]: 'yes' }, S.sandboxEnabled], [{ [S.failIfUnavailable]: false }, S.failIfUnavailable],
+  for (const [sb, k] of [[{ [S.sandboxEnabled]: 'yes' }, S.sandboxEnabled], [{ [S.sandboxEnabled]: 0 }, S.sandboxEnabled], [{ [S.sandboxEnabled]: 'true' }, S.sandboxEnabled], [{ [S.sandboxEnabled]: null }, S.sandboxEnabled], [{ [S.failIfUnavailable]: false }, S.failIfUnavailable],
     [{ [S.allowUnsandboxedCommands]: 'no' }, S.allowUnsandboxedCommands], [{ [S.network]: { [S.strictAllowlist]: false } }, S.strictAllowlist],
     [{ [S.network]: { deniedDomains: 'x' } }, 'deniedDomains'], [{ [S.network]: { allowManagedDomainsOnly: 'yes' } }, 'allowManagedDomainsOnly'],
     [{ [S.filesystem]: { [S.denyRead]: '/x' } }, S.denyRead], [{ [S.filesystem]: { [S.denyWrite]: [1] } }, S.denyWrite]]) {
@@ -569,4 +577,14 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     [S.sandbox]: { [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.strictAllowlist]: true },
       [S.filesystem]: { [S.denyRead]: ['/w/held'], [S.denyWrite]: ['/w/held'] } } };
   assert.deepEqual(checkMachineWide({ readFile: () => JSON.stringify(hardened), path: '/fake/managed.json' }), { ok: true });
+});
+
+test('#410 r3 m1: apart is one rule, both ways, without regard to case; a shared prefix is apart, a trailing slash is not', () => {
+  const rows = [['/w/out', '/w/outbox', true], ['/w/out', '/w/out', false], ['/w/out', '/W/OUT', false], ['/W/OUT', '/w/out/x', false],
+    ['/w/out/', '/w/out', false], ['/w/out/', '/w/out/x', false], ['/W/Out/', '/w/oUT/x', false], ['/w/OUTBOX', '/w/out', true],
+    ['/w/out-2', '/w/out', true], ['/', '/w', false], ['/w/x', '/w/y', true], ['/w/outnotes', '/w/out', true]];
+  for (const [a, b, want] of rows) {
+    assert.equal(apart(a, b), want, `${a} ${b}`);
+    assert.equal(apart(b, a), want, `${b} ${a}`);
+  }
 });

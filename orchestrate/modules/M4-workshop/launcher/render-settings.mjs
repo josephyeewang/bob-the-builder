@@ -303,9 +303,11 @@ const isBool = (v) => typeof v === 'boolean';
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const block = () => true; // a sub-block, checked as its own part below
 const isTextList = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+// An empty allowedDomains narrows (a hardened file may write it beside allowManagedDomainsOnly); any domain in it widens (#410 r3 m2).
+const isEmptyList = (v) => Array.isArray(v) && v.length === 0;
 const MANAGED_SANDBOX = Object.freeze({
   '': { [S.sandboxEnabled]: isTrue, [S.failIfUnavailable]: isTrue, [S.allowUnsandboxedCommands]: isFalse, [S.network]: block, [S.filesystem]: block },
-  [S.network]: { deniedDomains: isTextList, [S.strictAllowlist]: isTrue, allowManagedDomainsOnly: isBool },
+  [S.network]: { deniedDomains: isTextList, [S.strictAllowlist]: isTrue, allowManagedDomainsOnly: isBool, [S.allowedDomains]: isEmptyList },
   [S.filesystem]: { [S.denyRead]: isTextList, [S.denyWrite]: isTextList },
 });
 /** Why a settings file's sandbox block may widen the shell's reach, or null. */
