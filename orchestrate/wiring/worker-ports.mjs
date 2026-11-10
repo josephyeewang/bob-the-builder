@@ -32,9 +32,6 @@ export const NOT_WIRED_WORKER = Object.freeze(['sessions', 'probe', 'launch', 's
 // together), and which of those aren't wired yet. To wire one: answer it in `cleanup` below and take it off NOT_WIRED_CLEANUP.
 export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot']);
 export const NOT_WIRED_CLEANUP = Object.freeze(['saveWork', 'copiesRoot']);
-// The folders: cleanupPass reads a missing one as "nothing to do" (no copies, no staging to sweep), so each not wired yet
-// refuses on read, and a wired one is checked on read, rather than being left out (audit #127 r2 m-C: a sealRoot left out would never sweep, in silence).
-const CLEANUP_FOLDERS = Object.freeze(['copiesRoot', 'sealRoot']);
 
 /** Why the cleanup group can't start, or null. The same rules as the tick's ports, inside the one port the tick reads as a group. */
 export function cleanupProblem(cleanup) {
@@ -155,11 +152,12 @@ export function workerPorts(ctx) {
   let ls;
   try { ls = lstatSync(join(c.reviewRoot, RUNNER_LAUNCHES)); } catch (e) { throw new Error(`the review runner's folder (reviewRoot) ${c.reviewRoot} has no ${RUNNER_LAUNCHES} folder, so it is not the runner's (${e?.code ?? e})`); }
   if (ls.isSymbolicLink() || !ls.isDirectory()) throw new Error(`the review runner's folder (reviewRoot) ${c.reviewRoot} has no ${RUNNER_LAUNCHES} folder, so it is not the runner's`);
-  // cleanupPass reads a missing folder as nothing to do (cleanup.mjs), which would pass in silence. So each folder not
-  // wired yet refuses: the tick spreads this object into the step, and the read throws inside the step.
+  // Every unwired cleanup port refuses when READ, not only when called: cleanupPass reads a folder it can't use (a
+  // function in its place included) as nothing to do (cleanup.mjs), which would pass in silence (audit #127 r2 m-C;
+  // #310 audit m-2: no hand-kept list of which ones are folders). The tick spreads this object into the step, so the
+  // read throws inside the step. The wired ones come first, so the first refusal is NOT_WIRED_CLEANUP[0].
   const cleanup = cleanupPorts(ctx);
-  for (const k of NOT_WIRED_CLEANUP.filter((n) => !CLEANUP_FOLDERS.includes(n))) cleanup[k] = refusing(`cleanup.${k}`);
-  for (const k of NOT_WIRED_CLEANUP.filter((n) => CLEANUP_FOLDERS.includes(n))) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
+  for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return {
     cleanup,
     hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, selfUid: ctx.selfUid }),
