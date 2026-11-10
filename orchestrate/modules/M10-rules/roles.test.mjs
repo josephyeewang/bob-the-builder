@@ -108,7 +108,8 @@ test('the subagent tool is refused under both its names, at the profile and at t
     const init = { tools: [...w.tools, name], mcp_servers: [], plugins: [], skills: [...(w.skills ?? [])], setting_sources: ['flag'], permissionMode: w.mode, claude_code_version: PIN };
     assert.match(checkInit(init, { role: 'worker', profile: w }).reason, /never-list tools loaded/, name);
   }
-  // One list in two homes: M4's is M10's plus Workflow, which only M10's script profile may hold.
+  // One list in two homes: M4's is M10's plus Workflow. M10 still lets a script profile name Workflow, but no published
+  // profile does (L770), because M4 never starts it; the test below holds every profile to M4's list.
   assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
 });
 
