@@ -2,12 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, linkSync, mkdtempSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, closeSync, linkSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { REQUEST_MAX_BYTES, readRequest, writeStatus } from './runner-files.mjs';
 
-const dir = () => realpathSync(mkdtempSync(join(tmpdir(), 'orch-rf-')));
+const dir = () => realpathSync(tempDir('orch-rf-'));
 const ME = process.getuid();
 
 test('L763: the status is written as a new file renamed over the old one, so a hard link to the old one never gets the next status', () => {

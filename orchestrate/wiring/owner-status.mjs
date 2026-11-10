@@ -10,8 +10,9 @@
 // folders (a ruling for the lane that owns render-settings), and here every field that can be derived is checked against
 // what it must be (outbox, uid, role from kind), so a forged file can at worst lie about liveness, card or product, never
 // widen which file kinds or which outbox a session may use. The wiring cross-checks card against the launch record.
-// The bound (L769, #328 r1 M1): a forged status needs an unsandboxed process running as the owner; that is outside the wall's job. Such a process can also forge answers, so a refused launch or a stop, and
-// the runner keeps the window short by rewriting the status at least every RUNNER_STATUS_EVERY_MS (runner-files.mjs).
+// The bound (L769, #328 r1 M1): a forged status needs an unsandboxed process running as the owner; that is outside the
+// wall's job. Such a process could also forge answers (a launch refused, or a stop that never happened). The runner keeps
+// the window short by rewriting the status at least every RUNNER_STATUS_EVERY_MS (runner-files.mjs).
 //
 // The status file's folder is the runner's own, apart from the requests folder the Dispatcher writes into (that one
 // would fail the folder's write check). The owner and mode checks do not see macOS access lists; that is moot while the

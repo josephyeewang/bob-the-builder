@@ -2,8 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -19,7 +19,7 @@ const input = (kind, runner, more = {}) => ({ kind, workerRunner: runner, profil
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], ...more });
 
 function runnerDirs() {
-  const d = realpathSync(mkdtempSync(join(tmpdir(), 'orch-rl-')));
+  const d = realpathSync(tempDir('orch-rl-'));
   const runner = { requestsDir: join(d, 'requests'), statusFile: join(d, 'state', 'status.json') };
   mkdirSync(runner.requestsDir); mkdirSync(join(d, 'state'));
   return { d, runner };
