@@ -785,7 +785,7 @@ test('#403 r3: a replacing entry carries no delivered_mark key when the held one
 });
 
 test('#403 r3 m2, r4 c1: plain() puts a space for every control character, separator, and invisible format character', () => {
-  for (const c of ['\n', '\r', '\t', '\v', '\f', '\u0085', '\u001b', '\u2028', '\u2029', '\u200B', '\u200E', '\u202E', '\u2066', '\u061C', '\uFEFF', '\u206A', '\uFFF9', '\u180E', '\u{E0001}', '\u00AD', '\u115F', '\u3164']) {
+  for (const c of ['\n', '\r', '\t', '\v', '\f', '\u0085', '\u001b', '\u2028', '\u2029', '\u200B', '\u200E', '\u202E', '\u2066', '\u061C', '\uFEFF', '\u206A', '\uFFF9', '\u180E', '\u{E0001}', '\u00AD', '\u115F', '\u1160', '\u2065', '\u3164']) {
     assert.equal(plain(`a${c}b`), 'a b', JSON.stringify(c));
   }
   assert.equal(plain('plain words, kept'), 'plain words, kept');
