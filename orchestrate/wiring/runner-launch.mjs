@@ -4,7 +4,8 @@
 // checkRunnerWall passes on them, with those paths as real paths. A launch that fails either is refused: "not walled".
 //
 // The role is the kind's (owner-status.mjs RUNNER_ROLE_OF), never one the request names. A role with no design profile
-// (script, until lane 2 adds one: L757) can't be rendered, so it is refused here: no script session runs unwalled.
+// can't be rendered, so it is refused here: no session runs unwalled. (Lane 2 has since added the script profile, L757,
+// so a script launch now gets the script role's settings with the wall.)
 
 import { checkRunnerWall, renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { checkProfile } from '../modules/M4-workshop/launcher/role-profiles.mjs';
