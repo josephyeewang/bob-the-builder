@@ -121,7 +121,7 @@ test('#317 audit r1 M1: stop and save take any session sessions() lists, routed 
   const pass = code('pass.mjs');
   const sr = pass.slice(pass.indexOf('function stopReason'), pass.indexOf('\n}\n', pass.indexOf('function stopReason')));
   assert.ok(sr.indexOf("return 'cancel'") > 0 && sr.indexOf("return 'cancel'") < sr.indexOf('parkable(s)'), 'a cancel is decided before parkable');
-  assert.match(pass, /guarded\(\(\) => stopGroup\(s\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
+  assert.match(pass, /guarded\(\(signal\) => stopGroup\(s, \{ signal \}\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
   for (const k of ['probe', 'stopGroup', 'saveWork']) assert.match(OWNER_PORTS[k].in, /^\(session\): any session sessions\(\) lists, routed by kind/, k);
   assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save: only the kinds named here, review, audit, readonly, lead and front_door \(by kind, never by role/);
   assert.match(OWNER_PORTS.saveWork.out, /editing, undo, script and overnight save/);

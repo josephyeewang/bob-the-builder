@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -689,6 +689,60 @@ test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
   assert.equal((await stopProcessGroup({ pgid: 1, kill, alive: () => true, sleep })).ok, false, 'never signals group 1');
   const gone = await stopProcessGroup({ pgid: 42, kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, alive: () => false, sleep });
   assert.equal(gone.how, 'gone');
+});
+
+test('L822 planted: a stop its caller aborted sends nothing more: not before SIGTERM, not during the wait, not SIGKILL', async () => {
+  const sent = [];
+  const kill = (p, s) => sent.push(s);
+  // Aborted before it starts: nothing is sent.
+  const before = new AbortController();
+  before.abort();
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: before.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, []);
+  // Aborted while it waits (the caller's port limit): SIGTERM only, no SIGKILL, and it stops waiting.
+  const mid = new AbortController();
+  let t = 0;
+  const sleep = async (ms) => { t += ms; if (t >= 3000) mid.abort(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep, signal: mid.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual([sent, t], [['SIGTERM'], 3000]);
+  // Aborted on the last wait, just before SIGKILL.
+  sent.length = 0;
+  const last = new AbortController();
+  let u = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async (ms) => { u += ms; if (u >= 10_000) last.abort(); }, signal: last.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // #372 m1: the abort and the group's exit at the same step: the exit is told, not 'abandoned'.
+  sent.length = 0;
+  const both = new AbortController();
+  let gone = false;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => !gone, sleep: async () => { gone = true; both.abort(); }, signal: both.signal }), { ok: true, how: 'SIGTERM' });
+  sent.length = 0;
+  const atEnd = new AbortController();
+  let v = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => v < 10_000, sleep: async (ms) => { v += ms; if (v >= 10_000) atEnd.abort(); }, signal: atEnd.signal }), { ok: true, how: 'SIGTERM' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // Never aborted: the same as with no signal.
+  sent.length = 0;
+  assert.equal((await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: new AbortController().signal })).how, 'SIGKILL');
+  assert.deepEqual(sent, ['SIGTERM', 'SIGKILL']);
+});
+
+test('#372 m2: guarded aborts the signal it hands its port when it gives up, and never when the port answers', async () => {
+  let seen;
+  const late = await guarded((signal) => { seen = signal; return new Promise(() => {}); }, 20);
+  assert.equal(late.timedOut, true);
+  assert.equal(seen.aborted, true);
+  let quick;
+  assert.deepEqual(await guarded((signal) => { quick = signal; return { ok: true }; }, 20), { ok: true });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(quick.aborted, false);
+  // The stops hand the pass's signal to the port.
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const got = [];
+  w.setCard('C-1', { state: 'cancelled' });
+  await w.pass(1, { stopGroup: async (s, o) => { got.push(o?.signal instanceof AbortSignal); return { ok: true, how: 'SIGTERM' }; } });
+  assert.deepEqual(got, [true]);
 });
 
 test('M7: a stop that fails alerts and leaves the card as it was; a failed save alerts but the stop stands', async () => {

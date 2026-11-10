@@ -15,7 +15,10 @@
 // STILL THERE, TOLD AGAIN (L732 m3). An issue the owner left open after fixing the store would otherwise hide the same
 // fault coming back: every start would find it and say nothing. So a start that finds the issue open comments on it once
 // a day while the fault lasts: not when the robot commented in the last day, nor when the issue was opened in the last
-// day (its body says when). A comment that notifies is the point; the body is never edited.
+// day (GitHub's created_at says when; its body's "Opened at" line when GitHub gives none). The day is counted by GitHub's
+// clock, so a computer clock ahead or behind still reminds once a day (L768, L801 M1); one more than a few minutes ahead
+// is said in the log, once each start. With no Date header from GitHub, the computer's clock stands, as before. A
+// comment that notifies is the point; the body is never edited.
 //
 // The reason is cut and fenced as a push reason is (L720 n2): local paths become <path>, a cut for length says so, and
 // the words are fenced as outside text. A look that fails opens nothing, as an unknown answer would otherwise flood the
@@ -26,10 +29,10 @@
 // the robot job, which opens the same folder, is what tells it.
 
 import { createHash } from 'node:crypto';
-import { lineIs } from './alerts.mjs';
+import { CLOCK_AHEAD_MS, clockAhead, lineIs } from './alerts.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
 import { ALERT_SEND_MS } from '../M11-dispatcher/alerts.mjs';
-import { pushReason } from '../M11-dispatcher/proposal-route.mjs';
+import { pushReason } from '../../shared/push-reason.mjs';
 
 export const STORE_KEEPS = Object.freeze(['recovery_stopped']);
 export const stopMarker = (product, type, key) => `<!-- orch:store_stopped ${product} ${createHash('sha256').update(`${type}\n${key}`).digest('hex').slice(0, 16)} -->`;
@@ -74,18 +77,24 @@ export async function tellStoreStopped({ stop, product, channel, log, sendMs = A
     return n ? 'opened' : notTold(gh.lastAnswer ?? 'GitHub refused the issue');
   } catch (e) { return notTold(msg(e)); }
 
-  // Once a day at most, counting the opening itself; a look that fails says nothing rather than risk a flood.
+  // Once a day at most, counting the opening itself; a look that fails says nothing rather than risk a flood. The day is
+  // counted by GitHub's times (L768): its clock on the read, the issue's created_at and the comments' own times. A robot
+  // clock more than CLOCK_AHEAD_MS ahead of GitHub's is logged, and still reminds once a day (L801 M1).
   async function remind(n) {
     const t = now();
-    const since = new Date(t - STOP_REMIND_MS).toISOString();
-    const last = await inTime(sendMs, () => gh.latestOwnComment(n, since));
-    if (last === false) { log(`robot: the stopped Record's issue #${n} is open; its comments could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
-    if (last) return 'already open';
     const issue = await inTime(sendMs, () => gh.read(n));
     if (!issue) { log(`robot: the stopped Record's issue #${n} could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
     if (issue.open === false) return 'already open';   // closed since the search: the next start opens a new one
-    const opened = Date.parse(OPENED.exec(issue.body)?.[1] ?? '');
-    if (Number.isFinite(opened) && t - opened < STOP_REMIND_MS) return 'already open';
+    const ahead = clockAhead(gh, t);
+    if (ahead !== null && ahead > CLOCK_AHEAD_MS) log(`robot: the stopped Record's issue #${n} is open; this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's; the day is counted by GitHub's time. Set the clock right.`);
+    // GitHub's time now, or this computer's when GitHub gave none. Not clamped at 0 as alerts' githubNow is: every time this
+    // count reads is GitHub's own (created_at, the comments), so a slow computer is put right too.
+    const g = ahead === null ? t : t - ahead;
+    const opened = Date.parse(issue.created_at ?? OPENED.exec(issue.body)?.[1] ?? '');
+    if (Number.isFinite(opened) && g - opened < STOP_REMIND_MS) return 'already open';
+    const last = await inTime(sendMs, () => gh.latestOwnComment(n, new Date(g - STOP_REMIND_MS).toISOString()));
+    if (last === false) { log(`robot: the stopped Record's issue #${n} is open; its comments could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
+    if (last) return 'already open';
     const c = await inTime(sendMs, () => gh.comment(n, `Still stopped (${stop.type}): ${said}`));
     return c === false ? notTold(gh.lastAnswer ?? 'GitHub refused the comment') : 'reminded';
   }
