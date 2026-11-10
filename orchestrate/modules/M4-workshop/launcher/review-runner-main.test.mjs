@@ -823,6 +823,8 @@ test('L736 m4 planted: the Front Door\'s taps folder is checked against the one 
   // Another spelling of the same folder is refused: the rules name it as given (#306 self-review m1).
   assert.match(tapsFolderProblem({ ownerTaps: join(base, 'link'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it/, 'a link to it');
   assert.match(tapsFolderProblem({ ownerTaps: taps.toUpperCase(), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it|is not the one the review runner reads/, 'another case');
+  // Two spellings that differ only in case are never taken as one (a case-sensitive disk holds two folders).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'later-taps'), runnerConfig: '/x', read: read({ ownerTaps: join(base, 'Later-Taps') }) }), /is not the one the review runner reads/);
   // The runner's own may be a link: it is compared on its real path.
   assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: join(base, 'link') }) }), null);
   assert.match(tapsFolderProblem({ ownerTaps: join(base, 'other'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not the one the review runner reads .*so its wall guards the wrong folder/);
