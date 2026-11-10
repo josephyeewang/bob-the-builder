@@ -313,7 +313,7 @@ test('planAuthor: the latest write that changed the plan, not the latest write',
   for (const a of ['dispatcher', 'lead:', ':S', null]) assert.equal(namedSession(a), null);
 });
 
-test('a refused raise is told once a day and the next card still runs', async () => {
+test('a row with no pass test is told once a day and the next card still runs', async () => {
   const w = world();
   card(w, 'A');
   card(w, 'B');
@@ -323,6 +323,63 @@ test('a refused raise is told once a day and the next card still runs', async ()
   await pass(w, { planRows: rows });
   assert.equal(w.sent.filter((s) => /card A could not be asked for a go/.test(s)).length, 1, w.sent.join(' | '));
   assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
+});
+
+// #295 r2 c2: raiseGo's own refusal, past the rows' pass tests, is told under 'raise' once a day.
+test('a refused raise is told once a day and the next card still runs', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  // A's row has its pass test but names itself as another row, which only raiseGo's checkRows refuses.
+  const rows = async ({ card: c }) => (c === 'A' ? { 'R-1': row('R-1', { id: 'R-2' }) } : ROWS);
+  for (let i = 0; i < 3; i++) await pass(w, { planRows: rows });
+  assert.deepEqual(w.sent.filter((s) => /card A could not be asked for a go/.test(s)), ['card A could not be asked for a go: row R-1 names itself R-2'], w.sent.join(' | '));
+  assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
+});
+
+// #295 r2 c3: a Tier-1 card with no rows is refused before its plan review, so no reviewer is started for it.
+test('a card with no rows is refused before its plan review, with raiseGo\'s words', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { planRows: async () => ({}) });
+  assert.deepEqual(w.started, []);
+  assert.ok(w.sent.some((s) => s === 'card A could not be asked for a go: a go names at least one row'), w.sent.join(' | '));
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2, { planRows: async () => null });
+  assert.deepEqual(w2.started, []);
+  assert.ok(w2.sent.some((s) => s === 'card B could not be asked for a go: the rows the card names are missing'), w2.sent.join(' | '));
+});
+
+// #295 r2 m1: a run-of-changes note the Record refuses is told, never silent.
+test('a run-of-changes note that can\'t be written is told under its own cause', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'newer' });
+  const id = PLAN_CHANGED_FACT('A');
+  const refusing = (r) => ({ ...r, list: (e) => (e === 'card' ? r.list('card').map((c) => (c.id === 'A' ? stale : c)) : r.list(e)),
+    write: (x) => (x?.entity === 'fact' && x.id === id ? { ok: false, reason: 'refused for the test' } : r.write(x)) });
+  const rec = refusing(w.t.record);
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(w.sent.some((s) => /card A's run of passes where it changed between reading and writing could not be noted.*refused for the test/.test(s)), w.sent.join(' | '));
+});
+
+// #295 r2 m1: a run-of-changes note that can't be read is told too, and is never written over.
+test('a run-of-changes note that can\'t be read is told, and not written over', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'newer' });
+  const id = PLAN_CHANGED_FACT('A');
+  const factWrites = [];
+  const r0 = w.t.record;
+  const rec = { ...r0, list: (e) => (e === 'card' ? r0.list('card').map((c) => (c.id === 'A' ? stale : c)) : r0.list(e)),
+    read: (e, i) => { if (e === 'fact' && i === id) throw new Error('unreadable for the test'); return r0.read(e, i); },
+    write: (x) => { if (x?.entity === 'fact' && x.id === id) factWrites.push(x); return r0.write(x); } };
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(w.sent.some((s) => /card A's run of passes where it changed between reading and writing could not be noted.*unreadable for the test/.test(s)), w.sent.join(' | '));
+  assert.deepEqual(factWrites, [], 'not written over');
 });
 
 test('one card whose port throws does not stop the next, and it is told', async () => {
@@ -1852,7 +1909,8 @@ test('L726 m5 planted: a card that changed after it was compared is not written,
   card(w, 'A', { done_when: 'free text' });
   // The pass lists the card as it was; the Record has moved on since.
   const stale = w.t.record.read('card', 'A');
-  seed(w.t, 'card', 'A', { ...stale.doc, brief: { ...(stale.doc.brief ?? {}), goal: 'the newer wording' } });
+  // #295 r2 m2: the Lead changes done_when, a field the Dispatcher may write too, so only the rev check stops the write.
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'the Lead\'s newer text' });
   assert.notEqual(w.t.record.read('card', 'A').rev, stale.rev);
   const rec = { ...w.t.record, list: (e) => (e === 'card' ? w.t.record.list('card').map((c) => (c.id === 'A' ? stale : c)) : w.t.record.list(e)) };
   const changed = /card A's pass test was not set from its rows: the card changed between reading and writing on 3 passes in a row; trying again next pass/;
@@ -1861,8 +1919,7 @@ test('L726 m5 planted: a card that changed after it was compared is not written,
     assert.ok(r.events.includes('done_when-changed A'), JSON.stringify(r.events));
     assert.ok(!w.sent.some((s) => /card A/.test(s)), `pass ${i}: a pass event only: ${w.sent.join(' | ')}`);
   }
-  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'free text');
-  assert.equal(w.t.record.read('card', 'A').doc.brief.goal, 'the newer wording', 'the newer card is kept');
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'the Lead\'s newer text', 'the newer card is kept');
   await pass(w, { planRows: async () => ROWS }, { record: rec });
   assert.equal(w.sent.filter((s) => changed.test(s)).length, 1, `third in a row: told: ${w.sent.join(' | ')}`);
   // Next pass, on the card as it now is: set, and the run of changes ends.

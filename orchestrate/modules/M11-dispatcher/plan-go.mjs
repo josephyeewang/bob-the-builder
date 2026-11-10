@@ -273,7 +273,7 @@ function goReady(ctx, tell, view, c, events) {
 }
 
 // A draft card's done_when becomes doneBar(rows), the one form M2 checkRows takes (L698 design b, L699). True when it
-// already is, or when there are no rows to set it from (raiseGo then refuses with its own reason, told as ever). A write
+// already is. No rows is refused, told under 'raise' with raiseGo's own words, before any plan review. A write
 // stops the card for this pass: the next pass fingerprints the card as it now is. A write the Record refuses (no
 // `dispatcher.updateInDraft: ['done_when']` in M9's permissions, a card that moved on) is told under the card's own cause,
 // never skipped: the card stays in draft and is never asked for a go on the Lead's free text.
@@ -282,37 +282,44 @@ function goReady(ctx, tell, view, c, events) {
 // so a row without one is named, never written as a blank piece the fingerprint later refuses for another reason. The
 // write is checked against the card as it was compared (L726 m5): a card that changed since is tried again next pass.
 // That is a pass event; Joe is told only once the same card has hit it PLAN_CHANGED_TELL_AT passes in a row (L733).
-function changedStreak(ctx, c, hit) {
+// A note it can't read or write is told under its own cause, as noteSlow's and noteReached's are (#295 r2 m1): a run of
+// changes would otherwise go on untold. A note it can't read is never written over.
+function changedStreak(ctx, tell, c, hit) {
   const rec = ctx.record;
   const id = PLAN_CHANGED_FACT(c.id);
-  let f = null;
-  try { f = rec.read('fact', id); } catch { f = null; }
+  const lost = (why) => tell(c.id, 'changed-noted', `card ${c.id}'s run of passes where it changed between reading and writing could not be noted, so a long run may go untold: ${short(why)}`);
+  let f;
+  try { f = rec.read('fact', id); } catch (e) { lost(e?.message ?? e); return hit ? 1 : 0; }
   const was = Number.isInteger(f?.doc?.streak) && f.doc.streak > 0 ? f.doc.streak : 0;
   if (!hit && !was) return 0;
   const streak = hit ? was + 1 : 0;
-  noteFact(rec, id, f?.rev ?? 0, { streak, at: new Date(ctx.now()).toISOString() });
+  const w = noteFact(rec, id, f?.rev ?? 0, { streak, at: new Date(ctx.now()).toISOString() });
+  if (!w.ok) lost(w.reason);
   return streak;
 }
 function doneFromRows(ctx, tell, c, rows, events) {
   const r = doneFromRowsOnce(ctx, tell, c, rows, events);
-  if (r !== 'changed') { changedStreak(ctx, c, false); return r; }
-  const streak = changedStreak(ctx, c, true);
+  if (r !== 'changed') { changedStreak(ctx, tell, c, false); return r; }
+  const streak = changedStreak(ctx, tell, c, true);
   events.push(`done_when-changed ${c.id}`);
   if (streak >= PLAN_CHANGED_TELL_AT) tell(c.id, 'done-when-changed', `card ${c.id}'s pass test was not set from its rows: the card changed between reading and writing on ${streak} passes in a row; trying again next pass`);
   return false;
 }
 function doneFromRowsOnce(ctx, tell, c, rows, events) {
-  if (!rows || typeof rows !== 'object' || Array.isArray(rows) || !Object.keys(rows).length) return true;
+  // No rows is refused here, with raiseGo's own words, so a Tier-1 card's plan is never reviewed for a go that can't be
+  // raised (#295 r1 c5, r2 c3).
+  if (!rows || typeof rows !== 'object' || Array.isArray(rows)) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: the rows the card names are missing`); return false; }
+  if (!Object.keys(rows).length) { tell(c.id, 'raise', `card ${c.id} could not be asked for a go: a go names at least one row`); return false; }
   for (const id of Object.keys(rows).sort()) {
     const r = rows[id];
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.done_when !== 'string' || !r.done_when.trim()) {
-      tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: row ${short(id)} has no pass test (done_when), so the card's can't be set from its rows`);
+      tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: row ${short(id)} has no pass test (done_when), so the card's pass test can't be set from its rows`);
       return false;
     }
   }
   const bar = doneBar(rows);
   if (c.doc.done_when === bar) return true;
-  if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its revision)`); return false; }
+  if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its version number)`); return false; }
   const w = ctx.record.write({ actor: 'dispatcher', entity: 'card', id: c.id, expectRev: c.rev, doc: { ...c.doc, done_when: bar }, kind: 'done_when_from_rows' });
   if (w.ok) { events.push(`done_when ${c.id}`); return false; }
   let now = null;
