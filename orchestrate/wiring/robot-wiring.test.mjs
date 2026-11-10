@@ -6,6 +6,7 @@
 // the rest of orchestrate's tests.
 
 import { test } from 'node:test';
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -447,7 +448,7 @@ test('audit #150 P21: the wired heartbeat reads the lock file its config names: 
 
 const ALERT_REPO = 'alerts-owner/alerts-repo';
 const APP = Object.freeze({ appId: 12345, appInstallation: 678, alertRepo: ALERT_REPO, alertOwner: 'owner-login' });
-const KEY_NAME = 'robot-app.pem';   // token.mjs's default key file name
+const KEY_NAME = ROBOT_KEY_FILE;   // token.mjs's default key file name (L734: imported, not copied)
 
 // The robot App's key, in the key folder under token.mjs's default name, the scripts' user's own, mode 600.
 let KEY_TEXT = null;

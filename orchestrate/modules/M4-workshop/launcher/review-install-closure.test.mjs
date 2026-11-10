@@ -41,6 +41,7 @@ import { SCRIPTS, reviewDaemonPlists, updaterPlist } from './review-daemons.mjs'
 import { NODE, UPDATER_CONFIG, RUNNER_CONFIG, STAMP, SOURCE, OUTSIDE_FILES, TEST_FOLDERS, currentCopy, readInstallStamp } from './install-check.mjs';
 import { loginJobPlist } from '../../M11-dispatcher/login-job.mjs';
 import { watchPlist } from '../../../setup/watch-setup.mjs';
+import { robotPlist, ROBOT_MAIN } from '../../../setup/robot-setup.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -81,6 +82,9 @@ const JOB_BUILDERS = Object.freeze({
   'setup/watch-setup.mjs': () => [watchPlist(null, { base: SAMPLE_BASE, label: LABEL, watch: { repo: 'owner/repo', rulesSha256: '0'.repeat(64) } })],
   'modules/M11-dispatcher/login-job.mjs': () => [loginJobPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, DISPATCHER_MAIN),
     config: join(SAMPLE_BASE, 'dispatcher.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE })],
+  // L734: the robot job's file is built through loginJobPlist, so its module never names a start command itself and the
+  // tripwire below can't find it; it is listed by hand, and its script (robot-main) is started like the others.
+  'setup/robot-setup.mjs': () => [robotPlist({ base: SAMPLE_BASE, label: LABEL })],
 });
 /** The one script of the copy a job file starts: the .mjs file under the copy's link in its start command. */
 function startedScript(text) {
@@ -91,6 +95,9 @@ function startedScript(text) {
   assert.equal(scripts.length, 1, `each job starts exactly one script of the copy: ${strings.join(' ')}`);
   return scripts[0];
 }
+// Builders that write their start command through another listed builder (so they never name one themselves), each with
+// the builder it uses; the tripwire checks each still imports it.
+const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs' });
 const ENTRY_POINTS = Object.freeze([...new Set(Object.values(JOB_BUILDERS).flatMap((b) => b().map(startedScript)))].sort());
 
 // Modules whose whole body is a test fixture's hook: each reads a hook's input on stdin and exits while it loads. Each
@@ -443,14 +450,20 @@ test('L92 item 4, L106 M-1: every module of the installed copy loads from the co
 // static imports do not, and on the same module without it.
 test('L136 m1: the programs to start come from every job-file builder of the copy, and a new builder must be listed', () => {
   // Every launchd job file of today, read from its builder: the three LaunchDaemons, the watch-only week, the Dispatcher.
-  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs'])].sort());
+  assert.deepEqual(ENTRY_POINTS, [...new Set([...Object.values(SCRIPTS), DISPATCHER_MAIN, 'modules/M6-merge-gate/watch-run.mjs', ROBOT_MAIN])].sort());
   // The tripwire: a module of the copy (test code aside) that writes a launchd start command is a job-file builder, and
   // each one must be on JOB_BUILDERS, so the script its jobs start is started through the link above. A listed
   // builder that no longer writes one is stale.
   const isTestCode = (r) => /\.test(-helper)?\.mjs$/.test(r) || r.split('/').slice(0, -1).some((d) => TEST_FOLDERS.includes(d));
   const writers = tracked([SOURCE]).filter((f) => f.endsWith('.mjs')).map((f) => f.slice(SOURCE.length + 1))
     .filter((r) => !isTestCode(r) && /ProgramArguments/.test(readFileSync(join(REPO, SOURCE, r), 'utf8')));
-  assert.deepEqual(writers.sort(), Object.keys(JOB_BUILDERS).sort(), 'every module that builds a job file is on JOB_BUILDERS, and only those');
+  const direct = Object.keys(JOB_BUILDERS).filter((f) => !(f in BUILT_THROUGH));
+  assert.deepEqual(writers.sort(), direct.sort(), 'every module that builds a job file is on JOB_BUILDERS, and only those');
+  for (const [f, via] of Object.entries(BUILT_THROUGH)) {
+    assert.ok(f in JOB_BUILDERS && writers.includes(via), `${f} builds through ${via}, a listed builder`);
+    const name = via.split('/').pop();
+    assert.ok(readFileSync(join(REPO, SOURCE, f), 'utf8').includes(`/${name}';`), `${f} still imports ${via}`);
+  }
   // Each builder's jobs each start one script of the copy, read from the job file's start command.
   for (const [f, build] of Object.entries(JOB_BUILDERS)) assert.ok(build().length >= 1, `${f} builds a job file`);
   assert.equal(startedScript(`<key>ProgramArguments</key><array><string>${join(SAMPLE_ROOT, NODE)}</string><string>${join(SAMPLE_ROOT, 'modules', 'x.mjs')}</string><string>${SAMPLE_ROOT}</string></array>`), 'modules/x.mjs');
