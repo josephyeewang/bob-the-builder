@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { git, gitOk } from '../M4-workshop/git/safe-git.mjs';
 import { FINDING_LABELS, MAX_OUTBOX_BYTES, holdsLabel, kindOf, readOutboxFile, verdictContent, verdictFields } from '../M9-record/outbox.mjs';
 import { findingProblem } from './verdict-file.mjs';
+import { outboxFolders } from '../../shared/record.mjs';
 
 /** What a reader gives for a path that is at the commit but is not a plain file (a link, say): no text to check. */
 export const NOT_TEXT = Symbol('not a plain file');
@@ -100,7 +101,10 @@ export function labelled(header, found) {
 export async function finalize({ outboxRoot, uids, role, sessionId, card, head, readFile, readBase, owner, mark }) {
   const no = (reason, none = false) => ({ ok: false, none, reason });
   if (typeof mark?.read !== 'function' || typeof mark?.keep !== 'function') return no('the runner gave no record to mark what it finalizes');
-  const dir = join(outboxRoot, role, sessionId);
+  // The session's folder from the one definition (shared outboxFolders, L850-2); a review outbox has no product folder.
+  const where = outboxFolders({ outboxRoot, tag: { role, sessionId } });
+  if (!where.ok) return no(where.reason);
+  const dir = where.folders.at(-1);
   let names;
   try { names = readdirSync(dir).filter((n) => !n.startsWith('.') && kindOf(n) === 'verdict-'); } catch (e) { return no(`its outbox folder could not be listed (${e?.code ?? e})`); }
   if (!names.length) return no('no verdict was handed in', true);
