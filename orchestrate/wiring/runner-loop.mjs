@@ -18,7 +18,7 @@
 // it, freeing a claim while the session may run. Starts still on (`pending`) are held in this process only: a runner
 // that stops with one on comes back with its request 'waiting', which is told each pass and never used up.
 //
-// The process-group ports (groupGone, stopGroup) use M9's processDead and M11's stopProcessGroup (one home each):
+// The process-group ports (groupGone, stopGroup) use M9's startTime and startDiffers and M11's stopProcessGroup (one home each):
 //   - a group is gone when signal 0 to it says ESRCH, or when its leader's pid is alive under another start time (the
 //     number was reused, so the group the runner started is gone: self-review M1's class). A leader that is there but
 //     whose start time can't be read, or a session with no leader start time, is "can't tell" (a throw), never live:
@@ -32,7 +32,8 @@
 // The leader's start time is read by leaderStart, which is M9 lock.mjs startTime (L850 X1): ps in UTC and the C locale
 // (#362 r1 M2), as UTC ISO, so a time zone change on the Mac never makes a live group read as reused. The start port
 // records it the same way, and groupGone compares with M9's startDiffers, the one comparison of two start times. A start
-// recorded before L830 is ps's UTC lstart text: it is read as the same instant (lstartIso), never as another start.
+// recorded before L850 X1 is ps's UTC lstart text (#362 r1 on): it is read as the same instant (lstartIso), never as
+// another start. Local-time records from before #362 r1 never existed: the runner had no start port then.
 // The start, save, pause, drain and size ports come in a later step; a loop without them is refused.
 
 import { execFileSync } from 'node:child_process';
@@ -62,7 +63,7 @@ export function leaderStart(pid, { run = execFileSync } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   return startTime(pid, { run, timeoutMs: RUNNER_PS_MS });
 }
-// A recorded start time in the one shape: UTC ISO, or the UTC lstart text a runner recorded before L830 (the same instant).
+// A recorded start time in the one shape: UTC ISO, or the UTC lstart text a runner recorded before L850 X1 (the same instant).
 const recordedStart = (v) => (typeof v === 'string' && START_ISO.test(v) ? v : lstartIso(v));
 const runnerProbe = Object.freeze({ kill: realProbe.kill, pidStart: leaderStart });
 
@@ -88,7 +89,8 @@ export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep
     if (!Number.isInteger(s?.pgid) || s.pgid <= 1) throw new Error('no process group');
     if (s.pid !== s.pgid || typeof s.pid_start !== 'string' || !s.pid_start) throw new Error('no group leader start time, so a reused number can\'t be told from the runner\'s group');
     const recorded = recordedStart(s.pid_start);
-    if (!recorded) throw new Error('the group leader\'s recorded start time is in no shape it can be compared in, so a reused number can\'t be told from the runner\'s group');
+    // A recorded value in no shape (a hand-edited memory file): a group signal 0 shows gone is gone; else can't tell.
+    if (!recorded) { if (signalGone(s.pgid)) return true; throw new Error('the group leader\'s recorded start time is in no shape it can be compared in, so a reused number can\'t be told from the runner\'s group'); }
     // The leader's number used again by another process: the runner's group is gone, whatever signal 0 says.
     // (A leader that has exited says nothing: the rest of its group may still run, and signal 0 below tells.)
     let there = true; try { probe.kill(s.pid); } catch (e) { if (e?.code === 'ESRCH') there = false; else if (e?.code !== 'EPERM') throw e; }

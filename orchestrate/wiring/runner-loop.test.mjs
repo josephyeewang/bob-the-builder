@@ -2,7 +2,7 @@
 // real process group; what the loop writes is read back through the Dispatcher's own reader (owner-status.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { writeStatus } from './runner-files.mjs';
 import { join } from 'node:path';
@@ -216,6 +216,9 @@ test('#362 r1 M2: the leader\'s start time is read in UTC, so a time zone change
     assert.ok(s.pid_start);
     process.env.TZ = 'America/Los_Angeles';
     assert.equal(leaderStart(child.pid), s.pid_start, 'the same string whatever the zone');
+    // A start recorded before L850 X1, as real ps printed it in UTC: the same live group.
+    const raw = execFileSync('ps', ['-o', 'lstart=', '-p', String(child.pid)], { encoding: 'utf8', env: { PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' } }).trim();
+    assert.equal(processGroupPorts().groupGone({ ...s, pid_start: raw }), false, 'an old raw value of a live group');
     const sent = [];
     const p = processGroupPorts({ kill: (g, sig) => { sent.push(sig); return process.kill(-g, sig); } });
     assert.equal(p.groupGone(s), false, 'a live group the runner started is not gone');
@@ -246,10 +249,15 @@ test('L850 X1: groupGone compares start times with M9 startDiffers: an old raw v
   assert.deepEqual(sent, [0], 'only signal 0');
   assert.equal(at(null, false).groupGone(G), true);
   assert.throws(() => at('Tue Nov 10 10:00:00 2026').groupGone(G), /start time can't be read/, 'a read in the old shape is not compared');
-  // A recorded value in no shape can't be compared: can't tell, and nothing is sent.
+  // An old raw value of a single-digit day (ps pads it with a space), and one whose leader has gone with the rest still there.
+  assert.equal(at('2026-11-03T10:00:00Z').groupGone({ ...G, pid_start: 'Tue Nov  3 10:00:00 2026' }), false, 'a padded day');
+  const leaderGone = processGroupPorts({ kill: () => {}, probe: { kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, pidStart: () => null } });
+  assert.equal(leaderGone.groupGone({ ...G, pid_start: 'Tue Nov 10 10:00:00 2026' }), false, 'an old raw value, the leader gone, members there');
+  // A recorded value in no shape can't be compared: only signal 0 is sent; there, can't tell; gone, gone.
   sent.length = 0;
   assert.throws(() => at(S0).groupGone({ ...G, pid_start: 'x' }), /no shape it can be compared in/);
-  assert.deepEqual(sent, []);
+  assert.deepEqual(sent, [0], 'only signal 0');
+  assert.equal(at(S0, false).groupGone({ ...G, pid_start: 'x' }), true, 'no shape, the group gone');
 });
 
 test('#362 r1 m1, m4, c2: the stop\'s ps fits its budget; a leader another user holds is still checked by its start time; a cadence past the bound is refused', async () => {
