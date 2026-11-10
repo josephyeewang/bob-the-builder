@@ -15,8 +15,8 @@ import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
 
 // Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
-// case, so refusing more is safe. The one rule for every "apart" check in this file.
-const apart = (a, b) => { const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
+// case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
+export const apart = (a, b) => { const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
 
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,
