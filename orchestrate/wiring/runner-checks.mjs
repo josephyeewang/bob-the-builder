@@ -67,6 +67,7 @@ import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
 import { groupThere } from './runner-ports.mjs';
+import { foldKey } from '../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 export const BASELINE_MS = 15 * 60_000;
@@ -95,7 +96,7 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
     if (!path.split('/').some(isProtectedName)) continue;
     // Only a plain file of main's is put back (worker-copy.mjs restoreMainCopies refuses a link, 120000).
     if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return `main's ${path} is not a plain file (mode ${mode})`;
-    want.set(path.toLowerCase(), { path, oid });
+    want.set(foldKey(path), { path, oid });
   }
   const found = [];
   let seen = 0;
@@ -126,14 +127,14 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
   };
   try { walk(copy, ''); } catch (e) { return `the copy's setup files: ${e?.message ?? e}`; }
   for (const r of found) {
-    const w = want.get(r.toLowerCase());
+    const w = want.get(foldKey(r));
     if (!w) return `the copy holds ${r}, which main does not`;
     const b = await run(['cat-file', 'blob', w.oid], { gitDir: mirror, purpose: 'runner-check-2-blob', timeoutMs: 60_000 });
     if (b?.code !== 0) return `main's ${r} can't be read from the mirror`;
     let mine; try { mine = readNoLink(join(copy, r)); } catch (e) { return `the copy's ${r} can't be read (${e?.code ?? e?.message})`; }
     if (!Buffer.from(b.stdout).equals(mine)) return `the copy's ${r} is not main's`;
   }
-  const have = new Set(found.map((r) => r.toLowerCase()));
+  const have = new Set(found.map((r) => foldKey(r)));
   const missing = [...want].filter(([k]) => !have.has(k)).map(([, w]) => w.path);
   return missing.length ? `main's ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not put back in the copy` : null;
 }

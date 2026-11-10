@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
+import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
@@ -86,9 +87,9 @@ export function checkRunnerConfig(c) {
     if (s === undefined) continue;
     if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
     // Not one of the runner's own files there (#369 r1 m4): check 8 would rename the snapshot over it.
-    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => n.toLowerCase() === basename(s).toLowerCase())) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
-    if (snaps.has(s.toLowerCase())) fail(`product ${name}: render.paths.snapshot is another product's`);
-    snaps.add(s.toLowerCase());
+    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => foldKey(n) === foldKey(basename(s)))) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
+    if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
+    snaps.add(foldKey(s));
   }
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
