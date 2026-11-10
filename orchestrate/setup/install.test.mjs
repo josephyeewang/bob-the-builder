@@ -1049,6 +1049,8 @@ const ROBOT_PLANTS = [
   ['A1 the Dispatcher\'s lock in a folder that does not exist', (c, { mac }) => ({ ...c, dispatcherLockFile: mac.at(`${BASE}/no-such-folder/dispatcher.lock`) }), /dispatcherLockFile: its folder \S*no-such-folder is missing/],
   ['A2 both locks in /tmp, which anyone can write', (c) => ({ ...c, lockFile: '/tmp/robot.lock', dispatcherLockFile: '/tmp/dispatcher.lock' }), /lockFile must be .*orchestrate's home.*dispatcherLockFile: it is not under/],
   ['A3 a lock that reaches the install through ..', (c) => ({ ...c, lockFile: `/tmp/..${c.installRoot}/robot.lock` }), /lockFile must be written plainly/],
+  // L738 self-review: root's folder that others can write (a 1777 one, as /tmp is), inside the prefix, so the mode check is reached.
+  ['A2 the Dispatcher\'s lock in a root folder others can write', (c, { mac }) => { mkdirSync(mac.at(`${BASE}/shared`)); chmodSync(mac.at(`${BASE}/shared`), 0o1777); mac.owners.set(`${BASE}/shared`, { uid: mac.rootUid, gid: 0 }); return { ...c, dispatcherLockFile: mac.at(`${BASE}/shared/dispatcher.lock`) }; }, /dispatcherLockFile: its folder \S*shared can be written by its group or others/],
   ['A3 the Dispatcher\'s lock written with .. or a doubled /', (c) => ({ ...c, dispatcherLockFile: c.dispatcherLockFile.replace('/orchestrate/', '/orchestrate/../orchestrate//') }), /dispatcherLockFile must be written plainly/],
   ['a key the robot does not take', (c) => ({ ...c, approvalsStateDir: '/x' }), /keys the robot job does not take: approvalsStateDir/],
   ['a bad run deadline', (c) => ({ ...c, runDeadlineMs: -1 }), /runDeadlineMs must be a positive number/],
