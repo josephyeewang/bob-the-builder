@@ -396,9 +396,10 @@ test('PLANT L722: the plan reviewer\'s outbox made the workers\' user\'s (as a w
   const mac = applied(); const d = P('outboxes/plan_reviewer');
   mac.owners.set(d, { uid: uidOf(mac, 'sam'), gid: 0 }); chmodSync(mac.at(d), 0o750);
   const f = fails(mac).filter((x) => x.what.includes(d)); assert.ok(f.length >= 1, JSON.stringify(fails(mac)));
-  assert.match(f.map((x) => x.why).join('\n'), /owner is uid \d+, want 602|mode is 750, want 755/);
+  const whys = f.map((x) => x.why).join('\n');
+  assert.match(whys, new RegExp(`owner is uid ${uidOf(mac, 'sam')}, want ${uidOf(mac, 'review')}`)); assert.match(whys, /mode is 750, want 755/);
   // A folder the workers' user owns is never taken over (a worker could have put files in it): root must look first.
-  const r = run(mac, ['users-folders']); assert.equal(r.code, 1, r.text); assert.match(r.text, /plan_reviewer is owned by uid \d+, who is neither root nor review; it was not made by this setup/);
+  const r = run(mac, ['users-folders']); assert.equal(r.code, 1, r.text); assert.match(r.text, /plan_reviewer is owned by uid \d+, who is neither root nor review, so it is not taken over: .* Look inside it, remove it by hand, then run users-folders again\. Nothing was changed/);
   assert.deepEqual(mac.owners.get(d), { uid: uidOf(mac, 'sam'), gid: 0 }); assert.ok(fails(mac).some((x) => x.what.includes(d)));
 });
 

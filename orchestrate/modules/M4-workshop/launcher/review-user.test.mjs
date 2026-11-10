@@ -109,8 +109,14 @@ test('A3b: the plan reviewer runs only as the review user, started by the runner
   refused(reviewUser({ role: 'plan_reviewer', uids: { ...UIDS, plan_reviewer: 0 }, self: 0 }), /may not be root/);
   // The map must name it, or a plan reviewer left out could share a worker's user unseen.
   const { plan_reviewer: _p, ...noPlan } = UIDS;
-  assert.equal(uidsProblem(noPlan), 'the map of role to Mac user id leaves out plan_reviewer');
-  refused(reviewUser({ role: 'reviewer', uids: noPlan, self: REVIEW }), /leaves out plan_reviewer/);
+  assert.equal(uidsProblem(noPlan, { plan: true }), 'the map of role to Mac user id leaves out plan_reviewer');
+  refused(reviewUser({ role: 'plan_reviewer', uids: noPlan, self: REVIEW }), /leaves out plan_reviewer/);
+  // L726 m3: a map from before the plan reviewer blocks plan reviews alone; every reviewer and auditor start still goes.
+  assert.equal(uidsProblem(noPlan), null);
+  for (const r of REVIEW_ROLES) assert.deepEqual(reviewUser({ role: r, uids: noPlan, self: REVIEW }), { ok: true, runAs: { user: REVIEW_USER, uid: REVIEW } }, r);
+  // Any other role left out still blocks them all.
+  const { scout: _s, ...noScout } = noPlan;
+  refused(reviewUser({ role: 'reviewer', uids: noScout, self: REVIEW }), /leaves out scout/);
   assert.equal(reviewOutbox({ outboxRoot: '/o', role: 'plan_reviewer', sessionId: 's-1' }), '/o/plan_reviewer/s-1');
   assert.throws(() => reviewOutbox({ outboxRoot: '/o', role: 'worker', sessionId: 's-1' }), /worker is not a review role/);
 });

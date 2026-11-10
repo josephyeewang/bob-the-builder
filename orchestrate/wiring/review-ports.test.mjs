@@ -332,6 +332,7 @@ test('A3b: startPlanReview writes one plan request, the same one for the same pl
   assert.notEqual(ask({ fingerprint: 'e'.repeat(64), key: `C-7-${'e'.repeat(64)}` }).session, r.session, 'a new plan is a new request');
   assert.match(ask({ fingerprint: 'F'.repeat(64) }).reason, /no fingerprint/);
   assert.match(ask({ card: '../x' }).reason, /not a card id/);
+  assert.match(ask({ key: `C-8-${fp}` }).reason, /the start's key is not its card and plan/, 'the one id is the card and plan the key names (L726 m1)');
   assert.throws(() => ask({ product: 'other' }), /can't ask about product other's plans/);
   assert.throws(() => ports.planReviewAnswer({ product: 'other', card: 'C-7', fingerprint: fp, session: r.session }), /can't ask about product other's plans/);
   // Nothing launched yet: still working.
