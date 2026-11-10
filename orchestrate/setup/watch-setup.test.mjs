@@ -286,7 +286,17 @@ test('R6 M-1 / L173 the config may name only the repository (prove-token needs j
   const dr = w.run(['watch-rules', '--rules-source', w.src, '--dry-run']); assert.equal(dr.code, 1, dr.text); assert.match(dr.text, /no rulesSha256 yet/);
   const ck = w.run(['check-watch-rules']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /FAIL .*no rulesSha256 yet/); assert.doesNotMatch(ck.text, /undefined/);
   // --only watch-only says the same, instead of "no such job"
-  for (const sub of ['place', 'load', 'unload', 'list', 'check']) { const x = w.run(['daemons', sub, '--only', 'watch-only']); assert.equal(x.code, 2, `${sub}: ${x.text}`); assert.match(x.text, /no rulesSha256 yet/); }
+  for (const sub of ['place', 'load', 'check']) { const x = w.run(['daemons', sub, '--only', 'watch-only']); assert.equal(x.code, 2, `${sub}: ${x.text}`); assert.match(x.text, /no rulesSha256 yet/); }
+  // L754 (lane 5 Q5): list and unload take the watch job alone while the config has no fingerprint, as they take a robot job
+  // the config turned off (#292 m3), so a watch job still loaded can be seen and taken out without the other jobs.
+  const lw = w.run(['daemons', 'list', '--only', 'watch-only']); assert.equal(lw.code, 0, lw.text); assert.equal(lw.text.trim().split('\n').length, 1, lw.text); assert.match(lw.text, /watch-only/);
+  // (this world has no install, so the unload is shown as its dry run: the same --only path, only the watch job's bootout)
+  w.mac.loaded.set(`${RAW.label}.watch-only`, { state: 'running', pid: 4100, ageS: 5, lastExit: '0' });   // a watch job left loaded from before
+  for (const j of ['review-updater', 'review-account', 'review-runner']) w.mac.loaded.set(`${RAW.label}.${j}`, { state: 'running', pid: 4101, ageS: 5, lastExit: '0' });
+  const lw2 = w.run(['daemons', 'list', '--only', 'watch-only']); assert.equal(lw2.code, 0, lw2.text); assert.match(lw2.text, new RegExp(`${RAW.label.replace(/\./g, '\\.')}\\.watch-only: loaded`));
+  const uw = w.run(['daemons', 'unload', '--only', 'watch-only', '--dry-run']); assert.equal(uw.code, 0, uw.text);
+  const outs = uw.text.split('\n').filter((l) => /bootout/.test(l));
+  assert.deepEqual(outs.map((l) => l.replace(/^.*bootout /, '')), [`system/${RAW.label}.watch-only`], uw.text);
   assert.equal(w.run(['watch-rules', '--print-config-line', '--repo', REPO, '--rules-source', w.src]).code, 0, 'the line that fixes it can still be printed');
   // and the job builder itself refuses (a caller that skips jobsFor)
   assert.throws(() => watchPlist(w.mac, w.cfg), /no rulesSha256 yet/);
@@ -468,7 +478,14 @@ test('PLANT L627 check: no App named, mode 644, a wrong owner, a link, a second 
   assert.equal(w.mac.run('/bin/chmod', ['+a', 'everyone allow read', f]).status, 0); assert.match(why(), /access list/);
   rmSync(f); writeFileSync(f, body); chmodSync(f, 0o600);
   rmSync(f); symlinkSync(w.src, f); assert.match(why(), /not a plain file/);
-  rmSync(f); assert.match(why(), /missing/);
+  // audit #305 c2 (L754): a link to a file that passes every other rule (orchestrate's 0600 file of a key's size) is
+  // refused for being a link, and for nothing else, so the link check itself is what holds.
+  rmSync(f); const realName = `${k}-real`; const real = w.mac.at(realName);
+  writeFileSync(real, body); chmodSync(real, 0o600); w.mac.owners.set(realName, own); symlinkSync(real, f);
+  const keyWhy = failing(checkWatchRules(w.mac, w.cfg)).filter((r) => r.what.includes(APP.keyFile) || r.why.includes(APP.keyFile)).map((r) => r.why);
+  assert.equal(keyWhy.length, 1, keyWhy.join(' | ')); assert.match(keyWhy[0], /is not a plain file/); assert.doesNotMatch(keyWhy[0], /mode|size|owner|not orchestrate|second name/);
+  rmSync(f); rmSync(real);
+  assert.match(why(), /missing/);
   writeFileSync(f, body); chmodSync(f, 0o600); assert.deepEqual(failing(checkWatchRules(w.mac, w.cfg)), []);
 });
 

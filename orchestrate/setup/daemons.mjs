@@ -40,12 +40,12 @@ export const ALL_JOBS = Object.freeze([...JOBS, ...OPTIONAL_JOBS]);
 const ROBOT_OFF = 'the config does not turn the robot job on: add "robot": true, with its robot.json among the extras';
 /**
  * `--only <job>`: that one job, or a clear refusal naming the jobs there are (the watch job exists only when the config's `watch`
- * entry has the rules fingerprint). `anyKnown` (unload and list): the robot job is taken whatever the config says, so a robot
- * job the config has since turned off can still be taken out alone (audit #292 m3). The watch job keeps its refusal here: its
- * tests pin it, and changing it is outside this change (raised with the lead).
+ * entry has the rules fingerprint). `anyKnown` (unload and list): either job a config may leave off is taken whatever the
+ * config says, so one it has since turned off (the robot, audit #292 m3; the watch job with no fingerprint, L754) can still
+ * be listed and taken out alone. place, load and check keep their refusals.
  */
 export function onlyJobs(cfg, name, { anyKnown = false } = {}) {
-  if (anyKnown && name === ROBOT_JOB) return [name];
+  if (anyKnown && OPTIONAL_JOBS.includes(name)) return [name];
   const all = jobsFor(cfg);
   if (name === 'watch-only' && cfg.watch && !cfg.watch.rulesSha256) throw new Error(WATCH_NO_HASH);
   if (name === ROBOT_JOB && !cfg.robot) throw new Error(ROBOT_OFF);
