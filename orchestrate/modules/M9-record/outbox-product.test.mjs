@@ -114,3 +114,10 @@ test('L850-2 (self-review): a product named as a role is refused, a role folder 
   const n = env.record.applyOutbox(null, join(real, 'S-1', 'report-1.md'));
   assert.equal(n.ok, false);
 });
+
+test('L890: a Record is opened only for a product name setup makes a folder for, never one setup can\'t make or a role\'s', () => {
+  for (const p of ['My.App', 'lead', 'Worker', 'a.b', 'A', '', '-x']) {
+    assert.throws(() => setup({ prefix: 'm9-outbox-product-', extra: { product: p } }), /the record needs its product name/, p);
+  }
+  assert.doesNotThrow(() => setup({ prefix: 'm9-outbox-product-', extra: { product: 'my-app' } }));
+});
