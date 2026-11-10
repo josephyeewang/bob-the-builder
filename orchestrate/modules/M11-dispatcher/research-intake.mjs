@@ -67,6 +67,10 @@ export const COPY_NOT_ON = 'copying research reports into the product is not swi
 const ONCE = Number.MAX_SAFE_INTEGER;
 // An ask's state, or null when there is none to read.
 const askState = (rec, askId) => { const a = rec.read('ask', askId); return a && !a.corrupt ? a.doc?.state ?? null : null; };
+// The ask is open and already answered by this card: its report is still the one to use (self-review m1).
+const landedOn = (rec, askId, cardId) => { const a = rec.read('ask', askId); return Boolean(a && !a.corrupt && a.doc?.state === 'open' && !a.doc.wait && a.doc.landed?.card === cardId); };
+// Whether a once-only hold has been told already: the card is then left quietly (self-review m7).
+const toldOnce = (rec, cause) => { try { return typeof rec.read('fact', HOLD_FACT(cause))?.doc?.told_at === 'string'; } catch { return false; } };
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -153,7 +157,7 @@ function settleTell(rec, alert, now, out, cardId, which, why, text) {
 export const CLOSED_CAUSE = (cardId) => settleCause('closed', cardId);
 /** The hold cause of a landed report that nothing copies yet: told once (L736 m2). */
 export const NOCOPY_CAUSE = (cardId) => settleCause('nocopy', cardId);
-const closedWhy = (st, reason) => (st === null ? 'the ask is gone' : st === 'open' ? `the ask no longer waits on a report (${reason})` : `the ask was ${st}`);
+const closedWhy = (st) => (st === null ? 'the ask is gone' : st === 'open' ? 'the ask no longer waits on this report' : `the ask was ${st}`);
 function tellClosed(rec, alert, now, cardId, askId, product, why) {
   holdAlert({ rec, cause: CLOSED_CAUSE(cardId), text: `${product}: the report for research ask ${askId} was not used: ${why}; its card ${cardId} is not copied`, alert, now, every: ONCE });
 }
@@ -165,9 +169,8 @@ function settle(rec, cardId, askId, now, alert) {
   if (c?.doc?.state === 'draft') {
     // A report whose ask Joe withdrew, or that expired, never reaches ready, so it can never be copied (L736 M1). Its
     // card stays a draft, its old "could not go to ready" goes, and Joe is told once.
-    const brief = researchBrief(rec, askId);
-    if (!brief.ok) {
-      const why = closedWhy(askState(rec, askId), brief.reason);
+    if (!researchBrief(rec, askId).ok && !landedOn(rec, askId, cardId)) {
+      const why = closedWhy(askState(rec, askId));
       out.push(`not used: ${why}`);
       settleTell(rec, alert, now, out, cardId, 'ready', null);
       tellClosed(rec, alert, now, cardId, askId, product, why);
@@ -191,8 +194,16 @@ function settle(rec, cardId, askId, now, alert) {
   settleTell(rec, alert, now, out, cardId, 'land', l.ok ? null : l.reason,
     `${product}: the report for research ask ${askId} is on its card ${cardId}, but the ask could not be marked as answered (${l.reason}); ${next}`);
   // Landed while nothing copies it yet (L410): said once, so Joe never sees the ask answered and waits for a copy.
-  if (l.ok && !l.already && !COPY_WIRED) holdAlert({ rec, cause: NOCOPY_CAUSE(cardId), text: `${product}: the report for research ask ${askId} is on its card ${cardId} and the ask is answered, but ${COPY_NOT_ON}`, alert, now, every: ONCE });
+  if (l.ok) tellNoCopy(rec, alert, now, out, cardId, askId, product);
   return out;
+}
+
+// Landed while nothing copies it yet (L410): said once, so Joe never sees the ask answered and waits for a copy. Asked
+// for again each pass until it has been told (self-review m3): a refused queue write or a pass cut off here is not lost.
+function tellNoCopy(rec, alert, now, out, cardId, askId, product) {
+  if (COPY_WIRED || toldOnce(rec, NOCOPY_CAUSE(cardId))) return;
+  const q = holdAlert({ rec, cause: NOCOPY_CAUSE(cardId), text: `${product}: the report for research ask ${askId} is on its card ${cardId} and the ask is answered, but ${COPY_NOT_ON}`, alert, now, every: ONCE });
+  if (q === false) out.push('the note that nothing copies it yet could not be queued; tried again next pass');
 }
 
 export function researchPass({ rec, now, alert }) {
@@ -201,8 +212,32 @@ export function researchPass({ rec, now, alert }) {
   const out = [];
   for (const c of rec.list('card')) {
     if (c.doc?.kind !== 'research_copy' || typeof c.doc.research_ask !== 'string') continue;
-    if (c.doc.state !== 'draft' && !researchBrief(rec, c.doc.research_ask).ok) continue;
-    for (const what of settle(rec, c.id, c.doc.research_ask, now, alert)) out.push([c.id, what]);
+    const ask = c.doc.research_ask;
+    const product = c.doc.product ?? 'a product';
+    const st = askState(rec, ask);
+    const landed = landedOn(rec, ask, c.id);
+    // Closed (withdrawn, expired, gone) and already told: left quietly, never settled again each pass (self-review m7).
+    if (st !== 'open' && toldOnce(rec, CLOSED_CAUSE(c.id))) continue;
+    if (c.doc.state !== 'draft') {
+      if (st !== 'open') {
+        // Closed after its card went ready (self-review M1): an old "could not be marked as answered; tried again each
+        // pass" goes, and Joe is told once that the report is not copied.
+        const why = closedWhy(st);
+        const lines = [`not used: ${why}`];
+        settleTell(rec, alert, now, lines, c.id, 'land', null);
+        tellClosed(rec, alert, now, c.id, ask, product, why);
+        for (const what of lines) out.push([c.id, what]);
+        continue;
+      }
+      if (landed) {
+        const lines = [];
+        tellNoCopy(rec, alert, now, lines, c.id, ask, product);
+        for (const what of lines) out.push([c.id, what]);
+        continue;
+      }
+      if (!researchBrief(rec, ask).ok) continue;
+    }
+    for (const what of settle(rec, c.id, ask, now, alert)) out.push([c.id, what]);
   }
   return out;
 }
@@ -276,7 +311,10 @@ export async function researchCopyPass({ rec, rules, pushResearch, alert, now, h
     const st = held ? askState(rec, ask) : 'open';
     if (st !== 'open') {
       const why = closedWhy(st);
-      out.push([c.id, `not copied: ${why}`]);
+      // Its "has waited over a day" and "report changed" go too (self-review m4): neither is true of a closed ask.
+      dropCause(rec, READY_FACT(c.id));
+      dropCause(rec, BYTES_FACT(c.id));
+      if (!toldOnce(rec, CLOSED_CAUSE(c.id))) out.push([c.id, `not copied: ${why}`]);
       tellClosed(rec, alert, now, c.id, ask, product, why);
       continue;
     }

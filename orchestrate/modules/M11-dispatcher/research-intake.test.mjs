@@ -11,14 +11,14 @@ import { join } from 'node:path';
 import { researchHandler, researchPass, researchCopyPass, researchCardDoc, researchPath, settleCause, alreadyCarded, CLOSED_CAUSE, NOCOPY_CAUSE, COPY_NOT_ON, COPY_WIRED, RESEARCH_CARD, RESEARCH_OFF, RETRY_MS, READY_FACT, BYTES_FACT, COPY_RUN, EMPTY_SHA256, EMPTY_BLOB } from './research-intake.mjs';
 import { REPORT_CHANGED } from '../M4-workshop/git/push.mjs';
 import { isQueued } from './alerts.mjs';
-import { proposalsPass } from './proposals-intake.mjs';
-import { NEVER_STARTED, HOLD_FACT } from './pass.mjs';
+import { proposalsPass, bytesFactId } from './proposals-intake.mjs';
+import { NEVER_STARTED, HOLD_FACT, holdAlert } from './pass.mjs';
 import { outbox, sendAlerts } from './alerts.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { setup, must, PRODUCT, UID } from '../M9-record/fixtures.test-helper.mjs';
 import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, outboxFile } from '../M1-front-door/outbox.mjs';
-import { openResearchAsks, researchBrief } from '../M2-approvals/research-ask.mjs';
+import { openResearchAsks, researchBrief, landResearch } from '../M2-approvals/research-ask.mjs';
 import { waitingItems } from '../M13-ledger/waiting.mjs';
 import { judge, researchCopyProblem } from '../M6-merge-gate/refusals.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
@@ -199,7 +199,8 @@ test('L736 M1 planted: withdrawn between the card and the ready move: the card s
   const port = fakeAlert();
   const pass = async (at) => { const q = outbox(w.rec, at); const o = researchPass({ rec: w.rec, now: at, alert: q }); await sendAlerts(w.rec, port, at); return o; };
   assert.deepEqual(await pass(w.t.clock.t), [[id, 'not used: the ask was withdrawn']]);
-  for (const dt of [60_000, DAY, 3 * DAY]) assert.deepEqual(await pass(w.t.clock.t + dt), [[id, 'not used: the ask was withdrawn']]);
+  // Told, then left quietly (self-review m7): not settled again every pass.
+  for (const dt of [60_000, DAY, 3 * DAY]) assert.deepEqual(await pass(w.t.clock.t + dt), []);
   assert.equal(w.rec.read('card', id).doc.state, 'draft', 'never ready');
   const closed = port.texts.filter((t) => /the report for research ask R-1 was not used: the ask was withdrawn; its card research-R-1 is not copied/.test(t));
   assert.equal(closed.length, 1, port.texts.join(' | '));
@@ -236,13 +237,75 @@ test('L736 M1 planted: researchCopyPass never pushes or sends on a card whose as
       must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, reask_count: 1, lapsed_at: new Date(w.T).toISOString() } }), 'lapse');
       ask = w.rec.read('ask', 'R-1');
     }
+    // Self-review m4: a "has waited over a day" and a "report changed" still queued go too.
+    for (const f of [READY_FACT(w.card), BYTES_FACT(w.card)]) assert.notEqual(holdAlert({ rec: w.rec, cause: f.replace(/^.*?(research-)/, '$1'), text: `stale ${f}`, alert: (t, o) => outbox(w.rec, w.T)(t, o), now: w.T }), false);
+    for (const f of [READY_FACT(w.card), BYTES_FACT(w.card)]) assert.equal(isQueued(w.rec, f), true, f);
     must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state } }), state);
     assert.deepEqual(await w.pass(), [[w.card, `not copied: the ask was ${state}`]]);
-    assert.deepEqual(await w.pass(w.T + RETRY_MS * 4), [[w.card, `not copied: the ask was ${state}`]]);
+    for (const f of [READY_FACT(w.card), BYTES_FACT(w.card)]) assert.equal(isQueued(w.rec, f), false, f);
+    assert.deepEqual(w.alerts.filter((t) => t.startsWith('stale')), []);
+    // Told, then left quietly (self-review m7).
+    assert.deepEqual(await w.pass(w.T + RETRY_MS * 4), []);
     assert.equal(w.calls.length, 0, 'never pushed');
     assert.equal(w.alerts.filter((t) => t.includes(`was not used: the ask was ${state}`)).length, 1, w.alerts.join(' | '));
     assert.equal(w.rec.read('card', w.card).doc.state, 'ready', 'left where it is');
   }
+});
+
+// Self-review M1: the ask closes after its card went ready and its landing was refused. The old "tried again each pass"
+// goes, Joe is told once that the report is not copied, and the card is then left quietly.
+test('L736 M1 planted: an ask closed after a refused landing clears the retry promise and is told once', async () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  const port = fakeAlert();
+  const pass = async (rec, at) => { const o = researchPass({ rec, now: at, alert: outbox(w.rec, at) }); return o; };
+  assert.deepEqual((await pass(askWritesRefused(w.rec), w.t.clock.t)).map(([, x]) => x.replace(/:.*/, '')), ['ready', 'not landed']);
+  const landMark = HOLD_FACT(settleCause('land', id));
+  assert.equal(isQueued(w.rec, landMark), true, 'the retry promise is queued');
+  const ask = w.rec.read('ask', 'R-1');
+  must(w.rec.write({ actor: 'approvals', entity: 'ask', id: 'R-1', expectRev: ask.rev, doc: { ...ask.doc, state: 'withdrawn' } }), 'withdraw');
+  assert.deepEqual(await pass(w.rec, w.t.clock.t + 60_000), [[id, 'not used: the ask was withdrawn']]);
+  assert.equal(isQueued(w.rec, landMark), false, 'the stale promise is never sent');
+  await sendAlerts(w.rec, port, w.t.clock.t + 60_000);
+  assert.equal(port.texts.filter((t) => /was not used: the ask was withdrawn; its card research-R-1 is not copied/.test(t)).length, 1, port.texts.join(' | '));
+  assert.deepEqual(port.texts.filter((t) => /tried again/.test(t)), []);
+  assert.deepEqual(await pass(w.rec, w.t.clock.t + DAY), [], 'then left quietly');
+});
+
+// Self-review m1: a draft card whose ask was already answered by it (a Record from before L736, which landed the ask
+// even when the ready move was refused) still goes ready; it is not taken for a closed ask.
+test('L736 m1 planted: a draft whose open ask already landed on it still goes ready', () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  assert.equal(landResearch({ record: w.rec, now: () => w.t.clock.t }, 'R-1').ok, true);
+  assert.deepEqual(researchPass({ rec: w.rec, now: w.t.clock.t, alert: w.alert }), [[id, 'ready']]);
+  assert.equal(w.rec.read('card', id).doc.state, 'ready');
+  assert.deepEqual(w.alert.texts.filter((t) => /was not used/.test(t)), []);
+});
+
+// Self-review m3: the once-only "nothing copies it yet" is asked for again each pass until it is told, so a refused
+// queue write never loses it.
+test('L736 m2 planted: a refused "nothing copies it yet" is said in the lines and told on the next pass, once', async () => {
+  const w = world({ asks: 1 });
+  const id = RESEARCH_CARD('R-1');
+  const port = fakeAlert();
+  let refuse = true;
+  const q = (at) => { const real = outbox(w.rec, at); return (text, o) => (refuse && text.includes(COPY_NOT_ON) ? false : real(text, o)); };
+  must(w.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, kind: 'research_card',
+    doc: researchCardDoc({ askId: 'R-1', product: PRODUCT, name: 'research-R-1.md', sha256: sha(REPORT), blob: blobSha(Buffer.from(REPORT)), size: 10 }) }), 'card');
+  const one = researchPass({ rec: w.rec, now: w.t.clock.t, alert: q(w.t.clock.t) });
+  assert.deepEqual(one.map(([, x]) => x), ['ready', 'landed', 'the note that nothing copies it yet could not be queued; tried again next pass']);
+  refuse = false;
+  for (const dt of [60_000, 2 * 60_000, DAY, 3 * DAY]) {
+    const at = w.t.clock.t + dt;
+    researchPass({ rec: w.rec, now: at, alert: q(at) });
+    await sendAlerts(w.rec, port, at);
+  }
+  assert.equal(port.texts.filter((t) => t.includes(COPY_NOT_ON)).length, 1, port.texts.join(' | '));
 });
 
 test('L303: a tell still queued when the move is made leaves the queue, so a stale "could not go to ready" is never sent', () => {
@@ -361,6 +424,35 @@ test('L736 m3 planted: a refused "applied" mark is said in the pass\'s lines and
   assert.equal(four.already, true);
   assert.deepEqual(port.texts.filter((t) => /interrupted/.test(t)), [], port.texts.join(' | '));
   assert.equal(w.rec.list('card').length, 1);
+  const bytes = w.rec.read('fact', bytesFactId(sha(REPORT))).doc;
+  assert.equal(bytes.used_at, undefined, 'the used note goes once the mark is made');
+  assert.equal(bytes.used_name, undefined);
+});
+
+// Self-review m2: the used note is the file's own. The bytes record is shared by every name with those bytes, so a note
+// left by another name, or older than this claim, never marks this one applied: it is told as an interruption.
+test('L736 m3 planted: a used note of another name, or older than the claim, is never read as this file\'s', async () => {
+  for (const spoil of [{ used_name: 'research-R-9.md' }, { used_at: new Date(0).toISOString() }]) {
+    const w = world({ asks: 1 });
+    const dir = join(w.t.base, 'proposals'); mkdirSync(dir); chmodSync(dir, 0o750);
+    const port = fakeAlert();
+    const now = w.t.clock.t + 3_600_000;
+    const rules = { get: (k, o) => (k === 'proposals.outbox' ? dir : w.t.rules.get(k, o)) };
+    const refusesApplied = new Proxy({}, { get: (_, k) => (k === 'write' ? (x) => (x?.kind === 'proposal_applied' ? { ok: false, reason: 'the disk is full' } : w.rec.write(x)) : typeof w.rec[k] === 'function' ? w.rec[k].bind(w.rec) : w.rec[k]) });
+    const pass = async (rec, at) => {
+      const out = await proposalsPass({ rec, rules, products: [PRODUCT], ownerUid: UID, wait: async () => {}, alert: outbox(w.rec, at), handlers: { research: w.research }, now: at });
+      await sendAlerts(w.rec, port, at);
+      return out.find((r) => r.name === 'research-R-1.md');
+    };
+    writeFileSync(join(dir, 'research-R-1.md'), REPORT);
+    assert.equal((await pass(refusesApplied, now)).applied, true);
+    const f = w.rec.read('fact', bytesFactId(sha(REPORT)));
+    assert.equal(f.doc.used_name, 'research-R-1.md');
+    must(w.rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(sha(REPORT)), expectRev: f.rev, doc: { ...f.doc, ...spoil }, kind: 'proposal_bytes' }), 'spoil');
+    const two = await pass(w.rec, now + 60_000);
+    assert.equal(two.marked, undefined, JSON.stringify(spoil));
+    assert.equal(port.texts.filter((t) => /interrupted/.test(t)).length, 1, `${JSON.stringify(spoil)}: ${port.texts.join(' | ')}`);
+  }
 });
 
 // ---- the merge gate, refusal 10 ----

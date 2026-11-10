@@ -26,7 +26,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
 import { outbox, sendAlerts, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
-import { holdAlert } from './pass.mjs';
+import { holdAlert, clearHold, HOLD_FACT } from './pass.mjs';
 import { limitedSync } from './sync-limit.mjs';
 
 // Every step at its own deadline and the pass's two sends (alerts.mjs), plus a margin: past this the pass is stuck.
@@ -111,7 +111,8 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     : null;
   if (low) log(`dispatcher: ${low}`);
   const tellLow = () => {
-    if (!low) return;
+    // Fixed (self-review m6): a copy still queued goes, and a deadline lowered again is told afresh.
+    if (!low) { try { clearHold(wired.rec, HOLD_FACT('run-deadline-low'), now, (line) => log(`dispatcher: ${line}`)); } catch (e) { log(`dispatcher: the low-deadline hold could not be cleared: ${e?.message ?? e}`); } return; }
     try { if (holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the low-deadline alert could not be queued'); }
     catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); }
   };

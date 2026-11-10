@@ -321,12 +321,16 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       return w;
     };
     // The used note on the bytes' own fact (L736 m3): its time, or null. Written only for bytes this product handed in.
-    const usedMark = (h) => { try { const o = rec.read('fact', bytesFactId(h)); return o && !o.corrupt && o.doc?.product === product && typeof o.doc.used_at === 'string' ? o.doc.used_at : null; } catch { return null; } };
-    const noteUsed = (h) => {
+    // The note names the file and is no older than its claim: the bytes fact is shared by every name with these bytes,
+    // so another name's use is never read as this one's (self-review m2). It goes once the mark is made.
+    const usedMark = (h, since) => { try { const o = rec.read('fact', bytesFactId(h)); return o && !o.corrupt && o.doc?.product === product && o.doc.used_name === name && typeof o.doc.used_at === 'string' && typeof since === 'string' && o.doc.used_at >= since ? o.doc.used_at : null; } catch { return null; } };
+    const noteUsed = (h, on = true) => {
       try {
         const o = rec.read('fact', bytesFactId(h));
         if (!o || o.corrupt || o.doc?.product !== product) return false;
-        return rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: o.rev, doc: { ...o.doc, used_at: new Date(now).toISOString() }, kind: 'proposal_bytes' }).ok === true;
+        const { used_at: _a, used_name: _n, ...rest } = o.doc;
+        if (!on && _a === undefined && _n === undefined) return true;
+        return rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: o.rev, doc: on ? { ...rest, used_name: name, used_at: new Date(now).toISOString() } : rest, kind: 'proposal_bytes' }).ok === true;
       } catch { return false; }
     };
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
@@ -416,8 +420,11 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     const hash = file.sha256;
     // A pass that used the file but could not mark it applied left that on the bytes' own fact (L736 m3): the mark is
     // tried again now, and nothing is told as an interruption, since the file is known to have been used.
-    if (prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat' && usedMark(prev.doc.sha256)) {
-      const m = put({ sha256: prev.doc.sha256, state: 'applied', applied_at: usedMark(prev.doc.sha256) }, 'proposal_applied');
+    const usedAt = prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat' ? usedMark(prev.doc.sha256, prev.doc.at) : null;
+    if (usedAt) {
+      const usedSha = prev.doc.sha256;
+      const m = put({ sha256: usedSha, state: 'applied', applied_at: usedAt }, 'proposal_applied');
+      if (m.ok && !noteUsed(usedSha, false)) note(`proposals ${product}: ${shown}: its "used" note could not be taken off the bytes record; it is left, and never read for a later claim, which is newer`);
       r.marked = m.ok ? 'used in an earlier pass; marked applied now' : `used in an earlier pass, and still could not be marked applied (${plainError(String(m.reason))}); tried again next pass`;
       // Never used twice: still unmarked, it is left for the next pass.
       if (!m.ok) { r.already = true; note(`proposals ${product}: ${shown}: ${r.marked}`); continue; }

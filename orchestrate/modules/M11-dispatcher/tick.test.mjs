@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
@@ -448,6 +448,10 @@ export { rec };
   assert.equal(mod.seen.filter((t) => /runDeadlineMs/.test(String(t))).length, 0, 'not ahead of the pass');
   assert.equal(await main([low], { self, now: T0 + 2 * MIN, log: () => {} }), 0);
   assert.equal(mod.seen.filter((t) => /runDeadlineMs .* is below the pass's own sum/.test(String(t))).length, 1, 'told to Joe');
+  assert.equal(typeof mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at, 'string');
+  // Fixed: the hold goes, so a deadline lowered again is told afresh.
+  assert.equal(await main([config], { self, now: T0 + 3 * MIN, log: (s) => logs.push(s) }), 0);
+  assert.equal(mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at ?? null, null, 'cleared once the config is fixed');
   logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
