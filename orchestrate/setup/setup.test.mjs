@@ -14,7 +14,7 @@ import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
-import { runProofs } from './proofs.mjs';
+import { proofList, runProofs } from './proofs.mjs';
 import { main } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 
@@ -711,6 +711,64 @@ test('PLANT a folder the owner can write (hooks is the owner\'s) → the proof F
   assert.equal(run(mac, ['proofs']).code, 1);
   const mac2 = applied(); mac2.owners.set(P('worker-copies'), { uid: mac2.rootUid, gid: 0 });   // the control: the owner must be able to write its own folder
   const all = runProofs(mac2, cfg); assert.equal(all[1].ok, false); assert.ok(all.slice(2).every((r) => !r.ok && /not proven/.test(r.why)));
+});
+
+test('L836 proofs: per product, the owner CAN write its copies folder and its worker runner outbox folders (controls), and can NOT write its outbox folder', () => {
+  const list = proofList(cfg); const res = runProofs(applied(), cfg);
+  assert.deepEqual(res.filter((r) => !r.ok), [], JSON.stringify(res.filter((r) => !r.ok)));
+  const lastControl = list.map((x) => !!x.control).lastIndexOf(true);
+  assert.ok(list.slice(0, lastControl + 1).every((x) => x.control), 'every control comes before every proof it guards');
+  for (const prod of cfg.products) {
+    for (const d of [`worker-copies/${prod}`, `outboxes/${prod}/worker`, `outboxes/${prod}/script`]) {
+      const x = list.find((y) => y.args.at(-1) === P(d)); assert.ok(x, d); assert.equal(x.control, true, d); assert.equal(x.expect, 'ok', d); assert.deepEqual(x.args, ['/bin/test', '-w', P(d)]);
+    }
+    const no = list.find((y) => y.args.at(-1) === P(`outboxes/${prod}`)); assert.ok(no, prod); assert.equal(no.expect, 'fail'); assert.ok(!no.control);
+    assert.match(no.what, new RegExp(`cannot write ${prod}'s outbox folder`));
+  }
+});
+
+test('L836 PLANT: a product\'s outbox folder the owner can write → that proof FAILs; its copies folder not the owner\'s → its control fails and nothing after counts', () => {
+  const mac = applied(); mac.owners.set(P('outboxes/beta'), { uid: uidOf(mac, 'sam'), gid: 20 });
+  const bad = runProofs(mac, cfg).filter((r) => !r.ok); assert.equal(bad.length, 1, JSON.stringify(bad));
+  assert.match(bad[0].what, /cannot write beta's outbox folder/); assert.match(bad[0].why, /CAN do this/);
+  assert.equal(run(mac, ['proofs']).code, 1);
+  const mac2 = applied(); mac2.owners.set(P('worker-copies/alpha'), { uid: mac2.rootUid, gid: 0 });
+  const all = runProofs(mac2, cfg); const at = all.findIndex((r) => r.what.includes(`write ${P('worker-copies/alpha')} `));
+  assert.ok(at > 1 && all[at].ok === false, JSON.stringify(all[at]));
+  assert.ok(all.slice(at + 1).length > 0 && all.slice(at + 1).every((r) => !r.ok && /not proven/.test(r.why)), JSON.stringify(all.slice(at + 1)));
+});
+
+test('L836 check: the workers\' copies folder holds only the config\'s product folders; a flat copy from before, or a dropped product\'s, FAILs by name and is not removed', () => {
+  const mac = applied();
+  const row = (c = cfg) => check(mac, c).find((i) => i.what.startsWith(`${P('worker-copies')} holds only`));
+  assert.equal(row().ok, true);
+  mkdirSync(mac.at(P('worker-copies/card-41')));
+  let i = row(); assert.equal(i.ok, false);
+  assert.match(i.why, new RegExp(`holds an entry that is no product folder of this config .*: ${P('worker-copies/card-41')}\\. Check that each holds nothing unsaved .* then remove it; setup removes nothing itself`));
+  assert.equal(run(mac, ['check']).code, 1);
+  assert.ok(existsSync(mac.at(P('worker-copies/card-41'))), 'setup removes nothing');
+  rmSync(mac.at(P('worker-copies/card-41')), { recursive: true });
+  // beta dropped from the config: its copies folder is named too.
+  const one = parseConfig({ ...RAW, products: ['alpha'] });
+  i = row(one); assert.equal(i.ok, false); assert.match(i.why, new RegExp(`: ${P('worker-copies/beta')}\\.`));
+  assert.equal(row().ok, true);
+  // Several, sorted, cut off after five; a stray file counts; Finder's .DS_Store does not (review m3, m5).
+  const C = (n) => P(`worker-copies/${n}`);
+  writeFileSync(mac.at(C('.DS_Store')), ''); assert.equal(row().ok, true, '.DS_Store is let be');
+  mkdirSync(mac.at(C('.card-9'))); assert.match(row().why, new RegExp(`^holds an entry .*: ${C('.card-9')}\\. Check`), 'any other hidden entry is named'); rmSync(mac.at(C('.card-9')), { recursive: true });
+  writeFileSync(mac.at(C('notes.txt')), 'x'); mkdirSync(mac.at(C('card-7')));
+  assert.match(row().why, new RegExp(`^holds 2 entries that are no product folder .*: ${C('card-7')}, ${C('notes.txt')}\\. Check`));
+  for (const n of ['card-1', 'card-2', 'card-3', 'card-4', 'card-5']) mkdirSync(mac.at(C(n)));
+  assert.match(row().why, new RegExp(`^holds 7 entries .*: ${['card-1', 'card-2', 'card-3', 'card-4', 'card-5'].map(C).join(', ')} and 2 more\\. Check`));
+  for (const n of ['notes.txt', 'card-7', 'card-1', 'card-2', 'card-3', 'card-4', 'card-5']) rmSync(mac.at(C(n)), { recursive: true });
+  assert.equal(row().ok, true);
+  // A flat copy whose card is named as a product looks like that product's folder, but it is a copy (review m4).
+  mkdirSync(mac.at(C('alpha/.git'))); assert.match(row().why, new RegExp(`^holds an entry .*: ${C('alpha')}\\. Check`));
+  rmSync(mac.at(C('alpha/.git')), { recursive: true }); assert.equal(row().ok, true);
+  // A folder that cannot be listed FAILs rather than drops the row (review m2).
+  const list = mac.list; mac.list = (d) => { if (d === P('worker-copies')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return list(d); };
+  assert.deepEqual(row(), { ok: false, what: `${P('worker-copies')} holds only the config's product folders (L836)`, why: 'its contents could not be listed' });
+  mac.list = list;
 });
 
 test('PLANT the keys folder readable by the owner (mode 755) → the proof FAILs', () => {
