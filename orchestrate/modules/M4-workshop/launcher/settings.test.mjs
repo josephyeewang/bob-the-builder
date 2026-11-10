@@ -8,15 +8,15 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell } from './render-settings.mjs';
-import { SETTINGS as S, ENV } from './settings-names.mjs';
+import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny } from './render-settings.mjs';
+import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
 const PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -414,4 +414,42 @@ test('L746 (audit R-0b-148 slice 1, m1): an empty proposals list is refused for 
   const ok = render('worker');
   assert.equal(ok.ok, true, ok.reason);
   for (const rule of ['Read(//w/proposals/**)', 'Edit(//w/proposals/**)']) assert.ok(ok.settings[S.permissions][S.deny].includes(rule), rule);
+});
+
+// L760: a script card's session is walled as a worker is: secrets, proposals, the Bob folder and the worker runner's
+// folders, checked through checkRunnerWall; and nothing a reviewer has.
+test('L760: the script profile renders with the worker\'s walls, passes checkRunnerWall, and holds nothing of a reviewer\'s', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
+  assert.equal(checkProfile('script', DESIGN_PROFILES.script).ok, true);
+  assert.deepEqual(DESIGN_PROFILES.script.outbox, ['report-']);
+  const r = render('script', { paths: { ...PATHS, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  // It asks nobody (dontAsk), and with no shell it reaches no host, even with the rules' hosts given (#331 audit m2).
+  assert.equal(r.settings[S.permissions][S.defaultMode], 'dontAsk');
+  assert.deepEqual(r.settings[S.sandbox][S.network][S.allowedDomains], []);
+  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
+  const w = render('worker', { paths: { ...PATHS, workerRunner: runner } });
+  const deny = r.settings[S.permissions][S.deny];
+  const fs = r.settings[S.sandbox][S.filesystem];
+  for (const dir of ['/w/secrets', '/w/proposals', '/h/.ssh', '/w/keys', '/w/record', '/w/copy2']) {
+    for (const t of ['Read', 'Edit']) assert.ok(deny.includes(`${t}(/${dir}/**)`), `${t} ${dir}`);
+    assert.ok(fs[S.denyRead].includes(dir), `the shell may not read ${dir}`);
+  }
+  for (const rule of bobFolderDeny('/w/bob')) assert.ok(deny.includes(rule), rule);
+  assert.ok(fs[S.denyWrite].includes('/w/bob'), 'the shell may not write the Bob folder');
+  // Every deny the worker has, the script has too, but for the shell and install walls of a role with a shell.
+  for (const rule of w.settings[S.permissions][S.deny]) if (!/^Bash\(/.test(rule)) assert.ok(deny.includes(rule), `the worker's ${rule}`);
+  assert.ok(!JSON.stringify(r.settings).includes('/r/'), 'no review runner or review outbox folder');
+  assert.equal(hasShell(DESIGN_PROFILES.script), false, 'no shell');
+  assert.equal(r.settings[S.permissions][S.allow].some((x) => /^Bash/.test(x)), false, 'no shell rule');
+  // Without the proposals folders, or with an empty list, it is refused like a worker.
+  assert.equal(render('script', { proposalOutboxes: undefined }).ok, false);
+  assert.equal(render('script', { proposalOutboxes: [], paths: { ...PATHS, deny: { ...PATHS.deny, proposals: [] } } }).ok, false);
+  // It writes its copy (the Dispatcher counts a script card as writing its files): the plain-files hook gets --copy.
+  const hook = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
+  assert.ok(hook.includes(' --copy /w/copy'), hook);
+  // M10's published script.json lists Workflow: still refused here, as on the never-list.
+  assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
 });

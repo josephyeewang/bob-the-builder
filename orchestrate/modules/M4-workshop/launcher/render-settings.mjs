@@ -7,7 +7,7 @@
 // anything not allowed is refused, never put to the owner.
 
 import { writeFileSync, readFileSync, renameSync, realpathSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, posix } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
 import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
@@ -55,6 +55,14 @@ export function renderAllowRules(commands = {}) {
 }
 
 const abs = (p) => `/${p.replace(/^\/+/, '')}`; // Claude's "//path" form needs one more slash
+// A wall path as the rules must name it (L736 #306 m1): absolute, plain characters, and spelled as its own resolved form
+// (no `.` or empty segment, no `..`), so a rule never names a spelling the tool's path match may not see. One trailing
+// slash run is dropped first; / itself is no folder to wall. → the path, or null.
+const wallPath = (p) => {
+  if (typeof p !== 'string' || !p.startsWith('/') || /[^A-Za-z0-9._/-]/.test(p)) return null;
+  const t = p.replace(/(?<=.)\/+$/, '');
+  return t !== '/' && posix.resolve(t) === t ? t : null;
+};
 const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 /** The rules that keep the Bob folder read-only. The one source for both the renderer and launch check 13 (L750), so
  *  the form check 13 looks for is the form written. */
@@ -101,12 +109,19 @@ export function checkRunnerWall({ settings, workerRunner, realpath = (p) => real
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner? }
+ *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner?, ownerTaps? }
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
  * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
  * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
  * read, edit and write, for the tools and the shell alike. Malformed is refused. Optional here (the launcher fixtures are
  * another lane's); checkRunnerWall is the launch-time check that it is there, as real paths.
+ * ownerTaps: the owner's "review again" taps folder (the runner's `ownerTaps`). Needed by the Front Door, refused without
+ * (L724 (4), R-0b-164): it runs as Joe's Mac user, who can write that folder, and only the owner's own tap handler may; so
+ * its tools get Edit and Write denied there, and its shell a write-deny. It must be the folder the runner reads, in the
+ * spelling the disk holds: `tapsFolderProblem` (review-runner-main.mjs) is that check, for the Front Door's install to run
+ * and refuse on (L736 m4). Nothing calls it yet: the Front Door's install is not built (R-0b-162, lane 4's setup).
+ * reviewAgainConfig: the owner's tap handler's config file (M1 review-again.mjs), which names the runner config it reads
+ * the taps folder from. Needed by the Front Door, refused without, and walled the same way (L735, #284 m1-r2).
  * notes: the session's own compaction-notes folder, apart from the outbox (L101). Needed by every role whose kinds hold no
  * `<compactKind>-compact-` kind (all but the worker and the Front Door), refused without: their note never goes in the outbox.
  * reviewWalls { outboxRoot, runnerRoot }: needed for a reviewer or auditor (L66 M3), refused without. runnerRoot is the
@@ -116,9 +131,9 @@ export function checkRunnerWall({ settings, workerRunner, realpath = (p) => real
  * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
- * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session runs as
- * `orchestrate`, which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for
- * every role but a reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
+ * L78 n5). Each must be on the read-deny list (`deny.proposals`), or the launch is refused: every AI session but the
+ * review roles runs as Joe's Mac user (L238), which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for every role but a
+ * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
 export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
@@ -175,13 +190,26 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
   for (const dir of runnerDirs) deny.push(...runnerWallDeny(dir));
   const walls = [];
+  if (role === 'front_door') {
+    const tt = wallPath(paths.ownerTaps);
+    if (!tt) return refuse('the Front Door\'s settings need the owner\'s taps folder (ownerTaps) as a plain absolute path, spelled as it resolves');
+    deny.push(`Edit(/${abs(tt)}/**)`, `Write(/${abs(tt)}/**)`);
+    walls.push(tt, `${tt}/**`);
+    const hc = wallPath(paths.reviewAgainConfig);
+    if (!hc || paths.reviewAgainConfig.endsWith('/')) return refuse('the Front Door\'s settings need the owner\'s tap handler\'s config file (reviewAgainConfig) as a plain absolute path, spelled as it resolves');
+    if (hc === tt || inside(hc, tt)) return refuse('the tap handler\'s config must sit outside the taps folder');
+    deny.push(`Edit(/${abs(hc)})`, `Write(/${abs(hc)})`);
+    walls.push(hc);
+  }
   // Every role the review runner starts sits behind the review walls, the plan reviewer too (L710).
   if (RUNNER_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
     for (const k of REVIEW_WALLS) {
-      if (typeof w[k] !== 'string' || !w[k].startsWith('/') || /[^A-Za-z0-9._/-]/.test(w[k]) || w[k].split('/').includes('..')) return refuse(`a ${role}'s settings need the review folder ${k} as a plain absolute path`);
-      walls.push(w[k].replace(/\/+$/, ''), `${w[k].replace(/\/+$/, '')}/**`);
-      if (k !== 'outboxRoot') deny.push(`Edit(/${abs(w[k])}/**)`, `Write(/${abs(w[k])}/**)`);
+      // The same spelling rule as every wall path (L736 m1, the class).
+      const p = wallPath(w[k]);
+      if (!p) return refuse(`a ${role}'s settings need the review folder ${k} as a plain absolute path, spelled as it resolves`);
+      walls.push(p, `${p}/**`);
+      if (k !== 'outboxRoot') deny.push(`Edit(/${abs(p)}/**)`, `Write(/${abs(p)}/**)`);
     }
   }
 
@@ -197,8 +225,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     if (inside(paths.notes, paths.outbox) || inside(paths.outbox, paths.notes)) return refuse('the notes folder must be apart from the outbox');
     notesArg = ` --notes ${paths.notes}`;
   }
-  // Only a worker and the writer change files in a code copy; every other role writes its outbox only.
-  const copyArg = ['worker', 'writer'].includes(role) ? ` --copy ${paths.copy}` : '';
+  // Only a worker, the writer and a script card's session (L760: the Dispatcher counts a script card as writing its
+  // files) change files in a code copy; every other role writes its outbox only.
+  const copyArg = ['worker', 'writer', 'script'].includes(role) ? ` --copy ${paths.copy}` : '';
   // The longer listed kinds this role may not hand in, so the hook reads a name's kind as M9 does (L82 M-1).
   // Kept on purpose as the general guard (L121 cosmetic): today every such kind is a `-compact-` kind (report-compact-
   // for the reviewer, scout, writer, thinking role and scripts), which the compaction rule alone already keeps from

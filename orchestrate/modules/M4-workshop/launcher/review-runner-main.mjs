@@ -14,7 +14,8 @@
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
-//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
+//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review;
+//                                                   since L760 that includes "script", the workers' user's id
 //     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/ and docs/verdict/)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
 //     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
@@ -192,6 +193,24 @@ function realPath(p) {
     rest.unshift(basename(head));
     head = up;
   }
+}
+/**
+ * Is the Front Door's taps folder the one the runner reads (L736 #306 m4)? The Front Door's walls guard `ownerTaps` as its
+ * launch is given it; were that another folder than the runner config's `ownerTaps`, the wall would guard the wrong one.
+ * Setup fills both from its one value; this compares them, reading the runner config as the runner does. The Front
+ * Door's must be its own real path, in the case the disk holds it (no link, no other case), since its rules name it as
+ * given and a rule for another spelling may match nothing (#306 self-review m1); trailing slashes aside, it must then be
+ * the runner's, on the runner's real path. No caller yet: the Front Door's install runs it and refuses on a reason when
+ * it is built (R-0b-162, lane 4's setup). `read` is a port for a test. → null | the reason
+ */
+export function tapsFolderProblem({ ownerTaps, runnerConfig, read = readConfig }) {
+  let c; try { c = read(runnerConfig); } catch (e) { return `the review runner's config can't be read (${String(e?.message ?? e).slice(0, 200)})`; }
+  if (typeof c?.ownerTaps !== 'string') return 'the review runner\'s config names no taps folder (ownerTaps), so no tap is ever read';
+  if (typeof ownerTaps !== 'string' || !isAbsolute(ownerTaps)) return 'the Front Door names no taps folder';
+  const given = ownerTaps.replace(/(?<=.)\/+$/, '');
+  const a = realPath(given), b = realPath(c.ownerTaps);
+  if (a !== given) return `the Front Door's taps folder (${ownerTaps}) is not written as the disk holds it (${a}), so a wall rule naming it may match nothing`;
+  return a === b ? null : `the Front Door's taps folder (${ownerTaps}) is not the one the review runner reads (${c.ownerTaps}), so its wall guards the wrong folder`;
 }
 /** Is `p` the folder `dir` or inside it? */
 const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
