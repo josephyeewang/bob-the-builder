@@ -504,7 +504,7 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
     if (running.some((s) => s.product === product && parkable(s))) continue;
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
     // The port's answer is read (L744 2): an ok:false is a failure, told like a throw, never counted as asked.
-    const asked = await guarded(async () => { const a = await pauseLead({ product }); return a?.ok === false ? { ok: false, reason: String(a.reason ?? 'the port said no') } : { ok: true }; }, portDeadlineMs);
+    const asked = await guarded(async () => { const a = await pauseLead({ product }); return a?.ok === false ? { ok: false, reason: String(a.reason || 'the port said no') } : { ok: true }; }, portDeadlineMs);
     if (!asked.ok) {
       // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
       const cause = String(asked.reason).replace(/\d+/g, 'N');

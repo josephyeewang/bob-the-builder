@@ -1,4 +1,3 @@
-import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -11,6 +10,7 @@ import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
 import { rulesWith, recWith, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
+import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
 // Test set-up only: plain git with no user or machine config, in a throwaway folder. It never asks for a
 // password, never shares this run's terminal and is stopped at a minute (no test may hang, 30 Oct 2026).
