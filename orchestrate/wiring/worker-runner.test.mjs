@@ -287,6 +287,19 @@ test('self-review M4: the status is written after each session and each request,
   assert.ok(Date.now() - t < 1000, 'each hung port is given up after portMs');
 });
 
+test('#388 r1 m4: a drain that hangs, throws or answers anything but true keeps an ended session\'s outbox open', async () => {
+  const cases = [['hangs', () => new Promise(() => {})], ['throws', () => { throw new Error('EIO'); }], ['rejects', () => Promise.reject(new Error('EIO'))],
+    ['false', () => false], ['undefined', () => undefined], ['an object', () => ({ drained: true })], ['the text true', () => 'true']];
+  for (const [why, drained] of [...cases, ['true', () => true]]) {
+    const w = world({ drained });
+    await w.pass([launchReq('S-1')]);
+    w.gone.add(4001); await w.pass(); await w.pass();
+    const x = w.status.sessions.find((y) => y.id === 'S-1');
+    assert.equal(x?.ended, true, why);
+    assert.equal(x.outbox_open, why !== 'true', why);
+  }
+});
+
 test('self-review m1, m3, m6, c3: a session stays listed while an answer naming it is kept; a request dated ahead, one that can\'t be removed, and a stop of another group are not acted on', async () => {
   const w = world();
   await w.pass([launchReq('S-1')]);

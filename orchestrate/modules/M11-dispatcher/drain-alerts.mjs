@@ -25,7 +25,8 @@ import { stillWaiting } from '../../shared/still-waiting.mjs';
 /** Why an ended session's outbox is not drained: the runner's one list (L896). */
 export const DRAIN_CAUSES = Object.freeze([
   'fact-id-too-long', 'name-not-utf8', 'name-not-a-fact-id', 'dot-name', 'not-a-plain-file', 'file-unreadable',
-  'not-taken', 'in-flight', 'hash-mismatch', 'record-unreadable', 'check-late', 'check-failed', 'other',
+  'not-taken', 'in-flight', 'hash-mismatch', 'bundle-not-pushed', 'bundle-changed', 'record-unreadable', 'check-late',
+  'check-failed', 'other',
 ]);
 const CAUSE_TEXT = Object.freeze({
   'fact-id-too-long': 'a file\'s name is too long for the Record to note it taken',
@@ -37,6 +38,8 @@ const CAUSE_TEXT = Object.freeze({
   'not-taken': 'a file in it was never taken in or told',
   'in-flight': 'a file\'s intake has been in progress for too long',
   'hash-mismatch': 'a file changed after the Record took it',
+  'bundle-not-pushed': 'the card\'s bundle has no push of this session\'s attempt that took it',
+  'bundle-changed': 'the card\'s bundle changed after its push took it',
   'record-unreadable': 'the Record\'s note of a file can\'t be read',
   'check-late': 'the drain check did not answer within the runner\'s limit',
   'check-failed': 'the drain check failed',

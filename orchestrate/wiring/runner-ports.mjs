@@ -77,6 +77,7 @@ import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
+import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -107,42 +108,79 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
  * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
  * A file with no such fact, a fact with another sha256 or still in flight (applying, starting), a file that is
  * not a plain one, or a Record that can't be read: not drained. No files, or the outbox gone: drained.
+ * `waiting` is done only for a worker or script session (#388 r1 m2): intake writes it only for a Lead's queued
+ * request or plan, which starts by itself later, so a Lead's outbox would close on a hand-in not yet taken. The fact
+ * is read first and the file hashed only when its fact is done (#388 r1 m3), so a file never taken is never read.
+ * The card's bundle (`bundle-<card>.bundle`, M4 push.mjs) is never an intake file: it counts as taken once the push of
+ * this session's attempt (read from the Record's session doc, `readSession`, M4 readSessionFile) is `pushed` with the
+ * sha256 of these bytes (`bundle_sha256`, L898). No session reader, no attempt, no such push, a refused one, an older
+ * fact without the hash, or other bytes: it stays open.
  * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
  * M4 review-runner-main.mjs readFactFile answers (runner-main.mjs wires it). Left out, every read fails and an outbox
  * holding a file stays open: it fails safe, never closing one the Record has not taken.
  */
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
+const WAITING_DONE_FOR = new Set(['worker', 'script']);
+const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
-function fileSha256(p) {
-  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
-}
-// The fact id rule the Record reads by (M4 readFactFile): a name it can't hold is told by what is wrong with it (L896).
-const FACT_ID = /^[A-Za-z0-9._-]{1,200}$/;
-const IN_FLIGHT = new Set(['applying', 'starting']);
+const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
+const SHA256 = /^[0-9a-f]{64}$/;
+// Not drained, and why (L896): a DRAIN_CAUSES name, so the runner can tell it once it lasts.
 const held = (cause) => {
   if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);
   return { drained: false, cause };
 };
+// A file that could not be hashed: not a plain one (a folder, a link, a pipe), or not readable.
+const hashCause = (e) => (/not a plain file/.test(e?.message ?? '') || e?.code === 'ELOOP' ? 'not-a-plain-file' : 'file-unreadable');
+// A fact read that is not ok: missing is "never taken" (a dot file told as its own), anything else unreadable.
+const readCause = (f, name) => (f?.missing === true ? (name.startsWith('.') ? 'dot-name' : 'not-taken') : 'record-unreadable');
+// The fact id rule the Record reads by (M4 readFactFile): a name it can't hold is told by what is wrong with it (L896).
+const FACT_ID = /^[A-Za-z0-9._-]{1,200}$/;
+const IN_FLIGHT = new Set(['applying', 'starting']);
 function nameCause(id, name) {
   if (name.includes('\uFFFD')) return 'name-not-utf8';
   if (id.length > 200) return 'fact-id-too-long';
   return FACT_ID.test(id) ? null : 'name-not-a-fact-id';
 }
-export function drainedPort({ list = readdirSync, readFact = noFactReader, hashOf = fileSha256 } = {}) {
+// The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
+// → null when taken, else its cause.
+function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+  let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
+  if (sd?.ok !== true) return 'record-unreadable';
+  const doc = sd.doc;
+  const att = doc?.card === s.card ? doc.attempt : undefined;
+  if (typeof att !== 'string' || !att) return 'other';
+  let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return 'record-unreadable'; }
+  if (f?.ok !== true) return f?.missing === true ? 'bundle-not-pushed' : 'record-unreadable';
+  const d = f.doc;
+  if (d?.result !== 'pushed' || !SHA256.test(String(d.bundle_sha256))) return 'bundle-not-pushed';
+  let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
+  return hash === d.bundle_sha256 ? null : 'bundle-changed';
+}
+function fileSha256(p) {
+  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
+}
+export function drainedPort({ list = readdirSync, readFact = noFactReader, readSession = noSessionReader, hashOf = fileSha256 } = {}) {
   return (s) => {
     let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT' ? true : held('file-unreadable'); }
     for (const name of names) {
+      if (typeof s.card === 'string' && name === bundleName(s.card)) {
+        const why = bundleHeld(s, join(s.outbox, name), { readFact, readSession, hashOf });
+        if (why) return held(why);
+        continue;
+      }
       const id = `intake-applied-${s.id}-${name}`;
       const bad = nameCause(id, name);
       if (bad) return held(bad);
-      let hash; try { hash = hashOf(join(s.outbox, name)); } catch (e) { return held(/not a plain file/.test(e?.message ?? '') || e?.code === 'ELOOP' ? 'not-a-plain-file' : 'file-unreadable'); }
       let f; try { f = readFact(id); } catch { return held('record-unreadable'); }
-      if (f?.ok !== true) return held(f?.missing === true ? (name.startsWith('.') ? 'dot-name' : 'not-taken') : 'record-unreadable');
+      if (f?.ok !== true) return held(readCause(f, name));
       const d = f.doc;
       if (!d || d.session !== s.id || d.name !== name) return held('other');
-      if (!INTAKE_DONE.has(d.state)) return held(IN_FLIGHT.has(d.state) ? 'in-flight' : 'other');
+      // A Lead's 'waiting' is a queued request not yet started (#388 r1 m2): still in flight.
+      if (!doneFor(s, d.state)) return held(IN_FLIGHT.has(d.state) || d.state === 'waiting' ? 'in-flight' : 'other');
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch (e) { return held(hashCause(e)); }
       if (d.sha256 !== hash) return held('hash-mismatch');
     }
     return true;

@@ -8,13 +8,20 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny } from './render-settings.mjs';
+import { apart, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { checkMachineWide } from './env-check.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
+// Sandbox setting names claude 2.1.322 reads (from its own code, #410 r2 M1) that the renderer never writes: each one is
+// refused in a role file and in the machine-wide file. Recheck on every pinned upgrade.
+const WIDENING_TOP = ['enabledPlatforms', 'allowAppleEvents', 'autoAllowBashIfSandboxed', 'enableWeakerNestedSandbox', 'enableWeakerNetworkIsolation',
+  'allowNestedUserNamespaces', 'credentials', 'ripgrep', 'bwrapPath', 'socatPath', 'ignoreViolations', 'tlsTerminate', 'somethingNew'];
+const WIDENING_NETWORK = ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding', 'allowMachLookup', 'httpProxyPort', 'socksProxyPort'];
+const WIDENING_FILESYSTEM = ['allowWrite', 'allowRead', 'allowManagedReadPathsOnly', 'somethingNew'];
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
@@ -332,6 +339,13 @@ test('L751: every role the runner starts is denied the worker runner\'s requests
   }
   // Both ways: a runner folder that holds one of the session's own folders is refused too.
   assert.match(render('worker', { paths: { ...PATHS, notes: '/u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+  // Without regard to case, both ways (#410 r2 m3): the Mac's disk ignores it.
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/U/RUNNER/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+  assert.match(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, requestsDir: '/W/COPY/requests' } } }).reason ?? '', /apart from the session's own folders/);
+  // The same rule at the renderer's other two apart checks: the notes folder and the tap handler's config.
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/W/OUTBOX/notes' } }).reason ?? '', /notes folder must be apart from the outbox/);
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/W' } }).reason ?? '', /notes folder must be apart from the outbox/);
+  assert.match(render('front_door', { paths: { ...PATHS, reviewAgainConfig: '/W/OWNER-TAPS/x.json' } }).reason ?? '', /outside the taps folder/);
 });
 
 // The closest real check on this Mac (L751): macOS's own sandbox (Seatbelt, which Claude Code's shell sandbox runs on)
@@ -452,4 +466,147 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   assert.ok(hook.includes(' --copy /w/copy'), hook);
   // M10's published script.json lists Workflow: still refused here, as on the never-list.
   assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
+});
+
+test('L881: the shell\'s write wall between sessions: the only added folders are the session\'s own outbox and the read-only Bob folder', () => {
+  const w = render('worker');
+  assert.equal(w.ok, true, w.reason);
+  const s = w.settings;
+  // What a worker's shell may write (claude's sandbox: the working folder, a per-user temp folder and the added
+  // folders) holds its own outbox and no sibling's: a sibling outbox can't be written, renamed or deleted.
+  assert.deepEqual(s[S.permissions][S.additionalDirectories], [PATHS.outbox, PATHS.bobFolder]);
+  const writable = [PATHS.copy, ...s[S.permissions][S.additionalDirectories]];
+  const inside = (x, d) => x === d || x.startsWith(`${d}/`);
+  for (const sibling of ['/w/outbox-2', '/w/outbox2/x', '/w', '/w/copy2']) assert.equal(writable.some((d) => inside(sibling, d)), false, sibling);
+  assert.equal(Object.keys(s[S.sandbox][S.filesystem]).some((k) => /allow/i.test(k)), false, 'no shell write is added by an allow list');
+  assert.equal(s[S.permissions][S.allow].every((r) => r.startsWith('Bash(')), true, 'no file write is allowed by rule');
+  assert.equal(checkSettings(s, { profile: DESIGN_PROFILES.worker }).ok, true);
+  // Every rendered role passes the same check.
+  const rendered = [];
+  for (const role of Object.keys(DESIGN_PROFILES)) {
+    const r = render(role);
+    if (!r.ok) continue;
+    rendered.push(role);
+    assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
+  }
+  // Every role renders with this test's paths (L881 review m6): none drops out of the loop unseen.
+  assert.deepEqual(rendered.sort(), Object.keys(DESIGN_PROFILES).sort());
+  // Each drift is refused by checkSettings, which launch check 0 and every read-back run.
+  const drift = (f) => { const c = structuredClone(s); f(c); return checkSettings(c, { profile: DESIGN_PROFILES.worker }); };
+  const dirs = (c) => c[S.permissions][S.additionalDirectories];
+  for (const [name, f] of [
+    ['a sibling outbox added', (c) => dirs(c).push('/w/outbox-2')],
+    ['the outbox root added', (c) => { dirs(c)[0] = '/w'; }],
+    ['a sibling in the outbox\'s place', (c) => { dirs(c)[0] = '/w/outbox-2'; }],
+    ['a sibling in the Bob folder\'s place', (c) => { dirs(c)[1] = '/w/outbox-2'; }],
+    ['the outbox twice', (c) => { dirs(c)[1] = PATHS.outbox; }],
+    ['the Bob folder\'s tools wall gone', (c) => { c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((r) => !bobFolderDeny(PATHS.bobFolder).includes(r)); }],
+    ['the Bob folder\'s shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => !r.startsWith(PATHS.bobFolder)); }],
+    ['the first hook naming another outbox', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
+    ['a later hook naming another outbox', (c) => { const h = Object.values(c[S.hooks]).at(-1).at(-1)[H.hooks].at(-1); h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
+    ['the added folders a string', (c) => { c[S.permissions][S.additionalDirectories] = '/w'; }],
+    ['the outbox spelled with ..', (c) => { for (const h of Object.values(c[S.hooks]).flat().flatMap((m) => m[H.hooks])) h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/x/../outbox'); dirs(c)[0] = '/w/x/../outbox'; }],
+    ['a hook naming its outbox twice', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox ${PATHS.outbox} --outbox /w/outbox-2`); }],
+    ['a hook naming it as --outbox=', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox=${PATHS.outbox}`); }],
+    ['the Bob folder spelled with .., walls in that spelling', (c) => { const b = '/w/x/../bob'; dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); }],
+    ['only the Bob folder\'s /** shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => r !== `${PATHS.bobFolder}/**`); }],
+    ['only the Bob folder\'s Edit rule gone (Write kept)', (c) => { c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((r) => r !== bobFolderDeny(PATHS.bobFolder)[0]); }],
+    ['the Bob folder in other capitals of the outbox\'s parent', (c) => { const b = '/W'; dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); }],
+    ['the Bob folder above the outbox', (c) => { dirs(c)[1] = '/w'; c[S.permissions][S.deny].push(...bobFolderDeny('/w')); c[S.sandbox][S.filesystem][S.denyWrite].push('/w', '/w/**'); }],
+  ]) assert.match(drift(f).reason ?? '', /beyond the session's own outbox/, name);
+  // Nothing in the sandbox's filesystem block but its two deny lists (L881 review M1): an allow list there would open
+  // a sibling's outbox to the shell whatever the added folders say.
+  for (const key of ['allowWrite', 'allowRead', 'somethingNew']) {
+    assert.match(drift((c) => { c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), key);
+    // With no added folders at all, too (#410 r1 A11).
+    assert.match(drift((c) => { delete c[S.permissions][S.additionalDirectories]; c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), `${key}, no added folders`);
+  }
+  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.322 reads (#410 r2 m1).
+  for (const k of WIDENING_TOP) assert.match(drift((c) => { c[S.sandbox][k] = true; }).reason ?? '', new RegExp(`sandbox holds ${k};`), k);
+  for (const k of WIDENING_NETWORK) assert.match(drift((c) => { c[S.sandbox][S.network][k] = ['x']; }).reason ?? '', new RegExp(`network holds ${k};`), `network ${k}`);
+  for (const k of WIDENING_FILESYSTEM) assert.match(drift((c) => { c[S.sandbox][S.filesystem][k] = true; }).reason ?? '', new RegExp(`filesystem holds ${k};`), `filesystem ${k}`);
+  for (const part of [S.network, S.filesystem]) for (const v of [[], 'x', null]) {
+    assert.match(drift((c) => { c[S.sandbox][part] = v; }).reason ?? '', new RegExp(`sandbox ${part} is not an object`), `${part} ${JSON.stringify(v)}`);
+  }
+  // The outbox in capitals, Bob inside it (#410 r2 m2): apart is checked without regard to case, both ways.
+  const bobAt = (c, b) => { dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); };
+  assert.match(drift((c) => bobAt(c, '/w/outbox/bob')).reason ?? '', /beyond the session's own outbox/, 'Bob inside the outbox');
+  assert.match(drift((c) => {
+    for (const h of Object.values(c[S.hooks]).flat().flatMap((m) => m[H.hooks])) h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /W/OUTBOX');
+    dirs(c)[0] = '/W/OUTBOX'; bobAt(c, '/w/outbox/bob');
+  }).reason ?? '', /beyond the session's own outbox/, 'the outbox in capitals, Bob inside it');
+  // With no profile (#410 r1 A8: writeRoleSettings may be called without one), the wall is still checked.
+  const noProfile = structuredClone(s); noProfile[S.permissions][S.additionalDirectories].push('/w/outbox-2');
+  assert.match(checkSettings(noProfile).reason ?? '', /beyond the session's own outbox/);
+  // The machine-wide file (#410 r1 M1, r2 M1, launch check 10): its sandbox block is an allow-list, each key with its
+  // one safe value; every other key claude 2.1.322 reads from it is refused (one case per name, r2 m1).
+  const mw = (sb) => checkSettings({ [S.sandbox]: sb }, { machineWide: true });
+  assert.equal(mw({ [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false,
+    [S.network]: { [S.strictAllowlist]: true, deniedDomains: ['example.com'], allowManagedDomainsOnly: true }, [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } }).ok, true);
+  for (const k of WIDENING_TOP) assert.match(mw({ [k]: true }).reason ?? '', new RegExp(`machine-wide sandbox holds ${k};`), k);
+  for (const k of WIDENING_NETWORK) assert.match(mw({ [S.network]: { [k]: [] } }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  // allowedDomains: an empty list only (#410 r3 m2); one domain in it is refused.
+  assert.equal(mw({ [S.network]: { [S.allowedDomains]: [], allowManagedDomainsOnly: true } }).ok, true, 'an empty allowedDomains');
+  for (const v of [['example.com'], [''], 'x', null, {}]) assert.match(mw({ [S.network]: { [S.allowedDomains]: v } }).reason ?? '', new RegExp(`sets ${S.allowedDomains} to a value that is not its safe one`), JSON.stringify(v));
+  // A key that is only an Object property name is not on the list (#410 r3 c1).
+  for (const k of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.match(mw(JSON.parse(`{"${k}": {}}`)).reason ?? '', new RegExp(`machine-wide sandbox holds ${k};`), k);
+    assert.match(mw({ [S.network]: JSON.parse(`{"${k}": {}}`) }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  }
+  for (const k of WIDENING_FILESYSTEM) assert.match(mw({ [S.filesystem]: { [k]: ['/w'] } }).reason ?? '', new RegExp(`machine-wide sandbox filesystem holds ${k};`), `filesystem ${k}`);
+  // The audit's probe cases as written (r2 M1).
+  for (const sb of [{ enabledPlatforms: [] }, { enabledPlatforms: ['linux'], [S.failIfUnavailable]: false }, { allowAppleEvents: true },
+    { [S.network]: { allowMachLookup: ['*'] } }, { [S.network]: { httpProxyPort: 8080, socksProxyPort: 1080 } }, { autoAllowBashIfSandboxed: true },
+    { enableWeakerNetworkIsolation: true }, { allowNestedUserNamespaces: true }, { [S.failIfUnavailable]: false }, { credentials: {} }, { ripgrep: {} },
+    { bwrapPath: '/x' }, { socatPath: '/x' }, { ignoreViolations: {} }, { tlsTerminate: true }, { [S.excludedCommands]: ['git'] }]) assert.equal(mw(sb).ok, false, JSON.stringify(sb));
+  // Each allowed key only at its safe value.
+  assert.match(mw({ [S.sandboxEnabled]: false }).reason ?? '', /switch the sandbox off/);
+  for (const [sb, k] of [[{ [S.sandboxEnabled]: 'yes' }, S.sandboxEnabled], [{ [S.sandboxEnabled]: 0 }, S.sandboxEnabled], [{ [S.sandboxEnabled]: 'true' }, S.sandboxEnabled], [{ [S.sandboxEnabled]: null }, S.sandboxEnabled], [{ [S.failIfUnavailable]: false }, S.failIfUnavailable],
+    [{ [S.allowUnsandboxedCommands]: 'no' }, S.allowUnsandboxedCommands], [{ [S.network]: { [S.strictAllowlist]: false } }, S.strictAllowlist],
+    [{ [S.network]: { deniedDomains: 'x' } }, 'deniedDomains'], [{ [S.network]: { allowManagedDomainsOnly: 'yes' } }, 'allowManagedDomainsOnly'],
+    [{ [S.filesystem]: { [S.denyRead]: '/x' } }, S.denyRead], [{ [S.filesystem]: { [S.denyWrite]: [1] } }, S.denyWrite]]) {
+    assert.match(mw(sb).reason ?? '', new RegExp(`sets ${k} to a value that is not its safe one`), JSON.stringify(sb));
+  }
+  for (const part of [S.network, S.filesystem]) for (const v of [[], 'x', null]) {
+    assert.match(mw({ [part]: v }).reason ?? '', new RegExp(`machine-wide sandbox ${part} is not an object`), `${part} ${JSON.stringify(v)}`);
+  }
+  for (const v of [[], 'x', null]) assert.match(mw(v).reason ?? '', /machine-wide sandbox block is not an object/, JSON.stringify(v));
+  // A realistic hardened managed file still passes launch check 10: the guard hook, deny rules, the sandbox on and fail-closed.
+  const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
+  const hardened = { [S.hooks]: { [E.preToolUse]: [guard] }, [S.permissions]: { [S.deny]: ['Read(//w/held/**)', 'Edit(//w/held/**)'] },
+    [S.sandbox]: { [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.strictAllowlist]: true },
+      [S.filesystem]: { [S.denyRead]: ['/w/held'], [S.denyWrite]: ['/w/held'] } } };
+  assert.deepEqual(checkMachineWide({ readFile: () => JSON.stringify(hardened), path: '/fake/managed.json' }), { ok: true });
+});
+
+test('#410 r3 m1: apart is one rule, both ways, without regard to case; a shared prefix is apart, a trailing slash is not', () => {
+  const rows = [['/w/out', '/w/outbox', true], ['/w/out', '/w/out', false], ['/w/out', '/W/OUT', false], ['/W/OUT', '/w/out/x', false],
+    ['/w/out/', '/w/out', false], ['/w/out/', '/w/out/x', false], ['/W/Out/', '/w/oUT/x', false], ['/w/OUTBOX', '/w/out', true],
+    ['/w/out-2', '/w/out', true], ['/', '/w', false], ['/w/x', '/w/y', true], ['/w/outnotes', '/w/out', true],
+    // Not spelled as it resolves: never apart, whatever the other side (the apart path card).
+    ['/w/x/../out', '/w/out', false], ['/w/x/../y', '/w/out', false], ['/w/./y', '/w/out', false], ['/w//y', '/w/out', false],
+    ['/w/y/', '/w/out', false], ['w/y', '/w/out', false], ['/w/y', '/w/out/..', false], [undefined, '/w/out', false]];
+  for (const [a, b, want] of rows) {
+    assert.equal(apart(a, b), want, `${a} ${b}`);
+    assert.equal(apart(b, a), want, `${b} ${a}`);
+  }
+});
+
+// The apart path card: a `..` spelling that names the other folder is refused at each call site, though its letters look apart.
+test('apart path card: the runner folders refuse a session folder spelled through ..', () => {
+  assert.equal(render('worker', { paths: { ...PATHS, workerRunner: RUNNER } }).ok, true);
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/w/notes/../../u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /path "\/w\/notes\/\.\.\/\.\.\/u\/runner\/state\/notes" is not a plain absolute path, spelled as it resolves/);
+  for (const hooksDir of ['/w/hooks/', '/w//hooks', '/w/./hooks']) assert.match(render('worker', { paths: { ...PATHS, hooksDir, workerRunner: RUNNER } }).reason ?? '', /is not a plain absolute path, spelled as it resolves/, hooksDir);
+});
+test('apart path card: the notes folder spelled through .. into the outbox is refused', () => {
+  assert.equal(render('lead').ok, true);
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/notes/../outbox' } }).reason ?? '', /path "\/w\/notes\/\.\.\/outbox" is not a plain absolute path, spelled as it resolves/);
+  for (const notes of ['/w/notes/', '/w//notes', '/w/./notes']) assert.match(render('lead', { paths: { ...PATHS, notes } }).reason ?? '', /is not a plain absolute path, spelled as it resolves/, notes);
+  // Spelled plainly but naming a folder inside the outbox: refused as not apart.
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/outbox/notes' } }).reason ?? '', /notes folder must be apart from the outbox/);
+});
+test('#420 r1 c2: the runner folders refuse a `.` or empty step, as they refuse `..`', () => {
+  for (const [k, v] of [['requestsDir', '/u/runner/./requests'], ['requestsDir', '/u//runner/requests'], ['statusFile', '/u/runner/./state/status.json'], ['statusFile', '/u//runner/state/status.json'], ['requestsDir', '/u/runner/../requests']])
+    assert.match(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, [k]: v } } }).reason ?? '', new RegExp(`worker runner's ${k} is not a plain absolute path`), v);
+  assert.equal(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, requestsDir: '/u/runner/requests/' } } }).ok, true, 'one trailing slash is dropped');
 });
