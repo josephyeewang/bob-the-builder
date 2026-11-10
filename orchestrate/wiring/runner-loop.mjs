@@ -73,7 +73,8 @@ const groupKill = (pgid, sig) => process.kill(-pgid, sig);
 
 /**
  * The process-group ports. `kill(pgid, signal)` signals a group; `probe` is { kill(pid), pidStart(pid) }: M9's kill and
- * leaderStart by default.
+ * leaderStart by default. The ps cap (RUNNER_PS_MS) is leaderStart's own: a probe given in its place must bound itself
+ * (a test seam only; #362 r2 c-b).
  * → { groupGone(session) → true | false (throws when it can't tell), stopGroup(session) → { ok, how | reason } }
  */
 export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep = sleepFor, waitMs = RUNNER_TERM_WAIT_MS, killWaitMs = RUNNER_KILL_WAIT_MS } = {}) {
