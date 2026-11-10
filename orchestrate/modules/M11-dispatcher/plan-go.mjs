@@ -272,12 +272,27 @@ function goReady(ctx, tell, view, c, events) {
 // stops the card for this pass: the next pass fingerprints the card as it now is. A write the Record refuses (no
 // `dispatcher.updateInDraft: ['done_when']` in M9's permissions, a card that moved on) is told under the card's own cause,
 // never skipped: the card stays in draft and is never asked for a go on the Lead's free text.
+//
+// Every row must have its own pass test before one is set from them (L726 m4): M2 checkRows' done_when check, run first,
+// so a row without one is named, never written as a blank piece the fingerprint later refuses for another reason. The
+// write is checked against the card as it was compared (L726 m5): a card that changed since is tried again next pass.
 function doneFromRows(ctx, tell, c, rows, events) {
   if (!rows || typeof rows !== 'object' || Array.isArray(rows) || !Object.keys(rows).length) return true;
+  for (const id of Object.keys(rows).sort()) {
+    const r = rows[id];
+    if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.done_when !== 'string' || !r.done_when.trim()) {
+      tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: row ${short(id)} has no pass test (done_when), so the card's can't be set from its rows`);
+      return false;
+    }
+  }
   const bar = doneBar(rows);
   if (c.doc.done_when === bar) return true;
-  const w = move(ctx.record, 'card', c.id, { done_when: bar }, { kind: 'done_when_from_rows' });
-  if (w.ok) events.push(`done_when ${c.id}`);
+  if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its revision)`); return false; }
+  const w = ctx.record.write({ actor: 'dispatcher', entity: 'card', id: c.id, expectRev: c.rev, doc: { ...c.doc, done_when: bar }, kind: 'done_when_from_rows' });
+  if (w.ok) { events.push(`done_when ${c.id}`); return false; }
+  let now = null;
+  try { now = ctx.record.read('card', c.id); } catch { /* told below as the write's own refusal */ }
+  if (now && !now.corrupt && now.rev !== c.rev) tell(c.id, 'done-when-changed', `card ${c.id}'s pass test was not set from its rows: the card changed; trying again next pass`);
   else tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (${short(w.reason)})`);
   return false;
 }
