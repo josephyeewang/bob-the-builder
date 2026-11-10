@@ -25,7 +25,7 @@ const tmp = () => realpathSync(tempDir('orch-launch-'));
 // The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
 // stand-in table that marks every name confirmed on the test version.
 const N_PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -349,7 +349,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, ownerTaps: '/w/owner-taps', notes, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes, deny: { secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };
