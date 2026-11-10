@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { ROOT_CONFIG_PATH, folderTable, parseConfig, watchNotesPath, watchRulesPath } from './layout.mjs';
 import { parseInstallConfig } from './install.mjs';
-import { jobsFor, plistTexts, checkDaemons, planPlace, planLoad, planUnload } from './daemons.mjs';
+import { jobsFor, plistTexts, checkDaemons, placeSteps, planLoad, planUnload } from './daemons.mjs';
 import { readConfigFile, realIo } from './mac.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkRulesCopy, checkRulesHash, checkWatchAppConfig, checkWatchAppKey, checkWatchRules, planWatchApp, planWatchRules, watchAppKeyPath, watchConfigLine, watchPlist, WATCH_RUN } from './watch-setup.mjs';
@@ -28,6 +28,10 @@ const RAW = {
   runnerConfig: '/tmp/x/review.json', extras: [], watch: { repo: REPO, rulesSha256: HASH, app: APP },
 };
 const sink = () => { const lines = []; return { lines, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }; };
+
+// This world has no install, so `daemons place` refuses on load's own checks (L807 M1; install.test.mjs plants them). The
+// tests of what place writes run its steps after that gate: placeOnly → the steps' texts.
+const placeOnly = (w, jobs) => { const p = placeSteps(w.mac, w.cfg, jobs); assert.deepEqual(p.problems, []); for (const o of p.ops) o.run(); return p.ops.map((o) => o.text).join('\n'); };
 
 function world({ raw = RAW, as = 0 } = {}) {
   const mac = fakeMac({ euid: 0 });
@@ -155,7 +159,7 @@ test('daemons: the watch-only job is a fourth job only with a watch entry; place
   const { watch, ...noWatch } = RAW;
   assert.deepEqual(jobsFor(parseInstallConfig(noWatch)), ['review-updater', 'review-account', 'review-runner']);
   const texts = plistTexts(w.mac, w.cfg).plists; assert.ok(texts['watch-only']);
-  const place = planPlace(w.mac, w.cfg); assert.deepEqual(place.problems, []);
+  const place = placeSteps(w.mac, w.cfg); assert.deepEqual(place.problems, []);
   assert.equal(place.ops.filter((o) => /watch-only\.plist/.test(o.text)).length, 1);
   // PLANT: the watch job's file changed by hand → the "exactly the built job file" item for it FAILS.
   for (const o of place.ops) o.run();
@@ -230,14 +234,15 @@ test('PLANT watch-rules: the rules file is REQUIRED and must be a full path — 
 
 test('daemons place --only <job>: places exactly that job; an unknown name is refused before anything runs; without --only all four, as before', () => {
   const w = world();
-  const one = w.run(['daemons', 'place', '--only', 'watch-only']); assert.equal(one.code, 0, one.text);
-  assert.match(one.text, /watch-only\.plist/); assert.doesNotMatch(one.text, /review-runner\.plist|review-updater\.plist|review-account\.plist/);
+  const gated = w.run(['daemons', 'place', '--only', 'watch-only']); assert.equal(gated.code, 1, gated.text); assert.match(gated.text, /the install is not there yet/);
+  const one = placeOnly(w, ['watch-only']);
+  assert.match(one, /watch-only\.plist/); assert.doesNotMatch(one, /review-runner\.plist|review-updater\.plist|review-account\.plist/);
   const placed = (job) => { try { statSync(w.mac.at(`/Library/LaunchDaemons/${RAW.label}.${job}.plist`)); return true; } catch { return false; } };
   assert.deepEqual(jobsFor(w.cfg).filter(placed), ['watch-only']);
   for (const name of ['nope', 'review', '../x', '']) { const x = w.run(['daemons', 'place', '--only', name]); assert.equal(x.code, 2, name); assert.match(x.text, /--only names no job of this config/); }
   const noWatch = { ...RAW }; delete noWatch.watch;
   const nw = world({ raw: noWatch }); const y = nw.run(['daemons', 'place', '--only', 'watch-only']); assert.equal(y.code, 2); assert.match(y.text, /the jobs are review-updater, review-account, review-runner/);
-  const all = w.run(['daemons', 'place']); assert.equal(all.code, 0, all.text);
+  placeOnly(w);
   assert.deepEqual(jobsFor(w.cfg).filter(placed), jobsFor(w.cfg));
   assert.throws(() => parseArgs(['daemons', 'reload-account', '--only', 'watch-only']), /--only is only for/);
   assert.throws(() => parseArgs(['check', '--only', 'watch-only']), /--only is only for/);
@@ -245,13 +250,13 @@ test('daemons place --only <job>: places exactly that job; an unknown name is re
 
 test('daemons load / list / check --only <job>: only that job is considered (the other jobs\' missing files and not-loaded state are not reported)', () => {
   const w = world();
-  assert.equal(w.run(['daemons', 'place', '--only', 'watch-only']).code, 0);
+  placeOnly(w, ['watch-only']);
   assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);
   const ps = (jobs) => planLoad(w.mac, w.cfg, jobs).problems.join('\n');
   assert.doesNotMatch(ps(['watch-only']), /review-runner|review-updater|review-account/);   // its own problem here is only that no install exists
   assert.match(ps(undefined), /review-runner\.plist is not there/);                          // all jobs, as before
   const rep = checkDaemons(w.mac, w.cfg, ['watch-only']); assert.deepEqual(rep.map((r) => /watch-only/.test(r.what)), rep.map(() => true));
-  assert.equal(checkDaemons(w.mac, w.cfg).length, 11);   // two of them say the two jobs with a user have their log files
+  assert.equal(checkDaemons(w.mac, w.cfg).length, 12);   // two of them say the two jobs with a user have their log files; one is the half-written file row (r1 m1)
   const l = w.run(['daemons', 'list', '--only', 'watch-only']); assert.equal(l.code, 0, l.text); assert.equal(l.text.trim().split('\n').length, 1);
   assert.equal(planUnload(w.mac, w.cfg, ['watch-only']).problems.length, 0);
 });
@@ -274,8 +279,8 @@ test('R6 M-1 / L173 the config may name only the repository (prove-token needs j
   const w = world({ raw: { ...RAW, watch: { repo: REPO } } }); const base = world({ raw: rawNo });
   assert.deepEqual(jobsFor(w.cfg), ['review-updater', 'review-account', 'review-runner']);                                   // R6A
   const t = plistTexts(w.mac, w.cfg); assert.equal(t.plists['watch-only'], undefined); assert.deepEqual(t.problems, []);
-  const place = w.run(['daemons', 'place']); assert.equal(place.code, 0, place.text);                                       // R6B
-  assert.doesNotMatch(place.text, /watch-only|undefined/);
+  const place = placeOnly(w);                                                                                                // R6B
+  assert.doesNotMatch(place, /watch-only|undefined/);
   const placed = (job) => { try { statSync(w.mac.at(`/Library/LaunchDaemons/${RAW.label}.${job}.plist`)); return true; } catch { return false; } };
   assert.deepEqual(['review-updater', 'review-account', 'review-runner', 'watch-only'].filter(placed), ['review-updater', 'review-account', 'review-runner']);
   assert.equal(planLoad(w.mac, w.cfg).problems.some((x) => /watch|rules/.test(x)), false);                                   // R6C: review jobs are not held up by the watch rules
@@ -354,7 +359,7 @@ import { mkdirSync, readdirSync } from 'node:fs';
 test('L181 m-A: the config loses its fingerprint (or its watch entry) while the hourly job is loaded: unload, list and check still see it', () => {
   const w = world({});
   assert.equal(w.run(['watch-rules', '--rules-source', w.src]).code, 0);
-  assert.equal(w.run(['daemons', 'place']).code, 0);
+  placeOnly(w);
   const wl = `${RAW.label}.watch-only`;
   w.mac.loaded.set(wl, { state: 'running', pid: 4100, ageS: 5, lastExit: '0' });
   for (const raw of [{ ...RAW, watch: { repo: REPO } }, (() => { const r = { ...RAW }; delete r.watch; return r; })()]) {
