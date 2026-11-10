@@ -505,6 +505,9 @@ test('L65: the config names every path as a full path', () => {
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
+  // L913 (a): machineWide is claude's fixed file only, refused at load rather than review by review at check 10.
+  writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide: '/etc/claude/managed-settings.json' }));
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file$/);
 });
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {

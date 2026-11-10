@@ -9,6 +9,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { writeStatus } from './runner-files.mjs';
+import { checkRunnerConfig } from './runner-main.mjs';
 
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
@@ -98,5 +99,27 @@ test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to
     writeFileSync(join(outbox, 'report-1.md'), 'x');
     const ok = ln(join(outbox, 'report-1.md'), join(outbox, 'report-2.md'));
     assert.equal(ok.status, 0, `control: a link inside the outbox failed: ${ok.stderr}`);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L916 (#423 M2): a worker launch built from the config\'s real snapshot placement passes the render\'s wall; the old placement is refused at load', () => {
+  const d = realpathSync(tempDir('orch-rl-'));
+  try {
+    for (const f of ['requests', 'runner', 'snapshots']) mkdirSync(join(d, f));
+    const deny = { record: '/w/record', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/w/keys', secrets: ['/w/secrets'], proposals: ['/w/proposals'], otherCopies: ['/w/copy2'] };
+    const cfg = (snapshot) => ({ installRoot: '/i', requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c',
+      home: '/home', path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/w/record', recordUid: 502, claimMs: 1,
+      products: { p1: { repo: 'o/p', mirror: '/w/mirror.git', render: { paths: { ...PATHS, deny, snapshot } } } } });
+    // As runner-main places it: the config is taken, and the launch it renders, through the real renderer and check, passes.
+    const c = checkRunnerConfig(cfg(join(d, 'snapshots', 'rules-p1.json')));
+    const launchFrom = (conf) => walledLaunchSettings(input('editing', conf.workerRunner, { paths: { ...PATHS, ...conf.products.p1.render.paths } }));
+    const r = launchFrom(c);
+    assert.equal(r.ok, true, r.reason);
+    assert.ok(r.settings[S.sandbox][S.filesystem][S.denyRead].includes(join(d, 'runner')), 'the runner folder stays walled');
+    // The old placement, the runner's own folder: refused at load, and (the bug it fixes) the render would refuse every launch.
+    const old = join(d, 'runner', 'rules-p1.json');
+    assert.throws(() => checkRunnerConfig(cfg(old)), /render\.paths\.snapshot must be a file in a folder of its own, apart from/);
+    const was = launchFrom({ workerRunner: c.workerRunner, products: { p1: { render: { paths: { ...c.products.p1.render.paths, snapshot: old } } } } });
+    assert.equal(was.ok, false); assert.match(was.reason, /the worker runner's folders must be apart from the session's own folders/);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

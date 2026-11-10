@@ -166,14 +166,14 @@ test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, 
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
-    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'runner', 'rules-p1.json') } } },
+    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } },
       p2: { repo: 'o/p2', mirror: join(d, 'mirror2'), render: { paths: { deny: DENY(d) } } } } });
     const kept = []; const logs = [];
     const fresh = (path, r) => { const k = { path, r, stopped: false }; kept.push(k); return { stop: () => { k.stopped = true; }, error: () => (path.endsWith('p1.json') ? Object.assign(new Error('x'), { code: 'ENOSPC' }) : null) }; };
     let during;
     const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { during = kept.map((k) => k.stopped); } });
     assert.equal(code, 0, logs.join('\n'));
-    assert.deepEqual(kept.map((k) => [k.path, k.r]), [[join(d, 'runner', 'rules-p1.json'), rules]], 'only a product with rules and a snapshot');
+    assert.deepEqual(kept.map((k) => [k.path, k.r]), [[join(d, 'snapshots', 'rules-p1.json'), rules]], 'only a product with rules and a snapshot');
     assert.deepEqual(during, [false], 'kept fresh while the loop runs'); assert.equal(kept[0].stopped, true, 'stopped at the end');
     assert.ok(logs.some((l) => /p1's rules snapshot stopped being kept fresh \(ENOSPC\)/.test(l)), logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -216,7 +216,7 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
-    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'runner', 'rules-p1.json') } } } } });
+    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
     const logs = []; let r;
     const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
     const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh,

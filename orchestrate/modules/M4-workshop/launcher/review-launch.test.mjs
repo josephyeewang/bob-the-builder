@@ -225,6 +225,9 @@ test('M-3 checks 9 and 10: no key in the session\'s environment; the machine-wid
   assert.match((await port({ ...w.x, machineWide: gone, managedReaders: { ...w.x.managedReaders, claudeFile: gone } }, 10)).reason, /missing or not JSON/);
   // Any machineWide but the fixed file refuses (L909).
   assert.match((await port({ ...w.x, machineWide: gone }, 10)).reason, /^machine-wide settings must be .*managed\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
+  // With no readers handed in, port 10 checks against claude's own fixed file: refused before anything is read, on any Mac.
+  const { managedReaders: _r, ...bare } = w.x;
+  assert.match((await port({ ...bare, machineWide: gone }, 10)).reason, /^machine-wide settings must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
   writeFileSync(w.x.machineWide, JSON.stringify({ [S.hooks]: {} }));
   assert.match((await port(w.x, 10)).reason, /not in force/);
 });

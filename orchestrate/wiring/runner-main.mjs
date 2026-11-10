@@ -21,14 +21,15 @@
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
-// lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
+// lock is broken). The wall (step 2) denies that folder and the requests folder to every session, so each product's rules
+// snapshot (render.paths.snapshot), which its sessions' hooks read, sits in a folder of its own apart from both (L916).
 // Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
 // read back, or a start the loop must refuse). It does not start when a copies or outbox root is missing or reached
 // through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
 import { mkdirSync, readdirSync, realpathSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
@@ -43,6 +44,7 @@ import { spawn as childSpawn } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
@@ -90,16 +92,30 @@ export function checkRunnerConfig(c) {
     fail(`machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   }
   const own = dirname(c.statusFile);
-  if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
-  // Each product's rules snapshot is the runner's own file, in its own folder outside every copy, one per product
-  // (#369 m4; as review-runner-main.mjs keeps its snapshot inside its root): the sessions' hooks read it.
+  if (!apart(own, c.requestsDir)) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
+  // The runner's two folders are walled off from every worker session (render-settings runnerWallDirs), and render
+  // refuses a launch whose own folders are not apart from them: so a product's hooks, notes, node or Bob inside either
+  // is refused here, at load, rather than every launch later (L916 self-review m1).
+  for (const [name, p] of Object.entries(c.products)) {
+    for (const k of RENDER_PATHS) {
+      const v = p.render.paths[k];
+      if (v !== undefined && (!apart(v, c.requestsDir) || !apart(v, own))) fail(`product ${name}: render.paths.${k} must be apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
+    }
+  }
+  // Each product's rules snapshot is the runner's to write, one per product: the sessions' hooks read it. It sits in a
+  // folder of its own, apart from both runner folders (L916, #423 M2): a snapshot in either would refuse every launch.
+  // That also keeps it off the runner's own files there (#369 r1 m4), which check 8 would rename it over. And nowhere a
+  // worker session can write (#369 m4; L916 self-review M1): not in the copies, the outboxes, the sessions' home or a
+  // product's mirror, where a worker could rewrite the rules its own hooks enforce. A missing folder holds the product,
+  // said in the log (keepSnapshots).
+  const writable = [['the copies', c.copiesRoot], ['the outboxes', c.outboxRoot], ["the sessions' home", c.home],
+    ...Object.entries(c.products).map(([n, q]) => [`product ${n}'s mirror`, q.mirror])];
   const snaps = new Set();
   for (const [name, p] of Object.entries(c.products)) {
     const s = p.render.paths.snapshot;
     if (s === undefined) continue;
-    if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
-    // Not one of the runner's own files there (#369 r1 m4): check 8 would rename the snapshot over it.
-    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => foldKey(n) === foldKey(basename(s)))) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
+    if (!fullPath(s) || dirname(s) === '/' || !apart(s, c.requestsDir) || !apart(s, own)) fail(`product ${name}: render.paths.snapshot must be a file in a folder of its own, apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
+    for (const [what, dir] of writable) if (!apart(s, dir)) fail(`product ${name}: render.paths.snapshot must not sit in ${what} (${dir}), where a worker session can write it`);
     if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
     snaps.add(foldKey(s));
   }

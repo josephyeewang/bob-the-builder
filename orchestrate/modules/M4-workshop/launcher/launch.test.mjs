@@ -514,6 +514,7 @@ test('L913 m1: with configDirs, check 10 reads the remote cache in exactly those
   w.files[CACHE] = JSON.stringify({ [S.hooks]: {} });   // under home: not this session's, not read
   assert.deepEqual(w.run({ configDirs: () => ['/s/cfg'] }), { ok: true });
   assert.equal(w.read.includes(CACHE), false);
+  assert.equal(w.read.includes(CACHE_B), false);
   for (const configDirs of [() => [undefined], () => ['rel'], () => [], () => { throw new Error('x'); }]) {
     assert.deepEqual(w.run({ configDirs }), { ok: false, reason: 'the remote settings cache can\'t be found (no home folder)' });
   }
