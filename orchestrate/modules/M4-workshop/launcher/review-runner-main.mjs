@@ -85,7 +85,7 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
-import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
+import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -460,6 +460,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const listed = budget.rec.list('product');
       return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
     },
+    // The Dispatcher's own read-only cap for a product (L735 M1), which the runner keeps for plan reviewers across every
+    // product. With no budget module it throws, and no plan reviewer starts.
+    planReviewCap: (product) => need(budget.rules, KEYS.readonlyPerSession, { product }),
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });

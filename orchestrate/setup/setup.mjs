@@ -18,10 +18,10 @@
 //   safe-directory  [--dry-run]  the owner's git trusts exactly the mirror folder  (root, runs git as the owner)
 //   check-safe-directory (read only; sudo to look)
 //   token  [--dry-run]  save the watch-only token (typed hidden, never shown)  (root)
-//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; then a note to check the token page by eye  (sudo: the token is read as orchestrate)
+//   prove-token  the repository is the config's watch.repo (private, not archived); read works, a no-op pull-request write is refused as "this token may not"; each kind of read the watch job makes works (the check runs with the watcher App's token, minted as orchestrate); then a note to check the token page by eye  (sudo: the token is read as orchestrate)
 //   watch-rules --rules-source <full path> [--dry-run]  put the watch-only week's rules in place (the file's hash must match the config)  (root)
 //   watch-rules --print-config-line --repo <owner/name> --rules-source <full path>  prints the config line (repo + fingerprint of that file)  (read only)
-//   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value  (read only; sudo to look)
+//   check-watch-rules  the rules copy is root's, 0644, and hashes to the config's value; the watcher App's key FILE is orchestrate's 0600 (the file only: it asks GitHub nothing; prove-token proves the App's read)  (read only; sudo to look)
 //   check-token  the token file's owner, mode and size (never its text)  (read only; sudo to look)
 //   watch-app --app-id <id> --app-installation <id> --app-key-name <name> [--rules-sha256 <hex>] [--dry-run]  name the watcher App in root's config (the key must already be in the keys folder); every other entry is kept  (root)
 //
@@ -42,7 +42,7 @@ import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
 import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
-import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, watchConfigLine } from './watch-setup.mjs';
+import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
 import { proveToken, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken } from './extras.mjs';
 
 // What prove-token did NOT prove, said after a PASS (L173 n1): only that the token cannot write pull requests.
@@ -50,7 +50,7 @@ const TOKEN_PAGE_NOTE = [
   'What this proved: the token cannot write pull requests. It did not prove the token cannot change code, or that it reaches only one repository.',
   "Now check that by eye, on GitHub's token page (github.com → your picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → this token):",
   '  - Repository access: only the one repository named in the config;',
-  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Checks = Read-only, Commit statuses = Read-only (the watch job reads these two to judge a merge), and nothing else.',
+  '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
 const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
@@ -99,10 +99,11 @@ export function parseArgs(argv) {
 }
 
 function report(res, out) {
-  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length;
+  // NOT TRIED is not a pass: it counts as a FAIL (L707 c1).
+  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.warn ? `WARNING  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length; const warned = res.filter((r) => r.warn).length;
   // A check that could not look is not a pass: with any NEEDS ROOT line the summary says so and the exit code is not 0.
-  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : `all ${res.length} PASS`}`);
+  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : warned ? `${res.length - warned} PASS and ${warned} WARNING (not a failure, but something does not work until it is put right)` : `all ${res.length} PASS`}`);
   return bad ? 1 : skipped ? 3 : 0;
 }
 
@@ -153,7 +154,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
   if (o.cmd === 'check-watch-rules') return report(checkWatchRules(io, cfg), out);
   if (o.cmd === 'watch-rules' && o.printLine) { const r = watchConfigLine(cfg, { repo: o.repo, source: o.rulesSource, readSource: (p) => io.readRules(p) }); if (r.problem) { err(`PROBLEM  ${r.problem}`); return 1; } out(r.line); return 0; }
-  if (o.cmd === 'prove-token') return proveToken(io, cfg).then((res) => { const code = report(res, out); if (code === 0) for (const l of TOKEN_PAGE_NOTE) out(l); return code; });
+  if (o.cmd === 'prove-token') return proveToken(io, cfg, { proveApp: (on) => proveWatchAppChecks(io, cfg, on) }).then((res) => { const code = report(res, out); if (code === 0) for (const l of TOKEN_PAGE_NOTE) out(l); return code; });
   if (o.cmd === 'daemons' && o.sub === 'check') return report(checkDaemons(io, cfg, o.jobs), out);
   if (o.cmd === 'daemons' && o.sub === 'list') {
     for (const j of list(io, cfg, o.jobs)) out(j.loaded ? `${j.label}: loaded, ${j.state}, last exit ${j.lastExit}` : `${j.label}: not loaded${j.error ? ` (${j.error})` : ''}`);
@@ -192,7 +193,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);
-  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS.`);
+  for (const r of after.filter((x) => x.warn)) out(`WARNING  ${r.what} — ${r.why}`);   // a WARNING is never summed up as a plain pass (L737 M1)
+  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS${after.some((x) => x.warn) ? ', with the WARNING above' : ''}.`);
   return bad.length ? 1 : 0;
 }
 

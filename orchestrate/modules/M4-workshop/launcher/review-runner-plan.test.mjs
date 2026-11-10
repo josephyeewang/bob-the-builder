@@ -5,13 +5,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, lstatSync, symlinkSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, symlinkSync, mkdirSync, readFileSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { runnerPass, needsRole, readRequest, packagePlan, planAnswerFor, readPlanEnded, RETRY_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, PLAN_FILE_NAME, PLAN_ANSWER_NAME } from './review-runner.mjs';
+import { runnerPass, needsRole, readRequest, packagePlan, planAnswerFor, readPlanEnded, PLAN_REQUEST_ID, RETRY_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, PLAN_FILE_NAME, PLAN_ANSWER_NAME } from './review-runner.mjs';
 import { planFingerprint } from '../../../shared/plan-fingerprint.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
-import { reviewPorts as dispatcherPorts } from '../../M11-dispatcher/review-requests.mjs';
+import { reviewPorts as dispatcherPorts, writePlanReviewRequest } from '../../M11-dispatcher/review-requests.mjs';
 import { recordPlanFile } from './review-runner-main.mjs';
 
 const ME = process.getuid();
@@ -61,11 +61,14 @@ function world(over = {}) {
     accountInUse: () => 'a',
     handedIn: () => ({ ok: false, none: true }),
     verdictTaken: () => ({ ok: true }),
+    planReviewCap: () => 4,
     ...over,
   };
   let q = 0;
   const ask = (body = {}) => {
-    const b = { card: 'C-7', fingerprint: fingerprintOf('C-7', cards.get('C-7') ?? card()), role: 'plan_reviewer', request_id: `pq-${++q}`, ...body };
+    // The Dispatcher's id for the card's plan (L726 m1), unless the test names another.
+    const b0 = { card: 'C-7', fingerprint: fingerprintOf('C-7', cards.get('C-7') ?? card()), role: 'plan_reviewer', ...body };
+    const b = { ...b0, request_id: Object.hasOwn(body, 'request_id') ? body.request_id : (typeof b0.card === 'string' && typeof b0.fingerprint === 'string' ? PLAN_REQUEST_ID(b0.card, b0.fingerprint) : `pq-${++q}`) };
     for (const k of Object.keys(b)) if (b[k] === undefined) delete b[k];
     writeFileSync(join(root, 'requests', `${b.request_id}.json`), JSON.stringify(b), { mode: 0o644 });
     return b;
@@ -148,15 +151,29 @@ test('L703 planted: a plan request is refused for each check, and nothing starts
   }
 });
 
+// The runner's memory of request ids is kept short (KEEP_SEEN); this stands in for one that has let an id go, so
+// the checks behind it are reached.
+const forgetSeen = (w) => {
+  const f = join(w.root, 'state.json');
+  const st = JSON.parse(readFileSync(f, 'utf8'));
+  writeFileSync(f, JSON.stringify({ ...st, seen: [] }));
+};
+
 test('L703: one plan reviewer per plan; a new plan gets a new one', async () => {
   const w = await ready();
   w.ask();
   await runnerPass(w.ctx);
+  // The same plan asked again has the same id (L726 m1), so it is refused as seen; and were it forgotten, the runner
+  // still sees the reviewer running, and then the launch.
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /request id [0-9a-f]{64} was seen before/);
+  forgetSeen(w);
   w.ask();
   refusedFor(await runnerPass(w.ctx), /a plan reviewer is already running for card C-7's plan/);
   w.end('P-1');
   w.answer('P-1', 'PASS\n');
   await runnerPass(w.ctx);
+  forgetSeen(w);
   w.ask();
   refusedFor(await runnerPass(w.ctx), /a plan reviewer was already started for card C-7's plan .*; one per plan/);
   assert.equal(w.starts.length, 1);
@@ -225,7 +242,8 @@ test('L703: a plan reviewer whose claude never ran is tried again by the runner 
   assert.equal(w.starts.length, 1);
   assert.deepEqual(quiet.refused, [], 'a try not yet due is passed over quietly, not refused each pass');
   // A request that comes again before then starts nothing either.
-  w.ask({ request_id: b.request_id + '-again' });
+  forgetSeen(w);
+  w.ask();
   refusedFor(await runnerPass(w.ctx), /the last start of a plan reviewer for card C-7 failed less than 15 minutes ago/);
   assert.equal(w.starts.length, 1);
   w.clock.t += 1;
@@ -371,4 +389,201 @@ test('L703: the real planFile port finds the plan by the Record\'s note of what 
   assert.deepEqual(find(), { ok: true, path: join(outboxRoot, 'lead', 'L-1', 'plan-6.json') });
   assert.match(find('nope').reason, /names no plan sha256/);
   assert.match(find(sha(PLAN), OTHER).reason, /not the Record owner's alone/);
+});
+
+// L726 m1: a request anyone could write, with the right card and plan but not the Dispatcher's id, can't take the plan's
+// one start; it is refused and kept as one hold for its cause, and the Dispatcher's own request then starts.
+test('L726 m1 planted: a plan request with another id is refused, and the Dispatcher\'s request still starts', async () => {
+  const w = await ready();
+  const forged = w.ask({ request_id: 'forged-1' });
+  const r1 = await runnerPass(w.ctx);
+  refusedFor(r1, /a plan review request must have the id the Dispatcher gives card C-7's plan; forged-1 is not it/);
+  assert.deepEqual(r1.started, []);
+  assert.deepEqual(r1.alerts, [], 'anyone may write a request: no alert a file');
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.equal(st.unread_requests['plan request with another id'].file, 'forged-1.json');
+  const real = w.ask();
+  assert.equal(real.request_id, PLAN_REQUEST_ID('C-7', forged.fingerprint));
+  const r2 = await runnerPass(w.ctx);
+  assert.deepEqual(r2.started.map((s) => s.session_id), ['P-1']);
+  // Its status names the request, so the Dispatcher counts the one it asked for once.
+  assert.equal(w.status().running[0].request_id, real.request_id);
+  // The answer is read by the Dispatcher's id.
+  w.answer('P-1', 'PASS\n');
+  w.end('P-1');
+  await runnerPass(w.ctx);
+  assert.deepEqual(await w.read(real), { ok: true, answer: 'PASS\n' });
+});
+
+// L726 m2: once a request is for the card's plan as it is now, a refusal that ends it is told once, with its cause.
+test('L726 m2 planted: a refused request for the card\'s real plan is told once, with its cause; a made-up one is not told', async () => {
+  // A start that gives a process that is not claude ends the request: told, with that cause.
+  const w = await ready({ start: async () => ({ ok: true, pid: 1 }) });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  const told = r.alerts.filter((a) => /^plan-refused-/.test(a.id));
+  assert.equal(told.length, 1, JSON.stringify(r.alerts));
+  assert.match(told[0].text, /did not start a plan reviewer for card C-7 \(plan [0-9a-f]{12}\): the plan reviewer start gave process 1, which is not claude/);
+  // A card not in the Record, or a plan the card does not have: refused, never told (anyone may write one).
+  for (const body of [{ card: 'C-99' }, { fingerprint: 'a'.repeat(64) }]) {
+    const b = w.ask(body);
+    const x = await runnerPass(w.ctx);
+    assert.ok(x.refused.some((y) => y.request_id === b.request_id), JSON.stringify(body));
+    assert.deepEqual(x.alerts, [], JSON.stringify(body));
+  }
+});
+
+// L735 m2-r2: the plan's own reviewer running, or already started, is no refusal of the Dispatcher's request. A replay of
+// the plan's id is refused quietly, and a flood of other ids can't push the Dispatcher's out of what the runner has seen.
+test('L735 m2-r2 planted: a replay of the plan\'s id while its reviewer runs, or once it answered, is refused but never told', async () => {
+  const w = await ready();
+  const b = w.ask();
+  await runnerPass(w.ctx);
+  assert.equal(w.starts.length, 1);
+  const quiet = async (re) => {
+    w.ask();
+    const r = await runnerPass(w.ctx);
+    refusedFor(r, re);
+    assert.deepEqual(r.alerts.filter((a) => /^plan-refused-/.test(a.id)), [], JSON.stringify(r.alerts));
+  };
+  forgetSeen(w);
+  await quiet(/a plan reviewer is already running for card C-7's plan/);
+  w.answer('P-1', 'PASS\n');
+  w.end('P-1');
+  await runnerPass(w.ctx);
+  forgetSeen(w);
+  await quiet(/a plan reviewer was already started for card C-7's plan [0-9a-f]{12}; one per plan/);
+  assert.equal(w.starts.length, 1);
+  assert.deepEqual(await w.read(b), { ok: true, answer: 'PASS\n' });
+  // Plan requests under other ids are not remembered as seen, so the plan's own id stays seen past any number of them.
+  for (let i = 0; i < 510; i++) w.ask({ request_id: `junk-${i}` });
+  await runnerPass(w.ctx);
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.ok(st.seen.includes(b.request_id), 'the plan\'s id is still seen');
+  assert.ok(!st.seen.some((x) => x.startsWith('junk-')), 'no other id is');
+  await quiet(/request id [0-9a-f]+ was seen before/);
+});
+
+// L735 m1-r2: anyone may write the requests folder and work out a plan's request name, so a file already under it counts
+// as asked only when it is the Dispatcher's own, with these very bytes. Any other is said, with its cause, so plan-go
+// takes no cap slot for it and tells it (its `start` hold).
+test('L735 m1-r2 planted: a file put first under the plan\'s request name is said, never taken as asked', async () => {
+  const w = await ready();
+  const d = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
+  const fp = fingerprintOf('C-7', w.cards.get('C-7'));
+  const name = join(w.root, 'requests', `${PLAN_REQUEST_ID('C-7', fp)}.json`);
+  const ask = () => d.startPlanReview({ card: 'C-7', fingerprint: fp, key: `C-7-${fp}` });
+  const mine = ask();
+  assert.equal(mine.ok, true, mine.reason);
+  assert.deepEqual(ask(), { ok: true, session: mine.session }, 'its own request, still waiting: asked');
+  const bytes = readFileSync(name);
+  for (const [junk, re] of [['not json', /it holds another request/], [`${bytes.toString()} `, /it holds another request/], [JSON.stringify({ ...JSON.parse(bytes), request_id: 'other-1' }), /it holds another request/],
+    // The same size, one byte apart.
+    [bytes.toString().replace(/"card":"C-7"/, '"card":"C-8"'), /it holds another request/]]) {
+    unlinkSync(name);
+    writeFileSync(name, junk, { mode: 0o644 });
+    const r = ask();
+    assert.equal(r.ok, false, junk);
+    assert.match(r.reason, /another file stands under this plan's request name, so the request was not written/);
+    assert.match(r.reason, re);
+  }
+  unlinkSync(name);
+  const elsewhere = join(w.base, 'elsewhere.json');
+  writeFileSync(elsewhere, bytes);
+  symlinkSync(elsewhere, name);
+  assert.match(ask().reason, /another file stands under this plan's request name, .*can't be opened \(ELOOP\)/);
+  unlinkSync(name);
+  mkdirSync(name);
+  assert.match(ask().reason, /it is not a plain file/);
+  rmdirSync(name);
+  assert.equal(ask().ok, true, 'once it is gone, the Dispatcher asks');
+  // The same bytes, but not the Dispatcher's own file (as the writer sees it here, under another uid): said.
+  const other = writePlanReviewRequest({ dir: join(w.root, 'requests'), card: 'C-7', fingerprint: fp, key: `C-7-${fp}`, uid: OTHER });
+  assert.match(other.reason, new RegExp(`it is uid ${ME}'s, not the Dispatcher's`));
+});
+
+// L735 M1: the runner keeps the plan reviewers' cap itself, across every product's requests. Two products' requests
+// reach the one shared runner (each as its Dispatcher's gate would let it through; the gates are not run here): with
+// 3 running and a cap of 4, the runner starts exactly one; the other waits as the runner's own, never counted as a failed start, and
+// starts once one ends. A request no Dispatcher wrote is held by the same cap.
+test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 1 starts, the other waits and starts when one ends', async () => {
+  const caps = [];
+  const w = await ready({ planReviewCap: (product) => { caps.push(product); return 4; } });
+  const two = (id, product) => { w.cards.set(id, card({ product })); return fingerprintOf(id, w.cards.get(id)); };
+  // Three running already, from both products.
+  for (const [id, product] of [['C-10', 'app'], ['C-11', 'p2'], ['C-12', 'p2']]) w.ask({ card: id, fingerprint: two(id, product) });
+  await runnerPass(w.ctx);
+  assert.equal(w.starts.length, 3);
+  // Each product's Dispatcher, through its own ports, asks for one more: both are under the cap as each one counts.
+  const a = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
+  const bp = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
+  const fa = two('C-3', 'app');
+  const fb = two('C-4', 'p2');
+  assert.equal(a.startPlanReview({ card: 'C-3', fingerprint: fa, key: `C-3-${fa}` }).ok, true);
+  assert.equal(bp.startPlanReview({ card: 'C-4', fingerprint: fb, key: `C-4-${fb}` }).ok, true);
+  const r = await runnerPass(w.ctx);
+  assert.equal(w.starts.length, 4, 'exactly one more starts');
+  assert.equal(r.started.length, 1);
+  const waiting = r.started[0].card === 'C-3' ? 'C-4' : 'C-3';
+  refusedFor(r, new RegExp(`4 plan reviewers already run \\(cap 4\\); card ${waiting}'s waits`));
+  assert.ok(caps.includes('app') && caps.includes('p2'), 'the cap is the card\'s own product\'s');
+  // It waits, pass after pass, never told and never given up on.
+  for (let i = 0; i < MAX_FAILED_STARTS + 2; i++) {
+    w.clock.t += RETRY_MS;
+    const x = await runnerPass(w.ctx);
+    assert.deepEqual(x.started, []);
+    assert.deepEqual(x.alerts, [], JSON.stringify(x.alerts));
+  }
+  // A request no Dispatcher wrote, under a plan's own id, is held by the same cap.
+  w.ask({ card: 'C-5', fingerprint: two('C-5', 'app') });
+  assert.deepEqual((await runnerPass(w.ctx)).started, []);
+  assert.equal(w.starts.length, 4);
+  // One ends: the one that waited longest starts, and only it.
+  w.end('P-1');
+  const y = await runnerPass(w.ctx);
+  assert.deepEqual(y.started.map((s) => s.card), [waiting]);
+  assert.equal(w.starts.length, 5);
+});
+
+// #294 self-review m1: a start the runner can't follow (it gave a process that is not claude) still holds its cap slot
+// for the rest of the pass, so a second request in the same pass waits rather than passing the cap by one.
+test('L735 M1 planted: a start the runner can\'t follow holds its cap slot for the rest of the pass', async () => {
+  let n = 0;
+  const w = await ready({ planReviewCap: () => 1, start: async () => { n += 1; return { ok: true, pid: 1 }; } });
+  w.cards.set('C-3', card());
+  w.ask();
+  w.ask({ card: 'C-3', fingerprint: fingerprintOf('C-3', w.cards.get('C-3')) });
+  const r = await runnerPass(w.ctx);
+  assert.equal(n, 1, 'one start only: the untracked one holds the one slot');
+  refusedFor(r, /1 plan reviewers already run \(cap 1\)/);
+});
+
+test('L735 M1: a cap that can\'t be read starts no plan reviewer, and is told once the runner gives up', async () => {
+  const w = await ready({ planReviewCap: () => { throw new Error('no budget module'); } });
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /the plan reviewers' cap could not be read \(no budget module\)/);
+  let told = [];
+  for (let i = 0; i < MAX_FAILED_STARTS + 1; i++) { w.clock.t += RETRY_MS; told = [...told, ...(await runnerPass(w.ctx)).alerts]; }
+  assert.ok(told.some((a) => /the plan reviewers' cap could not be read/.test(a.text)), JSON.stringify(told));
+  assert.deepEqual(w.starts, []);
+});
+
+// L726 m3: a map of Mac users from before the plan reviewer blocks plan reviews alone; the runner tries again itself
+// and tells the cause when it gives up, and setting it up lets the plan's reviewer start.
+test('L726 m3 planted: a map without plan_reviewer refuses plan starts with the cause; the runner\'s pass still runs', async () => {
+  const { plan_reviewer: _p, ...noPlan } = UIDS;
+  const w = await ready({ uids: noPlan });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  assert.equal(r.ok, true, r.error);
+  refusedFor(r, /the plan reviewer could not be started: the review user is not set up for plan reviews: the map of role to Mac user id leaves out plan_reviewer/);
+  assert.deepEqual(w.starts, []);
+  let told = [];
+  for (let i = 0; i < MAX_FAILED_STARTS + 1; i++) { w.clock.t += RETRY_MS; told = [...told, ...(await runnerPass(w.ctx)).alerts]; }
+  assert.ok(told.some((a) => /after \d+ tries \(last: the review user is not set up for plan reviews/.test(a.text)), JSON.stringify(told));
+  assert.deepEqual(w.starts, []);
+  const other = await ready({ uids: { ...UIDS, plan_reviewer: OTHER } });
+  other.ask();
+  refusedFor(await runnerPass(other.ctx), /the plan reviewer's Mac user \(uid \d+\) is not the review user/);
+  assert.deepEqual(other.starts, []);
 });

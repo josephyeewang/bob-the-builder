@@ -9,6 +9,11 @@ import { dirname, join } from 'node:path';
 import { DEFAULT_PROPOSALS_PARENT, ROOT_CONFIG_PATH, folderTable, mirrorPath, ownerAnswerPath, ownerTapsPath, parseConfig, proposalRows, proposalsParentOf } from './layout.mjs';
 import { readSecretFromTty, realIo, writeNewFile } from './mac.mjs';
 import { aclEntries, apply, check } from './users-folders.mjs';
+import { READ_TROUBLE, WATCH_READS } from '../modules/M6-merge-gate/watch-only.mjs';
+import { generateKeyPairSync } from 'node:crypto';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { installPaths } from './install.mjs';
+import { WATCH_RUN, watchAppKeyPath } from './watch-setup.mjs';
 import { proposalsProblem, checkProposals, checkSafeDirectory, checkToken, planProposals, planSafeDirectory, planToken, tokenPath, tokenProblem } from './extras.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
@@ -351,21 +356,102 @@ test('REAL: git config --global --get-all of an unset key exits 1 (what planSafe
 
 // ───────────────────────────────────────────── prove-token (L99 (3))
 
-const RAWW = { ...RAW, watch: { repo: 'org/repo' } };
+const APP = { id: '5635934', installation: '179103836', keyFile: 'watch-app-key' };
+const RAWW = { ...RAW, watch: { repo: 'org/repo', app: APP } };
+const RAWW_NO_APP = { ...RAW, watch: { repo: 'org/repo' } };
 const GH_NO_WRITE = '{"message":"Resource not accessible by personal access token"}';
 /** A stand-in for GitHub that refuses what GitHub refuses: no/wrong bearer → 401; the repo is private; the write answers what `write` says. */
-function github(w, { write = 403, writeText = GH_NO_WRITE, writeRemaining, prs = [{ number: 7, title: 'A title' }], repo = { private: true, archived: false } } = {}) {
+// Main: TOP (a direct commit, no pull request), then MERGED (pull request 7), then its parent. `reads` turns one kind's status.
+const [TOP, MERGED, BEFORE, PRHEAD, TREE] = ['a', 'b', 'c', 'd', 'e'].map((x) => x.repeat(40));
+const NO_READ = '{"message":"Resource not accessible by personal access token"}';
+function jobRead(u, init, reads, jobPulls) {
+  const p = u.pathname.replace('/repos/org/repo', '');
+  if (p === '/graphql') {
+    if (init.method !== 'POST') return { status: 404, text: '' };
+    return reads.threads ? { status: reads.threads, text: NO_READ } : { status: 200, text: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { totalCount: 0, nodes: [] } } } } }) };
+  }
+  if ((init.method ?? 'GET') !== 'GET') return null;
+  const kinds = [
+    ['head', /^\/commits\/main$/, () => ({ sha: TOP })],
+    ['commit', /^\/commits\/[0-9a-f]{40}$/, () => ({ commit: { committer: { date: '2026-11-05T00:00:00Z' } } })],
+    ['gitCommit', /^\/git\/commits\/([0-9a-f]{40})$/, (m) => ({ sha: m[1], tree: { sha: TREE }, parents: m[1] === TOP ? [{ sha: MERGED }] : m[1] === MERGED ? [{ sha: BEFORE }] : [] })],
+    ['gitTree', /^\/git\/trees\/[0-9a-f]{40}$/, () => ({ truncated: false, tree: [] })],
+    ['compare', /^\/compare\/[0-9a-f]{40}\.\.\.[0-9a-f]{40}$/, () => ({ files: [] })],
+    ['rules', /^\/contents\//, () => ({ sha: TREE })],
+    ['commitsByPath', /^\/commits$/, () => (u.searchParams.get('path') === 'orchestrate/policy.yaml' && /^[0-9a-f]{40}$/.test(u.searchParams.get('sha') ?? '') ? [] : null)],
+    ['commitPulls', /^\/commits\/([0-9a-f]{40})\/pulls$/, (m) => (m[1] === MERGED ? jobPulls : [])],
+    ['pull', /^\/pulls\/7$/, () => ({ number: 7, merged: reads.notMerged !== true, head: { sha: PRHEAD } })],
+    ['checks', /^\/commits\/[0-9a-f]{40}\/check-runs$/, () => ({ total_count: 0, check_runs: [] })],
+    ['statuses', /^\/commits\/[0-9a-f]{40}\/status$/, () => ({ total_count: 0, statuses: [] })],
+  ];
+  // reads[key]: a status (403 carries GitHub's "not accessible" words), or { status, text, rateRemaining } as GitHub sent it.
+  for (const [key, shape, answer] of kinds) {
+    const m = shape.exec(p); if (!m) continue;
+    const x = reads[key];
+    if (x && typeof x === 'object') return { status: x.status, text: x.text ?? '', rateRemaining: x.rateRemaining ?? '4999' };
+    return x ? { status: x, text: x === 403 ? NO_READ : '' } : { status: 200, text: JSON.stringify(answer(m)) };
+  }
+  return null;
+}
+function github(w, { write = 403, writeText = GH_NO_WRITE, writeRemaining, prs = [{ number: 7, title: 'A title' }], repo = { private: true, archived: false }, reads = {}, jobPulls = [{ number: 7, merge_commit_sha: MERGED }] } = {}) {
   w.mac.github = (url, init) => {
     if (init.headers.Authorization !== `Bearer ${SECRET}`) return { status: 401, text: '{"message":"Bad credentials"}' };
     const u = new URL(url);
     if (u.host !== 'api.github.com') return { status: 404, text: '' };
     if ((init.method ?? 'GET') === 'GET' && u.pathname === '/repos/org/repo') return { status: 200, text: JSON.stringify(repo) };
     if ((init.method ?? 'GET') === 'GET' && /^\/repos\/org\/repo\/pulls$/.test(u.pathname)) return { status: 200, text: JSON.stringify(prs) };
+    const job = jobRead(u, init, reads, jobPulls); if (job) return job;
     if (init.method === 'PATCH' && /^\/repos\/org\/repo\/pulls\/7$/.test(u.pathname)) { w.patched = JSON.parse(init.body); return { status: write, text: writeText, rateRemaining: writeRemaining }; }
     return { status: 404, text: '' };
   };
 }
-const withToken = (raw = RAWW) => { const w = world({ raw }); w.raw = raw; w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); return w; };
+const withToken = (raw = RAWW) => { const w = world({ raw }); w.raw = raw; w.mac.secretInput = SECRET; assert.equal(w.run(['token']).code, 0); if (raw.watch?.app) withApp(w); return w; };
+
+// ── the watcher App's read of the check runs (L707 M1)
+// The App's key, the installed copy's watch-run.mjs, and a stand-in for `sudo -u orchestrate <node> <watch-run> checks ...`
+// that runs the REAL watch-run.mjs `checks` (this repository's) in a child node, with only fetch stood in for: the real
+// argv setup builds, the real mint (token.mjs, with a key pair made here) and the real read. `w.app` sets what GitHub
+// answers: { mint: status, checks: { status, text, rateRemaining } }. `w.appRuns` keeps who ran what; `w.appSeen` what the
+// child asked GitHub, with which token ('jwt' for the signed mint request).
+const APP_TOKEN = 'ghs_madeUpWatcherInstallationToken0000';
+let keyText = null;
+const appKey = () => (keyText ??= generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }));
+const WATCH_RUN_HERE = fileURLToPath(new URL(`../${WATCH_RUN}`, import.meta.url));
+// Loaded with `node --import` ahead of the real watch-run.mjs, which then runs as the program, the way launchd starts it
+// (no import() here: M2's writeDoc check counts a non-literal one as a way to reach writeDoc).
+const HARNESS = `
+import { readFileSync, appendFileSync } from 'node:fs';
+const sc = JSON.parse(readFileSync(process.env.L707_SCENARIO, 'utf8'));
+globalThis.fetch = async (url, init = {}) => {
+  const path = String(url).replace('https://api.github.com', '');
+  const h = init.headers ?? {}; const auth = h.authorization ?? h.Authorization ?? '';
+  appendFileSync(sc.log, JSON.stringify([init.method ?? 'GET', path, auth.startsWith('Bearer ey') ? 'jwt' : auth]) + '\\n');
+  const json = (status, body) => new Response(JSON.stringify(body), { status });
+  if (init.method === 'POST' && /^\\/app\\/installations\\/\\d+\\/access_tokens$/.test(path)) return sc.mint === 201 ? json(201, { token: sc.token, expires_at: '2026-11-06T13:00:00Z' }) : json(sc.mint, { message: 'Bad credentials ' + sc.token });
+  if (path === '/app') return json(200, { slug: 'jw-orchestrate-watcher' });
+  if (/\\/check-runs\\?/.test(path)) { const c = sc.checks; return c.status === 200 && c.text === undefined ? json(200, { total_count: 0, check_runs: [] }) : new Response(c.text ?? '', { status: c.status, headers: c.rateRemaining ? { 'x-ratelimit-remaining': c.rateRemaining } : {} }); }
+  return json(404, { message: 'Not Found' });
+};
+`;
+function withApp(w) {
+  const P = installPaths(w.cfg);
+  const key = watchAppKeyPath(w.cfg); writeFileSync(w.mac.at(key), appKey(), { mode: 0o600 });
+  const run = w.mac.at(join(P.installRoot, WATCH_RUN)); mkdirSync(dirname(run), { recursive: true }); writeFileSync(run, '// the installed copy\n');
+  const dir = tempDir('orch-extras-app-'); const harness = join(dir, 'harness.mjs'); writeFileSync(harness, HARNESS);
+  w.app = { mint: 201, checks: { status: 200 } }; w.appRuns = []; w.appSeen = [];
+  w.mac.programs.set(join(P.installRoot, 'bin/node'), (who, args) => {
+    w.appRuns.push([who, ...args]);
+    if (w.appStandIn) return w.appStandIn(who, args);
+    const log = join(dir, `seen-${w.appRuns.length}.jsonl`); writeFileSync(log, '');
+    const scenario = join(dir, `scenario-${w.appRuns.length}.json`); writeFileSync(scenario, JSON.stringify({ ...w.app, token: APP_TOKEN, log }));
+    const [prog, ...rest] = args;
+    assert.equal(prog, join(P.installRoot, WATCH_RUN), 'the installed copy\'s watch-run.mjs, as the job runs it');
+    const real = rest.map((a, i) => (rest[i - 1] === '--app-key-file' ? w.mac.at(a) : a));
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(harness).href, WATCH_RUN_HERE, ...real], { encoding: 'utf8', env: { ...process.env, L707_SCENARIO: scenario } });
+    w.appSeen.push(...readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+    return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
+  });
+}
 const prove = async (w, raw = w.raw ?? RAWW) => { const lines = []; const code = await main(withConfig(w.mac, w.file, raw, ['prove-token']), { io: w.mac, out: (s) => lines.push(s), err: (s) => lines.push(`ERR ${s}`) }); return { code, text: lines.join('\n') }; };
 const gets = (w) => w.mac.fetchLog.map((x) => x.method);
 
@@ -374,8 +460,200 @@ test('prove-token: private repo from the config, the read works, the no-op write
   const r = await prove(w);
   assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*is a private repository/); assert.match(r.text, /PASS .*open pull requests works/); assert.match(r.text, /PASS .*pull request #7's title set to itself\) is refused because this token may not write/);
   assert.deepEqual(w.patched, { title: 'A title' });
-  assert.deepEqual(gets(w), ['GET', 'GET', 'PATCH']);
+  assert.deepEqual([gets(w)[0], gets(w).at(-2), gets(w).at(-1)], ['GET', 'GET', 'PATCH']);
   assert.ok(!r.text.includes(SECRET) && !r.text.includes('Resource not accessible'));
+});
+
+test('PLANT L591 prove-token makes one real read of each kind on the job\'s list, on the latest commit with a pull request', async () => {
+  const w = withToken(); github(w); const r = await prove(w);
+  assert.equal(r.code, 0, r.text);
+  for (const k of WATCH_READS.filter((x) => !x.byApp)) assert.match(r.text, new RegExp(`PASS .*the job's read of ${k.what.replace(/'/g, '.')} works`), k.key);
+  // L624: the check runs are read with the watcher App's token, so this token is not asked for them, and says so.
+  // L624, L707 M1: the check runs are read with the watcher App's token, minted as orchestrate, and proven that way.
+  assert.match(r.text, /PASS {2}the watcher App's token, minted as orchestrate, reads the check runs \(at pull request #7's head ddddddd\)/);
+  assert.doesNotMatch(r.text, /not tried|NOT TRIED|check-watch-rules/, 'no line claims a check that asks GitHub nothing');
+  const asked = w.mac.fetchLog.map((x) => new URL(x.url).pathname);
+  for (const k of WATCH_READS.filter((x) => !x.byApp)) assert.ok(asked.some((p, i) => k.shape.test(p + (new URL(w.mac.fetchLog[i].url).search))), `no read of ${k.key}`);
+  assert.ok(asked.some((p) => p === `/repos/org/repo/commits/${PRHEAD}/status`), 'the statuses are read on the pull request\'s head, as the job reads them');
+  assert.ok(!asked.some((p) => /\/check-runs$/.test(p)), 'the check runs are not asked for with this token (L624)');
+  assert.ok(asked.some((p) => p === `/repos/org/repo/compare/${BEFORE}...${MERGED}`), 'on the commit with the pull request, not on main\'s top');
+});
+
+for (const k of WATCH_READS.filter((x) => !x.byApp && !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key))) {
+  test(`PLANT L591 a key that can't make the read of ${k.what} fails prove-token, names it, and the write is still tried`, async () => {
+    const w = withToken(); github(w, { reads: { [k.key]: 403 } }); const r = await prove(w);
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works.*GitHub answered 403; give the key this permission`));
+    assert.ok(!r.text.includes('Resource not accessible'), 'GitHub\'s own words are never printed');
+    assert.equal(gets(w).at(-1), 'PATCH'); assert.doesNotMatch(r.text, /What this proved/);
+    assert.ok(!r.text.includes(SECRET), 'the token is in no line (L707 m4)');
+  });
+}
+
+for (const key of ['head', 'gitCommit', 'commitPulls', 'pull']) {
+  test(`PLANT L591 a key that can't walk main (${key}) fails prove-token with a status, and says nothing was proven of the rest`, async () => {
+    const w = withToken(); github(w, { reads: { [key]: 403 } }); const r = await prove(w);
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, /FAIL .*walk main to its latest pull request.*GitHub answered 403/);
+    assert.doesNotMatch(r.text, /PASS .*the job's read/);
+  });
+}
+
+test('PLANT L591 no commit on main with a pull request: it says so and does not pass, even though every read works', async () => {
+  const w = withToken(); github(w, { jobPulls: [] }); const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /FAIL .*a commit on main with a pull request.*there is none, so the reads the job makes could not be tried/);
+});
+
+test('L591 no rules file at the commit is an answer: the key could ask, and a repository on draft rules has none yet', async () => {
+  const w = withToken(); github(w, { reads: { rules: 404 } }); const r = await prove(w);
+  assert.equal(r.code, 0, r.text); assert.match(r.text, /PASS .*the rules file at a commit works \(there is none there\)/);
+});
+
+const JOB_ONLY = WATCH_READS.filter((x) => !x.byApp && !['head', 'gitCommit', 'commitPulls', 'pull'].includes(x.key));
+for (const k of JOB_ONLY) {
+  test(`L591 no answer at all from GitHub on the read of ${k.what} fails, and is not taken for a pass`, async () => {
+    const w = withToken(); github(w); const real = w.mac.github;
+    // /git/commits/ is the walk's own read, which the commit's shape also fits.
+    w.mac.github = (url, init) => { const u = new URL(url); if (k.shape.test(u.pathname + u.search) && !u.pathname.includes('/git/commits/')) throw new Error('down'); return real(url, init); };
+    const r = await prove(w);
+    assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works.*${READ_TROUBLE.replace(/'/g, '.')}`));
+    assert.ok(!r.text.includes(SECRET), 'the token is in no line (L707 m4)');
+  });
+}
+
+// A key with no permission on a private repository is often told 404, not 403: only the rules file may read a 404 as an answer.
+for (const k of JOB_ONLY.filter((x) => x.key !== 'rules')) {
+  test(`PLANT L591 a 404 on the read of ${k.what} fails prove-token: only the rules file can be absent`, async () => {
+    const w = withToken(); github(w, { reads: { [k.key]: 404 } }); const r = await prove(w);
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works`));
+  });
+}
+
+test('PLANT L591 a pull request that was closed unmerged is not the commit\'s pull request: the walk goes on, and says so when there is no other', async () => {
+  const w = withToken(); github(w, { reads: { notMerged: true } }); const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /FAIL .*a commit on main with a pull request.*there is none/);
+  assert.doesNotMatch(r.text, /PASS .*the job's read/);
+});
+
+// ───────────────────────────── L707 (audit-pr270-r1)
+
+test('PLANT L707 M1 prove-token mints the watcher App\'s token AS orchestrate and reads the check runs on the same pull request\'s head; the job\'s own arguments; no token anywhere', async () => {
+  const w = withToken(); github(w); const r = await prove(w);
+  assert.equal(r.code, 0, r.text);
+  const P = installPaths(w.cfg);
+  assert.deepEqual(w.appRuns, [['orchestrate', join(P.installRoot, WATCH_RUN), 'checks', '--repo', 'org/repo', '--sha', PRHEAD, '--app-id', APP.id, '--app-installation', APP.installation, '--app-key-file', watchAppKeyPath(w.cfg)]]);
+  const runs = w.calls.filter((c) => c.includes('checks'));
+  assert.deepEqual(runs.map((c) => c.slice(0, 6)), [['/usr/bin/sudo', '-n', '-H', '-u', 'orchestrate', join(P.installRoot, 'bin/node')]], 'run as orchestrate, with the installed node, as the job is');
+  // The child really minted (a signed request) and read the check runs at the pull request's head with the App's token, and nothing else.
+  assert.deepEqual(w.appSeen.map(([m, p, a]) => [m, p, a]), [
+    ['POST', `/app/installations/${APP.installation}/access_tokens`, 'jwt'], ['GET', '/app', 'jwt'],
+    ['GET', `/repos/org/repo/commits/${PRHEAD}/check-runs?per_page=100`, `Bearer ${APP_TOKEN}`]]);
+  assert.ok(!w.mac.fetchLog.some((x) => /check-runs/.test(x.url)), 'the fine-grained token is still never asked for the check runs');
+  assert.ok(!r.text.includes(APP_TOKEN) && !r.text.includes(SECRET), 'no token in any line');
+  assert.ok(!w.calls.flat().some((x) => String(x).includes(APP_TOKEN) || String(x).includes(SECRET)), 'no token in any argument');
+});
+
+test('PLANT L707 M1 no App in the config, no key file, an old installed copy, or a run that dies: each FAILs and says which; nothing passes', async () => {
+  const none = withToken(RAWW_NO_APP); github(none); const a = await prove(none);
+  assert.equal(a.code, 1, a.text); assert.match(a.text, /FAIL .*reads the check runs.*names no watcher App/);
+
+  const nokey = withToken(); github(nokey); rmSync(nokey.mac.at(watchAppKeyPath(nokey.cfg)));
+  const b = await prove(nokey);
+  assert.equal(b.code, 1, b.text); assert.match(b.text, /FAIL .*reads the check runs.*key file .* is missing/); assert.deepEqual(nokey.appRuns, [], 'nothing run without the key');
+
+  const old = withToken(); github(old); old.appStandIn = () => ({ status: 2, stdout: '', stderr: 'first word must be once, summary or explain\nusage: ...' });
+  const c = await prove(old);
+  assert.equal(c.code, 1, c.text); assert.match(c.text, /FAIL .*the installed copy is older than this check.*update the install/);
+
+  const dies = withToken(); github(dies); dies.appStandIn = () => ({ status: 1, stdout: 'not json', stderr: 'boom' });
+  const d = await prove(dies);
+  assert.equal(d.code, 1, d.text); assert.match(d.text, /FAIL .*could not run as orchestrate \(exit 1\)/); assert.doesNotMatch(d.text, /boom|not json/);
+
+  const lies = withToken(); github(lies); lies.appStandIn = () => ({ status: 1, stdout: '{"ok":true,"stage":"read"}\n', stderr: '' });
+  assert.equal((await prove(lies)).code, 1, 'an ok line from a run that did not exit 0 is not a pass');
+});
+
+test('PLANT L707 M1 a failed mint FAILs with the mint\'s own plain reason, and no check runs are asked for', async () => {
+  const w = withToken(); github(w); w.app.mint = 401; const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /FAIL .*reads the check runs.*could not be minted as orchestrate \(GitHub refused the token request \(401\)\)/);
+  assert.ok(!w.appSeen.some(([, p]) => /check-runs/.test(p)));
+  assert.ok(!r.text.includes(APP_TOKEN) && !r.text.includes('Bad credentials'), 'nothing GitHub sent is shown');
+});
+
+for (const [name, checks, words] of [
+  ['a 403', { status: 403, text: '{"message":"Resource not accessible by integration"}' }, /GitHub answered 403; give the watcher App "Checks: Read" and install it on org\/repo at GitHub/],
+  ['a 404 (the App not installed on the repository)', { status: 404, text: '{"message":"Not Found"}' }, /GitHub answered 404; give the watcher App "Checks: Read"/],
+  ['a 429', { status: 429 }, /GitHub answered 429 \(a rate limit\); GitHub didn.t answer properly, run setup again/],
+  ['a rate-limit 403', { status: 403, rateRemaining: '0' }, /GitHub answered 403 \(a rate limit\); GitHub didn.t answer properly, run setup again/],
+  ['a 502', { status: 502 }, /GitHub answered 502; GitHub didn.t answer properly, run setup again/],
+  ['a 200 with an empty body', { status: 200, text: '' }, /no usable answer came back from GitHub; GitHub didn.t answer properly/],
+]) {
+  test(`PLANT L707 M1 m3 the App's read of the check runs answered ${name} FAILs, in words that follow the status`, async () => {
+    const w = withToken(); github(w); w.app.checks = checks; const r = await prove(w);
+    assert.equal(r.code, 1, r.text);
+    assert.match(r.text, new RegExp(`FAIL .*reads the check runs.*${words.source}`));
+    if (!/give the watcher App/.test(words.source)) assert.doesNotMatch(r.text, /give the watcher App/, 'no permission advice when GitHub only had trouble');
+    assert.ok(!r.text.includes(APP_TOKEN) && !r.text.includes('Resource not accessible'));
+  });
+}
+
+test('PLANT L707 c1 a walk that fails leaves the App\'s read NOT TRIED, which prints as such and is not a pass', async () => {
+  const w = withToken(); github(w, { reads: { head: 403 } }); const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /NOT TRIED {2}the job's read of the check runs, with the watcher App's token — there was no commit to try it on/);
+  assert.doesNotMatch(r.text, /PASS .*check runs/); assert.deepEqual(w.appRuns, []);
+});
+
+// m3: the fine-grained token's reads. Permission words only for a 403 that is not a rate limit, and for a 404.
+const TROUBLE = [['a 429', { status: 429 }], ['a rate-limit 403', { status: 403, rateRemaining: '0' }], ['a rate-limit 403 said in words', { status: 403, text: '{"message":"API rate limit exceeded for user"}' }], ['a 500', { status: 500 }], ['a 503', { status: 503 }]];
+for (const k of JOB_ONLY) {
+  for (const [name, x] of TROUBLE) {
+    test(`PLANT L707 m3 ${name} on the read of ${k.what} FAILs and says GitHub didn't answer properly, not to change the key`, async () => {
+      const w = withToken(); github(w, { reads: { [k.key]: x } }); const r = await prove(w);
+      assert.equal(r.code, 1, r.text);
+      assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works.*${READ_TROUBLE.replace(/'/g, '.')}`));
+      assert.doesNotMatch(r.text, /give the key this permission/);
+      assert.ok(!r.text.includes(SECRET) && !r.text.includes('rate limit exceeded'));
+    });
+  }
+  if (k.key !== 'rules') {
+    test(`PLANT L707 m3 a 403 (not a rate limit) and a 404 on the read of ${k.what} still say to give the key this permission`, async () => {
+      for (const status of [403, 404]) {
+        const w = withToken(); github(w, { reads: { [k.key]: status } }); const r = await prove(w);
+        assert.match(r.text, new RegExp(`FAIL .*the job's read of ${k.what.replace(/'/g, '.')} works.*GitHub answered ${status}; give the key this permission`));
+      }
+    });
+  }
+}
+
+test('PLANT L707 m3 a 500 while walking main says GitHub didn\'t answer properly, not to change the key', async () => {
+  const w = withToken(); github(w, { reads: { commitPulls: { status: 500 } } }); const r = await prove(w);
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /FAIL .*walk main to its latest pull request.*GitHub answered 500; GitHub didn.t answer properly, run setup again/);
+  assert.doesNotMatch(r.text, /give the key/);
+});
+
+for (const k of [...JOB_ONLY.filter((x) => x.key !== 'threads'), ...WATCH_READS.filter((x) => ['commitPulls', 'pull'].includes(x.key))]) {
+  test(`PLANT L707 c2 a 200 with an empty or unreadable body on the read of ${k.what} is a FAIL, as in the job`, async () => {
+    for (const text of ['', 'not json']) {
+      const w = withToken(); github(w, { reads: { [k.key]: { status: 200, text } } }); const r = await prove(w);
+      assert.equal(r.code, 1, r.text);
+      assert.match(r.text, /FAIL .*(GitHub answered 200 with nothing readable in it|no usable answer came back from GitHub)/);
+    }
+  });
+}
+
+test('PLANT L707 m1 the job\'s read of the latest commit that changed the rules file is on the list and proven, as M10\'s reader asks for it', async () => {
+  const k = WATCH_READS.find((x) => x.key === 'commitsByPath');
+  assert.ok(k && !k.byApp);
+  assert.ok(k.shape.test(`/repos/o/r/commits?sha=${'a'.repeat(40)}&path=${encodeURIComponent('orchestrate/policy.yaml')}&per_page=1`), 'the shape M10 reader.mjs asks for');
+  const w = withToken(); github(w); const r = await prove(w);
+  assert.match(r.text, /PASS .*the job's read of the latest commit that changed the rules file works/);
+  assert.ok(w.mac.fetchLog.some((x) => { const u = new URL(x.url); return u.pathname === '/repos/org/repo/commits' && u.searchParams.get('sha') === MERGED && u.searchParams.get('path') === 'orchestrate/policy.yaml'; }));
 });
 
 test('L150 m4 the token is read AS orchestrate (sudo -n -H -u orchestrate /bin/cat <file>), never by root through the name; the token is in no argument', async () => {
@@ -452,7 +730,7 @@ test('PLANT any other answer to the write (404, 422, 500) is not proof → FAIL'
 });
 
 test('prove-token: no open pull request (the advice names the config\'s repo), no network, no token file → each FAILs plainly; no write without a pull request', async () => {
-  let w = withToken(); github(w, { prs: [] }); let r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /org\/repo has none open\. Open one there/); assert.deepEqual(gets(w), ['GET', 'GET']);
+  let w = withToken(); github(w, { prs: [] }); let r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /org\/repo has none open\. Open one there/); assert.ok(!gets(w).includes('PATCH'));
   w = withToken(); w.mac.github = null; r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /no answer \(ENOTFOUND\)/);
   w = world({ raw: RAWW }); w.raw = RAWW; github(w); r = await prove(w); assert.equal(r.code, 1); assert.match(r.text, /is not there/); assert.equal(w.mac.fetchLog.length, 0);
 });
@@ -576,7 +854,9 @@ test('L173 n1 prove-token says what it proved (pull requests only) and tells Joe
   const w = withToken(); github(w);
   const r = await prove(w); assert.equal(r.code, 0, r.text);
   assert.match(r.text, /What this proved: the token cannot write pull requests\. It did not prove the token cannot change code/);
-  assert.match(r.text, /Fine-grained tokens/); assert.match(r.text, /Metadata = Read-only \(GitHub adds it by itself; fine if absent\), Contents = Read-only.*Pull requests = Read-only, Checks = Read-only, Commit statuses = Read-only .*and nothing else/); assert.match(r.text, /only the one repository/);
+  assert.match(r.text, /Fine-grained tokens/); assert.match(r.text, /Metadata = Read-only \(GitHub adds it by itself; fine if absent\), Contents = Read-only.*Pull requests = Read-only, Commit statuses = Read-only .*and nothing else/);
+  const list = r.text.split('\n').find((l) => /Permissions:/.test(l)); assert.doesNotMatch(list.split('and nothing else')[0], /Checks/, 'the token is not asked to hold Checks (L707 m2)');
+  assert.match(list, /the watcher App, which holds Checks: read/); assert.match(r.text, /only the one repository/);
   const bad = withToken(); github(bad, { write: 200 }); const f = await prove(bad);
   assert.equal(f.code, 1); assert.doesNotMatch(f.text, /What this proved/);
   const readme = readFileSync(new URL('./README.md', import.meta.url), 'utf8');

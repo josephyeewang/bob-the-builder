@@ -31,9 +31,9 @@ function place() {
 }
 
 function render(pl, profile = DESIGN_PROFILES[ROLE]) {
-  return renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: ROLE, profile, product: {},
+  return renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: ROLE, profile, product: {},
     paths: { copy: '/w/copy', outbox: pl.outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: join(pl.root, 'notes'),
-      bobFolder: '/w/bob', deny: { secrets: ['/w/secrets'] }, reviewWalls: { outboxRoot: pl.outboxRoot, runnerRoot: pl.runnerRoot } } });
+      bobFolder: '/w/bob', deny: { secrets: ['/w/secrets'], proposals: ['/w/proposals'] }, reviewWalls: { outboxRoot: pl.outboxRoot, runnerRoot: pl.runnerRoot } } });
 }
 
 // The plain-files hook's arguments exactly as rendered.

@@ -10,17 +10,18 @@ import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_A
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT } from './render-settings.mjs';
 import { SETTINGS as S, ENV } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
-  deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
+  deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const PRODUCT = { commands: { test: 'npm test', build: 'npm run build' }, hosts: ['registry.example.com'] };
-const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
+const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
 
 // ---- role profiles ----
 
@@ -240,7 +241,7 @@ test('the role file is written, read back from disk and checked', () => {
 // ---- planted failures for each refusal line, checked by their own reasons (audit R-0b-44 M-6) ----
 
 test('render and check: an unknown role, a bad phase, a path with a space, a missing unsandboxed refusal and a read-back that differs each refuse with their own reason', () => {
-  assert.equal(renderRoleSettings({ productionFiles: [], proposalOutboxes: [], role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
+  assert.equal(renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'nobody', profile: DESIGN_PROFILES.worker, paths: PATHS }).reason, 'no such role "nobody"');
   assert.equal(render('worker', { phase: 'later' }).reason, 'bad phase');
   assert.match(render('worker', { paths: { ...PATHS, outbox: '/w/out box' } }).reason, /^path "\/w\/out box" is not a plain absolute path$/);
   const s = structuredClone(render('worker').settings);
@@ -300,4 +301,18 @@ test('round 3 MIN-2: a production file the rules list but the role file does not
   assert.equal(render('worker', { productionFiles: ['/p/settings.production'] }).reason, 'the rules list production files the role file does not deny: /p/settings.production');
   assert.equal(render('worker', { productionFiles: ['/w/secrets/settings.production', '/w/secrets'] }).ok, true, 'inside a denied folder, or the folder itself');
   assert.equal(render('worker', { productionFiles: ['/w/secretsX/settings.production'] }).ok, false, 'a folder whose name only starts the same');
+});
+
+test('L746 (audit R-0b-148 slice 1, m1): an empty proposals list is refused for every role but a reviewer or auditor', () => {
+  for (const role of Object.keys(DESIGN_PROFILES).filter((r) => !REVIEW_ROLES.includes(r))) {
+    const r = render(role, { proposalOutboxes: [], paths: { ...PATHS, deny: { ...PATHS.deny, proposals: [] } } });
+    assert.equal(r.ok, false, role);
+    assert.equal(r.reason, 'the rules\' proposals folders are an empty list, so nothing would deny them', role);
+  }
+  // A reviewer or auditor runs as the review user, which the folders already shut out: an empty list is fine there.
+  for (const role of ['reviewer', 'auditor']) assert.equal(render(role, { proposalOutboxes: [] }).ok, true, role);
+  // A non-empty list on the deny list still renders, and its folder is denied.
+  const ok = render('worker');
+  assert.equal(ok.ok, true, ok.reason);
+  for (const rule of ['Read(//w/proposals/**)', 'Edit(//w/proposals/**)']) assert.ok(ok.settings[S.permissions][S.deny].includes(rule), rule);
 });

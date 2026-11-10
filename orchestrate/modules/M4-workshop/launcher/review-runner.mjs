@@ -343,6 +343,13 @@ export function packagePlan({ path, sha256, dir, max = MAX_PLAN_BYTES, between }
   return { ok: true, sha256: got, file };
 }
 
+/**
+ * The one request id a plan review is asked by (L726 m1): the sha256 of `<card>-<fingerprint>`, which the Dispatcher's
+ * request writer uses. The runner takes no plan request with another id, so a request someone else wrote with the
+ * right card and plan can't take the one start that plan gets.
+ */
+export const PLAN_REQUEST_ID = (card, fingerprint) => createHash('sha256').update(`${card}-${fingerprint}`).digest('hex');
+
 const PLAN_RECORD_MAX = 64 * 1024;
 const goodPlanLaunch = (d, name) => isObject(d) && d.role === PLAN_REVIEW_ROLE && typeof d.session_id === 'string' && SESSION_ID.test(d.session_id) && name === `${d.session_id}.json`
   && typeof d.card === 'string' && CARD_ID.test(d.card) && typeof d.fingerprint === 'string' && HEX64.test(d.fingerprint) && typeof d.request_id === 'string' && REQUEST_ID.test(d.request_id);
@@ -474,7 +481,7 @@ export async function runnerPass(ctx) {
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
-      running: state.running.map(({ card, head, role, session_id, started_at, fingerprint }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint } : {}) })),
+      running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
@@ -876,6 +883,9 @@ export async function runnerPass(ctx) {
   if (names.length > MAX_PENDING) alert('requests-pending', `${names.length} review requests are waiting (more than ${MAX_PENDING}); something may be asking far too often.`);
   else state.told = state.told.filter((t) => t !== 'requests-pending');
   let starts = 0;
+  // Plan reviewers started this pass that the runner could not follow (a start that ran but gave no claude): each still
+  // holds a cap slot until the pass ends, so the cap is never passed by one (#294 self-review m1).
+  let untrackedPlans = 0;
   // A plan reviewer (L703). The Dispatcher asks once per plan (plan-go), so a start that failed is tried again by the
   // runner itself (`plan_tries`), RETRY_MS apart and MAX_FAILED_STARTS times in all, and then the owner is told. A refusal
   // that says the plan is not one to review (the card is gone, not a Tier-1 draft, or its plan is another) ends it.
@@ -884,7 +894,15 @@ export async function runnerPass(ctx) {
     const k = planKey(card, fingerprint);
     const tries = state.plan_tries && typeof state.plan_tries === 'object' ? state.plan_tries : (state.plan_tries = {});
     const was = tries[k];
-    const drop = (reason) => { delete tries[k]; refuse(reason); };
+    // Once the request is for the card's plan as it is now, a refusal that ends it is told (L726 m2): the Dispatcher
+    // waits on this plan's answer, and the owner must hear why none comes, not only that it is slow. Before that check
+    // it is not told: anyone may write a request, so made-up cards and plans must not reach the owner.
+    let real = false;
+    const drop = (reason) => {
+      delete tries[k];
+      refuse(reason);
+      if (real) alert(`plan-refused-${k}`, `The review runner did not start a plan reviewer for card ${card} (plan ${fingerprint.slice(0, 12)}): ${String(reason).slice(0, 300)}. The card stays a draft and can't be asked for a go; a new plan gets a new reviewer.`);
+    };
     const again = (reason) => {
       const t = { card, fingerprint, request_id: rid, failures: (was?.failures ?? 0) + 1, last_failed_at: iso(now), last_reason: String(reason).slice(0, 300) };
       refuse(`the plan reviewer could not be started: ${reason}`);
@@ -899,12 +917,34 @@ export async function runnerPass(ctx) {
     const fp = planFingerprint({ product: d.product, card_id: card, tier: d.tier, files: d.files, done_when: d.done_when, plan_sha256: d.plan_sha256, main_commit: d.main_commit });
     if (!fp.ok) return drop(`card ${card}'s plan can't be fingerprinted (${fp.reason})`);
     if (fp.sha256 !== fingerprint) return drop(`the request names plan ${fingerprint.slice(0, 12)}, but card ${card}'s plan is ${fp.sha256.slice(0, 12)}`);
-    if (state.running.some((r) => r.role === PLAN_REVIEW_ROLE && r.card === card && r.fingerprint === fingerprint)) return drop(`a plan reviewer is already running for card ${card}'s plan ${fingerprint.slice(0, 12)}`);
+    real = true;
+    // A map of Mac users from before the plan reviewer blocks plan reviews alone (L726 m3); the runner tries again
+    // itself, so setting it up before it gives up lets this plan's reviewer start. Once it gives up, the owner is told
+    // the cause, and that plan never starts: a new plan gets a new reviewer (L735 c1-r2).
+    const mapBad = uidsProblem(ctx.uids, { plan: true });
+    if (mapBad) return again(`the review user is not set up for plan reviews: ${mapBad}`);
+    if (ctx.uids[PLAN_REVIEW_ROLE] !== uid) return again(`the plan reviewer's Mac user (uid ${ctx.uids[PLAN_REVIEW_ROLE]}) is not the review user (uid ${uid})`);
+    // Its own reviewer running or already started is no refusal of the Dispatcher's request (L735 m2-r2): the answer it
+    // waits on comes from that one. So a replay of the plan's id is refused quietly, never told as a stop.
+    const already = (reason) => { delete tries[k]; refuse(reason); };
+    if (state.running.some((r) => r.role === PLAN_REVIEW_ROLE && r.card === card && r.fingerprint === fingerprint)) return already(`a plan reviewer is already running for card ${card}'s plan ${fingerprint.slice(0, 12)}`);
     const pl = readPlanLaunches(P.planLaunches, uid);
     if (!pl.ok) return again(`the plan reviewers' launch records could not be read (${pl.reason})`);
     // One start per plan: a launch on it counts, unless claude never ran and its outbox is still review's own and empty.
-    if (pl.launches.some((l) => l.card === card && l.fingerprint === fingerprint && !planNeverRan(l))) return drop(`a plan reviewer was already started for card ${card}'s plan ${fingerprint.slice(0, 12)}; one per plan`);
+    if (pl.launches.some((l) => l.card === card && l.fingerprint === fingerprint && !planNeverRan(l))) return already(`a plan reviewer was already started for card ${card}'s plan ${fingerprint.slice(0, 12)}; one per plan`);
     if (was && now - (pastTime(was.last_failed_at, now) ?? -Infinity) < RETRY_MS) { refuse(`the last start of a plan reviewer for card ${card} failed less than 15 minutes ago; the runner tries again itself`); return; }
+    // The plan reviewers' cap, kept here too (L735 M1): the runner is the one place that sees every product's requests,
+    // so two Dispatchers each under the cap can't put it over between them, and a request no Dispatcher wrote can't
+    // either. It is the Dispatcher's own read-only cap for the card's product, against every plan reviewer that runs.
+    // At the cap the request waits as the runner's own, tried each pass and never counted as a failed start.
+    let cap; try { cap = await ctx.planReviewCap(d.product); } catch (e) { cap = { bad: e?.message ?? String(e) }; }
+    if (!Number.isInteger(cap) || cap < 0) return again(`the plan reviewers' cap could not be read (${String(cap?.bad ?? cap).slice(0, 200)})`);
+    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE).length + untrackedPlans;
+    if (runningPlans >= cap) {
+      tries[k] = { ...(was ?? {}), card, fingerprint, request_id: rid, failures: was?.failures ?? 0, waiting_since: was?.waiting_since ?? iso(now) };
+      refuse(`${runningPlans} plan reviewers already run (cap ${cap}); card ${card}'s waits, and the runner starts it itself once one ends`);
+      return;
+    }
 
     starts += 1;
     const sid = newId();
@@ -957,11 +997,12 @@ export async function runnerPass(ctx) {
       }
       drop(`the plan reviewer start said it failed (${String(r?.reason ?? 'no process id').slice(0, 200)}), but the session ran (${ranAs !== null ? `claude ${ranAs} carries its id` : liveNow === null ? 'the session list could not be read' : left.said}); it counts as started`);
       if (ranAs !== null) state.running.push({ card, role: PLAN_REVIEW_ROLE, fingerprint, request_id: rid, head: d.main_commit, session_id: sid, pid: ranAs, started_at: iso(now) });
-      else if (liveNow !== null) endPlan(doc, 'ended');
+      else { untrackedPlans += 1; if (liveNow !== null) endPlan(doc, 'ended'); }
       return;
     }
     let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
     if (!isClaudeCommand(cmd, ctx.claudeBin)) {
+      untrackedPlans += 1;
       drop(`the plan reviewer start gave process ${r.pid}, which is not claude; the session is held until the runner marks it ended`);
       alert(`untracked-${sid}`, `The plan reviewer ${sid} for card ${card} was started, but the start gave process ${r.pid}, which is not claude. The runner can't follow it: a live claude of review's is stopped on the next pass, and the session is marked ended 5 minutes after its start.`);
       return;
@@ -1008,9 +1049,25 @@ export async function runnerPass(ctx) {
       else if (Object.keys(state.refused_more).length < MAX_MORE_STREAKS) state.refused_more[streakKey] = entry;
     };
     const accepted = () => { delete state.refused_streaks?.[streakKey]; delete state.refused_more?.[streakKey]; };
+    // A plan request under another id is refused before it is remembered as seen (L735 m2-r2): anyone may write those,
+    // and a flood of them must not push the Dispatcher's own ids out of what the runner remembers.
+    if (got.req.fingerprint !== undefined) {
+      if (rid !== PLAN_REQUEST_ID(card, got.req.fingerprint)) {
+        // Not the Dispatcher's id (L726 m1): refused, and it can't take the plan's one start. It is a request anyone
+        // could write, so it is kept as one hold for its cause (like an unreadable request), never one alert a file.
+        refuse(`a plan review request must have the id the Dispatcher gives card ${card}'s plan; ${rid.slice(0, 16)} is not it`);
+        const cause = 'plan request with another id';
+        const was = state.unread_requests?.[cause];
+        state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: name, first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
+        continue;
+      }
+    }
     if (state.seen.includes(rid)) { refuse(`request id ${rid} was seen before`); continue; }
     state.seen = [...state.seen, rid].slice(-KEEP_SEEN);
-    if (got.req.fingerprint !== undefined) { await planStart({ card, fingerprint: got.req.fingerprint, rid, refuse }); continue; }
+    if (got.req.fingerprint !== undefined) {
+      await planStart({ card, fingerprint: got.req.fingerprint, rid, refuse });
+      continue;
+    }
     if (!REVIEW_ROLES.includes(role)) { refuse(`"${role}" is not a review role`); continue; }
     let c; try { c = await ctx.readCard(card); } catch (e) { c = { ok: false, reason: e?.message ?? String(e) }; }
     // A card that isn't there is no streak: anyone may write a request, so made-up ids must not reach the owner. It is
