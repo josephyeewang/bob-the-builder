@@ -685,6 +685,32 @@ test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
   assert.equal(gone.how, 'gone');
 });
 
+test('L822 planted: a stop its caller aborted sends nothing more: not before SIGTERM, not during the wait, not SIGKILL', async () => {
+  const sent = [];
+  const kill = (p, s) => sent.push(s);
+  // Aborted before it starts: nothing is sent.
+  const before = new AbortController();
+  before.abort();
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: before.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, []);
+  // Aborted while it waits (the caller's port limit): SIGTERM only, no SIGKILL, and it stops waiting.
+  const mid = new AbortController();
+  let t = 0;
+  const sleep = async (ms) => { t += ms; if (t >= 3000) mid.abort(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep, signal: mid.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual([sent, t], [['SIGTERM'], 3000]);
+  // Aborted on the last wait, just before SIGKILL.
+  sent.length = 0;
+  const last = new AbortController();
+  let u = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async (ms) => { u += ms; if (u >= 10_000) last.abort(); }, signal: last.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // Never aborted: the same as with no signal.
+  sent.length = 0;
+  assert.equal((await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: new AbortController().signal })).how, 'SIGKILL');
+  assert.deepEqual(sent, ['SIGTERM', 'SIGKILL']);
+});
+
 test('M7: a stop that fails alerts and leaves the card as it was; a failed save alerts but the stop stands', async () => {
   const w = world([card('C-1')]);
   await w.pass(0);

@@ -149,13 +149,24 @@ export function refusalReport({ rec, alert, now, lines, failureLog = () => {} })
   };
 }
 
-/** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
-export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS }) {
+/**
+ * Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. `signal` (an AbortSignal,
+ * L822): a caller that gives up on the stop (a port limit, say) aborts it, and no signal is sent after that, so a stop
+ * it abandoned can't SIGKILL a group later. An aborted stop answers { ok: false, reason: 'abandoned' }.
+ */
+export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS, signal }) {
   if (!Number.isInteger(pgid) || pgid <= 1) return { ok: false, reason: 'no process group to stop' };
+  const abandoned = { ok: false, reason: 'abandoned' };
+  if (signal?.aborted) return abandoned;
   // Any other error (EPERM, say) is an answer, not a throw (audit 0b-6 r2 MAT-7): one session must not end the pass.
   try { kill(pgid, 'SIGTERM'); } catch (e) { if (e.code === 'ESRCH') return { ok: true, how: 'gone' }; return { ok: false, reason: e.code ?? e.message }; }
-  for (let t = 0; t < waitMs; t += 500) { if (!alive(pgid)) return { ok: true, how: 'SIGTERM' }; await sleep(500); }
+  for (let t = 0; t < waitMs; t += 500) {
+    if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+    if (signal?.aborted) return abandoned;
+    await sleep(500);
+  }
   if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+  if (signal?.aborted) return abandoned;
   try { kill(pgid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') return { ok: false, reason: e.code ?? e.message }; }
   return { ok: true, how: 'SIGKILL' };
 }
