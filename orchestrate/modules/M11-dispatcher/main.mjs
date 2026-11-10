@@ -110,11 +110,12 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     ? `the Dispatcher config's runDeadlineMs (${config.runDeadlineMs}) is below the pass's own sum (${RUN_DEADLINE_MS} ms: every step's deadline and the two sends), so a slow step can get the pass stopped; raise it, or take it out`
     : null;
   if (low) log(`dispatcher: ${low}`);
+  const lowBox = outbox(wired.rec, now); // the queue's alert, made once (it only queues)
   const tellLow = () => {
     // Fixed (self-review m6): a copy still queued goes, and a deadline lowered again is told afresh.
-    if (!low) { try { clearHold(wired.rec, HOLD_FACT('run-deadline-low'), now, (line) => log(`dispatcher: ${line}`)); } catch (e) { log(`dispatcher: the low-deadline hold could not be cleared: ${e?.message ?? e}`); } return; }
-    try { if (holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the low-deadline alert could not be queued'); }
-    catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); }
+    if (!low) { try { clearHold(wired.rec, HOLD_FACT('run-deadline-low'), now, (line) => log(`dispatcher: ${line}`)); } catch (e) { log(`dispatcher: the low-deadline hold could not be cleared: ${e?.message ?? e}`); return false; } return; }
+    try { return holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: lowBox, now }); }
+    catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); return false; }
   };
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
@@ -127,7 +128,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
     // Queued, then sent with one send's time: a pass that is late every time never reaches its own sender.
     // A refused alert is logged (L130 m12): the late pass is otherwise silent.
-    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); tellLow(); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
+    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); if (tellLow() === false) log('dispatcher: the low-deadline alert could not be queued, or its hold cleared'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     flushHeld(wired.rec, log);
     return 2;
@@ -135,7 +136,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
   if (!r.ran) log(`dispatcher: ${r.reason}`);
   // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
   for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
-  tellLow();
+  if (tellLow() === false) log('dispatcher: the low-deadline alert could not be queued, or its hold cleared');
   flushHeld(wired.rec, log);
   return 0;
 }
