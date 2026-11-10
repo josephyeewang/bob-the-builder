@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
+import { atSafePoint } from '../modules/M11-dispatcher/transcript.mjs';
 import { notWiredText } from './not-wired.mjs';
 import { CLEANUP_PORTS, NOT_WIRED_CLEANUP, NOT_WIRED_WORKER } from './worker-ports.mjs';
 import { LAUNCH_DOC_FIELDS, OWNER_CLEANUP_PORTS, SESSION_RECORD_PUSH_FIELDS, OWNER_PORTS, STATUS_STALE_MS, ownerPorts } from './owner-ports.mjs';
@@ -112,4 +113,33 @@ test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a 
   const at = pass.indexOf('await guarded(async () => { await pauseLead('); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
   assert.match(pass.slice(at, at + 800), /'pause_lead_failed'/);
   assert.match(OWNER_PORTS.pauseLead.out, /^resolves \{ ok: true \}/); assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
+});
+
+test('#317 audit r1 M1: stop and save take any session sessions() lists, routed by kind; a session with no work copy saves as ok', () => {
+  // pass.mjs decides a cancel before it asks whether a session is parkable, so a review or audit session of a cancelled card
+  // reaches stopGroup and then saveWork: the contract must say where those go, or Joe is told of unsaved work that is not.
+  const pass = code('pass.mjs');
+  const sr = pass.slice(pass.indexOf('function stopReason'), pass.indexOf('\n}\n', pass.indexOf('function stopReason')));
+  assert.ok(sr.indexOf("return 'cancel'") > 0 && sr.indexOf("return 'cancel'") < sr.indexOf('parkable(s)'), 'a cancel is decided before parkable');
+  assert.match(pass, /guarded\(\(\) => stopGroup\(s\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
+  for (const k of ['probe', 'stopGroup', 'saveWork']) assert.match(OWNER_PORTS[k].in, /^\(session\): any session sessions\(\) lists, routed by kind/, k);
+  assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save \(any session but a worker's\), so a stop never reads as unsaved work/);
+});
+
+test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count, safe points, hand-ins and the copies are pinned', () => {
+  // m1: atSafePoint reads a missing state as safe, so a state that can't be told must be a throw.
+  assert.equal(atSafePoint({ role: 'lead', size: { turnEnded: true, openTools: [] }, activity: {} }), true, 'why the probe must throw');
+  assert.match(OWNER_PORTS.probe.notKnown, /a state the tracker can't tell is a throw, never a missing or null state/);
+  // m2: readOutboxFile compares the file's numeric owner.
+  assert.match(readFileSync(new URL('../modules/M4-workshop/launcher/outbox.mjs', import.meta.url), 'utf8'), /if \(st\.uid !== uid\) return refuse/);
+  assert.match(OWNER_PORTS.outboxSessions.out, /uid is the numeric Mac user id \(not a name\)/);
+  // m4: sessions is never a partial list (the start caps count from it); board is never false (the outage count).
+  assert.match(OWNER_PORTS.sessions.notKnown, /if any one source can't be read: never the sources it could read/);
+  assert.match(OWNER_PORTS.board.out, /An alive or ended the runner does not know is left out of that row \(the field, never the row\), never false/);
+  assert.doesNotMatch(OWNER_PORTS.board.out, /\bis false\b/);
+  // m3/m4: copiesRoot's access list is L747's, and grants no add or write.
+  const cr = OWNER_CLEANUP_PORTS.copiesRoot.out;
+  assert.match(cr, /list, search, read \(file contents and attributes, so a copy can be hashed\) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass's checks/);
+  assert.doesNotMatch(cr, /as on the worker outboxes/);
+  assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(write|add)\b/, 'no other grant of add or write');
 });
