@@ -11,7 +11,12 @@
 //     "outboxRoot": "/abs", "copiesRoot": "/abs", "home": "/abs", "path": "/abs:/abs", "claudeBin": "/abs",
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
-//                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] } } } }
+//                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
+//     "pin": "<claude version>"?, "machineWide": "/abs"? }
+// The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
+// leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
+// pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
+// first at check 4 (no install port), a script session at check 12.
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -23,13 +28,18 @@
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
 import { mkdirSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
+import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
+import { workerChecks } from './runner-checks.mjs';
+import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { spawn as childSpawn } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 
@@ -54,17 +64,61 @@ export function checkRunnerConfig(c) {
     if (typeof p?.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(p.repo)) fail(`product ${name}: repo must be owner/name`);
     if (!fullPath(p.mirror)) fail(`product ${name}: mirror must be a full path in its simplest form`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
+    if (p.rules !== undefined && (!p.rules || typeof p.rules !== 'object' || Array.isArray(p.rules))) fail(`product ${name}: rules must be the product's rules`);
+    // The rules' production lists, as review-runner-main.mjs readConfig requires them (#369 m4): check 8 must not pass on
+    // an empty snapshot.
+    const prod = p.rules?.production;
+    if (p.rules !== undefined && !(prod && ['env_files', 'programs', 'hosts'].every((k) => Array.isArray(prod[k]) && prod[k].every((v) => typeof v === 'string')))) fail(`product ${name}: rules.production must list env_files, programs and hosts`);
     // Every deny entry a worker session must have (#364 r1 M2, as review-runner-main.mjs refuses an empty deny list):
     // render-settings leaves a missing one out without a word, so here a missing one stops the runner instead.
     const d = p.render.paths.deny;
     for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path in its simplest form, not / itself`);
     if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths in their simplest form (the secrets, and the approvals and rules state)`);
   }
+  if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
+  if (c.machineWide !== undefined && !fullPath(c.machineWide)) fail('machineWide must be a full path in its simplest form');
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
+  // Each product's rules snapshot is the runner's own file, in its own folder outside every copy, one per product
+  // (#369 m4; as review-runner-main.mjs keeps its snapshot inside its root): the sessions' hooks read it.
+  const snaps = new Set();
+  for (const [name, p] of Object.entries(c.products)) {
+    const s = p.render.paths.snapshot;
+    if (s === undefined) continue;
+    if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
+    // Not one of the runner's own files there (#369 r1 m4): check 8 would rename the snapshot over it.
+    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => foldKey(n) === foldKey(basename(s)))) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
+    if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
+    snaps.add(foldKey(s));
+  }
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
+
+/** What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's. */
+export function workerCheckInputs(c, x, { log = () => {} } = {}) {
+  const p = c.products[x.product];
+  return { ...x, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
+    machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
+    testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
+}
+
+/** The checks run once more just before claude starts (#369 M1, r1 m1 and m2): the copy (its folder and HEAD), its setup
+ * files, the outbox, and the rules snapshot written afresh. */
+export const RECHECK = Object.freeze([1, 2, 3, 8]);
+/** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
+ * RECHECK checks once more just before claude starts. */
+export const startDeps = (c, { stopped = () => false, log, productHeld, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+  checksFor: checksOf,
+  beforeStart: async (x) => {
+    const k = checksOf(x);
+    for (const n of RECHECK) {
+      if (typeof k[n] !== 'function') return `check ${n} has no port`;
+      let a; try { a = await k[n](); } catch (e) { a = { ok: false, reason: e?.message ?? String(e) }; }
+      if (!a?.ok) return `check ${n}: ${a?.reason ?? 'no answer'}`;
+    }
+    return null;
+  } });
 
 /**
  * Why the runner must not start (#378 r1 M1), or null: a session it carries over (listed and not shown gone, or a start
@@ -100,10 +154,10 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld } = {}) {
   return {
     ...processGroupPorts(),
-    start: startPort(c, { stopped }),
+    start: startPort(c, startDeps(c, { stopped, log, productHeld })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     outboxDrained: drainedPort(),
@@ -113,12 +167,45 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false } = {}) {
 }
 
 /**
+ * Each product's rules snapshot kept fresh for the runner's life (#369 r1 m2): the sessions' hooks refuse every call once
+ * it is 5 minutes old. A rewrite that fails stops its refresher (snapshot.mjs), failing safe. Until it is kept fresh again
+ * that product starts no session (#369 r2 m2): `held(product)` starts the refresher once more at each start and, while
+ * that fails too, answers why (told once with `log`), so the start is refused. Sessions already running are kept fresh
+ * again by the next start that succeeds in this. → { held(product) → reason | null, stop() }.
+ */
+export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } = {}) {
+  const kept = new Map(); const failed = new Map(); const told = new Set();
+  const wanted = (name) => { const p = c.products[name]; return typeof p?.render?.paths?.snapshot === 'string' && p.rules ? p : null; };
+  for (const name of Object.keys(c.products)) {
+    const p = wanted(name);
+    if (!p) continue;
+    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); } catch (e) { failed.set(name, e); told.add(name); log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
+  }
+  const held = (name) => {
+    const p = wanted(name);
+    if (!p) return null;
+    const k = kept.get(name);
+    let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
+    if (!e) return null;
+    if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }
+    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); failed.delete(name); told.delete(name); log(`product ${name}'s rules snapshot is kept fresh again`); return null; } catch (x) {
+      failed.set(name, x);
+      const reason = `product ${name}'s rules snapshot is not kept fresh (${x?.code ?? x?.message}), so its sessions are not started`;
+      if (!told.has(name)) { told.add(name); log(reason); }
+      return reason;
+    }
+  };
+  const stop = () => { for (const [name, k] of kept) { try { k.stop(); if (k.error()) log(`product ${name}'s rules snapshot stopped being kept fresh (${k.error()?.code ?? k.error()?.message})`); } catch { /* stopped */ } } };
+  return { held, stop };
+}
+
+/**
  * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
  * memory (the memory reader).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
-  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop,
+  ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
   realpath = (p) => realpathSync.native(p), memory = loadMemory } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
@@ -136,9 +223,11 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
+  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots).
+  const snaps = keepSnapshots(c, { fresh, log });
   let P;
   try {
-    P = realRunnerPorts(c, ports, { stopped: () => stopping });
+    P = realRunnerPorts(c, ports, { stopped: () => stopping, log, productHeld: snaps.held });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;
@@ -146,7 +235,10 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
       outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: P, note: log, stopWhen: () => stopping });
     return 0;
-  } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally { try { l.release(held.nonce); } catch { /* gone */ } }
+  } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
+    snaps.stop();
+    try { l.release(held.nonce); } catch { /* gone */ }
+  }
 }
 
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
