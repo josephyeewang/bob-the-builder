@@ -9,7 +9,8 @@
 // a comment found there is what the told line then says (L393).
 // Titles are
 // the step names ("product N / <check>"), so no product data appears.
-import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 export const BOT = 'github-actions[bot]';
 // This file runs alone in the outside-check repo, so it can't import shared/still-waiting.mjs. Same rule, in small: a
@@ -95,7 +96,12 @@ function bodyOf(title, old, stamp, told = stamp) {
   return `The outside check's step "${title}" is failing. Open the latest outside-check run for its reason code.\n\nfailing since ${since}\nlast seen ${stamp}\nlast told ${told ?? since}`;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a link such as an installed copy (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so argv[1] is resolved before the two are compared.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) {
   const base = `https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}`;
   const api = async (method, path, body) => {
     const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json' }, body: body ? JSON.stringify(body) : undefined });
