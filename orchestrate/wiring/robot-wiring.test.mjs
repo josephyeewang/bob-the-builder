@@ -620,6 +620,13 @@ test('L800 M-A: a taker that broke a dead lock and then lost the place to a late
   assert.equal(late.a?.ok, true);
   assert.deepEqual([r.ok, r.broke?.pid], [false, DEAD.pid], r.line);
   late.a.release();
+  // L816 m-1: the generic LOCK_REFUSED refusal carries it too: here the late holder is a process that is not this user's.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  late = lateTaker(process.pid);
+  try { r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => (isDead(p) ? 'dead' : 'foreign') }); } finally { late.undo(); }
+  assert.equal(late.a?.ok, true);
+  assert.deepEqual([r.ok, r.code, r.broke?.pid], [false, LOCK_REFUSED, DEAD.pid], r.line);
+  late.a.release();
   // A refusal with no break carries none.
   writeFileSync(f, JSON.stringify({ pid: 5001, taken_at: new Date(at).toISOString() }), { mode: 0o600 });
   const plain = takePassLock(f, { pid: 5002, now: at, dead: isDead });
@@ -675,6 +682,9 @@ test('L800 M-A: robot-main tells a dead lock it broke even when a late round too
   assert.equal(late?.ok, true, 'the late round holds');
   assert.equal(code, 0, logs.join('\n'));
   assert.ok(queued(readRecord(w)).some((t) => /the last robot job round \(taken T-dead\) was stopped before it finished; another round holds the lock now/.test(t)), JSON.stringify(queued(readRecord(w))));
+  // L816 m-2: under the holder's own cause, so a holder and a refuser that both carry the break tell it once that day.
+  const entries = readRecord(w).read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+  assert.equal(entries.find((e) => /another round holds the lock now/.test(e.text))?.mark?.fact, HOLD_FACT('robot-run-late'), JSON.stringify(entries));
   late.release();
 });
 

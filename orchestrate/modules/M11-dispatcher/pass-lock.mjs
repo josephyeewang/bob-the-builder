@@ -24,6 +24,9 @@
 // - A put-back of a lock its holder has since released leaves that lock behind, so a later pass breaks it and says a pass
 //   was stopped (one false tell). It needs the mover to stall across the holder's whole pass: it read the dead lock before
 //   the holder broke it, and moved the holder's lock only after the holder released.
+// - A lock that vanishes between the read and the move is taken as broken by another taker (`broke`), as a dead holder
+//   never releases. A live holder that released and exited in that window (microseconds; a process takes milliseconds to
+//   exit) would be told as stopped before it finished: one false tell, under the once-a-day cause (audit #336 r3 c-3).
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, renameSync } from 'node:fs';
 
@@ -65,7 +68,8 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
       try { unlinkSync(moved); } catch { /* none left from a crash */ }
       try { renameSync(file, moved); } catch (e) {
         // Another taker moved it first: try the link again. `held` was judged dead and a dead holder never releases, so
-        // only a breaker moved it: the dead lock was broken, and whichever taker holds tells it (L785 M1).
+        // only a breaker moved it: the dead lock was broken, and this taker tells it whether it then holds or not (L785 M1,
+        // L800 M-A).
         if (e?.code === 'ENOENT') { broke = held; continue; }
         return refuse({ ok: false, reason: 'could not break a dead pass lock' });
       }
