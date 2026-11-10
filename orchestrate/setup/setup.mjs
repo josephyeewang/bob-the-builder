@@ -48,7 +48,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
-import { DISPATCHER_JOB, checkDispatcherConfig, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { DISPATCHER_JOB, checkDispatcherConfig, parseDispatcher, planDispatcherConfig } from './dispatcher-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -172,7 +172,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
-    o.dispatcherOn = raw?.dispatcher !== null && typeof raw?.dispatcher === 'object';   // check reads the plain config, which drops the entry (L807 c2)
+    // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
+    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch { return false; } })();
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 

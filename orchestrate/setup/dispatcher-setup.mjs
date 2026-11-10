@@ -27,7 +27,7 @@ import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { tokenPath } from './extras.mjs';
-import { homeOf } from './layout.mjs';
+import { homeOf, privatePath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
@@ -58,8 +58,8 @@ const OWNER_PATHS = Object.freeze(OWNER_KEYS.filter((k) => k !== 'product'));
  * The entry may still name any of them; `dispatcher-config` prints what it uses.
  */
 export const dispatcherDefaults = (cfg) => Object.freeze({
-  productsFile: join(cfg.base, 'private', 'products.json'), rulesStateDir: join(cfg.base, 'private', 'rules-state'),
-  tokenFile: tokenPath(cfg), approvalsStateDir: join(cfg.base, 'private', 'approvals'),
+  productsFile: join(privatePath(cfg), 'products.json'), rulesStateDir: join(privatePath(cfg), 'rules-state'),
+  tokenFile: tokenPath(cfg), approvalsStateDir: join(privatePath(cfg), 'approvals'),
 });
 const PLAIN_PATH = (p) => typeof p === 'string' && p.startsWith('/') && p !== '/' && posix.normalize(p) === p && !p.endsWith('/') && !/[\u0000-\u001f\u007f]/.test(p) && p.length <= 300;
 const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';

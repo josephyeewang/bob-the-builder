@@ -1531,6 +1531,38 @@ test('L807 M1: place refuses where load does for the review jobs (the install) a
   assert.equal(wr.run(['daemons', 'place', '--only', 'review-runner']).code, 0, 'a job whose checks pass is placed on its own');
 });
 
+test('r1 M1: a refused full place names only the placed jobs whose own checks fail; a broken install names them all', async () => {
+  const w = await dPlaced();
+  rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true });   // only check-dispatcher fails: README Part 6 step 3
+  const r = w.run(['daemons', 'place']); assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /launches/);
+  assert.match(r.text, /dispatcher's job file .* is still in place and launchd starts it at boot/);
+  for (const job of JOBS) assert.doesNotMatch(r.text, new RegExp(`${job}'s job file`), `planted: a healthy ${job} is told to come out`);
+  chmodSync(w.root, 0o775);   // the install check fails: every job of the set is refused, and each placed one named
+  const all = w.run(['daemons', 'place']); assert.equal(all.code, 1, all.text);
+  for (const job of [...JOBS, 'dispatcher']) assert.match(all.text, new RegExp(`${job}'s job file .* is still in place`), job);
+});
+
+test('r1 m1: daemons check names a half-written job file a cut-off write left, under any label', async () => {
+  const w = await placed();
+  const row = () => checkDaemons(w.mac, w.cfg).find((i) => i.what.startsWith('no half-written job file'));
+  assert.equal(row().ok, true);
+  for (const name of [`.${LABEL}.review-runner.plist.new`, '.old.label.dispatcher.plist.new']) {
+    writeFileSync(w.mac.at(`/Library/LaunchDaemons/${name}`), 'x');
+    const i = row(); assert.equal(i.ok, false, name); assert.match(i.why, new RegExp(`${name.replace(/\./g, '\\.')}: left by a write that was cut off; delete it \\(sudo rm /Library/LaunchDaemons/`));
+    rmSync(w.mac.at(`/Library/LaunchDaemons/${name}`));
+  }
+  assert.equal(row().ok, true);
+  assert.equal(checkDaemons(w.mac, w.cfg, ['review-runner']).find((i) => i.what.startsWith('no half-written')), undefined, 'a check narrowed with --only leaves it out, as the label row');
+});
+
+test('r1 c1: check counts the dispatcher entry on only when its parser takes it, so a broken one names a leftover base dispatcher.json', async () => {
+  const w = await installed();
+  writeFileSync(w.mac.at(D_SRC), '{}\n'); w.mac.owners.set(D_SRC, { uid: w.mac.rootUid, gid: 0 });
+  w.raw.dispatcher = { product: 'alpha', notAKey: 1 };
+  const r = w.run(['check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /holds an entry the setup did not make: dispatcher\.json/);
+});
+
 test('L807 m4: a job file is written whole beside its name and renamed over it; a failed rename leaves the old file and no side file', async () => {
   const w = await placed();
   const f = `/Library/LaunchDaemons/${LABEL}.review-runner.plist`; const side = `/Library/LaunchDaemons/.${LABEL}.review-runner.plist.new`;
