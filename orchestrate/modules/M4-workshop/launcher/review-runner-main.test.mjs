@@ -820,11 +820,17 @@ test('L736 m4 planted: the Front Door\'s taps folder is checked against the one 
   const read = (doc) => () => doc;
   assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null);
   assert.equal(tapsFolderProblem({ ownerTaps: `${taps}/`, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null, 'a trailing slash is the same folder');
-  assert.equal(tapsFolderProblem({ ownerTaps: join(base, 'link'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null, 'a link to it is the same folder');
+  // Another spelling of the same folder is refused: the rules name it as given (#306 self-review m1).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'link'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it/, 'a link to it');
+  assert.match(tapsFolderProblem({ ownerTaps: taps.toUpperCase(), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it|is not the one the review runner reads/, 'another case');
+  // Two spellings that differ only in case are never taken as one (a case-sensitive disk holds two folders).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'later-taps'), runnerConfig: '/x', read: read({ ownerTaps: join(base, 'Later-Taps') }) }), /is not the one the review runner reads/);
+  // The runner's own may be a link: it is compared on its real path.
+  assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: join(base, 'link') }) }), null);
   assert.match(tapsFolderProblem({ ownerTaps: join(base, 'other'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not the one the review runner reads .*so its wall guards the wrong folder/);
   assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({}) }), /names no taps folder \(ownerTaps\)/);
   assert.match(tapsFolderProblem({ ownerTaps: 'owner-taps', runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /the Front Door names no taps folder/);
   assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: () => { throw new Error('config: not root\'s'); } }), /the review runner's config can't be read \(config: not root's\)/);
-  // The real reader by default: a file that is not the runner's own is refused.
+  // The real reader by default: a config that is not there can't be read, and is refused.
   assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: join(base, 'nothing.json') }), /the review runner's config can't be read/);
 });

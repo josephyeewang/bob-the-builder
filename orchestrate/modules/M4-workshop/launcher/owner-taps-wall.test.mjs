@@ -72,7 +72,7 @@ test('L736 m1 planted: wall paths spelled other than as they resolve are refused
 
 test('L724 (4): the wall is the Front Door\'s; every other role, which runs as Joe\'s Mac user too (L238) and is kept off the taps folder by its hooks and sandbox, is unchanged', () => {
   for (const role of Object.keys(DESIGN_PROFILES).filter((x) => x !== 'front_door')) {
-    const a = render(role, undefined, undefined), b = render(role, TAPS);
+    const a = render(role, undefined, null), b = render(role, TAPS);
     assert.equal(a.ok, true, `${role}: ${a.reason}`);
     assert.deepEqual(b.settings, a.settings, role);
   }
