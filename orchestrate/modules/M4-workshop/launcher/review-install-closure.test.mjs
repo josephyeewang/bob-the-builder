@@ -105,11 +105,14 @@ function startedScript(text) {
 // Builders that write their start command through another listed builder (so they never name one themselves), each with
 // the builder it uses; the tripwire checks each still imports it.
 const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs' });
-// The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1). A
-// module of the copy that brings one in by a named import, `import * as` or a dynamic `import()` of its module, at any
-// indent and outside comments, is a builder through it (BUILT_THROUGH) or only writes the files it is given
-// (USES_JOB_FILES), and must be on one list or the other. What the scan does not see: a module reached through another
-// module that re-exports a builder, or an `import()` whose target is not a plain string (CONFIG_IMPORTS lists those).
+// The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1, r2 M1).
+// The scan reads each module of the copy through lex() below, so comments, strings and template text are never read as
+// code. A module that brings a builder in, by a named import or re-export (`import { … } from`, `import d, { … } from`,
+// `export { … } from`), by `import * as` / `import d, * as` / `export * from` its module, or by an `import()` of its
+// module named by a plain string or a backtick string with no `${}`, anywhere on a line, is a builder through it
+// (BUILT_THROUGH) or only writes the files it is given (USES_JOB_FILES), and must be on one list or the other. A module
+// that re-exports a builder is caught itself, so the modules that import from it are not followed. What the scan does
+// not see: an `import()` whose name is built at run time (`${}`, `+`, `new URL(…)`; CONFIG_IMPORTS lists those).
 const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/login-job.mjs', watchPlist: 'setup/watch-setup.mjs',
   reviewDaemonPlists: 'modules/M4-workshop/launcher/review-daemons.mjs', updaterPlist: 'modules/M4-workshop/launcher/review-daemons.mjs',
   sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs' });
@@ -119,15 +122,21 @@ const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job file
  * from. An `import * as` or an `import()` of a builder's module brings in every function that module exports.
  */
 function jobFileImports(text, r) {
-  const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const target = (from) => (from.startsWith('.') ? join(dirname(r), from).split(sep).join('/') : from);
+  const { code, lits } = lex(text);
+  const target = (n) => {
+    const from = lits[+n].v.replace(/[?#].*$/, '');
+    return from.startsWith('.') ? join(dirname(r), from).split(sep).join('/') : from;
+  };
   const out = [];
-  for (const m of code.matchAll(/^\s*import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/gm)) {
-    for (const name of m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0])) if (name in JOB_FILE_FNS) out.push({ name, from: target(m[3]) });
+  for (const m of code.matchAll(/(?<![\w$.])(?:import|export)\s*(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*"#(\d+)"/g)) {
+    for (const name of m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0])) if (name in JOB_FILE_FNS) out.push({ name, from: target(m[2]) });
   }
-  const whole = [...code.matchAll(/^\s*import\s*\*\s*as\s+\w+\s+from\s*(['"])([^'"]+)\1/gm), ...code.matchAll(/\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g)];
+  const whole = [
+    ...code.matchAll(/(?<![\w$.])(?:import|export)\s*(?:[\w$]+\s*,\s*)?\*\s*(?:as\s+[\w$]+\s*)?from\s*"#(\d+)"/g),
+    ...code.matchAll(/(?<![\w$.])import\s*\(\s*"#(\d+)"\s*[,)]/g),
+  ];
   for (const m of whole) {
-    const from = target(m[2]);
+    const from = target(m[1]);
     for (const [name, mod] of Object.entries(JOB_FILE_FNS)) if (mod === from) out.push({ name, from });
   }
   return out;
@@ -513,6 +522,21 @@ test('L136 m1: the programs to start come from every job-file builder of the cop
   assert.deepEqual(jobFileImports(`const m = await import( "../modules/M12-sensors/sensors-job.mjs" );`, at), [{ name: 'sensorsJobPlist', from: 'modules/M12-sensors/sensors-job.mjs' }], 'dynamic');
   assert.deepEqual(jobFileImports(`import * as y from './y.mjs';\nawait import('./z.mjs');`, at), []);
   assert.deepEqual(jobFileImports(`import { sensorsJobPlist } from '../modules/M12-sensors/sensors-job.mjs';\nimport { robotPlist } from './robot-setup.mjs';`, at).map((u) => u.name), ['sensorsJobPlist', 'robotPlist'], 'the two builders through loginJobPlist are on the list');
+  // Read through lex() (#352 r2 M1, m2, c1): a `/*` or `*/` in a string hides nothing; a backtick name with no `${}` is
+  // a plain name; text that only looks like an import (a string, a template, a comment after code) is none; and the
+  // other shapes of an import or re-export.
+  const L = "'../modules/M11-dispatcher/login-job.mjs'";
+  const lj = [{ name: 'loginJobPlist', from: 'modules/M11-dispatcher/login-job.mjs' }];
+  assert.deepEqual(jobFileImports(`const A = '~/Library/LaunchAgents/*';\nimport { loginJobPlist } from ${L};\nconst E = '*/5 * * * *';`, at), lj, 'glob and cron strings');
+  assert.deepEqual(jobFileImports("const m = await import(`../modules/M11-dispatcher/login-job.mjs`);", at), lj, 'backtick import()');
+  assert.deepEqual(jobFileImports("const m = await import(`../modules/${n}/login-job.mjs`);", at), [], 'a name built at run time is not read');
+  assert.deepEqual(jobFileImports(`const help = "run import(${L}) to see";\nx(); // later: import(${L})\nconst src = \`\nimport { loginJobPlist } from ${L};\n\`;`, at), [], 'text that only looks like an import');
+  assert.deepEqual(jobFileImports(`import d, * as ns from ${L};`, at), lj, 'default and namespace');
+  assert.deepEqual(jobFileImports(`import d, { loginJobPlist } from ${L};`, at), lj, 'default and named');
+  assert.deepEqual(jobFileImports(`const a = 1; import { loginJobPlist } from ${L};`, at), lj, 'after code on its line');
+  assert.deepEqual(jobFileImports(`export { loginJobPlist as make } from ${L};`, at), lj, 're-export');
+  assert.deepEqual(jobFileImports(`export * from ${L};`, at), lj, 'export *');
+  assert.deepEqual(jobFileImports(`import {\n  ROBOT_MAIN,\n  loginJobPlist as make,\n} from '../modules/M11-dispatcher/login-job.mjs?v=1';`, at), lj, 'over lines, with a query');
   // Each builder's jobs each start one script of the copy, read from the job file's start command.
   for (const [f, build] of Object.entries(JOB_BUILDERS)) assert.ok(build().length >= 1, `${f} builds a job file`);
   assert.equal(startedScript(`<key>ProgramArguments</key><array><string>${join(SAMPLE_ROOT, NODE)}</string><string>${join(SAMPLE_ROOT, 'modules', 'x.mjs')}</string><string>${SAMPLE_ROOT}</string></array>`), 'modules/x.mjs');
