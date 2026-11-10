@@ -264,6 +264,20 @@ test('L748: without root the host.lock read is NEEDS ROOT, never a PASS; the lau
   assert.equal(res[0].ok, true); assert.ok(!res[0].skip);
 });
 
+test('L763 self-review m4: without root, a host.lock in a guarded folder is still NOT TRIED (it needs no read), there or missing, or its folder shut', () => {
+  const lock = '/Users/sam/Desktop/host.lock';
+  for (const state of ['there', 'missing', 'shut']) {
+    const w = world({ raw: { ...RAW, hostLockPath: lock }, lock: false });
+    mkdirSync(w.mac.at('/Users/sam/Desktop'), { recursive: true }); chmodSync(w.mac.at('/Users/sam/Desktop'), 0o755); w.mac.owners.set('/Users/sam/Desktop', { uid: 65001, gid: 20 });
+    if (state !== 'missing') { writeFileSync(w.mac.at(lock), 'host: mini\n'); chmodSync(w.mac.at(lock), 0o644); w.mac.owners.set(lock, { uid: 65001, gid: 20 }); }
+    w.mac.as = 65001;
+    const real = w.mac.lstat; if (state === 'shut') w.mac.lstat = (p) => { if (p === lock) { const e = new Error('EACCES'); e.code = 'EACCES'; throw e; } return real(p); };
+    const res = checkDispatcherKeys(w.mac, w.cfg);
+    assert.ok(res.some((r) => r.skip), `${state}: ${JSON.stringify(res)}`);
+    assert.ok(res.some((r) => r.notTried), `planted: a NEEDS ROOT return without the guarded line (${state}: ${JSON.stringify(res)})`);
+  }
+});
+
 test('L748 PLANT: the runner\'s launches folder missing or a link → FAIL, saying to load the review jobs first', () => {
   const w = world({ launches: false });
   const res = checkDispatcherKeys(w.mac, w.cfg);
