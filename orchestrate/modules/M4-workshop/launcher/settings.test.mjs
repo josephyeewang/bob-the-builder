@@ -11,10 +11,17 @@ import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_A
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { checkMachineWide } from './env-check.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
+// Sandbox setting names claude 2.1.322 reads (from its own code, #410 r2 M1) that the renderer never writes: each one is
+// refused in a role file and in the machine-wide file. Recheck on every pinned upgrade.
+const WIDENING_TOP = ['enabledPlatforms', 'allowAppleEvents', 'autoAllowBashIfSandboxed', 'enableWeakerNestedSandbox', 'enableWeakerNetworkIsolation',
+  'allowNestedUserNamespaces', 'credentials', 'ripgrep', 'bwrapPath', 'socatPath', 'ignoreViolations', 'tlsTerminate', 'somethingNew'];
+const WIDENING_NETWORK = ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding', 'allowMachLookup', 'httpProxyPort', 'socksProxyPort'];
+const WIDENING_FILESYSTEM = ['allowWrite', 'allowRead', 'allowManagedReadPathsOnly', 'somethingNew'];
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
@@ -332,6 +339,13 @@ test('L751: every role the runner starts is denied the worker runner\'s requests
   }
   // Both ways: a runner folder that holds one of the session's own folders is refused too.
   assert.match(render('worker', { paths: { ...PATHS, notes: '/u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+  // Without regard to case, both ways (#410 r2 m3): the Mac's disk ignores it.
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/U/RUNNER/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+  assert.match(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, requestsDir: '/W/COPY/requests' } } }).reason ?? '', /apart from the session's own folders/);
+  // The same rule at the renderer's other two apart checks: the notes folder and the tap handler's config.
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/W/OUTBOX/notes' } }).reason ?? '', /notes folder must be apart from the outbox/);
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/W' } }).reason ?? '', /notes folder must be apart from the outbox/);
+  assert.match(render('front_door', { paths: { ...PATHS, reviewAgainConfig: '/W/OWNER-TAPS/x.json' } }).reason ?? '', /outside the taps folder/);
 });
 
 // The closest real check on this Mac (L751): macOS's own sandbox (Seatbelt, which Claude Code's shell sandbox runs on)
@@ -507,20 +521,52 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     // With no added folders at all, too (#410 r1 A11).
     assert.match(drift((c) => { delete c[S.permissions][S.additionalDirectories]; c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), `${key}, no added folders`);
   }
-  // Any sandbox key the renderer does not write (#410 r1 m3).
-  assert.match(drift((c) => { c[S.sandbox].enableWeakerNestedSandbox = true; }).reason ?? '', /holds enableWeakerNestedSandbox/);
-  assert.match(drift((c) => { c[S.sandbox][S.network].allowUnixSockets = ['/var/run/x.sock']; }).reason ?? '', /network holds allowUnixSockets/);
+  // Any sandbox key the renderer does not write (#410 r1 m3), each name claude 2.1.322 reads (#410 r2 m1).
+  for (const k of WIDENING_TOP) assert.match(drift((c) => { c[S.sandbox][k] = true; }).reason ?? '', new RegExp(`sandbox holds ${k};`), k);
+  for (const k of WIDENING_NETWORK) assert.match(drift((c) => { c[S.sandbox][S.network][k] = ['x']; }).reason ?? '', new RegExp(`network holds ${k};`), `network ${k}`);
+  for (const k of WIDENING_FILESYSTEM) assert.match(drift((c) => { c[S.sandbox][S.filesystem][k] = true; }).reason ?? '', new RegExp(`filesystem holds ${k};`), `filesystem ${k}`);
+  for (const part of [S.network, S.filesystem]) for (const v of [[], 'x', null]) {
+    assert.match(drift((c) => { c[S.sandbox][part] = v; }).reason ?? '', new RegExp(`sandbox ${part} is not an object`), `${part} ${JSON.stringify(v)}`);
+  }
+  // The outbox in capitals, Bob inside it (#410 r2 m2): apart is checked without regard to case, both ways.
+  const bobAt = (c, b) => { dirs(c)[1] = b; c[S.permissions][S.deny].push(...bobFolderDeny(b)); c[S.sandbox][S.filesystem][S.denyWrite].push(...bobFolderShell(b)); };
+  assert.match(drift((c) => bobAt(c, '/w/outbox/bob')).reason ?? '', /beyond the session's own outbox/, 'Bob inside the outbox');
+  assert.match(drift((c) => {
+    for (const h of Object.values(c[S.hooks]).flat().flatMap((m) => m[H.hooks])) h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /W/OUTBOX');
+    dirs(c)[0] = '/W/OUTBOX'; bobAt(c, '/w/outbox/bob');
+  }).reason ?? '', /beyond the session's own outbox/, 'the outbox in capitals, Bob inside it');
   // With no profile (#410 r1 A8: writeRoleSettings may be called without one), the wall is still checked.
   const noProfile = structuredClone(s); noProfile[S.permissions][S.additionalDirectories].push('/w/outbox-2');
   assert.match(checkSettings(noProfile).reason ?? '', /beyond the session's own outbox/);
-  // The machine-wide file (#410 r1 M1, launch check 10): its filesystem block holds deny lists only, and no setting that
-  // widens the sandbox (claude 2.1.322 takes a managed file's allowWrite into the shell's write list).
-  assert.equal(checkSettings({ [S.sandbox]: { [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } } }, { machineWide: true }).ok, true);
-  for (const [m, why] of [
-    [{ [S.sandbox]: { [S.filesystem]: { allowWrite: ['/w'] } } }, /machine-wide sandbox filesystem holds allowWrite/],
-    [{ [S.sandbox]: { [S.filesystem]: { allowRead: ['/w'] } } }, /holds allowRead/],
-    [{ [S.sandbox]: { [S.filesystem]: { somethingNew: 1 } } }, /holds somethingNew/],
-    [{ [S.sandbox]: { [S.network]: { allowUnixSockets: ['/s'] } } }, /network holds allowUnixSockets/],
-    [{ [S.sandbox]: { enableWeakerNestedSandbox: true } }, /holds enableWeakerNestedSandbox/],
-  ]) assert.match(checkSettings(m, { machineWide: true }).reason ?? '', why, JSON.stringify(m));
+  // The machine-wide file (#410 r1 M1, r2 M1, launch check 10): its sandbox block is an allow-list, each key with its
+  // one safe value; every other key claude 2.1.322 reads from it is refused (one case per name, r2 m1).
+  const mw = (sb) => checkSettings({ [S.sandbox]: sb }, { machineWide: true });
+  assert.equal(mw({ [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false,
+    [S.network]: { [S.strictAllowlist]: true, deniedDomains: ['example.com'], allowManagedDomainsOnly: true }, [S.filesystem]: { [S.denyRead]: ['/x'], [S.denyWrite]: ['/y'] } }).ok, true);
+  for (const k of WIDENING_TOP) assert.match(mw({ [k]: true }).reason ?? '', new RegExp(`machine-wide sandbox holds ${k};`), k);
+  for (const k of [...WIDENING_NETWORK, S.allowedDomains]) assert.match(mw({ [S.network]: { [k]: [] } }).reason ?? '', new RegExp(`machine-wide sandbox network holds ${k};`), `network ${k}`);
+  for (const k of WIDENING_FILESYSTEM) assert.match(mw({ [S.filesystem]: { [k]: ['/w'] } }).reason ?? '', new RegExp(`machine-wide sandbox filesystem holds ${k};`), `filesystem ${k}`);
+  // The audit's probe cases as written (r2 M1).
+  for (const sb of [{ enabledPlatforms: [] }, { enabledPlatforms: ['linux'], [S.failIfUnavailable]: false }, { allowAppleEvents: true },
+    { [S.network]: { allowMachLookup: ['*'] } }, { [S.network]: { httpProxyPort: 8080, socksProxyPort: 1080 } }, { autoAllowBashIfSandboxed: true },
+    { enableWeakerNetworkIsolation: true }, { allowNestedUserNamespaces: true }, { [S.failIfUnavailable]: false }, { credentials: {} }, { ripgrep: {} },
+    { bwrapPath: '/x' }, { socatPath: '/x' }, { ignoreViolations: {} }, { tlsTerminate: true }, { [S.excludedCommands]: ['git'] }]) assert.equal(mw(sb).ok, false, JSON.stringify(sb));
+  // Each allowed key only at its safe value.
+  assert.match(mw({ [S.sandboxEnabled]: false }).reason ?? '', /switch the sandbox off/);
+  for (const [sb, k] of [[{ [S.sandboxEnabled]: 'yes' }, S.sandboxEnabled], [{ [S.failIfUnavailable]: false }, S.failIfUnavailable],
+    [{ [S.allowUnsandboxedCommands]: 'no' }, S.allowUnsandboxedCommands], [{ [S.network]: { [S.strictAllowlist]: false } }, S.strictAllowlist],
+    [{ [S.network]: { deniedDomains: 'x' } }, 'deniedDomains'], [{ [S.network]: { allowManagedDomainsOnly: 'yes' } }, 'allowManagedDomainsOnly'],
+    [{ [S.filesystem]: { [S.denyRead]: '/x' } }, S.denyRead], [{ [S.filesystem]: { [S.denyWrite]: [1] } }, S.denyWrite]]) {
+    assert.match(mw(sb).reason ?? '', new RegExp(`sets ${k} to a value that is not its safe one`), JSON.stringify(sb));
+  }
+  for (const part of [S.network, S.filesystem]) for (const v of [[], 'x', null]) {
+    assert.match(mw({ [part]: v }).reason ?? '', new RegExp(`machine-wide sandbox ${part} is not an object`), `${part} ${JSON.stringify(v)}`);
+  }
+  for (const v of [[], 'x', null]) assert.match(mw(v).reason ?? '', /machine-wide sandbox block is not an object/, JSON.stringify(v));
+  // A realistic hardened managed file still passes launch check 10: the guard hook, deny rules, the sandbox on and fail-closed.
+  const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
+  const hardened = { [S.hooks]: { [E.preToolUse]: [guard] }, [S.permissions]: { [S.deny]: ['Read(//w/held/**)', 'Edit(//w/held/**)'] },
+    [S.sandbox]: { [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.strictAllowlist]: true },
+      [S.filesystem]: { [S.denyRead]: ['/w/held'], [S.denyWrite]: ['/w/held'] } } };
+  assert.deepEqual(checkMachineWide({ readFile: () => JSON.stringify(hardened), path: '/fake/managed.json' }), { ok: true });
 });
