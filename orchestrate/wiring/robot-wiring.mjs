@@ -42,7 +42,7 @@
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS } from './dispatcher-wiring.mjs';
+import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS, WORKER_CONFIG_KEYS } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 import { makeMasker } from '../modules/M12-sensors/mask.mjs';
@@ -59,10 +59,10 @@ import { mintInstallationToken } from '../modules/M6-merge-gate/token.mjs';
 import { appMintClient } from '../modules/M6-merge-gate/watch-run.mjs';
 
 // approvalsStateDir is the Dispatcher's alone (M2 runs only in its approvals step), and so are the review runner's keys
-// (L639), so the robot config refuses them.
+// (L639), and the worker and cleanup ports' (L739), so the robot config refuses them.
 // The robot App and where its alerts go (L600): all four or none.
 export const APP_KEYS = Object.freeze(['appId', 'appInstallation', 'alertRepo', 'alertOwner']);
-export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
+export const CONFIG_KEYS = Object.freeze([...DISPATCHER_KEYS.filter((k) => k !== 'approvalsStateDir' && !REVIEW_CONFIG_KEYS.includes(k) && !WORKER_CONFIG_KEYS.includes(k)), 'keyDir', 'dispatcherLockFile',
   ...APP_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'keyDir', 'dispatcherLockFile']);
 // The longest a live Dispatcher pass may hold its lock: M11's run deadline, its watchdog's margin, and a minute (audit
