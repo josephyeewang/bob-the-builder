@@ -75,6 +75,7 @@ import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
+import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -104,25 +105,53 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
  * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
  * A file with no such fact, a fact with another sha256 or still in flight (applying, starting), a file that is
  * not a plain one, or a Record that can't be read: not drained. No files, or the outbox gone: drained.
+ * `waiting` is done only for a worker or script session (#388 r1 m2): intake writes it only for a Lead's queued
+ * request or plan, which starts by itself later, so a Lead's outbox would close on a hand-in not yet taken. The fact
+ * is read first and the file hashed only when its fact is done (#388 r1 m3), so a file never taken is never read.
+ * The card's bundle (`bundle-<card>.bundle`, M4 push.mjs) is never an intake file: it counts as taken once the push of
+ * this session's attempt (read from the Record's session doc, `readSession`, M4 readSessionFile) is `pushed` with the
+ * sha256 of these bytes (`bundle_sha256`, L898). No session reader, no attempt, no such push, a refused one, an older
+ * fact without the hash, or other bytes: it stays open.
  * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
  * M4 review-runner-main.mjs readFactFile answers (runner-main.mjs wires it). Left out, every read fails and an outbox
  * holding a file stays open: it fails safe, never closing one the Record has not taken.
  */
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
+const WAITING_DONE_FOR = new Set(['worker', 'script']);
+const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
+const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
+const SHA256 = /^[0-9a-f]{64}$/;
+// The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
+function bundlePushed(s, path, { readFact, readSession, hashOf }) {
+  let sd; try { sd = readSession(s.id); } catch { return false; }
+  const doc = sd?.ok === true ? sd.doc : null;
+  const att = doc?.card === s.card ? doc.attempt : undefined;
+  if (typeof att !== 'string' || !att) return false;
+  let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return false; }
+  const d = f?.ok === true ? f.doc : null;
+  if (d?.result !== 'pushed' || !SHA256.test(String(d.bundle_sha256))) return false;
+  let hash; try { hash = hashOf(path); } catch { return false; }
+  return hash === d.bundle_sha256;
+}
 function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
 }
-export function drainedPort({ list = readdirSync, readFact = noFactReader, hashOf = fileSha256 } = {}) {
+export function drainedPort({ list = readdirSync, readFact = noFactReader, readSession = noSessionReader, hashOf = fileSha256 } = {}) {
   return (s) => {
     let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
     for (const name of names) {
-      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
+      if (typeof s.card === 'string' && name === bundleName(s.card)) {
+        if (!bundlePushed(s, join(s.outbox, name), { readFact, readSession, hashOf })) return false;
+        continue;
+      }
       let f; try { f = readFact(`intake-applied-${s.id}-${name}`); } catch { return false; }
       const d = f?.ok === true ? f.doc : null;
-      if (!d || d.session !== s.id || d.name !== name || !INTAKE_DONE.has(d.state) || d.sha256 !== hash) return false;
+      if (!d || d.session !== s.id || d.name !== name || !doneFor(s, d.state)) return false;
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
+      if (d.sha256 !== hash) return false;
     }
     return true;
   };
