@@ -1472,7 +1472,7 @@ test('#307 r1 M1 planted: a push drops the old head\'s offer and attempt; a tap 
   w.taps.push({ session_id: 'S-1', key: 'k-old' });
   r = await runnerPass(w.ctx);
   assert.deepEqual(r.setAside, []);
-  refusedFor(r, /review again" for session S-1: card C-1 has moved on to head bbbbbbb since this session's aaaaaaa, and the new head gets its own review/);
+  refusedFor(r, /review again" for session S-1: card C-1 has moved on to head bbbbbbb, with a code change since this session's aaaaaaa, and the new head gets its own review/);
   assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 1);
 });
 
@@ -1515,6 +1515,91 @@ test('#307 r1 M1 planted: a card that no longer needs a reviewer is not offered,
   assert.deepEqual(r.setAside, []);
   refusedFor(r, /review again" for session S-1: card C-1 no longer needs a reviewer \(it is running\), so no new review would start/);
   assert.deepEqual(w.status().offers, []);
+});
+
+// #307 self-review M1: an amend that keeps the tree is the same review, so the tap still counts and a review of the
+// amend starts; only a push with a code change refuses it.
+test('#307 self-review M1 planted: after an amend that keeps the tree, the silent session is still offered, and a tap lets the amend be reviewed', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const AMEND = 'f'.repeat(40);
+  w.trees.set(AMEND, TREE);
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: AMEND });
+  w.heads.set('C-1', AMEND);
+  w.ask({ head: AMEND });
+  refusedFor(await runnerPass(w.ctx), /one start per head and tree/);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-1'], 'still offered');
+  w.taps.push({ session_id: 'S-1', key: 'k-1' });
+  w.ask({ head: AMEND });
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }]);
+  assert.deepEqual(r.started.map((x) => [x.session_id, x.head]), [['S-2', AMEND]]);
+});
+
+// #307 self-review m1: a card that can't be read for a moment leaves the tap for the next pass, untold.
+test('#307 self-review m1 planted: a tap read while the card can\'t be read is kept and taken next pass', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const readCard = w.ctx.readCard;
+  w.ctx.readCard = () => { throw new Error('the Record is busy'); };
+  // The Front Door's listing: a tap stays until the status lists it as read.
+  w.ctx.setAsideByJoe = () => [{ session_id: 'S-1', key: 'k-1' }];
+  let r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, []);
+  refusedFor(r, /review again" for session S-1: card C-1 could not be read, so whether a new review would start can't be known yet; it is read again next pass/);
+  assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 0, 'not told for a moment\'s failure');
+  assert.ok(!w.status().taps_read.includes('k-1'), 'the tap is not marked read');
+  w.ctx.readCard = readCard;
+  r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }]);
+  assert.ok(w.status().taps_read.includes('k-1'));
+});
+
+// #307 self-review m2: pruning keeps a failed-start count, so a tree a revert brings back gets no fresh tries.
+test('#307 self-review m2 planted: a tree with failed starts keeps its count through a push and a revert', async () => {
+  let tries = 0;
+  const w = await ready({ start: async () => { tries += 1; return { ok: false, reason: 'claude would not start' }; } });
+  for (let i = 1; i <= MAX_FAILED_STARTS; i++) { w.ask(); await runnerPass(w.ctx); w.clock.t += RETRY_MS; }
+  assert.equal(tries, MAX_FAILED_STARTS);
+  // A push to a new tree, a pass, then a revert to the first head.
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 });
+  w.heads.set('C-1', HEAD2);
+  await runnerPass(w.ctx);
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD });
+  w.heads.set('C-1', HEAD);
+  w.clock.t += RETRY_MS;
+  w.ask();
+  refusedFor(await runnerPass(w.ctx), /3 starts of a reviewer for card C-1 at aaaaaaa failed/);
+  assert.equal(tries, MAX_FAILED_STARTS, 'no fresh tries');
+});
+
+// #307 self-review c2: a running session's attempt is never pruned, and a pruned tree that comes back gets no second start.
+test('#307 self-review c2 planted: pruning skips a running session, and a pruned tree that comes back is not started again', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  // S-1 runs while the card moves on: its attempt stays.
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 });
+  w.heads.set('C-1', HEAD2);
+  await runnerPass(w.ctx);
+  const keys = () => Object.keys(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts);
+  assert.ok(keys().includes(`C-1:${TREE}:reviewer`), `kept while running: ${keys()}`);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.ok(!keys().includes(`C-1:${TREE}:reviewer`), 'dropped once ended');
+  // A revert to HEAD: the launch records still hold S-1, so no second session starts on that tree.
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD });
+  w.heads.set('C-1', HEAD);
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(r.started, []);
+  refusedFor(r, /one start per head and tree/);
 });
 
 // #307 r1 m1 (probe B): an offer passes the tap loop's own test, so a session whose outbox now holds a fail is no offer.
