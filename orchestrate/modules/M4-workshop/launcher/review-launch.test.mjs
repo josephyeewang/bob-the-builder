@@ -239,13 +239,37 @@ test('L900: check 10 reads the other managed sources through the real readers un
   writeFileSync(cache, JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } }));
   const why = `the machine-wide production block is not in force (in ${cache})`;
   assert.equal((await port(w.x, 10)).reason, why, 'the fakes read the session\'s home');
-  // Left out, the live readers; the caches are still the session's home (reviewHome), not the runner's HOME (L906 m2).
+  // Left out, the live readers; the cache is still the session's own HOME's (here reviewHome), not the runner's (L913 m1).
   // Only the fixed file is still named for the test (L909: machineWide must be it), so /Library's fixed managed-settings.json is not read.
   const live = { ...w.x, managedReaders: { claudeFile: w.x.machineWide } };
   assert.notEqual(process.env.HOME, w.x.reviewHome, 'here the two differ');
   assert.equal((await port(live, 10)).reason, why);
   writeFileSync(cache, '{}');   // what claude writes when the server has none (L906 M1)
   assert.deepEqual(await port(live, 10), { ok: true });
+});
+
+// L913 m1 (the #419 r2 probe): check 10 reads the remote cache where the session's claude reads it, from the
+// session's own environment: account a's HOME (the runner's, not reviewHome), account b's CLAUDE_CONFIG_DIR.
+test('L913 m1: check 10 reads the session\'s own remote cache: its CLAUDE_CONFIG_DIR, else its HOME\'s .claude', async () => {
+  const w = world();
+  const runnerHome = join(w.root, 'runnerHOME');
+  const noGuard = JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } });
+  const put = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'remote-settings.json'), noGuard); return join(dir, 'remote-settings.json'); };
+  const a = { ...w.x, env: { ...w.x.env, HOME: runnerHome } };
+  assert.notEqual(runnerHome, w.x.reviewHome);
+  const atReview = put(join(w.x.reviewHome, '.claude'));
+  assert.deepEqual(await port(a, 10), { ok: true }, 'reviewHome\'s cache is not account a\'s session\'s');
+  rmSync(atReview);
+  const atRunner = put(join(runnerHome, '.claude'));
+  assert.equal((await port(a, 10)).reason, `the machine-wide production block is not in force (in ${atRunner})`);
+  // Account b: its CLAUDE_CONFIG_DIR, whatever HOME says.
+  const b = { ...w.x, env: { ...a.env, ...accountEnv(w.x.reviewHome, 'b') } };
+  assert.deepEqual(await port(b, 10), { ok: true }, 'the HOME cache is not account b\'s');
+  const atB = put(accountEnv(w.x.reviewHome, 'b').CLAUDE_CONFIG_DIR);
+  assert.equal((await port(b, 10)).reason, `the machine-wide production block is not in force (in ${atB})`);
+  // No HOME and no CLAUDE_CONFIG_DIR: nowhere to look, refused.
+  const { HOME, ...noHome } = w.x.env;
+  assert.equal((await port({ ...w.x, env: noHome }, 10)).reason, 'the remote settings cache can\'t be found (no home folder)');
 });
 
 // L900: the "parent" managed source (env-check.mjs MANAGED SOURCES). Check 10 doesn't read it: it holds only

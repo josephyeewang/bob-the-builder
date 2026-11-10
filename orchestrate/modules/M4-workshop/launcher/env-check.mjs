@@ -46,9 +46,9 @@ export function checkRoleEnv(env) {
 // CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code): RECHECK ON EVERY UPGRADE of the pin.
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
 // This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
-// (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). It also has a
-// storage backend for the remote cache (the one CLAUDE_CODE_HOVER_REST pins) stubbed out (always none), so the cache is the file below only;
-// on an upgrade, look for the cache moving into that storage.
+// (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). Its storage backend
+// for the remote cache is stubbed out (uCo() returns undefined; CLAUDE_CODE_HOVER_REST pins it), so the
+// cache is the file below only; on an upgrade, look for the cache moving into that storage.
 // Sources, highest precedence first. By default ONLY the highest tier with content applies, and the
 // ones beneath it are not read for policy at all (unless a source sets managedSourcesBehavior "merge").
 // So a remote cache or managed preferences with content displaces managed-settings.json and its guard
@@ -61,9 +61,10 @@ export function checkRoleEnv(env) {
 //   remote  server-managed settings, fetched at start for a signed-in organization that has some, and
 //           cached at <config home>/remote-settings.json. The config home is CLAUDE_CONFIG_DIR, else
 //           $HOME/.claude; a review session sets CLAUDE_CONFIG_DIR only for the second account
-//           (accounts.mjs accountEnv), so check 10 reads the cache in every account folder under the
-//           session's home (ACCOUNTS: .claude, .claude-b; reviewChecks passes reviewHome, and the
-//           default reader is $HOME). The CLAUDE_CODE_REMOTE_SETTINGS_PATH override is not in this
+//           (accounts.mjs accountEnv). So reviewChecks has check 10 read the cache in the session's own
+//           config home, from the session's own environment (configDirs: its CLAUDE_CONFIG_DIR, else its
+//           HOME's .claude); called without configDirs, check 10 reads every account folder (ACCOUNTS:
+//           .claude, .claude-b) under home(), $HOME by default. The CLAUDE_CODE_REMOTE_SETTINGS_PATH override is not in this
 //           build. A readable cache must pass; an unreadable or non-JSON one refuses.
 //           KNOWN GAP: a missing cache passes. Settings the server sends at start are never seen by
 //           check 10, and since only the highest source applies, they would also displace the guard
@@ -135,7 +136,7 @@ function sourceProblem(obj, label, guardScript) {
  */
 export function checkMachineWide({ readFile, path, guardScript = 'production-write-guard.mjs',
   listDir = MANAGED_READERS.listDir, plist = MANAGED_READERS.plist, user = MANAGED_READERS.user, home = MANAGED_READERS.home,
-  claudeFile = MANAGED_READERS.claudeFile }) {
+  claudeFile = MANAGED_READERS.claudeFile, configDirs }) {
   // Claude reads only its fixed file (L909): a guard in any other file would never apply. Nothing is read first.
   if (path !== claudeFile) return refuse(`machine-wide settings must be ${claudeFile}, not ${path}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   let obj;
@@ -155,9 +156,13 @@ export function checkMachineWide({ readFile, path, guardScript = 'production-wri
     if (bad) return bad;
   }
 
-  const h = home();
-  if (typeof h !== 'string' || !h.startsWith('/')) return refuse('the remote settings cache can\'t be found (no home folder)');
-  for (const cache of ACCOUNT_NAMES.map((n) => join(accountDir(h, n), REMOTE_CACHE))) {
+  // The config homes whose remote cache claude reads: the session's own when the caller names it (L913 m1),
+  // else every account folder under home.
+  let dirs;
+  if (configDirs) { try { dirs = configDirs(); } catch {} }
+  else { const h = home(); if (typeof h === 'string' && h.startsWith('/')) dirs = ACCOUNT_NAMES.map((n) => accountDir(h, n)); }
+  if (!Array.isArray(dirs) || !dirs.length || !dirs.every((d) => typeof d === 'string' && d.startsWith('/'))) return refuse('the remote settings cache can\'t be found (no home folder)');
+  for (const cache of dirs.map((d) => join(d, REMOTE_CACHE))) {
     let text = null;
     try { text = readFile(cache); } catch (e) { if (!ABSENT.has(e?.code)) return refuse(`the remote settings cache ${cache} can't be read (${e?.code ?? e?.message})`); }
     if (text === null) continue;

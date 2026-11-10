@@ -223,11 +223,11 @@ test('step 6, check 2 (#369 m7): names compared after folding letter case, a non
 const RULES = { production: { env_files: ['.env'], programs: ['psql'], hosts: ['db.example.com'] } };
 test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
-    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/mw.json',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/o/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
-    ['/m', '2.1.300', '/h', RULES, '/o/s.json', '/mw.json', '/home', 'npm test', '/b', null]);
+    ['/m', '2.1.300', '/h', RULES, '/o/s.json', '/Library/Application Support/ClaudeCode/managed-settings.json', '/home', 'npm test', '/b', null]);
   for (const k of ['busy', 'writeSnapshot', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
   // The start port gets these checks and check 0's version.
   const sd = startDeps(c);
@@ -242,6 +242,17 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
   for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w']) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), /machineWide must be a full path in its simplest form/, machineWide);   // the #364 r2 n4 class
+  // L915 (#420 m2): render.paths node, hooksDir, notes and bobFolder, when given, in their simplest form, at load.
+  for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) {
+    const at = (v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });
+    for (const bad of [`/x/${k}/`, `x/${k}`, `/x/../${k}`, '/', 7]) {
+      assert.throws(() => checkRunnerConfig(at(bad)), new RegExp(`product p1: render\\.paths\\.${k} must be a full path in its simplest form`), `${k} ${bad}`);
+    }
+    assert.doesNotThrow(() => checkRunnerConfig(at(`/x/${k}`)), k);
+  }
+  // L913 (a): any file but claude's fixed one is refused at load, not session by session at check 10.
+  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/);
+  assert.equal(checkRunnerConfig({ ...base, machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json' }).machineWide, '/Library/Application Support/ClaudeCode/managed-settings.json');
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
   // #369 m4: the rules' production lists, as the review runner requires; the snapshot in the runner's own folder, one per product.
   for (const rules of [{}, { production: { env_files: [], programs: [] } }, { production: { env_files: [1], programs: [], hosts: [] } }]) {

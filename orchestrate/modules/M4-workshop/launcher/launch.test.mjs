@@ -490,6 +490,33 @@ test('L906 M1: an empty source ({}) is none in every managed source but the fixe
   // The main file itself, empty, refuses.
   const m = managedWorld(); m.files['/m/managed-settings.json'] = '{}';
   assert.deepEqual(m.run(), { ok: false, reason: 'the machine-wide production block is not in force' });
+  // L913 m2: only a plain object with no keys is none. null, a scalar, or a key named "" is content and refuses.
+  for (const text of ['null', '0', 'false', '""', '{"":1}']) {
+    const p = managedWorld(); p.prefs[USER_PREFS] = text;
+    assert.equal(p.run().ok, false, `user managed preferences ${text}`);
+    const c = managedWorld(); c.files[CACHE] = text;
+    assert.equal(c.run().ok, false, `remote cache ${text}`);
+  }
+  // An empty source is skipped, never the end of the list: a later drop-in, or the second account's cache, is still read.
+  const d = managedWorld(); d.dropIns.push('10-a.json', '20-b.json');
+  d.files['/m/managed-settings.d/10-a.json'] = '{}'; d.files['/m/managed-settings.d/20-b.json'] = JSON.stringify({ [S.hooks]: {} });
+  assert.deepEqual(d.run(), { ok: false, reason: 'the machine-wide production block is not in force (in /m/managed-settings.d/20-b.json)' });
+  const a = managedWorld(); a.files[CACHE] = '{}'; a.files[CACHE_B] = JSON.stringify({ [S.hooks]: {} });
+  assert.deepEqual(a.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${CACHE_B})` });
+});
+
+test('L913 m1: with configDirs, check 10 reads the remote cache in exactly those folders, not every account under home', () => {
+  const w = managedWorld();
+  w.files['/s/cfg/remote-settings.json'] = JSON.stringify({ [S.hooks]: {} });
+  assert.deepEqual(w.run({ configDirs: () => ['/s/cfg'] }), { ok: false, reason: 'the machine-wide production block is not in force (in /s/cfg/remote-settings.json)' });
+  w.read.length = 0;
+  w.files['/s/cfg/remote-settings.json'] = '{}';
+  w.files[CACHE] = JSON.stringify({ [S.hooks]: {} });   // under home: not this session's, not read
+  assert.deepEqual(w.run({ configDirs: () => ['/s/cfg'] }), { ok: true });
+  assert.equal(w.read.includes(CACHE), false);
+  for (const configDirs of [() => [undefined], () => ['rel'], () => [], () => { throw new Error('x'); }]) {
+    assert.deepEqual(w.run({ configDirs }), { ok: false, reason: 'the remote settings cache can\'t be found (no home folder)' });
+  }
 });
 
 test('L900 check 10: its default readers are the real ones', () => {

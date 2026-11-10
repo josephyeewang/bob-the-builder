@@ -19,7 +19,7 @@ import { git, gitOk } from '../git/safe-git.mjs';
 
 const ME = process.getuid();
 // R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
-const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
+const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
 
 test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
   const base = tempDir('m4-install-');

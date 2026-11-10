@@ -12,7 +12,7 @@
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
-//     "pin": "<claude version>"?, "machineWide": "/abs"? }
+//     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913) }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
 // pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
@@ -42,6 +42,7 @@ import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/s
 import { spawn as childSpawn } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
@@ -49,6 +50,9 @@ const UIDS = ['orchestrateUid', 'recordUid'];
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
 // The product rule is setup's (shared/product-paths.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
 const productName = (p) => PRODUCT.test(p);
+
+// The session's own folders in render.paths that the config may give (L915).
+export const RENDER_PATHS = Object.freeze(['node', 'hooksDir', 'notes', 'bobFolder']);
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -74,9 +78,17 @@ export function checkRunnerConfig(c) {
     const d = p.render.paths.deny;
     for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path in its simplest form, not / itself`);
     if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths in their simplest form (the secrets, and the approvals and rules state)`);
+    // L915 (#420 m2): the session's own folders, when given, in their simplest form here, at load, rather than
+    // every launch refused later by render-settings.
+    for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
-  if (c.machineWide !== undefined && !fullPath(c.machineWide)) fail('machineWide must be a full path in its simplest form');
+  // L913 (a): claude reads only its fixed managed file, so it is the one value taken (its name has a space, which the
+  // full-path rule refuses elsewhere); any other would refuse every session at check 10 instead.
+  if (c.machineWide !== undefined && c.machineWide !== CLAUDE_FILE) {
+    if (!fullPath(c.machineWide)) fail('machineWide must be a full path in its simplest form');
+    fail(`machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
+  }
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
   // Each product's rules snapshot is the runner's own file, in its own folder outside every copy, one per product
