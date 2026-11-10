@@ -36,7 +36,7 @@ import { SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, bobPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
@@ -73,7 +73,8 @@ export function setupFields(cfg, { pin, userOf }) {
   if (problems.length) return { fields: null, problems };
   // Every role of the design table has a Mac user (m-1): the review roles run as review, every other role as the owner's
   // own user, whose outbox folders it owns (layout.mjs folderTable).
-  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, REVIEW_ROLES.includes(r) ? review.uid : owner.uid]));
+  // The runner's roles (L722: the review roles and the plan reviewer) write as review; every other role is the owner's.
+  const uids = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, RUNNER_ROLES.includes(r) ? review.uid : owner.uid]));
   const fields = {
     installRoot: P.installRoot, root: P.reviewRoot, outboxRoot: outboxRootPath(cfg), reviewHome: homeOf(cfg, 'review'),
     uids, recordUid: orch.uid, mirror: mirrorPath(cfg), hooksDir: join(P.installRoot, COPY_HOOKS), accountCopy: P.accountCopy,

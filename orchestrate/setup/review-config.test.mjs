@@ -8,7 +8,7 @@ import { INSTALL_LATER, OWNER_INPUT, SOURCES, buildReviewConfig, ownerFields, pi
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { COPY_CLAUDE_CODE, COPY_HOOKS, REVIEW_SNAPSHOT_FILE, folderTable, parseConfig, storePath } from './layout.mjs';
 import { planInstall } from './install.mjs';
 import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
@@ -79,7 +79,7 @@ test('the file written is the one the runner\'s own readConfig takes, with setup
     assert.deepEqual(c.deny, [join(B, 'keys'), join(B, 'private'), '/Users/joe']);
     assert.equal(c.pin, PIN);
     assert.deepEqual(Object.keys(c.uids).sort(), Object.keys(DESIGN_PROFILES).sort());
-    for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, REVIEW_ROLES.includes(role) ? me : OWNER_UID, role);
+    for (const [role, uid] of Object.entries(c.uids)) assert.equal(uid, RUNNER_ROLES.includes(role) ? me : OWNER_UID, role);
     assert.equal(c.budget, undefined); assert.equal(c.bobManifest, undefined);
     assert.equal(r.text.includes('2.1.316') && !/"(budget|bobManifest)"/.test(r.text), true);
   } finally { w.done(); }
@@ -240,7 +240,9 @@ test('L731 M1: --for-install builds the file a first install takes; the plain fi
     for (const k of INSTALL_LATER) delete a[k];
     assert.deepEqual(b, a, 'every other field is the full file\'s, read back whole');
     // Install's own plan, on a fresh Mac (no copy yet), reading each file as the runner config.
-    const io = { at: (p) => p, rootUid: 0, nodeBinProblem: () => null };
+    // install reads the review user's id to check the map against it (main's L726/L737): the world's review user answers.
+    const dsclRead = (name) => `UniqueID: ${w.users[name].uid}\nPrimaryGroupID: 20\nUserShell: /usr/bin/false\nNFSHomeDirectory: /var/empty\nIsHidden: 1\n`;
+    const io = { at: (p) => p, rootUid: 0, nodeBinProblem: () => null, run: (cmd, args) => (cmd === '/usr/bin/dscl' && args[1] === '-read' && w.users[args[2].replace('/Users/', '')] ? { status: 0, stdout: dsclRead(args[2].replace('/Users/', '')), stderr: '' } : { status: 56, stdout: '', stderr: '' }) };
     const plan = (file) => planInstall(io, { ...w.cfg, runnerConfig: file, extras: [], nodeBin: '/usr/local/bin/node', address: 'https://example.invalid/o/r.git', gitBin: '/usr/bin/git' }, { readSource: (f) => readFileSync(f, 'utf8'), runUpdater: () => ({ status: 0 }) });
     const p1 = plan(first.outFile);
     assert.deepEqual(p1.problems, [], 'install takes the --for-install file');

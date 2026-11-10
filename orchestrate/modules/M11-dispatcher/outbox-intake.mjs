@@ -391,8 +391,9 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         catch (e) { return { ok: false, reason: `the start failed: ${e.message}` }; }
       }, startMs);
       r.request = started;
-      // It may have started, so it is left as a crash would leave it: the next pass tells that, and starts nothing.
-      if (/^it did not answer within /.test(started?.reason ?? '')) { r.refused = `the start ${started.reason}`; continue; }
+      // It may have started, so it is left as a crash would leave it: the next pass tells that, and starts nothing. Late is
+      // known by `timedOut` (guarded's own late answer, or a port's in its own words), the wording only as a backstop (L755).
+      if (started?.timedOut === true || /^it did not answer within /.test(started?.reason ?? '')) { r.refused = `the start ${started?.reason ?? 'did not answer in time'}`; continue; }
       if (!started?.ok) {
         const reason = started?.reason ?? 'no answer';
         const told = (prev?.doc?.tries ?? 0) > 0;

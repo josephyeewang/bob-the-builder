@@ -210,8 +210,15 @@ function readersAccept(text) {
     return START_KINDS.every((kind) => !startGate({ rules, rec, card, kind, product, b, running: [], lead: 'S-lead' }).missing);
   });
   const fine = (f) => { try { f(); return true; } catch { return false; } };
+  // The handoff check as the intake calls it (L755): the kind is 'handoff-', and the Lead's session names its product, so
+  // the cap is read at the product's scope. It must refuse a note over the cap (a string), not only not throw: called as it
+  // was, with kind 'handoff' and no session, it returned null before reading anything.
+  const handoffRefusesOverCap = () => {
+    const cap = need(rules, M11_KEYS.handoffCapRole, p);
+    return typeof handoffVet(rules)({ session: { product, role: 'lead' }, kind: 'handoff-', text: 'x'.repeat(cap * 4 + 8) }) === 'string';
+  };
   const others = fine(() => bands({ rules, reading: { ok: false, reason: 'no reading' }, now: 0 }))
-    && fine(() => handoffVet(rules)({ kind: 'handoff', text: 'x' }));
+    && (() => { try { return handoffRefusesOverCap(); } catch { return false; } })();
   const { scopes } = m11SourceScopes();
   const m11 = Object.entries(M11_KEYS).every(([name, key]) => [...(scopes.get(name) ?? [])].every((scope) => {
     try { need(rules, key, { ...(scope === 'product' ? p : {}), type: M11_TYPE[name] ?? 'number' }); return true; } catch { return false; }
