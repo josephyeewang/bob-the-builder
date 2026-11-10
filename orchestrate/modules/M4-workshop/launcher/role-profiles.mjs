@@ -7,6 +7,7 @@
 
 import { createHash } from 'node:crypto';
 import { OUTBOX_KINDS } from '../../../shared/record-names.mjs';
+import { OUTBOX_FILE } from '../hooks/lib.mjs';
 
 // Agent and Task are one subagent tool under two names (L629); M10's roles.mjs keeps the same list less Workflow.
 export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
@@ -33,7 +34,13 @@ export const shadowKindsFor = (role, own = outboxKindsFor(role)) =>
 export const NOT_YET = Object.freeze({ front_door: Object.freeze(['state-', 'request-']) });
 const designKinds = (role) => outboxKindsFor(role).filter((k) => !(NOT_YET[role] ?? []).includes(k));
 
-const p = (o) => Object.freeze({ ...o, tools: Object.freeze(o.tools), outbox: Object.freeze(o.outbox) });
+const p = (o) => Object.freeze({ ...o, tools: Object.freeze(o.tools), outbox: Object.freeze(o.outbox), files: Object.freeze(o.files ?? []) });
+
+// The plan reviewer's one outbox file: its one-line answer, which the review runner reads when the session ends (L703,
+// L710). An exact name, not a kind: no other role may write it, and the plan reviewer may write nothing else.
+export const PLAN_ANSWER_NAME = 'answer.txt';
+// The exact outbox file names a role may write besides its kinds (`files`) follow the hooks' one rule, OUTBOX_FILE.
+export { OUTBOX_FILE };
 
 // Compaction windows come from the rules' context key; these are the design values (R-0b-42).
 export const DESIGN_PROFILES = Object.freeze({
@@ -46,6 +53,11 @@ export const DESIGN_PROFILES = Object.freeze({
     outbox: designKinds('reviewer'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
   auditor: p({ tools: ['Read', 'Glob', 'Grep', 'Bash', 'Write'], mode: 'dontAsk', restricted: true,
     outbox: designKinds('auditor'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
+  // The plan reviewer (L683, L687, L710): read only toward the repo and the plan, no shell, no outbox kinds. Write is for
+  // one file only, PLAN_ANSWER_NAME in its own outbox (the plain-files hook refuses every other path and name); the
+  // runner reads that file when the session ends and keeps it in its own ended record, which is all the Dispatcher reads.
+  plan_reviewer: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'dontAsk', restricted: true,
+    outbox: designKinds('plan_reviewer'), files: [PLAN_ANSWER_NAME], compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'verdict' }),
   incident: p({ tools: ['Read', 'Glob', 'Grep'], mode: 'dontAsk', restricted: true,
     outbox: designKinds('incident'), compactWindow: 300000, setupFileRefusals: false, bobFolder: false, compactKind: 'ask' }),
   scout: p({ tools: ['Read', 'Glob', 'Grep'], mode: 'dontAsk', restricted: true,
@@ -85,6 +97,9 @@ export function checkProfile(role, profile) {
   if (extra.length) return refuse(`profile for ${role} holds tools outside the design list: ${extra.join(', ')}`);
   const extraKinds = profile.outbox.filter((k) => !design.outbox.includes(k));
   if (extraKinds.length) return refuse(`profile for ${role} holds outbox kinds outside the design: ${extraKinds.join(', ')}`);
+  if (profile.files !== undefined && !Array.isArray(profile.files)) return refuse(`profile for ${role} is malformed`);
+  const extraFiles = (profile.files ?? []).filter((f) => !design.files.includes(f));
+  if (extraFiles.length) return refuse(`profile for ${role} holds outbox files outside the design: ${extraFiles.join(', ')}`);
   if (profile.mode !== design.mode) return refuse(`profile for ${role} has mode ${profile.mode}, design says ${design.mode}`);
   if (profile.restricted !== true) return refuse(`profile for ${role} is not restricted`);
   if (!Number.isInteger(profile.compactWindow) || profile.compactWindow <= 0) return refuse(`profile for ${role} has no compaction window`);

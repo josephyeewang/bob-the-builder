@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
-import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny } from './render-settings.mjs';
+import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack } from './readback.mjs';
 import { roleEnv, checkRoleEnv, checkMachineWide } from './env-check.mjs';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
@@ -40,7 +40,7 @@ function NAMES(role, over = {}) {
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, script: 501, reviewer: 503, auditor: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, script: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -668,7 +668,8 @@ test('check 13: each Bob folder refusal gives its own reason', () => {
   const bob = join(d, 'bob'); mkdirSync(bob);
   writeFileSync(join(bob, 'rules.md'), 'r');
   const manifest = { 'rules.md': sha256(Buffer.from('r')) };
-  const settings = { [S.permissions]: { [S.deny]: bobFolderDeny(bob) } };   // the shared rules (L750)
+  // The shared rules (L750), for the tools and the shell (L763).
+  const settings = { [S.permissions]: { [S.deny]: bobFolderDeny(bob) }, [S.sandbox]: { [S.filesystem]: { [S.denyWrite]: bobFolderShell(bob) } } };
   const file = join(d, 'a-file'); writeFileSync(file, 'x');
   assert.equal(checkBobFolder({ folder: file, manifest, settings }).reason, 'the Bob folder is not a plain folder');
   assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).reason, 'no pinned Bob file list');
@@ -678,6 +679,16 @@ test('check 13: each Bob folder refusal gives its own reason', () => {
   assert.equal(plant('skills/a.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a skills folder (skills/a.md)');
   assert.equal(plant('extra.md', (p) => writeFileSync(p, 's')), 'the Bob folder holds a file the pin does not (extra.md)');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings }).ok, true);
+  // L763: every rule is needed, for the tools and for the shell; drop any one and check 13 refuses.
+  for (const r of bobFolderDeny(bob)) {
+    const s = structuredClone(settings); s[S.permissions][S.deny] = s[S.permissions][S.deny].filter((x) => x !== r);
+    assert.equal(checkBobFolder({ folder: bob, manifest, settings: s }).reason, 'the Bob folder is not attached read-only', r);
+  }
+  for (const r of bobFolderShell(bob)) {
+    const s = structuredClone(settings); s[S.sandbox][S.filesystem][S.denyWrite] = s[S.sandbox][S.filesystem][S.denyWrite].filter((x) => x !== r);
+    assert.equal(checkBobFolder({ folder: bob, manifest, settings: s }).reason, 'the Bob folder is not walled off from the shell\'s writes', r);
+  }
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: settings[S.permissions] } }).reason, 'the Bob folder is not walled off from the shell\'s writes', 'no sandbox at all');
 });
 
 test('check 11: a smoke or baseline run that does not finish refuses with its own reason', async () => {

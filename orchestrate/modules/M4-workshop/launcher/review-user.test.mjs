@@ -11,7 +11,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 
 const SELF = 501;
 const REVIEW = 503;
-const UIDS = { lead: SELF, worker: SELF, writer: SELF, incident: SELF, scout: SELF, front_door: SELF, thinking: SELF, learning: SELF, script: SELF, reviewer: REVIEW, auditor: REVIEW };
+const UIDS = { lead: SELF, worker: SELF, writer: SELF, incident: SELF, scout: SELF, front_door: SELF, thinking: SELF, learning: SELF, script: SELF, reviewer: REVIEW, auditor: REVIEW, plan_reviewer: REVIEW };
 const refused = (r, re) => { assert.equal(r.ok, false, 'expected a refusal'); assert.match(r.reason, re); };
 
 // A fake lstat: each path answers as a plain folder owned by `uid` with `mode`, unless `over[path]` says otherwise.
@@ -78,4 +78,45 @@ test('L44: a real folder that is a link, or a file, is refused (lstat, never fol
   refused(checkReviewOutbox({ ...base, sessionId: 'R-2' }), /session outbox folder is a link/);
   writeFileSync(join(root, 'reviewer', 'R-3'), 'x');
   refused(checkReviewOutbox({ ...base, sessionId: 'R-3' }), /session outbox folder is not a folder/);
+});
+
+// ---- A3b (L683, L688, L691): the plan reviewer runs as the review user, started by the runner, but its answer is a
+// plan check, never a verdict: it is in RUNNER_ROLES and AI_ROLES, and never in REVIEW_ROLES.
+import { PLAN_REVIEW_ROLE, REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
+import { AI_ROLES } from '../../../shared/record.mjs';
+import { reviewUserProblem, reviewUid, sessionVerdict, runnerLaunchFor, verdictFromFile } from '../../M9-record/outbox.mjs';
+
+test('A3b: the plan reviewer is a runner role and an AI role, and never a role whose verdict counts toward a merge', () => {
+  assert.equal(PLAN_REVIEW_ROLE, 'plan_reviewer');
+  assert.deepEqual([...REVIEW_ROLES], ['reviewer', 'auditor']);
+  assert.deepEqual([...RUNNER_ROLES], ['reviewer', 'auditor', 'plan_reviewer']);
+  assert.ok(AI_ROLES.includes('plan_reviewer'));
+  // M9's verdict readers refuse it by role, before anything is read: whatever it writes is no verdict.
+  assert.match(sessionVerdict({ outboxRoot: '/nowhere', uids: UIDS, role: 'plan_reviewer', sessionId: 's-1', card: 'C-1', head: 'a'.repeat(40) }).reason, /plan_reviewer is not a review role/);
+  assert.match(runnerLaunchFor({ root: '/nowhere', uids: UIDS, uid: REVIEW, role: 'plan_reviewer', card: 'C-1', head: 'a'.repeat(40), sessionId: 's-1' }).reason, /plan_reviewer is not a review role/);
+  assert.match(verdictFromFile({ outboxRoot: '/nowhere', uids: UIDS, row: { doc: { role: 'plan_reviewer', session_id: 's-1' } } }).reason, /names no review role/);
+  // The one review user is still the reviewer's and the auditor's.
+  assert.deepEqual(reviewUid(UIDS), { ok: true, uid: REVIEW });
+});
+
+test('A3b: the plan reviewer runs only as the review user, started by the runner; sharing that user is not "shared"', () => {
+  assert.equal(reviewUserProblem(UIDS, 'plan_reviewer'), null);
+  // The review user running the plan reviewer too is not a shared user, for any runner role.
+  for (const r of RUNNER_ROLES) assert.equal(reviewUserProblem(UIDS, r), null, r);
+  assert.deepEqual(reviewUser({ role: 'plan_reviewer', uids: UIDS, self: REVIEW }), { ok: true, runAs: { user: REVIEW_USER, uid: REVIEW } });
+  refused(reviewUser({ role: 'plan_reviewer', uids: UIDS, self: SELF }), /a plan_reviewer is started only by the review runner/);
+  refused(reviewUser({ role: 'plan_reviewer', uids: { ...UIDS, plan_reviewer: SELF }, self: SELF }), /not a separate Mac user \(shared with /);
+  refused(reviewUser({ role: 'plan_reviewer', uids: { ...UIDS, plan_reviewer: 0 }, self: 0 }), /may not be root/);
+  // The map must name it, or a plan reviewer left out could share a worker's user unseen.
+  const { plan_reviewer: _p, ...noPlan } = UIDS;
+  assert.equal(uidsProblem(noPlan, { plan: true }), 'the map of role to Mac user id leaves out plan_reviewer');
+  refused(reviewUser({ role: 'plan_reviewer', uids: noPlan, self: REVIEW }), /leaves out plan_reviewer/);
+  // L726 m3: a map from before the plan reviewer blocks plan reviews alone; every reviewer and auditor start still goes.
+  assert.equal(uidsProblem(noPlan), null);
+  for (const r of REVIEW_ROLES) assert.deepEqual(reviewUser({ role: r, uids: noPlan, self: REVIEW }), { ok: true, runAs: { user: REVIEW_USER, uid: REVIEW } }, r);
+  // Any other role left out still blocks them all.
+  const { scout: _s, ...noScout } = noPlan;
+  refused(reviewUser({ role: 'reviewer', uids: noScout, self: REVIEW }), /leaves out scout/);
+  assert.equal(reviewOutbox({ outboxRoot: '/o', role: 'plan_reviewer', sessionId: 's-1' }), '/o/plan_reviewer/s-1');
+  assert.throws(() => reviewOutbox({ outboxRoot: '/o', role: 'worker', sessionId: 's-1' }), /worker is not a review role/);
 });

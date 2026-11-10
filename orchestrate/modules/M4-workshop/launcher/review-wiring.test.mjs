@@ -20,7 +20,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const HEAD = 'a'.repeat(40);
 const PKG_SHA = 'f'.repeat(64);
 const ME = process.getuid();
-const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
+const UIDS = { ...Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000])), plan_reviewer: ME };
 
 function settingsOf(role) {
   const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },

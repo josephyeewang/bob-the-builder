@@ -25,7 +25,7 @@ import { VERDICT_CHECKLIST } from '../../shared/record.mjs';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
 const CLAUDE = '/pinned/claude';
 const CLEAN = Object.fromEntries(VERDICT_CHECKLIST.map((k) => [k, 'clean']));
 
