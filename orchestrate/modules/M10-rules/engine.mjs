@@ -25,6 +25,9 @@ import { PRODUCT_STATES, HOURS, validZone, compareVersions, START_RULES, TIER1_M
 import { loadRoles, profileFor } from './roles.mjs';
 import { docsLaneProblem, DOCS_FLOOR } from './lane-check.mjs';
 import { activeKind } from '../../shared/asks.mjs';
+// The one row-file pattern (c1-r2, L704): M2's, which the Merge Gate (M6 gather.mjs), the Dispatcher's gate and the
+// wiring's planRows read too, so the lane rule and the go agree on which file is a row. Case-folded like BLUEPRINT (audit round 7).
+import { ROW_FILE } from '../M2-approvals/go.mjs';
 
 // Mac-wide keys and how they combine across products (MAT-10, R2-M5(b), L96): one definition, in shared/rules.mjs,
 // so fakeRules answers a read with no product exactly as this engine does (L110).
@@ -33,7 +36,6 @@ export { MAC_MIN, MAC_MAX, MAC_MATCH, MAC_LIST_ALL } from '../../shared/rules.mj
 export const LANES = Object.freeze(['lead', 'docs', 'product']);
 export const REVERSED_AUDIT = Object.freeze(['failure', 'success', 'none']);
 const SHA = /^[0-9a-f]{40}$/;
-const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // case-folded like BLUEPRINT (audit round 7)
 const BLUEPRINT = compileList(['docs/blueprint/**']);
 const DOCS_LANE = DOCS_FLOOR;   // one definition, in lane-check.mjs
 const NOT_PRODUCT = compileList(['docs/blueprint/**', 'docs/*.md', 'docs/domains/**']);
