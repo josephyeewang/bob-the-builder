@@ -117,7 +117,8 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  *   hooksDir, reviewHome, settings ({ file, settings } from settingsFor), rules (the config's), snapshot,
  *   writeSnapshot(path, rules), machineWide (path), busy(dir) → [holders], alert(text), spawn, ownUid(),
  *   cardDoc (the card from the Record), budget ({ rules, rec, bandsNow, runningNow } or null),
- *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs.
+ *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; managedReaders (tests only: fakes for check 10's
+ *   readers of the other managed sources, env-check.mjs MANAGED_READERS; left out, the real ones).
  * → { [n]: async () => { ok, reason } }, with no entry for a check this role has no port for.
  */
 export function reviewChecks(x) {
@@ -156,7 +157,7 @@ export function reviewChecks(x) {
       return isDeepStrictEqual(s.rules, x.rules) ? { ok: true } : refuse('the rules snapshot holds other rules than the runner\'s config');
     },
     9: async () => checkRoleEnv(x.env),
-    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide }),
+    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide, ...x.managedReaders }),
     11: async () => {
       const f = smokeFiles(x);
       for (const p of Object.values(f)) rmSync(p, { force: true });

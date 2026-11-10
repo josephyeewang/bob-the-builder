@@ -6,10 +6,16 @@
 // a key: AI roles use the owner's signed-in Claude account only.
 //
 // Check 10: the machine-wide settings file carries the production-write guard as a blocking hook
-// and no escape (excludedCommands, unsandboxed commands, allow or ask rules, extra hosts).
+// and no escape (excludedCommands, unsandboxed commands, allow or ask rules, extra hosts), and so
+// does every other managed settings source claude reads (MANAGED SOURCES below).
 
+import { readdirSync, lstatSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { userInfo } from 'node:os';
+import { dirname, join } from 'node:path';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { checkSettings } from './render-settings.mjs';
+import { ACCOUNT_NAMES, accountDir } from './accounts.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
 
@@ -35,15 +41,140 @@ export function checkRoleEnv(env) {
   return { ok: true };
 }
 
-/** Check 10. `readFile(path)` returns the text of the machine-wide settings file. */
-export function checkMachineWide({ readFile, path, guardScript = 'production-write-guard.mjs' }) {
+// MANAGED SOURCES: the managed (policy) settings sources check 10 reads, as claude reads them.
+//
+// CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code): RECHECK ON EVERY UPGRADE of the pin.
+// A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
+// Sources, highest precedence first. By default ONLY the highest source with content applies, and the
+// ones beneath it are not read for policy at all (unless a source sets managedSourcesBehavior "merge").
+// So any higher source with content displaces managed-settings.json and its guard hook, which is why
+// each source below must carry the guard itself, not only hold no escape.
+//   helper  a policyHelper or policyHelpers key in a managed source runs a program whose output is policy.
+//           Check 10 can't judge that output ahead of time: any source holding either key refuses.
+//   remote  server-managed settings, fetched at start for a signed-in organization that has some, and
+//           cached at <config home>/remote-settings.json. The config home is CLAUDE_CONFIG_DIR, else
+//           $HOME/.claude; a review session sets CLAUDE_CONFIG_DIR only for the second account
+//           (accounts.mjs accountEnv), so check 10 reads the cache in every account folder under $HOME
+//           (ACCOUNTS: .claude, .claude-b). The CLAUDE_CODE_REMOTE_SETTINGS_PATH override is not in this
+//           build. A readable cache must pass; an unreadable or non-JSON one refuses.
+//           KNOWN GAP: a missing cache passes. Settings the server sends at start are never seen by
+//           check 10, and since only the highest source applies, they would also displace the guard
+//           hook. Only an organization admin on the service's side can set them (no worker can); the
+//           owner confirms the account has none (a check on the machine, not here).
+//   plist   MDM: /Library/Managed Preferences/<user>/com.anthropic.claudecode.plist, then
+//           /Library/Managed Preferences/com.anthropic.claudecode.plist, converted with
+//           /usr/bin/plutil -convert json -o - --. Each one present must pass; one that can't be read refuses.
+//   file    /Library/Application Support/ClaudeCode/managed-settings.json (CLAUDE_FILE; the config's
+//           machineWide should name it, and when it names another file the fixed one is checked too) and
+//           every managed-settings.d/ entry beside each that is a file or a link named *.json, not starting
+//           with a dot, read in name order. Each must pass on its own. A linked drop-in refuses: the
+//           launcher reads every source without following a link.
+//   Every source, the empty one ({}) included, must carry the guard: check 10 doesn't copy claude's
+//   rules for which content counts.
+//   parent  --managed-settings <json>, or CLAUDE_CODE_MANAGED_SETTINGS_PATH: the launcher passes neither
+//           (pinned by review-launch.test.mjs).
+export const MANAGED_SOURCES_CHECKED_ON = '2.1.322';
+export const MANAGED_PREFS = Object.freeze({ dir: '/Library/Managed Preferences', name: 'com.anthropic.claudecode.plist' });
+export const DROP_INS = 'managed-settings.d';
+export const REMOTE_CACHE = 'remote-settings.json';
+export const CLAUDE_FILE = '/Library/Application Support/ClaudeCode/managed-settings.json';
+const HELPER_KEYS = Object.freeze(['policyHelper', 'policyHelpers']);
+const ABSENT = new Set(['ENOENT', 'ENOTDIR']);
+
+// The names in a drop-in folder that claude reads, in its order. Throws when the folder can't be listed.
+export function listDropIns(dir) {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => (e.isFile() || e.isSymbolicLink()) && e.name.endsWith('.json') && !e.name.startsWith('.'))
+    .map((e) => e.name).sort();
+}
+
+// A managed preferences file as JSON text, or null when there is none. Throws when one is there and can't be read.
+export function readPlist(p) {
+  try { lstatSync(p); } catch (e) { if (ABSENT.has(e?.code)) return null; throw e; }
+  return execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', p],
+    { encoding: 'utf8', timeout: 5000, maxBuffer: 2 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+// The readers check 10 uses for the sources beyond the main file, as live code runs it. A test passes fakes
+// (review-launch's reviewChecks takes them as x.managedReaders); nothing else does.
+export const MANAGED_READERS = Object.freeze({ listDir: listDropIns, plist: readPlist, user: () => userInfo().username,
+  home: () => process.env.HOME, claudeFile: CLAUDE_FILE });
+
+const guardIn = (obj, guardScript) => {
+  const pre = obj?.[S.hooks]?.[E.preToolUse];
+  return Array.isArray(pre) && pre.some((m) => m?.[H.matcher] === '*' && Array.isArray(m?.[H.hooks])
+    && m[H.hooks].some((h) => h?.[H.type] === 'command' && typeof h?.[H.command] === 'string' && h[H.command].includes(guardScript) && h?.[H.onFailure] === 'block'));
+};
+
+// One source's settings → null when it passes, else a refusal. `label` names the source in every reason but the main file's.
+function sourceProblem(obj, label, guardScript) {
+  const tail = label ? ` (in ${label})` : '';
+  if (obj && typeof obj === 'object' && HELPER_KEYS.some((k) => Object.hasOwn(obj, k))) return refuse(`machine-wide settings name a policy helper, whose output check 10 can't judge${tail}`);
+  const c = checkSettings(obj, { machineWide: true });
+  if (!c.ok) return refuse(`${c.reason}${tail}`);
+  if (!guardIn(obj, guardScript)) return refuse(`the machine-wide production block is not in force${tail}`);
+  return null;
+}
+
+/**
+ * Check 10. `readFile(path)` returns the text of the machine-wide settings file, and of its drop-ins and the remote
+ * cache (it throws with code ENOENT or ENOTDIR for one that isn't there). The other readers default to the real ones.
+ */
+export function checkMachineWide({ readFile, path, guardScript = 'production-write-guard.mjs',
+  listDir = MANAGED_READERS.listDir, plist = MANAGED_READERS.plist, user = MANAGED_READERS.user, home = MANAGED_READERS.home,
+  claudeFile = MANAGED_READERS.claudeFile }) {
   let obj;
   try { obj = JSON.parse(readFile(path)); } catch { return refuse('machine-wide settings are missing or not JSON'); }
-  const c = checkSettings(obj, { machineWide: true });
-  if (!c.ok) return c;
-  const pre = obj?.[S.hooks]?.[E.preToolUse];
-  const has = Array.isArray(pre) && pre.some((m) => m?.[H.matcher] === '*' && Array.isArray(m?.[H.hooks])
-    && m[H.hooks].some((h) => h?.[H.type] === 'command' && typeof h?.[H.command] === 'string' && h[H.command].includes(guardScript) && h?.[H.onFailure] === 'block'));
-  if (!has) return refuse('the machine-wide production block is not in force');
+  const main = sourceProblem(obj, '', guardScript);
+  if (main) return main;
+  const firstDropIns = dropInsProblem(path, { readFile, listDir, guardScript });
+  if (firstDropIns) return firstDropIns;
+  // The file claude itself reads, when the config named another one: absent is none, present must pass.
+  if (claudeFile !== path) {
+    let text = null;
+    try { text = readFile(claudeFile); } catch (e) { if (!ABSENT.has(e?.code)) return refuse(`the machine-wide settings ${claudeFile} can't be read (${e?.code ?? e?.message})`); }
+    if (text !== null) {
+      let d; try { d = JSON.parse(text); } catch { return refuse(`the machine-wide settings ${claudeFile} are not JSON`); }
+      const bad = sourceProblem(d, claudeFile, guardScript);
+      if (bad) return bad;
+    }
+    const more = dropInsProblem(claudeFile, { readFile, listDir, guardScript });
+    if (more) return more;
+  }
+
+  let who; try { who = user(); } catch {}
+  if (typeof who !== 'string' || !who || who.includes('/')) return refuse('the user\'s managed preferences can\'t be named (no user name)');
+  for (const p of [join(MANAGED_PREFS.dir, who, MANAGED_PREFS.name), join(MANAGED_PREFS.dir, MANAGED_PREFS.name)]) {
+    let text; try { text = plist(p); } catch (e) { return refuse(`the managed preferences ${p} can't be read (${e?.code ?? e?.message})`); }
+    if (text === null) continue;
+    let d; try { d = JSON.parse(text); } catch { return refuse(`the managed preferences ${p} are not JSON once converted`); }
+    const bad = sourceProblem(d, p, guardScript);
+    if (bad) return bad;
+  }
+
+  const h = home();
+  if (typeof h !== 'string' || !h.startsWith('/')) return refuse('the remote settings cache can\'t be found (no home folder)');
+  for (const cache of ACCOUNT_NAMES.map((n) => join(accountDir(h, n), REMOTE_CACHE))) {
+    let text = null;
+    try { text = readFile(cache); } catch (e) { if (!ABSENT.has(e?.code)) return refuse(`the remote settings cache ${cache} can't be read (${e?.code ?? e?.message})`); }
+    if (text === null) continue;
+    let d; try { d = JSON.parse(text); } catch { return refuse(`the remote settings cache ${cache} is not JSON`); }
+    const bad = sourceProblem(d, cache, guardScript);
+    if (bad) return bad;
+  }
   return { ok: true };
+}
+
+// The drop-ins beside one managed settings file → null when each passes (or there are none), else a refusal.
+function dropInsProblem(file, { readFile, listDir, guardScript }) {
+  const dir = join(dirname(file), DROP_INS);
+  let names = [];
+  try { names = listDir(dir); } catch (e) { if (!ABSENT.has(e?.code)) return refuse(`the machine-wide drop-in folder ${dir} can't be listed (${e?.code ?? e?.message})`); }
+  for (const n of names) {
+    const p = join(dir, n);
+    let d; try { d = JSON.parse(readFile(p)); } catch (e) { return refuse(`the machine-wide drop-in ${p} is unreadable or not JSON (${e?.code ?? e?.message})`); }
+    const bad = sourceProblem(d, p, guardScript);
+    if (bad) return bad;
+  }
+  return null;
 }

@@ -10,7 +10,8 @@ import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack } from './readback.mjs';
-import { roleEnv, checkRoleEnv, checkMachineWide } from './env-check.mjs';
+import { roleEnv, checkRoleEnv, checkMachineWide, listDropIns, readPlist, MANAGED_READERS, CLAUDE_FILE } from './env-check.mjs';
+import { userInfo } from 'node:os';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
 import { emptyOutbox, readOutboxFile } from './outbox.mjs';
 import { namesIn, unconfirmedNames, FLAGS } from './settings-names.mjs';
@@ -316,8 +317,9 @@ test('check 9: every refused variable is stripped, and a planted one refuses the
 test('check 10: the machine-wide file must carry the production guard and no escape', () => {
   const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
   const files = { '/fake/managed.json': JSON.stringify({ [S.hooks]: { [E.preToolUse]: [guard] } }) };
-  const readFile = (p) => { if (!(p in files)) throw new Error('missing'); return files[p]; };
-  assert.equal(checkMachineWide({ readFile, path: '/fake/managed.json' }).ok, true);
+  // Not there, as readNoLink says it (the other managed sources are read through it too, L900).
+  const readFile = (p) => { if (!(p in files)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return files[p]; };
+  assert.equal(checkMachineWide({ readFile, path: '/fake/managed.json', plist: () => null }).ok, true);
   const bad = {
     missing: null,
     'not JSON': '{',
@@ -332,6 +334,160 @@ test('check 10: the machine-wide file must carry the production guard and no esc
   for (const [what, text] of Object.entries(bad)) {
     const r = checkMachineWide({ readFile: (p) => { if (text === null) throw new Error('missing'); return text; }, path: '/fake/managed.json' });
     assert.equal(r.ok, false, what);
+  }
+});
+
+// ---- check 10, L900: every managed settings source claude 2.1.322 reads ----
+
+function managedWorld() {
+  const guard = { [H.matcher]: '*', [H.hooks]: [{ [H.type]: 'command', [H.command]: '/o/node /o/hooks/production-write-guard.mjs --role any', [H.timeout]: 10, [H.onFailure]: 'block' }] };
+  const good = JSON.stringify({ [S.hooks]: { [E.preToolUse]: [guard] } });
+  const files = { '/m/managed-settings.json': good };
+  const dropIns = []; const prefs = {}; const listed = []; const asked = []; const read = [];
+  const absent = () => Object.assign(new Error('missing'), { code: 'ENOENT' });
+  const io = {
+    readFile: (p) => { read.push(p); const v = files[p]; if (v === undefined) throw absent(); if (v instanceof Error) throw v; return v; },
+    path: '/m/managed-settings.json', claudeFile: '/m/managed-settings.json',
+    listDir: (d) => { listed.push(d); if (dropIns instanceof Error) throw dropIns; if (!dropIns.length) throw absent(); return [...dropIns]; },
+    plist: (p) => { asked.push(p); const v = prefs[p]; if (v instanceof Error) throw v; return v ?? null; },
+    user: () => 'role', home: () => '/h',
+  };
+  return { guard, good, files, dropIns, prefs, listed, asked, read, io, run: (o = {}) => checkMachineWide({ ...io, ...o }) };
+}
+const USER_PREFS = '/Library/Managed Preferences/role/com.anthropic.claudecode.plist';
+const DEVICE_PREFS = '/Library/Managed Preferences/com.anthropic.claudecode.plist';
+const CACHE = '/h/.claude/remote-settings.json';
+const CACHE_B = '/h/.claude-b/remote-settings.json';
+
+test('L900 check 10: with only a good managed-settings.json it passes, and it looked at every other source', () => {
+  const w = managedWorld();
+  assert.deepEqual(w.run(), { ok: true });
+  assert.deepEqual(w.listed, ['/m/managed-settings.d']);
+  assert.deepEqual(w.asked, [USER_PREFS, DEVICE_PREFS], 'the user\'s managed preferences first, then the device\'s');
+  assert.deepEqual(w.read, ['/m/managed-settings.json', CACHE, CACHE_B], 'the remote settings cache of both accounts');
+  // Every source present and good passes too.
+  w.dropIns.push('10-a.json', '20-b.json');
+  w.files['/m/managed-settings.d/10-a.json'] = w.good; w.files['/m/managed-settings.d/20-b.json'] = w.good;
+  w.prefs[USER_PREFS] = w.good; w.prefs[DEVICE_PREFS] = w.good; w.files[CACHE] = w.good; w.files[CACHE_B] = w.good;
+  assert.deepEqual(w.run(), { ok: true });
+});
+
+test('L900 check 10: when the config names another file, the one claude reads is checked too, with its drop-ins', () => {
+  const C = '/Library/Application Support/ClaudeCode/managed-settings.json';
+  const w = managedWorld();
+  assert.deepEqual(w.run({ claudeFile: undefined }), { ok: true }, 'none there: the default names claude\'s own file');
+  assert.ok(w.read.includes(C), 'the fixed file was read');
+  assert.ok(w.listed.includes('/Library/Application Support/ClaudeCode/managed-settings.d'));
+  w.files[C] = JSON.stringify({ [S.hooks]: {} });
+  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide production block is not in force (in ${C})` });
+  w.files[C] = '{';
+  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide settings ${C} are not JSON` });
+  w.files[C] = Object.assign(new Error('x'), { code: 'EACCES' });
+  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide settings ${C} can't be read (EACCES)` });
+  w.files[C] = w.good;
+  assert.deepEqual(w.run({ claudeFile: C }), { ok: true });
+  const v = managedWorld();
+  v.dropIns.push('50-x.json'); v.files['/Library/Application Support/ClaudeCode/managed-settings.d/50-x.json'] = JSON.stringify({});
+  v.files['/m/managed-settings.d/50-x.json'] = v.good;
+  assert.match(v.run({ claudeFile: C }).reason, /not in force \(in \/Library\/Application Support\/ClaudeCode\/managed-settings\.d\/50-x\.json\)/);
+});
+
+test('L900 check 10: a drop-in without the guard, with an escape, unreadable or not JSON refuses and names it', () => {
+  const D = '/m/managed-settings.d/50-x.json';
+  const cases = [
+    [JSON.stringify({ [S.hooks]: {} }), `the machine-wide production block is not in force (in ${D})`],
+    [JSON.stringify({ [S.permissions]: { [S.allow]: ['Bash(*)'] } }), `machine-wide settings hold allow or ask rules (in ${D})`],
+    ['{', /^the machine-wide drop-in \/m\/managed-settings\.d\/50-x\.json is unreadable or not JSON \(/],
+    [Object.assign(new Error('x'), { code: 'EACCES' }), `the machine-wide drop-in ${D} is unreadable or not JSON (EACCES)`],
+    [Object.assign(new Error('x'), { code: 'ELOOP' }), `the machine-wide drop-in ${D} is unreadable or not JSON (ELOOP)`],
+  ];
+  for (const [text, why] of cases) {
+    const w = managedWorld();
+    w.dropIns.push('10-ok.json', '50-x.json');
+    w.files['/m/managed-settings.d/10-ok.json'] = w.good; w.files[D] = text;
+    const r = w.run();
+    if (why instanceof RegExp) { assert.equal(r.ok, false); assert.match(r.reason, why); } else assert.deepEqual(r, { ok: false, reason: why });
+  }
+  // A folder that is there and can't be listed refuses; one that isn't there is none.
+  const w = managedWorld();
+  assert.deepEqual(w.run({ listDir: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } }),
+    { ok: false, reason: 'the machine-wide drop-in folder /m/managed-settings.d can\'t be listed (EACCES)' });
+  assert.deepEqual(w.run({ listDir: () => { throw Object.assign(new Error('x'), { code: 'ENOTDIR' }); } }), { ok: true });
+});
+
+test('L900 check 10: a managed preferences file with content but no guard refuses although managed-settings.json is good (it would displace it)', () => {
+  for (const p of [USER_PREFS, DEVICE_PREFS]) {
+    const w = managedWorld();
+    w.prefs[p] = JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } });
+    assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${p})` });
+    w.prefs[p] = JSON.stringify({ [S.hooks]: { [E.preToolUse]: [w.guard] }, [S.env]: { A: '1' } });
+    assert.deepEqual(w.run(), { ok: false, reason: `machine-wide settings set variables (in ${p})` });
+    w.prefs[p] = 'not json';
+    assert.deepEqual(w.run(), { ok: false, reason: `the managed preferences ${p} are not JSON once converted` });
+    w.prefs[p] = Object.assign(new Error('plutil failed'), { status: 1 });
+    assert.deepEqual(w.run(), { ok: false, reason: `the managed preferences ${p} can't be read (plutil failed)` });
+  }
+  const w = managedWorld();
+  for (const user of [() => '', () => { throw new Error('x'); }, () => 'a/b']) {
+    assert.deepEqual(w.run({ user }), { ok: false, reason: 'the user\'s managed preferences can\'t be named (no user name)' });
+  }
+});
+
+test('L900 check 10: a policy helper in any source refuses', () => {
+  for (const key of ['policyHelper', 'policyHelpers']) {
+    const w = managedWorld();
+    w.files['/m/managed-settings.json'] = JSON.stringify({ ...JSON.parse(w.good), [key]: { command: '/x' } });
+    assert.deepEqual(w.run(), { ok: false, reason: 'machine-wide settings name a policy helper, whose output check 10 can\'t judge' });
+    const v = managedWorld();
+    v.files[CACHE] = JSON.stringify({ ...JSON.parse(v.good), [key]: null });
+    assert.deepEqual(v.run(), { ok: false, reason: `machine-wide settings name a policy helper, whose output check 10 can't judge (in ${CACHE})` });
+  }
+});
+
+test('L900 check 10: the remote settings cache must pass when it is there; missing passes (the known gap), unreadable refuses', () => {
+  const w = managedWorld();
+  assert.deepEqual(w.run(), { ok: true }, 'no cache: passes, the gap the capability note names');
+  w.files[CACHE] = JSON.stringify({ [S.sandbox]: { [S.excludedCommands]: ['git'] } });
+  assert.deepEqual(w.run(), { ok: false, reason: `machine-wide settings hold excludedCommands (in ${CACHE})` });
+  w.files[CACHE] = JSON.stringify({});
+  assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${CACHE})` });
+  w.files[CACHE] = '{';
+  assert.deepEqual(w.run(), { ok: false, reason: `the remote settings cache ${CACHE} is not JSON` });
+  w.files[CACHE] = Object.assign(new Error('x'), { code: 'EACCES' });
+  assert.deepEqual(w.run(), { ok: false, reason: `the remote settings cache ${CACHE} can't be read (EACCES)` });
+  delete w.files[CACHE];
+  // The second account's folder (its review sessions run with CLAUDE_CONFIG_DIR there).
+  w.files[CACHE_B] = JSON.stringify({});
+  assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${CACHE_B})` });
+  delete w.files[CACHE_B];
+  for (const home of [() => undefined, () => 'rel']) assert.deepEqual(w.run({ home }), { ok: false, reason: 'the remote settings cache can\'t be found (no home folder)' });
+});
+
+test('L900 check 10: its default readers are the real ones', () => {
+  assert.equal(MANAGED_READERS.listDir, listDropIns);
+  assert.equal(MANAGED_READERS.plist, readPlist);
+  assert.equal(MANAGED_READERS.claudeFile, CLAUDE_FILE);
+  assert.equal(CLAUDE_FILE, '/Library/Application Support/ClaudeCode/managed-settings.json');
+  assert.equal(MANAGED_READERS.user(), userInfo().username);
+  assert.equal(MANAGED_READERS.home(), process.env.HOME);
+});
+
+test('L900 check 10: the real readers list drop-ins as claude does and convert managed preferences with plutil', () => {
+  const d = tmp();
+  for (const n of ['20-b.json', '10-a.json', '.hidden.json', 'notes.txt']) writeFileSync(join(d, n), '{}');
+  mkdirSync(join(d, '30-folder.json'));
+  symlinkSync(join(d, '10-a.json'), join(d, '40-link.json'));
+  assert.deepEqual(listDropIns(d), ['10-a.json', '20-b.json', '40-link.json']);
+  assert.throws(() => listDropIns(join(d, 'gone')), { code: 'ENOENT' });
+  assert.equal(readPlist(join(d, 'gone.plist')), null);
+  assert.equal(readPlist(join(d, 'notes.txt', 'x.plist')), null, 'ENOTDIR is none too');
+  if (process.platform === 'darwin') {
+    const p = join(d, 'p.plist');
+    writeFileSync(p, JSON.stringify({ a: 1 }));
+    spawnSync('/usr/bin/plutil', ['-convert', 'xml1', p]);
+    assert.deepEqual(JSON.parse(readPlist(p)), { a: 1 });
+    writeFileSync(p, 'not a plist');
+    assert.throws(() => readPlist(p));
   }
 });
 
