@@ -21,12 +21,13 @@ export const REQUEST_MAX_BYTES = 16_384;
 
 /**
  * Write the status: a new file in the same folder (created, never opened through a link or over an existing one), synced,
- * then renamed over `file`. → nothing; any failure throws and leaves the old status as it was.
+ * then renamed over `file`. `mode` is the new file's (the runner's own memory is written 0o600, readable by it alone).
+ * → nothing; any failure throws and leaves the old status as it was.
  */
-export function writeStatus(file, text, { fs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync }, tag = () => randomBytes(6).toString('hex') } = {}) {
+export function writeStatus(file, text, { fs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync }, tag = () => randomBytes(6).toString('hex'), mode = 0o644 } = {}) {
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the status file is not a full path');
   const tmp = join(dirname(file), `.${basename(file)}.${tag()}.tmp`);
-  const fd = fs.openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  const fd = fs.openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
   let closed = false; let done = false;
   try {
     const buf = Buffer.from(text, 'utf8');
