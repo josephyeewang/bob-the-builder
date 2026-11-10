@@ -73,6 +73,8 @@ export async function workflowsPass({ mirror, workflowRule }) {
 /** Facts 3 and 4, read from the record. */
 export function vercelFact({ record, kind, product, vercelProject, now }) {
   const label = kind === 'vercel_skip' ? 'the pinned Vercel skip command' : 'no Vercel value in both Preview and Production';
+  // Asked first: with no project, a fact naming none would match, and would say nothing about any project (L570).
+  if (typeof vercelProject !== 'string' || !vercelProject) return shut(`the rules name no Vercel project, so ${label} cannot be checked`);
   const f = record.read('fact', factId(kind, product));
   const d = f?.doc;
   if (!d || typeof d !== 'object') return shut(`no fact yet for ${label}`);

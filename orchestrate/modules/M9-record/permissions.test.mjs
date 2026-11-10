@@ -96,3 +96,32 @@ test('the Lead changes plan inputs only on a draft; never on a fix card (R2-M12,
   assert.ok(!fieldsAllowed('card', 'lead:L-1', { state: 'ready' }).has('files'));
   assert.ok(!fieldsAllowed('card', 'worker:S-1', { state: 'running' }).has('needs_joe'));
 });
+
+// L722 (L698 design b, L699): the Dispatcher may set a card's done_when while the card is a draft, and never after;
+// it gets no other plan input. Checked on the real Record, not only on the table.
+test('L722: the Dispatcher sets done_when on a draft card only; past draft, and for any other plan input, the Record refuses', () => {
+  assert.deepEqual([...fieldsAllowed('card', 'dispatcher', { state: 'draft' })].filter((f) => !WRITERS.card.dispatcher.update.includes(f)), ['done_when']);
+  for (const state of ['ready', 'running', 'waiting', 'merged']) assert.ok(!fieldsAllowed('card', 'dispatcher', { state }).has('done_when'), state);
+  const env = setup({ prefix: 'm9-perm-' });
+  const card = (id, state) => { seed(env, 'card', id, { ...minimal('card', env), product: PRODUCT, kind: 'ordinary', round: 1, state, done_when: 'the Lead\'s words' }); return env.record.read('card', id); };
+  const put = (cur, fields) => env.record.write({ actor: 'dispatcher', entity: 'card', id: cur.id, expectRev: cur.rev, doc: { ...cur.doc, ...fields } });
+  const d = card('C-draft', 'draft');
+  const ok = put(d, { done_when: 'R-1: tests pass' });
+  assert.equal(ok.ok, true, ok.reason);
+  assert.equal(env.record.read('card', 'C-draft').doc.done_when, 'R-1: tests pass');
+  const r = card('C-ready', 'ready');
+  const no = put(r, { done_when: 'R-1: tests pass' });
+  assert.equal(no.ok, false, 'past draft the Dispatcher may not change done_when');
+  assert.match(no.reason, FIELD_GATE);
+  // A go-free kind it does not make (the Lead's daily card) stays refused: the grant is only for a card that needs a go.
+  seed(env, 'card', 'C-daily', { ...minimal('card', env), product: PRODUCT, kind: 'lead_daily_card', round: 1, state: 'draft', done_when: 'x' });
+  const daily = put(env.record.read('card', 'C-daily'), { done_when: 'R-1: tests pass' });
+  assert.equal(daily.ok, false, 'a go-free draft the Dispatcher did not make');
+  assert.match(daily.reason, /may not change the plan of a lead_daily_card card/);
+  for (const field of ['files', 'tier', 'plan_sha256', 'main_commit', 'brief']) {
+    const c = card(`C-${field}`, 'draft');
+    const w = put(c, { [field]: field === 'tier' ? 2 : field === 'brief' ? { goal: 'x' } : `v-${field}` });
+    assert.equal(w.ok, false, `${field}: the Dispatcher gets done_when only`);
+    assert.match(w.reason, FIELD_GATE, field);
+  }
+});

@@ -130,6 +130,9 @@ export const WRITERS = Object.freeze({
       // tab's hand-in: the writer checks each against the move.
       // attempts: only its own keys (ATTEMPTS), checked by the guard.
       update: f('claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'),
+      // done_when only while the card is a draft: the Dispatcher sets it to its rows' pass tests before the Tier-1
+      // review and the ask (L698 design b, L699, L722); the Lead's own words stay in brief.done_when.
+      updateInDraft: f('done_when'),
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),

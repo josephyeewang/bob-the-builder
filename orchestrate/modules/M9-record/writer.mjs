@@ -21,9 +21,9 @@ import { hostname } from 'node:os';
 import { basename } from 'node:path';
 import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
-import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, WRITERS, actorName, factFrom, mayCreateKind } from './permissions.mjs';
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
-import { readyCheck } from './ready.mjs';
+import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
 import { processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
@@ -230,7 +230,12 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
     // The Lead edits the plan only of a card kind it may make (0b-2 audit MAT-1): a go-free card (exact_reverse,
     // research_copy) gets to ready with no go, so a changed plan on one would run with no go at all.
-    if (PLAN_INPUTS.some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change the plan of a ${old.kind} card`);
+    // One exception (L722): a draft-only grant (permissions updateInDraft, the Dispatcher's done_when) on a draft of a kind
+    // that always needs a go. Its go is still asked on the plan as it then stands, so the hole MAT-1 closes stays closed.
+    const plan = PLAN_INPUTS.filter((f) => changed.includes(f));
+    const draftGrant = old.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind)
+      && plan.every((f) => (WRITERS.card[name]?.updateInDraft ?? []).includes(f));
+    if (plan.length && !mayCreateKind(name, old.kind) && !draftGrant) return no(`${name} may not change the plan of a ${old.kind} card`);
     // Nor its brief, desired outcome or merge request (round 2 m5); needs_joe is a flag any setter may raise on any card.
     if (['brief', 'desired', 'merge_requested'].some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change a ${old.kind} card's brief, desired or merge request`);
     if (changed.includes('needs_joe')) {
