@@ -9,8 +9,8 @@
 import { writeFileSync, readFileSync, renameSync, realpathSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
-import { hasShell, DESIGN_PROFILES, shadowKindsFor } from './role-profiles.mjs';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
 import { inside } from '../hooks/lib.mjs';
 
@@ -175,7 +175,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (paths.bobFolder) deny.push(...bobFolderDeny(paths.bobFolder));
   for (const dir of runnerDirs) deny.push(...runnerWallDeny(dir));
   const walls = [];
-  if (REVIEW_ROLES.includes(role)) {
+  // Every role the review runner starts sits behind the review walls, the plan reviewer too (L710).
+  if (RUNNER_ROLES.includes(role)) {
     const w = paths.reviewWalls ?? {};
     for (const k of REVIEW_WALLS) {
       if (typeof w[k] !== 'string' || !w[k].startsWith('/') || /[^A-Za-z0-9._/-]/.test(w[k]) || w[k].split('/').includes('..')) return refuse(`a ${role}'s settings need the review folder ${k} as a plain absolute path`);
@@ -204,8 +205,13 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // matching; this list also covers a longer kind added later that is not a compaction kind.
   const shadow = shadowKindsFor(role, profile.outbox);
   const notKinds = shadow.length ? ` --not-kinds ${shadow.join(',')}` : '';
+  // A role with no kinds (the plan reviewer) gets no --kinds word, and its exact outbox files (L710) go as --files.
+  const files = profile.files ?? [];
+  if (files.some((f) => !OUTBOX_FILE.test(f))) return refuse(`a ${role}'s outbox file names are not plain names`);
+  const kindsArg = profile.outbox.length ? ` --kinds ${profile.outbox.join(',')}` : '';
+  const filesArg = files.length ? ` --files ${files.join(',')}` : '';
   const hookCmd = (name, extra = '') =>
-    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot} --kinds ${profile.outbox.join(',')}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
+    `${paths.node} ${join(paths.hooksDir, `${name}.mjs`)} --role ${role} --outbox ${paths.outbox} --snapshot ${paths.snapshot}${kindsArg}${filesArg}${notKinds}${copyArg}${extra}${HOOK_FAILS_CLOSED}`;
   const hooks = { [E.preToolUse]: [] };
   for (const [name, matcher] of Object.entries(POLICY_HOOKS)) {
     hooks[E.preToolUse].push({ [H.matcher]: matcher, [H.hooks]: [{ [H.type]: 'command', [H.command]: hookCmd(name), [H.timeout]: HOOK_TIMEOUT, [H.onFailure]: 'block' }] });
