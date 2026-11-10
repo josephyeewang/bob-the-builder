@@ -20,8 +20,9 @@ export const snapshotHash = (rules) => createHash('sha256').update(JSON.stringif
 
 export function staleReason(ageMs, maxAgeMs = SNAPSHOT_MAX_AGE_MS) {
   return `rules snapshot is stale (${Math.round(ageMs / 1000)} s old, the limit is ${Math.round(maxAgeMs / 1000)} s), `
-    + 'so every call is refused until it is rewritten; the loop rewrites it every pass, so a stale one means the loop '
-    + 'has stopped, or a run that wrote its own snapshot outlasted it (keep it fresh with keepSnapshotFresh)';
+    + 'so every call is refused until it is rewritten; the loop rewrites it every pass for its own sessions, and the '
+    + 'worker runner for a worker session it started (keepSnapshotFresh), so a stale one means whichever wrote it has '
+    + 'stopped, or a run that wrote its own snapshot outlasted it (keep it fresh with keepSnapshotFresh)';
 }
 
 export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_AGE_MS } = {}) {

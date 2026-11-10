@@ -624,6 +624,32 @@ test('#367 r1 self-review m1, m2 planted: the restore write is never taken; a li
     (e) => /it was restored from the Record's diary, then its list could not be kept \(refused for the test\)/.test(e.message) && /C-2 \(r\)/.test(e.message));
 });
 
+// #367 r2 m1, m2 (plants Q4, Q7): when the kept list can't be read or restored, nothing is kept, so the error names every
+// refusal this pass, past REFUSED_LIST_MAX too; and it says the check's own refused alert is not a lost write (m3).
+test('#367 r2 m1, m2, m3 planted: a list that stays corrupt names every refusal this pass, and says the check write\'s refusal is expected', () => {
+  const ids = Array.from({ length: REFUSED_LIST_MAX + 5 }, (_, i) => `C-${i + 1}`);
+  const a = keptWorld(ids);
+  const stuck = Object.create(a.rec);
+  Object.defineProperty(stuck, 'read', { value: (e, id) => (e === 'fact' && id === REFUSED_FACT('park') ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : a.rec.read(e, id)) });
+  let msg = '';
+  assert.throws(() => tellRefused({ rec: stuck, alert: a.alert, now: T0, refused: new Map([['park', ids.map((id) => a.item(id))]]), ran: () => true }), (e) => { msg = e.message; return true; });
+  assert.match(msg, /could not be read \(bad bytes\) or restored, so this pass's refusals are not kept/);
+  for (const id of ids) assert.ok(msg.includes(`${id} (r)`), `${id} is named`);
+  assert.doesNotMatch(msg, /more/, 'none is only counted');
+  assert.match(msg, /"refused" alert for this list at version 9007199254740991 is this check, not a lost write/);
+  // c2: with no refusal this pass, a restored list's error does not say they are kept.
+  const b = keptWorld(['C-1']);
+  assert.equal(b.tell(b.rec, T0, new Map([['park', [b.item('C-1')]]])), 'told');
+  let first = true;
+  const once = Object.create(b.rec);
+  Object.defineProperty(once, 'read', { value: (e, id) => {
+    if (e === 'fact' && id === REFUSED_FACT('park') && first) { first = false; return { id, entity: e, corrupt: true, reason: 'bad bytes' }; }
+    return b.rec.read(e, id);
+  } });
+  assert.throws(() => tellRefused({ rec: once, alert: b.alert, now: T0 + H, refused: new Map(), ran: () => true }),
+    (e) => /it was restored from the Record's diary/.test(e.message) && !/kept with it/.test(e.message) && !/refused this pass/.test(e.message));
+});
+
 test('#367 r1 m3 planted: a kept list that reads corrupt when its clear is due is told, never cleared over', () => {
   const a = keptWorld();
   assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
