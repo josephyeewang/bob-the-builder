@@ -3678,7 +3678,7 @@ async function mirrorWorld() {
   const mirror = join(d, 'mirror.git');
   await initMirror(mirror);
   const values = { 'product.repo': 'sample-org/sample-app', 'product.mirror': mirror };
-  const port = createMirrorRefresh({ rules: { get: (k) => values[k] }, getRobotToken: async () => 'test-value', testRemote: () => real.gd });
+  const port = createMirrorRefresh({ rules: { get: (k) => values[k] }, productPlace: async () => ({ repo: values['product.repo'], mirror: values['product.mirror'] }), getRobotToken: async () => 'test-value', testRemote: () => real.gd });
   const refresh = (x) => { real.publish({ main: w.g.main, 'card/c-2': w.g.pulls.get(8).head }); return port(x); };
   assert.deepEqual(await refresh({ product: PRODUCT, card: 'C-2', head: H0 }), { ok: true });
   const inMirror = async (ref) => { const o = await safeGit(['rev-parse', '--verify', '-q', ref], { gitDir: mirror, purpose: 'test' }); return o.code === 0 ? o.stdout.toString('utf8').trim() : null; };

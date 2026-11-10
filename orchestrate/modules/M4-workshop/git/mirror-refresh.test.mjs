@@ -27,7 +27,7 @@ async function world() {
   const main = await commit('c');
   const mirror = join(d, 'mirror.git');
   await initMirror(mirror);
-  const make = (values = OK_RULES(mirror), token = async () => 'a-test-value') => createMirrorRefresh({ rules: { get: (k) => values[k] }, getRobotToken: token, testRemote: () => hub });
+  const make = (values = OK_RULES(mirror), token = async () => 'a-test-value') => createMirrorRefresh({ rules: { get: (k) => values[k] }, productPlace: async () => ({ repo: values['product.repo'], mirror: values['product.mirror'] }), getRobotToken: token, testRemote: () => hub });
   const ref = async (r) => (await gitOk(['rev-parse', '--verify', r], { gitDir: mirror, purpose: 't' })).trim();
   return { d, g, commit, base, head, main, mirror, make, ref };
 }
@@ -60,12 +60,12 @@ test('L521: every refusal is an answer, never a throw, and none carries a key or
     [w.make(), { head: 'HEAD' }, /^the head is not 40 hex$/],
     [w.make({ 'product.mirror': w.mirror }), {}, /no valid GitHub repo/],
     [w.make({ 'product.repo': 'a/../b', 'product.mirror': w.mirror }), {}, /no valid GitHub repo/],
-    [w.make({ 'product.repo': 'a/b' }), {}, /no mirror in the rules/],
-    [w.make({ 'product.repo': 'a/b', 'product.mirror': 'relative' }), {}, /no mirror in the rules/],
+    [w.make({ 'product.repo': 'a/b' }), {}, /no mirror on this Mac/],
+    [w.make({ 'product.repo': 'a/b', 'product.mirror': 'relative' }), {}, /no mirror on this Mac/],
     [w.make({ 'product.repo': 'a/b', 'product.mirror': join(w.d, 'none') }), {}, /^mirror: /],
     [w.make(undefined, async () => { throw new Error(key); }), {}, /^no robot key for this product$/],
     [w.make(undefined, async () => ''), {}, /^no robot key for this product$/],
-    [createMirrorRefresh({ rules: { get: (k) => OK_RULES(w.mirror)[k] }, getRobotToken: async () => key, testRemote: () => join(w.d, 'no-such-hub') }), {}, /^could not fetch from GitHub$/],
+    [createMirrorRefresh({ rules: { get: (k) => OK_RULES(w.mirror)[k] }, productPlace: async () => ({ repo: OK_RULES(w.mirror)['product.repo'], mirror: w.mirror }), getRobotToken: async () => key, testRemote: () => join(w.d, 'no-such-hub') }), {}, /^could not fetch from GitHub$/],
   ];
   for (const [make, over, want] of cases) {
     const r = await ask(make, over);

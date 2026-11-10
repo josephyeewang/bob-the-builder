@@ -7,12 +7,14 @@
 //
 // The fetch goes through safe-git, the way push.mjs fetches: the same flags, the same one address besides local paths.
 //
-//   createMirrorRefresh({ rules, getRobotToken, testRemote? }) → refreshMirror({ product, card, head })
+//   createMirrorRefresh({ rules, productPlace, getRobotToken, testRemote? }) → refreshMirror({ product, card, head })
 //     → { ok: true } | { ok: false, reason }
 //
 // It never throws for a refusal, and no reason carries git's own output. Run on every pass of a re-audit wait: main keeps
 // moving, and a fetch that failed is simply tried again. Ports:
-//   rules          rules.get('product.repo' | 'product.mirror' | 'product.default_branch', { product })
+//   productPlace(product)   { repo: 'owner/name', mirror: '<folder>' }, as push.mjs takes it: the product's place comes
+//                           from the wiring (products.json and this Mac's config), never the rules (L568)
+//   rules          rules.get('product.default_branch', { product }) only (an optional key: missing reads as main)
 //   getRobotToken(product)  M6's short-lived robot key (R-0b-86)
 //   testRemote(repo)        tests only: a local folder standing in for GitHub
 
@@ -23,17 +25,18 @@ import { BRANCH, githubUrl, tokenConfig } from './push.mjs';
 const REPO = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const SHA = /^[0-9a-f]{40}$/;
 
-export function createMirrorRefresh({ rules, getRobotToken, testRemote }) {
+export function createMirrorRefresh({ rules, productPlace, getRobotToken, testRemote }) {
   return async function refreshMirror({ product, card, head }) {
     const no = (reason) => ({ ok: false, reason });
     const branch = `card/${String(card).toLowerCase()}`;
     if (!BRANCH.test(branch)) return no('not a card\'s branch');
     if (!SHA.test(String(head))) return no('the head is not 40 hex');
-    const repo = rules.get('product.repo', { product });
-    const mirror = rules.get('product.mirror', { product });
+    let place;
+    try { place = await productPlace(product); } catch { place = null; }
+    const { repo, mirror } = place ?? {};
     const base = rules.get('product.default_branch', { product }) ?? 'main';
-    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) return no('the product has no valid GitHub repo in the rules');
-    if (typeof mirror !== 'string' || !isAbsolute(mirror)) return no('the product has no mirror in the rules');
+    if (typeof repo !== 'string' || !REPO.test(repo) || repo.includes('..')) return no('the product has no valid GitHub repo on this Mac');
+    if (typeof mirror !== 'string' || !isAbsolute(mirror)) return no('the product has no mirror on this Mac');
     const m = checkMirror(mirror);
     if (!m.ok) return no(`mirror: ${m.reason}`);
     const url = testRemote ? testRemote(repo) : githubUrl(repo);
