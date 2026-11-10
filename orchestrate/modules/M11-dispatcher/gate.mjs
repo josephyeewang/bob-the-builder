@@ -213,12 +213,16 @@ export function disjoint({ rules, card, product, others, rec }) {
  * this port asks the same check, with the same `filesOf` (the files a merge commit changed), and refuses as the pass
  * does an undo that is not an exact reverse: given no `filesOf`, every undo is refused (the caller must pass the pass's
  * own). undo.mjs is loaded only when an undo asks: it imports the pass, which imports this file.
+ * `ctx.card` must carry its `id` ({ id, ...doc }; L863 m1): at launch the undo's own card is already claimed, and
+ * startGate tells it from another undo only by that id, so an undo with none is refused, never counted as running.
  */
 export function check12({ rules, rec, bandsNow, runningNow, filesOf }) {
   return async (ctx) => {
     let exact = false;
     if (ctx.kind === 'undo') {
+      if (ctx.card && (typeof ctx.card.id !== 'string' || !ctx.card.id)) return refuse('the undo\'s card names no id, so its own claim can\'t be told from another undo (pass { id, ...doc })');
       let e;
+      // No card: M4's port 12 refuses first (review-launch.mjs), so this is defence for another caller (L863 c3).
       try { e = ctx.card ? (await import('./undo.mjs')).exactReverse({ rec, card: ctx.card, filesOf }) : { ok: false, reason: 'it has no card' }; }
       catch (err) { e = { ok: false, reason: `the check could not be made (${err?.message ?? err})` }; }
       if (e?.ok !== true) return refuse(`it is not an exact reverse: ${e?.reason ?? 'no answer'}`);
