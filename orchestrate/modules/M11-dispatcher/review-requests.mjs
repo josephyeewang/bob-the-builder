@@ -204,13 +204,20 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
     // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
     startPlanReview: ({ card, fingerprint, key }) => writePlanReviewRequest({ dir: requests, card, fingerprint, key }),
-    // A plan with no answer yet that the runner holds at the cap is said to wait for a slot (#294 r3 m1). That is wording
-    // only: a status that can't be read leaves the plain "still working", never a refusal.
+    // A plan with no answer yet that the runner holds at the cap is said to wait for a slot (#294 r3 m1), naming the
+    // plan reviewers that hold the slots and since when (#335 r1 M1). One that runs says when its reviewer started, so
+    // "slow" is counted from there (#335 r1 m1). That is wording only: a status that can't be read leaves the plain
+    // "still working", never a refusal.
     planReviewAnswer: ({ card, fingerprint, session }) => {
       const a = planAnswerFor({ root: dirname(status), uid: reviewUid, card, fingerprint, session });
       if (a.ok !== true || a.answer !== undefined) return a;
       let s; try { s = read(); } catch { return a; }
-      return s.plans_waiting.some((p) => p.request_id === session && p.card === card && p.fingerprint === fingerprint) ? { ok: true, waiting: 'slot' } : a;
+      const plans = (Array.isArray(s.running) ? s.running : []).filter((r) => r !== null && typeof r === 'object' && r.role === PLAN_REVIEW_ROLE && typeof r.card === 'string');
+      if (s.plans_waiting.some((p) => p.request_id === session && p.card === card && p.fingerprint === fingerprint)) {
+        return { ok: true, waiting: 'slot', holders: plans.map((r) => ({ card: r.card, ...(typeof r.started_at === 'string' ? { started_at: r.started_at } : {}), ...(r.card === card && r.fingerprint !== fingerprint ? { older_plan: true } : {}) })) };
+      }
+      const mine = plans.find((r) => r.request_id === session && r.card === card && r.fingerprint === fingerprint && typeof r.started_at === 'string');
+      return mine ? { ok: true, started_at: mine.started_at } : a;
     },
   };
 }

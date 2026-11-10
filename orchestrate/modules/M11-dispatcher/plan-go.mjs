@@ -9,8 +9,9 @@
 //     ctx: one product's Approvals context (tick.mjs approvalsStep). The ports take { product, card, ... }:
 //     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording, key }) → { ok: true, session } | { ok: false, reason }
 //       key is the same for a card's plan: a port that can use it gives a repeated start the same session
-//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works |
-//       { ok: true, waiting: 'slot' } while it waits at the plan reviewers' cap, none started yet | { ok: false, reason }
+//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true, started_at? } while it
+//       works (started_at: when its reviewer started, if known) | { ok: true, waiting: 'slot', holders: [{ card, started_at? }] }
+//       while it waits at the plan reviewers' cap, none started yet, holders being the plan reviewers that run | { ok: false, reason }
 //     planRows({ product, card }) → { <row id>: row }      planView({ product }) → a repo view      mainSha({ product }) → sha
 //     replyToLead({ lead, text }) → { ok: true } | { ok: false, reason }      leaves a note for the Lead whose session wrote the plan
 //   Each port call has a time limit (PLAN_PORT_MS), and so has each call raiseGo makes: the repo view's isDir and the close
@@ -116,6 +117,16 @@ const whole = (product) => `product.${product}`;
 // The step's one write: its notes on a card's plan facts.
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
+// The plan reviewers holding the slots, as the runner's status lists them: "card A, on an older plan, for 3 hours, card B
+// for 20 minutes". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
+const runFor = (ms) => (ms < 2 * 60 * 60_000 ? `for ${Math.max(1, Math.round(ms / 60_000))} minutes` : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+const slotHolders = (holders, now) => {
+  const list = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string').slice(0, 10).map((h) => {
+    const at = pastTime(h.started_at, now);
+    return `card ${short(h.card).slice(0, 40)}${h.older_plan === true ? ', on an older plan,' : ''}${at === null ? '' : ` running ${runFor(now - at)}`}`;
+  });
+  return list.length ? list.join('; ') : "the runner's status names none of them";
+};
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // The session after the `role:` of an actor; a script actor, or a role with no session, names none.
@@ -188,10 +199,14 @@ async function reviewed(ctx, ports, tell, c, fp) {
   const a = await ports.planReviewAnswer({ product: ctx.product, card: c.id, fingerprint: fp.fingerprint, session: f.session });
   if (a?.ok !== true) { tell(c.id, 'answer', `the plan reviewer's answer on card ${c.id} could not be read: ${short(a?.reason)}`); return null; }
   if (a.answer === undefined || a.answer === null) {
-    const since = pastTime(f.started_at, ctx.now());
+    // The hour runs from the plan's request while it waits for a slot, and from its reviewer's own start once one runs
+    // (#335 r1 m1): a plan that waited three hours is not told "slow" a minute after its reviewer starts.
+    const slot = a.waiting === 'slot';
+    const since = (slot ? null : pastTime(a.started_at, ctx.now())) ?? pastTime(f.started_at, ctx.now());
     if (since !== null && ctx.now() - since < PLAN_REVIEW_SLOW_MS) return null;
-    // At the cap no reviewer has started, so "has not answered" would point at one that isn't there (#294 r3 m1).
-    if (a.waiting === 'slot') tell(c.id, 'slot', `card ${c.id}'s plan is waiting for a reviewer slot: as many plan reviewers as the cap allows already run, and it starts once one ends`);
+    // At the cap no reviewer has started, so "has not answered" would point at one that isn't there (#294 r3 m1). The
+    // slots' holders are named, since one stuck on an old plan holds its slot until its session ends (#335 r1 M1).
+    if (slot) tell(c.id, 'slot', `card ${c.id}'s plan review hasn't started: the most plan reviews allowed at once are already running (${slotHolders(a.holders, ctx.now())}). Until one finishes, card ${c.id} can't be asked for a go`);
     else tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
     return null;
   }
