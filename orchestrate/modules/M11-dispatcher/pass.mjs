@@ -765,7 +765,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
     // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
     // must keep its card claimed or a second one would start.
-    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
+    // Under the role the session runs (L767: a script card's outbox is <root>/script/<id>).
+    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot, role: startRole(kind) });
     if (outboxWrong) {
       const stopped = await guarded((signal) => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }, { signal }), portDeadlineMs);
       const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
