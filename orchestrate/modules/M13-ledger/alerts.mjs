@@ -120,7 +120,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
 
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
-  const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return p === null ? t : new Date(p).toISOString(); };
+  // With no readable time it is GitHub's time now (L801 self-review m1): a fast robot stamp would read as ahead, so due every pass.
+  const toldAt = (at, t) => { const p = pastTime(at, Date.parse(t)); return new Date(p ?? githubNow(gh, Date.parse(t))).toISOString(); };
 
   // Keeps where the issue is. `behind`: GitHub already showed the Record out of date, so an earlier write was refused too.
   const cache = (id, s, key, issue, status, behind) => {
@@ -198,6 +199,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       at = await looked(id, s, t);
       if (at === false) return false;
     }
+    sayClock(Date.parse(t));   // after a GitHub answer, so its time is this pass's; on every path, not only the quiet one
     if (!at) {
       // The told stamp is GitHub's time, as every later one is (toldAt keeps a comment's own time): one clock counts the day.
       const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: new Date(githubNow(gh, Date.parse(t))).toISOString(), cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
@@ -230,8 +232,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       // The day is counted by GitHub's time (L768, L801 M1). The told stamps are GitHub's too: the opening's is stamped by
       // GitHub's time, and toldAt keeps each comment's own time from GitHub. So a robot clock ahead of GitHub's, by minutes
       // or by days, neither tells on every pass nor holds a reminder back. With no Date header (GitHub always sends one)
-      // the robot's clock counts, as before L768. A clock over CLOCK_AHEAD_MS ahead is logged once while it stays so.
-      sayClock(Date.parse(t));
+      // the robot's clock counts, as before L768. A clock over CLOCK_AHEAD_MS ahead is logged once while it stays so (sayClock, above).
       const told = stillWaiting({ now: githubNow(gh, Date.parse(t)), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
       if (told.did !== 'quiet') return told.answer;
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';

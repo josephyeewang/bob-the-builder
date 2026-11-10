@@ -17,7 +17,8 @@
 // a day while the fault lasts: not when the robot commented in the last day, nor when the issue was opened in the last
 // day (GitHub's created_at says when; its body's "Opened at" line when GitHub gives none). The day is counted by GitHub's
 // clock, so a computer clock ahead or behind still reminds once a day (L768, L801 M1); one more than a few minutes ahead
-// is said in the log. With no Date header from GitHub, the computer's clock stands, as before. A comment that notifies is the point; the body is never edited.
+// is said in the log, once each start. With no Date header from GitHub, the computer's clock stands, as before. A
+// comment that notifies is the point; the body is never edited.
 //
 // The reason is cut and fenced as a push reason is (L720 n2): local paths become <path>, a cut for length says so, and
 // the words are fenced as outside text. A look that fails opens nothing, as an unknown answer would otherwise flood the
@@ -86,7 +87,9 @@ export async function tellStoreStopped({ stop, product, channel, log, sendMs = A
     if (issue.open === false) return 'already open';   // closed since the search: the next start opens a new one
     const ahead = clockAhead(gh, t);
     if (ahead !== null && ahead > CLOCK_AHEAD_MS) log(`robot: the stopped Record's issue #${n} is open; this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's; the day is counted by GitHub's time. Set the clock right.`);
-    const g = ahead === null ? t : t - ahead;   // GitHub's time now, or this computer's when GitHub gave none
+    // GitHub's time now, or this computer's when GitHub gave none. Not clamped at 0 as alerts' githubNow is: every time this
+    // count reads is GitHub's own (created_at, the comments), so a slow computer is put right too.
+    const g = ahead === null ? t : t - ahead;
     const opened = Date.parse(issue.created_at ?? OPENED.exec(issue.body)?.[1] ?? '');
     if (Number.isFinite(opened) && g - opened < STOP_REMIND_MS) return 'already open';
     const last = await inTime(sendMs, () => gh.latestOwnComment(n, new Date(g - STOP_REMIND_MS).toISOString()));

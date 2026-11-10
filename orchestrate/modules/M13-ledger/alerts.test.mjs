@@ -1142,7 +1142,17 @@ test('L768, L801 M1: a robot clock ahead of GitHub\'s, by minutes or days, remin
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS), false);
   assert.equal(CLOCK_AHEAD_MS, 5 * 60_000, 'the limit is pinned (L801 m1): a few minutes, the most a kept clock drifts');
   // Said once while wrong; said again after it has been right in between.
-  const again = make(10);
-  await again.alerts.raise(standing); again.tick(60); await again.alerts.raise(standing);
-  assert.equal(again.lines.length, 1);
+  // Said once while wrong, and again only after it has been right in between.
+  let g = Date.parse('2026-11-03T08:00:00Z'); let ahead = 10 * 60000;
+  const lines = [];
+  const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
+  const a = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: () => new Date(g + ahead), log: (s) => lines.push(s) });
+  for (const skew of [10, 10, 0, 10, 10]) { ahead = skew * 60000; await a.raise(standing); g += 60 * 60000; }
+  assert.equal(lines.length, 2, lines.join('\n'));
+  // The opening logs it too, not only the quiet reminder path (L801 self-review m4).
+  const lines2 = [];
+  const gh2 = fakeIssues({ now: () => new Date(g + 20 * 60000), serverNow: () => new Date(g) });
+  const a2 = makeAlerts({ rec: memoryRecord(), gh: gh2, owner: 'owner-login', now: () => new Date(g + 20 * 60000), log: (s) => lines2.push(s) });
+  assert.equal(await a2.raise(standing), 'opened');
+  assert.equal(lines2.length, 1);
 });
