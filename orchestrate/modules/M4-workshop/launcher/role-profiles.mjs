@@ -8,7 +8,7 @@
 import { createHash } from 'node:crypto';
 import { OUTBOX_KINDS } from '../../../shared/record-names.mjs';
 
-// Agent and Task are one subagent tool under two names (L629); M10's roles.mjs keeps the same list less Workflow.
+// Agent and Task are one subagent tool under two names (L629); M10's roles.mjs now keeps the same list, Workflow included (L787).
 export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
   'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile', 'Workflow']);
 // Tolerated in every read-back (m2).
