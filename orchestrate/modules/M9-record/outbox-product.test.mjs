@@ -93,9 +93,24 @@ test('L850-2: a review role has no product folder, and a product folder that is 
   const rv = outboxFolders({ outboxRoot: env.outRoot, tag: { role: 'reviewer', sessionId: 'S-1', product: PRODUCT } });
   assert.equal(rv.ok, false); assert.match(rv.reason, /a reviewer outbox has no product folder/);
   const real = join(env.base, 'elsewhere');
-  const file = drop(join(real, 'worker', 'S-1'));
+  drop(join(real, 'worker', 'S-1'));
   symlinkSync(real, join(env.outRoot, PRODUCT));
   const r = outboxPlace({ outboxRoot: env.outRoot, tag: { role: 'worker', sessionId: 'S-1', product: PRODUCT }, file: join(env.outRoot, PRODUCT, 'worker', 'S-1', 'report-1.md') });
   assert.equal(r.ok, false); assert.match(r.reason, new RegExp(`outbox folder ${PRODUCT} is a link`));
-  assert.ok(file);
+});
+
+test('L850-2 (self-review): a product named as a role is refused, a role folder inside a product that is a link is refused, and a missing tag is a refusal', () => {
+  const env = world();
+  for (const p of ['worker', 'Lead']) {
+    const w = outboxFolders({ outboxRoot: env.outRoot, tag: { role: 'worker', sessionId: 'S-1', product: p } });
+    assert.equal(w.ok, false, p); assert.match(w.reason, /bad outbox tag/);
+  }
+  const real = join(env.base, 'elsewhere2');
+  drop(join(real, 'S-1'));
+  mkdirSync(join(env.outRoot, PRODUCT), { recursive: true });
+  symlinkSync(real, join(env.outRoot, PRODUCT, 'worker'));
+  const r = outboxPlace({ outboxRoot: env.outRoot, tag: { role: 'worker', sessionId: 'S-1', product: PRODUCT }, file: join(env.outRoot, PRODUCT, 'worker', 'S-1', 'report-1.md') });
+  assert.equal(r.ok, false); assert.match(r.reason, /outbox folder worker is a link/);
+  const n = env.record.applyOutbox(null, join(real, 'S-1', 'report-1.md'));
+  assert.equal(n.ok, false);
 });

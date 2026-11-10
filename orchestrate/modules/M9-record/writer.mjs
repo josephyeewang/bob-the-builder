@@ -534,7 +534,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   function applyOutbox(tag, file) {
     // A worker runner session's tag names its product (L836): this Record takes only its own product's hand-ins, so
     // another product's outbox (client work) is never read from here (L850-2).
-    if (tag.product != null && tag.product !== product) return no(`this record is product ${product}'s, and the outbox is product ${tag.product}'s`);
+    if (tag?.product != null && tag.product !== product) return no(`this record is product ${product}'s, and the outbox is product ${tag.product}'s`);
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
     // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
     if (isNotARecord(f)) return notARecord(f.kind);

@@ -3165,6 +3165,8 @@ function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) 
       // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
       // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
       // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
+      // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
+      // (L850-2); a tag's product still picks the folder through outboxPlace.
       const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).
