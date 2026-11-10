@@ -359,7 +359,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
- *   filesOf(sha) -> [paths] | null   (the files a merge commit changed: an undo's exact-reverse check)
+ *   filesOf(sha) -> [paths]   (the files a merge commit changed: an undo's exact-reverse check; never null, it throws instead)
  *   alert(text)
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
