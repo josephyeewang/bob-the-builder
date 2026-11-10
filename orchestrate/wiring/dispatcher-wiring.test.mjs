@@ -41,16 +41,16 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 const PORTS_NOT_WIRED = Object.freeze(['board', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
   'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
   'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
-const CLEANUP_NOT_WIRED = Object.freeze(['copiesRoot', 'saveWork']);
+const CLEANUP_NOT_WIRED = Object.freeze(['saveWork']);
 // The cleanup ports wired for real (L739; worker-ports.test.mjs plants each).
-const CLEANUP_WIRED = Object.freeze(['git', 'mirrorFor', 'sealRoot']);
+const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'sealRoot']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below). filesOf, hostLock
 // and reviewEnded (L739): worker-ports.test.mjs plants each.
-const PORTS_WIRED = Object.freeze(['approvals', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'reviewEnded', 'startPlanReview', 'wait']);
+const PORTS_WIRED = Object.freeze(['approvals', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'outboxRoot', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'reviewEnded', 'startPlanReview', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
-const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'outboxRoot', 'proposalsFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
+const NOT_PORTS = Object.freeze(['alert', 'alertSendMs', 'approvalsProductMs', 'cleanup', 'intakeFs', 'proposalsFs', 'portDeadlineMs', 'saveDeadlineMs', 'stepDeadlineMs']);
 // One full pass with the ports above refusing: each step's outcome, and for a failed step the port its error names.
 const NW = (port) => notWiredText(port);
 // LEAD-RULED (L652, re-ruled by L674 for the separate-process boots): the boot's review user is another user (this one's
@@ -241,7 +241,7 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
     ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'wait']);
   const w = world();
-  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'hostLock', 'reviewEnded']);
+  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded']);
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };
@@ -276,7 +276,7 @@ const BAD_GROUPS = [
   ['a listing the tick never reads', () => rest([], { notWired: ['lanuch'], build: () => ({}) }), /no tick step reads these ports: lanuch$/],
   ['neither answered nor listed', () => rest(['resume']), /nothing answers or lists these ports, which the tick needs: resume$/],
   ['no cleanup at all', () => rest(['cleanup']), /nothing answers or lists these ports, which the tick needs: cleanup$/],
-  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.saveWork, cleanup\.copiesRoot$/],
+  ['in the cleanup group answered and still listed', () => rest(['cleanup'], answer({ cleanup: {} })), /still listed as not wired: cleanup\.saveWork$/],
   ['a port file that is async, so answers nothing yet', () => rest(['cleanup'], { notWired: [], build: async () => ({ cleanup: {} }) }), /nothing answers or lists these ports, which the tick needs: cleanup$/],
 ];
 for (const [name, groups, why] of BAD_GROUPS) {
@@ -304,9 +304,9 @@ test('the seam: the cleanup group follows the same rules, by its own list', () =
     return Object.defineProperties({}, { ...c, ...changes });
   };
   assert.match(cleanupProblem(cleanup({ saveWork: { enumerable: true, value: () => 'real' } })), /still listed as not wired: cleanup\.saveWork$/);
-  assert.match(cleanupProblem(cleanup({ copiesRoot: { enumerable: true, value: '/real/folder' } })), /still listed as not wired: cleanup\.copiesRoot$/);
+  assert.equal(group().copiesRoot, w.config.copiesRoot, 'copiesRoot is wired (L887): the TOP worker-copies folder, read as the checked folder');
   // A wired port that went back to refusing is answered by nothing.
-  assert.match(cleanupProblem(cleanup({ sealRoot: { enumerable: true, get: refusing('cleanup.sealRoot') } })), /nothing answers or lists these ports, which the tick needs: cleanup\.sealRoot$/);
+  for (const k of ['sealRoot', 'copiesRoot']) assert.match(cleanupProblem(cleanup({ [k]: { enumerable: true, get: refusing(`cleanup.${k}`) } })), new RegExp(`nothing answers or lists these ports, which the tick needs: cleanup\\.${k}$`));
   assert.match(cleanupProblem({}), new RegExp(`still listed as not wired: ${CLEANUP_PORTS.filter((k) => NOT_WIRED_CLEANUP.includes(k)).map((k) => `cleanup\\.${k}`).join(', ')}$`), 'gone is not wired');
   assert.match(cleanupProblem(cleanup({ extra: { enumerable: true, value: 1 } })), /no tick step reads these ports: cleanup\.extra$/);
 });

@@ -34,6 +34,7 @@ import { consumeAsk } from '../M2-approvals/ask-store.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
 import { answerCounts } from '../../shared/approval.mjs';
 import { runnerCopy, runnerPlaces } from '../../shared/product-paths.mjs';
+import { holdAlert } from './pass.mjs';
 
 export const ASK_ID = (card) => `delete-copy-${card}`;
 export const CLEANUP_FACT = (card) => `cleanup-${card}`;
@@ -303,8 +304,11 @@ export function sweepStaging(sealRoot, now) {
  * a time. `copiesRoot` is the root, not a product's folder: each product's own folder sits under it (#378 r1 m2).
  * `mirrorFor(cardDoc)` names the product's mirror. A folder at the top that is no product's (a name the runner's
  * folders can't hold, no product the Record holds, a link or a file) is listed as kept and never looked inside; a
- * product folder that can't be read fails the step, as the copies folder does (L744 3).
+ * product folder that can't be read fails the step, as the copies folder does (L744 3). The folders kept that way are
+ * (folders and links only: a file is no copy) named to Joe in one notice, once a day (#403 r1 m4: a copy of the old flat layout is never kept silently), and never
+ * moved: what to do with one is Joe's.
  */
+export const COPIES_NOT_PRODUCT_CAUSE = 'copies-not-a-product';
 export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirrorFor, git, saveWork, alert }) {
   const out = [];
   if (sealRoot) for (const n of sweepStaging(sealRoot, now)) out.push([n, { result: 'removed', reasons: ['a staging folder left by a killed run'] }]);
@@ -315,16 +319,20 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     if (e?.code === 'ENOENT') return out;
     throw new Error(`the copies folder could not be read (${e?.code ?? e?.message ?? e})`);
   }
+  const stray = [];
+  // Only a folder (or a link) can be a copy, so only those are told; a stray file is kept and listed, never told.
+  const notProduct = (name, why) => { const s = st(join(copiesRoot, name)); if (s && (s.isDirectory() || s.isSymbolicLink())) stray.push(name); out.push([name, { result: 'kept', reasons: [`not a product's copies folder: ${why}`] }]); };
   for (const product of names.sort()) {
     let dir;
-    try { dir = runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies; } catch (e) { out.push([product, { result: 'kept', reasons: [`not a product's copies folder: ${e?.message ?? e}`] }]); continue; }
+    try { dir = runnerPlaces({ copiesRoot, outboxRoot: '/', product }).copies; } catch (e) { notProduct(product, e?.message ?? e); continue; }
     // Only a product the Record holds has a copies folder: a lower-case card folder of the old flat layout has a
     // product's shape, and is never entered (L836 self-review m2).
+    // A product read that throws, or a corrupt one, is kept the same way: never entered on a guess (#403 r1 A5, A6).
     let known = null;
-    try { known = rec.read('product', product); } catch { known = null; }
-    if (!known || known.corrupt) { out.push([product, { result: 'kept', reasons: ['not a product\'s copies folder: no product of that name'] }]); continue; }
+    try { known = rec.read('product', product); } catch (e) { notProduct(product, `its product could not be read (${e?.message ?? e})`); continue; }
+    if (!known || known.corrupt) { notProduct(product, known?.corrupt ? 'its product record is damaged' : 'no product of that name'); continue; }
     const s = st(dir);
-    if (!s || s.isSymbolicLink() || !s.isDirectory()) { out.push([product, { result: 'kept', reasons: ['not a product\'s copies folder: not a real folder'] }]); continue; }
+    if (!s || s.isSymbolicLink() || !s.isDirectory()) { notProduct(product, 'not a real folder'); continue; }
     let cards;
     try { cards = readdirSync(dir).filter((n) => !n.startsWith('.')); } catch (e) {
       if (e?.code === 'ENOENT') continue;
@@ -336,6 +344,10 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
       if (!mirror) { out.push([card, { result: 'kept', reasons: ['no record or mirror for this copy'] }]); continue; }
       out.push([card, await cleanupCopy({ rec, rules, now, card, product, copiesRoot, sealRoot, mirror, git, saveWork, alert })]);
     }
+  }
+  if (stray.length && alert) {
+    const text = `the worker copies folder ${copiesRoot} holds ${stray.length === 1 ? 'a folder' : `${stray.length} folders`} that ${stray.length === 1 ? 'is' : 'are'} no product's, kept as ${stray.length === 1 ? 'it is' : 'they are'} and never looked inside: ${stray.join(', ')} (a copy from before copies were kept in each product's folder, L836, is moved or deleted by hand)`;
+    try { await holdAlert({ rec, cause: COPIES_NOT_PRODUCT_CAUSE, text, alert, now }); } catch (e) { alert(`the Dispatcher could not tell the copies that are no product's: ${e?.message ?? e}`); }
   }
   return out;
 }

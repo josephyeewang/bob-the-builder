@@ -321,6 +321,8 @@ export function createPushScript(deps) {
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
   if (uids.worker === ownerUid) throw new Error('createPushScript: the worker user and the owner must be different users');
+  // #403 r1 M1: a push must find the outbox in its own product's folder under the real root, never by shape alone.
+  if (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot)) throw new Error('createPushScript: outboxRoot must be the outboxes\' full path');
 
   /** A worker's inputs, from the session record only (step 1). */
   function workerInputs(sessionId) {

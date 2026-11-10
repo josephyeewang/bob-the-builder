@@ -73,7 +73,13 @@ test('L836: outboxProblemFor checks the outbox in the session\'s own product\'s 
   for (const product of [undefined, '', 'P1', '..', 'p1/x', 'worker', 'Script']) assert.match(ask(join(root, 'p1', 'worker', SID), product), /^has no product folder to be in \(/, String(product));
   // c3: a root that is no full path is no place, never read against wherever the process runs.
   for (const bad of ['', 'outboxes', './outboxes', 7]) assert.match(outboxProblemFor(join(root, 'p1', 'worker', SID), SID, { outboxRoot: bad, product: 'p1' }), /the outbox root is not a full path/, String(bad));
-  // With no root, the shape alone, as workerOutboxProblem.
-  assert.equal(outboxProblemFor(join(root, 'p2', 'worker', SID), SID, { product: 'p1' }), null);
+  // #403 r1 M1: with no root, the shape, and the folder above the role must be this product's: never another
+  // product's, the old flat place, or a product name the runner can't hold.
+  assert.match(outboxProblemFor(join(root, 'p2', 'worker', SID), SID, { product: 'p1' }), /is not in product p1's own folder/, 'another product');
+  assert.match(outboxProblemFor(join(root, 'worker', SID), SID, { product: 'p1' }), /is not in product p1's own folder/, 'the flat layout');
+  assert.match(outboxProblemFor(join(root, 'p1', 'p1', 'worker', SID).replace('/p1/p1/', '/../p1/'), SID, { product: 'p1' }), /is not a plain path/, '..');
+  for (const product of ['..', undefined, 'P1', 'worker']) assert.match(outboxProblemFor(join(root, 'p1', 'worker', SID), SID, { product }), /^has no product folder to be in \(/, String(product));
+  assert.equal(outboxProblemFor(join(root, 'p1', 'worker', SID), SID, { product: 'p1' }), null);
+  assert.equal(outboxProblemFor(join(root, 'p1', 'script', SID), SID, { product: 'p1', role: 'script' }), null);
   assert.match(outboxProblemFor('worker/S-1', SID, { product: 'p1' }), /not a full path/);
 });

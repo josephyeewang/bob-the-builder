@@ -5,12 +5,12 @@
 // The outbox is <outbox root>/<product>/<role>/<session id> (L836, shared/product-paths.mjs), where role is the one the
 // session runs and hands in as: worker, or script for a script card (L767: a script has its own outbox, so tag.role
 // names one thing, the folder, the kinds it may write and the actor). workerOutboxProblem checks a path against the
-// product's own folder; outboxProblemFor finds that folder from the root. Without a root only the path's shape can be
-// checked; with it, the real folder must be that exact one, through any link.
+// product's own folder; outboxProblemFor checks it is the session's own product's. Without a root, the path's shape and
+// its product folder's name are checked (#403 r1 M1); with it, the real folder must be that exact one, through any link.
 
 import { realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { runnerPlaces } from '../../../shared/product-paths.mjs';
+import { runnerOutbox, runnerPlaces } from '../../../shared/product-paths.mjs';
 
 /** The roles a worker-runner session hands in as, each with its own outbox folder (L767). */
 export const WORKER_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
@@ -40,15 +40,23 @@ export function workerOutboxProblem(outbox, sessionId, { root, realpath = realpa
 /**
  * workerOutboxProblem for a session of `product`, whose outboxes are its own folder under the outbox root (`outboxRoot`
  * is the root, not the product's folder, #378 r1 m2; L836:
- * <outboxRoot>/<product>/<role>/<session id>, shared/product-paths.mjs runnerPlaces). With no root, only the shape is
- * checked, as workerOutboxProblem does; a product the runner's folders can't hold has no outbox, and is said so.
+ * <outboxRoot>/<product>/<role>/<session id>, shared/product-paths.mjs runnerPlaces). A product the runner's folders
+ * can't hold has no outbox, and is said so. With no root, the shape is checked as workerOutboxProblem does, and the
+ * folder above the role must be named for this product (#403 r1 M1: the old flat place, or another product's, is not
+ * this session's own). With a root, the real outbox must be runnerOutbox under the real root (#403 r1 m3).
  */
-export function outboxProblemFor(outbox, sessionId, { outboxRoot, product, role, realpath } = {}) {
-  const opts = { ...(role !== undefined ? { role } : {}), ...(realpath ? { realpath } : {}) };
-  if (outboxRoot === undefined || outboxRoot === null) return workerOutboxProblem(outbox, sessionId, opts);
+export function outboxProblemFor(outbox, sessionId, { outboxRoot, product, role, realpath = realpathSync } = {}) {
+  const opts = { ...(role !== undefined ? { role } : {}), realpath };
+  const noRoot = outboxRoot === undefined || outboxRoot === null;
   // A root that is no full path (an empty one, or one read against wherever the process runs) is no place (L836 c3).
-  if (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot)) return 'has no product folder to be in (the outbox root is not a full path)';
-  let root;
-  try { root = runnerPlaces({ copiesRoot: '/', outboxRoot, product }).outboxes; } catch (e) { return `has no product folder to be in (${e?.message ?? e})`; }
-  return workerOutboxProblem(outbox, sessionId, { ...opts, root });
+  if (!noRoot && (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot))) return 'has no product folder to be in (the outbox root is not a full path)';
+  try { runnerPlaces({ copiesRoot: '/', outboxRoot: noRoot ? '/' : outboxRoot, product }); } catch (e) { return `has no product folder to be in (${e?.message ?? e})`; }
+  const shape = workerOutboxProblem(outbox, sessionId, opts);
+  if (shape) return shape;
+  const under = outbox.split('/').at(-2);
+  if (noRoot) return outbox.split('/').at(-3) === product ? null : `is not in product ${product}'s own folder`;
+  let own;
+  try { own = runnerOutbox({ outboxRoot: realpath(outboxRoot), product, role: under, sessionId }); } catch (e) { return `could not be read (${e?.code ?? e?.message ?? e})`; }
+  try { if (realpath(outbox) !== own) return 'is not inside the outbox root'; } catch (e) { return `could not be read (${e?.code ?? e?.message ?? e})`; }
+  return null;
 }

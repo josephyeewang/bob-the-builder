@@ -15,7 +15,8 @@ test('L741: the owner-side ports are the not-wired worker ports the runner answe
   for (const k of Object.keys(OWNER_PORTS)) assert.ok(NOT_WIRED_WORKER.includes(k), k);
   // What stays orchestrate-side (L737's chunk for lane 3) is not here.
   for (const k of ['hostLock', 'reviewEnded']) assert.equal(OWNER_PORTS[k], undefined, k);
-  assert.deepEqual(Object.keys(OWNER_CLEANUP_PORTS).sort(), ['copiesRoot', 'saveWork']);
+  // copiesRoot is the Dispatcher config's (L887), so only saveWork is the runner's.
+  assert.deepEqual(Object.keys(OWNER_CLEANUP_PORTS).sort(), ['saveWork']);
   for (const k of Object.keys(OWNER_CLEANUP_PORTS)) { assert.ok(CLEANUP_PORTS.includes(k), k); assert.ok(NOT_WIRED_CLEANUP.includes(k), k); }
 });
 
@@ -24,7 +25,7 @@ test('L741: the stub refuses each port with the same text wire() uses, and copie
   assert.deepEqual(Object.keys(ports).sort(), Object.keys(OWNER_PORTS).sort());
   for (const k of Object.keys(OWNER_PORTS)) assert.throws(() => ports[k]({}), { message: notWiredText(k) }, k);
   for (const k of Object.keys(OWNER_CLEANUP_PORTS)) assert.throws(() => cleanup[k], { message: notWiredText(`cleanup.${k}`) }, `${k} refuses when read`);
-  assert.deepEqual(Object.keys(cleanup).sort(), ['copiesRoot', 'saveWork']);
+  assert.deepEqual(Object.keys(cleanup).sort(), ['saveWork']);
 });
 
 test('L741: every port says what goes in, what comes out, and how it fails; sync ports have no deadline, async ones the tick\'s', () => {
@@ -155,8 +156,10 @@ test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count,
   assert.match(OWNER_PORTS.sessions.notKnown, /if any one source can't be read: never the sources it could read/);
   assert.match(OWNER_PORTS.board.out, /An alive or ended the runner does not know is left out of that row \(the field, never the row\), never false/);
   assert.doesNotMatch(OWNER_PORTS.board.out, /\bis false\b/);
-  // m3/m4: copiesRoot's access list is L747's, and grants no add or write.
-  const cr = OWNER_CLEANUP_PORTS.copiesRoot.out;
+  // m3/m4: copiesRoot's access list is L747's, and grants no add or write. copiesRoot is the Dispatcher config's now
+  // (L887), so its contract is in worker-ports.mjs.
+  const wp = readFileSync(new URL('./worker-ports.mjs', import.meta.url), 'utf8');
+  const cr = wp.slice(wp.indexOf('//   cleanup.copiesRoot'), wp.indexOf('//   outboxRoot')).replace(/\n\/\/\s+/g, ' ');
   assert.match(cr, /list, search, read \(file contents and attributes, so a copy can be hashed\) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass's checks/);
   assert.doesNotMatch(cr, /as on the worker outboxes/);
   assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(writ|add)\w*/i, 'no other grant of add or write (writes, adds, written too)');

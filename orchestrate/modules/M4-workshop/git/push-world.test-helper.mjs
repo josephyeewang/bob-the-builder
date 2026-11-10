@@ -163,6 +163,8 @@ export async function pushWorld({ root, record = memoryRecord(), seed = true, ca
     testRemote: () => gh,
     uids: { worker: ME },
     ownerUid: ME + 1,
+    // The outboxes' root, required (#403 r1 M1): the push finds the session's outbox in its product's folder under it.
+    outboxRoot: join(root, 'outboxes'),
   };
   const commit = async (msg, fn) => { fn?.(clone); await gitOk(['add', '-A'], cg); await gitOk(['commit', '-q', '--allow-empty', '-m', msg], cg); };
   // The worker's hand-in: the card's branch as a bundle in `into` (the world's own outbox when left out).

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -486,9 +486,10 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   // m4: every copy handed to saveWork, and every ask made, is recorded, so p2's C-1 is shown never bundled nor asked.
   const saved = [];
   const saveWork = async (x, ...rest) => { saved.push(x); return locked(x, ...rest); };
-  const alerts = [];
+  const alert = fakeAlert();
+  const alerts = alert.texts;
   const out = await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
-    git: guardedGit(w.copiesRoot), saveWork, alert: (a) => alerts.push(a) });
+    git: guardedGit(w.copiesRoot), saveWork, alert });
   const by = (k) => out.filter(([c]) => c === k).map(([, r]) => r);
   assert.deepEqual(out.map(([c, r]) => [c, r.result]), [['C-7', 'kept'], ['c-8', 'kept'], ['C-1', 'deleted'], ['C-1', 'kept'], ['p3', 'kept'], ['p4', 'kept'], ['worker', 'kept']]);
   assert.match(by('C-1')[1].reasons.join(), /the copy is in product p2's folder, but the card is product p1's/);
@@ -505,12 +506,43 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   assert.ok(!existsSync(w.copy), 'its own copy, proven, is deleted');
   assert.equal(readFileSync(join(w.copiesRoot, 'p2', 'C-1', 'x'), 'utf8'), 'p2', 'another product\'s folder is untouched');
   for (const p of ['C-7', 'worker', join('..', 'elsewhere', 'C-1')]) assert.ok(existsSync(join(w.copiesRoot, p)), p);
+  // #403 r1 m4: the folders kept as no product's are named to Joe in one notice, once a day, and never moved.
+  const told = alerts.filter((a) => /no product's, kept as they are/.test(String(a?.text ?? a)));
+  assert.equal(told.length, 1, JSON.stringify(alerts));
+  assert.match(String(told[0]?.text ?? told[0]), /holds 4 folders that are no product's, kept as they are and never looked inside: C-7, c-8, p3, worker \(a copy from before/);
+  // Through holdAlert (once a day per cause, marked told only once delivered): the mark names its own cause.
+  const call = alert.calls.find(([t]) => told[0] === t);
+  assert.equal(call[1].mark.fact, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
+  assert.equal(call[1].mark.kind, 'hold_alert');
+  assert.ok(existsSync(join(w.copiesRoot, 'C-7')) && existsSync(join(w.copiesRoot, 'c-8', 'x')), 'never moved');
   // A product folder that can't be read fails the step, as the copies folder does (L744 3).
   chmodSync(join(w.copiesRoot, 'p2'), 0o000);
   try {
     await assert.rejects(cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror, git: guardedGit(w.copiesRoot), saveWork: locked, alert: () => {} }),
       /product p2's copies folder could not be read \(EACCES\)/);
   } finally { chmodSync(join(w.copiesRoot, 'p2'), 0o755); }
+});
+
+test('#403 r1 A5, A6: a product read that throws, or a damaged product record, keeps its folder unentered and is told', async () => {
+  for (const [name, read, why] of [
+    ['A5', () => { throw new Error('the store is down'); }, /not a product's copies folder: its product could not be read \(the store is down\)/],
+    ['A6', () => ({ corrupt: true }), /not a product's copies folder: its product record is damaged/],
+  ]) {
+    const w = world();
+    const real = recFor(w);
+    // The Record is frozen: a stand-in with every one of its calls, and read() changed for products only.
+    const rec = Object.fromEntries(Object.keys(real).map((k) => [k, typeof real[k] === 'function' ? real[k].bind(real) : real[k]]));
+    rec.read = (kind, id) => (kind === 'product' ? read() : real.read(kind, id));
+    const saved = [];
+    const alert = fakeAlert();
+    const out = await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => w.mirror,
+      git: guardedGit(w.copiesRoot), saveWork: async (x, ...r) => { saved.push(x); return locked(x, ...r); }, alert });
+    assert.deepEqual(out.map(([c, r]) => [c, r.result]), [['p1', 'kept']], name);
+    assert.match(out[0][1].reasons.join(), why, name);
+    assert.ok(existsSync(w.copy), `${name}: the copy is never deleted`);
+    assert.deepEqual(saved, [], `${name}: nor bundled`);
+    assert.ok(alert.texts.some((t) => /no product's, kept as it is and never looked inside: p1 /.test(String(t))), `${name}: and told`);
+  }
 });
 
 test('L836: cleanupCopy refuses a card or product that names no plain place, and a card of another product', async () => {

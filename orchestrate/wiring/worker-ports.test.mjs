@@ -54,12 +54,36 @@ function mirrorWorld() {
   writeFileSync(join(mirror, 'config'), MIRROR_CONFIG_TEMPLATE);
   chmodSync(mirror, 0o755);
   // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2 };
+  // The TOP outboxes and worker-copies folders (L887), as setup makes them.
+  for (const f of ['outboxes', 'worker-copies']) mkdirSync(join(base, f), { recursive: true, mode: 0o755 });
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
 }
 
 // ---- cleanup.mirrorFor, cleanup.git, cleanup.sealRoot ----
+
+// L887: the TOP outboxes and worker-copies folders come from the config. outboxRoot is checked at start; copiesRoot on
+// each read, so a folder gone later throws inside the step, never "no copies".
+test('L887: outboxRoot and cleanup.copiesRoot are the config\'s top folders, real folders only', () => {
+  const w = mirrorWorld();
+  const ports = workerPorts(w.ctx);
+  assert.equal(ports.outboxRoot, w.config.outboxRoot);
+  assert.equal(ports.cleanup.copiesRoot, w.config.copiesRoot);
+  for (const [k, what] of [['outboxRoot', /the outboxes folder \(outboxRoot\)/], ['copiesRoot', /the worker copies folder \(copiesRoot\)/]]) {
+    const link = join(w.base, `${k}-link`);
+    symlinkSync(w.config[k], link);
+    const file = join(w.base, `${k}-file`);
+    writeFileSync(file, '');
+    for (const [bad, why] of [[join(w.base, 'nope'), /can't be read \(ENOENT\)/], [link, /is not a plain folder/], [file, /is not a plain folder/]]) {
+      const read = () => { const p = workerPorts({ ...w.ctx, config: { ...w.config, [k]: bad } }); return k === 'outboxRoot' ? p.outboxRoot : p.cleanup.copiesRoot; };
+      assert.throws(read, (e) => what.test(e.message) && why.test(e.message), `${k} ${bad}`);
+    }
+  }
+  const later = workerPorts(w.ctx).cleanup;
+  rmSync(w.config.copiesRoot, { recursive: true });
+  assert.throws(() => later.copiesRoot, /the worker copies folder \(copiesRoot\) .* can't be read \(ENOENT\)/, 'checked on each read');
+});
 
 test('C (L739): mirrorFor names the mirror for this product\'s cards only; a mirror gone later throws, never "no mirror"', () => {
   const w = mirrorWorld();

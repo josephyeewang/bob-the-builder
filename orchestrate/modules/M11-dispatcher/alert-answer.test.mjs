@@ -93,7 +93,7 @@ async function stageChecking(w) {
   readyCard(w.E, 'C-1');
   let sid = null;
   await dispatcherPass({ rec: w.E.record, rules: w.rules, now: w.E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
+    launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert: outbox(w.E.record, w.E.clock.t) });
   must(put(w.E.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
   must(w.E.record.applyOutbox({ role: 'worker', sessionId: sid, card: 'C-1' }, outboxFile(w.E, 'worker', sid, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
