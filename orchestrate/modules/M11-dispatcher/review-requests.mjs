@@ -32,10 +32,10 @@
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
-import { closeSync, constants, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { readReviewStatus, planAnswerFor, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
+import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
@@ -61,18 +61,42 @@ export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }
 }
 
 // One request file: written whole under a hidden name, then given its own name, never over another. `same`: a file
-// already under that name is this very request (a plan's id is its key's hash), so it counts as written. → { ok, exists? }
-function writeRequestFile(dir, id, body, { same = false } = {}) {
+// already under that name may be this very request (a plan's id is its key's hash), and counts as written only when it
+// is (L735 m1-r2): a plain file of the Dispatcher's own, holding these very bytes. Anyone may write the requests folder
+// and work the name out, so any other file there is said, never taken as asked. → { ok, exists? } | { ok: false, reason }
+function writeRequestFile(dir, id, body, { same = false, uid = process.getuid() } = {}) {
   const tmp = join(dir, `.${id}.tmp`);
   const final = join(dir, `${id}.json`);
+  const text = JSON.stringify(body);
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, JSON.stringify(body)); } finally { closeSync(fd); }
-    try { linkSync(tmp, final); } catch (e) { if (same && e?.code === 'EEXIST') return { ok: true, exists: true }; throw e; }
+    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, text); } finally { closeSync(fd); }
+    try { linkSync(tmp, final); } catch (e) {
+      if (!same || e?.code !== 'EEXIST') throw e;
+      const why = ownRequest(final, text, uid);
+      return why ? { ok: false, reason: `another file stands under this plan's request name, so the request was not written (${why}); the runner can't be asked until it is gone` } : { ok: true, exists: true };
+    }
   } catch (e) {
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
   } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
   return { ok: true };
+}
+
+// Why the file under a request's name is not this very request, or null when it is: read by descriptor, never a link.
+function ownRequest(file, text, uid) {
+  let fd;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return `it can't be opened (${e?.code ?? e?.message})`; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return 'it is not a plain file';
+    if (st.uid !== uid) return `it is uid ${st.uid}'s, not the Dispatcher's`;
+    const want = Buffer.from(text);
+    if (st.size !== want.length) return 'it holds another request';
+    const got = Buffer.alloc(want.length);
+    let n = 0;
+    while (n < got.length) { const r = readSync(fd, got, n, got.length - n, n); if (r === 0) break; n += r; }
+    return n === want.length && got.equals(want) ? null : 'it holds another request';
+  } catch (e) { return `it can't be read (${e?.code ?? e?.message})`; } finally { closeSync(fd); }
 }
 
 /**
@@ -83,12 +107,14 @@ function writeRequestFile(dir, id, body, { same = false } = {}) {
  * by it. The runner checks the request against the Record (a Tier-1 draft whose plan has this fingerprint) and starts
  * the reviewer itself, retrying its own failed starts. → { ok: true, session } | { ok: false, reason }
  */
-export function writePlanReviewRequest({ dir, card, fingerprint, key }) {
+export function writePlanReviewRequest({ dir, card, fingerprint, key, uid = process.getuid() }) {
   if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
   if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) return { ok: false, reason: 'the plan names no fingerprint (64 hex)' };
   if (typeof key !== 'string' || !key) return { ok: false, reason: 'the start names no key' };
-  const id = createHash('sha256').update(key).digest('hex');
-  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true });
+  // The one id the runner takes for this plan (L726 m1): the key plan-go gives must be the card and plan it names.
+  const id = PLAN_REQUEST_ID(card, fingerprint);
+  if (key !== `${card}-${fingerprint}`) return { ok: false, reason: 'the start\'s key is not its card and plan' };
+  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true, uid });
   return w.ok ? { ok: true, session: id } : w;
 }
 
@@ -163,7 +189,7 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
     // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list
     // never sees them. Throws when the status can't be trusted, so the tick counts them as at the cap, never as none.
-    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt }) => ({ card, session_id: sessionId, started_at: startedAt })),
+    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt, request_id: requestId }) => ({ card, session_id: sessionId, started_at: startedAt, ...(typeof requestId === 'string' ? { request_id: requestId } : {}) })),
     reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
     // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
     // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
