@@ -582,9 +582,22 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
 test('#410 r3 m1: apart is one rule, both ways, without regard to case; a shared prefix is apart, a trailing slash is not', () => {
   const rows = [['/w/out', '/w/outbox', true], ['/w/out', '/w/out', false], ['/w/out', '/W/OUT', false], ['/W/OUT', '/w/out/x', false],
     ['/w/out/', '/w/out', false], ['/w/out/', '/w/out/x', false], ['/W/Out/', '/w/oUT/x', false], ['/w/OUTBOX', '/w/out', true],
-    ['/w/out-2', '/w/out', true], ['/', '/w', false], ['/w/x', '/w/y', true], ['/w/outnotes', '/w/out', true]];
+    ['/w/out-2', '/w/out', true], ['/', '/w', false], ['/w/x', '/w/y', true], ['/w/outnotes', '/w/out', true],
+    // Not spelled as it resolves: never apart, whatever the other side (the apart path card).
+    ['/w/x/../out', '/w/out', false], ['/w/x/../y', '/w/out', false], ['/w/./y', '/w/out', false], ['/w//y', '/w/out', false],
+    ['/w/y/', '/w/out', false], ['w/y', '/w/out', false], ['/w/y', '/w/out/..', false], [undefined, '/w/out', false]];
   for (const [a, b, want] of rows) {
     assert.equal(apart(a, b), want, `${a} ${b}`);
     assert.equal(apart(b, a), want, `${b} ${a}`);
   }
+});
+
+// The apart path card: a `..` spelling that names the other folder is refused at each call site, though its letters look apart.
+test('apart path card: the runner folders refuse a session folder spelled through ..', () => {
+  assert.equal(render('worker', { paths: { ...PATHS, workerRunner: RUNNER } }).ok, true);
+  assert.match(render('worker', { paths: { ...PATHS, notes: '/w/notes/../../u/runner/state/notes', workerRunner: RUNNER } }).reason ?? '', /apart from the session's own folders/);
+});
+test('apart path card: the notes folder spelled through .. into the outbox is refused', () => {
+  assert.equal(render('lead').ok, true);
+  assert.match(render('lead', { paths: { ...PATHS, notes: '/w/notes/../outbox' } }).reason ?? '', /notes folder must be apart from the outbox/);
 });

@@ -16,7 +16,9 @@ import { inside } from '../hooks/lib.mjs';
 
 // Two folders apart, neither inside the other, without regard to case (#410 r1 m2, r2 m3): the Mac's disk ignores
 // case, so refusing more is safe. The one rule for every "apart" check here and in hooks-check.mjs.
-export const apart = (a, b) => { const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
+// Both sides must be spelled as they resolve (wallPath), or they are not apart: `/w/x/../outbox` names the outbox,
+// and a spelling compare would call it apart (the apart path card). So `..`, `.`, a doubled or trailing slash fail closed.
+export const apart = (a, b) => { if (wallPath(a) !== a || wallPath(b) !== b) return false; const [x, y] = [String(a).toLowerCase(), String(b).toLowerCase()]; return !inside(x, y) && !inside(y, x); };
 
 // The review user's own folders (L66 M3): what a verdict counts from. A reviewer runs the change's tests by design, so
 // code a worker wrote runs as `review`; the shell sandbox, for Bash and everything it starts, may write none of them,

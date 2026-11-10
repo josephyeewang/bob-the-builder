@@ -384,6 +384,19 @@ test('L101: check 7 refuses a compaction hook that keeps a Lead\'s note in its o
   assert.equal(k.check().ok, true);
 });
 
+// The apart path card: a notes folder spelled through `..` into the outbox is refused, though its letters look apart.
+test('apart path card: check 7 refuses a compaction hook whose notes folder is the outbox spelled through ..', () => {
+  const w = hookWorld('lead');
+  const swap = (fn) => {
+    const s = structuredClone(w.settings);
+    for (const ev of [E.preCompact, E.postCompact, E.sessionStart]) for (const e of s[S.hooks][ev] ?? []) for (const h of e[H.hooks]) h[H.command] = fn(h[H.command]);
+    return s;
+  };
+  const cut = w.outbox.lastIndexOf('/');
+  const dotted = `${w.outbox.slice(0, cut)}/notes/..${w.outbox.slice(cut)}`;
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${dotted}`)) }).reason, /not apart from the outbox/);
+});
+
 test('check 7: for each of the five hooks, a missing, unreadable, failing, odd-answering, always-passing or slow script refuses', () => {
   const broken = {
     'exit 1': 'process.exit(1);\n',
