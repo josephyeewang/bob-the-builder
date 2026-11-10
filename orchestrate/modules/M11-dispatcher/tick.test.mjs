@@ -1848,8 +1848,8 @@ test('L785 m1: runTick tells a moved, not-put-back live lock (moved_live) once a
 test('L800 M-A: runTick tells a broken dead lock carried on a refusal, once a day with the holder\'s tell', async () => {
   const w = world([account(), usage()]);
   const told = () => (w.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /the last Dispatcher pass \(taken T-dead\) was stopped before it finished/.test(e.text));
-  const lost = () => ({ ok: false, reason: 'another pass runs (pid 7)', broke: { pid: 999, taken_at: 'T-dead' } });
-  assert.equal((await runTick({ lockFile: '/unused', lock: lost, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
+  const lostPlace = () => ({ ok: false, reason: 'another pass runs (pid 7)', broke: { pid: 999, taken_at: 'T-dead' } });
+  assert.equal((await runTick({ lockFile: '/unused', lock: lostPlace, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
   assert.deepEqual(told().map((e) => e.text.endsWith('another pass holds the lock now')), [true], 'told on the refusal');
   const held = () => ({ ok: true, broke: { pid: 999, taken_at: 'T-dead' }, release() {} });
   await runTick({ lockFile: '/unused', lock: held, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
