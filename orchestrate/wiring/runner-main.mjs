@@ -11,7 +11,11 @@
 //     "outboxRoot": "/abs", "copiesRoot": "/abs", "home": "/abs", "path": "/abs:/abs", "claudeBin": "/abs",
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
-//                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] } } } }
+//                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
+//     "pin": "<claude version>"?, "machineWide": "/abs"? }
+// The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
+// leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
+// pinned Bob file list (check 13) have no config field yet, so check 12 refuses every start until they do.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
 // lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
@@ -26,6 +30,10 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, pauseLeadPort, saveWorkPort, sizePort, startPort } from './runner-ports.mjs';
+import { workerChecks } from './runner-checks.mjs';
+import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
+import { spawn as childSpawn } from 'node:child_process';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
@@ -45,18 +53,32 @@ export function checkRunnerConfig(c) {
     if (typeof p?.repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(p.repo)) fail(`product ${name}: repo must be owner/name`);
     if (typeof p.mirror !== 'string' || !isAbsolute(p.mirror)) fail(`product ${name}: mirror must be a full path`);
     if (!p.render?.paths || typeof p.render.paths !== 'object') fail(`product ${name}: render.paths must hold the session settings' fixed paths`);
+    if (p.rules !== undefined && (!p.rules || typeof p.rules !== 'object' || Array.isArray(p.rules))) fail(`product ${name}: rules must be the product's rules`);
   }
+  if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
+  if (c.machineWide !== undefined && (typeof c.machineWide !== 'string' || !isAbsolute(c.machineWide))) fail('machineWide must be a full path');
   const own = dirname(c.statusFile);
   if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
   return { ...c, ownDir: own, memoryFile: join(own, 'memory.json'), settingsDir: join(own, 'settings'),
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
 
+/** What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's. */
+export function workerCheckInputs(c, x, { log = () => {} } = {}) {
+  const p = c.products[x.product];
+  return { ...x, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
+    machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
+    testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
+}
+
+/** The start port's ports from the config: the stop flag, check 0's pinned version, and the worker launch checks. */
+export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin }, checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })) });
+
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {}) {
   return {
     ...processGroupPorts(),
-    start: startPort(c, { stopped }),
+    start: startPort(c, startDeps(c, { stopped, log })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     outboxDrained: drainedPort(),
@@ -83,7 +105,7 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   onStop(() => { stopping = true; });
   try {
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping }), note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping, log }), note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally { try { l.release(held.nonce); } catch { /* gone */ } }
 }

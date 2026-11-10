@@ -18,8 +18,8 @@
 //        made after this start is not in this session's list (a deny on all of <copiesRoot> would deny its own copy too,
 //        and a deny wins over an allow). What closes it is the copies folder's access list (L751, lane 3's draft), so
 //        each session's user reaches only its own copy; until then this list is defence in depth only;
-//     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (not built yet: lane 4's next step,
-//        reusing review-launch.mjs's ports); a check that applies and has no port is refused there;
+//     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
+//        by runner-main.mjs; none by default); a check that applies and has no port is refused there;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
 //        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
