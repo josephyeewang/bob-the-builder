@@ -11,9 +11,6 @@ export const NOT_WIRED_WORKER = Object.freeze(['sessions', 'probe', 'launch', 's
 // together), and which of those aren't wired yet. To wire one: answer it in `cleanup` below and take it off NOT_WIRED_CLEANUP.
 export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot']);
 export const NOT_WIRED_CLEANUP = Object.freeze([...CLEANUP_PORTS]);
-// The folders: cleanupPass reads a missing one as "nothing to do" (no copies, no staging to sweep), so each refuses on
-// read rather than being left out (audit #127 r2 m-C: a sealRoot left out would never sweep, in silence).
-const CLEANUP_FOLDERS = Object.freeze(['copiesRoot', 'sealRoot']);
 
 /** Why the cleanup group can't start, or null. The same rules as the tick's ports, inside the one port the tick reads as a group. */
 export function cleanupProblem(cleanup) {
@@ -31,9 +28,11 @@ export function cleanupProblem(cleanup) {
 /** @param {object} ctx see `wire()` in dispatcher-wiring.mjs */
 export function workerPorts(ctx) {
   void ctx;
-  // cleanupPass reads a missing folder as nothing to do (cleanup.mjs), which would pass in silence. So each folder itself
-  // refuses: the tick spreads this object into the step, and the read throws inside the step.
-  const cleanup = Object.fromEntries(NOT_WIRED_CLEANUP.filter((k) => !CLEANUP_FOLDERS.includes(k)).map((k) => [k, refusing(`cleanup.${k}`)]));
-  for (const k of NOT_WIRED_CLEANUP.filter((n) => CLEANUP_FOLDERS.includes(n))) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
+  // Every unwired cleanup port refuses when READ, not only when called: cleanupPass reads a folder it can't use (a
+  // function in its place included) as nothing to do (cleanup.mjs), which would pass in silence (audit #127 r2 m-C;
+  // #310 audit m-2: no hand-kept list of which ones are folders). The tick spreads this object into the step, so the
+  // read throws inside the step.
+  const cleanup = {};
+  for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return { cleanup };
 }

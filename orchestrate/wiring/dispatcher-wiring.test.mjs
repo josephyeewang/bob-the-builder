@@ -56,7 +56,7 @@ const NW = (port) => notWiredText(port);
 const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
 const EXPECTED_STEPS = Object.freeze({
   stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
-  pass: NW('sessions'), limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW('cleanup.copiesRoot'),
+  pass: NW('sessions'), limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
 });
 
 // One Mac's worth of files in a temp folder: the config, products.json, the approval list, the token file.
@@ -264,9 +264,10 @@ for (const [name, groups, why] of BAD_GROUPS) {
 test('the seam: the cleanup group follows the same rules, by its own list', () => {
   assert.deepEqual([...NOT_WIRED_CLEANUP].sort(), [...CLEANUP_NOT_WIRED].sort());
   assert.equal(cleanupProblem(workerPorts({}).cleanup), null, 'as it stands');
-  // A folder must refuse when read, not be a function that refuses when called: cleanupPass reads a folder it can't use
-  // as nothing to do (m-C), so a function standing in for sealRoot would skip the sweep in silence.
-  for (const k of ['copiesRoot', 'sealRoot']) assert.throws(() => workerPorts({}).cleanup[k], { message: notWiredText(`cleanup.${k}`) }, k);
+  // Every unwired cleanup port refuses when read, not only when called: cleanupPass reads a folder it can't use (a
+  // function in its place included) as nothing to do (m-C), so a stand-in would skip the sweep in silence. Every name in
+  // CLEANUP_PORTS, so a new folder parameter can't be missed (#310 audit m-2).
+  for (const k of CLEANUP_PORTS) assert.throws(() => workerPorts({}).cleanup[k], { message: notWiredText(`cleanup.${k}`) }, k);
   const cleanup = (changes) => {
     const c = Object.getOwnPropertyDescriptors(workerPorts({}).cleanup);
     return Object.defineProperties({}, { ...c, ...changes });
@@ -285,9 +286,11 @@ test('audit #127 r2 m-A: the tick reads its ports only as p.<name>, so the pin b
   // Any other way to read one (p?.x, p['x'], const { x = default } = p, a copy of p handed on) would let a port the
   // wiring never answers fall back to its default in silence. The one bare `p` is where the tick names its ports.
   const code = tickCode().replace(/\.\.\./g, '   ');
-  const bare = [...code.matchAll(/(?<![\w$.])p\b(?!\s*\.\s*[A-Za-z_$])/g)].map((m) => code.slice(Math.max(0, m.index - 30), m.index + 1).replace(/\s+/g, ' ').trim());
+  const bare = [...code.matchAll(/(?<![\w$.])p\b(?!\.[A-Za-z_$])/g)].map((m) => code.slice(Math.max(0, m.index - 30), m.index + 1).replace(/\s+/g, ' ').trim());
   assert.equal(bare.length, 1, `read each port as p.<name>; found a bare p at: ${bare.join(' | ')}`);
   assert.match(bare[0], /clock = \(\) => now, ports: p$/, 'the tick\'s own parameter list');
+  // The whole parameter list, exactly: a second `ports:` unpacking with defaults would read ports the pin never sees (#310 audit m-1).
+  assert.equal(code.match(/export async function tick\(\{[^{}]*\}\)/)?.[0], 'export async function tick({ rec, rules, now, clock = () => now, ports: p })');
 });
 
 test('audit #127 r2 m-C: the cleanup group lists exactly what cleanupPass reads, less what the tick gives every step', () => {
@@ -329,9 +332,9 @@ test('R-0b-162 A: every port not wired yet refuses when called, and the alert po
   const { ports, rec } = await wire(w.config, { log: (s) => logs.push(s), fetchFn: fakeGitHubFetch(w.fake) });
   assert.ok(rec && typeof rec.read === 'function');
   for (const k of PORTS_NOT_WIRED) assert.throws(() => ports[k](), { message: notWiredText(k) }, k);
-  for (const k of CLEANUP_NOT_WIRED.filter((x) => x !== 'copiesRoot')) assert.throws(() => ports.cleanup[k](), { message: notWiredText(`cleanup.${k}`) }, k);
-  // The tick spreads the cleanup ports into its step: the spread itself refuses.
-  assert.throws(() => ({ ...ports.cleanup }), { message: notWiredText('cleanup.copiesRoot') });
+  for (const k of CLEANUP_NOT_WIRED) assert.throws(() => ports.cleanup[k], { message: notWiredText(`cleanup.${k}`) }, `${k} refuses when read`);
+  // The tick spreads the cleanup ports into its step: the spread itself refuses, at the first one it reads.
+  assert.throws(() => ({ ...ports.cleanup }), { message: notWiredText(`cleanup.${NOT_WIRED_CLEANUP[0]}`) });
   assert.equal(await ports.alert('hello'), false);
   assert.deepEqual(logs, ['dispatcher: alert not sent (no channel to Joe is wired yet): hello']);
 });
