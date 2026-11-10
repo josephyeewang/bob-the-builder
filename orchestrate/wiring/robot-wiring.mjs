@@ -49,6 +49,7 @@ import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
+import { readDoc } from '../shared/record-read.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
@@ -217,9 +218,12 @@ export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, hold
 export function dropLateAlerts(rec) {
   const prefix = HOLD_FACT(LATE_CAUSE(''));
   // A hold fact is written only once its alert is delivered (pass.mjs holdAlert), so the causes are read from the queue
-  // itself: its waiting entries and its listed drops.
+  // itself: its waiting entries and its listed drops. A queue that can't be read answers false: it is not known that
+  // every drop was written (L797; the Record's read never throws, so a failure comes back as a corrupt row, not an error).
   const facts = new Set();
-  let d = null; try { d = rec.read('fact', ALERT_QUEUE_FACT)?.doc; } catch { return false; }
+  const q = readDoc(rec, 'fact', ALERT_QUEUE_FACT);
+  if (q.state === 'failed') return false;
+  const d = q.state === 'found' ? q.doc : null;
   for (const m of [...(d?.entries ?? []).map((e) => e?.mark?.fact), ...(d?.dropped_causes ?? []).map((c) => c?.fact)]) {
     if (typeof m === 'string' && m.startsWith(prefix)) facts.add(m);
   }
