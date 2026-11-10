@@ -37,8 +37,9 @@
 // A 'waiting' entry left by a runner that stopped mid-start (so no pending start is held for it) is left as it is: its
 // session may have started, so the request is never used up, stopSession never answers true for it, and the claim stays
 // until Joe is told (M9 lapseClaims); it is noted each pass.
-// Time (self-review M4): the status is written after each session's check and each request, and no port is waited on
-// longer than RUNNER_PORT_MS, so no two writes are further apart than one port's wait. The caller runs a pass at least
+// Time (self-review M4, step-4 review M4): the status is written after every port wait, each session's check and each
+// request, and no port is waited on longer than RUNNER_PORT_MS, so no two writes in a pass are further apart than one
+// port's wait (a port that blocks the process itself, a synchronous one, is bounded only by its own limit). The caller runs a pass at least
 // every RUNNER_STATUS_EVERY_MS (L769).
 
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
@@ -117,6 +118,8 @@ export async function workerRunnerPass(ctx) {
     answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])) });
   // The memory is kept first, then the status written: a status never runs ahead of what the runner will remember.
   const flush = () => { keep(structuredClone(state)); const doc = statusDoc(); write(doc); return doc; };
+  // Every port wait is followed by a write (step-4 review M4), so no two writes are further apart than one port's wait.
+  const wait = async (fn) => { const r = await within(portMs, fn); flush(); return r; };
 
   // 0. Starts that answered since the last pass; a 'waiting' entry with no start held for it is told.
   for (const [id, p] of [...pending]) if (p.done) { pending.delete(id); await settle(p); }
@@ -125,17 +128,17 @@ export async function workerRunnerPass(ctx) {
   // 1. The sessions as they are now. Ended is final (M1).
   async function check(s) {
     if (s.ended === true) { s.alive = false; return; }
-    const g = await within(portMs, () => ports.groupGone(s));
+    const g = await wait(() => ports.groupGone(s));
     if (g === true) { s.alive = false; s.ended = true; s.ended_at ??= now; } else if (g === false) { s.alive = true; } else delete s.alive;
     if (!isLive(s) && state.requests[s.id]?.state === 'started') state.requests[s.id] = { state: 'stopped', at: now };
   }
   for (const s of state.sessions) {
     await check(s);
     if (isLive(s) && ports.size) {
-      const z = await within(portMs, () => ports.size(s));
+      const z = await wait(() => ports.size(s));
       if (z && !z.late && !z.threw && z.size) { s.size = z.size; s.activity = z.activity; if (Number.isFinite(z.lastWriteAt)) s.last_write_at = z.lastWriteAt; } else { delete s.size; delete s.activity; }
     }
-    if (!isLive(s) && s.outbox_open) { const d = await within(portMs, () => ports.outboxDrained(s)); if (d === true) s.outbox_open = false; }
+    if (!isLive(s) && s.outbox_open) { const d = await wait(() => ports.outboxDrained(s)); if (d === true) s.outbox_open = false; }
     flush();
   }
   // A session leaves only once no kept answer names it (#328 r1 m1): an ok is never read with its session gone.
@@ -144,7 +147,8 @@ export async function workerRunnerPass(ctx) {
 
   // 2. The requests.
   for (const { name, body } of requests) {
-    // Removed before it is read, so it is never acted on twice; one that can't be removed is left for the owner (m6).
+    // Removed before it is acted on (its body was read by the caller), so it is never acted on twice; one that can't be
+    // removed is left for the owner and not acted on (m6).
     try { remove(name); } catch (e) { note(`request ${String(name).slice(0, 80)} could not be removed (${e?.message ?? e}); not read`); continue; }
     const k = requestKey(name);
     const asked = Date.parse(body?.asked_at ?? '');
@@ -176,7 +180,7 @@ export async function workerRunnerPass(ctx) {
   // Set the flag and write it down before acting (L762); the stop's own outcome then settles alive and the request.
   async function stopping(s) {
     s.stop_requested = true; flush();
-    const r = await within(portMs, () => ports.stopGroup(s));
+    const r = await wait(() => ports.stopGroup(s));
     await check(s);
     return r;
   }
@@ -208,14 +212,16 @@ export async function workerRunnerPass(ctx) {
     let wrong = null;
     try { checkSession(project(s), { uid, outboxRoot, realpath }); } catch (e) { wrong = e.message; }
     if (!wrong && !(Number.isInteger(a.pid) && a.pid > 1)) wrong = `session ${id}'s start named no process`;
+    // The runner tells a reused process group number from its own only by the leader's start time (step-4 review M3).
+    if (!wrong && !(a.pid === a.pgid && typeof a.pidStart === 'string' && a.pidStart)) wrong = `session ${id}'s start named no group leader with a start time`;
     if (!wrong) {
       state.sessions.push(s); state.requests[id] = { state: 'started', at: now };
       return answer(key, { ok: true, sessionId: id, pid: a.pid, pidStart: a.pidStart, pgid: a.pgid, head: a.head, outbox: a.outbox, signin: a.signin, configDir: a.configDir, copy: a.copy });
     }
     note(`the start of ${id} answered what the status can't carry (${wrong}); it is stopped`);
     if (!(Number.isInteger(a.pgid) && a.pgid > 1)) { note(`the start of ${id} named no process group, so it can't be stopped; it stays waiting, so its claim stays`); return; }
-    await within(portMs, () => ports.stopGroup({ ...s, stop_requested: true }));
-    const g = await within(portMs, () => ports.groupGone(s));
+    await wait(() => ports.stopGroup({ ...s, stop_requested: true }));
+    const g = await wait(() => ports.groupGone(s));
     if (g === true) return refuse(`the start answered what the runner can't list (${wrong}); it was stopped`);
     note(`the start of ${id} could not be shown stopped; it stays waiting, so its claim stays`);
   }
@@ -231,11 +237,11 @@ export async function workerRunnerPass(ctx) {
   async function save(k) {
     const s = find(k.id);
     if (!s) return answer(k.key, { ok: false, reason: 'the worker runner did not start that session, so it has no copy to save' });
-    const r = await within(portMs, () => ports.saveWork(s));
+    const r = await wait(() => ports.saveWork(s));
     answer(k.key, r?.ok === true ? { ok: true } : { ok: false, reason: failed(r, 'the save') });
   }
   async function pause(k, p) {
-    const r = await within(portMs, () => ports.pauseLead({ product: p.product }));
+    const r = await wait(() => ports.pauseLead({ product: p.product }));
     answer(k.key, r?.ok === true ? { ok: true } : { ok: false, reason: failed(r, 'the pause') });
   }
 

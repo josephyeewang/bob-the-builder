@@ -3,13 +3,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { writeStatus } from './runner-files.mjs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { pidStart } from '../modules/M9-record/lock.mjs';
 import { RUNNER_STATUS_EVERY_MS, readOwnerStatus } from './owner-status.mjs';
 import { RUNNER_PORT_MS } from './worker-runner.mjs';
-import { RUNNER_TERM_WAIT_MS, RUNNER_TICK_MS, listRequests, loadMemory, processGroupPorts, runRunner, runnerTick } from './runner-loop.mjs';
+import { RUNNER_KILL_WAIT_MS, RUNNER_TERM_WAIT_MS, RUNNER_TICK_MS, listRequests, loadMemory, processGroupPorts, runRunner, runnerTick } from './runner-loop.mjs';
 
 const UID = process.getuid();
 const T0 = Date.parse('2026-11-10T12:00:00Z');
@@ -34,8 +35,8 @@ function world() {
 const launch = (sid) => [`launch-${sid}.json`, { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: sid } }];
 
 test('step 4: the limits fit inside each other (a tick under the status cadence, a stop inside one port\'s wait)', () => {
-  assert.ok(RUNNER_TICK_MS < RUNNER_STATUS_EVERY_MS);
-  assert.ok(RUNNER_TERM_WAIT_MS + 1_000 < RUNNER_PORT_MS);
+  assert.ok(RUNNER_TICK_MS + RUNNER_PORT_MS < RUNNER_STATUS_EVERY_MS, 'a sleep and one port wait fit between two writes');
+  assert.ok(RUNNER_TERM_WAIT_MS + RUNNER_KILL_WAIT_MS + 1_000 < RUNNER_PORT_MS);
 });
 
 test('step 4: a tick reads the requests, removes them, keeps the memory 0o600 and writes a status the Dispatcher reads', async () => {
@@ -86,7 +87,7 @@ test('step 4: the memory is loaded once; a missing file is a first run, and a me
   v.ports.outboxDrained = async () => true;
   const state = await runRunner({ ...v.ctx(), stopWhen: () => n >= 2, sleep: async (ms) => { slept.push(ms); n += 1; },
     load: (f, o) => loadMemory(f, o) });
-  assert.match(v.notes.join('\n'), /no memory yet: a first run/);
+  assert.match(v.notes.join('\n'), /no memory file yet: a first run/);
   assert.deepEqual(slept, [RUNNER_TICK_MS, RUNNER_TICK_MS]);
   assert.deepEqual(state.sessions, []);
   const u = world(); let k = 0;
@@ -116,17 +117,18 @@ test('step 4: the process-group ports on a real group: live, stopped with SIGTER
   } finally { try { process.kill(-pgid, 'SIGKILL'); } catch { /* gone */ } }
   // A group that won't go on SIGTERM gets SIGKILL; a signal that fails otherwise is an answer, and a group the port
   // can't tell about throws (so the pass keeps no alive field).
+  const G = { pgid: 4242, pid: 4242, pid_start: 'x' };
   let alive = true; const sigs = [];
   const z = processGroupPorts({ kill: (g, sig) => { if (sig === 0) { if (!alive) throw Object.assign(new Error('x'), { code: 'ESRCH' }); return; } sigs.push(sig); if (sig === 'SIGKILL') alive = false; },
-    probe: { kill: () => {}, pidStart: () => null }, sleep: async () => {}, waitMs: 1000 });
-  assert.deepEqual(await z.stopGroup({ pgid: 4242 }), { ok: true, how: 'SIGKILL' });
+    probe: { kill: () => {}, pidStart: () => 'x' }, sleep: async () => {}, waitMs: 1000 });
+  assert.deepEqual(await z.stopGroup(G), { ok: true, how: 'SIGKILL' });
   assert.deepEqual(sigs, ['SIGTERM', 'SIGKILL']);
-  const e = processGroupPorts({ kill: (g, sig) => { if (sig === 0) return; throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => null } });
-  assert.deepEqual(await e.stopGroup({ pgid: 4242 }), { ok: false, reason: 'EPERM' });
-  const g = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => null } });
-  assert.equal(g.groupGone({ pgid: 4242 }), false, 'EPERM: the group is there');
-  const f = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EINVAL' }); }, probe: { kill: () => {}, pidStart: () => null } });
-  assert.throws(() => f.groupGone({ pgid: 4242 }), /x/);
+  const e = processGroupPorts({ kill: (g, sig) => { if (sig === 0) return; throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  assert.deepEqual(await e.stopGroup(G), { ok: false, reason: 'EPERM' });
+  const g = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  assert.equal(g.groupGone(G), false, 'EPERM: the group is there');
+  const f = processGroupPorts({ kill: () => { throw Object.assign(new Error('x'), { code: 'EINVAL' }); }, probe: { kill: () => {}, pidStart: () => 'x' } });
+  assert.throws(() => f.groupGone(G), /x/);
   assert.throws(() => f.groupGone({ pgid: 1 }), /no process group/);
 });
 
@@ -136,4 +138,62 @@ test('step 4: a start still on at the end of a tick is settled by a later tick o
   w.ask(...launch('S-1'));
   const state = await runRunner({ ...w.ctx({ portMs: 20 }), stopWhen: () => n >= 2, sleep: async () => { if (n === 0) { assert.equal(w.read().requests['S-1'].state, 'waiting'); go(); await new Promise((r) => setImmediate(r)); } n += 1; } });
   assert.deepEqual([state.requests['S-1'].state, w.read().answers['launch-S-1'].ok], ['started', true]);
+});
+
+test('step-4 review M2, M3, m2: a group whose leader start can\'t be read, or that has no leader start, is "can\'t tell" and never signalled; after SIGKILL the stop waits for the group to go', async () => {
+  const G = { pgid: 4242, pid: 4242, pid_start: 'x' }; const sent = [];
+  const kill = (g, sig) => { sent.push(sig); };
+  const noPs = processGroupPorts({ kill, probe: { kill: () => {}, pidStart: () => null } });
+  assert.throws(() => noPs.groupGone(G), /start time can't be read/);
+  await assert.rejects(noPs.stopGroup(G), /start time can't be read/);
+  assert.deepEqual(sent.filter((x) => x !== 0), [], 'no stop signal sent');
+  const noStart = processGroupPorts({ kill, probe: { kill: () => {}, pidStart: () => 'x' } });
+  sent.length = 0;
+  for (const s of [{ pgid: 4242, pid: 4242 }, { pgid: 4242, pid: 4243, pid_start: 'x' }]) assert.throws(() => noStart.groupGone(s), /no group leader start time/);
+  assert.deepEqual(sent, [], 'nothing sent, not even signal 0');
+  // The leader gone (ESRCH) with the rest of its group still there: live.
+  const members = processGroupPorts({ kill: () => {}, probe: { kill: () => { throw Object.assign(new Error('x'), { code: 'ESRCH' }); }, pidStart: () => null } });
+  assert.equal(members.groupGone(G), false);
+  // After SIGKILL the group takes a moment to go: the stop waits (up to RUNNER_KILL_WAIT_MS), so its answer is not a false failure.
+  let zero = 0; let killed = false; const slept = [];
+  const slow = processGroupPorts({ kill: (g, sig) => { if (sig === 'SIGKILL') killed = true; if (sig === 0 && killed && (zero += 1) > 3) throw Object.assign(new Error('x'), { code: 'ESRCH' }); },
+    probe: { kill: () => {}, pidStart: () => 'x' }, sleep: async (ms) => { slept.push(ms); }, waitMs: 500 });
+  assert.deepEqual(await slow.stopGroup(G), { ok: true, how: 'SIGKILL' });
+  assert.equal(slow.groupGone(G), true);
+  const waits = slept.filter((x) => x === 100).length;
+  assert.ok(waits >= 3 && waits <= RUNNER_KILL_WAIT_MS / 100, String(waits));
+});
+
+test('step-4 review M1, M5: a tick that fails after keeping memory leaves the loop on that memory; a listing that fails still writes the status', async () => {
+  const w = world(); let n = 0; let failStatus = true;
+  w.ask(...launch('S-1'));
+  // The status write fails once the session is started: its memory was kept just before.
+  const files = { write: (f, text, mode) => { if (f === w.statusFile && failStatus && JSON.parse(text).requests['S-1']?.state === 'started') throw new Error('ENOSPC'); writeStatus(f, text, { mode }); } };
+  const state = await runRunner({ ...w.ctx({ files }), stopWhen: () => n >= 2, sleep: async () => {
+    if (n === 0) { failStatus = false; w.ask('stop-S-1.json', { stop: 'S-1' }); } n += 1; } });
+  assert.match(w.notes.join('\n'), /tick failed \(ENOSPC\)/);
+  // The launch kept before the failure is remembered: the stop stops the session, never cancels a launch it can't see.
+  assert.notEqual(state.requests['S-1'].state, 'cancelled');
+  assert.deepEqual(state.sessions.map((x) => [x.id, x.stop_requested]), [['S-1', true]]);
+  assert.ok(w.gone.has(7001), 'the group was stopped');
+  // M5: the requests folder gone: noted, and the status still written.
+  const v = world(); rmSync(v.requestsDir, { recursive: true });
+  await runnerTick({ ...v.ctx(), state: {}, pending: new Map() });
+  assert.match(v.notes.join('\n'), /requests can't be listed \(ENOENT\)/);
+  assert.deepEqual(v.read().sessions, []);
+});
+
+test('step-4 review m3, m4: a memory that is a link, has two names or the wrong shape is refused', () => {
+  const w = world();
+  writeFileSync(join(w.d, 'real.json'), '{}'); chmodSync(join(w.d, 'real.json'), 0o600);
+  symlinkSync(join(w.d, 'real.json'), w.memoryFile);
+  assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /is a link/);
+  rmSync(w.memoryFile); linkSync(join(w.d, 'real.json'), w.memoryFile);
+  assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /more than one name/);
+  rmSync(w.memoryFile);
+  for (const bad of ['{"sessions":{}}', '{"requests":[]}', '{"answers":null}', '{"seen":[1]}', '[]']) {
+    writeFileSync(w.memoryFile, bad); chmodSync(w.memoryFile, 0o600);
+    assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /not what the runner writes/, bad);
+    rmSync(w.memoryFile);
+  }
 });

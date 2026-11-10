@@ -5,10 +5,14 @@
 //   2. one workerRunnerPass runs with them;
 //   3. its memory is kept (keep) in `memoryFile`, written 0o600 by writeStatus (a new file renamed over the old), and the
 //      status written to `statusFile` the same way, 0o644, so the Dispatcher can read it.
-// The ticks are RUNNER_TICK_MS apart, under RUNNER_STATUS_EVERY_MS (L769), so the status is rewritten at that cadence
-// even when no request comes.
+// Time (L769, step-4 review M4): within a pass no two writes are further apart than one port's wait (RUNNER_PORT_MS,
+// worker-runner.mjs), and the loop sleeps RUNNER_TICK_MS after a tick's last write, so RUNNER_TICK_MS + RUNNER_PORT_MS,
+// under RUNNER_STATUS_EVERY_MS, bounds the gap between any two writes. A listing that fails is noted and the pass runs
+// with no requests (review M5), so the status is still rewritten and the sessions still checked.
 //
-// Memory (self-review M3): the memory file is read once, at start. A missing file is a first run (noted); one that
+// Memory (self-review M3): the memory file is read at start, and again after any tick that fails (review M1: that tick
+// may have kept newer memory and removed requests before it threw; the old in-process state would undo both). A missing
+// file is a first run (noted); one that
 // can't be read, or is not the runner's own plain file with one name, stops the runner before any pass, because a runner
 // that came back with no memory would read a stop for a session whose start was on as a launch it never saw, and cancel
 // it, freeing a claim while the session may run. Starts still on (`pending`) are held in this process only: a runner
@@ -16,25 +20,29 @@
 //
 // The process-group ports (groupGone, stopGroup) use M9's processDead and M11's stopProcessGroup (one home each):
 //   - a group is gone when signal 0 to it says ESRCH, or when its leader's pid is alive under another start time (the
-//     number was reused, so the group the runner started is gone: self-review M1's class);
-//   - a stop is never sent to a group already gone by that rule, so a reused number is never signalled;
-//   - the stop waits RUNNER_TERM_WAIT_MS for SIGTERM, then sends SIGKILL, inside RUNNER_PORT_MS.
+//     number was reused, so the group the runner started is gone: self-review M1's class). A leader that is there but
+//     whose start time can't be read, or a session with no leader start time, is "can't tell" (a throw), never live:
+//     the pass then keeps no alive field and sends no stop (review M2, M3);
+//   - a stop is sent only to a group shown to be the runner's by that rule, so a reused number is never signalled;
+//   - the stop waits RUNNER_TERM_WAIT_MS for SIGTERM (signal 0 alone between, so the wait is not spent on ps), then
+//     sends SIGKILL and waits up to RUNNER_KILL_WAIT_MS for the group to go (review m2), all inside RUNNER_PORT_MS.
 // The start, save, pause, drain and size ports come in a later step; a loop without them is refused.
 
-import { lstatSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { processDead, realProbe } from '../modules/M9-record/lock.mjs';
+import { realProbe } from '../modules/M9-record/lock.mjs';
 import { stopProcessGroup } from '../modules/M11-dispatcher/pass.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
 import { readRequest, writeStatus } from './runner-files.mjs';
 import { RUNNER_PORT_MS, workerRunnerPass } from './worker-runner.mjs';
 
 /** How far apart the ticks are: under the status rewrite cadence (L769). */
-export const RUNNER_TICK_MS = 5_000;
-/** How long a stop waits for SIGTERM before SIGKILL: inside one port's limit, with room for the SIGKILL. */
+export const RUNNER_TICK_MS = 4_000;
+/** How long a stop waits for SIGTERM before SIGKILL, and then for the group to go: inside one port's limit. */
 export const RUNNER_TERM_WAIT_MS = 6_000;
-if (RUNNER_TICK_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_TICK_MS must be under RUNNER_STATUS_EVERY_MS');
-if (RUNNER_TERM_WAIT_MS + 1_000 >= RUNNER_PORT_MS) throw new Error('RUNNER_TERM_WAIT_MS must leave room inside RUNNER_PORT_MS');
+export const RUNNER_KILL_WAIT_MS = 1_000;
+if (RUNNER_TICK_MS + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_TICK_MS + RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
+if (RUNNER_TERM_WAIT_MS + RUNNER_KILL_WAIT_MS + 1_000 >= RUNNER_PORT_MS) throw new Error('the stop\'s waits must leave room inside RUNNER_PORT_MS');
 
 const sleepFor = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const groupKill = (pgid, sig) => process.kill(-pgid, sig);
@@ -43,24 +51,33 @@ const groupKill = (pgid, sig) => process.kill(-pgid, sig);
  * The process-group ports. `kill(pgid, signal)` signals a group; `probe` is M9's ({ kill(pid), pidStart(pid) }).
  * → { groupGone(session) → true | false (throws when it can't tell), stopGroup(session) → { ok, how | reason } }
  */
-export function processGroupPorts({ kill = groupKill, probe = realProbe, sleep = sleepFor, waitMs = RUNNER_TERM_WAIT_MS } = {}) {
-  const groupGone = (s) => {
-    if (!Number.isInteger(s?.pgid) || s.pgid <= 1) throw new Error('no process group');
-    // The leader's number used again by another process: the runner's group is gone, whatever signal 0 says.
-    // (A leader that has exited says nothing: the rest of its group may still run, and signal 0 below tells.)
-    if (s.pid === s.pgid && typeof s.pid_start === 'string' && s.pid_start) {
-      let there = true; try { probe.kill(s.pid); } catch (e) { if (e?.code === 'ESRCH') there = false; }
-      if (there && processDead({ pid: s.pid, pid_start: s.pid_start }, probe)) return true;
-    }
-    try { kill(s.pgid, 0); return false; } catch (e) {
+export function processGroupPorts({ kill = groupKill, probe = realProbe, sleep = sleepFor, waitMs = RUNNER_TERM_WAIT_MS, killWaitMs = RUNNER_KILL_WAIT_MS } = {}) {
+  // Signal 0 to the group: true when it is gone, false when it is there, a throw when that can't be told.
+  const signalGone = (pgid) => {
+    try { kill(pgid, 0); return false; } catch (e) {
       if (e?.code === 'ESRCH') return true;
       if (e?.code === 'EPERM') return false; // there, but not ours to signal
       throw e;
     }
   };
+  const groupGone = (s) => {
+    if (!Number.isInteger(s?.pgid) || s.pgid <= 1) throw new Error('no process group');
+    if (s.pid !== s.pgid || typeof s.pid_start !== 'string' || !s.pid_start) throw new Error('no group leader start time, so a reused number can\'t be told from the runner\'s group');
+    // The leader's number used again by another process: the runner's group is gone, whatever signal 0 says.
+    // (A leader that has exited says nothing: the rest of its group may still run, and signal 0 below tells.)
+    let there = true; try { probe.kill(s.pid); } catch (e) { if (e?.code === 'ESRCH') there = false; else if (e?.code !== 'EPERM') throw e; }
+    if (there) {
+      const now = probe.pidStart(s.pid);
+      if (typeof now !== 'string' || !now) { if (signalGone(s.pgid)) return true; throw new Error('the group leader\'s start time can\'t be read'); }
+      if (now !== s.pid_start) return true;
+    }
+    return signalGone(s.pgid);
+  };
   const stopGroup = async (s) => {
     if (groupGone(s)) return { ok: true, how: 'already gone' };
-    return stopProcessGroup({ pgid: s.pgid, kill, alive: (p) => !groupGone({ ...s, pgid: p }), sleep, waitMs });
+    const r = await stopProcessGroup({ pgid: s.pgid, kill, alive: (p) => !signalGone(p), sleep, waitMs });
+    if (r?.how === 'SIGKILL') for (let t = 0; t < killWaitMs && !signalGone(s.pgid); t += 100) await sleep(100);
+    return r;
   };
   return { groupGone, stopGroup };
 }
@@ -68,15 +85,27 @@ export function processGroupPorts({ kill = groupKill, probe = realProbe, sleep =
 /**
  * The runner's memory, read once at start. → {} on a first run (no file), the memory, or a throw (never a guess).
  */
-export function loadMemory(file, { uid, stat = lstatSync, read = readFileSync } = {}) {
-  let st;
-  try { st = stat(file); } catch (e) { if (e?.code === 'ENOENT') return {}; throw new Error(`the worker runner's memory can't be checked (${e?.code ?? e?.message})`); }
-  if (!st.isFile() || st.isSymbolicLink?.()) throw new Error('the worker runner\'s memory is not a plain file');
-  if (st.nlink !== 1) throw new Error('the worker runner\'s memory has more than one name');
-  if (st.uid !== uid) throw new Error('the worker runner\'s memory is not the owner\'s');
-  if (st.mode & 0o077) throw new Error('the worker runner\'s memory can be read or written by others');
-  let m; try { m = JSON.parse(read(file, 'utf8')); } catch { throw new Error('the worker runner\'s memory can\'t be read'); }
-  if (!m || typeof m !== 'object' || Array.isArray(m)) throw new Error('the worker runner\'s memory is not what the runner writes');
+export function loadMemory(file, { uid, note = () => {}, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
+  // Opened once, never through a link, and that open file checked and read (review m3: never check one file, read another).
+  let fd;
+  try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    if (e?.code === 'ENOENT') { note('the worker runner has no memory file yet: a first run'); return {}; }
+    throw new Error(e?.code === 'ELOOP' ? 'the worker runner\'s memory is a link' : `the worker runner's memory can't be opened (${e?.code ?? e?.message})`);
+  }
+  let m;
+  try {
+    const st = fstat(fd);
+    if (!st.isFile()) throw new Error('the worker runner\'s memory is not a plain file');
+    if (st.nlink !== 1) throw new Error('the worker runner\'s memory has more than one name');
+    if (st.uid !== uid) throw new Error('the worker runner\'s memory is not the owner\'s');
+    if (st.mode & 0o077) throw new Error('the worker runner\'s memory can be read or written by others');
+    try { m = JSON.parse(read(fd, 'utf8')); } catch { throw new Error('the worker runner\'s memory can\'t be read'); }
+  } finally { close(fd); }
+  const plain = (x) => x === undefined || (!!x && typeof x === 'object' && !Array.isArray(x));
+  // The shape a pass needs (review m4): one that would make every pass throw is refused here, before any tick.
+  if (!m || typeof m !== 'object' || Array.isArray(m) || !(m.sessions === undefined || Array.isArray(m.sessions)) || !plain(m.requests) || !plain(m.answers) || !plain(m.seen)) {
+    throw new Error('the worker runner\'s memory is not what the runner writes');
+  }
   return m;
 }
 
@@ -98,7 +127,9 @@ export async function runnerTick(ctx) {
   for (const p of PORTS) if (typeof ports?.[p] !== 'function') throw new Error(`the worker runner has no ${p} port`);
   const read = files.read ?? ((f) => readRequest(f, { orchestrateUid }));
   const write = files.write ?? ((f, text, mode) => writeStatus(f, text, { mode }));
-  const requests = listRequests(requestsDir, files).map((name) => ({ name, body: read(join(requestsDir, name)) }));
+  let names = [];
+  try { names = listRequests(requestsDir, files); } catch (e) { note(`the worker runner's requests can't be listed (${e?.code ?? e?.message}); this pass reads none`); }
+  const requests = names.map((name) => ({ name, body: read(join(requestsDir, name)) }));
   const r = await workerRunnerPass({ ...ctx, requests, now: clock(), note,
     keep: (m) => write(memoryFile, JSON.stringify(m), 0o600),
     write: (doc) => write(statusFile, JSON.stringify(doc), 0o644),
@@ -112,11 +143,14 @@ export async function runnerTick(ctx) {
  */
 export async function runRunner(ctx) {
   const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory } = ctx;
-  let state = load(memoryFile, { uid });
-  if (!Object.keys(state).length) note('the worker runner has no memory yet: a first run');
+  let state = load(memoryFile, { uid, note });
   const pending = new Map();
   while (!stopWhen()) {
-    try { state = await runnerTick({ ...ctx, state, pending }); } catch (e) { note(`a worker runner tick failed (${e?.message ?? e}); the next one runs in ${everyMs} ms`); }
+    try { state = await runnerTick({ ...ctx, state, pending }); } catch (e) {
+      note(`a worker runner tick failed (${e?.message ?? e}); the next one runs in ${everyMs} ms`);
+      // What that tick kept is the memory now (review M1); one that can't be read back stops the runner (a throw).
+      state = load(memoryFile, { uid, note });
+    }
     if (stopWhen()) break;
     await sleep(everyMs);
   }

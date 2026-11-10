@@ -210,7 +210,8 @@ test('self-review M1: an ended session is final; a process group number used aga
 
 test('self-review M2: a start answer the reader would refuse is never listed; it is stopped, then refused once its group is gone', async () => {
   const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/script/S-1` },
-    'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 } };
+    'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 },
+    'no start time (step-4 review M3)': { pidStart: '' }, 'a leader not its group\'s (step-4 review M3)': { pgid: 4002 } };
   for (const [what, more] of Object.entries(bad)) {
     const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more }) });
     await w.pass([launchReq('S-1')]);
@@ -255,11 +256,14 @@ test('self-review M4: the status is written after each session and each request,
   assert.ok(RUNNER_PORT_MS < RUNNER_STATUS_EVERY_MS);
   const w = world();
   await w.pass([launchReq('S-1'), launchReq('S-2')]);
-  w.ports.groupGone = () => new Promise(() => {}); // a port that hangs
-  const n = w.writes.length; const t = Date.now();
-  await w.pass([launchReq('S-3')]);
-  // 2 session checks, the launch's 'waiting' write, its answer, and the last: 5 writes, each read whole.
-  assert.equal(w.writes.length - n, 5);
+  // Ports that hang: every port wait is followed by a write before the next port is asked (step-4 review M4).
+  const at = []; const hang = (name) => () => { at.push([name, w.writes.length]); return new Promise(() => {}); };
+  w.ports.groupGone = hang('groupGone'); w.ports.size = hang('size'); w.ports.outboxDrained = hang('outboxDrained'); w.ports.saveWork = hang('saveWork');
+  const t = Date.now();
+  await w.pass([launchReq('S-3'), { name: `saveWork-S-1-${N1}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } }]);
+  assert.deepEqual(at.map((x) => x[0]), ['groupGone', 'size', 'groupGone', 'size', 'saveWork']);
+  for (let i = 1; i < at.length; i += 1) assert.ok(at[i][1] > at[i - 1][1], `a write between ${at[i - 1][0]} and ${at[i][0]}`);
+  assert.ok(w.writes.length > at.at(-1)[1], 'and after the last');
   assert.ok(Date.now() - t < 1000, 'each hung port is given up after portMs');
 });
 
