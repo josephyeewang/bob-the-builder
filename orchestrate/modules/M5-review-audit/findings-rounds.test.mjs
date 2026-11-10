@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { runnerPass } from '../M4-workshop/launcher/review-runner.mjs';
@@ -808,4 +808,11 @@ test('L738 re-merge planted: finalize leaves a file as written when it holds a f
   const two = await go();
   assert.match(two.reason ?? '', /more than one verdict file/);
   assert.equal(sha256(f), was);
+  // L783 (#64 audit m1): a verdict followed by a second line is left as written, not cut to its header.
+  rmSync(second);
+  appendFileSync(f, 'a second line\n');
+  was = sha256(f);
+  const long = await go();
+  assert.match(long.reason ?? '', /more than its one line/);
+  assert.equal(sha256(f), was, 'left as written');
 });
