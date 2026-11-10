@@ -75,6 +75,12 @@ test('L835: an outbox is drained once every file in it has the Record\'s done in
     symlinkSync(join(o, 'bundle-C-1.json'), join(o, 'report-C-1.md')); fact('bundle-C-1.json');
     facts.set(`intake-applied-${SID}-report-C-1.md`, { ...facts.get(`intake-applied-${SID}-bundle-C-1.json`), name: 'report-C-1.md' });
     assert.equal(drained(s), false, 'a link is not a plain file');
+    rmSync(join(o, 'report-C-1.md')); facts.delete(`intake-applied-${SID}-report-C-1.md`);
+    assert.equal(drained(s), true);
+    // A named pipe opens without following a link, and reads as no bytes: not a plain file, never matched to a fact.
+    spawnSync('mkfifo', [join(o, 'pipe')]);
+    facts.set(`intake-applied-${SID}-pipe`, { ...facts.get(`intake-applied-${SID}-bundle-C-1.json`), name: 'pipe', sha256: createHash('sha256').update('').digest('hex') });
+    assert.equal(drained(s), false, 'a pipe is not a plain file');
     rmSync(o, { recursive: true });
     assert.equal(drained(s), true, 'gone: nothing left to take');
     assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), false);
