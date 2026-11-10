@@ -33,6 +33,7 @@ import { join } from 'node:path';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
+import { START_ISO } from '../modules/M9-record/lock.mjs';
 import { RUNNER_KINDS, RUNNER_ROLE_OF, live, readOwnerStatus } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
@@ -58,7 +59,7 @@ export function launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copies
   if (a?.sessionId !== undefined && a.sessionId !== sessionId) return 'the answer names another session';
   if (!realPid(a?.pid)) return 'the start named no process';
   if (!realPid(a.pgid)) return 'the start named no process group';
-  if (!name(a.pidStart)) return 'the start named no start time for its process';
+  if (typeof a.pidStart !== 'string' || !START_ISO.test(a.pidStart)) return 'the start named no UTC start time for its process (M9 startTime)';
   if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
   if (!Object.hasOwn(RUNNER_ROLE_OF, kind) || a.outbox !== join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId)) return 'the start named another outbox than the session\'s own';
   if (typeof copiesRoot !== 'string' || a.copy !== join(copiesRoot, card)) return 'the start named another copy than the card\'s';

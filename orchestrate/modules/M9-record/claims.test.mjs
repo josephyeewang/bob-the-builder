@@ -16,11 +16,11 @@ const err = (code) => Object.assign(new Error(code), { code });
 function fakeProbe({ dead = [], eperm = [], starts = {} } = {}) {
   return {
     kill(pid) { if (dead.includes(pid)) throw err('ESRCH'); if (eperm.includes(pid)) throw err('EPERM'); },
-    pidStart: (pid) => starts[pid] ?? 'Thu Oct  1 11:00:00 2026',
+    pidStart: (pid) => starts[pid] ?? '2026-10-01T11:00:00Z',
   };
 }
 // A session record for claim `sid`, written `ago` minutes before the clock.
-function session(env, sid, { state = 'ended', pid = 4242, pid_start = 'Thu Oct  1 11:00:00 2026', ago = 0 } = {}) {
+function session(env, sid, { state = 'ended', pid = 4242, pid_start = '2026-10-01T11:00:00Z', ago = 0 } = {}) {
   const t = env.clock.t;
   env.clock.t = t - ago * MIN;
   seed(env, 'session', sid, { state, role: 'worker', pid, pid_start, card: null, last_activity: iso(env.clock.t) });
@@ -297,7 +297,7 @@ test('G1 (a): EPERM counts as alive, with a fake and with a real process of anot
 });
 
 test('G1 (a): a reused pid (other start time) is a dead process, but the claim stays while (b) or (c) say alive', () => {
-  const probe = fakeProbe({ starts: { 4242: 'Fri Oct  2 09:00:00 2026', 7000: 'Thu Oct  1 11:00:00 2026' } });
+  const probe = fakeProbe({ starts: { 4242: '2026-10-02T09:00:00Z', 7000: '2026-10-01T11:00:00Z' } });
   const env = setup({ prefix: 'm9-g1-', probe });
   board(env);
   runCard(env, 'C-1');
