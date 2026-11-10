@@ -154,7 +154,10 @@ export function planDispatcherConfig(io, cfg) {
   // start that reads it then sees the old text or the new (self-review m2).
   const write = (f) => ({ text: `write ${f}   (root:wheel 0644)`, run: () => {
     const tmp = join(dirname(f), `.${DISPATCHER_CONFIG}.new`);
-    io.rm(tmp); io.write(tmp, text, 0o600); io.secureFile(tmp, { uid: io.rootUid, gid: 0, mode: 0o644 }); io.rename(tmp, f);
+    // A leftover side name is only a name: plain unlink, never a folder's contents. A failed write or rename removes it.
+    io.unlink(tmp);
+    const drop = () => { try { io.unlink(tmp); } catch { /* the first error is the one to report */ } };
+    try { io.write(tmp, text, 0o600); io.secureFile(tmp, { uid: io.rootUid, gid: 0, mode: 0o644 }); io.rename(tmp, f); } catch (e) { drop(); throw e; }
   } });
   const src = dispatcherSourcePath(cfg);
   if (fileProblem(io, src, text)) ops.push(write(src));
@@ -163,7 +166,13 @@ export function planDispatcherConfig(io, cfg) {
   if (copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true })) {
     // Root writes in the copy only when the copy is root's alone, every folder above it too (self-review m3).
     const bad = installProblem(io.at(P.installRoot), [], { owner: io.rootUid, top: io.prefix || '/' });
-    if (bad) return { ops: [], problems: [`the installed copy is not root's alone (${bad}), so root won't write in it; install again`] };
+    // The base file is still written, so the install that replaces the copy carries the new text and is not refused for it
+    // (L757 r2 m1); then the command stops, naming the way out (README Part 3: a copy that is not root's is installed again).
+    if (bad) {
+      const why = `the installed copy is not root's alone (${bad}), so root won't write in it; install the copy again (unload the jobs, remove ${P.install}, run install), which carries ${src} into it`;
+      ops.push({ text: `stop: ${why}`, run: () => { throw new Error(why); } });
+      return { ops, problems: [] };
+    }
     ops.push(write(inCopy));
   }
   return { ops, problems: [] };
@@ -200,7 +209,7 @@ export function dispatcherConfigProblem(io, cfg) {
  */
 export function robotMatchProblem(io, cfg, config = dispatcherConfigFor(io, cfg).config) {
   if (!cfg.robot || !cfg.dispatcher) return null;
-  if (!config) return `the Dispatcher's config can't be built from this setup, so the robot can't be held to the same Record and lock`;
+  if (!config) return `the Dispatcher's config can't be built from this setup (${dispatcherConfigFor(io, cfg).problems.join('; ')}), so the robot can't be held to the same Record and lock`;
   let r; try { r = JSON.parse(io.readText(join(installPaths(cfg).installRoot, 'robot.json'))); } catch { return 'the robot job is on, but the copy\'s robot.json can\'t be read, so it can\'t be held to the same Record and lock'; }
   const differ = ['product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile'].filter((k) => r?.[k] !== config[k]);
   if (r?.dispatcherLockFile !== config.lockFile) differ.push(`dispatcherLockFile (must be ${config.lockFile}, the Dispatcher's lock)`);

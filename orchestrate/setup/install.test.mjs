@@ -18,7 +18,7 @@ import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts } from './daemons.mjs';
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
-import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
 import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
@@ -1302,6 +1302,9 @@ test('Dispatcher with the robot job: robot.json must name the same Record and th
   assert.equal(w2.mac.loaded.size, 0, 'nothing was loaded');
   const ck = w2.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /they differ in recordRoot, dispatcherLockFile/);
   assert.equal(w.run(['daemons', 'load', '--only', 'robot']).code, 0, 'the same Record and lock: the robot alone loads');
+  // A Dispatcher config that can't be built says why, so a robot-only load or check is not left without a reason (r2 m4).
+  w.mac.users.delete('orchestrate');
+  assert.match(robotMatchProblem(w.mac, w.cfg), /can't be built from this setup \(the orchestrate user does not exist \(run users-folders first\)\)/);
 });
 
 test('Dispatcher config: each file is written whole and renamed over its name; root writes in the copy only when it is root\'s alone', async () => {
@@ -1323,6 +1326,20 @@ test('Dispatcher config: each file is written whole and renamed over its name; r
   const before = readFileSync(copyConfig(w), 'utf8');
   const r2 = w.run(['dispatcher-config']); assert.equal(r2.code, 1, r2.text); assert.match(r2.text, /the installed copy is not root's alone .*so root won't write in it/);
   assert.equal(readFileSync(copyConfig(w), 'utf8'), before, 'planted: a writer without the copy check writes here');
+  // The base file took the new text, so install is not refused for it and replaces the copy: no stuck state (r2 m1).
+  assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), dispatcherConfigText(dispatcherConfigFor(w.mac, w.cfg).config), 'the base file is written first');
+  assert.match(r2.text, /unload the jobs, remove .*\/install, run install/);
+  rmSync(w.mac.at(`${BASE}/install`), { recursive: true, force: true });
+  const inst = w.run(['install']); assert.equal(inst.code, 0, inst.text);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), readFileSync(w.mac.at(D_SRC), 'utf8'), 'the new copy carries the new text');
+  assert.equal(w.run(['dispatcher-config']).code, 0, 'and dispatcher-config then has nothing to do');
+  // A rename that fails leaves no side file behind, and the old file as it was (r2 m2).
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 400000 }; w.cfg = parseInstallConfig(w.raw);
+  const old = readFileSync(w.mac.at(D_SRC), 'utf8'); const real = w.mac.rename;
+  w.mac.rename = () => { const e = new Error('EIO: rename failed'); e.code = 'EIO'; throw e; };
+  const r3 = w.run(['dispatcher-config']); w.mac.rename = real; assert.equal(r3.code, 1, r3.text);
+  assert.equal(existsSync(w.mac.at(join(dirname(D_SRC), '.dispatcher.json.new'))), false, 'planted: a writer without the clean-up leaves the side file');
+  assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), old, 'the old file is unchanged');
 });
 
 test('Dispatcher job: daemons check reads a run as stuck only past the Dispatcher\'s deadline and the watchdog\'s margin', async () => {
