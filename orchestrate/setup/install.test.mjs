@@ -22,6 +22,9 @@ import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
+import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
+import { runnerUidsProblem } from './install.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -103,6 +106,10 @@ async function world({ euid = 0, rules = null } = {}) {
   const run = (args, extra = {}) => { const s = sink(); const code = main(argvFor(args), { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
+  // L726: the role-to-user map the runner needs: every design role, and every role the runner starts names review's id.
+  const reviewUid = Number(mac.users.get('review').UniqueID);
+  const uids = Object.fromEntries([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES].map((r) => [r, RUNNER_ROLES.includes(r) ? reviewUid : 65001]));
+  const rcFile = join(ext, 'review.json'); writeFileSync(rcFile, JSON.stringify({ ...JSON.parse(readFileSync(rcFile, 'utf8')), uids }));
   mac.as = euid;
   return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root, rulesSrc };
 }
@@ -239,6 +246,32 @@ test('install: refuses a runner config for another place, or one that names thin
   r = w.run(['install']);
   assert.equal(r.code, 1); assert.match(r.text, /is not valid JSON/);
   assert.equal(w.mac.log.length, before);
+});
+
+test('L726 PLANT: a review.json whose uids leaves out plan_reviewer (or names it apart from review) → install refuses, nothing changed; the same in the copy → check-install FAILS', async () => {
+  const w = await world(); const before = w.mac.log.length;
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const reviewUid = good.uids.reviewer;
+  assert.equal(runnerUidsProblem(w.mac, good.uids), null);
+  const without = { ...good.uids }; delete without.plan_reviewer;
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: without }));
+  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /leaves out plan_reviewer/);
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: { ...good.uids, plan_reviewer: 65001 } }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /reviewer, auditor, plan_reviewer must all name the one review user/);
+  const other = Object.fromEntries(Object.entries(good.uids).map(([k, v]) => [k, v === reviewUid ? reviewUid + 50 : v]));
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: other }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`must name ${reviewUid}, review's id`));
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: undefined }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no map of role to Mac user id/);
+  assert.equal(w.mac.log.length, before);
+  // Installed with the good map; then the copy's own review.json loses plan_reviewer → check-install FAILS on that item.
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify(good));
+  r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  const item = (res) => res.find((x) => /every role the runner starts \(the plan reviewer too\) names review/.test(x.what));
+  assert.equal(item(checkInstall(w.mac, w.cfg))?.ok, true);
+  const f = join(copyOf(w), RUNNER_CONFIG);
+  writeFileSync(f, JSON.stringify({ ...good, uids: without }));
+  const bad = item(checkInstall(w.mac, w.cfg)); assert.equal(bad?.ok, false); assert.match(bad.why ?? '', /leaves out plan_reviewer/);
 });
 
 test('install: a cut-off run (the updater fails) leaves no link, and the next run starts clean and finishes', async () => {

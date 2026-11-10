@@ -19,7 +19,10 @@ import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { parseConfig } from './layout.mjs';
+import { readUser } from './users-folders.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
@@ -97,6 +100,21 @@ export function updaterConfigFor(io, cfg) {
  * What the install does: { ops, problems, installed }. Reads only. `readSource(path)` reads a file of this machine outside
  * the prefix (the runner config) and `runUpdater(io, {node, script, config, seed})` is the updater's first run (ports for a test).
  */
+/**
+ * L726: the runner config's role-to-user map (`uids`), written by hand, must name every role the runner checks
+ * (uidsProblem, the runner's own rule: the design table and RUNNER_ROLES), and every role the runner starts must name the
+ * one `review` user, review's own uid once that user exists. A map without plan_reviewer would make the runner refuse
+ * every plan review on the Mini. Null, or what to put right (never quoting the file).
+ */
+export function runnerUidsProblem(io, uids) {
+  const why = uidsProblem(uids); if (why) return `review.json: ${why}; add each as "<role>": <its Mac user id> (every role the runner starts names review's)`;
+  const ids = new Set(RUNNER_ROLES.map((r) => uids[r]));
+  if (ids.size !== 1) return `review.json: ${RUNNER_ROLES.join(', ')} must all name the one review user's id`;
+  const review = readUser(io, 'review');
+  if (review.exists && uids[RUNNER_ROLES[0]] !== review.uid) return `review.json: ${RUNNER_ROLES.join(', ')} must name ${review.uid}, review's id`;
+  return null;
+}
+
 export function planInstall(io, cfg, { readSource, runUpdater }) {
   const P = installPaths(cfg); const ops = []; const problems = [];
   const cur = currentCopy(io.at(P.installRoot), { owner: io.rootUid });
@@ -109,6 +127,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
   if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
+  if (rc && typeof rc === 'object') { const why = runnerUidsProblem(io, rc.uids); if (why) problems.push(why); }
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
   const inCopy = io.at(P.installRoot);
   for (const n of names) {
@@ -185,6 +204,7 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   item(acl === null, `none of the ${dirs.length} install folders has an access list`, acl);
   let rc = null; try { rc = JSON.parse(io.readText(join(P.installRoot, RUNNER_CONFIG))); } catch { /* reported below */ }
   item(rc !== null && rc.installRoot === root, 'the copy\'s review.json is JSON and names this copy', 'unreadable or names another installRoot');
+  if (rc !== null) { const why = runnerUidsProblem(io, rc.uids); item(why === null, 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review', why); }
   for (const n of RUNNER_NAMES) if (rc && typeof rc[n] === 'string') { let here = true; try { io.lstatReal(rc[n]); } catch { here = false; } item(here, `review.json's ${n} exists in the copy`, `${rc[n]} is missing`); }
   return out;
 }
