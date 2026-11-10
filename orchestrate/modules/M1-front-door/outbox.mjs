@@ -27,7 +27,7 @@ import { makeMasker } from '../M12-sensors/mask.mjs';
 import { stripControls } from '../M12-sensors/escape.mjs';
 import { checkTimeZone } from './timezone.mjs';
 import { MODE_REQUESTS } from './sort.mjs';
-import { PRODUCT } from '../../shared/product-paths.mjs';
+import { PRODUCT, productRoleClash } from '../../shared/product-paths.mjs';
 
 export const FRONT_DOOR_KINDS = Object.freeze(['request', 'state', 'idea', 'ask-request']);
 export const ASK_REQUESTS = Object.freeze(['research', 'undo']);
@@ -50,7 +50,9 @@ function realDay(s) {
   const t = new Date(Date.UTC(y, m - 1, d));
   return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
 }
-const isName = (v) => typeof v === 'string' && PRODUCT.test(v); // a string, never a number (round 5 minor 5)
+// A string, never a number (round 5 minor 5), and never a role's name, which the runner's folders can't hold (L890 m-3):
+// the M2 callers pass no product list, so the form itself must refuse `lead`.
+const isName = (v) => typeof v === 'string' && PRODUCT.test(v) && !productRoleClash(v);
 
 export function stateDoc({ product, state, until = null, tz = null }) {
   if (!isName(product)) return refuse('no valid product name');

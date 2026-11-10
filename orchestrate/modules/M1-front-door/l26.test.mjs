@@ -21,11 +21,19 @@ test('L26 planted: a product not on the list is refused, and the push says so', 
 // L878 m3: the front door asks the runner's one product form (shared/product-paths.mjs), so a name the runner can't
 // make folders for is refused here, even when the list names it.
 test('L878 m3: a product name outside the shared form is refused, listed or not', () => {
-  for (const bad of ['Test-Product', 'my_app', 'my.app', 'a'.repeat(65), '-app']) {
+  for (const bad of ['Test-Product', 'my_app', 'my.app', 'a'.repeat(65), '-app', 'lead', 'worker', 'Reviewer', 'script']) {
     const r = checkOutboxFile('state-20261103-0915-kq.json', pause(bad), { products: [bad] });
     assert.equal(r.ok, false, bad);
     assert.match(r.reason, /no valid product name/, bad);
+    // L890 m-1: the request and ask-request writers refuse it too (they are what the M2 callers use, with no list).
+    const req = outboxFile('request', '20261103-0915-kq', { request: 'resume', product: bad });
+    assert.equal(req.ok, false, `request ${bad}`); assert.match(req.reason, /no valid product name/, bad);
+    for (const ask of ['research', 'undo']) {
+      const a = outboxFile('ask-request', '20261103-0915-kq', { ask, product: bad, brief: 'look into it', ...(ask === 'undo' ? { pr: 7 } : {}) });
+      assert.equal(a.ok, false, `${ask} ${bad}`); assert.match(a.reason, /ask names its product/, bad);
+    }
   }
+  assert.equal(outboxFile('request', '20261103-0915-kq', { request: 'resume', product: 'leads' }).ok, true, 'a name that only starts like a role is a product');
   assert.equal(checkOutboxFile('state-20261103-0915-kq.json', pause('a'.repeat(64)), { products: ['a'.repeat(64)] }).ok, true);
 });
 
