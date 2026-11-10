@@ -18,7 +18,7 @@ import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -826,4 +826,19 @@ test('L746 m-B: Joe closes the heartbeat Dispatcher alert; the next round tells 
   assert.deepEqual(open().map((i) => i.title), [], 'nothing open');
   t += 24 * 60 * MIN; await passes.heartbeat(); await passes.deliver();
   assert.ok(open().length >= 1, 'a day later the lasting stop is told again');
+});
+
+// L738 self-review of m-B: when the queue refused the alert there is no queued copy, so the heartbeat's tell is marked as
+// holdAlert would mark it, only when the hold was due; one already told today keeps its time.
+test('L746 m-B: with no queued copy the heartbeat tell still marks the hold, once a day, never resetting the count', async () => {
+  const w = world();
+  const { rec } = await wire(w.config, { now: () => T730, log: () => {} });
+  const cause = 'robot-dispatcher-late-test';
+  assert.equal(markToldByBeat(rec, { cause, text: 'late', now: T730 }), true);
+  assert.equal(Date.parse(rec.read('fact', HOLD_FACT(cause))?.doc?.told_at), T730, 'the hold is marked told by the heartbeat');
+  assert.equal(markToldByBeat(rec, { cause, text: 'late', now: T730 + MIN }), true);
+  assert.equal(Date.parse(rec.read('fact', HOLD_FACT(cause))?.doc?.told_at), T730, 'told a minute ago: its time is kept, so the daily repeat still comes');
+  assert.equal(markToldByBeat(rec, { cause, text: 'late', now: T730 + 25 * 60 * MIN }), true);
+  assert.equal(Date.parse(rec.read('fact', HOLD_FACT(cause))?.doc?.told_at), T730 + 25 * 60 * MIN, 'a day on, the new tell is marked');
+  assert.equal(markToldByBeat({ read: () => { throw new Error('x'); } }, { cause, text: 'late', now: T730 }), false, 'never throws');
 });

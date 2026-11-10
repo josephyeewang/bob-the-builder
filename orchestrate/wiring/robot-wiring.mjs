@@ -74,6 +74,23 @@ const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tok
 // #137 M6). Past this, a live holder is stuck, and the Dispatcher counts as late. It uses M11's default deadline. Nothing
 // stops the Dispatcher's config from setting a longer one, so setup must not: a healthy pass would then read as stuck.
 export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
+/**
+ * The heartbeat told the hold for `cause`: its told mark is written onto the hold fact as delivery would write it (L746 m-B).
+ * The mark is the one holdAlert itself gives, the same the queued copy carries, so it is written whether or not the queue
+ * took that copy (L738 self-review), and only when the hold was due: one already told today keeps its time and its daily
+ * count. → whether the hold now carries the mark; never throws.
+ */
+export function markToldByBeat(rec, { cause, text, now }) {
+  try {
+    const fact = HOLD_FACT(cause);
+    let mark = null;
+    holdAlert({ rec, cause, text, now, alert: (_t, o) => { mark = o?.mark ?? null; return true; } });
+    if (!mark || mark.fact !== fact) return true;
+    const base = rec.read('fact', fact)?.doc ?? null;
+    return writeFrom(rec, fact, base, { ...(base ?? {}), ...(mark.fields ?? {}) }, mark.kind ?? 'alert_told')?.ok === true;
+  } catch { return false; }
+}
+
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
@@ -109,19 +126,6 @@ export function appProblem(c, { none = null } = {}) {
  * a refused mint is not retried until the next round. A round is far shorter than the token's hour (robot-main.mjs
  * RUN_DEADLINE_MS). Never throws or rejects: a throw becomes { ok: false, reason }. The token stays in memory (R-0b-86).
  */
-/**
- * The told mark of the queued copy whose mark names `fact`, written onto that fact as delivery would write it (L746 m-B).
- * Nothing queued for it is nothing to mark. → whether the fact now carries the mark; never throws.
- */
-export function markToldByBeat(rec, fact) {
-  try {
-    const e = (rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).find((x) => x?.mark?.fact === fact);
-    if (!e) return true;
-    const base = rec.read('fact', fact)?.doc ?? null;
-    return writeFrom(rec, fact, base, { ...(base ?? {}), ...(e.mark.fields ?? {}) }, e.mark.kind ?? 'alert_told')?.ok === true;
-  } catch { return false; }
-}
-
 export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid?.(), now = Date.now, mint = mintInstallationToken } = {}) {
   let p = null;
   return () => (p ??= Promise.resolve()
@@ -313,7 +317,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
       const fact = HOLD_FACT(LATE_CAUSE(late.since));
       // L746 m-B: the heartbeat's tell is the tell, so the hold is marked told now, as delivery would have marked it; the
       // daily count then starts from it, and Joe closing that issue is answered the next day, not in a minute.
-      if (!markToldByBeat(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: it may be told again within a day');
+      if (!markToldByBeat(rec, { cause: LATE_CAUSE(late.since), text: late.text, now: now() })) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: it may be told again within a day');
       if (!dropCause(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
     }
     if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
