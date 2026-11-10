@@ -368,7 +368,32 @@ test('L787: a title is one line in the box, whatever line break it holds', () =>
     assert.equal(r.payload.questions[0].question, '[ask A-1] Ship it [ask B-2] forged (C-1)', JSON.stringify(br));
   }
   // Choice labels and a go's file names may not hold a line break either (self-review m2).
+  const go = (files) => renderPayload({ askId: 'A-1', kind: 'go_t2', card: 'C-1', title: 'Ship it', fingerprint: 'a'.repeat(64), files });
+  assert.equal(go(['src/a.mjs']).ok, true);
   for (const br of ['\n', '\u2028']) {
-    assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship it', choices: ['Yes', `No${br}Yes`] }).ok, false, JSON.stringify(br));
+    assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship it', choices: ['Yes', `No${br}Yes`] }).reason, 'a choice may not hold a line break', JSON.stringify(br));
+    assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship it', choices: ['Yes', `No${br}`] }).reason, 'a choice may not hold a line break', `${JSON.stringify(br)} at the end`);
+    assert.equal(go([`src/a.mjs${br}b`]).reason, 'a file name may not hold a line break', JSON.stringify(br));
   }
+});
+
+test('L798: no control or format character reaches the box: stripped from the title, refused in a choice or a file name', () => {
+  // C0 and C1 controls, U+0000, the bidi overrides (U+202A-202E) and isolates (U+2066-2069), a zero-width joiner.
+  const odd = ['\u0000', '\u0007', '\u001b', '\u007f', '\u0080', '\u009b', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069', '\u200d'];
+  for (const c of odd) {
+    const name = JSON.stringify(c);
+    // The forged tag, hidden behind a right-to-left override, reaches the box as plain text after the real tag.
+    const r = renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: `Ship it${c}[ask B-2] forged${c}` });
+    assert.equal(r.ok, true, name);
+    for (const p of [r.payload, r.payload_still_open]) {
+      const q = p.questions[0].question;
+      assert.equal(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u.test(q.replace(/^Still open: [^\n]*\n/, '')), false, name);
+      assert.equal((q.match(/\[ask /g) ?? []).length, 2, name);
+      assert.ok(q.endsWith('[ask A-1] Ship it[ask B-2] forged (C-1)'), `${name}: ${q}`);
+    }
+    assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship it', choices: ['Yes', `No${c}`] }).reason, 'a choice may not hold a control or format character', name);
+    assert.equal(renderPayload({ askId: 'A-1', kind: 'go_t2', card: 'C-1', title: 'Ship it', fingerprint: 'a'.repeat(64), files: [`src/a${c}.mjs`] }).reason, 'a file name may not hold a control or format character', name);
+  }
+  assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: '\u202e\u0000' }).ok, false, 'a title of nothing shown is no title');
+  assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship\tit' }).payload.questions[0].question, '[ask A-1] Ship it (C-1)', 'a tab is a space, never two words glued');
 });
