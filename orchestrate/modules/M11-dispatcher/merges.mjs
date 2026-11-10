@@ -365,10 +365,10 @@ export function endedMerges(rec, card, head) {
   return { n, rev };
 }
 
-// The session that made the card's work: its newest worker launch, or a research copy's run (the Dispatcher's own
-// launch records).
+// The session that made the card's work: its newest worker launch, or a research copy's or proposal's run (the
+// Dispatcher's own launch records).
 function workerSession(rec, cardId) {
-  const mine = launchesNewestFirst(rec, (l) => (l.doc.role === 'worker' || l.doc.role === 'copy_run') && l.doc.card === cardId);
+  const mine = launchesNewestFirst(rec, (l) => ['worker', 'copy_run', 'proposal_run'].includes(l.doc.role) && l.doc.card === cardId);
   return mine.find((l) => typeof l.doc.session_id === 'string')?.doc.session_id ?? null;
 }
 // A card's worker launches, newest first, by the Record's order.
