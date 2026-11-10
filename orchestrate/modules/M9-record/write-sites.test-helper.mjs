@@ -75,6 +75,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'card lead create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'card lead update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'card worker update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
+  { grant: 'card script update', reason: 'an AI role: its hand-in comes in through its outbox (M9 writer.mjs applyOutbox, L838), never a write() call' },
   { grant: 'verdict reviewer create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'verdict auditor create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'handoff lead create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
