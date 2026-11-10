@@ -44,6 +44,8 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   assert.deepEqual(world(scriptDoc()).ports.outboxSessions().map((x) => [x.role, x.outbox]), [['script', `${ROOT}/script/s1`]]);
   assert.throws(() => world(scriptDoc({ outbox: `${ROOT}/worker/s1` })).ports.sessions(), /not a script outbox/, 'a script under the worker folder');
   assert.throws(() => world(doc({ sessions: [session('s1', { outbox: `${ROOT}/script/s1` })] })).ports.sessions(), /not a worker outbox/, 'a worker under the script folder');
+  // A closed script outbox gets only the shape check, so the root is checked on its own: a script folder elsewhere is refused.
+  assert.throws(() => world(scriptDoc({ outbox: '/elsewhere/script/s1', outbox_open: false })).ports.sessions(), /not inside the outbox root/, 'a closed script outbox outside the root');
   assert.deepEqual(world(doc({ sessions: [session('s1', { size: { ...SIZE, tokens: null } })] })).ports.probe({ id: 's1' }).size.tokens, null, 'readSize\'s "none yet" is a full size');
 });
 

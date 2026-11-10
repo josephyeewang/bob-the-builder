@@ -44,7 +44,8 @@ const launchReq = (sid, more = {}, at = T0) => ({ name: `launch-${sid}.json`, bo
 test('step 3: a launch asked through owner-asks starts once, is listed, and the ask trusts the answer the runner wrote', async () => {
   const w = world();
   await w.pass();
-  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' });
+  // The product rule is M10's (as the ask checks it): a name with capitals, a dot and an underscore is taken.
+  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'P.1_x', sessionId: 'S-1' });
   assert.equal(r.ok, true, r.reason); assert.equal(r.outbox, `${ROOT}/worker/S-1`); assert.equal(r.copy, `${COPIES}/C-1`);
   assert.deepEqual(w.started, ['S-1']);
   const s = w.read();
@@ -66,6 +67,11 @@ test('step 3: stopGroup writes stop_requested before it acts, answers ok only on
   assert.deepEqual(s.sessions.map((x) => [x.id, x.alive, x.ended, x.stop_requested]), [['S-1', false, true, true]]);
   assert.equal(s.requests['S-1'].state, 'stopped');
   assert.deepEqual(w.sync().board(), [], 'stopped on request: off the board');
+  // A stop the port calls done while the group is still there is no ok: the answer waits on the group, not the port.
+  const z = world({ stopAnswer: () => ({ ok: true, how: 'SIGTERM' }) });
+  await z.pass([launchReq('S-1')]);
+  const zr = await z.asks().stopGroup({ id: 'S-1', pgid: 4001, kind: 'editing' });
+  assert.equal(zr.ok, false); assert.match(zr.reason, /the process group is still there; it may still run/);
   // A session the runner never started is no silent ok.
   const other = await w.asks().stopGroup({ id: 'S-9', pgid: 77, kind: 'editing' });
   assert.equal(other.ok, false); assert.match(other.reason, /did not start/);
@@ -159,7 +165,10 @@ test('step 3: an ended session keeps its outbox open until intake has drained it
   dry = true; await w.pass();
   assert.deepEqual(w.sync().outboxSessions(), []);
   assert.deepEqual(w.read().sessions.map((x) => x.id), ['S-1'], 'still listed within the keep window');
-  w.now += RUNNER_KEEP_USED_UP_MS + MIN; await w.pass();
+  // Past the keep window with its outbox still open, the session stays listed, and so does its 'stopped' entry.
+  dry = false; w.state.sessions[0].outbox_open = true; w.now += RUNNER_KEEP_USED_UP_MS + MIN; await w.pass();
+  assert.deepEqual([w.read().sessions.map((x) => x.id), w.read().requests['S-1']?.state], [['S-1'], 'stopped']);
+  dry = true; await w.pass();
   const s = w.read();
   assert.deepEqual([s.sessions, s.requests], [[], {}], 'gone with its used-up entry once the window has passed');
   // A group the port can't tell about has no alive field, so it still counts as live.

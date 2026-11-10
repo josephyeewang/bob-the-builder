@@ -126,8 +126,8 @@ export async function workerRunnerPass(ctx) {
     if (body?.refused) { note(`request ${name} was refused unread: ${body.refused}`); continue; }
     if (!bodyMatches(k, body)) { note(`request ${name} says something other than its name; not read`); continue; }
     // A stop is asked again each pass until its launch is used up (stopSession), and asking twice only stops twice: it
-    // is never a replay. Every other key is acted on once.
-    if (k.verb !== 'stop' && (Object.hasOwn(state.answers, k.key) || Object.hasOwn(state.seen, k.key))) { note(`request ${name} was answered before; a replay is not read`); continue; }
+    // is never a replay, so its key is never kept as seen. Every other key is acted on once.
+    if (Object.hasOwn(state.answers, k.key) || Object.hasOwn(state.seen, k.key)) { note(`request ${name} was answered before; a replay is not read`); continue; }
     if (k.verb !== 'stop' && (!Number.isFinite(asked) || now - asked > RUNNER_KEEP_USED_UP_MS)) { note(`request ${name} is older than the runner keeps answers; not read`); continue; }
     if (k.verb !== 'stop') state.seen[k.key] = now;
     if (k.verb === 'stop') await stopRequest(k.id);
