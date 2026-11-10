@@ -601,7 +601,7 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
   'modules/M11-dispatcher/': { files: 4, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake (proposal-route and research-intake are reached by the robot job through M13 store-stopped, which cuts a stop reason with pushReason, L724)' },
   'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
-  'modules/M13-ledger/': { files: 1, why: 'R-0b-77 waiting (alert-channel.mjs is reached through the robot job\'s deliver pass, #288; alerts.mjs since #184, L428)' },
+  'modules/M13-ledger/': { files: 1, why: 'R-0b-77 waiting (alert-channel.mjs reached through the robot job since #288, L730; alerts.mjs since #184, L428)' },
 });
 const isFixture = (f) => /(?:^|[/-])(?:fixtures?|fakes?|png-fixture|test-tmp)\.mjs$/.test(f);
 const unreachedFiles = () => {
