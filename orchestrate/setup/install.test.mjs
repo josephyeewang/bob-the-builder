@@ -22,6 +22,11 @@ import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
+import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
+import { runnerUidsProblem } from './install.mjs';
+import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
+import { reviewUid as runnerReviewUid } from '../modules/M9-record/outbox.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -103,6 +108,10 @@ async function world({ euid = 0, rules = null } = {}) {
   const run = (args, extra = {}) => { const s = sink(); const code = main(argvFor(args), { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
+  // L726: the role-to-user map the runner needs: every design role, and every role the runner starts names review's id.
+  const reviewUid = Number(mac.users.get('review').UniqueID);
+  const uids = Object.fromEntries([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES].map((r) => [r, RUNNER_ROLES.includes(r) ? reviewUid : 65001]));
+  const rcFile = join(ext, 'review.json'); writeFileSync(rcFile, JSON.stringify({ ...JSON.parse(readFileSync(rcFile, 'utf8')), uids }));
   mac.as = euid;
   return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root, rulesSrc };
 }
@@ -239,6 +248,128 @@ test('install: refuses a runner config for another place, or one that names thin
   r = w.run(['install']);
   assert.equal(r.code, 1); assert.match(r.text, /is not valid JSON/);
   assert.equal(w.mac.log.length, before);
+});
+
+test('L726 PLANT: a review.json whose uids leaves out plan_reviewer (or names it apart from review) → install refuses, nothing changed; the same in the copy → check-install WARNS (L737 M1)', async () => {
+  const w = await world(); const before = w.mac.log.length;
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const reviewUid = good.uids.reviewer;
+  assert.equal(runnerUidsProblem(w.mac, good.uids), null);
+  const without = { ...good.uids }; delete without.plan_reviewer;
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: without }));
+  let r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /leaves out plan_reviewer/);
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: { ...good.uids, plan_reviewer: 65001 } }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /reviewer, auditor, plan_reviewer must all name the one review user/);
+  const other = Object.fromEntries(Object.entries(good.uids).map(([k, v]) => [k, v === reviewUid ? reviewUid + 50 : v]));
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: other }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, new RegExp(`must name ${reviewUid}, review's id`));
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids: undefined }));
+  r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no map of role to Mac user id/);
+  assert.equal(w.mac.log.length, before);
+  // Installed with the good map; then the copy's own review.json loses plan_reviewer → check-install WARNS on that item (L737 M1).
+  writeFileSync(w.cfg.runnerConfig, JSON.stringify(good));
+  r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  const item = (res) => res.find((x) => /every role the runner starts \(the plan reviewer too\) names review/.test(x.what));
+  assert.equal(item(checkInstall(w.mac, w.cfg))?.ok, true);
+  const f = join(copyOf(w), RUNNER_CONFIG);
+  writeFileSync(f, JSON.stringify({ ...good, uids: without }));
+  const warned = item(checkInstall(w.mac, w.cfg)); assert.equal(warned?.warn, true, JSON.stringify(warned)); assert.match(warned.why ?? '', /leaves out plan_reviewer/);
+  // Anything else wrong with that old map stays a FAIL: here reviewer and auditor no longer name review's id.
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...without, reviewer: reviewUid + 50, auditor: reviewUid + 50 } }));
+  const bad = item(checkInstall(w.mac, w.cfg)); assert.equal(bad?.ok, false); assert.equal(bad.warn, undefined); assert.match(bad.why ?? '', new RegExp(`must name ${reviewUid}, review's id.*\\(it also leaves out plan_reviewer\\)`));
+});
+
+test('L737 M2: install asks M4\'s real uidsProblem for the plan reviewer; a map lacking only plan_reviewer says "leaves out", not "one id"', async () => {
+  const w = await world();
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const without = { ...good.uids }; delete without.plan_reviewer;
+  // The real M4 function: without the plan reviewer asked for it passes this map, with it, it names the gap.
+  assert.equal(uidsProblem(without), null);
+  assert.match(uidsProblem(without, { plan: true }) ?? '', /leaves out plan_reviewer/);
+  const why = runnerUidsProblem(w.mac, without);
+  assert.match(why ?? '', /leaves out plan_reviewer/); assert.doesNotMatch(why, /must all name the one review user/);
+});
+
+test('L737 M1: an install made before the plan reviewer → WARNING (the jobs still load); the README\'s steps put it right', async () => {
+  const w = await placed();
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const without = { ...good.uids }; delete without.plan_reviewer;
+  const f = join(copyOf(w), RUNNER_CONFIG);
+  writeFileSync(f, JSON.stringify({ ...good, uids: without }));
+  // check-install: a WARNING with the real steps, never summed up as a plain pass; exit 0.
+  let r = w.run(['check-install']);
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /WARNING {2}review\.json names a Mac user .* leaves out plan_reviewer/);
+  assert.match(r.text, /Re-running install does not change it/);
+  assert.match(r.text, new RegExp(`sudo install -o root -g wheel -m 0644 <that file> ${BASE.replace(/[/.]/g, '\\$&')}/install/orchestrate/review\\.json`));
+  assert.match(r.text, /PASS and 1 WARNING/); assert.doesNotMatch(r.text, /all \d+ PASS/);
+  // Re-running install, the step that used to be named, changes nothing: the copy is kept.
+  r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).uids.plan_reviewer, undefined);
+  // The jobs still load (the runner still does reviews and audits).
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text);
+  assert.deepEqual([...w.mac.loaded.keys()].sort(), JOBS.map((j) => `${LABEL}.${j}`).sort());
+  // The named step: the checked file, with plan_reviewer, put in the copy as root's 0644 → check-install has no WARNING.
+  writeFileSync(f, JSON.stringify(good)); chmodSync(f, 0o644);
+  r = w.run(['check-install']); assert.equal(r.code, 0, r.text); assert.doesNotMatch(r.text, /WARNING/); assert.match(r.text, /all \d+ PASS/);
+  // A misspelt extra key in the copy, every real key right: a WARNING, and the jobs still load (install still refuses it).
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, bogus: 1 } })); chmodSync(f, 0o644);
+  const extra = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(extra?.warn, true, JSON.stringify(extra)); assert.match(extra.why, /it names bogus, which no role is called/);
+  r = w.run(['check-install']); assert.equal(r.code, 0, r.text); assert.match(r.text, /WARNING {2}review\.json names .* it names bogus, which no role is called/);
+  r = w.run(['daemons', 'unload']); assert.equal(r.code, 0, r.text);
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text);
+  // The same extra key carrying review's id is not harmless: the runner (M9 reviewUid, the whole map) reads it as another
+  // role sharing the review user and refuses every review, so it FAILS (self-review of 9d38a2c, M1).
+  const R = good.uids.reviewer;
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, typo: R } })); chmodSync(f, 0o644);
+  const shared = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(shared.ok, false, JSON.stringify(shared)); assert.notEqual(shared.warn, true);
+  assert.match(shared.why, new RegExp(`it names typo, which no role is called, with review's id ${R}; the runner reads that as another role sharing the review user`));
+  assert.match(runnerReviewUid({ ...good.uids, typo: R }).reason ?? '', /shared with typo/, 'the runner\'s own rule refuses that map');
+  r = w.run(['daemons', 'load']); assert.notEqual(r.code, 0, 'a map the runner would refuse blocks the load');
+  // An old map lacking plan_reviewer AND naming a bogus key: one WARNING carrying both, the plan_reviewer steps first.
+  const { plan_reviewer: _drop, ...noPlan } = good.uids; void _drop;
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...noPlan, bogus: 1 } })); chmodSync(f, 0o644);
+  const both = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(both.warn, true, JSON.stringify(both)); assert.match(both.why, /^the copy's review\.json leaves out plan_reviewer, .* check-install again\. Also, it names bogus, which no role is called; take it out/);
+  // A negative plan_reviewer is as missing as none: the same WARNING.
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, plan_reviewer: -1 } })); chmodSync(f, 0o644);
+  const neg = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(neg?.warn, true); assert.match(neg.why, /leaves out plan_reviewer/);
+});
+
+test('L737 m1: a runner role sharing an id with another role, or any role naming root, is refused at install, as the runner would refuse it later', async () => {
+  const w = await world(); const before = w.mac.log.length;
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const reviewUid = good.uids.reviewer;
+  const cases = [
+    [{ ...good.uids, worker: reviewUid }, /reviewer: the review user is not a separate Mac user \(shared with worker\)/],
+    [{ ...good.uids, lead: 0 }, /lead may not be root \(0\); name the owner's id/],
+    [{ ...good.uids, reviewer: 0, auditor: 0, plan_reviewer: 0 }, /reviewer: the review user may not be root/],
+    [{ ...good.uids, 'plan-reviewer': reviewUid }, /it names plan-reviewer, which no role is called/],
+  ];
+  for (const [uids, want] of cases) {
+    assert.match(runnerUidsProblem(w.mac, uids) ?? '', want, JSON.stringify(uids));
+    writeFileSync(w.cfg.runnerConfig, JSON.stringify({ ...good, uids }));
+    const r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, want);
+  }
+  assert.equal(w.mac.log.length, before);
+});
+
+test('L737 m2: when the review user can\'t be read (a directory error, or no such user yet), the map is "couldn\'t tell", never passed', async () => {
+  const w = await world();
+  const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
+  const owner = { ...good.uids, reviewer: 65001, auditor: 65001, plan_reviewer: 65001 };
+  const baseRun = w.mac.run;
+  w.mac.run = (cmd, args) => (args?.[0] === '.' && args?.[1] === '-read' && /\/Users\/review$/.test(args?.[2] ?? '') ? { status: 1, stdout: '', stderr: 'DS error' } : baseRun(cmd, args));
+  // owner's ids are shared with the design roles, so make them a lone id the map gives no other role
+  const lone = { ...good.uids, reviewer: 70000, auditor: 70000, plan_reviewer: 70000 };
+  assert.match(runnerUidsProblem(w.mac, lone) ?? '', /couldn't read the review user \(DS error\), so the map can't be checked against it; run users-folders first/);
+  w.mac.run = (cmd, args) => (args?.[0] === '.' && args?.[1] === '-read' && /\/Users\/review$/.test(args?.[2] ?? '') ? { status: 56, stdout: '', stderr: 'eDSRecordNotFound' } : baseRun(cmd, args));
+  assert.match(runnerUidsProblem(w.mac, lone) ?? '', /couldn't read the review user \(there is no Mac user called review\)/);
+  assert.match(runnerUidsProblem(w.mac, owner) ?? '', /shared with/);
+  w.mac.run = baseRun;
 });
 
 test('install: a cut-off run (the updater fails) leaves no link, and the next run starts clean and finishes', async () => {

@@ -327,6 +327,13 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   assert.equal(ruled([{ id: 'p1' }, { id: 'p2' }]).requestGapMs(undefined), 2880 * 60_000, 'a request with no card takes the longest');
   assert.equal(ruled([]).requestGapMs(undefined), Infinity, 'no product listed is no answer, and ends nothing');
   assert.throws(() => realPorts(c, {}).requestGapMs('p1'), 'with no budget module it throws, and the runner ends nothing on silence');
+  // The plan reviewers' cap (L735 M1): the Dispatcher's own read-only cap for the card's product; none without a budget.
+  asked.length = 0;
+  const capRules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 4, p2: 2 })[o.product] };
+  const capped = realPorts(c, {}, { budget: { rules: capRules, rec: { list: () => [] } } });
+  assert.deepEqual([capped.planReviewCap('p1'), capped.planReviewCap('p2')], [4, 2]);
+  assert.deepEqual(asked[0], ['caps.readonly_per_session', 'p1']);
+  assert.throws(() => realPorts(c, {}).planReviewCap('p1'), 'with no budget module it throws, and no plan reviewer starts');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
 });
@@ -595,7 +602,7 @@ test('L71 planted: root and outboxRoot, and every folder above them, are root\'s
   mkdirSync(join(mid, 'review'), { recursive: true });
   mkdirSync(join(mid, 'outbox'));
   for (const p of [mid, join(mid, 'review'), join(mid, 'outbox')]) chmodSync(p, 0o755);
-  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer });
+  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer, plan_reviewer: reviewer });
   const good = withR163({ installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const cfg = (over = {}, opts = { top: d }) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), opts); };
   assert.equal(cfg()().outboxRoot, join(mid, 'outbox'), 'the control: review\'s folders, under review\'s and root\'s');
