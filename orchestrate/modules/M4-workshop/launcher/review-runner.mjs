@@ -251,6 +251,7 @@ function writeWhole(path, value, mode) {
 }
 /** A launch or ended record: written under a temp name, then given its real name only if that name is free (never written over). */
 function writeLaunch(dir, sid, doc) {
+  // A fixed hidden name is safe here (#294 r3 m2 checked): only review writes these folders, and each session id is new.
   const tmp = join(dir, `.${sid}.json.tmp`);
   const final = join(dir, `${sid}.json`);
   try { unlinkSync(tmp); } catch { /* none left from a pass that stopped part way */ }
@@ -1278,7 +1279,7 @@ const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card
 /**
  * The Dispatcher's read of status.json (for `hasReviewer`): the list of review sessions running, or a throw when the
  * status is missing, unreadable, not the runner's shape or older than 3 minutes (L63: never read as "none").
- * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error }
+ * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, plans_waiting, installed_commit }
  */
 export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   // The owner check is never skipped: a status anyone could write would say what runs.

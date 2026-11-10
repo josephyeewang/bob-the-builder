@@ -531,6 +531,11 @@ test('L735 M1 planted: two products share one runner; 3 running, cap 4: exactly 
   const [wp, wf, ws, sp, sf, ss] = waiting === 'C-3' ? [a, fa, sa, bp, fb, sb] : [bp, fb, sb, a, fa, sa];
   assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true, waiting: 'slot' });
   assert.deepEqual(sp.planReviewAnswer({ card: r.started[0].card, fingerprint: sf, session: ss.session }), { ok: true });
+  // Only that very card and plan count: the same session asked about another plan is plainly working (self-review m1).
+  assert.deepEqual(wp.planReviewAnswer({ card: waiting, fingerprint: 'f'.repeat(64), session: ws.session }), { ok: true });
+  // A status that can't be trusted (here stale) changes the wording only: plainly working, never a throw or a refusal.
+  const late = dispatcherPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t + 60 * 60_000 });
+  assert.deepEqual(late.planReviewAnswer({ card: waiting, fingerprint: wf, session: ws.session }), { ok: true });
   assert.ok(caps.includes('app') && caps.includes('p2'), 'the cap is the card\'s own product\'s');
   // It waits, pass after pass, never told and never given up on.
   for (let i = 0; i < MAX_FAILED_STARTS + 2; i++) {
