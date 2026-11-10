@@ -127,10 +127,12 @@ test('#317 audit r1 M1: stop and save take any session sessions() lists, routed 
   assert.match(OWNER_PORTS.saveWork.out, /editing, undo, script and overnight save/);
   assert.match(OWNER_PORTS.saveWork.out, /any kind not named \(merge and undo_merge included, until it is settled that they have no copy\) is \{ ok: false, reason: no runner saves that kind \}/);
   assert.match(OWNER_PORTS.stopGroup.out, /the runner has set stop_requested for it in a status written before it answers/);
+  assert.match(OWNER_PORTS.stopGroup.fails, /it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out/, 'L764 m1, #328 r1 c3');
   assert.match(OWNER_PORTS.saveWork.out, /a worker kind whose copy is missing or unreadable is \{ ok: false, reason \}/);
   assert.match(OWNER_PORTS.stopGroup.in, /it needs only \{ id, pgid, kind \}/);
   // r2 n1: the routing map names every kind gate.mjs knows, once, with its runner; a kind no runner owns is never a silent ok.
   const head = readFileSync(new URL('./owner-ports.mjs', import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).join('\n');
+  assert.match(head.replace(/\n\/\/\s*/g, ' '), /the worker runner's asks, owner-asks\.mjs, stop waiting at a limit past every tick limit and answer there as the tick's limit does, \{ ok: false, timedOut: true \}/, 'L759: the asks\' own limit is a noted exception');
   assert.match(head, /the worker kinds, editing, undo and script, to this runner \(overnight, an editing kind gate\.mjs counts, too/);
   assert.match(head, /the wiring routes each by kind to the runner that started it, never all to this one/);
   assert.match(head, /review and audit to the review runner;/);

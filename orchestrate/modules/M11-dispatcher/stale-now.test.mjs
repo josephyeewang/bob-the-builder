@@ -57,7 +57,7 @@ function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', prod
     alert: fake,
     board: board ?? (() => [{ id: 'S-2', card: 'C-2', alive: false, ended: true, lastWriteAt: E.clock.t - 10 * MIN }]),
     healthy: () => true, resume: () => false,
-    outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {}, leads: () => [],
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {}, leads: () => [],
     sessions: () => sessions, probe: () => idle,
     launch: async () => ({ ok: false, reason: 'no launches in this test' }),
     stopGroup: async () => { sessions = []; return { ok: true, how: 'SIGTERM' }; },
@@ -262,6 +262,7 @@ const rec = recWith();
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),

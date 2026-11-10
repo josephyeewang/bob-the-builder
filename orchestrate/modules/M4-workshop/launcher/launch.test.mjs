@@ -25,7 +25,7 @@ const tmp = () => realpathSync(tempDir('orch-launch-'));
 // The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
 // stand-in table that marks every name confirmed on the test version.
 const N_PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -40,7 +40,7 @@ function NAMES(role, over = {}) {
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, script: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -86,6 +86,8 @@ test('launch: which checks apply to which role', async () => {
   assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('auditor'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('learning'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // L760: a script card's session, on a fresh copy with the Bob folder checked, as a worker's; no shell, no install.
+  assert.deepEqual(await ran('script'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
   // A shell added to a role that had none brings check 11 with it.
   const called = [];
   const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));
@@ -349,7 +351,7 @@ function hookWorld(role = 'worker') {
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, notes, deny: { proposals: ['/w/proposals'], secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile, paths: { copy, outbox, hooksDir, snapshot, node: process.execPath, ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes, deny: { proposals: ['/w/proposals'], secrets: [keys] }, reviewWalls: { outboxRoot: join(root, 'ro'), runnerRoot: join(root, 'rr') } }, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, r.reason);
   const check = (over = {}) => checkHooks({ settings: r.settings, hooksDir, source, kinds: profile.outbox, copy, outbox, harmfulProduction: productionProbe(rules), timeoutMs: 1500, ...over });
   return { root, source, hooksDir, outbox, settings: r.settings, check, rules };

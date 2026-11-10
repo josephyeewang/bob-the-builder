@@ -33,8 +33,16 @@
 // NOT HERE: `gateAlive` asks whether the Merge Gate is running, and it runs in the robot job's gate pass, which is not
 // wired; it has no sign of life to read yet. It moves to whoever wires that pass, which writes a "gate last ran at"
 // mark for it (L639).
-// NOT HERE: `filesOf` answers at once (undo.mjs calls it without waiting), from the local mirror, so it is not a GitHub
-// read; it stays listed until the mirror is wired.
+// WIRED (C, L739): filesOf(merge_commit) → the paths the commit changed, from the product's mirror (config mirror). It
+// answers at once (undo.mjs calls it without waiting), so its git runs through limitedSync with safe-git's own pieces:
+// the repository check (every config file on the safe list) and the environment, under `env -i`. Anything it can't read,
+// and a commit that changes no file, throws: undo holds the tap and tells it, never "no files".
+// NOT YET (A4, L615 grant 3): `proposals()` → { products, ownerUid }, for the tick's proposals step (proposals-intake.mjs).
+// The products are this Dispatcher's one; the intake's ownerUid must be Joe's own Mac uid, whose proposals folders are
+// (setup layout.mjs makes them his), and it is never read from the folder itself (L78 n6). The Dispatcher config's
+// ownerUid is orchestrate's uid, the Record's owner; Joe's uid (the workers' user, L238) has no config key yet. It gets
+// its own, `proposalsUid`, filled from setup's `owner` (L736): until then the port stays listed, and refuses (CONFIG_KEYS
+// and root's config write, lane 4's setup).
 
 import { makeGitView, notRead } from '../modules/M10-rules/git-view.mjs';
 import { BRANCH } from '../modules/M10-rules/reader.mjs';
@@ -45,8 +53,10 @@ import { GIT_MS } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { pastTime } from '../shared/still-waiting.mjs';
 import { readRowAt } from '../modules/M6-merge-gate/gather.mjs';
 import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
+import { inertSetting, repoConfigFiles, safeGitEnv, withNoPrograms } from '../modules/M4-workshop/git/safe-git.mjs';
+import { mirrorProblem } from './worker-ports.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['gateAlive', 'healthy', 'resume', 'proposals']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -101,6 +111,43 @@ export function planRows({ gh, entry, rec }) {
   };
 }
 
+// One git call of filesOf's: under limitedSync's limit, a cleared environment (safe-git's), from git's private home.
+export const FILES_OF_MS = 20_000;
+
+/**
+ * filesOf for the mirror at `mirror` (this user's, `uid`). `run` is limitedSync's runner. safe-git's git() is async, so
+ * its repository check is run here in the same steps (repoConfigFiles, then each config file read without includes and
+ * held to inertSetting), and git gets safe-git's environment and no-program flags.
+ */
+export function mirrorFilesOf({ mirror, uid, run }) {
+  const git = (env, args) => run('/usr/bin/env', ['-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), 'git', '--no-pager', ...args], { timeoutMs: FILES_OF_MS, cwd: env.HOME });
+  return (sha) => {
+    if (typeof run !== 'function') throw new Error('filesOf: the wiring was given no limitedSync to run git with');
+    if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error(`filesOf: ${JSON.stringify(String(sha)).slice(0, 60)} is not a commit id`);
+    const bad = mirrorProblem(mirror, uid);
+    if (bad) throw new Error(bad);
+    let found;
+    try { found = repoConfigFiles(mirror); } catch (e) { found = { why: `its folders could not be read: ${e?.message ?? e}` }; }
+    if (found.why) throw new Error(`the product's mirror can't be used: ${found.why}`);
+    for (const f of found.files) {
+      const r = git(safeGitEnv(), ['config', '--file', f, '--no-includes', '--list', '-z']);
+      if (!r.ok) throw new Error(`the product's mirror's config ${f} could not be read (${r.why})`);
+      const off = String(r.stdout).split('\0').filter(Boolean)
+        .map((x) => { const nl = x.indexOf('\n'); return nl < 0 ? [x, undefined] : [x.slice(0, nl), x.slice(nl + 1)]; })
+        .filter(([k, v]) => !inertSetting(k, v)).map(([k]) => k);
+      if (off.length) throw new Error(`the product's mirror's config sets what is not on the safe list: ${off.join(', ')}`);
+    }
+    const r = git(safeGitEnv({ gitDir: found.dir, commonDir: found.common }), withNoPrograms(['diff-tree', '-r', '-z', '--name-only', '--no-renames', '--no-commit-id', '--root', sha]));
+    if (!r.ok) throw new Error(`the mirror can't say which files commit ${sha.slice(0, 7)} changed (${r.why})`);
+    const files = String(r.stdout).split('\0').filter(Boolean);
+    // limitedSync reads git's output as UTF-8: a name that isn't would come back changed, and the undo would name files
+    // that don't exist (self-review m5). Such a commit is told, never answered with altered names.
+    if (files.some((f) => f.includes('\uFFFD'))) throw new Error(`commit ${sha.slice(0, 7)} changes a file whose name is not UTF-8, so its undo can't be checked`);
+    if (!files.length) throw new Error(`commit ${sha.slice(0, 7)} changes no file on the mirror (an empty commit, or a merge commit), so its undo can't be checked`);
+    return files;
+  };
+}
+
 /** A plain timer. A wait that can't be read waits no time at all, rather than for ever. */
 export const wait = (ms) => new Promise((ok) => { setTimeout(ok, Number.isFinite(ms) && ms > 0 ? ms : 0); });
 
@@ -133,12 +180,13 @@ export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
 /**
  * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
  * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
- * Dispatcher's nor the workers' (ownerUid): either could then write the status that says a reviewer runs (L668, L674).
+ * Dispatcher's nor the Record owner's (ownerUid, orchestrate's uid; Joe's uid, the workers' user, L238, has no config key
+ * yet): either could then write the status that says a reviewer runs (L668, L674).
  */
 export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');
   if (c.reviewUid === selfUid) throw new Error('config: reviewUid is the Dispatcher\'s own user; the review user must be its own');
-  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the workers\' user (ownerUid); the review user must be its own');
+  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the Record owner\'s (ownerUid); the review user must be its own');
   const main = mainSeen({ installRoot: c.reviewInstallRoot, now, owner, top });
   return runnerPorts({ requests: c.reviewRequestsDir, status: c.reviewStatusFile, reviewUid: c.reviewUid, runnerLog: c.reviewRunnerLog, now,
     mainHead: mainSeenHead({ installRoot: c.reviewInstallRoot, main, owner, top }) });
@@ -150,7 +198,7 @@ export function reviewPorts(ctx) {
   const own = (product) => {
     if (product !== ctx.entry.product) throw new Error(`this Dispatcher runs product ${ctx.entry.product}, so it can't ask about product ${product}'s plans`);
   };
-  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...runner,
+  return { ...githubReads({ gh: ctx.gh, entry: ctx.entry }), filesOf: mirrorFilesOf({ mirror: ctx.config.mirror, uid: ctx.selfUid, run: ctx.limitedSync }), planRows: planRows({ gh: ctx.gh, entry: ctx.entry, rec: ctx.rec }), wait, ...runner,
     startPlanReview: (x) => { own(x?.product); return runner.startPlanReview(x); },
     planReviewAnswer: (x) => { own(x?.product); return runner.planReviewAnswer(x); } };
 }
