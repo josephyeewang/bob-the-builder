@@ -49,7 +49,7 @@
 // stops the next. Facts sit in the Dispatcher's `hold-` family; a stale mark does no harm, and a new plan gets a new review.
 
 import { goNeeded, readyCheck } from '../M9-record/ready.mjs';
-import { PLAN_INPUTS } from '../M9-record/permissions.mjs';
+import { draftFields, PLAN_INPUTS } from '../M9-record/permissions.mjs';
 import { askStore } from '../M2-approvals/ask-store.mjs';
 import { doneBar, goFingerprint, raiseGo, recordGo } from '../M2-approvals/go.mjs';
 import { PLAN_REVIEW_WORDING, readPlanReview } from '../M3-lead/lead-wording.mjs';
@@ -343,6 +343,12 @@ function doneFromRowsOnce(ctx, tell, c, rows, events) {
   }
   const bar = doneBar(rows);
   if (c.doc.done_when === bar) return true;
+  // #295 r3 m1: a kind the Dispatcher may not set done_when on (permissions.mjs draftKinds) is told what fixes it,
+  // before a write that can't be taken (so a Lead edit between read and write never hides it as 'changed').
+  if (typeof c.doc.kind === 'string' && !draftFields('dispatcher', c.doc.kind).includes('done_when')) {
+    tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test can't be filled in from its rows on a ${short(c.doc.kind)} card; the Lead must write this card's pass tests before a go can be asked: its rows' pass tests in row-id order, each separated by a line of ---, exactly`);
+    return false;
+  }
   if (!Number.isInteger(c.rev)) { tell(c.id, 'done-when', `card ${c.id} could not be asked for a go: its pass test could not be set from its rows (the card was read without its version number)`); return false; }
   const w = ctx.record.write({ actor: 'dispatcher', entity: 'card', id: c.id, expectRev: c.rev, doc: { ...c.doc, done_when: bar }, kind: 'done_when_from_rows' });
   if (w.ok) { events.push(`done_when ${c.id}`); return false; }

@@ -16,8 +16,9 @@
 // round may run. A round that can never take its lock then shows as a last exit that is not 0, which `daemons check`
 // fails on, never as a quiet 0 every minute. The log line names the lock and the cause. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
 // M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
-// One exception: a store that stopped the start is told to the owner (L587). `stopChannel` ({ gh, owner }) is injected like
-// `deliver`, and needs the same writing token: until the robot App exists (R-0b-02) the stop is only logged.
+// One exception: a store that stopped the start is told to the owner (L587), through the robot App's store-free channel
+// (robot-wiring.mjs robotChannel, L727), or a `stopChannel` ({ gh, owner }) a test injects. A config with no robot App
+// gets no channel, and the stop is only logged.
 //
 // A pass that ran past its time limit may still be running (a race stops the waiting, not the pass). The round then
 // keeps its lock, as M11 does for a late pass: the process exits, and the next start breaks the dead lock and says so.
@@ -29,7 +30,7 @@ import { takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox } from '../modules/M11-dispatcher/alerts.mjs';
 import { tellStoreStopped } from '../modules/M13-ledger/store-stopped.mjs';
-import { ROBOT_PASSES } from './robot-wiring.mjs';
+import { ROBOT_PASSES, robotChannel } from './robot-wiring.mjs';
 
 export const PASS_DEADLINE_MS = 120_000;
 export const RUN_DEADLINE_MS = ROBOT_PASSES.length * PASS_DEADLINE_MS + 20_000;
@@ -79,25 +80,28 @@ export function pidState(pid, { kill = (p, s) => process.kill(p, s) } = {}) {
 
 /**
  * Takes the robot's round lock (M11 takePassLock) and says what a refusal means (L740): { ok: true, lock } or
- * { ok: false, code, line }. Code 0 only for a readable lock held by a live process of this user, taken within the
+ * { ok: false, code, line, moved_live?, broke? }. Code 0 only for a readable lock held by a live process of this user, taken within the
  * longest a round may run; every other refusal is LOCK_REFUSED.
  */
 export function takeRoundLock(file, { now, maxHeldMs, state = pidState }) {
   let seen = null;
   const l = takePassLock(file, { now, dead: (pid) => { seen = state(pid); return seen === 'dead'; } });
   if (l.ok) return { ok: true, lock: l };
+  // A dead lock this round broke before another linked in rides on the refusal, so it is still told (L800 M-A).
+  const out = (r) => (l.broke ? { ...r, broke: l.broke } : r);
   if (seen === 'ours') {
     // The holder takePassLock read (L754): never a second read, which could find the lock released or taken by another.
     const takenAt = Date.parse(l.held?.taken_at ?? '');
     const held = now - takenAt;
-    if (Number.isFinite(takenAt) && held >= -60_000 && held <= maxHeldMs) return { ok: false, code: 0, line: `robot: ${l.reason}` };
+    if (Number.isFinite(takenAt) && held >= -60_000 && held <= maxHeldMs) return out({ ok: false, code: 0, line: `robot: ${l.reason}` });
     const why = Number.isFinite(takenAt) ? (held < -60_000 ? 'its time is in the future' : `it has been held ${Math.round(held / 60e3)} minutes, longer than any round may run`) : 'it has no readable time';
     // A pid of ours that lives on past any round is a reused pid, or a stuck round: the lock is never broken on its own,
     // so the line says how to clear it (L754).
-    return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}; if no robot round is running (check pid ${l.held?.pid} is not one), delete ${file}` };
+    return out({ ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}; if no robot round is running (check pid ${l.held?.pid} is not one), delete ${file}` });
   }
   const cause = seen === 'foreign' ? `${l.reason}, a process that is not this job's user's` : l.reason;
-  return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}` };
+  // `moved_live`: a live lock moved while breaking a dead one and not put back, so two rounds may run (L785 m1).
+  return out({ ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}`, ...(l.moved_live ? { moved_live: true } : {}) });
 }
 
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
@@ -119,20 +123,25 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
     log(`robot: not started: ${e.message}`);
     // A store that won't open has no alert queue, so this is told here: one issue per fault, a comment once a day while it
     // lasts (L587, L724, L732).
-    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel, log, now });
+    if (e?.stop) await tellStoreStopped({ stop: e.stop, product: config?.product, channel: wireOpts.stopChannel ?? robotChannel(config, { log, fetchFn: wireOpts.fetchFn }), log, now });
     dog?.terminate();
     return 1;
   }
   const { rec, passes } = wired;
   const limit = config.runDeadlineMs ?? RUN_DEADLINE_MS;
   const taken = takeRoundLock(config.lockFile, { now: now(), maxHeldMs: limit + WATCHDOG_MARGIN_MS + 60_000 });
-  if (!taken.ok) { log(taken.line); dog?.terminate(); return taken.code; }
-  const l = taken.lock;
   // One tell, with its refusal logged (L130 m12): a queue that answers false or throws is never silent.
-  const tell = (what, text) => {
-    try { if (hold({ rec, cause: 'robot-run-late', text, alert: outbox(rec, now()), now: now() }) === false) log(`robot: ${what} ${NOT_QUEUED}`); }
+  const tell = (what, text, cause = 'robot-run-late') => {
+    try { if (hold({ rec, cause, text, alert: outbox(rec, now()), now: now() }) === false) log(`robot: ${what} ${NOT_QUEUED}`); }
     catch (e) { log(`robot: ${what} could not be told: ${e?.message ?? e}`); }
   };
+  if (!taken.ok) {
+    log(taken.line);
+    if (taken.broke) tell('the stopped round', `the last robot job round (taken ${taken.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; another round holds the lock now`);
+    if (taken.moved_live) tell('the moved lock', `two robot job rounds may be running at once: ${taken.line}. If it repeats, check for two running rounds`, 'robot-lock-moved');
+    dog?.terminate(); return taken.code;
+  }
+  const l = taken.lock;
   let timer; let keepLock = false;
   try {
     if (l.broke) tell('the stopped round', `the last robot job round (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this round runs as usual`);

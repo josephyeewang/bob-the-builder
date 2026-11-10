@@ -40,6 +40,7 @@ export const NOT_OBJECT_SITES = Object.freeze([
 export const OTHER_FORMS = Object.freeze([
   { file: 'modules/M9-record/writer.mjs', count: 1, reason: 'the Store Writer itself: its checked writes carry a `write` field that it commits' },
   { file: 'modules/M4-workshop/launcher/review-runner-main.mjs', count: 1, reason: "the runner's ports: write is its snapshot file writer, not the Record" },
+  { file: 'wiring/runner-loop.mjs', count: 1, reason: "the worker runner's files port: write is its status and memory file writer, not the Record (L849)" },
 ]);
 
 // Writes whose actor or entity comes from a variable. `count` is how many such sites the file has; each entry says
@@ -75,6 +76,7 @@ export const UNUSED_GRANTS = Object.freeze([
   { grant: 'card lead create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'card lead update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'card worker update', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
+  { grant: 'card script update', reason: 'an AI role: its hand-in comes in through its outbox (M9 writer.mjs applyOutbox, L838), never a write() call' },
   { grant: 'verdict reviewer create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'verdict auditor create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },
   { grant: 'handoff lead create', reason: 'an AI role: its documents come in through its outbox (M9 writer.mjs applyOutbox), never a write() call' },

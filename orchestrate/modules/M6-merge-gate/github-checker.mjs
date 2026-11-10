@@ -2177,8 +2177,9 @@ const MOVES = Object.freeze({
     ready: { claimed: D, waiting: D, cancelled: A },
     // claimed → ready: the holder's release, a lapse or a dead owner's claim broken (always with the claim cleared).
     claimed: { running: D, ready: D, cancelled: A },
-    // running → in_review: a worker's hand-in through its own outbox, or the Dispatcher for a tab's accepted proposal.
-    running: { in_review: ['worker', 'dispatcher'], failed: D, waiting: D, cancelled: A },
+    // running → in_review: a worker's or a script's hand-in through its own outbox (L838), or the Dispatcher for a tab's
+    // accepted proposal.
+    running: { in_review: ['worker', 'script', 'dispatcher'], failed: D, waiting: D, cancelled: A },
     in_review: { verified: D, failed: D, waiting: D, cancelled: A },
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
     // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
@@ -2421,6 +2422,8 @@ const WRITERS = Object.freeze({
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
+    // L838: a script hands in as a worker does, its own claimed card only (writer.mjs's hand-in checks), and nothing else.
+    script: Object.freeze({ update: f('summary', 'report_ref') }),
     workshop: Object.freeze({ update: f('head') }),
     approvals: Object.freeze({ update: f('needs_joe', 'approval_required', 'cancel_reason') }),
     merge_gate: Object.freeze({ update: f('needs_joe', 'merge_commit', 'attempts') }),
@@ -2485,6 +2488,7 @@ const { createHash } = __bob_node_crypto;
 Object.defineProperties(__bob_e, {
   TIER1_BAR: { get: () => TIER1_BAR, enumerable: true },
   canonicalJson: { get: () => canonicalJson, enumerable: true },
+  UNPRINTED: { get: () => UNPRINTED, enumerable: true },
   cleanPath: { get: () => cleanPath, enumerable: true },
   foldKey: { get: () => foldKey, enumerable: true },
   matchForm: { get: () => matchForm, enumerable: true },
@@ -2530,6 +2534,7 @@ function canonicalJson(v) {
 // (audit-pr133 m-2 and the pre-existing case, L289): over 4096 characters, a leading `~` (a home folder), any `:` (a
 // drive letter, and the Finder shows `:` as `/`), and a path that is only spaces.
 // Returns the path in NFC with any leading "./" taken off, or null.
+// Exported as the one rule for a character no screen should be trusted to show (M2's question box too, L798).
 const UNPRINTED = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/u;
 function shapeClean(p) {
   if (typeof p !== 'string' || !p || p.length > 4096 || !p.isWellFormed()) return null;
@@ -2672,7 +2677,8 @@ const OUTBOX_KINDS = Object.freeze(Object.fromEntries(Object.entries({
   'state-compact-': { roles: ['front_door'], entity: 'report', mode: 'create',
     kept: 'the Front Door\'s note at a compaction, kept for the history; nothing acts on it' },
   'handoff-': { roles: ['lead', 'learning'], entity: 'handoff', mode: 'create' },
-  'handin-': { roles: ['worker'], entity: 'card', mode: 'move' },   // the worker's running → in_review (0b-2 R3-M4)
+  // A worker's or a script's running → in_review (0b-2 R3-M4; L838: a script card has no other way to leave running).
+  'handin-': { roles: ['worker', 'script'], entity: 'card', mode: 'move' },
   'lesson-': { roles: ['learning'], entity: 'lesson', mode: 'create' },
   'verdict-': { roles: ['reviewer', 'auditor'], entity: 'verdict', mode: 'move' },
   // Stored as an inert request document; only approvals turns it into an ask (0b-2 R3-M2), so it is never an `ask` here.

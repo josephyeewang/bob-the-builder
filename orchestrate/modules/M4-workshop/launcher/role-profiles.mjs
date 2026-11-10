@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { OUTBOX_KINDS } from '../../../shared/record-names.mjs';
 import { OUTBOX_FILE } from '../hooks/lib.mjs';
 
-// Agent and Task are one subagent tool under two names (L629); M10's roles.mjs keeps the same list less Workflow.
+// Agent and Task are one subagent tool under two names (L629); M10's roles.mjs now keeps the same list, Workflow included (L787).
 export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
   'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile', 'Workflow']);
 // Tolerated in every read-back (m2).
@@ -76,7 +76,7 @@ export const DESIGN_PROFILES = Object.freeze({
   // has. Its tools are M10's published script.json less Workflow, which stays on this never-list until it is walled;
   // a published file that holds Workflow is refused here (a capability claim, checked on this code, not a version).
   // L767 gives it its own outbox, <outboxRoot>/script/<session>, recorded as script:<session>, never the worker's (as a
-  // worker it could hand in handin-). Lane 4 is building that folder and path (step 3); until then a script start fails
+  // worker it could send report-compact- too; since L838 it hands in its own card with handin-, as script:<session>). Lane 4 is building that folder and path (step 3); until then a script start fails
   // closed. Nothing here names the folder; the launcher gives it (paths.outbox).
   script: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'dontAsk', restricted: true,
     outbox: designKinds('script'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'report' }),

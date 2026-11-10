@@ -90,7 +90,7 @@ test('L135 E: the alert for a torn diary line cut is kept and sent again until d
 
 // The claims set-up from claims.test.mjs: a fake process table and ended sessions.
 const err = (code) => Object.assign(new Error(code), { code });
-const fakeProbe = (dead) => ({ kill(pid) { if (dead.includes(pid)) throw err('ESRCH'); }, pidStart: () => 'Thu Oct  1 11:00:00 2026' });
+const fakeProbe = (dead) => ({ kill(pid) { if (dead.includes(pid)) throw err('ESRCH'); }, pidStart: () => '2026-10-01T11:00:00Z' });
 function claimsBoard(s, deadPids, ids) {
   const env = open(s, { prefix: 'm9-l135-', probe: fakeProbe(deadPids) });
   product(env);
@@ -99,7 +99,7 @@ function claimsBoard(s, deadPids, ids) {
     runCard(env, id, sessionClaim({ session_id: `S-${i}`, pid: 100 + i }));
     const t = env.clock.t;
     env.clock.t = t - 600 * MIN;
-    seed(env, 'session', `S-${i}`, { state: 'ended', role: 'worker', pid: 100 + i, pid_start: 'Thu Oct  1 11:00:00 2026', card: null, last_activity: iso(env.clock.t) });
+    seed(env, 'session', `S-${i}`, { state: 'ended', role: 'worker', pid: 100 + i, pid_start: '2026-10-01T11:00:00Z', card: null, last_activity: iso(env.clock.t) });
     env.clock.t = t;
   });
   return env;

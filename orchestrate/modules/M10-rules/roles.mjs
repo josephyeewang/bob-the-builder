@@ -4,7 +4,7 @@
 // WHY. A role's tools, model and outbox kinds decide what an AI session can do. The profiles are plain Bob files,
 // installed by the launcher from the pinned Bob commit, so a bad edit must be caught here, before any start:
 //   - a tool on the never-list (cross-session messages, sub-agents, schedules, web) is refused in every profile;
-//   - `Workflow` is refused everywhere except `script`;
+//   - `Workflow` is on it too (L787): M4 never starts it, so the two lists are one list;
 //   - a tool outside the known built-in names is refused (a new or misspelt name could be anything);
 //   - an outbox kind must fit the name pattern AND be listed for that role in shared OUTBOX_KINDS;
 //   - an unknown field is refused.
@@ -42,9 +42,9 @@ export const TOOLS_CHECKED = Object.freeze({ claude_code: '2.1.316', date: '2026
 // The subagent tool goes by two names: the tool reference says Agent, and 2.1.316's own start message says Task (L629).
 // A never-allowed tool is refused under every name it goes by.
 export const NEVER_TOOLS = Object.freeze(['RemoteTrigger', 'SendMessage', 'ListAgents', 'Agent', 'Task', 'CronCreate',
-  'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile']);
+  'ScheduleWakeup', 'Monitor', 'WebFetch', 'WebSearch', 'SendUserFile', 'Workflow']);
 export const KNOWN_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'Bash',
-  'AskUserQuestion', 'PushNotification', 'Skill', 'Workflow', 'EndConversation', ...NEVER_TOOLS]);
+  'AskUserQuestion', 'PushNotification', 'Skill', 'EndConversation', ...NEVER_TOOLS]);
 
 const MODELS = ['main', 'sonnet', 'haiku', 'per_task'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'per_row', 'as_asked'];
@@ -69,7 +69,6 @@ export function checkProfile(role, p) {
   for (const t of p.tools) {
     if (NEVER_TOOLS.includes(t)) no(`tool ${t} is never allowed`);
     if (!KNOWN_TOOLS.includes(t)) no(`unknown tool ${JSON.stringify(t)}`);
-    if (t === 'Workflow' && role !== 'script') no('Workflow is allowed only in the script profile');
   }
   if (new Set(p.tools).size !== p.tools.length) no('a tool is listed twice');
   const one = Object.hasOwn(ONE_FILE_ROLES, role) ? ONE_FILE_ROLES[role] : null;
