@@ -9,11 +9,13 @@
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
 //   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
+//   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot and hostLockPath as JSON       (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
-//                                       (the robot job, `robot`, is one of them only when the config says "robot": true; robot-setup.mjs)
+//                                       (the robot job, `robot`, is one of them only when the config says "robot": true; robot-setup.mjs;
+//                                       the Dispatcher job, `dispatcher`, only when the config has a "dispatcher" entry; dispatcher-setup.mjs)
 //   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes  (read only)
 //   daemons reload-account [--dry-run]  reload the account job; exits 1 ("Run: daemons load") when it is not loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
@@ -40,6 +42,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, dispatcherKeys, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys } from './dispatcher-check.mjs';
+import { checkDispatcherConfig, planDispatcherConfig } from './dispatcher-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -56,9 +59,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-keys|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 
@@ -124,6 +127,7 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   if (o.cmd === 'safe-directory') return planSafeDirectory(io, cfg);   // root writes nothing: git runs as the owner
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'token' ? planToken(io, cfg)
+    : o.cmd === 'dispatcher-config' ? planDispatcherConfig(io, cfg)
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
@@ -199,6 +203,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
   const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' ? checkInstall(io, cfg)
+    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;

@@ -21,6 +21,7 @@ import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFI
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
 import { parseConfig } from './layout.mjs';
 import { parseRobot } from './robot-setup.mjs';
+import { DISPATCHER_CONFIG, dispatcherConfigFor, dispatcherConfigText, dispatcherSourcePath, parseDispatcher } from './dispatcher-setup.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
@@ -36,7 +37,7 @@ const KEEP_NAME = /^(?!\.\.?$)[A-Za-z0-9._-]{1,128}$/;
 /** Config for the install and the jobs: the setup config (layout.mjs) plus these keys. */
 export function parseInstallConfig(raw) {
   const base = parseConfig(raw);
-  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot } = raw;
+  const { address, gitBin = '/usr/bin/git', label, runnerConfig, extras = [], nodeBin = realpathSync(process.execPath), robot, dispatcher } = raw;
   if (typeof address !== 'string' || !HTTPS.test(address)) throw new Error('config: address must be the https address of the repository');
   if (!PLAIN_ABS(gitBin)) throw new Error('config: gitBin must be a full path');
   if (typeof label !== 'string' || !LABEL_RE.test(label)) throw new Error('config: label must be letters, digits, . and - (it starts the jobs\' names)');
@@ -45,11 +46,13 @@ export function parseInstallConfig(raw) {
   // A code home's name is main's alone (L257 (B)), in any case (lane 2 on #144: macOS's disk ignores case), and said so.
   const home = Array.isArray(extras) ? extras.find((e) => typeof e === 'string' && MODULE_HOMES.includes(posix.basename(e).toLowerCase())) : undefined;
   if (home) throw new Error(`config: extras must not hold ${home}: ${posix.basename(home)} is the name of a folder of the copy's own code (main's alone)`);
-  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
+  if (!Array.isArray(extras) || extras.length > 20 || extras.some((e) => !PLAIN_ABS(e) || !KEEP_NAME.test(posix.basename(e)) || [...Object.keys(MUST_KEEP), STAMP, UPDATER_CONFIG, RUNNER_CONFIG, ...(dispatcher !== undefined ? [DISPATCHER_CONFIG] : [])].map((n) => n.toLowerCase()).includes(posix.basename(e).toLowerCase()))) {
     throw new Error('config: extras must be full paths of files or folders to carry into the copy (the review runner\'s claude program and its hooks), each with a plain name of its own');
   }
   // The robot job (robot-setup.mjs): on only when asked, and only with its config among the extras.
-  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}) };
+  // The Dispatcher job (dispatcher-setup.mjs): on only with its entry, which names what setup can't know itself.
+  const d = parseDispatcher(dispatcher, base);
+  return { ...base, address, gitBin, label, runnerConfig, extras, nodeBin, ...(parseRobot(robot, extras) ? { robot: true } : {}), ...(d ? { dispatcher: d } : {}) };
 }
 
 export function installPaths(cfg) {
@@ -62,7 +65,7 @@ export function installPaths(cfg) {
 }
 
 /** The entries the install and the jobs put directly under the base, so `check` does not call them strangers (r3 n4). */
-export const rootMadeEntries = (cfg) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy]; };
+export const rootMadeEntries = (cfg) => { const P = installPaths(cfg); return [P.install, P.work, P.logDir, P.accountCopy, dispatcherSourcePath(cfg)]; };
 
 const op = (text, run) => ({ text, run });
 /** Why `p` (a real path outside the prefix) cannot be carried into the copy, or null: it must exist, be a plain file or folder, and hold no link anywhere inside (the copy is root's alone and carries no links). */
@@ -92,7 +95,7 @@ function ownTree(io, p) {
 /** The updater's own config, as the copy keeps it. Paths are the ones the updater will see (io.at). */
 export function updaterConfigFor(io, cfg) {
   const P = installPaths(cfg);
-  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
+  return { installRoot: io.at(P.installRoot), clone: io.at(P.clone), address: cfg.address, keep: ['bin', UPDATER_CONFIG, RUNNER_CONFIG, ...(cfg.dispatcher ? [DISPATCHER_CONFIG] : []), ...cfg.extras.map((e) => posix.basename(e))], gitBin: cfg.gitBin };
 }
 
 /**
@@ -124,6 +127,16 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   // used to fail only after the install had made its folders and run the updater.
   const nodeWhy = io.nodeBinProblem(cfg.nodeBin); if (nodeWhy) problems.push(`nodeBin ${cfg.nodeBin}: ${nodeWhy}. Leave nodeBin out of the config to use the node running this command`);
   for (const e of cfg.extras) { const why = linkProblem(io, e); if (why) problems.push(`the extra ${e}: ${why}`); }
+  // The Dispatcher's config (dispatcher-setup.mjs): written first by dispatcher-config, root's in the base, and still what this setup writes.
+  let dText = null;
+  if (cfg.dispatcher) {
+    const built = dispatcherConfigFor(io, cfg); const src = dispatcherSourcePath(cfg);
+    let st = null; try { st = io.lstat(src); } catch { /* below */ }
+    let have = null; if (st && st.isFile() && !st.isSymbolicLink() && st.uid === io.rootUid && (st.mode & 0o7777) === 0o644 && st.nlink === 1) { try { have = io.readText(src); } catch { /* below */ } }
+    if (built.problems.length) problems.push(...built.problems);
+    else if (have !== dispatcherConfigText(built.config)) problems.push(`${src} is not there, not root's 0644, or not the config this setup writes now: run dispatcher-config first`);
+    else dText = have;
+  }
   if (problems.length) return { ops, problems, installed: false };
 
   const dir = (p, mode, text) => [op(text ?? `mkdir ${p}`, () => { try { io.mkdir(p, 0o700); } catch (e) { if (e.code !== 'EEXIST') throw e; } }), ...rootOwned(io, p, mode, 'dir')];
@@ -135,6 +148,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   const uc = updaterConfigFor(io, cfg);
   ops.push(op(`write ${join(P.seed, UPDATER_CONFIG)}`, () => io.write(join(P.seed, UPDATER_CONFIG), `${JSON.stringify(uc, null, 1)}\n`, 0o644)), ...rootOwned(io, join(P.seed, UPDATER_CONFIG), 0o644));
   ops.push(op(`copy ${cfg.runnerConfig} → ${join(P.seed, RUNNER_CONFIG)}`, () => io.write(join(P.seed, RUNNER_CONFIG), rcText, 0o644)), ...rootOwned(io, join(P.seed, RUNNER_CONFIG), 0o644));
+  if (dText !== null) ops.push(op(`copy ${dispatcherSourcePath(cfg)} → ${join(P.seed, DISPATCHER_CONFIG)}`, () => io.write(join(P.seed, DISPATCHER_CONFIG), dText, 0o644)), ...rootOwned(io, join(P.seed, DISPATCHER_CONFIG), 0o644));
   for (const e of cfg.extras) { const to = join(P.seed, posix.basename(e)); ops.push(op(`copy ${e} → ${to}`, () => { io.copyTree(e, to); ownTree(io, to); })); }
   ops.push(op(`run the updater's first run as root: ${join(P.seed, NODE)} ${join(P.bootstrap, SCRIPTS.updater)} ${join(P.seed, UPDATER_CONFIG)} --first ${P.seed}`, () => {
     const r = runUpdater(io, { node: join(P.seed, NODE), script: join(P.bootstrap, SCRIPTS.updater), config: join(P.seed, UPDATER_CONFIG), seed: P.seed });

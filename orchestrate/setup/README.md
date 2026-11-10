@@ -186,3 +186,33 @@ prepared config as a file named `robot.json`, which the install puts in the copy
 
 Loading it on the always-on Mac is an owner-run step. It waits for the robot's config (the Dispatcher's keys, C) and
 for the passes it runs to be wired.
+
+## Part 6 — the Dispatcher's config and job (R-0b-162; LEAD-CALLS L748, L757)
+
+`dispatcher-setup.mjs`. Off unless the setup config has a `dispatcher` entry, which names what setup can't know itself and
+nothing else: `{ "product": "<one of products>", "productsFile": "<M10's products.json>", "rulesStateDir": "<M10's state
+folder>", "tokenFile": "<orchestrate's read-only GitHub token file>", "approvalsStateDir": "<M2's state folder>" }`, plus an
+optional `runDeadlineMs`. Each path is full and written plainly, outside the install. The entry needs `hostLockPath` too.
+Every other key of the Dispatcher's config setup writes itself, from the layout: the copy and its wiring, the lock
+(`<base>/home/orchestrate/dispatcher.lock`, in orchestrate's home, which only it can write), the Record (`<base>/products/<product>/store`,
+owned by `orchestrate`, whose uid is `ownerUid`), the review runner's requests folder, status file, user and log, and the four
+keys `dispatcher-keys` prints.
+
+| Command | What it does | Root? |
+|---|---|---|
+| `sudo node setup.mjs dispatcher-config` (`--dry-run`) | writes `<base>/dispatcher.json` (root:wheel 0644), every key `wiring/dispatcher-wiring.mjs` takes, and nothing else; once there is an installed copy that keeps it, the copy's `dispatcher.json` as well. Twice does nothing. It closes with a check of both | yes |
+| `sudo node setup.mjs install` | with the entry, refuses unless `<base>/dispatcher.json` is there, root's 0644, and the config this setup writes now; then carries it into the copy, and the updater keeps it on every update (it is one of `keep`), as `review.json` | yes |
+| `sudo node setup.mjs daemons place` / `load` / `check` (also `--only dispatcher`) | a job `<label>.dispatcher`: runs as `orchestrate`, from the installed copy, `modules/M11-dispatcher/main.mjs <copy>/dispatcher.json`, every 60 s and once at load, `HOME` orchestrate's home and `Umask 63`, logs `dispatcher.out.log` / `dispatcher.err.log` (orchestrate's). Built by M11's `loginJobPlist`, as the robot job. `load` refuses, and `check` FAILs, unless the copy's `dispatcher.json` is root's alone and exactly what `dispatcher-config` writes now, and the copy keeps it. With the robot job on, the copy's `robot.json` must name the same Record (product, Record folder and owner, products file, rules state, token file) and the Dispatcher's lock as its `dispatcherLockFile`. `load` also runs check-dispatcher first and refuses on any FAIL in it. A NOT TRIED line (host.lock in a folder macOS guards) does not stop the load, because only the job's own read can prove it. `daemons unload --only dispatcher` works even after the entry is gone | yes |
+
+A copy installed before the entry existed has an updater that does not keep `dispatcher.json`: `dispatcher-config` and
+`check` say so, and the copy must be installed again (unload the jobs, remove `<base>/install`, run `install`).
+
+**On the always-on Mac (owner-run steps):**
+1. Add `hostLockPath` and the `dispatcher` entry to the setup config, and put it in place.
+2. `sudo node setup.mjs users-folders`, then `sudo node setup.mjs dispatcher-config`.
+3. Install (again, if the copy is older than the entry), then `sudo node setup.mjs check-install` and `sudo node setup.mjs check-dispatcher`.
+4. `sudo node setup.mjs daemons place`, then `daemons load`, then `daemons check`.
+5. Prove the job's own read of host.lock: its log must show no "not known" for host.lock. host.lock stays in the synced
+   folder, because the lock between the Macs needs the sync. **If macOS's privacy protection stops the job's read there**,
+   the fallback is a small job of the owner's own that copies host.lock to a plain folder outside the guarded ones, with
+   `hostLockPath` pointing at the copy. It is not built yet.
