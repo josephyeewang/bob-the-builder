@@ -5,12 +5,14 @@
 // another user answers kill(pid, 0) with EPERM, and a pid can be reused, so "dead" is ESRCH, or a different start time.
 //
 //   processDead({ pid, pid_start }, probe?)   → true only when the process is provably gone (check (a) of G1)
-//   pidStart(pid)                              → the process's start time as `ps -o lstart=` prints it, or null
-//   const lock = makeLock({ dir, host, timeoutMs, onBroken })
+//   startTime(pid, { run?, timeoutMs? })       → the process's start time in UTC as "2026-11-10T10:16:00Z", or null
+//   pidStart(pid)                              → startTime(pid): the one start-time reader every recorder and checker uses
+//   machineId()                                → this Mac's hardware id (IOPlatformUUID), read once, or null when it can't be read
+//   const lock = makeLock({ dir, host, machine, timeoutMs, onBroken })
 //   lock.acquire() → { nonce, broke }          // throws 'store busy' after timeoutMs
 //   lock.holds(nonce) → boolean                // re-read before the commit point
 //   lock.release(nonce)
-//   readHolder(dir) → the lock's holder record { pid, pid_start, host, nonce, at } | null (no lock) | { unreadable: true }
+//   readHolder(dir) → the lock's holder record { pid, pid_start, host, machine, nonce, at } | null (no lock) | { unreadable: true }
 //
 // The lock file is written whole before it appears (written to a temp name, then hard-linked into place, which fails if
 // one exists), so a reader never sees an empty lock. A dead holder's lock is broken only while holding `break.lock`, and
@@ -25,12 +27,52 @@ import { join } from 'node:path';
 const SLEEP = new Int32Array(new SharedArrayBuffer(4));
 export function sleepMs(ms) { Atomics.wait(SLEEP, 0, 0, Math.max(1, ms)); }
 
-export function pidStart(pid) {
+// The one start-time reader (L830). ps prints lstart in the Mac's time zone and language, so a time zone change made a live
+// process's start time read differently and its lock or claim look like a reused pid's. Here ps runs in UTC and the C
+// locale, with a time cap, and the answer is turned into one ISO shape that ps itself never prints. A recorded value in
+// that shape is compared exactly; any other recorded value (the local lstart every lock and claim held before L830, or
+// anything unreadable) can't be compared, so it never says "reused" (processDead).
+export const START_PS_MS = 5000;
+export const START_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const START_ENV = Object.freeze({ PATH: '/bin:/usr/bin', TZ: 'UTC0', LC_ALL: 'C' });
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// ps -o lstart= in the C locale, read as UTC: "Tue Nov 10 10:16:00 2026" (the day may be space-padded) → ISO, or null.
+export function lstartIso(text) {
+  const m = /^[A-Z][a-z]{2} ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(String(text ?? '').trim());
+  const mon = m ? MONTHS.indexOf(m[1]) : -1;
+  if (mon < 0) return null;
+  const [d, h, mi, se, y] = [m[2], m[3], m[4], m[5], m[6]].map(Number);
+  const t = new Date(Date.UTC(y, mon, d, h, mi, se));
+  if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mon || t.getUTCDate() !== d || t.getUTCHours() !== h || t.getUTCMinutes() !== mi || t.getUTCSeconds() !== se) return null;
+  return t.toISOString().replace('.000Z', 'Z');
+}
+
+export function startTime(pid, { run = execFileSync, timeoutMs = START_PS_MS } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
-    return out.trim() || null;
+    const out = run('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: timeoutMs, env: START_ENV });
+    return lstartIso(out);
   } catch { return null; }
+}
+
+export function pidStart(pid) { return startTime(pid); }
+
+// This Mac's own id (L826, #364 r1 m5): a lock is "this machine's" when its host name or its machine id matches, so a
+// host name change after a crash (macOS renames on a name clash, or the owner renames the Mac) no longer leaves a dead
+// holder's lock unbreakable for ever. Read once per process; null (no id read) falls back to the host name alone.
+export function readMachineId({ run = execFileSync, read = (p) => readFileSync(p, 'utf8') } = {}) {
+  try {
+    const out = run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: START_PS_MS, env: { PATH: '/usr/sbin:/usr/bin:/bin', LC_ALL: 'C' } });
+    const id = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(String(out))?.[1];
+    if (id) return id;
+  } catch { /* not a Mac, or ioreg can't run: try the other place */ }
+  try { return /^[0-9a-f]{32}$/.exec(read('/etc/machine-id').trim())?.[0] ?? null; } catch { return null; }
+}
+let ownMachine;
+export function machineId() {
+  if (ownMachine === undefined) ownMachine = readMachineId();
+  return ownMachine;
 }
 
 export const realProbe = Object.freeze({
@@ -39,17 +81,18 @@ export const realProbe = Object.freeze({
 });
 
 // (a) of G1. ESRCH means gone; EPERM means alive (another user's process). A live pid whose start time differs from the
-// recorded one is a reused pid, so the recorded process is gone. Anything we can't read counts as alive.
+// recorded one is a reused pid, so the recorded process is gone. Anything we can't read or compare counts as alive.
 export function processDead({ pid, pid_start: recorded } = {}, probe = realProbe) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { probe.kill(pid); } catch (e) {
     if (e?.code === 'ESRCH') return true;
     return false;
   }
-  if (typeof recorded !== 'string' || !recorded) return false;
+  // Only two start times in the one shape can show a reused pid (L830): an older recorded value can't be compared, so alive.
+  if (typeof recorded !== 'string' || !START_ISO.test(recorded)) return false;
   let now;
   try { now = probe.pidStart(pid); } catch { return false; }
-  return typeof now === 'string' && now !== '' && now !== recorded;
+  return typeof now === 'string' && START_ISO.test(now) && now !== recorded;
 }
 
 let ownStart;
@@ -76,13 +119,19 @@ export function readHolder(dir) { return readJson(join(dir, 'lock')); }
 
 // The one test of a dead holder: one on this host whose process is gone. makeLock breaks only such a lock; the alert
 // channel uses the same test to see that a lock is no one's, and leaves breaking it to the store (lane 1's review).
-export function holderDead(h, { host = hostname(), probe = realProbe } = {}) { return !!h && !h.unreadable && h.host === host && processDead(h, probe); }
+export function holderDead(h, { host = hostname(), machine = machineId(), probe = realProbe } = {}) {
+  return !!h && !h.unreadable && onThisMachine(h, { host, machine }) && processDead(h, probe);
+}
+// A holder is this machine's when its host name matches, or its machine id does (L826): only a process here can be probed.
+export function onThisMachine(h, { host, machine }) {
+  return h?.host === host || (typeof h?.machine === 'string' && h.machine !== '' && typeof machine === 'string' && h.machine === machine);
+}
 
-export function makeLock({ dir, host = hostname(), timeoutMs = 10000, probe = realProbe, disabled = false } = {}) {
+export function makeLock({ dir, host = hostname(), machine = machineId(), timeoutMs = 10000, probe = realProbe, disabled = false } = {}) {
   const path = join(dir, 'lock');
   const breakPath = join(dir, 'break.lock');
-  const isDead = (h) => holderDead(h, { host, probe });
-  const me = () => ({ pid: process.pid, pid_start: ownPidStart(), host, nonce: randomBytes(12).toString('hex'), at: new Date().toISOString() });
+  const isDead = (h) => holderDead(h, { host, machine, probe });
+  const me = () => ({ pid: process.pid, pid_start: ownPidStart(), host, ...(machine ? { machine } : {}), nonce: randomBytes(12).toString('hex'), at: new Date().toISOString() });
 
   function tryBreak(found) {
     const mine = me();
