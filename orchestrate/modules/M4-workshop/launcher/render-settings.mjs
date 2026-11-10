@@ -59,6 +59,8 @@ const denyPair = (p) => [`Read(/${abs(p)}/**)`, `Edit(/${abs(p)}/**)`];
 /** The rules that keep the Bob folder read-only. The one source for both the renderer and launch check 13 (L750), so
  *  the form check 13 looks for is the form written. */
 export const bobFolderDeny = (folder) => [`Edit(/${abs(folder)}/**)`, `Write(/${abs(folder)}/**)`];
+/** The shell sandbox's write wall on the Bob folder (L763): the folder and everything in it. */
+export const bobFolderShell = (folder) => [folder, `${folder}/**`];
 
 /** The worker runner's folders (L751): its requests folder and its status file's folder, or a refusal. */
 export function runnerWallDirs(workerRunner) {
@@ -223,7 +225,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? [paths.bobFolder, `${paths.bobFolder}/**`] : []), ...runnerDirs.flatMap(runnerWallShell), ...walls] },
+      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },

@@ -9,7 +9,7 @@ import { join, relative, sep } from 'node:path';
 import { sha256 } from './role-profiles.mjs';
 import { SETTINGS as S, unconfirmedNames } from './settings-names.mjs';
 import { hasShell } from './role-profiles.mjs';
-import { checkSettings, bobFolderDeny } from './render-settings.mjs';
+import { checkSettings, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
 import { REVIEW_ROLES, reviewUser } from './review-user.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -144,6 +144,9 @@ export function checkBobFolder({ folder, manifest, settings }) {
   const deny = settings?.[S.permissions]?.[S.deny] ?? [];
   // The rules exactly as render-settings writes them (L750: they were read in a one-slash form it never writes).
   if (!bobFolderDeny(folder).every((r) => deny.includes(r))) return refuse('the Bob folder is not attached read-only');
+  // The shell's wall too (L763): a tools-only deny leaves the folder writable from the shell.
+  const shellWrite = settings?.[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
+  if (!bobFolderShell(folder).every((r) => shellWrite.includes(r))) return refuse('the Bob folder is not walled off from the shell\'s writes');
   return { ok: true };
 }
 
