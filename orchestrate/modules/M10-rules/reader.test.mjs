@@ -243,13 +243,24 @@ test('an unknown product, and a malformed products list, deny', () => {
     // L309 Minor 1: a name names a folder: it starts with a letter or digit, and two names differing in case are one.
     '[{"product":"..","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":".","owner":"o","repo":"r","joe_github_id":1}]',
     '[{"product":".app","owner":"o","repo":"r","joe_github_id":1}]', '[{"product":"-app","owner":"o","repo":"r","joe_github_id":1}]',
-    '[{"product":"App","owner":"o","repo":"r","joe_github_id":1},{"product":"app","owner":"o","repo":"r2","joe_github_id":1}]',
+    '[{"product":"app","owner":"o","repo":"r","joe_github_id":1},{"product":"app","owner":"o","repo":"r2","joe_github_id":1}]',
     '[{"product":"a","owner":"o","repo":"r","joe_github_id":1},{"product":"a","owner":"o","repo":"r","joe_github_id":1}]']) {
     writeFileSync(f, bad);
     assert.throws(() => readProducts(f), bad);
   }
   writeFileSync(f, JSON.stringify([PRODUCT]));
   assert.equal(readProducts(f)[0].repo, 'sample-app');
+  // L867: the runner's one product form. A name it can't make folders for is refused here, and says why.
+  const one = (product) => JSON.stringify([{ product, owner: 'o', repo: 'r', joe_github_id: 1 }]);
+  for (const bad of ['App', 'my_app', 'my.app', 'a'.repeat(65)]) {
+    writeFileSync(f, one(bad));
+    assert.throws(() => readProducts(f), /a product name is lower-case letters, digits and -/, bad);
+  }
+  for (const role of ['worker', 'script', 'lead']) {
+    writeFileSync(f, one(role));
+    assert.throws(() => readProducts(f), /may not be named as a role/, role);
+  }
+  for (const good of ['my-app', 'a1', 'a'.repeat(64)]) { writeFileSync(f, one(good)); assert.equal(readProducts(f)[0].product, good); }
 });
 
 test('an alert sink that throws does not change the answer', async () => {

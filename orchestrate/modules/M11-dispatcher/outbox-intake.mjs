@@ -440,7 +440,8 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const claim = put({ state: 'applying' }, 'outbox_claim');
     if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
     let applied;
-    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card, ...(isPlan ? { checked_sha256: hash } : {}) }, path); }
+    // The session's product, so the Record finds the outbox in that product's own folder (L865, L836).
+    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card, ...(s.product ? { product: s.product } : {}), ...(isPlan ? { checked_sha256: hash } : {}) }, path); }
     catch (e) { applied = { ok: false, reason: e.message }; }
     // L140: a kind with no record rule is handled, not refused, so it is no alert.
     if (notARecord(applied)) applied = { ok: true, not_a_record: true };
