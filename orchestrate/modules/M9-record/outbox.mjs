@@ -1,8 +1,8 @@
 // outbox.mjs — read one AI session's outbox file safely (0b-2 M-3, R2-M8, R2-M9, R2-M10, R3-m7).
 //
-// WHY. AI sessions never write the record. They drop files in their own outbox, `<outboxRoot>/<role>/<sessionId>/`, or
-// `<outboxRoot>/<product>/<role>/<sessionId>/` for a worker runner session whose tag names its product (L836; the one
-// definition is shared outboxFolders), and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
+// WHY. AI sessions never write the record. They drop files in their own outbox: `<outboxRoot>/<product>/<role>/<sessionId>/`
+// for a worker runner session (PRODUCT_OUTBOX_ROLES; its tag must name the product, L836, L895 m1), and
+// `<outboxRoot>/<role>/<sessionId>/` for every other role (the one definition is shared outboxFolders), and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
 //   - the role and session come from where the file really is (realpath), never from what it says;
 //   - it is opened without following a link, and must be a plain file owned by the role's user, ≤ 256 KB, so a link to a
 //     key file can't be copied into the record; in a worker's outbox it must have one name, and in review's it may have

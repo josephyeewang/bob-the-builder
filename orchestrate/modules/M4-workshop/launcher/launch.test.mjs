@@ -597,6 +597,27 @@ test('L101: check 7 refuses a compaction hook that keeps a Lead\'s note in its o
   assert.equal(k.check().ok, true);
 });
 
+// The apart path card: a notes folder spelled through `..` into the outbox is refused, though its letters look apart.
+test('apart path card: check 7 refuses a compaction hook whose notes folder is the outbox spelled through ..', () => {
+  const w = hookWorld('lead');
+  const swap = (fn) => {
+    const s = structuredClone(w.settings);
+    for (const ev of [E.preCompact, E.postCompact, E.sessionStart]) for (const e of s[S.hooks][ev] ?? []) for (const h of e[H.hooks]) h[H.command] = fn(h[H.command]);
+    return s;
+  };
+  // A repeated flag: the hook's parser keeps the last, the check read the first (#420 r1 m1).
+  for (const k of ['notes', 'outbox', 'kind', 'kinds']) {
+    const s = swap((c) => c.replace(new RegExp(` --${k} (\\S+)`), (m) => `${m}${m}`));
+    assert.notDeepEqual(s, w.settings, `the Lead's compaction hooks give --${k}`);
+    assert.match(w.check({ settings: s }).reason ?? '', new RegExp(`gives --${k} more than once`), k);
+  }
+  const twice = swap((c) => c.replace(/ --notes \S+/, (m) => `${m} --notes ${w.outbox}`));
+  assert.match(w.check({ settings: twice }).reason ?? '', /gives --notes more than once/);
+  const cut = w.outbox.lastIndexOf('/');
+  const dotted = `${w.outbox.slice(0, cut)}/notes/..${w.outbox.slice(cut)}`;
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${dotted}`)) }).reason, /not apart from the outbox/);
+});
+
 test('check 7: for each of the five hooks, a missing, unreadable, failing, odd-answering, always-passing or slow script refuses', () => {
   const broken = {
     'exit 1': 'process.exit(1);\n',

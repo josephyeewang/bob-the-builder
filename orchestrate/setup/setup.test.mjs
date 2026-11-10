@@ -193,11 +193,12 @@ test('M9\'s own reader reads the table\'s paths: one worker file and one verdict
   const mac = applied();
   const me = process.getuid();
   const root = mac.at(P('outboxes'));
-  const put = (role, sid, name, text) => { const d = join(root, role, sid); mkdirSync(d, { recursive: true }); const f = join(d, name); writeFileSync(f, text, { mode: 0o644 }); chmodSync(f, 0o644); return f; };
-  const workerFile = put('worker', 'sess-1', 'report-x.md', 'a report\n');
-  const w = readOutboxFile({ outboxRoot: root, uids: { worker: me, reviewer: me + 1, auditor: me + 1 }, tag: { role: 'worker', sessionId: 'sess-1' }, file: workerFile });
+  const put = (dir, name, text) => { const d = join(root, ...dir); mkdirSync(d, { recursive: true }); const f = join(d, name); writeFileSync(f, text, { mode: 0o644 }); chmodSync(f, 0o644); return f; };
+  // A worker's outbox is in its product's folder (L836, L895 m1); a reviewer's is flat.
+  const workerFile = put(['alpha', 'worker', 'sess-1'], 'report-x.md', 'a report\n');
+  const w = readOutboxFile({ outboxRoot: root, uids: { worker: me, reviewer: me + 1, auditor: me + 1 }, tag: { role: 'worker', product: 'alpha', sessionId: 'sess-1' }, file: workerFile });
   assert.equal(w.ok, true, w.reason);
-  const verdictFile = put('reviewer', 'sess-2', 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', fields: {} })}\nbody\n`);
+  const verdictFile = put(['reviewer', 'sess-2'], 'verdict-1.md', `${JSON.stringify({ entity: 'verdict', fields: {} })}\nbody\n`);
   chmodSync(join(root, 'reviewer', 'sess-2'), 0o755);
   const v = readOutboxFile({ outboxRoot: root, uids: { worker: me + 1, reviewer: me, auditor: me }, tag: { role: 'reviewer', sessionId: 'sess-2' }, file: verdictFile });
   assert.equal(v.ok, true, v.reason);
