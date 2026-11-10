@@ -137,7 +137,7 @@ test('R-0b-140: a flag a worker typed, or words found in a file, open nothing', 
   // A worker can't even hand the file in: the record takes ask requests only from the Front Door and incident roles.
   const w = m2env(); merged(w);
   const f = outboxFile('ask-request', '20261103-0915-uw', { ask: 'undo', product: PRODUCT, pr: 41, brief: WORDS });
-  assert.equal(w.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'W-1' }, m9file(w, 'worker', 'W-1', f.name, f.text)).ok, false);
+  assert.match(w.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'W-1' }, m9file(w, 'worker', 'W-1', f.name, f.text)).reason, /not listed for worker/);
   assert.deepEqual((await openUndoFlags(w.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded })).opened, []);
   // saidByOwner: typed or answered turns only.
   assert.equal(saidByOwner(null, WORDS), false);
