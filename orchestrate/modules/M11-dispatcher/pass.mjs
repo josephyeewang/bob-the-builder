@@ -79,10 +79,13 @@ const iso = (ms) => new Date(ms).toISOString();
 // STEP_DEADLINE_MS (tick.mjs).
 export const PORT_DEADLINE_MS = 30_000;
 export const SAVE_DEADLINE_MS = 75_000;
+// `f` gets an AbortSignal that is aborted when guarded gives up on it (L822, #372 m2), so a port that honours it (a
+// stop, say) does nothing more once its answer no longer counts. A port that ignores it is unchanged.
 export async function guarded(f, ms = PORT_DEADLINE_MS) {
   let timer;
-  const late = new Promise((ok) => { timer = setTimeout(() => ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }), ms); });
-  try { return await Promise.race([Promise.resolve().then(f), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
+  const giveUp = new AbortController();
+  const late = new Promise((ok) => { timer = setTimeout(() => { giveUp.abort(); ok({ ok: false, timedOut: true, reason: `it did not answer within ${ms} ms` }); }, ms); });
+  try { return await Promise.race([Promise.resolve().then(() => f(giveUp.signal)), late]); } catch (e) { return { ok: false, reason: e?.message ?? String(e) }; } finally { clearTimeout(timer); }
 }
 
 /**
@@ -150,13 +153,27 @@ export function refusalReport({ rec, alert, now, lines, failureLog = () => {} })
   };
 }
 
-/** Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. */
-export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS }) {
+/**
+ * Stops a process group: SIGTERM, then SIGKILL if still alive after 10 s. Ports for tests. `signal` (an AbortSignal,
+ * L822): a caller that gives up on the stop (a port limit, say) aborts it, and no signal is sent after that, so a stop
+ * it abandoned can't SIGKILL a group later. An aborted stop answers { ok: false, reason: 'abandoned' }: the caller
+ * gave up, which says nothing about whether the group still runs (#372 c2). A group seen gone after SIGTERM is still
+ * answered { ok: true, how: 'SIGTERM' }, even when the abort came at the same step. An abort during a `sleep` takes
+ * effect when that sleep ends (the sleep is the caller's, and is not cut short; #372 c1).
+ */
+export async function stopProcessGroup({ pgid, kill = (p, s) => process.kill(-p, s), alive, sleep, waitMs = TERM_WAIT_MS, signal }) {
   if (!Number.isInteger(pgid) || pgid <= 1) return { ok: false, reason: 'no process group to stop' };
+  const abandoned = { ok: false, reason: 'abandoned' };
+  if (signal?.aborted) return abandoned;
   // Any other error (EPERM, say) is an answer, not a throw (audit 0b-6 r2 MAT-7): one session must not end the pass.
   try { kill(pgid, 'SIGTERM'); } catch (e) { if (e.code === 'ESRCH') return { ok: true, how: 'gone' }; return { ok: false, reason: e.code ?? e.message }; }
-  for (let t = 0; t < waitMs; t += 500) { if (!alive(pgid)) return { ok: true, how: 'SIGTERM' }; await sleep(500); }
+  for (let t = 0; t < waitMs; t += 500) {
+    if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+    if (signal?.aborted) return abandoned;
+    await sleep(500);
+  }
   if (!alive(pgid)) return { ok: true, how: 'SIGTERM' };
+  if (signal?.aborted) return abandoned;
   try { kill(pgid, 'SIGKILL'); } catch (e) { if (e.code !== 'ESRCH') return { ok: false, reason: e.code ?? e.message }; }
   return { ok: true, how: 'SIGKILL' };
 }
@@ -278,7 +295,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
     if (!atSafePoint({ role: roleOf(s), size: p?.size, activity: p?.activity }) && !late) { out.stopping.push([s.id, pending.reason]); continue; }
     due.push({ s, pending, late });
   }
-  const answers = await Promise.all(due.map(({ s }) => guarded(() => stopGroup(s), portDeadlineMs)));
+  const answers = await Promise.all(due.map(({ s }) => guarded((signal) => stopGroup(s, { signal }), portDeadlineMs)));
   const done = [];
   const failed = [];
   due.forEach((d, i) => {
@@ -357,7 +374,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
- *   stopGroup(s) -> { ok, how }      (stopProcessGroup on the session's group)
+ *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
@@ -749,9 +766,10 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // A worker with the wrong outbox, or none, can hand in nothing that is its own, so it does not run (#219 audit M-1,
     // m-1): the session is stopped, and only then is the claim given back, since a session that may still be running
     // must keep its card claimed or a second one would start.
-    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot });
+    // Under the role the session runs (L767: a script card's outbox is <root>/script/<id>).
+    const outboxWrong = workerOutboxProblem(l.outbox, sessionId, { root: outboxRoot, role: startRole(kind) });
     if (outboxWrong) {
-      const stopped = await guarded(() => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }), portDeadlineMs);
+      const stopped = await guarded((signal) => stopGroup({ id: sessionId, product, kind, card: id, pgid: l.pgid, signin: l.signin ?? null, config_dir: l.configDir ?? null }, { signal }), portDeadlineMs);
       const back = stopped?.ok ? rec.release({ card: id, session_id: sessionId, reason: `launcher: its outbox ${outboxWrong}` }) : null;
       const then = !stopped?.ok ? `it could not be stopped (${stopped?.reason ?? 'no answer'}), so the card stays claimed and cannot start twice; it lapses at claims.unlaunched_min once its session is stopped`
         : !back?.ok ? `it was stopped, but its claim could not be given back (${back?.reason ?? 'no answer'}); it lapses at claims.unlaunched_min`

@@ -70,9 +70,14 @@ export function readMachineId({ run = execFileSync } = {}) {
     return /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/.exec(String(out))?.[1] ?? null;
   } catch { return null; }
 }
-let ownMachine;
-export function machineId() {
-  if (ownMachine === undefined) ownMachine = readMachineId();
+// A failed read (ioreg slow or missing) is remembered for OWN_RETRY_MS, as ownPidStart does, then tried again; a read id is kept.
+let ownMachine = null;
+let machineFailedAt = -Infinity;
+export function machineId({ read = readMachineId, now = Date.now } = {}) {
+  if (ownMachine === null && now() - machineFailedAt >= OWN_RETRY_MS) {
+    ownMachine = read();
+    if (ownMachine === null) machineFailedAt = now();
+  }
   return ownMachine;
 }
 

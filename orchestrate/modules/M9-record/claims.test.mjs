@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pidStart, realProbe, sleepMs } from './lock.mjs';
+import { machineId, pidStart, realProbe, sleepMs } from './lock.mjs';
 import { openRecord } from './writer.mjs';
 import { PRODUCT, UID, claimOnly, iso, must, product, put, readyCard, runCard, claimCard, rulesFor, seed, sessionClaim, setup } from './fixtures.test-helper.mjs';
 
@@ -324,19 +324,32 @@ test('L845: a claim from this Mac under its old host name is broken; another Mac
   session(env, 'S-4', { state: 'ended', ago: 600 });
   assert.equal(env.record.read('card', 'C-1').doc.claim.machine, 'MAC-A-ID', 'the claim keeps its machine id');
   must(env.record.breakIfDead({ card: 'C-1' }), 'this Mac, renamed: broken');
-  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /host mac-b; never broken from here/, 'another Mac');
-  assert.match(env.record.breakIfDead({ card: 'C-3' }).reason, /host mac-b; never broken from here/, 'an old claim with no id, another host');
+  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /another Mac \(host mac-b[^)]*\); never broken from here/, 'another Mac');
+  assert.match(env.record.breakIfDead({ card: 'C-3' }).reason, /another Mac \(host mac-b[^)]*\); never broken from here/, 'an old claim with no id, another host');
   must(env.record.breakIfDead({ card: 'C-4' }), 'an old claim with no id, this host: broken, as before');
   // #379 r1 m2: the same host name with another machine id is another Mac: never broken from here.
   runCard(env, 'C-5', sessionClaim({ host: 'mac-a', machine: 'MAC-B-ID', session_id: 'S-5' }));
   session(env, 'S-5', { state: 'ended', ago: 600 });
-  assert.match(env.record.breakIfDead({ card: 'C-5' }).reason, /host mac-a; never broken from here/, 'same name, another Mac');
+  assert.match(env.record.breakIfDead({ card: 'C-5' }).reason, /another Mac \(host mac-a[^)]*\); never broken from here/, 'same name, another Mac');
   // A Mac whose own id could not be read never matches a claim that has none.
   const env2 = setup({ prefix: 'm9-claim-', probe: fakeProbe({ dead: [4242] }), extra: { machine: null } });
   board(env2);
   runCard(env2, 'C-1', sessionClaim({ host: 'mac-b', session_id: 'S-1' }));
   session(env2, 'S-1', { state: 'ended', ago: 600 });
-  assert.match(env2.record.breakIfDead({ card: 'C-1' }).reason, /host mac-b; never broken from here/);
+  assert.match(env2.record.breakIfDead({ card: 'C-1' }).reason, /another Mac \(host mac-b[^)]*\); never broken from here/);
+});
+
+test('L845 (#389 r1): a Record opened with no machine option uses this Mac\'s own id, so a renamed Mac\'s dead claim still breaks', (t) => {
+  const own = machineId();
+  if (!own) return t.skip('no machine id can be read here');
+  const env = setup({ prefix: 'm9-claim-', probe: fakeProbe({ dead: [4242] }) });
+  board(env, ['C-1', 'C-2']);
+  runCard(env, 'C-1', sessionClaim({ host: 'old-name', machine: own, session_id: 'S-1' }));
+  session(env, 'S-1', { state: 'ended', ago: 600 });
+  runCard(env, 'C-2', sessionClaim({ host: 'old-name', machine: `${own}-other`, session_id: 'S-2' }));
+  session(env, 'S-2', { state: 'ended', ago: 600 });
+  must(env.record.breakIfDead({ card: 'C-1' }), 'this Mac, renamed, by its own id');
+  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /another Mac \(host old-name, machine /, 'another id: never');
 });
 
 test('L845: a claim\'s machine, when given, is a non-empty text; nothing else joins it at claimed -> running', () => {
@@ -358,7 +371,7 @@ test('G1: no session record, another host, or no stuck_min in the rules: nothing
   assert.match(env.record.breakIfDead({ card: 'C-1' }).reason, /no session record/);
   runCard(env, 'C-2', sessionClaim({ host: 'mac-b', session_id: 'S-2' }));
   session(env, 'S-2', { state: 'ended', ago: 600 });
-  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /host mac-b; never broken from here/);
+  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /another Mac \(host mac-b[^)]*\); never broken from here/);
   const env2 = setup({ prefix: 'm9-g1-', probe: fakeProbe({ dead: [4242] }), values: { 'claims.stuck_min': undefined } });
   board(env2);
   runCard(env2, 'C-1');

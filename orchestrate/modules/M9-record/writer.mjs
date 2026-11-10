@@ -616,7 +616,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
         // This Mac's claim when its host name or its machine id matches (L845, as for locks); an older claim with no id: host only.
-        if (!onThisMachine(claim, { host, machine })) return no(`claim is from host ${claim.host}; never broken from here`);
+        if (!onThisMachine(claim, { host, machine })) return no(`claim is from another Mac (host ${claim.host}${claim.machine ? `, machine ${claim.machine}` : ''}); never broken from here`);
         if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
         const stuckMin = num('claims.stuck_min');
         if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');

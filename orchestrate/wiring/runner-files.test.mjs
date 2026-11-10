@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, closeSync, linkSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fchmodSync, linkSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { REQUEST_MAX_BYTES, readRequest, writeStatus } from './runner-files.mjs';
@@ -39,7 +39,7 @@ test('L763: a failed write leaves the old status and no temp file', () => {
   const d = dir();
   try {
     const f = join(d, 'status.json'); writeStatus(f, 'old\n');
-    const fs = { openSync, writeSync, closeSync, renameSync, unlinkSync, fsyncSync: () => { throw new Error('disk full'); } };
+    const fs = { openSync, writeSync, fchmodSync, closeSync, renameSync, unlinkSync, fsyncSync: () => { throw new Error('disk full'); } };
     assert.throws(() => writeStatus(f, 'new\n', { fs, tag: () => 't2' }), /disk full/);
     assert.equal(readFileSync(f, 'utf8'), 'old\n');
     assert.deepEqual(readdirSync(d), ['status.json']);
@@ -88,9 +88,21 @@ test('step 2 review m1: a failed rename closes the new file once, never twice, a
   try {
     const f = join(d, 'status.json'); writeStatus(f, 'old\n');
     const closes = [];
-    const fs = { openSync, writeSync, fsyncSync: () => {}, unlinkSync, closeSync: (fd) => { closes.push(fd); closeSync(fd); }, renameSync: () => { throw new Error('EXDEV'); } };
+    const fs = { openSync, writeSync, fchmodSync, fsyncSync: () => {}, unlinkSync, closeSync: (fd) => { closes.push(fd); closeSync(fd); }, renameSync: () => { throw new Error('EXDEV'); } };
     assert.throws(() => writeStatus(f, 'new\n', { fs, tag: () => 't3' }), /EXDEV/);
     assert.equal(closes.length, 1, `closed ${JSON.stringify(closes)}`);
     assert.deepEqual(readdirSync(d), ['status.json']); assert.equal(readFileSync(f, 'utf8'), 'old\n');
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('step 5: the status gets the mode asked for whatever the umask (the runner\'s job runs under umask 077)', () => {
+  const d = dir();
+  const was = process.umask(0o077);
+  try {
+    const f = join(d, 'status.json'); const m = join(d, 'memory.json');
+    writeStatus(f, '{}\n');
+    writeStatus(m, '{}\n', { mode: 0o600 });
+    assert.equal(statSync(f).mode & 0o777, 0o644, 'the Dispatcher can read the status');
+    assert.equal(statSync(m).mode & 0o777, 0o600);
+  } finally { process.umask(was); rmSync(d, { recursive: true, force: true }); }
 });
