@@ -139,7 +139,9 @@ export function sensorsPorts({ file, ownerUid, now = () => new Date(), staleMs =
   // row it came from (L746 r3 self-review): M11 reads the week alone, so a change of row must not start it afresh.
   const marksOf = (account, slot) => {
     const out = []; const m = seen.get(`${account}|${slot}`); if (m) out.push(m);
-    let d = null; try { d = stored(account); } catch { d = null; }
+    // Stored marks that can't be read are never taken as none (that would let a forged low reading through): the read
+    // fails, and the usage writer hands the stored reading on, or refuses when it can't read it either.
+    let d = null; try { d = stored(account); } catch (e) { throw new Error(`the stored usage marks could not be read (${String(e?.message ?? e).slice(0, 80)})`); }
     const sw = slot === 'session' ? d?.h5 : d?.week;
     const r = Date.parse(sw?.resets_at ?? '');
     if (sw && Number.isFinite(r) && Number.isFinite(sw.used_pct)) out.push({ resets: r, pct: sw.used_pct });

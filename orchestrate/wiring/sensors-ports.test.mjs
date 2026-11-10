@@ -412,4 +412,22 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
     d = rec.read('fact', USAGE_FACT('a')).doc; assert.deepEqual([d.h5.used_pct, d.h5.resets_at, d.week.used_pct], [null, null, 95]);
     assert.equal(d.observed_at, new Date(T0).toISOString(), 'the week still handed on keeps the first time');
   });
+  test('L757 M-1: a stored usage fact that cannot be read is never taken as none (nothing is written over it)', async () => {
+    const rec = memoryRecord();
+    const w = makeFactWriter(rec, { now: () => new Date(T0) });
+    assert.equal((await writeUsageFact(w, async () => ({ source: 's', ...real }), 'a', { now: () => new Date(T0) })).ok, true);
+    const before = rec.read('fact', USAGE_FACT('a'));
+    const broken = { ...w, get: () => { throw new Error('record read failed'); } };
+    const r = await writeUsageFact(broken, async () => ({ source: null, h5: null, week: null }), 'a', { now: () => new Date(T0 + 60e3) });
+    assert.equal(r.ok, false); assert.match(r.reason, /could not be read, so nothing was written over it/);
+    assert.deepEqual(rec.read('fact', USAGE_FACT('a')), before, 'the stored fact is untouched');
+  });
+  test('L757 M-1: stored marks that cannot be read let no reading through (the read fails; it is not checked against nothing)', async () => {
+    const dir = tempDir('orch-l757m-'); chmodSync(dir, 0o755); const file = join(dir, ANSWER_FILE);
+    try {
+      assert.equal(writeAnswer({ to: file, answer: { v: 1, account: 'a', signed_in: true, observed_at: new Date(T0).toISOString(), usage: { h5: H(5), week: W(5), week_from: 'weekly_all' } } }).ok, true);
+      const q = sensorsPorts({ file, ownerUid: UID, now: () => new Date(T0), acl: noAcl, stored: () => { throw new Error('record read failed'); } });
+      await assert.rejects(q.readUsage('a'), /the stored usage marks could not be read \(record read failed\)/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 }

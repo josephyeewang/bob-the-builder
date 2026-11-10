@@ -61,7 +61,10 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
   let observed_at = relayed(started, r.observed_at);
   if (!observed_at) return { ok: false, reason: `the usage reading for ${account} has an observed_at that is not a time` };
   const win = (w) => ({ used_pct: w?.used_pct ?? null, resets_at: w?.resets_at ?? null });
-  let stored = null; try { stored = typeof writer.get === 'function' ? writer.get(USAGE_FACT(account)) : null; } catch { stored = null; }
+  // A stored fact that can't be read is never taken as none: that would write over the marks (self-review Minor).
+  let stored = null; try { stored = typeof writer.get === 'function' ? writer.get(USAGE_FACT(account)) : null; } catch (e) {
+    return { ok: false, reason: `the stored usage for ${account} could not be read, so nothing was written over it (${String(e?.message ?? e).slice(0, 80)})` };
+  }
   const at = Date.parse(started);
   const open = (w) => known(w) && Date.parse(w.resets_at) > at;
   const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
