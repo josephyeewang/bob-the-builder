@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
@@ -436,4 +436,23 @@ test('L744 3: cleanupPass reads a missing copies folder as nothing to do, and fa
   } finally { chmodSync(shut, 0o755); }
   const file = join(dir, 'a-file'); writeFileSync(file, 'x');
   await assert.rejects(cleanupPass(args(file)), /the copies folder could not be read \(ENOTDIR\)/);
+});
+
+// L755 (audit #311/314/315 r1 m2): the seal folder, as L744 3 the copies folder. Missing is nothing to sweep; one that can't
+// be read fails the step (the tick tells it), never "nothing to sweep", and never before a stale staging folder is seen.
+test('L755: sweepStaging reads a missing seal folder as nothing to do, and fails on one it cannot read', { skip: process.getuid?.() === 0 ? 'root reads any folder' : false }, async () => {
+  const dir = tempDir('m11-l755-');
+  const copies = join(dir, 'copies'); mkdirSync(copies);
+  const args = (sealRoot) => ({ rec: recWith(), rules: R, now: T0, copiesRoot: copies, sealRoot, mirrorFor: () => null, alert: fakeAlert() });
+  assert.deepEqual(sweepStaging(join(dir, 'none'), T0), []);
+  assert.deepEqual(await cleanupPass(args(join(dir, 'none'))), []);
+  const seal = join(dir, 'seal');
+  mkdirSync(join(seal, '.staging-old'), { recursive: true });
+  chmodSync(seal, 0o000);
+  try {
+    assert.throws(() => sweepStaging(seal, T0), /the seal folder could not be read \(EACCES\)/);
+    await assert.rejects(cleanupPass(args(seal)), /the seal folder could not be read \(EACCES\)/);
+  } finally { chmodSync(seal, 0o755); }
+  const file = join(dir, 'a-file'); writeFileSync(file, 'x');
+  await assert.rejects(cleanupPass(args(file)), /the seal folder could not be read \(ENOTDIR\)/);
 });

@@ -127,6 +127,8 @@ export function stopInAccount({ home, stopIn }) {
  * The Leads over both folders. Each Lead's `stopSession()` stops it through its own folder (`stopSession(ctx)`), and its
  * `startLead(x)` starts the next one in the account in use (`startLead(x, ctx)`), so a Lead restarted after a switch
  * comes back on the account in use.
+ * Caller hazard (L778): when any folder's `listIn` is async, this returns a Promise, but the tick reads `leads()` at
+ * once (`for (const l of p.leads())`) and a Promise there throws. A folder's Lead list must be synchronous.
  */
 export function acrossLeads({ home, listIn }) {
   const list = acrossAccounts({ home, listIn, idOf: (l) => l?.lead?.sessionId, what: 'Leads' });
@@ -157,6 +159,8 @@ export function frontDoorPorts({ home, aliveIn, restartIn, stopIn }) {
   };
   const frontDoorAlive = () => {
     const u = inUse(home);
+    // Caller hazard (L778): an account in use that can't be read answers a silent null, not the error L63 m1 asks for
+    // above, so the phone step neither restarts nor tells. Left as it is until the phone ports are wired.
     if (!u.ctx) return null;
     const here = ask(u.ctx.signin);
     if (here === true) return true;

@@ -5,3 +5,8 @@
 // Dispatcher or the launcher's own user.
 
 export const REVIEW_ROLES = Object.freeze(['reviewer', 'auditor']);
+// The plan reviewer (L683, L688) reads one Tier-1 card's plan before its go. It runs as the review user, started by the
+// review runner, so a worker can't write its answer; but its answer is a plan check, never a verdict, so it stays out of
+// REVIEW_ROLES: nothing it writes can count toward a merge. RUNNER_ROLES is every role the runner starts.
+export const PLAN_REVIEW_ROLE = 'plan_reviewer';
+export const RUNNER_ROLES = Object.freeze([...REVIEW_ROLES, PLAN_REVIEW_ROLE]);

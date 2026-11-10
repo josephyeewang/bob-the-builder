@@ -2,14 +2,15 @@
 //
 // A role writes plain files only: never a tool or setup file (git, editor, package-manager, hook
 // or Claude config), and in its outbox only a flat file named `<kind><id>.md|json|txt` of one of
-// its own kinds. The Lead, Front Door, thinking room and Learning write nowhere but the outbox;
+// its own kinds, or one of its exact files (--files, the plan reviewer's answer.txt). The Lead, Front Door, thinking
+// room, Learning and the plan reviewer write nowhere but the outbox;
 // other roles write only inside their code copy (--copy) or the outbox.
 
 import { basename, dirname, sep } from 'node:path';
 import { isMain, runHook, block, pass, landingPath, inside, realFolder, linkedFile, fold, oddPath } from './lib.mjs';
 import { kindAmong } from './outbox-kind.mjs';
 
-export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning']);
+export const OUTBOX_ONLY_ROLES = Object.freeze(['lead', 'front_door', 'thinking', 'learning', 'plan_reviewer']);
 
 // Folder names that hold tool settings, anywhere in a path (lower-cased compare).
 const SETUP_FOLDERS = ['.git', '.claude', '.vscode', '.idea', '.husky', '.devcontainer', '.config'];
@@ -55,6 +56,8 @@ export function decide(input, args) {
   if (inside(p, outbox)) {
     if (dirname(p) !== outbox) return block('outbox files must sit directly in the outbox');
     const name = basename(p);
+    // One of the role's exact files (--files): the plan reviewer's answer.txt, its only write (L710).
+    if ((args.files ?? []).includes(name)) return pass();
     if (!OUTBOX_NAME.test(name)) return block(`"${name}" is not an outbox file name`);
     if (!kindIn(name, args.kinds, args.notKinds)) return block(`the ${args.role} role may not hand in "${name}"`);
     return pass();
