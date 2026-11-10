@@ -643,6 +643,21 @@ test('link card: checkRunnerWall refuses a session folder that is a link, or one
   assert.deepEqual(wall({ ...own, node: join(d, 's', 'node-out') }), { ok: true });
   assert.match(wall({ ...own, node: join(d, 's', 'node-in') }).reason ?? '', /node-in resolves to .*fake-node, which is not apart from the worker runner's folders/);
   assert.match(wall({ ...own, snapshot: join(d, 's', 'node-in') }).reason ?? '', /not apart from the worker runner's folders/, 'the rules snapshot alike');
+  // A link that leads nowhere yet, or in a loop, is refused, and so is a path below one (#423 r1 M1).
+  symlinkSync(join(runner.requestsDir, 'later'), join(d, 's', 'dangling'));
+  symlinkSync(join(d, 's', 'loop'), join(d, 's', 'loop'));
+  for (const notes of [join(d, 's', 'dangling'), join(d, 's', 'dangling', 'x'), join(d, 's', 'loop'), join(d, 's', 'loop', 'x')])
+    assert.match(wall({ ...own, notes }).reason ?? '', /can't be resolved/, notes);
+  // Another case from the disk's is named as such, not as a link (#423 r1 m1).
+  mkdirSync(join(d, 's', 'CaseDir'));
+  assert.match(wall({ ...own, notes: join(d, 's', 'casedir') }).reason ?? '', /not spelled in the case the disk holds/);
+  // Called directly with a path the render would refuse first: the check's own spelling rule (#423 r1 m3).
+  const okSettings = render('worker', { paths: { ...own, workerRunner: runner } }).settings;
+  for (const notes of [`${join(d, 's')}/x/../notes`, `${join(d, 's')}/./notes`, `${join(d, 's', 'notes')}/`, join(d, 's') + '//notes'])
+    assert.match(checkRunnerWall({ settings: okSettings, workerRunner: runner, paths: { ...own, notes } }).reason ?? '', /is not a plain absolute path, spelled as it resolves/, notes);
+  // An error that is not "nothing there" is refused, never walked past.
+  const eacces = (p) => { if (p === own.notes) throw Object.assign(new Error('no'), { code: 'EACCES' }); return realpathSync.native(p); };
+  assert.match(checkRunnerWall({ settings: okSettings, workerRunner: runner, paths: own, realpath: eacces }).reason ?? '', /can't be resolved .*EACCES/);
   // No session paths: refused, not skipped.
   const r = render('worker', { paths: { ...own, workerRunner: runner } });
   assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner }).reason ?? '', /not given the session's own folders/);

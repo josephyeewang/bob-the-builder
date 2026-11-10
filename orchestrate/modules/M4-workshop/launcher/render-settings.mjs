@@ -6,7 +6,7 @@
 // prefix rule or a shell joiner is refused outright, never rendered. There are no "ask" rules:
 // anything not allowed is refused, never put to the owner.
 
-import { writeFileSync, readFileSync, renameSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, renameSync, realpathSync, lstatSync } from 'node:fs';
 import { join, dirname, basename, posix } from 'node:path';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, ENV, REFUSED_SETTINGS } from './settings-names.mjs';
 import { hasShell, DESIGN_PROFILES, shadowKindsFor, OUTBOX_FILE } from './role-profiles.mjs';
@@ -113,7 +113,7 @@ export const runnerWallShell = (dir) => [dir, `${dir}/**`];
  * resolves apart from the runner's folders (the link card).
  * The launcher calls it for every role the runner starts (all but the Lead and the review roles), before the start.
  */
-export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) => realpathSync.native(p) }) {
+export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) => realpathSync.native(p), lstat = (p) => lstatSync(p) }) {
   const w = runnerWallDirs(workerRunner);
   if (!w.ok) return w;
   const deny = settings?.[S.permissions]?.[S.deny] ?? [];
@@ -127,15 +127,23 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
   // The session's own folders, as the disk resolves them (the link card): apart compares spellings, so a notes folder
   // that is a link into the requests folder passed the render's apart check. Each folder (and each folder above it)
   // must be spelled as its real path, and each own path, folder or file, must resolve apart from every runner folder.
-  // A path not made yet is resolved through the nearest folder above it that is.
+  // A path not made yet is resolved through the nearest folder above it that is: only when nothing at all is at that
+  // name. A link that leads nowhere yet, or in a loop, is refused (#423 r1 M1): its target could be made later.
+  // Hard links are not seen here (realpath can't); the two files are the runner's own, replaced by rename, and the
+  // sandbox test (L769) covers a hard link made from a session. Links inside the copy are the sandbox's, not this check's.
   if (!paths || typeof paths !== 'object') return refuse('the wall check was not given the session\'s own folders');
   for (const [p, isFolder] of sessionOwnPaths(paths)) {
     if (wallPath(p) !== p) return refuse(`the session's path ${p} is not a plain absolute path, spelled as it resolves`);
     let q = p; let real;
     for (;;) {
-      try { real = realpath(q); break; } catch { if (q === '/') return refuse(`the session's path ${p} can't be resolved`); q = dirname(q); }
+      try { real = realpath(q); break; } catch (e) {
+        let there = true; try { lstat(q); } catch { there = false; }
+        if (there || e?.code !== 'ENOENT' || q === '/') return refuse(`the session's path ${p} can't be resolved (${q}: ${e?.code ?? e}); a link that leads nowhere yet could be made to lead into the runner's folders`);
+        q = dirname(q);
+      }
     }
-    if (isFolder && real !== q) return refuse(`the session's folder ${p} is reached through a link (${q} is ${real}); a link can lead into the runner's folders`);
+    if (isFolder && real !== q && foldKey(real) === foldKey(q)) return refuse(`the session's folder ${p} is not spelled in the case the disk holds (${real}); the wall's rules name spellings`);
+    if (isFolder && real !== q) return refuse(`the session's folder ${p} is reached through a link (${q} is ${real}); the wall's rules name spellings, so a session folder must be its real path`);
     const resolved = q === p ? real : posix.join(real, posix.relative(q, p));
     if (w.dirs.some((dir) => !apart(resolved, dir))) return refuse(`the session's path ${p} resolves to ${resolved}, which is not apart from the worker runner's folders`);
   }
