@@ -388,3 +388,17 @@ test('#358 r1 m7: a stopGroup whose pgid is not the listed number (a string incl
   await w.pass([stopReq('S-1', N1, w.now, { pgid: '4001' })]);
   assert.deepEqual([w.stops, w.read().answers[`stopGroup-S-1-${N1}`].ok], [[], false]);
 });
+
+test('#358 r2 m-a (P7): each port wait is followed by a write, and no write comes before the first port', async () => {
+  const ev = [];
+  const a = (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/${x.card}` });
+  const ports = { start: async (x) => a(x), groupGone: async () => { ev.push('port:gg'); return false; }, stopGroup: async () => ({ ok: true }),
+    saveWork: async () => { ev.push('port:save'); return { ok: true }; }, pauseLead: async () => ({ ok: true }), outboxDrained: async () => false };
+  const base = { uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, ports, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0 };
+  const r1 = await workerRunnerPass({ ...base, state: {}, requests: [{ name: 'launch-S-1.json', body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' }, asked_at: new Date(T0).toISOString() } }], write: () => {} });
+  ev.length = 0;
+  await workerRunnerPass({ ...base, state: r1.state, write: () => ev.push('write'),
+    requests: [{ name: 'saveWork-S-1-0123456789abcdef.json', body: { saveWork: { id: 'S-1' }, asked_at: new Date(T0).toISOString() } }] });
+  assert.equal(ev[0], 'port:gg', ev.join(' '));
+  for (let i = 0; i < ev.length; i++) if (ev[i].startsWith('port:')) assert.equal(ev[i + 1], 'write', ev.join(' '));
+});

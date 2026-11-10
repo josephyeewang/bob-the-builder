@@ -40,8 +40,9 @@
 // A start leaves `pending` only once a memory holding its result has been kept (#358 r1 m3, #362 r1 M1): a keep that
 // fails leaves it there, so the next pass settles it again from the memory last kept.
 // A launch for a card that already has a live session, or a start still waiting, is refused (#358 r1 m4).
-// The ports' contract (#358 r1 m5), which the real ports (runner-loop.mjs processGroupPorts) keep: every port is async
-// (a synchronous one blocks the pass past RUNNER_PORT_MS); groupGone answers true only when the leader (pid and pid_start)
+// The ports' contract (#358 r1 m5), which the real ports (runner-loop.mjs processGroupPorts) keep: a port is waited on
+// for at most RUNNER_PORT_MS only if it is async; a synchronous one blocks the pass for as long as it runs, so a
+// synchronous real port must bound itself well inside that wait (#362 r2 c-a: groupGone's ps, at most RUNNER_PS_MS); groupGone answers true only when the leader (pid and pid_start)
 // is certainly gone, false when it is there, and throws when it can't tell; EPERM (another user's process) is never gone;
 // stopGroup signals only a group whose leader's pid_start is the session's.
 // Time (self-review M4, step-4 review M4, #358 r1 M1): the status is written after every port wait (a start's: by the request's own write),
