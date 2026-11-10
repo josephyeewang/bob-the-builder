@@ -376,6 +376,9 @@ test('L101: check 7 refuses a compaction hook that keeps a Lead\'s note in its o
   };
   assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, '')) }).reason, /names no notes folder/);
   assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${w.outbox}/notes`)) }).reason, /not apart from the outbox/);
+  // Without regard to case, both ways (#410 r2 m3, the class): the Mac's disk ignores it.
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${w.outbox.toUpperCase()}/notes`)) }).reason, /not apart from the outbox/);
+  assert.match(w.check({ settings: swap((c) => c.replace(/ --notes \S+/, ` --notes ${w.outbox.slice(0, w.outbox.lastIndexOf('/')).toUpperCase()}`)) }).reason, /not apart from the outbox/);
   // The worker keeps its note in the outbox by its own kind: no notes folder is asked of it.
   const k = hookWorld('worker');
   assert.equal(k.check().ok, true);
