@@ -1532,6 +1532,17 @@ test('L584: the tick passes the vet, so an oversize handoff is refused and the L
   assert.equal(w.calls.alerts.filter((a) => a.includes('outbox file')).length, 0, 'a file the Lead can rewrite is not the owner\'s yet');
 });
 
+test('R-0b-143: the tick passes the shape check too: a handoff that does not read is re-asked, the old Lead is not stopped, and the Lead hears why', async () => {
+  const w = leadsWorld();
+  await w.pass(0);
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote().replace('## Next step', '## Later'));
+  w.state.endedAt = T0 + 2 * MIN;
+  const r = await w.pass(3);
+  assert.match(r.steps.intake.result[0].refused, /the handoff does not read/);
+  assert.match(w.sent[1], /Your handoff was not used \(the handoff does not read/);
+  assert.deepEqual(r.steps.leads.result, [['L-1', 're-asked']], 'asked again, never restarted (the stop comes only with a restart)');
+});
+
 for (const [name, bad, why] of [
   ['no product', { sessionId: 'L-B' }, /the Lead L-B \(no product named\) was skipped this pass: it names no product/],
   ['an empty product', { sessionId: 'L-B', product: '' }, /the Lead L-B \(no product named\) was skipped/],

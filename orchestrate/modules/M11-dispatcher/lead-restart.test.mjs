@@ -177,6 +177,11 @@ test('R-0b-143: the handoff vet refuses a note that does not read as the one sha
   assert.match(vet({ session, kind: 'handoff-', text: 'x'.repeat(33_000) }), /over the 8000 cap/);
   const long = vet({ session, kind: 'handoff-', text: GOOD_TYPED.replace('- export format: Markdown only (1 Nov)', `- ${'y'.repeat(500)}`) });
   assert.ok(long.length <= 'the handoff does not read: '.length + 200 && !long.includes('\n'), long);
+  // A learning session writes handoff- files in its own form: only the size holds there (review of #311, Minor 4).
+  const learning = { product: 'p', role: 'learning' };
+  assert.equal(vet({ session: learning, kind: 'handoff-', text: 'notes in the learning session\'s own form' }), null);
+  assert.match(vet({ session: learning, kind: 'handoff-', text: 'x'.repeat(33_000) }), /over the 8000 cap/);
+  assert.match(vet({ session: { product: 'p', role: 'lead' }, kind: 'handoff-', text: 'x' }), /does not read/);
 });
 
 test('R-0b-143 (c): a hand-typed note that does not read, through the composed vet: refused, re-asked, the old Lead not stopped', async () => {

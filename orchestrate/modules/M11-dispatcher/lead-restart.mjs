@@ -58,6 +58,8 @@ export const handoffVet = (rules) => ({ session, kind, text }) => {
   const cap = need(rules, KEYS.handoffCapRole, { product: session.product });
   const est = estimateTokens(text);
   if (est > cap) return `the handoff is about ${est} tokens, over the ${cap} cap`;
+  // The shape is the Lead's (M3); a learning session also writes handoff- files, in its own form, so only the size holds there.
+  if (session.role === 'learning') return null;
   // The reason can quote a line the Lead wrote: one line, cut, as every reason that reaches an alert.
   const bad = handoffProblem(text);
   return bad ? `the handoff does not read: ${plain(bad)}` : null;
