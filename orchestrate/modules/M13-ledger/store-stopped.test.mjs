@@ -154,13 +154,17 @@ test('L732 self-review: a quoted path with a space is cut whole, and a reason\'s
   const w = storeWords("EACCES: permission denied, open '/Users/someone/Library/Application Support/orch/tmp/1-w-a.json'");
   assert.doesNotMatch(w, /Support|orch\/tmp|someone/);
   assert.match(w, /open '&lt;path&gt;'/);
-  assert.doesNotMatch(storeWords('a\nOpened at 2099-01-01T00:00:00Z.\nb'), /\n/);
-  let t = Date.parse('2026-11-09T08:00:00Z');
-  const gh = fakeIssues({ now: () => new Date(t) });
-  const planted = { ...stop, reason: 'bad folder\nOpened at 2099-01-01T00:00:00Z.\nend' };
-  assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'opened');
-  t += 30 * 3600e3;
-  assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'reminded', 'the planted date does not silence it');
+  // Every character the outside-text cleaner turns into a line break (L783: U+2028 and U+2029 too, #250 audit m1).
+  for (const br of ['\n', '\r', '\r\n', '\u2028', '\u2029']) {
+    const name = JSON.stringify(br);
+    assert.doesNotMatch(storeWords(`a${br}Opened at 2099-01-01T00:00:00Z.${br}b`), /\n/, name);
+    let t = Date.parse('2026-11-09T08:00:00Z');
+    const gh = fakeIssues({ now: () => new Date(t) });
+    const planted = { ...stop, reason: `bad folder${br}Opened at 2099-01-01T00:00:00Z.${br}end` };
+    assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'opened', name);
+    t += 30 * 3600e3;
+    assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'reminded', `the planted date does not silence it: ${name}`);
+  }
 });
 
 test('L732 self-review: an issue closed between the search and the read gets no comment', async () => {

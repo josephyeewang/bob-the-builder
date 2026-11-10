@@ -40,11 +40,12 @@ const msg = (e) => String(e?.message ?? e).slice(0, 200);
 /**
  * A store reason or value as GitHub text, the one form for the stop issue and the store's alerts (L732 m1, self-review m1
  * m2): a quoted path is cut whole (a folder name with a space in it, such as "Application Support", would otherwise leak
- * its tail), line breaks become spaces (so no line of it can pass for the issue's own "Opened at" line), then pushReason
+ * its tail), line breaks become spaces (so no line of it can pass for the issue's own "Opened at" line; U+2028 and U+2029
+ * too, since cleanOutside's stripControls turns them into line breaks, L783), then pushReason
  * cuts other local paths and the length, and the words are fenced as outside text.
  */
 export const storeWords = (v) => cleanOutside(pushReason(String(typeof v === 'string' ? v : JSON.stringify(v))
-  .replace(/(['"])\/[^'"\n]*\1/g, '$1<path>$1').replace(/[\r\n]+/g, ' ')), 'log-line');
+  .replace(/(['"])\/[^'"\n]*\1/g, '$1<path>$1').replace(/[\r\n\u2028\u2029]+/g, ' ')), 'log-line');
 export const STOP_REMIND_MS = 24 * 60 * 60 * 1000;
 const OPENED = /^Opened at (\d{4}-\d\d-\d\dT[\d:.]+Z)\.$/m;
 function inTime(ms, f) {
