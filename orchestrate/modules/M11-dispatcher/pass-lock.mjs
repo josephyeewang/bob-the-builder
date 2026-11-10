@@ -10,8 +10,16 @@
 //
 // The lock appears whole (L754, #312 Minor): it is written to a file of this pid's own, then linked into place, which fails
 // when a lock is there. So no reader ever finds it empty half-way through being taken, which read as "unreadable".
+//
+// A dead lock is broken by moving it (L771 Minor 1): a rename of it to a name of this pid's own, then a re-read of what was
+// moved. Only one taker can move a given file, so only one breaks the dead lock; one that finds the move missing (another
+// moved it first) tries the link again. One that moved a lock that is not the dead one (another broke it and linked a live
+// lock in between) puts it back and refuses. Deleting it after the check, as before, could delete a live lock another taker
+// had just linked, and both passes ran.
+// Known limit: a third taker that links in the instant a moved live lock is out of place leaves two passes running. It needs
+// three takers inside microseconds over a dead lock; the put-back says so (`moved_live`) rather than pass it off.
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync } from 'node:fs';
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, renameSync } from 'node:fs';
 
 /** True only when the pid surely does not exist. Permission errors mean it exists. */
 export function pidDead(pid) {
@@ -44,7 +52,21 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
         return { ok: false, reason: 'the pass lock is unreadable; another pass may run' };
       }
       if (!dead(held?.pid)) return { ok: false, reason: `another pass runs (pid ${held?.pid})`, held };
-      try { unlinkSync(file); } catch { return { ok: false, reason: 'could not break a dead pass lock' }; }
+      const moved = `${file}.${pid}.dead`;
+      try { unlinkSync(moved); } catch { /* none left from a crash */ }
+      try { renameSync(file, moved); } catch (e) {
+        if (e?.code === 'ENOENT') continue;   // another taker moved it first: try the link again
+        return { ok: false, reason: 'could not break a dead pass lock' };
+      }
+      let was = null; try { was = JSON.parse(readFileSync(moved, 'utf8')); } catch { /* checked below */ }
+      if (was?.pid !== held?.pid || was?.taken_at !== held?.taken_at) {
+        // Not the dead lock: another taker broke it and linked its own in between. Put that one back and refuse.
+        let back = false; try { linkSync(moved, file); back = true; } catch { /* a third took the place: told below */ }
+        try { unlinkSync(moved); } catch { /* gone */ }
+        return back ? { ok: false, reason: `another pass runs (pid ${was?.pid})`, held: was }
+          : { ok: false, reason: `another pass runs (pid ${was?.pid}); its lock was moved while breaking a dead one and a third took the place`, held: was, moved_live: true };
+      }
+      try { unlinkSync(moved); } catch { /* the dead lock is out of place either way */ }
       broke = held;
       continue;
     }

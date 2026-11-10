@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import fs, { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -535,6 +535,36 @@ test('L754: a holder that releases while the round looks is still a running roun
   assert.equal(gone, 1, 'the release happened between the link and the read');
   assert.equal(again.ok, true, again.reason);
   again.release();
+});
+
+test('L771 Minor 1: two takers over one dead lock: only one breaks it and holds; the other never deletes a live lock', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  const DEAD = { pid: 999, taken_at: new Date(at - 60e3).toISOString() };
+  const isDead = (p) => p === DEAD.pid;
+  const leftover = () => readdirSync(dirname(f)).filter((n) => n.endsWith('.dead') || n.endsWith('.new'));
+  // B has read the dead lock and judged it dead; before B acts, A takes the whole lock (breaks the dead one, links its own).
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let a = null;
+  const b = takePassLock(f, { pid: 5002, now: at, dead: (p) => { a ??= takePassLock(f, { pid: 5001, now: at, dead: isDead }); return isDead(p); } });
+  assert.deepEqual([a?.ok, a?.broke?.pid], [true, DEAD.pid], 'A broke the dead lock and holds');
+  assert.deepEqual([b.ok, b.held?.pid], [false, 5001], `B refuses, naming A: ${b.reason}`);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).pid, 5001, 'A\'s lock is in place, never deleted by B');
+  assert.deepEqual(leftover(), [], 'no moved or own file is left');
+  a.release();
+  assert.equal(existsSync(f), false);
+  // A judged it dead; B moved it first and has not linked yet: A finds the move missing, tries the link again and holds;
+  // B's link then finds A's live lock and refuses.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const bMoved = `${f}.5002.dead`;
+  const a2 = takePassLock(f, { pid: 5001, now: at, dead: (p) => { if (existsSync(f)) renameSync(f, bMoved); return isDead(p); } });
+  assert.equal(a2.ok, true, a2.reason);
+  rmSync(bMoved, { force: true });
+  const b2 = takePassLock(f, { pid: 5002, now: at, dead: isDead });
+  assert.deepEqual([b2.ok, b2.held?.pid], [false, 5001], b2.reason);
+  assert.deepEqual(leftover(), []);
+  a2.release();
 });
 
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────
