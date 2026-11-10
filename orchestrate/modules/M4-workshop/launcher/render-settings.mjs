@@ -288,24 +288,38 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
  * hook is told (--outbox). → the reason, or null.
  */
 function ownFoldersProblem(obj) {
-  const dirs = obj[S.permissions]?.[S.additionalDirectories] ?? [];
+  // The shell writes nowhere a sandbox allow list adds (L881 review M1): the role file's filesystem block holds the
+  // two deny lists and nothing else, so no allowWrite (or any key a later version adds) can open a sibling's outbox.
+  const fsKeys = Object.keys(obj[S.sandbox]?.[S.filesystem] ?? {});
+  const extra = fsKeys.filter((k) => k !== S.denyRead && k !== S.denyWrite);
+  if (extra.length) return `the role file's sandbox filesystem holds ${extra.join(', ')}; only its deny lists may be there`;
+  const p = obj[S.permissions] ?? {};
+  if (!Object.hasOwn(p, S.additionalDirectories)) return null;
+  const dirs = p[S.additionalDirectories];
+  const beyond = 'the role file adds folders beyond the session\'s own outbox and the Bob folder';
+  if (!Array.isArray(dirs)) return `${beyond} (its added folders are not a list)`;
+  if (!dirs.length) return null;
   const outboxes = new Set();
   for (const list of Object.values(obj[S.hooks] ?? {})) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
-      const w = typeof h?.[H.command] === 'string' ? h[H.command].match(/ --outbox (\S+)/) : null;
+      if (typeof h?.[H.command] !== 'string') continue;
+      // One spelling only: ` --outbox <path>`, at most once in a hook (a second, or `--outbox=`, could be the one read).
+      const words = h[H.command].match(/--outbox\b/g) ?? [];
+      const w = h[H.command].match(/ --outbox (\S+)/);
+      if (words.length > 1 || (words.length === 1 && !w)) return `${beyond} (a hook names its outbox in another spelling)`;
       if (w) outboxes.add(w[1]);
     }
   }
-  const beyond = 'the role file adds folders beyond the session\'s own outbox and the Bob folder';
-  if (!Array.isArray(dirs) || !dirs.length) return null;
   if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
   const [outbox] = outboxes;
+  if (!wallPath(outbox) || wallPath(outbox) !== outbox) return `${beyond} (the outbox is not a plain absolute path)`;
   if (dirs[0] !== outbox || dirs.length > 2) return beyond;
   if (dirs.length === 2) {
     const bob = dirs[1];
-    const deny = obj[S.permissions]?.[S.deny] ?? [];
+    const deny = p[S.deny] ?? [];
     const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
-    if (typeof bob !== 'string' || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
+    if (typeof bob !== 'string' || wallPath(bob) !== bob || inside(bob, outbox) || inside(outbox, bob)
+      || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
   }
   return null;
 }

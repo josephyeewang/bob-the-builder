@@ -468,10 +468,15 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   assert.equal(s[S.permissions][S.allow].every((r) => r.startsWith('Bash(')), true, 'no file write is allowed by rule');
   assert.equal(checkSettings(s, { profile: DESIGN_PROFILES.worker }).ok, true);
   // Every rendered role passes the same check.
+  const rendered = [];
   for (const role of Object.keys(DESIGN_PROFILES)) {
     const r = render(role);
-    if (r.ok) assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
+    if (!r.ok) continue;
+    rendered.push(role);
+    assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
   }
+  // Every role renders with this test's paths (L881 review m6): none drops out of the loop unseen.
+  assert.deepEqual(rendered.sort(), Object.keys(DESIGN_PROFILES).sort());
   // Each drift is refused at launch (check 0 runs checkSettings).
   const drift = (f) => { const c = structuredClone(s); f(c); return checkSettings(c, { profile: DESIGN_PROFILES.worker }); };
   const dirs = (c) => c[S.permissions][S.additionalDirectories];
@@ -485,5 +490,15 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
     ['the Bob folder\'s shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => !r.startsWith(PATHS.bobFolder)); }],
     ['the first hook naming another outbox', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
     ['a later hook naming another outbox', (c) => { const h = Object.values(c[S.hooks]).at(-1).at(-1)[H.hooks].at(-1); h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
+    ['the added folders a string', (c) => { c[S.permissions][S.additionalDirectories] = '/w'; }],
+    ['the outbox spelled with ..', (c) => { for (const h of Object.values(c[S.hooks]).flat().flatMap((m) => m[H.hooks])) h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/x/../outbox'); dirs(c)[0] = '/w/x/../outbox'; }],
+    ['a hook naming its outbox twice', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox ${PATHS.outbox} --outbox /w/outbox-2`); }],
+    ['a hook naming it as --outbox=', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ` --outbox=${PATHS.outbox}`); }],
+    ['the Bob folder above the outbox', (c) => { dirs(c)[1] = '/w'; c[S.permissions][S.deny].push(...bobFolderDeny('/w')); c[S.sandbox][S.filesystem][S.denyWrite].push('/w', '/w/**'); }],
   ]) assert.match(drift(f).reason ?? '', /beyond the session's own outbox/, name);
+  // Nothing in the sandbox's filesystem block but its two deny lists (L881 review M1): an allow list there would open
+  // a sibling's outbox to the shell whatever the added folders say.
+  for (const key of ['allowWrite', 'allowRead', 'somethingNew']) {
+    assert.match(drift((c) => { c[S.sandbox][S.filesystem][key] = ['/w/outbox-2']; }).reason ?? '', new RegExp(`holds ${key}`), key);
+  }
 });
