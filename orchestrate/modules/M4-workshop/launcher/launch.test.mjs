@@ -40,7 +40,7 @@ function NAMES(role, over = {}) {
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, script: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
 
 // ---- the order (§14.1.3) ----
 
@@ -86,6 +86,8 @@ test('launch: which checks apply to which role', async () => {
   assert.deepEqual(await ran('reviewer'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('auditor'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.deepEqual(await ran('learning'), [3, 5, 6, 7, 8, 9, 10, 12, 13]);
+  // L760: a script card's session, on a fresh copy with the Bob folder checked, as a worker's; no shell, no install.
+  assert.deepEqual(await ran('script'), [1, 2, 3, 5, 6, 7, 8, 9, 10, 12, 13]);
   // A shell added to a role that had none brings check 11 with it.
   const called = [];
   const checks = Object.fromEntries(CHECKS.map((c) => [c.n, async () => { called.push(c.n); return { ok: true }; }]));

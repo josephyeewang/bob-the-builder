@@ -255,6 +255,7 @@ function writeWhole(path, value, mode) {
 }
 /** A launch or ended record: written under a temp name, then given its real name only if that name is free (never written over). */
 function writeLaunch(dir, sid, doc) {
+  // A fixed hidden name is safe here (#294 r3 m2 checked): only review writes these folders, and each session id is new.
   const tmp = join(dir, `.${sid}.json.tmp`);
   const final = join(dir, `${sid}.json`);
   try { unlinkSync(tmp); } catch { /* none left from a pass that stopped part way */ }
@@ -488,7 +489,11 @@ export async function runnerPass(ctx) {
       running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
-      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
+      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [],
+      // The plan reviews waiting at the cap (#294 r3 m1): the Dispatcher tells such a plan as waiting for a slot, not as
+      // a reviewer that has not answered. A try that failed since carries no waiting_since, so it is not listed.
+      plans_waiting: Object.values(isObject(state.plan_tries) ? state.plan_tries : {}).filter((t) => isObject(t) && stamp(t.waiting_since))
+        .map(({ card, fingerprint, request_id, waiting_since }) => ({ card, fingerprint, request_id, waiting_since })) };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
     if (st.ok) writeWhole(P.state, state, 0o600);
@@ -1296,7 +1301,7 @@ const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card
 /**
  * The Dispatcher's read of status.json (for `hasReviewer`): the list of review sessions running, or a throw when the
  * status is missing, unreadable, not the runner's shape or older than 3 minutes (L63: never read as "none").
- * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, installed_commit, taps_read }
+ * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, plans_waiting, installed_commit, taps_read }
  * taps_read: the keys of the owner's taps the runner has read, as a list of strings, for the Front Door's tap handler to
  * remove (L724 (4)); an entry that is not a string is left out, and a status with no list gives [] (nothing removed).
  */
@@ -1320,7 +1325,8 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (!Number.isFinite(at) || !Array.isArray(s.running)) throw new Error('the review runner\'s status is not what the runner writes');
   if (now - at > STATUS_STALE_MS) throw new Error(`the review runner's status is ${Math.round((now - at) / 60_000)} minutes old; the runner may be stopped`);
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
-  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
+  const plansWaiting = (Array.isArray(s.plans_waiting) ? s.plans_waiting : []).filter((p) => isObject(p) && typeof p.card === 'string' && typeof p.fingerprint === 'string' && typeof p.request_id === 'string');
+  return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null, plans_waiting: plansWaiting,
     installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null,
     taps_read: Array.isArray(s.taps_read) ? s.taps_read.filter((k) => typeof k === 'string') : [] };
 }
