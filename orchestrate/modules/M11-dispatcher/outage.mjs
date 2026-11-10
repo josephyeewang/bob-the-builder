@@ -14,10 +14,12 @@
 // every dead session's card waits on Joe, the safe side. This file is the one outage rule (L72 (ii)): M9's
 // breakIfDead only breaks the claim it is given.
 // Counted once (L759, from lane 4's #324 r3 m3): a dead session the Record would not take off the board (its ask or
-// its claim's break refused) stays on it, dead, every pass. The ids already counted are kept in the outage fact
-// (`counted_dead`, the dead on the board at the last pass), so only newly dead sessions count toward an outage; the
-// still-dead ones are still handed to `actOnDead` each pass, to try again. A refused write of the list leaves them to
-// be counted again next pass, as before.
+// its claim's break refused) stays on it, dead, every pass. The deaths already counted are kept in the outage fact
+// (`counted_dead`: each as its session id and last write time, so a session restarted under the same id that dies
+// again counts again), set by the last pass outside an outage, or by the outage's end. Only new deaths count toward
+// an outage, against the board less the deaths already counted; the still-dead are still handed to `actOnDead` each
+// pass, to try again. The list is written only when it changes; a refused write is returned as `countedRefused`
+// (they would be counted again next pass, as before L759).
 
 import { KEYS, need, minutes } from './keys.mjs';
 import { tellThen } from './alerts.mjs';
@@ -26,6 +28,8 @@ export const OUTAGE_FACT = 'outage';
 export const HEALTHY_PASSES = 2;
 export const OUTAGE_MIN_DEAD = 3;     // L43(a): the floor; the rules' outage.min_dead may raise it
 export const OUTAGE_MIN_SHARE = 0.5;  // L43(a): half the board or more; the rules' outage.share may raise it
+
+const deathKey = (s) => `${s.id}@${s.lastWriteAt}`;
 
 /** G1. `s` = { alive, ended, lastWriteAt } as observed this pass. Unknown parts are not dead. */
 export function isDead(s, { now, quietMs }) {
@@ -50,7 +54,7 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
   if (open) {
     const passes = healthy ? (cur.doc.healthy_passes ?? 0) + 1 : 0;
     if (resume || passes >= HEALTHY_PASSES) {
-      write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: dead.map((s) => s.id) }, 'outage_end');
+      write({ ...cur.doc, state: 'ended', healthy_passes: passes, ended_at: new Date(now).toISOString(), ended_by: resume ? 'joe' : 'healthy', counted_dead: dead.map(deathKey) }, 'outage_end');
       // Sessions that died in the outage left the board; they are decided now, with the newly dead.
       const held = (cur.doc.dead ?? []).filter((d) => !dead.some((s) => s.id === d.id));
       return { outage: false, ended: true, ...decide(rec, [...held, ...dead]) };
@@ -62,18 +66,26 @@ export function outageStep({ rec, rules, board, now, healthy, resume = false, al
     return { outage: true, ended: false, restart: [], asks: [] };
   }
   const counted = new Set(Array.isArray(cur?.doc?.counted_dead) ? cur.doc.counted_dead : []);
-  const fresh = dead.filter((s) => !counted.has(s.id));
-  const threshold = Math.max(OUTAGE_MIN_DEAD, minDead, Math.ceil(Math.max(OUTAGE_MIN_SHARE, share) * board.length));
-  if (board.length && fresh.length >= threshold) {
+  const fresh = dead.filter((s) => !counted.has(deathKey(s)));
+  // The board less the deaths already counted: those were not running at the previous pass (review of L759).
+  const running = board.length - (dead.length - fresh.length);
+  const threshold = Math.max(OUTAGE_MIN_DEAD, minDead, Math.ceil(Math.max(OUTAGE_MIN_SHARE, share) * running));
+  if (running && fresh.length >= threshold) {
     const id = `outage-${new Date(now).toISOString()}`;
-    const text = `${fresh.length} of ${board.length} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`;
+    const text = `${fresh.length} of ${running} running sessions stopped at once (${id}). Nothing will be restarted until the network, sign-in and usage are back, or you say resume.`;
     const w = write({ id, state: 'open', started_at: new Date(now).toISOString(), dead: dead.map((s) => ({ id: s.id, card: s.card ?? null })), board: board.length, healthy_passes: 0, alert_text: text }, 'outage_start');
     if (w.ok) tellThen(alert, text, { fact: OUTAGE_FACT, fields: { told_id: id }, kind: 'outage_told' });
     return { outage: true, ended: false, restart: [], asks: [] };
   }
-  const ids = dead.map((s) => s.id);
-  if (ids.length !== counted.size || ids.some((x) => !counted.has(x))) write({ state: 'none', ...(cur?.doc ?? {}), counted_dead: ids }, 'outage_counted');
-  return { outage: false, ended: false, ...decide(rec, dead) };
+  const keys = dead.map(deathKey);
+  let countedRefused;
+  // Kept on an ended outage's fact as it is (only 'open' is read, and a new outage replaces the whole fact); 'none'
+  // when there has been no outage.
+  if (keys.length !== counted.size || keys.some((k) => !counted.has(k))) {
+    const w = write({ ...(cur?.doc ?? {}), state: cur?.doc?.state ?? 'none', counted_dead: keys }, 'outage_counted');
+    if (!w.ok) countedRefused = w.reason ?? 'refused';
+  }
+  return { outage: false, ended: false, ...decide(rec, dead), ...(countedRefused ? { countedRefused } : {}) };
 }
 
 // M10: restart only a card marked safe to re-run; any other becomes an ask (m18).

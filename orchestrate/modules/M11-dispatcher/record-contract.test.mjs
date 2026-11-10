@@ -312,12 +312,14 @@ test('L72 (5): two dead out of ten is no outage; three dead out of five is', () 
   const w = world();
   const gone = (id) => ({ id, card: null, alive: false, ended: true, lastWriteAt: w.env.clock.t - 10 * MIN });
   const live = (id) => ({ id, card: null, alive: true, ended: false, lastWriteAt: w.env.clock.t });
-  const board = (d, a) => [...Array.from({ length: d }, (_, i) => gone(`D${i}`)), ...Array.from({ length: a }, (_, i) => live(`L${i}`))];
+  const board = (d, a, tag = 'D') => [...Array.from({ length: d }, (_, i) => gone(`${tag}${i}`)), ...Array.from({ length: a }, (_, i) => live(`L${i}`))];
   const alerts = [];
   const two = outageStep({ rec: w.rec, rules: w.rules, board: board(2, 8), now: w.env.clock.t, healthy: true, alert: (a) => alerts.push(a) });
   assert.equal(two.outage, false);
-  assert.equal(w.rec.read('fact', OUTAGE_FACT), null);
-  const three = outageStep({ rec: w.rec, rules: w.rules, board: board(3, 2), now: w.env.clock.t, healthy: true, alert: (a) => alerts.push(a) });
+  assert.notEqual(w.rec.read('fact', OUTAGE_FACT)?.doc?.state, 'open');
+  assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.counted_dead.length, 2, 'the real Record takes the deaths counted (L759)');
+  // Three new deaths (the two above are counted already, L759).
+  const three = outageStep({ rec: w.rec, rules: w.rules, board: board(3, 2, 'E'), now: w.env.clock.t, healthy: true, alert: (a) => alerts.push(a) });
   assert.equal(three.outage, true);
   assert.equal(w.rec.read('fact', OUTAGE_FACT).doc.state, 'open', 'the real Record takes the Dispatcher\'s outage fact');
   assert.equal(alerts.length, 1);
