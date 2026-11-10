@@ -302,7 +302,8 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   }
   if (jobs.includes(ROBOT_JOB)) {
     const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why);
-    for (const k of robotAppKeyItems(io, cfg)) item(k.ok, `the robot App's key: ${k.what}`, k.why, k.skip);
+    // A key that needs root to look at is listed as NEEDS ROOT, never dropped (audit #305 n3): a check without sudo is not a pass.
+    for (const k of robotAppKeyItems(io, cfg)) if (k.skip) out.push({ ok: true, skip: true, what: `the robot App's key: ${k.what}`, why: k.why }); else item(k.ok, `the robot App's key: ${k.what}`, k.why);
   }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {

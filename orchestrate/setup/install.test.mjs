@@ -24,6 +24,7 @@ import { apply, check } from './users-folders.mjs';
 import { fakeMac, macTest as test } from './fake-mac.test-helper.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
+import { robotToken } from '../wiring/robot-wiring.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ME = process.getuid();
@@ -1076,6 +1077,20 @@ test('L727: the robot App named in robot.json → its key (token.mjs\'s default 
   chmodSync(w.mac.at(key), 0o600);
   ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(ROBOT_LABEL));
   ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 0, ck.text); assert.match(ck.text, /the robot App's key: /);
+  // audit #305 c2: a link in the key's place, to a file that would pass every other rule, is refused for being a link.
+  const real = w.mac.at(`${BASE}/keys/real-key-file`); renameSync(w.mac.at(key), real); symlinkSync(real, w.mac.at(key));
+  ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /the robot App's key: .* — is not a plain file$/m);
+});
+
+test('audit #305 n3: daemons check without sudo lists the robot App\'s key as NEEDS ROOT, never drops it, and does not exit 0', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  w.mac.as = 501;
+  const ck = w.run(['daemons', 'check', '--only', 'robot']);
+  assert.match(ck.text, new RegExp(`^NEEDS ROOT  the robot App's key: \\S*keys/${ROBOT_KEY_FILE.replace('.', '\\.')} is orchestrate's own 0600 file.* — the folder is orchestrate-only; needs root to look; run with sudo$`, 'm'), ck.text);
+  assert.doesNotMatch(ck.text, /^PASS  the robot App's key/m);
+  assert.notEqual(ck.code, 0, ck.text);
+  w.mac.as = 0;
 });
 
 test('L727: with none of the four App keys no key is asked for (the deliver pass refuses as not wired); the key name is token.mjs\'s default', async () => {
@@ -1083,8 +1098,15 @@ test('L727: with none of the four App keys no key is asked for (the deliver pass
   assert.equal(w.run(['daemons', 'place']).code, 0);
   const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text);
   assert.doesNotMatch(w.run(['daemons', 'check', '--only', 'robot']).text, /the robot App's key/);
+  // audit #305 n2: the tripwire reads the default parameter itself (never a comment), and the wiring must name no key file of its own.
   const token = readFileSync(new URL('../modules/M6-merge-gate/token.mjs', import.meta.url), 'utf8');
-  assert.ok(token.includes(`keyFile = '${ROBOT_KEY_FILE}'`), 'token.mjs mints from this name when given none; if it changes, change ROBOT_KEY_FILE');
+  const sig = /^export async function mintInstallationToken\(\{([^}]*)\}/m.exec(token);
+  assert.ok(sig, 'token.mjs still exports mintInstallationToken({ ... })');
+  assert.equal(/(?:^|,)\s*keyFile = '([^']+)'\s*(?:,|$)/.exec(sig[1])?.[1], ROBOT_KEY_FILE, 'token.mjs mints from this name when given none; if it changes, change ROBOT_KEY_FILE');
+  const asked = [];
+  await robotToken({ keyDir: '/k', appId: '1', appInstallation: '2', ownerUid: 7 }, { mint: async (a) => { asked.push(a); return { ok: false, reason: 'x' }; } })();
+  assert.equal(asked.length, 1);
+  assert.ok(!('keyFile' in asked[0]), `robot-wiring passes its own keyFile (${asked[0].keyFile}): setup would check a file the job never reads`);
 });
 
 test('PLANT robot.json: missing from the copy, or not root\'s alone → load refuses, check FAILs', async () => {

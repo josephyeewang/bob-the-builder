@@ -162,9 +162,14 @@ The robot App (L600, L727): `robot.json` may name it with four keys, all or none
 the repository where alert issues go, where the App is installed; never Bob's repository) and `alertOwner` (the GitHub
 login the issues are assigned to). Some but not all, or a bad value: `load` refuses and `check` FAILs. With all four, the
 App's key must be in the robot key folder under token.mjs's default name, `<base>/keys/robot-app.pem`: orchestrate's own
-plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). Missing or open: `load` refuses
-(no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, it is not looked at).
-With none of the four, no key is asked for and the deliver pass refuses as not wired, so alerts stay queued.
+plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). The mode must be exactly 0600:
+0400 is refused too, so a key copied in read-only needs `chmod 600`. Missing or open: `load` refuses
+(no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, the key is listed as
+NEEDS ROOT and check does not exit 0). With none of the four, no key is asked for and the deliver pass refuses as not
+wired, so alerts stay queued.
+Setup checks the key file's owner, mode and size only; it never reads the key, so it does not prove the key is the robot
+App's or that a token can be minted from it. A wrong key (another App's, or one replaced later) passes `load` and `check`
+and fails at the job's first mint. After any key swap, confirm one test alert reaches the phone, as at first setup.
 
 Loading it on the always-on Mac is an owner-run step. It waits for the robot's config (the Dispatcher's keys, C) and
 for the passes it runs to be wired.
