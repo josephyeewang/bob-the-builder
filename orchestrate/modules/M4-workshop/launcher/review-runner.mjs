@@ -47,8 +47,9 @@
 //   set-aside/   0755   Joe's "review again": one record per session Joe set aside (M9 `runnerAside` reads them)
 //   packages/    0755   one folder per session holding the review package it was given (change.diff), and
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
-//   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read }
-//                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps)
+//   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read, offers }
+//                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps;
+//                       `offers`: [{ session_id, card, role, head }], the sessions a tap would set aside now, L733)
 //   state.json   0600   the runner's own memory: running sessions, tries per card, head and role, request ids seen,
 //                       and what has kept a review from going ahead (`refused_streaks`, `refused_more`,
 //                       `unread_requests`, `no_verdict`), each told from a day on as a hold in the status (R-0b-171)
@@ -107,6 +108,22 @@ const iso = (t) => new Date(t).toISOString();
 export const isClaudeCommand = (cmd, bin) => typeof cmd === 'string' && typeof bin === 'string' && bin.length > 0 && (cmd === bin || cmd.startsWith(`${bin} `));
 // One start per card, tree and role (L69 point 4): an amend with no code change keeps its tree, so it gets no new roll.
 const keyOf = (card, tree, role) => `${card}:${tree}:${role}`;
+
+/**
+ * The "review again" offers open now (L733), for the Front Door: one per held attempt that allows a tap, the same test
+ * the tap loop uses (held, tap, its session). An attempt that does not name its card, role and head is left out: an
+ * offer the Front Door can't show is no offer. Sorted by session, so the same state gives the same list.
+ */
+export function tapOffers(state) {
+  const out = [];
+  for (const a of Object.values(state?.attempts ?? {})) {
+    if (a?.held !== true || a.tap !== true) continue;
+    const { session_id, card, role, head } = a;
+    if (![session_id, card, role, head].every((v) => typeof v === 'string' && v)) continue;
+    out.push({ session_id, card, role, head });
+  }
+  return out.sort((x, y) => (x.session_id < y.session_id ? -1 : x.session_id > y.session_id ? 1 : 0));
+}
 
 const MAX_PEEK_FILES = 20;
 const MAX_PEEK_BYTES = 64 * 1024;
@@ -352,7 +369,7 @@ export async function runnerPass(ctx) {
       running: state.running.map(({ card, head, role, session_id, started_at }) => ({ card, head, role, session_id, started_at })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
-      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [] };
+      taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [], offers: tapOffers(state) };
     state.refused = status.refused;
     // A corrupt state is never written over: Joe looks at it first (the status says why).
     if (st.ok) writeWhole(P.state, state, 0o600);
@@ -528,7 +545,8 @@ export async function runnerPass(ctx) {
     const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }));
     if (sha) state.attempts[k] = { ...done, held: false };
     else if (said === 'none' && left.empty) {
-      state.attempts[k] = { ...done, held: true, tap: true, last_reason: 'ended with no verdict' };
+      // The offer names what it is for (L733), so the status can list it without the launch records.
+      state.attempts[k] = { ...done, held: true, tap: true, card: doc.card, role: doc.role, head: doc.head, last_reason: 'ended with no verdict' };
       alert(`silent-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} ended without handing in a verdict (a crash, a context-limit stop or a kill does this too); ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own. ${reviewAgain}`, undefined, offer);
     } else if (said === 'none') {
       state.attempts[k] = { ...done, held: true, last_reason: 'ended with no verdict, and its outbox is not empty' };
@@ -927,9 +945,11 @@ const notTakenText = ({ role, card, head, why }) => `The ${role} for card ${card
 /**
  * The Dispatcher's read of status.json (for `hasReviewer`): the list of review sessions running, or a throw when the
  * status is missing, unreadable, not the runner's shape or older than 3 minutes (L63: never read as "none").
- * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, installed_commit, taps_read }
+ * `stat` lets a test stand in for the file's owner. → { running, alerts, holds, ok, error, installed_commit, taps_read, offers }
  * taps_read: the keys of the owner's taps the runner has read, as a list of strings, for the Front Door's tap handler to
  * remove (L724 (4)); an entry that is not a string is left out, and a status with no list gives [] (nothing removed).
+ * offers: the "review again" offers open now (L733), each { session_id, card, role, head } as strings; any other entry
+ * is left out, and a status with no list gives [].
  */
 export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   // The owner check is never skipped: a status anyone could write would say what runs.
@@ -953,5 +973,6 @@ export function readReviewStatus({ file, now, uid, stat = lstatSync }) {
   if (at - now > STATUS_STALE_MS) throw new Error('the review runner\'s status is dated in the future; a clock is wrong');
   return { running: s.running, alerts: Array.isArray(s.alerts) ? s.alerts : [], holds: Array.isArray(s.holds) ? s.holds : [], ok: s.ok === true, error: s.error ?? null,
     installed_commit: typeof s.installed_commit === 'string' && HEX40.test(s.installed_commit) ? s.installed_commit : null,
-    taps_read: Array.isArray(s.taps_read) ? s.taps_read.filter((k) => typeof k === 'string') : [] };
+    taps_read: Array.isArray(s.taps_read) ? s.taps_read.filter((k) => typeof k === 'string') : [],
+    offers: Array.isArray(s.offers) ? s.offers.filter((o) => o && typeof o === 'object' && ['session_id', 'card', 'role', 'head'].every((f) => typeof o[f] === 'string' && o[f])).map(({ session_id, card, role, head }) => ({ session_id, card, role, head })) : [] };
 }

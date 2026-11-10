@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
+import { runnerPass, readReviewStatus, tapOffers, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { reviewPorts } from '../../M11-dispatcher/review-requests.mjs';
@@ -1390,4 +1390,53 @@ test('L725 planted: a refused tap is told once with its cause, through the Dispa
   assert.deepEqual(again.alerts.filter((a) => /^tap-refused-/.test(a.id)), []);
   assert.ok(again.refused.some((x) => /not a session/.test(x.reason)), 'still refused, only not told again');
   listing = [];
+});
+
+// L733 (lane 3's ask): the status lists the "review again" offers open now, from the held attempts that allow a tap,
+// so the Front Door can show them; a taken tap, or a session that can't be set aside, is no offer.
+test('L733 planted: the status lists each open "review again" offer, and only those', async () => {
+  const w = await ready();
+  let listing = [];
+  w.ctx.setAsideByJoe = () => listing.slice();
+  w.ask();
+  await runnerPass(w.ctx);
+  const run = w.status().running[0];
+  assert.deepEqual(w.status().offers, [], 'a running session is no offer');
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  const offer = { session_id: 'S-1', card: run.card, role: run.role, head: run.head };
+  assert.deepEqual(w.status().offers, [offer]);
+  assert.deepEqual(readReviewStatus({ file: join(w.root, 'status.json'), now: w.clock.t, uid: ME }).offers, [offer]);
+  // The tap is taken: the offer is gone.
+  listing = [{ session_id: 'S-1', key: 'k-S-1' }];
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers, []);
+});
+
+test('L733: tapOffers takes only held attempts that allow a tap and name what they are for; readReviewStatus keeps only whole offers', async () => {
+  const full = { held: true, tap: true, session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) };
+  const attempts = {
+    a: full,
+    b: { ...full, session_id: 'S-1' },
+    c: { ...full, session_id: 'S-3', tap: false },
+    d: { ...full, session_id: 'S-4', held: false },
+    e: { ...full, session_id: 'S-5', head: undefined },
+    f: { ...full, session_id: '' },
+  };
+  assert.deepEqual(tapOffers({ attempts }).map((o) => o.session_id), ['S-1', 'S-2'], 'sorted by session');
+  assert.deepEqual(tapOffers({ attempts: { a: full } }), [{ session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) }], 'only the four fields');
+  assert.deepEqual(tapOffers({}), []);
+  const w = await ready();
+  const file = join(w.root, 'status.json');
+  const base = JSON.parse(readFileSync(file, 'utf8'));
+  const read = (offers) => {
+    const s = { ...base, written_at: new Date(T0).toISOString() };
+    if (offers === undefined) delete s.offers; else s.offers = offers;
+    writeFileSync(file, JSON.stringify(s));
+    return readReviewStatus({ file, now: T0, uid: ME }).offers;
+  };
+  const o = { session_id: 'S-2', card: 'C-1', role: 'reviewer', head: 'a'.repeat(40) };
+  assert.deepEqual(read([o, { ...o, extra: 1 }]), [o, o], 'only the four fields are passed on');
+  assert.deepEqual(read([o, null, 7, 'S-1', [o], { ...o, card: 3 }, { ...o, head: '' }]), [o]);
+  for (const bad of [undefined, null, 'x', 5, { a: 1 }]) assert.deepEqual(read(bad), [], `no list: ${JSON.stringify(bad)}`);
 });
