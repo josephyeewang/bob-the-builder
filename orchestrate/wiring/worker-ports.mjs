@@ -96,20 +96,31 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
   return ports;
 }
 
-// host.lock is read in a child under limitedSync (the Dispatcher's read is held to its time limit), opened without following a
+// host.lock is read in a child under limitedSync (the Dropbox read is held to its time limit), opened without following a
 // link and checked on the opened file: a plain file of the owner's (config hostLockUid), with one name, at most
 // HOST_LOCK_MAX bytes. The folder is one the owner's user can write, so it can point the name at another file by a link in
 // the folders above, a hard link, or a link made and removed in the gap between the open and the check (r1 M1: 44 of 400
 // reads got another file's text). The owner check is on the file that was opened, so none of those gets a file that is
 // not the owner's own into the Record, and the owner can read their own files anyway (L739 self-review M1, L763).
 export const HOST_LOCK_MAX = 4096;
+/** Why `uid` can't be host.lock's owner (config hostLockUid), or null. The Dispatcher can write its own files, so a host.lock
+ * of its own would let it say who the host is (L739 self-review M1); root's files are not the owner's to give, nor the review
+ * user's (L763 self-review). */
+export function hostLockOwnerProblem(uid, selfUid, reviewUid) {
+  if (!Number.isSafeInteger(uid) || uid < 0) return "hostLockUid (the owner's Mac user id, host.lock's owner) must be a Mac user id";
+  if (uid === 0) return "hostLockUid is root; host.lock must be the owner's";
+  if (uid === selfUid) return "hostLockUid is the Dispatcher's own user; host.lock must be the owner's";
+  if (uid === reviewUid) return "hostLockUid is the review user; host.lock must be the owner's";
+  return null;
+}
 const HOST_LOCK_READ = `const fs = require('fs'); const [p, owner, max] = process.argv.slice(1); const say = (o) => process.stdout.write(JSON.stringify(o));
 let fd; try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch (e) { say({ code: e.code || String(e) }); process.exit(0); }
 const st = fs.fstatSync(fd);
 if (st.uid !== Number(owner)) say({ no: "is not the owner's file (its owner is uid " + st.uid + ', not ' + owner + ')' });
 else if (!st.isFile()) say({ no: 'is not a plain file' }); else if (st.nlink !== 1) say({ no: 'has another name too (a hard link)' });
 else if (st.size > Number(max)) say({ no: 'is over ' + max + ' bytes' });
-else say({ text: fs.readFileSync(fd, 'utf8') });`;
+else { const b = Buffer.alloc(Number(max) + 1); let n = 0; for (;;) { const k = fs.readSync(fd, b, n, b.length - n, null); if (k === 0) break; n += k; if (n === b.length) break; }
+  if (n > Number(max)) say({ no: 'is over ' + max + ' bytes' }); else say({ text: b.subarray(0, n).toString('utf8') }); }`;
 
 /**
  * hostLock for Joe's host.lock at `path`, which must be owner `ownerUid`'s file (config hostLockUid), read as Dispatcher
@@ -120,9 +131,8 @@ export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, no
   return () => {
     if (typeof run !== 'function') throw new Error('host.lock: the wiring was given no limitedSync to read it with');
     if (!Number.isSafeInteger(selfUid)) throw new Error("host.lock: the wiring was given no Dispatcher uid to check it against");
-    if (!Number.isSafeInteger(ownerUid) || ownerUid < 0) throw new Error("host.lock: the config's hostLockUid (the owner's Mac user id) must be a Mac user id");
-    // The Dispatcher can write its own files, so a host.lock of its own would let it say who the host is (L739 self-review M1).
-    if (ownerUid === selfUid) throw new Error("host.lock: the config's hostLockUid is the Dispatcher's own user; it must be the owner's");
+    const bad = hostLockOwnerProblem(ownerUid, selfUid);
+    if (bad) throw new Error(`host.lock: the config's ${bad}`);
     const r = run(node, ['-e', HOST_LOCK_READ, path, String(ownerUid), String(HOST_LOCK_MAX)], { timeoutMs: 10_000 });
     if (!r?.ok) throw new Error(`host.lock ${path} can't be read (${r?.why ?? 'no answer'})`);
     let got;
@@ -170,10 +180,11 @@ export function workerPorts(ctx) {
   // function in its place included) as nothing to do (cleanup.mjs), which would pass in silence (audit #127 r2 m-C;
   // #310 audit m-2: no hand-kept list of which ones are folders). The tick spreads this object into the step, so the
   // read throws inside the step. The wired ones come first, so the first refusal is NOT_WIRED_CLEANUP[0].
+  // A host.lock owner that can't be right stops the start, before anything is made, rather than making every pass "not known"
+  // (L763). Root's files and the review user's are not the owner's to name the host with.
+  const lockOwner = hostLockOwnerProblem(c.hostLockUid, ctx.selfUid, c.reviewUid);
+  if (lockOwner) throw new Error(`config: ${lockOwner}`);
   const cleanup = cleanupPorts(ctx);
-  // A host.lock owner that can't be right stops the start, rather than making every pass "not known" (L763).
-  if (!Number.isSafeInteger(c.hostLockUid) || c.hostLockUid < 0) throw new Error("config: hostLockUid (the owner's Mac user id, host.lock's owner) must be a Mac user id");
-  if (c.hostLockUid === ctx.selfUid) throw new Error("config: hostLockUid is the Dispatcher's own user; host.lock must be the owner's");
   for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return {
     cleanup,
