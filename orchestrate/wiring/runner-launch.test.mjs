@@ -1,12 +1,14 @@
 // Part C, runner step 2: the launch wall (runner-launch.mjs), with the real renderer and #320's real check.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
+import { writeStatus } from './runner-files.mjs';
 
 const PATHS = {
   copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
@@ -64,5 +66,33 @@ test('L759 step 2: settings without the wall, a linked runner folder or a missin
     assert.match(walledLaunchSettings(input('editing', null)).reason, /^not walled: /);
     assert.match(walledLaunchSettings(input('editing', runner, { render: () => ({ ok: false, reason: 'bad phase' }) })).reason, /^not walled: the worker settings can't be made \(bad phase\)/);
     assert.match(walledLaunchSettings(input('editing', runner, { check: () => undefined })).reason, /^not walled: the wall check gave no answer/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// #328 r1 M1 (L769): a forged status needs a hard link to status.json made outside the sandbox. Under macOS's own sandbox
+// (Seatbelt, which Claude Code's shell sandbox runs on), given the rendered denyWrite list as #320's L751 test does, a
+// worker's shell can't make that link, into its outbox or anywhere, nor one beside the status.
+test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to the runner\'s status; it can in its own outbox', {
+  skip: process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec') ? 'needs macOS sandbox-exec' : false,
+}, () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const outbox = join(d, 'outbox'); mkdirSync(outbox);
+    writeStatus(runner.statusFile, '{}\n');
+    const r = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, outbox } }));
+    assert.equal(r.ok, true, r.reason);
+    const rules = r.settings[S.sandbox][S.filesystem][S.denyWrite].filter((p) => !/[*]/.test(p) && p.startsWith(d)).map((p) => `(deny file-write* (subpath "${p}"))`);
+    assert.equal(rules.length, 2, 'the runner folders are on the denyWrite list as plain folders here');
+    const profile = `(version 1)(allow default)${rules.join('')}`;
+    const ln = (from, to) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/ln', from, to], { encoding: 'utf8' });
+    for (const to of [join(outbox, 'status-link.json'), join(d, 'state', 'second-name.json'), join(d, 'elsewhere.json')]) {
+      const w = ln(runner.statusFile, to);
+      assert.notEqual(w.status, 0, `a link at ${to} was made`);
+      assert.equal(existsSync(to), false, `${to} exists`);
+    }
+    assert.equal(statSync(runner.statusFile).nlink, 1);
+    writeFileSync(join(outbox, 'report-1.md'), 'x');
+    const ok = ln(join(outbox, 'report-1.md'), join(outbox, 'report-2.md'));
+    assert.equal(ok.status, 0, `control: a link inside the outbox failed: ${ok.stderr}`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

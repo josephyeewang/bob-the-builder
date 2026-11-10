@@ -85,7 +85,8 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       // Before the request is written a throw reads as refused (owner-ports.mjs).
       if (!REQUEST_ID.test(sessionId ?? '')) throw new Error('the launch names no session id the runner takes');
       if (!RUNNER_KINDS.includes(kind)) throw new Error(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
-      if (!CARD_ID.test(card ?? '') || !productName(product)) throw new Error('the launch names no card or product');
+      // No leading dot (#328 r1 c1): '.' would name copiesRoot itself, as review-runner.mjs refuses too.
+      if (!CARD_ID.test(card ?? '') || card.startsWith('.') || !productName(product)) throw new Error('the launch names no card or product');
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;

@@ -156,7 +156,7 @@ test('step 2 review M1, M2: an answer that contradicts the session its own statu
   // Unlisted, the answer alone is checked: its outbox must still be the one this runner makes.
   const elsewhere = (i, x) => { listed(null, 'stopped')(i, x); x.doc.answers['launch-S-1'].outbox = `${ROOT}/worker/S-2`; };
   assert.equal((await world(elsewhere, { giveUpMs: 2_000 }).ports.launch(LAUNCH)).timedOut, true, 'unlisted, wrong outbox');
-  for (const card of ['../x', 'a/b', 'C..1']) await assert.rejects(world().ports.launch({ ...LAUNCH, card }), /no card or product/, card);
+  for (const card of ['../x', 'a/b', 'C..1', '.', '.hidden']) await assert.rejects(world().ports.launch({ ...LAUNCH, card }), /no card or product/, card);
   // stopGroup: no alive field is not gone (it is live by the status's own rule), and the group must be the one asked.
   const stop = (more, state = 'stopped') => (i, x) => { x.doc = { sessions: [session('S-1', { stop_requested: true, ...more })], requests: { 'S-1': { state } }, answers: { 'stopGroup-S-1-n1': { ok: true, how: 'killed' } } }; };
   for (const [more, state] of [[{ alive: undefined, ended: undefined }, 'started'], [{ alive: false, ended: true, pgid: 78 }, 'stopped']]) {
@@ -175,4 +175,13 @@ test('step 2 review c4: nothing after the request is written throws; a failing c
     stat: () => st({ dir: true }), open: () => ({ st: st(), text: '{}' }), realpath: (x) => x, writeRequest: (n) => writes.push(n) });
   const r = await p.launch(LAUNCH);
   assert.equal(r.timedOut, true); assert.deepEqual(writes, ['launch-S-1.json']);
+});
+
+test('#328 r1 c2 (P11): the ask stops at its limit by the clock too, not only by counting its reads', async () => {
+  let t = T0; let reads = 0;
+  const p = ownerAsyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, clock: () => t, pollMs: 1, giveUpMs: 60_000,
+    sleep: async () => { t += 10_000; }, stat: () => st({ dir: true }), open: () => { reads += 1; return { st: st(), text: '{}' }; }, realpath: (x) => x, writeRequest: () => {} });
+  const r = await p.launch(LAUNCH);
+  assert.equal(r.timedOut, true);
+  assert.ok(reads <= 8, `${reads} reads: a minute of clock is six 10 s sleeps, whatever pollMs says`);
 });
