@@ -1710,7 +1710,7 @@ test('#307 r2 M1 planted: a session held for what it left in its outbox stays he
   w.taps.push({ session_id: 'S-1', key: 'k-1' });
   w.ask();
   const r = await runnerPass(w.ctx);
-  refusedFor(r, /review again" for session S-1: its ended record does not say its outbox was empty when it ended/);
+  refusedFor(r, /review again" for session S-1: its ended record does not say its outbox was empty when it ended, .*; that needs the builder, and a new push gets a new review/);
   assert.deepEqual(r.setAside, []);
   assert.deepEqual(r.started, []);
   // A clean silent end is marked, and keeps its right through the same prune (the P1 test above).

@@ -903,7 +903,7 @@ export async function runnerPass(ctx) {
     if (!e.ok || e.ended.verdict_sha256 !== 'none') return bad(`only a session that ended without handing in anything can be set aside (${e.ok ? 'its ended record names a verdict file' : e.reason})`);
     // With no attempt, the ended record must say the outbox was empty at the end (#307 r2 self-review M1): one held because
     // it was not is never set aside, even once the outbox is emptied. A record from before this was noted says neither.
-    if (a === undefined && e.ended.outbox_empty !== true) return bad('its ended record does not say its outbox was empty when it ended, so it may have been held for what it left there; that needs the builder');
+    if (a === undefined && e.ended.outbox_empty !== true) return bad('its ended record does not say its outbox was empty when it ended, so it may have been held for what it left there; that needs the builder, and a new push gets a new review');
     const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid, uid });
     if (!walls.ok) return bad(`its outbox fails its checks, so what it holds can't be known (${walls.reason}); that needs the builder`);
     const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid }));
@@ -1374,6 +1374,12 @@ export async function runnerPass(ctx) {
     .filter((d) => REVIEW_ROLES.includes(d.role) && isHead(d.head) && state.attempts[keyOf(d.card, d.tree ?? d.head, d.role)] === undefined && !asideIds.has(d.session_id)
       && (pastTime(d.launched_at, now) ?? -Infinity) >= now - OFFER_REBUILD_MS)
     .filter((d, i, all) => all.findIndex((x) => x.card === d.card && x.role === d.role && (x.tree ?? x.head) === (d.tree ?? d.head)) === i)
+    // Only an end tapCheck could pass (L812 m2): a clean silent end, marked. Read after the newest per tree is picked, so
+    // the offers made are the same; this only spares a card read each pass for one that can never pass.
+    .filter((d) => {
+      const e = runnerEnded({ root: P.ended, uid, role: d.role, card: d.card, head: d.head, sessionId: d.session_id });
+      return e.ok && e.ended.verdict_sha256 === 'none' && e.ended.outbox_empty === true;
+    })
     .map((d) => ({ session_id: d.session_id })) : [];
   const candidates = [...tapOffers(state), ...rebuilt].filter((x, i, all) => all.findIndex((y) => y.session_id === x.session_id) === i);
   for (const cand of candidates) {
