@@ -99,10 +99,10 @@ export function parseArgs(argv) {
 }
 
 function report(res, out) {
-  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length;
+  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.warn ? `WARNING  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length; const warned = res.filter((r) => r.warn).length;
   // A check that could not look is not a pass: with any NEEDS ROOT line the summary says so and the exit code is not 0.
-  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : `all ${res.length} PASS`}`);
+  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : warned ? `${res.length - warned} PASS and ${warned} WARNING (not a failure, but something does not work until it is put right)` : `all ${res.length} PASS`}`);
   return bad ? 1 : skipped ? 3 : 0;
 }
 
@@ -192,7 +192,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);
-  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS.`);
+  for (const r of after.filter((x) => x.warn)) out(`WARNING  ${r.what} — ${r.why}`);   // a WARNING is never summed up as a plain pass (L737 M1)
+  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS${after.some((x) => x.warn) ? ', with the WARNING above' : ''}.`);
   return bad.length ? 1 : 0;
 }
 
