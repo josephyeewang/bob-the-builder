@@ -86,12 +86,17 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
+import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
 import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
+import { TOOLS_CHECKED } from '../../M10-rules/roles.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
 const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget'];
 const PIN = /^\d+\.\d+\.\d+$/;
+// Every field readConfig reads, and nothing else: setup's review-config (setup/review-config.mjs) builds each from
+// exactly one source, and its test holds that table equal to this list.
+export const CONFIG_FIELDS = Object.freeze([...ABS, ...OPTIONAL_ABS, 'deny', 'pin', 'rules', 'uids', 'recordUid', 'ownerUid']);
 // The one export a wiring may have (R-0b-163, L78 n4).
 export const WIRING_EXPORTS = Object.freeze(['start']);
 const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
@@ -112,6 +117,10 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
   if (typeof c.pin !== 'string' || !PIN.test(c.pin)) throw new Error('config: pin must be the Claude Code version the rules pin (x.y.z)');
+  // m-5 (L599, L709): the pin is the one the role tool lists were checked on. add-to-install wrote this pin, and the
+  // program at claudeBin, into the copy; a pin moved without that re-check is refused here, at daemon start, by its own
+  // name, not later by launch check 0 as "setting names not confirmed". No rules snapshot is read for it.
+  if (c.pin !== TOOLS_CHECKED.claude_code) throw new Error(`config: pin is ${c.pin}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
   // No path may be / itself (L83 minor 3): a deny of / denies nothing the template can name, and a bobFolder of / would
   // attach the whole disk read-only as the method folder.
   for (const [k, p] of [...[...ABS, ...OPTIONAL_ABS].map((k) => [k, c[k]]), ...c.deny.map((p) => ['deny', p])]) {
@@ -185,6 +194,24 @@ function realPath(p) {
     rest.unshift(basename(head));
     head = up;
   }
+}
+/**
+ * Is the Front Door's taps folder the one the runner reads (L736 #306 m4)? The Front Door's walls guard `ownerTaps` as its
+ * launch is given it; were that another folder than the runner config's `ownerTaps`, the wall would guard the wrong one.
+ * Setup fills both from its one value; this compares them, reading the runner config as the runner does. The Front
+ * Door's must be its own real path, in the case the disk holds it (no link, no other case), since its rules name it as
+ * given and a rule for another spelling may match nothing (#306 self-review m1); trailing slashes aside, it must then be
+ * the runner's, on the runner's real path. No caller yet: the Front Door's install runs it and refuses on a reason when
+ * it is built (R-0b-162, lane 4's setup). `read` is a port for a test. → null | the reason
+ */
+export function tapsFolderProblem({ ownerTaps, runnerConfig, read = readConfig }) {
+  let c; try { c = read(runnerConfig); } catch (e) { return `the review runner's config can't be read (${String(e?.message ?? e).slice(0, 200)})`; }
+  if (typeof c?.ownerTaps !== 'string') return 'the review runner\'s config names no taps folder (ownerTaps), so no tap is ever read';
+  if (typeof ownerTaps !== 'string' || !isAbsolute(ownerTaps)) return 'the Front Door names no taps folder';
+  const given = ownerTaps.replace(/(?<=.)\/+$/, '');
+  const a = realPath(given), b = realPath(c.ownerTaps);
+  if (a !== given) return `the Front Door's taps folder (${ownerTaps}) is not written as the disk holds it (${a}), so a wall rule naming it may match nothing`;
+  return a === b ? null : `the Front Door's taps folder (${ownerTaps}) is not the one the review runner reads (${c.ownerTaps}), so its wall guards the wrong folder`;
 }
 /** Is `p` the folder `dir` or inside it? */
 const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
@@ -513,6 +540,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
+    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, ...await changeReaders({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }

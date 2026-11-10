@@ -55,6 +55,7 @@ export function wallPlaces(c, { sessionId, other, role = 'reviewer' }) {
     { place: 'its own review package\'s pin', file: join(runner(FOLDERS.packages), `${sessionId}.sha256`) },
     folder('the runner\'s ended/', runner(FOLDERS.ended)),
     folder('the runner\'s set-aside/', runner(FOLDERS.aside)),
+    folder('the runner\'s finalized/', runner(FOLDERS.finalized)),
     folder('the runner\'s settings/', runner(SETTINGS_DIR)),
     { place: 'the runner\'s status.json', file: runner(FOLDERS.status) },
     { place: 'the runner\'s state.json', file: runner(FOLDERS.state) },
