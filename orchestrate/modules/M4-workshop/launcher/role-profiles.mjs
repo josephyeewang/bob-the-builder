@@ -63,6 +63,8 @@ export const DESIGN_PROFILES = Object.freeze({
   // worker's walls (secrets, proposals, the Bob folder, the worker runner's requests and status) and nothing a reviewer
   // has. Its tools are M10's published script.json less Workflow, which stays on this never-list until it is walled;
   // a published file that holds Workflow is refused here (a capability claim, checked on this code, not a version).
+  // The Dispatcher starts it under the worker's outbox root (<root>/worker/<session>) and records it as a worker, so
+  // M9 reads its hand-ins with the worker's kinds; its own hooks run as role script (report- only).
   script: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'dontAsk', restricted: true,
     outbox: designKinds('script'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'report' }),
 });

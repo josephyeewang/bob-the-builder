@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
 import { renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, bobFolderDeny } from './render-settings.mjs';
-import { SETTINGS as S, ENV } from './settings-names.mjs';
+import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
@@ -373,7 +373,6 @@ test('L751: under macOS\'s sandbox, a worker\'s shell write to the runner\'s sta
   assert.equal(ok.status, 0, `control: the outbox write failed: ${ok.stderr}`);
 });
 
-// Review of #320 M1, M2: the launch-time check of the runner wall: present in the role file, and spelled as real paths.
 // L760: a script card's session is walled as a worker is: secrets, proposals, the Bob folder and the worker runner's
 // folders, checked through checkRunnerWall; and nothing a reviewer has.
 test('L760: the script profile renders with the worker\'s walls, passes checkRunnerWall, and holds nothing of a reviewer\'s', () => {
@@ -402,10 +401,14 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   // Without the proposals folders, or with an empty list, it is refused like a worker.
   assert.equal(render('script', { proposalOutboxes: undefined }).ok, false);
   assert.equal(render('script', { proposalOutboxes: [], paths: { ...PATHS, deny: { ...PATHS.deny, proposals: [] } } }).ok, false);
+  // It writes its copy (the Dispatcher counts a script card as writing its files): the plain-files hook gets --copy.
+  const hook = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
+  assert.ok(hook.includes(' --copy /w/copy'), hook);
   // M10's published script.json lists Workflow: still refused here, as on the never-list.
   assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
 });
 
+// Review of #320 M1, M2: the launch-time check of the runner wall: present in the role file, and spelled as real paths.
 test('L751: checkRunnerWall passes a rendered worker file with real runner folders, and refuses a missing wall or a linked spelling', () => {
   const d = realpathSync(tmp());
   const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };

@@ -96,7 +96,7 @@ test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s i
     }
   }
   // Every (role, kind) pair in the table was reached as an allowed hand-in.
-  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => r !== 'script' && !notYet(r, k)).map((r) => `${r}:${k}`));
+  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => !notYet(r, k)).map((r) => `${r}:${k}`));
   for (const p of pairs) assert.ok(swept.includes(p), `${p} was swept`);
 });
 
