@@ -106,7 +106,8 @@ export function openRead(file) {
 // Running: its process group is known to be there, or nothing says it is gone or ended.
 export const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
 const bad = (x, why) => { throw new Error(`session ${x.id} in the worker runner's status ${why}`); };
-function checkSession(x, { uid, outboxRoot, realpath }) {
+/** One listed session checked as the reader checks it, or a throw (the runner checks a start's answer with it before listing it). */
+export function checkSession(x, { uid, outboxRoot, realpath }) {
   if (!x || typeof x !== 'object' || !REQUEST_ID.test(x.id ?? '')) throw new Error('a session in the worker runner\'s status is not what the runner writes');
   for (const f of SESSION_FIELDS) if (x[f] === undefined) bad(x, `has no ${f}`);
   if (!Object.hasOwn(RUNNER_ROLE_OF, x.kind)) bad(x, `has kind ${JSON.stringify(x.kind)}, which the runner does not start`);
