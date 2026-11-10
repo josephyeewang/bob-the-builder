@@ -45,6 +45,14 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
+// L722, L729: the draft-only plan grant, on its own so a test can reach it past the field gate, which refuses the same
+// writes first. True only when the card is a draft of a kind that always needs a go and EVERY changed plan input is on
+// the writer's updateInDraft list; one plan input off the list refuses the whole write.
+export function draftPlanGrant(name, old, plan) {
+  return old?.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind)
+    && plan.every((f) => (WRITERS.card[name]?.updateInDraft ?? []).includes(f));
+}
+
 export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
   probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
   if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
@@ -233,9 +241,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     // One exception (L722): a draft-only grant (permissions updateInDraft, the Dispatcher's done_when) on a draft of a kind
     // that always needs a go. Its go is still asked on the plan as it then stands, so the hole MAT-1 closes stays closed.
     const plan = PLAN_INPUTS.filter((f) => changed.includes(f));
-    const draftGrant = old.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind)
-      && plan.every((f) => (WRITERS.card[name]?.updateInDraft ?? []).includes(f));
-    if (plan.length && !mayCreateKind(name, old.kind) && !draftGrant) return no(`${name} may not change the plan of a ${old.kind} card`);
+    if (plan.length && !mayCreateKind(name, old.kind) && !draftPlanGrant(name, old, plan)) return no(`${name} may not change the plan of a ${old.kind} card`);
     // Nor its brief, desired outcome or merge request (round 2 m5); needs_joe is a flag any setter may raise on any card.
     if (['brief', 'desired', 'merge_requested'].some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change a ${old.kind} card's brief, desired or merge request`);
     if (changed.includes('needs_joe')) {
