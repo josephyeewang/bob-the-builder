@@ -4,7 +4,7 @@
 // NOT_WIRED_WORKER, in the same change. dispatcher-wiring.mjs stays as it is.
 //
 // WIRED (C, L739):
-//   hostLock()           → the text of Joe's host.lock (config hostLockPath), or null when there is no such file in a
+//   hostLock()           → the text of Joe's host.lock (config hostLockPath, a file of config hostLockUid's), or null when there is no such file in a
 //                          folder that is there. A file or folder that can't be read throws: pass.mjs reads a throw as
 //                          "not known" and tells it, never as "no host". The read runs through limitedSync (a Dropbox
 //                          file may hang while it downloads).
@@ -20,7 +20,7 @@ import { lstatSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isRefusing, refusing } from './not-wired.mjs';
 import { privateFolder } from './private-folder.mjs';
-import { git as safeGit } from '../modules/M4-workshop/git/safe-git.mjs';
+import { checkMirror, git as safeGit } from '../modules/M4-workshop/git/safe-git.mjs';
 import { ENDED_FOLDER, runnerEnded } from '../modules/M9-record/outbox.mjs';
 import { FOLDERS as RUNNER_FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 
@@ -51,12 +51,16 @@ export function cleanupProblem(cleanup) {
  * (setup makes it orchestrate's, 0755). Throws saying why. Checked at start and again on each use, so a mirror that goes
  * away later is told, never read as "no mirror". The one check: review-ports.mjs filesOf uses it too.
  */
-export function mirrorProblem(mirror, uid, { lstat = lstatSync } = {}) {
+export function mirrorProblem(mirror, uid, { lstat = lstatSync, shape = checkMirror } = {}) {
   let st;
   try { st = lstat(mirror); } catch (e) { return `the product's mirror (mirror) ${mirror} can't be read (${e?.code ?? e})`; }
   if (st.isSymbolicLink() || !st.isDirectory()) return `the product's mirror (mirror) ${mirror} is not a plain folder`;
   if (st.uid !== uid) return `the product's mirror (mirror) ${mirror} belongs to uid ${st.uid}, not to this job's uid ${uid}`;
   if (st.mode & 0o022) return `the product's mirror (mirror) ${mirror} can be written by others (mode ${(st.mode & 0o777).toString(8)})`;
+  // safe-git's own mirror check, as worker-copy and push run it: its config is the template, and nothing in it (grafts,
+  // shallow, commit-graph, alternates, hooks) changes what a commit's parents or files are read as (r1 m2, L763).
+  const m = shape(mirror);
+  if (!m?.ok) return `the product's mirror (mirror) ${mirror} can't be used: ${m?.reason ?? 'its check gave no answer'}`;
   return null;
 }
 export function checkedMirror(mirror, uid, opts) {
@@ -67,6 +71,7 @@ export function checkedMirror(mirror, uid, opts) {
 
 // The two reads cleanup.mjs makes of the mirror (mirrorTree's ls-tree, the on-main merge-base). Anything else is refused.
 export const CLEANUP_GIT = Object.freeze(['ls-tree', 'merge-base']);
+export const CLEANUP_GIT_MS = 60_000;
 
 /** The cleanup group's wired ports for one product. `run` is safe-git's runner (a port for a test). */
 export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
@@ -79,8 +84,11 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
     git: (args, opts = {}) => {
       if (opts.gitDir !== c.mirror) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `cleanup git: refused: only the product's mirror is read here, not ${opts.gitDir}` });
       if (!CLEANUP_GIT.includes(args?.[0])) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `cleanup git: refused: only ${CLEANUP_GIT.join(' and ')} run on the mirror` });
+      const bad = mirrorProblem(c.mirror, selfUid);
+      if (bad) return Promise.resolve({ code: -1, stdout: Buffer.alloc(0), stderr: `cleanup git: refused: ${bad}` });
       // Only these options reach safe-git: no other program, path, work tree or config can be asked for (self-review m2).
-      return run(args, { gitDir: c.mirror, purpose: opts.purpose, ...(Number.isFinite(opts.timeoutMs) ? { timeoutMs: Math.min(opts.timeoutMs, 60_000) } : {}) });
+      // The time limit is at most CLEANUP_GIT_MS, given or not: cleanup.mjs gives none (r1 m1, L763).
+      return run(args, { gitDir: c.mirror, purpose: opts.purpose, timeoutMs: Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? Math.min(opts.timeoutMs, CLEANUP_GIT_MS) : CLEANUP_GIT_MS });
     },
   };
   // A folder, read on each pass: one that can't be used throws inside the step, so the sweep is never skipped in silence.
@@ -88,28 +96,34 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
   return ports;
 }
 
-// host.lock is read in a child under limitedSync (the Dropbox read is held to its time limit), opened without following a
-// link and checked on the opened file: a plain file with one name, not the Dispatcher's own, at most HOST_LOCK_MAX bytes.
-// The folder is one another user can write, so a check of the name alone would let that user link (or hard-link) a file
-// only the Dispatcher can read to host.lock and have its text put in the Record (L739 self-review M1).
+// host.lock is read in a child under limitedSync (the Dispatcher's read is held to its time limit), opened without following a
+// link and checked on the opened file: a plain file of the owner's (config hostLockUid), with one name, at most
+// HOST_LOCK_MAX bytes. The folder is one the owner's user can write, so it can point the name at another file by a link in
+// the folders above, a hard link, or a link made and removed in the gap between the open and the check (r1 M1: 44 of 400
+// reads got another file's text). The owner check is on the file that was opened, so none of those gets a file that is
+// not the owner's own into the Record, and the owner can read their own files anyway (L739 self-review M1, L763).
 export const HOST_LOCK_MAX = 4096;
-const HOST_LOCK_READ = `const fs = require('fs'); const [p, self, max] = process.argv.slice(1); const say = (o) => process.stdout.write(JSON.stringify(o));
+const HOST_LOCK_READ = `const fs = require('fs'); const [p, owner, max] = process.argv.slice(1); const say = (o) => process.stdout.write(JSON.stringify(o));
 let fd; try { fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch (e) { say({ code: e.code || String(e) }); process.exit(0); }
 const st = fs.fstatSync(fd);
-if (!st.isFile()) say({ no: 'is not a plain file' }); else if (st.nlink !== 1) say({ no: 'has another name too (a hard link)' });
-else if (st.uid === Number(self)) say({ no: "is the Dispatcher's own file, not the owner's" }); else if (st.size > Number(max)) say({ no: 'is over ' + max + ' bytes' });
+if (st.uid !== Number(owner)) say({ no: "is not the owner's file (its owner is uid " + st.uid + ', not ' + owner + ')' });
+else if (!st.isFile()) say({ no: 'is not a plain file' }); else if (st.nlink !== 1) say({ no: 'has another name too (a hard link)' });
+else if (st.size > Number(max)) say({ no: 'is over ' + max + ' bytes' });
 else say({ text: fs.readFileSync(fd, 'utf8') });`;
 
 /**
- * hostLock for Joe's host.lock at `path`, as Dispatcher user `selfUid`. Missing file in a folder that is there → null (no
- * host claimed). Anything else that stops the read throws, so the pass reads it as "not known". Read by `run`
- * (limitedSync's), in a child of this Node.
+ * hostLock for Joe's host.lock at `path`, which must be owner `ownerUid`'s file (config hostLockUid), read as Dispatcher
+ * user `selfUid`. Missing file in a folder that is there → null (no host claimed). Anything else that stops the read
+ * throws, so the pass reads it as "not known". Read by `run` (limitedSync's), in a child of this Node.
  */
-export function hostLockPort({ path, run, selfUid, stat = statSync, node = process.execPath }) {
+export function hostLockPort({ path, run, ownerUid, selfUid, stat = statSync, node = process.execPath }) {
   return () => {
     if (typeof run !== 'function') throw new Error('host.lock: the wiring was given no limitedSync to read it with');
     if (!Number.isSafeInteger(selfUid)) throw new Error("host.lock: the wiring was given no Dispatcher uid to check it against");
-    const r = run(node, ['-e', HOST_LOCK_READ, path, String(selfUid), String(HOST_LOCK_MAX)], { timeoutMs: 10_000 });
+    if (!Number.isSafeInteger(ownerUid) || ownerUid < 0) throw new Error("host.lock: the config's hostLockUid (the owner's Mac user id) must be a Mac user id");
+    // The Dispatcher can write its own files, so a host.lock of its own would let it say who the host is (L739 self-review M1).
+    if (ownerUid === selfUid) throw new Error("host.lock: the config's hostLockUid is the Dispatcher's own user; it must be the owner's");
+    const r = run(node, ['-e', HOST_LOCK_READ, path, String(ownerUid), String(HOST_LOCK_MAX)], { timeoutMs: 10_000 });
     if (!r?.ok) throw new Error(`host.lock ${path} can't be read (${r?.why ?? 'no answer'})`);
     let got;
     try { got = JSON.parse(String(r.stdout)); } catch { throw new Error(`host.lock ${path} can't be read (its reader said nothing it could parse)`); }
@@ -157,10 +171,13 @@ export function workerPorts(ctx) {
   // #310 audit m-2: no hand-kept list of which ones are folders). The tick spreads this object into the step, so the
   // read throws inside the step. The wired ones come first, so the first refusal is NOT_WIRED_CLEANUP[0].
   const cleanup = cleanupPorts(ctx);
+  // A host.lock owner that can't be right stops the start, rather than making every pass "not known" (L763).
+  if (!Number.isSafeInteger(c.hostLockUid) || c.hostLockUid < 0) throw new Error("config: hostLockUid (the owner's Mac user id, host.lock's owner) must be a Mac user id");
+  if (c.hostLockUid === ctx.selfUid) throw new Error("config: hostLockUid is the Dispatcher's own user; host.lock must be the owner's");
   for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return {
     cleanup,
-    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, selfUid: ctx.selfUid }),
+    hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid }),
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
   };
 }

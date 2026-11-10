@@ -51,6 +51,9 @@
 //                  unless a plain folder of this user's, private and writable, the approvals folder's check (L295)
 //   hostLockPath   Joe's host.lock (~/Dropbox/99.0 Claude Sync/host.lock in the owner's home, L739). No file there is
 //                  "no host claimed"; a file or folder that can't be read is "not known", told, never "no host"
+//   hostLockUid    the owner's Mac user id: host.lock is read only when the opened file is that user's, so a link, a hard
+//                  link or a swap in the owner's folder never puts another user's file in the Record (L763). It may not
+//                  be the Dispatcher's own user, which could then write who the host is
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -77,10 +80,10 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 // The review runner's (L615, L639; review-ports.mjs reviewRunner). The Dispatcher's alone: the robot config refuses them.
 export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewStatusFile', 'reviewUid', 'reviewRunnerLog', 'reviewInstallRoot']);
 // The worker and cleanup ports' (worker-ports.mjs, and filesOf in review-ports.mjs, L739). The Dispatcher's alone too.
-export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'hostLockPath']);
+export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'hostLockPath', 'hostLockUid']);
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
   ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid'), ...WORKER_CONFIG_KEYS]);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid'), ...WORKER_CONFIG_KEYS.filter((k) => k !== 'hostLockUid')]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
 // on a list throws when called: never a stand-in answer. To wire one, change its port file; this file doesn't change.
