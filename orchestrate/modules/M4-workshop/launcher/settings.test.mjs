@@ -453,3 +453,37 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   // M10's published script.json lists Workflow: still refused here, as on the never-list.
   assert.match(checkProfile('script', { ...DESIGN_PROFILES.script, tools: [...DESIGN_PROFILES.script.tools, 'Workflow'] }).reason, /never-list/);
 });
+
+test('L881: the shell\'s write wall between sessions: the only added folders are the session\'s own outbox and the read-only Bob folder', () => {
+  const w = render('worker');
+  assert.equal(w.ok, true, w.reason);
+  const s = w.settings;
+  // What a worker's shell may write (claude's sandbox: the working folder, a per-user temp folder and the added
+  // folders) holds its own outbox and no sibling's: a sibling outbox can't be written, renamed or deleted.
+  assert.deepEqual(s[S.permissions][S.additionalDirectories], [PATHS.outbox, PATHS.bobFolder]);
+  const writable = [PATHS.copy, ...s[S.permissions][S.additionalDirectories]];
+  const inside = (x, d) => x === d || x.startsWith(`${d}/`);
+  for (const sibling of ['/w/outbox-2', '/w/outbox2/x', '/w', '/w/copy2']) assert.equal(writable.some((d) => inside(sibling, d)), false, sibling);
+  assert.equal(Object.keys(s[S.sandbox][S.filesystem]).some((k) => /allow/i.test(k)), false, 'no shell write is added by an allow list');
+  assert.equal(s[S.permissions][S.allow].every((r) => r.startsWith('Bash(')), true, 'no file write is allowed by rule');
+  assert.equal(checkSettings(s, { profile: DESIGN_PROFILES.worker }).ok, true);
+  // Every rendered role passes the same check.
+  for (const role of Object.keys(DESIGN_PROFILES)) {
+    const r = render(role);
+    if (r.ok) assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
+  }
+  // Each drift is refused at launch (check 0 runs checkSettings).
+  const drift = (f) => { const c = structuredClone(s); f(c); return checkSettings(c, { profile: DESIGN_PROFILES.worker }); };
+  const dirs = (c) => c[S.permissions][S.additionalDirectories];
+  for (const [name, f] of [
+    ['a sibling outbox added', (c) => dirs(c).push('/w/outbox-2')],
+    ['the outbox root added', (c) => { dirs(c)[0] = '/w'; }],
+    ['a sibling in the outbox\'s place', (c) => { dirs(c)[0] = '/w/outbox-2'; }],
+    ['a sibling in the Bob folder\'s place', (c) => { dirs(c)[1] = '/w/outbox-2'; }],
+    ['the outbox twice', (c) => { dirs(c)[1] = PATHS.outbox; }],
+    ['the Bob folder\'s tools wall gone', (c) => { c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((r) => !bobFolderDeny(PATHS.bobFolder).includes(r)); }],
+    ['the Bob folder\'s shell wall gone', (c) => { c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => !r.startsWith(PATHS.bobFolder)); }],
+    ['the first hook naming another outbox', (c) => { const h = Object.values(c[S.hooks])[0][0][H.hooks][0]; h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
+    ['a later hook naming another outbox', (c) => { const h = Object.values(c[S.hooks]).at(-1).at(-1)[H.hooks].at(-1); h[H.command] = h[H.command].replace(` --outbox ${PATHS.outbox}`, ' --outbox /w/outbox-2'); }],
+  ]) assert.match(drift(f).reason ?? '', /beyond the session's own outbox/, name);
+});

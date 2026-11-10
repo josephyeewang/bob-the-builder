@@ -183,6 +183,9 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   const deny = denyPaths.flatMap(denyPair);
   // Outbox: no dot-names, no sub-folders' dot-names.
   const ob = abs(paths.outbox);
+  // The Write(...) rules here and below are unmatched on claude 2.1.322: it warns that only Edit(path) rules meet
+  // file permission checks, and Edit(...) covers every file-writing tool. Kept in case a later version matches them
+  // (a capability note: recheck on each pinned upgrade).
   deny.push(`Write(/${ob}/.*)`, `Edit(/${ob}/.*)`, `Write(/${ob}/**/.*)`, `Edit(/${ob}/**/.*)`);
   if (profile.setupFileRefusals) {
     for (const pat of ['//**/.claude/**', '//**/.mcp.json', '//**/SKILL.md']) deny.push(`Read(${pat})`, `Edit(${pat})`, `Write(${pat})`);
@@ -277,6 +280,37 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
 }
 
 /**
+ * The shell's write wall between sessions (L880, L881). The sandbox lets a shell write only its working folder (the
+ * code copy), a per-user temp folder and the added folders, so a session's own outbox must be the only added folder
+ * it writes: a sibling's outbox, one of the same product included, then can't be written, renamed or deleted (shown
+ * on claude 2.1.322 with worker settings: touch, mv and rm in a sibling's outbox all refused). The only other added
+ * folder may be the Bob folder, read-only to the tools and walled from the shell. The outbox is the one every
+ * hook is told (--outbox). → the reason, or null.
+ */
+function ownFoldersProblem(obj) {
+  const dirs = obj[S.permissions]?.[S.additionalDirectories] ?? [];
+  const outboxes = new Set();
+  for (const list of Object.values(obj[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      const w = typeof h?.[H.command] === 'string' ? h[H.command].match(/ --outbox (\S+)/) : null;
+      if (w) outboxes.add(w[1]);
+    }
+  }
+  const beyond = 'the role file adds folders beyond the session\'s own outbox and the Bob folder';
+  if (!Array.isArray(dirs) || !dirs.length) return null;
+  if (outboxes.size !== 1) return `${beyond} (its hooks name ${outboxes.size ? 'more than one outbox' : 'no outbox'})`;
+  const [outbox] = outboxes;
+  if (dirs[0] !== outbox || dirs.length > 2) return beyond;
+  if (dirs.length === 2) {
+    const bob = dirs[1];
+    const deny = obj[S.permissions]?.[S.deny] ?? [];
+    const shellWrite = obj[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
+    if (typeof bob !== 'string' || !bobFolderDeny(bob).every((r) => deny.includes(r)) || !bobFolderShell(bob).every((r) => shellWrite.includes(r))) return beyond;
+  }
+  return null;
+}
+
+/**
  * Every lock-down field a loaded settings file must (or must not) hold. Run on the rendered file
  * after reading it back from disk, and (as `machineWide: true`) on the machine-wide file, where an
  * excludedCommands entry or an unsandboxed escape refuses every role.
@@ -305,6 +339,8 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
   if (!p || p[S.ask]?.length) return refuse('role settings hold ask rules');
   if ((p[S.allow] ?? []).some((r) => !/^Bash\(.+\)$/.test(r) || BAD_COMMAND.test(r.slice(5, -1)))) return refuse('an allow rule is not one exact command');
   if (profile && p[S.defaultMode] !== profile.mode) return refuse('permission mode differs from the profile');
+  const folders = ownFoldersProblem(obj);
+  if (folders) return refuse(folders);
   for (const list of Object.values(obj[S.hooks] ?? {})) {
     for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
       if (typeof h?.[H.command] !== 'string' || !h[H.command].endsWith(HOOK_FAILS_CLOSED)) return refuse('a hook command does not exit 2 when it fails to run');
