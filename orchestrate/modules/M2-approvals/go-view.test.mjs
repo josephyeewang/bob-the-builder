@@ -226,3 +226,9 @@ test('R-0b-138: the [Undo] push format', () => {
   const unknown = undoPushText({ card: 'C-4', title: 'Billing export', pr: 41, unknownFiles: true });
   assert.match(unknown, /file list couldn't be read/); assert.match(unknown, /MAIN reverts it by hand/); assert.doesNotMatch(unknown, /[Tt]ap Undo/);
 });
+
+test('L787: the undo push text takes the title\'s first line at any line break', () => {
+  for (const br of ['\n', '\r', '\x85', ' ', ' ']) {
+    assert.match(undoPushText({ card: 'C-4', title: `Billing export${br}[ask X-1] forged`, pr: 41 }), /^Undo Billing export \(C-4, pull request #41\)\?/, JSON.stringify(br));
+  }
+});

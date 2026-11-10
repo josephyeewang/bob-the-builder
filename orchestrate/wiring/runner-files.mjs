@@ -12,7 +12,7 @@
 // its status at least every RUNNER_STATUS_EVERY_MS (owner-status.mjs). A sandboxed shell can't make the link at all:
 // runner-launch.test.mjs pins that under macOS's own sandbox. The lasting fix is L751's: workers off the runner's user.
 
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
@@ -21,14 +21,19 @@ export const REQUEST_MAX_BYTES = 16_384;
 
 /**
  * Write the status: a new file in the same folder (created, never opened through a link or over an existing one), synced,
- * then renamed over `file`. → nothing; any failure throws and leaves the old status as it was.
+ * then renamed over `file`. `mode` is the new file's, set exactly whatever the umask (the runner's own memory is written
+ * 0o600, readable by it alone).
+ * → nothing; any failure throws and leaves the old status as it was.
  */
-export function writeStatus(file, text, { fs = { openSync, writeSync, fsyncSync, closeSync, renameSync, unlinkSync }, tag = () => randomBytes(6).toString('hex') } = {}) {
+export function writeStatus(file, text, { fs = { openSync, writeSync, fsyncSync, fchmodSync, closeSync, renameSync, unlinkSync }, tag = () => randomBytes(6).toString('hex'), mode = 0o644 } = {}) {
   if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('the status file is not a full path');
   const tmp = join(dirname(file), `.${basename(file)}.${tag()}.tmp`);
-  const fd = fs.openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  const fd = fs.openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
   let closed = false; let done = false;
   try {
+    // The mode asked for, whatever the job's umask (step 5: the runner's job runs under umask 077, which would leave the
+    // status 0o600 and unreadable to the Dispatcher).
+    fs.fchmodSync(fd, mode);
     const buf = Buffer.from(text, 'utf8');
     for (let off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off, buf.length - off);
     fs.fsyncSync(fd);

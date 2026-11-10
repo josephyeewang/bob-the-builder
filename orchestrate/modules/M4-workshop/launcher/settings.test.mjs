@@ -423,7 +423,7 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
   for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
   assert.equal(checkProfile('script', DESIGN_PROFILES.script).ok, true);
-  assert.deepEqual(DESIGN_PROFILES.script.outbox, ['report-']);
+  assert.deepEqual(DESIGN_PROFILES.script.outbox, ['report-', 'handin-']);
   const r = render('script', { paths: { ...PATHS, workerRunner: runner } });
   assert.equal(r.ok, true, r.reason);
   // It asks nobody (dontAsk), and with no shell it reaches no host, even with the rules' hosts given (#331 audit m2).

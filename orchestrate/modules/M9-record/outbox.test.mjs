@@ -212,6 +212,23 @@ test('a hand-in after 3 head pushes is accepted; one from another session is ref
   assert.equal(env.record.diary().at(-1).actor, 'worker:S-1');
 });
 
+test('L838: a script hands in as a worker does: its own claimed card only, as script:<id>, and no other worker kind', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  running(env);
+  must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'push');
+  // A script session that does not hold the card is refused, as a worker would be.
+  const other = env.record.applyOutbox({ role: 'script', sessionId: 'S-2', card: 'C-1' }, outboxFile(env, 'script', 'S-2', 'handin-1.md', handin('C-1')));
+  refusedCleanly(env, other, /S-2 does not hold card C-1/);
+  // A worker's compaction note is not a script's kind.
+  const compact = env.record.applyOutbox({ role: 'script', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'script', 'S-1', 'report-compact-1.md', 'a note\n'));
+  assert.equal(compact.ok, false, JSON.stringify(compact));
+  must(env.record.applyOutbox({ role: 'script', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'script', 'S-1', 'handin-1.md', handin('C-1'))), 'hand-in');
+  const c = env.record.read('card', 'C-1').doc;
+  assert.equal(c.state, 'in_review');
+  assert.equal(c.claim, undefined, 'the claim ends with the hand-in');
+  assert.equal(env.record.diary().at(-1).actor, 'script:S-1', 'its actor is its own role, never worker:');
+});
+
 test('a hand-in may not clear needs_joe (R2-M12)', () => {
   const env = setup({ prefix: 'm9-out-' });
   product(env);

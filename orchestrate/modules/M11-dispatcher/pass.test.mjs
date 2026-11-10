@@ -49,7 +49,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -502,6 +502,12 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   const l = w.rec.read('launch', sid).doc;
   assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
+  assert.equal(l.base, null, 'a launcher that does not say a base records null');
+  // L825-2: the commit the launcher started the copy on is recorded as it said it.
+  const b = world([card('C-3')]);
+  b.refuseLaunch(() => ({ ok: true, base: 'b'.repeat(40) }));
+  await b.pass();
+  assert.equal(b.rec.read('launch', b.sessions[0].id).doc.base, 'b'.repeat(40));
   // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
