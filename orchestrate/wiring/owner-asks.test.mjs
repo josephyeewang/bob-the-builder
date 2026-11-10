@@ -60,6 +60,11 @@ test('L759 step 2: launch trusts no answer the rest of the status does not bear 
 test('L759 step 2: a refused launch is told only when the request is marked refused; a bad launch throws before any request', async () => {
   const w = world((i, x) => { if (i === 1) x.doc = { sessions: [], requests: { 'S-1': { state: 'refused' } }, answers: { 'launch-S-1': { ok: false, reason: 'not walled: no such role' } } }; });
   assert.deepEqual(await w.ports.launch(LAUNCH), { ok: false, reason: 'not walled: no such role' });
+  // A refusal while the request is not marked refused (something may have started) is not trusted: it waits.
+  for (const doc of [{ sessions: [session('S-1')], requests: { 'S-1': { state: 'started' } } }, { sessions: [], requests: {} }, { sessions: [], requests: { 'S-1': { state: 'waiting' } } }]) {
+    const x = world((i, y) => { y.doc = { ...doc, answers: { 'launch-S-1': { ok: false, reason: 'no' } } }; }, { giveUpMs: 2_000 });
+    assert.equal((await x.ports.launch(LAUNCH)).timedOut, true, JSON.stringify(doc.requests));
+  }
   for (const [bad, why] of [[{ sessionId: '../x' }, /no session id/], [{ kind: 'review' }, /does not start "review"/], [{ kind: 'overnight' }, /does not start/], [{ card: '' }, /no card or product/], [{ product: '../p' }, /no card or product/], [{ product: 'p'.repeat(65) }, /no card or product/]]) {
     const x = world();
     await assert.rejects(x.ports.launch({ ...LAUNCH, ...bad }), why, JSON.stringify(bad));
@@ -81,6 +86,13 @@ test('L759 step 2: stopGroup is ok only when the same status shows stop_requeste
   assert.equal((await gone.ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).timedOut, true, 'a session not listed is not shown stopped');
   const no = world((i, y) => { if (i === 0) y.doc.answers = { 'stopGroup-S-1-n1': { ok: false, reason: 'EPERM' } }; });
   assert.deepEqual(await no.ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' }), { ok: false, reason: 'EPERM' });
+  // A fresh nonce per stop: a stop asked again later never reads the first one's answer.
+  let n = 0;
+  const again = world((i, y) => { y.doc.answers = { 'stopGroup-S-1-n1': { ok: false, reason: 'EPERM' } }; }, { giveUpMs: 2_000 });
+  const p2 = ownerAsyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, clock: () => again.now, sleep: async (ms) => { again.now += ms; }, nonce: () => `n${++n}`, giveUpMs: 2_000,
+    stat: () => st({ dir: true }), open: () => ({ st: st(), text: JSON.stringify({ written_at: new Date(again.now).toISOString(), sessions: [], requests: {}, answers: { 'stopGroup-S-1-n1': { ok: false, reason: 'EPERM' } } }) }), realpath: (p) => p, writeRequest: () => {} });
+  assert.deepEqual(await p2.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' }), { ok: false, reason: 'EPERM' });
+  assert.equal((await p2.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).timedOut, true, 'the second stop waits on its own answer');
   for (const kind of ['review', 'lead', undefined]) {
     const x = world();
     assert.match((await x.ports.stopGroup({ id: 'S-1', pgid: 77, kind })).reason, /did not start/);
@@ -97,7 +109,7 @@ test('L759 step 2: saveWork asks for the runner\'s kinds, answers the no-copy ki
   assert.deepEqual([...NO_COPY_KINDS], ['review', 'audit', 'readonly', 'lead', 'front_door'], 'owner-ports.mjs saveWork names these, and only these');
   for (const kind of NO_COPY_KINDS) { const x = world(); assert.deepEqual(await x.ports.saveWork({ id: 'S-1', kind }), { ok: true }); assert.deepEqual(x.writes, []); }
   for (const [kind, why] of [['overnight', /no runner starts overnight sessions yet/], ['merge', /no runner saves "merge"/], ['undo_merge', /no runner saves/], [undefined, /no runner saves/]]) {
-    const x = world(); assert.match((await x.ports.saveWork({ id: 'S-1', kind })).reason, why); assert.deepEqual(x.writes, []);
+    const x = world(); const r = await x.ports.saveWork({ id: 'S-1', kind }); assert.equal(r.ok, false, String(kind)); assert.match(r.reason, why); assert.deepEqual(x.writes, []);
   }
   assert.equal(new Set([...NO_COPY_KINDS, ...RUNNER_KINDS]).size, NO_COPY_KINDS.length + RUNNER_KINDS.length, 'no kind is both');
   const slow = world(() => {}, { giveUpMs: 2_000 });
