@@ -640,7 +640,14 @@ export async function runnerPass(ctx) {
       state.taps_seen = [...(state.taps_seen ?? []), t.key];
     }
     const sid = t?.session_id;
-    const no = (reason) => result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${reason}` });
+    // A refused tap is told to Joe once, with its cause (L725): the tap is his, and a refusal only in the status would
+    // leave him waiting on a new review that never comes. Told once by the tap's key (a tap is read once by its key);
+    // a tap with no key, by its session.
+    const no = (reason) => {
+      const text = `Joe's "review again" for session ${String(sid).slice(0, 80)}: ${reason}`;
+      result.refused.push({ at: iso(now), request: null, card: null, role: null, request_id: null, reason: text });
+      alert(`tap-refused-${String(typeof t?.key === 'string' ? t.key : sid).slice(0, 120)}`, `${text}. Nothing was set aside, so no new review starts from that tap.`);
+    };
     if (typeof sid !== 'string' || !SESSION_ID.test(sid)) { no('that is not a session id'); continue; }
     if (!rl.ok) { no('the launch records could not be read'); continue; }
     if (state.running.some((r) => r.session_id === sid)) { no('that session is still running'); continue; }
