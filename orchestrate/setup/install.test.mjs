@@ -18,7 +18,8 @@ import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts } from './daemons.mjs';
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
-import { dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig } from './dispatcher-setup.mjs';
+import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
 import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
 import { dispatcherKeysOn } from './dispatcher-check.mjs';
@@ -1173,6 +1174,7 @@ test('Dispatcher config: the entry takes only the owner\'s keys, plain full path
   assert.equal(parseInstallConfig(raw).dispatcher, undefined);
   assert.deepEqual({ ...parseInstallConfig({ ...raw, dispatcher: GOOD_DISPATCHER }).dispatcher }, GOOD_DISPATCHER);
   assert.equal(parseInstallConfig({ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: 900000 } }).dispatcher.runDeadlineMs, 900000);
+  assert.equal(parseInstallConfig({ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: RUN_DEADLINE_MS } }).dispatcher.runDeadlineMs, RUN_DEADLINE_MS);
   const bad = [
     [{ ...w.raw, dispatcher: GOOD_DISPATCHER }, /needs hostLockPath/],
     [{ ...raw, dispatcher: 'yes' }, /dispatcher must be an object/],
@@ -1183,6 +1185,12 @@ test('Dispatcher config: the entry takes only the owner\'s keys, plain full path
     [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, productsFile: `${BASE}/install/orchestrate/products.json` } }, /must not be inside the install/],
     [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, approvalsStateDir: `${BASE}/home/orchestrate/approvals/` } }, /written plainly/],
     [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: -1 } }, /runDeadlineMs must be a positive whole number/],
+    // Longer than the default the robot judges a pass by: a healthy pass would read as stuck (self-review M1).
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: RUN_DEADLINE_MS + 1 } }, new RegExp(`runDeadlineMs may be at most ${RUN_DEADLINE_MS}`)],
+    // The disk ignores case, so INSTALL is the install too (self-review c2).
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, productsFile: `${BASE}/INSTALL/orchestrate/products.json` } }, /must not be inside the install/],
+    // The name is reserved whether or not the entry is set, so an owner's file of that name never rides into the copy (c3).
+    [{ ...w.raw, extras: [...w.raw.extras, join(w.ext, 'dispatcher.json')] }, /extras must be full paths/],
     [{ ...raw, dispatcher: GOOD_DISPATCHER, extras: [...w.raw.extras, join(w.ext, 'dispatcher.json')] }, /extras must be full paths/],
   ];
   for (const [r, re] of bad) assert.throws(() => parseInstallConfig(r), re, JSON.stringify(r.dispatcher));
@@ -1249,7 +1257,8 @@ const D_PLANTS = [
   ['the copy\'s file written by its group', (w) => chmodSync(copyConfig(w), 0o664), /not root's alone|has mode 664/],
   ['the copy\'s file gone', (w) => rmSync(copyConfig(w)), /dispatcher\.json is not in the copy/],
   ['the copy\'s file a link', (w) => { const f = copyConfig(w); renameSync(f, `${w.ext}/d.json`); symlinkSync(`${w.ext}/d.json`, f); }, /not root's alone|not a plain file/],
-  ['the copy\'s file with a second name', (w) => { linkSync(copyConfig(w), join(w.root, 'second.json')); }, /2 names|not root's alone/],
+  ['the copy\'s file with a second name', (w) => { linkSync(copyConfig(w), join(w.root, 'second.json')); }, /orchestrate\/dispatcher\.json has 2 names/],
+  ['the Dispatcher\'s lock folder writable by others', (w) => chmodSync(w.mac.at(`${BASE}/home/orchestrate`), 0o777), /the Dispatcher's lock \(lockFile\): its folder .* can be written by its group or others/],
   ['check-dispatcher FAILs: no launches folder', (w) => rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true }), /check-dispatcher FAILs .*launches/],
   ['check-dispatcher FAILs: host.lock orchestrate can\'t read', (w) => chmodSync(w.mac.at(DLOCK), 0o600), /check-dispatcher FAILs .*host\.lock/],
 ];
@@ -1281,4 +1290,53 @@ test('Dispatcher with the robot job: robot.json must name the same Record and th
   const w2 = await dPlaced({ robot: (x) => ({ ...same(x), recordRoot: x.mac.at(`${BASE}/record`), dispatcherLockFile: x.mac.at(`${BASE}/home/orchestrate/other.lock`) }) });
   const ld = w2.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text);
   assert.match(ld.text, /must name the same Record and lock; they differ in recordRoot, dispatcherLockFile/);
+  // Loading or checking only the robot holds the two together too (self-review M2).
+  const only = w2.run(['daemons', 'load', '--only', 'robot']); assert.equal(only.code, 1, only.text);
+  assert.match(only.text, /they differ in recordRoot, dispatcherLockFile.*so the robot job would not start/);
+  assert.equal(w2.mac.loaded.size, 0, 'nothing was loaded');
+  const ck = w2.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /they differ in recordRoot, dispatcherLockFile/);
+  assert.equal(w.run(['daemons', 'load', '--only', 'robot']).code, 0, 'the same Record and lock: the robot alone loads');
 });
+
+test('Dispatcher config: each file is written whole and renamed over its name; root writes in the copy only when it is root\'s alone', async () => {
+  const w = await dPlaced();
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 600000 }; w.cfg = parseInstallConfig(w.raw);
+  const from = w.mac.log.length;
+  const r = w.run(['dispatcher-config']); assert.equal(r.code, 0, r.text);
+  const log = w.mac.log.slice(from);
+  const copyFile = `${BASE}/install/orchestrate/dispatcher.json`;
+  for (const f of [D_SRC, copyFile]) {
+    const tmp = join(dirname(f), '.dispatcher.json.new');
+    assert.ok(log.includes(`rename ${tmp} ${f}`), `planted: a writer that removes ${f} first leaves a gap with no file (${log.join(' | ')})`);
+    assert.ok(!log.includes(`rm ${f}`), `${f} is never removed`);
+    assert.equal(existsSync(w.mac.at(tmp)), false, 'no temporary file is left');
+  }
+  // A copy with a file its group can write: root won't write in it.
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 500000 }; w.cfg = parseInstallConfig(w.raw);
+  chmodSync(join(w.root, UPDATER_CONFIG), 0o664);
+  const before = readFileSync(copyConfig(w), 'utf8');
+  const r2 = w.run(['dispatcher-config']); assert.equal(r2.code, 1, r2.text); assert.match(r2.text, /the installed copy is not root's alone .*so root won't write in it/);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), before, 'planted: a writer without the copy check writes here');
+});
+
+test('Dispatcher job: daemons check reads a run as stuck only past the Dispatcher\'s deadline and the watchdog\'s margin', () => {
+  assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 >= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS, 'a healthy pass is never stuck');
+  assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 <= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS + 120_000, 'and a hung one is told soon after');
+});
+
+// The base file is what install carries into the copy: each fault in it, planted after dispatcher-config, stops the install.
+for (const [what, plant] of [
+  ['owned by another user', (w) => w.mac.owners.set(D_SRC, { uid: 65001, gid: 20 })],
+  ['mode 666', (w) => chmodSync(w.mac.at(D_SRC), 0o666)],
+  ['with a second name', (w) => linkSync(w.mac.at(D_SRC), w.mac.at(`${BASE}/d2.json`))],
+  ['a link', (w) => { renameSync(w.mac.at(D_SRC), w.mac.at(`${BASE}/d2.json`)); symlinkSync(w.mac.at(`${BASE}/d2.json`), w.mac.at(D_SRC)); }],
+  ['other text', (w) => { const f = w.mac.at(D_SRC); chmodSync(f, 0o644); writeFileSync(f, '{}\n'); }],
+]) {
+  test(`PLANT Dispatcher: the base dispatcher.json ${what} → install refuses`, async () => {
+    const w = await world({ dispatcher: true });
+    const c = w.run(['dispatcher-config']); assert.equal(c.code, 0, c.text);
+    plant(w);
+    const r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /run dispatcher-config first/);
+    assert.equal(existsSync(copyConfig(w)), false, 'nothing reached a copy');
+  });
+}

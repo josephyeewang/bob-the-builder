@@ -19,8 +19,9 @@
 //
 // Off unless the setup config has a `dispatcher` entry. Nothing here names a product or a person.
 
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
+import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { NODE, UPDATER_CONFIG, currentCopy, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
@@ -29,12 +30,15 @@ import { homeOf } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
+import { lockFolderProblem } from './robot-setup.mjs';
 
 export const DISPATCHER_JOB = 'dispatcher';
 export const DISPATCHER_CONFIG = 'dispatcher.json';
 export const DISPATCHER_MAIN = 'modules/M11-dispatcher/main.mjs';
 export const DISPATCHER_WIRING = 'wiring/dispatcher-wiring.mjs';
 export const DISPATCHER_USER = 'orchestrate';
+/** The longest a healthy Dispatcher run goes, in seconds: its deadline, the watchdog's margin, and a minute (daemons check). */
+export const DISPATCHER_RUN_LIMIT_S = Math.ceil((RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS) / 1000) + 60;
 export const DISPATCHER_LOCK = 'dispatcher.lock';
 /** Where the writer puts the config, in the base (root's): the install carries it into the copy from here. */
 export const dispatcherSourcePath = (cfg) => join(cfg.base, DISPATCHER_CONFIG);
@@ -64,9 +68,12 @@ export function parseDispatcher(raw, cfg) {
   const install = `${installPaths(cfg).install}/`;
   for (const k of OWNER_PATHS) {
     if (!PLAIN_PATH(raw[k])) throw new Error(`config: dispatcher.${k} must be a full path, written plainly (no . or .., no doubled or trailing /)`);
-    if (`${raw[k]}/`.startsWith(install)) throw new Error(`config: dispatcher.${k} must not be inside the install, which only root writes`);
+    if (`${raw[k]}/`.toLowerCase().startsWith(install.toLowerCase())) throw new Error(`config: dispatcher.${k} must not be inside the install, which only root writes`);
   }
   if (raw.runDeadlineMs !== undefined && !(Number.isSafeInteger(raw.runDeadlineMs) && raw.runDeadlineMs > 0)) throw new Error('config: dispatcher.runDeadlineMs must be a positive whole number of milliseconds');
+  // The robot judges the Dispatcher by the default limit (robot-wiring.mjs LIVE_PASS_MAX_MS): a longer one would make a healthy
+  // pass read as stuck, so setup takes none (self-review M1).
+  if (raw.runDeadlineMs > RUN_DEADLINE_MS) throw new Error(`config: dispatcher.runDeadlineMs may be at most ${RUN_DEADLINE_MS} (the Dispatcher's default, which the robot job judges it by)`);
   if (cfg.hostLockPath === undefined) throw new Error('config: a dispatcher entry needs hostLockPath (the full path of the owner\'s host.lock)');
   return Object.freeze(Object.fromEntries([...OWNER_KEYS, ...(raw.runDeadlineMs !== undefined ? ['runDeadlineMs'] : [])].map((k) => [k, raw[k]])));
 }
@@ -143,12 +150,22 @@ export function planDispatcherConfig(io, cfg) {
   const { config, problems } = dispatcherConfigFor(io, cfg);
   if (problems.length) return { ops: [], problems };
   const text = dispatcherConfigText(config); const ops = [];
-  const write = (f) => ({ text: `write ${f}   (root:wheel 0644)`, run: () => { io.rm(f); io.write(f, text, 0o600); io.secureFile(f, { uid: io.rootUid, gid: 0, mode: 0o644 }); } });
+  // Written whole beside the name and renamed over it, so there is never a moment with no file or half a file: an update or a
+  // start that reads it then sees the old text or the new (self-review m2).
+  const write = (f) => ({ text: `write ${f}   (root:wheel 0644)`, run: () => {
+    const tmp = join(dirname(f), `.${DISPATCHER_CONFIG}.new`);
+    io.rm(tmp); io.write(tmp, text, 0o600); io.secureFile(tmp, { uid: io.rootUid, gid: 0, mode: 0o644 }); io.rename(tmp, f);
+  } });
   const src = dispatcherSourcePath(cfg);
   if (fileProblem(io, src, text)) ops.push(write(src));
   // The copy is root's (and every folder above it), so writing in it through its link is root writing in root's folders.
-  const inCopy = join(installPaths(cfg).installRoot, DISPATCHER_CONFIG);
-  if (copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true })) ops.push(write(inCopy));
+  const P = installPaths(cfg); const inCopy = join(P.installRoot, DISPATCHER_CONFIG);
+  if (copyKeeps(io, cfg) === true && fileProblem(io, inCopy, text, { inCopy: true })) {
+    // Root writes in the copy only when the copy is root's alone, every folder above it too (self-review m3).
+    const bad = installProblem(io.at(P.installRoot), [], { owner: io.rootUid, top: io.prefix || '/' });
+    if (bad) return { ops: [], problems: [`the installed copy is not root's alone (${bad}), so root won't write in it; install again`] };
+    ops.push(write(inCopy));
+  }
   return { ops, problems: [] };
 }
 
@@ -170,13 +187,24 @@ export function dispatcherConfigProblem(io, cfg) {
   const why = fileProblem(io, file, dispatcherConfigText(config), { inCopy: true });
   if (why) return why;
   if (!keeps) return KEEPS_NOT;
-  if (cfg.robot) {
-    let r; try { r = JSON.parse(io.readText(join(P.installRoot, 'robot.json'))); } catch { return 'the robot job is on, but the copy\'s robot.json can\'t be read, so it can\'t be held to the same Record and lock'; }
-    const differ = ['product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile'].filter((k) => r?.[k] !== config[k]);
-    if (r?.dispatcherLockFile !== config.lockFile) differ.push(`dispatcherLockFile (must be ${config.lockFile}, the Dispatcher's lock)`);
-    if (differ.length) return `the copy's robot.json and ${DISPATCHER_CONFIG} must name the same Record and lock; they differ in ${differ.join(', ')}`;
-  }
-  return null;
+  // The Dispatcher's own lock: in orchestrate's home, a folder only it can write, every folder above root's (self-review m4).
+  const orch = readUser(io, DISPATCHER_USER);
+  const lock = lockFolderProblem(io, config.lockFile, [orch.uid]);
+  if (lock) return `the Dispatcher's lock (lockFile): ${lock}`;
+  return cfg.robot ? robotMatchProblem(io, cfg, config) : null;
+}
+
+/**
+ * With both the robot and the Dispatcher on: null, or why the copy's robot.json doesn't name the Dispatcher's Record and lock.
+ * Checked from either job, so loading or checking only one of them still holds the two together (self-review M2).
+ */
+export function robotMatchProblem(io, cfg, config = dispatcherConfigFor(io, cfg).config) {
+  if (!cfg.robot || !cfg.dispatcher) return null;
+  if (!config) return `the Dispatcher's config can't be built from this setup, so the robot can't be held to the same Record and lock`;
+  let r; try { r = JSON.parse(io.readText(join(installPaths(cfg).installRoot, 'robot.json'))); } catch { return 'the robot job is on, but the copy\'s robot.json can\'t be read, so it can\'t be held to the same Record and lock'; }
+  const differ = ['product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile'].filter((k) => r?.[k] !== config[k]);
+  if (r?.dispatcherLockFile !== config.lockFile) differ.push(`dispatcherLockFile (must be ${config.lockFile}, the Dispatcher's lock)`);
+  return differ.length ? `the copy's robot.json and ${DISPATCHER_CONFIG} must name the same Record and lock; they differ in ${differ.join(', ')}` : null;
 }
 
 /** The rows the writer's closing check prints: the base file, and, once there is a copy, the copy's (the job reads the copy's). */

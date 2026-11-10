@@ -26,7 +26,7 @@ import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
 import { ROBOT_JOB, robotConfigProblem, robotPlist } from './robot-setup.mjs';
-import { DISPATCHER_JOB, DISPATCHER_OFF, dispatcherConfigProblem, dispatcherLoadProblem, dispatcherPlist } from './dispatcher-setup.mjs';
+import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem } from './dispatcher-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
 const LAUNCHCTL = '/bin/launchctl';
@@ -206,7 +206,11 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
     let r = null; try { r = io.lstat(watchRulesPath(cfg)); } catch { /* below */ }
     if (!r) problems.push(`${watchRulesPath(cfg)} is not there (run watch-rules first), so the hourly watch job would have no rules to judge by`);
   }
-  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`); }
+  if (jobs.includes(ROBOT_JOB)) {
+    const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`);
+    // With the Dispatcher on, the robot must name its Record and lock, also when only the robot is loaded (self-review M2).
+    const apart = why ? null : robotMatchProblem(io, cfg); if (apart) problems.push(`${apart}, so the robot job would not start`);
+  }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
   const rec = readRecord(io, cfg);
@@ -283,6 +287,9 @@ export function list(io, cfg, jobs = null) {
 /** Read only → [{ ok, what, why? }]. */
 const NEVER = '(never exited)';
 export const FIRST_RUN_LIMIT_S = 30 * 60;
+// How long one run of `job` may go before it reads as stuck: a Dispatcher pass may run to its deadline and watchdog margin
+// (self-review m5); the others, FIRST_RUN_LIMIT_S.
+const runLimitS = (job) => (job === DISPATCHER_JOB ? DISPATCHER_RUN_LIMIT_S : FIRST_RUN_LIMIT_S);
 const UNREADABLE = 'unreadable';
 /** Seconds the process has been running (`ps -o etime=`: [[dd-]hh:]mm:ss); null if there is no such process any more (ps failed or printed nothing: it ended between the two reads); UNREADABLE if ps answered with something this cannot parse (L180 m5b). */
 function runningSeconds(io, pid) {
@@ -308,7 +315,7 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
   }
-  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
+  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg) ?? robotMatchProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherConfigProblem(io, cfg); item(why === null, `the Dispatcher's config in the copy (dispatcher.json) is the one this setup writes`, why); }
   const rec = readRecord(io, cfg);
   for (const job of jobs) {
@@ -335,12 +342,12 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     if (s.pid && s.lastExit !== NEVER) {
       // A later run that hangs leaves the job running, and launchd starts no new run while one is going: the last exit would stay green.
       const age = runningSeconds(io, s.pid);
-      item(age === null || (age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S), `${label}'s current run is not stuck (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`, age === UNREADABLE ? `ps answered with something that could not be read, so how long this run has been going is not known; look in ${installPaths(cfg).logDir}` : `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
+      item(age === null || (age !== UNREADABLE && age <= runLimitS(job)), `${label}'s current run is not stuck (at most ${Math.ceil(runLimitS(job) / 60)} minutes)`, age === UNREADABLE ? `ps answered with something that could not be read, so how long this run has been going is not known; look in ${installPaths(cfg).logDir}` : `this run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
     if (s.lastExit === NEVER) {
       // It has not finished a run yet. Every job starts at load and then runs on a timer, so this is fine only while its first run is young.
       const age = s.pid ? runningSeconds(io, s.pid) : null;
-      item(age !== null && age !== UNREADABLE && age <= FIRST_RUN_LIMIT_S, `${label} is on its first run, and not for long (at most ${FIRST_RUN_LIMIT_S / 60} minutes)`,
+      item(age !== null && age !== UNREADABLE && age <= runLimitS(job), `${label} is on its first run, and not for long (at most ${Math.ceil(runLimitS(job) / 60)} minutes)`,
         age === null ? `it is loaded but has no running process and has never finished a run; look in ${installPaths(cfg).logDir}` : age === UNREADABLE ? `ps answered with something that could not be read, so how long the first run has been going is not known; look in ${installPaths(cfg).logDir}` : `its first run has been going for ${Math.round(age / 60)} minutes and has not ended; look in ${installPaths(cfg).logDir}`);
     }
   }
