@@ -16,7 +16,7 @@ import { recordPlanFile } from './review-runner-main.mjs';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
 const MAIN = 'e'.repeat(40);
 const T0 = Date.parse('2026-11-06T12:00:00Z');
 const MIN = 60_000;

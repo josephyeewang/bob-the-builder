@@ -71,6 +71,15 @@ export const DESIGN_PROFILES = Object.freeze({
     restricted: true, outbox: designKinds('thinking'), compactWindow: 400000, setupFileRefusals: true, bobFolder: false, compactKind: 'report' }),
   learning: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'acceptEdits', restricted: true,
     outbox: designKinds('learning'), compactWindow: 400000, setupFileRefusals: true, bobFolder: true, compactKind: 'handoff' }),
+  // A script card's session (L760): started by the Dispatcher as a worker is, on the workers' user, so it gets the
+  // worker's walls (secrets, proposals, the Bob folder, the worker runner's requests and status) and nothing a reviewer
+  // has. Its tools are M10's published script.json less Workflow, which stays on this never-list until it is walled;
+  // a published file that holds Workflow is refused here (a capability claim, checked on this code, not a version).
+  // L767 gives it its own outbox, <outboxRoot>/script/<session>, recorded as script:<session>, never the worker's (as a
+  // worker it could hand in handin-). Lane 4 is building that folder and path (step 3); until then a script start fails
+  // closed. Nothing here names the folder; the launcher gives it (paths.outbox).
+  script: p({ tools: ['Read', 'Glob', 'Grep', 'Write'], mode: 'dontAsk', restricted: true,
+    outbox: designKinds('script'), compactWindow: 300000, setupFileRefusals: false, bobFolder: true, compactKind: 'report' }),
 });
 
 export const hasShell = (profile) => profile.tools.includes('Bash');

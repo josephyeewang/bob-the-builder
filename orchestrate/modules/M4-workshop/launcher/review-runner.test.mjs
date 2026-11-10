@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME, plan_reviewer: ME };
 const HEAD = 'a'.repeat(40);
 const HEAD2 = 'b'.repeat(40);
 const TREE = 'c'.repeat(40);
