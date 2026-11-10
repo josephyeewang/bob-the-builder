@@ -74,7 +74,9 @@ export function checkRunnerConfig(c) {
 export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), listSettings = () => readdirSync(c.settingsDir) } = {}) {
   // No memory (a first run, or one lost) while settings files of earlier sessions are there (#378 self-review M3): a
   // session started with one may still run, and the runner knows nothing of it, so it can't be told about.
-  if (memory && typeof memory === 'object' && Object.keys(memory).length === 0) {
+  // A memory with no sessions and no requests is no memory either (#378 r2 n4: one restored or edited to empty lists).
+  const none = (v) => v === undefined || (Array.isArray(v) ? v.length === 0 : (v && typeof v === 'object' && Object.keys(v).length === 0));
+  if (memory && typeof memory === 'object' && none(memory.sessions) && none(memory.requests)) {
     let files; try { files = listSettings().filter((n) => n.endsWith('.json')); } catch (e) { return `its settings folder can't be listed (${e?.code ?? e?.message})`; }
     if (files.length) return `it has no memory, but its settings folder holds ${files.length} earlier session${files.length === 1 ? '\'s' : 's\''} settings (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''}); a session started with one may still run. Once none does, remove them from ${c.settingsDir}`;
     return null;

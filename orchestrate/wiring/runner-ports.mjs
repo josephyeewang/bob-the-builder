@@ -210,7 +210,10 @@ export function liveWallProblem(live, product, places, read) {
     if (typeof s?.product !== 'string') return `${who} names no product, so whether it may read product ${product}'s folders can't be told`;
     if (err) return `${who}'s settings can't be read (${err?.code ?? err?.message}), so whether it may read product ${product}'s folders can't be told`;
     const gap = productWallGap(set, places);
-    if (gap) return `${who} (product ${s.product}) started before product ${product}'s folders were on its deny list (${gap}); start product ${product}'s sessions once it has ended`;
+    if (gap) return s.unstarted === true
+      // A waiting row never ends (#378 r2 c1): the owner removes its settings file once no claude runs with it (then ENOENT: skipped).
+      ? `${who} (product ${s.product}), a start from an earlier run still waiting, left settings that don't deny product ${product}'s folders (${gap}); once no claude runs with them, the owner removes that settings file (${s.id}.json in the runner's settings folder), and product ${product}'s sessions can start`
+      : `${who} (product ${s.product}) started before product ${product}'s folders were on its deny list (${gap}); start product ${product}'s sessions once it has ended`;
   }
   return null;
 }

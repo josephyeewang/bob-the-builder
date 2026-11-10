@@ -122,7 +122,7 @@ export function readyCard(env, id, over = {}) {
 // A session's claim with its process. The claim has two steps (L72): claimCard writes it without pid and pid_start
 // (ready → claimed), and runCard adds them (claimed → running).
 export function sessionClaim(over = {}) {
-  return { kind: 'session', host: 'mac-a', pid: 4242, pid_start: 'Thu Oct  1 11:00:00 2026', session_id: 'S-1', ...over };
+  return { kind: 'session', host: 'mac-a', pid: 4242, pid_start: '2026-10-01T11:00:00Z', session_id: 'S-1', ...over };
 }
 export function claimOnly(claim) {
   if (claim?.kind !== 'session') return claim;

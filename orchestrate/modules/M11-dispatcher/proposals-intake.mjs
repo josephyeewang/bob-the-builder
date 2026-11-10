@@ -639,12 +639,13 @@ function putWait(rec, id, expectRev, doc) {
 }
 
 // The bytes a fact says were used, or may have been (applied, interrupted), with those it carried. A claim still out
-// (applying) is not listed: the pass turns it into interrupted before anything reads this.
-const USED_STATES = ['applied', 'interrupted'];
+// (applying) is not listed: the pass turns it into interrupted before anything reads this. Not intake-facts.mjs USED_STATES (an outbox
+// file's intake that is done for now): these are the states whose bytes count as used.
+const BYTES_USED_STATES = ['applied', 'interrupted'];
 const USED_MAX = 50;
 function usedOf(d) {
   const list = Array.isArray(d?.used) ? d.used.filter((x) => typeof x === 'string') : [];
-  if (d && USED_STATES.includes(d.state) && typeof d.sha256 === 'string' && !list.includes(d.sha256)) list.push(d.sha256);
+  if (d && BYTES_USED_STATES.includes(d.state) && typeof d.sha256 === 'string' && !list.includes(d.sha256)) list.push(d.sha256);
   return list.slice(-USED_MAX);
 }
 

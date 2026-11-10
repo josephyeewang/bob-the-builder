@@ -4,7 +4,7 @@
 // PLANT tests break one clause each and name the check that catches it. The last tests run read-only tools on this Mac.
 
 import assert from 'node:assert/strict';
-import { chmodSync, fchmodSync, lstatSync, readlinkSync, renameSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, fchmodSync, linkSync, lstatSync, readlinkSync, renameSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -17,7 +17,13 @@ import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { realIo, writeNewFile } from './mac.mjs';
 import { ROOT_CONFIG_PATH } from './layout.mjs';
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
-import { JOBS, checkDaemons, list, plistTexts } from './daemons.mjs';
+import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
+import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
+import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
+import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
+import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
+import { ROOT_CONFIG_PATH as _R } from './layout.mjs';
+import { dispatcherKeysOn } from './dispatcher-check.mjs';
 import { checkInstall, planAddToInstall, rootMadeEntries } from './install.mjs';
 import { main, parseArgs, planCommand } from './setup.mjs';
 import { apply, check } from './users-folders.mjs';
@@ -65,7 +71,7 @@ async function origin(root) {
 }
 
 /** The throwaway Mac with the users and folders already set up (part 1), and the files the install needs. */
-async function world({ euid = 0, rules = null } = {}) {
+async function world({ euid = 0, rules = null, robot = null, dispatcher = null, lock = DLOCK } = {}) {
   const mac = fakeMac({ euid: 0 });
   const ext = realpathSync(tempDir('orch-setup-ext-'));
   const bare = await origin(ext);
@@ -85,6 +91,11 @@ async function world({ euid = 0, rules = null } = {}) {
   // `rules` (a text): the config also names the watch-only week, with the fingerprint of that text, and the file is at ext/rules.yaml.
   const rulesSrc = join(ext, 'rules.yaml');
   if (rules !== null) { writeFileSync(rulesSrc, rules); raw.watch = { repo: 'example-org/example-repo', rulesSha256: createHash('sha256').update(rules).digest('hex') }; }
+  // `robot` (a function of the folders made → the robot's config object, or text): the config turns the robot job on, and its
+  // robot.json is one of the extras. The file is written once the users exist (its ownerUid is orchestrate's).
+  if (robot !== null) { raw.robot = true; raw.extras.push(join(ext, 'robot.json')); writeFileSync(join(ext, 'robot.json'), '{}'); }
+  // `dispatcher` (an entry, or true for a good one): the config turns the Dispatcher job on, with the owner's host.lock at `lock`.
+  if (dispatcher !== null) { raw.hostLockPath = lock; raw.dispatcher = dispatcher === true ? { ...GOOD_DISPATCHER } : dispatcher; }
   const cfgFile = join(ext, 'install.json'); writeFileSync(cfgFile, JSON.stringify(raw));
   const cfg = parseInstallConfig(raw);
   // The updater's first run, for real, in a child: the setup's own seed and bootstrap copy, GitHub's address swapped for the
@@ -113,6 +124,16 @@ async function world({ euid = 0, rules = null } = {}) {
   const run = (args, extra = {}) => { const s = sink(); const code = main(argvFor(args), { io: mac, runUpdater, out: s.out, err: s.err, ...extra }); return { code, text: text(s), s }; };
   const folders = run(['users-folders']);
   assert.equal(folders.code, 0, folders.text);
+  if (robot !== null) { const c = robot({ mac, root, uid: Number(mac.users.get('orchestrate').UniqueID) }); writeFileSync(join(ext, 'robot.json'), typeof c === 'string' ? c : JSON.stringify(c)); }
+  if (dispatcher !== null) {
+    // What check-dispatcher looks for: the owner's home and host.lock (sam's), and the runner's launches folder.
+    chmodSync(mac.prefix, 0o755);   // the stand-in's '/': on a real Mac everyone may search it
+    const sam = { uid: 65001, gid: 20 };
+    const dirs = []; for (let d = dirname(lock); d !== '/'; d = dirname(d)) dirs.unshift(d);
+    for (const d of dirs) { mkdirSync(mac.at(d), { recursive: true }); chmodSync(mac.at(d), 0o755); mac.owners.set(d, d === '/Users' ? { uid: mac.rootUid, gid: 0 } : sam); }
+    writeFileSync(mac.at(lock), 'host: mini\n'); chmodSync(mac.at(lock), 0o644); mac.owners.set(lock, sam);
+    mkdirSync(mac.at(`${BASE}/review/launches`), { recursive: true });
+  }
   // L726: the role-to-user map the runner needs: every design role, and every role the runner starts names review's id.
   const reviewUid = Number(mac.users.get('review').UniqueID);
   const uids = Object.fromEntries([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES].map((r) => [r, RUNNER_ROLES.includes(r) ? reviewUid : 65001]));
@@ -120,6 +141,8 @@ async function world({ euid = 0, rules = null } = {}) {
   mac.as = euid;
   return { mac, ext, raw, cfg, cfgFile, run, runUpdater, updaterRuns, updaterCalls, root, rulesSrc };
 }
+const DLOCK = '/Users/sam/Sync Folder/host.lock';
+const GOOD_DISPATCHER = Object.freeze({ product: 'alpha', productsFile: `${BASE}/home/orchestrate/products.json`, rulesStateDir: `${BASE}/home/orchestrate/rules`, tokenFile: `${BASE}/keys/watch-only-token`, approvalsStateDir: `${BASE}/home/orchestrate/approvals` });
 const installed = async () => { const w = await world(); const r = w.run(['install']); assert.equal(r.code, 0, r.text); return w; };
 const placed = async () => { const w = await installed(); const r = w.run(['daemons', 'place']); assert.equal(r.code, 0, r.text); return w; };
 const failed = (res) => res.filter((r) => !r.ok);
@@ -127,6 +150,20 @@ const realCopy = (w) => join(w.mac.at(`${BASE}/install`), readdirSync(w.mac.at(`
 /** The copy itself: the versioned folder's orchestrate/ (the stamp and the outside files sit beside it, in the folder). */
 const copyOf = (w) => join(realCopy(w), 'orchestrate');
 const plistFile = (w, job) => w.mac.at(`/Library/LaunchDaemons/${LABEL}.${job}.plist`);
+// L807 M1: launchd starts a placed job at boot with no load to refuse it, so place refuses wherever load does, on the one list
+// both use (startProblems), and puts no job file down. `re` names the planted reason.
+const placeRefuses = (w, job, re) => {
+  if (existsSync(plistFile(w, job))) {   // one placed before: the refusal says it still starts at boot (L807 r1 m6)
+    const p = w.run(['daemons', 'place', '--only', job]); assert.equal(p.code, 1, p.text);
+    assert.match(p.text, new RegExp(`${job}'s job file .* is still in place and launchd starts it at boot: sudo node setup\\.mjs daemons unload --only ${job}, then delete it`));
+  }
+  rmSync(plistFile(w, job), { force: true });
+  const gate = startProblems(w.mac, w.cfg, [job]); assert.match(gate.join(' '), re);
+  assert.deepEqual(planPlace(w.mac, w.cfg, [job]), { ops: [], problems: gate }, 'place refuses on exactly the start checks');
+  assert.deepEqual(planLoad(w.mac, w.cfg, [job]).problems.slice(0, gate.length), gate, 'load refuses on the same ones');
+  for (const args of [['daemons', 'place', '--only', job], ['daemons', 'place']]) { const p = w.run(args); assert.equal(p.code, 1, p.text); assert.match(p.text, re); }
+  assert.equal(existsSync(plistFile(w, job)), false, `planted: place puts ${job}'s job file down where load refuses`);
+};
 
 // ───────────────────────────── config and the pins to the launcher's own modules ─────────────────────────────
 
@@ -765,7 +802,10 @@ test('reload-account: loaded with an OLD file (no --install) → the file is rew
   const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 0, r.text);
   assert.equal(readFileSync(f, 'utf8'), plists['review-account']);
   const steps = w.mac.log.slice(n).filter((l) => /review-account|launchctl/.test(l) && !/^(chown|chmod) /.test(l));
-  assert.deepEqual(steps.map((s) => s.split(' ').slice(0, 2).join(' ')), ['rm /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'write /Library/LaunchDaemons/com.example.orch-test.review-account.plist', 'launchctl bootout', 'launchctl bootstrap']);
+  // Written whole beside the name and renamed over it (L807 m4): never removed first, so a cut-off run leaves the old file.
+  const side = '/Library/LaunchDaemons/.com.example.orch-test.review-account.plist.new';
+  assert.deepEqual(steps.map((s) => s.split(' ').slice(0, 2).join(' ')), [`unlink ${side}`, `write ${side}`, `rename ${side}`, 'launchctl bootout', 'launchctl bootstrap']);
+  assert.ok(steps.includes(`rename ${side} /Library/LaunchDaemons/com.example.orch-test.review-account.plist`), steps.join(' | '));
   assert.ok(!w.mac.log.slice(n).some((l) => /review-runner|review-updater/.test(l)), 'another job was touched');
   assert.ok(w.mac.loaded.has(`${LABEL}.review-account`) && w.mac.loaded.has(`${LABEL}.review-runner`));
   assert.deepEqual(failed(checkDaemons(w.mac, w.cfg)), []);
@@ -1106,6 +1146,542 @@ test('L203 reload-account refuses on a missing install (the not-there branch of 
   const r = w.run(['daemons', 'reload-account']); assert.equal(r.code, 1, r.text); assert.match(r.text, /install is not there yet/);
   assert.ok(!w.mac.log.slice(n).some((l) => /^launchctl (bootout|bootstrap)/.test(l)));
 });
+
+// ───────────────────────────── the robot job (robot-setup.mjs; L236, L238, L610) ─────────────────────────────
+
+const ROBOT_LABEL = `${LABEL}.robot`;
+/** A robot.json as setup lays it out: the copy's wiring, orchestrate as the Record's owner, the keys folder, two locks of its own. */
+const goodRobot = ({ mac, root, uid }) => ({
+  installRoot: root, wiring: `${root}/wiring/robot-wiring.mjs`, product: 'alpha', ownerUid: uid,
+  lockFile: mac.at(`${BASE}/home/orchestrate/robot.lock`), dispatcherLockFile: mac.at(`${BASE}/home/orchestrate/dispatcher.lock`),
+  recordRoot: mac.at(`${BASE}/record`), productsFile: mac.at(`${BASE}/home/orchestrate/products.json`), rulesStateDir: mac.at(`${BASE}/home/orchestrate/rules`),
+  tokenFile: mac.at(`${BASE}/keys/watch-only-token`), keyDir: mac.at(`${BASE}/keys`),
+});
+const robotWorld = async (edit = (c) => c) => { const w = await world({ robot: (x) => edit(goodRobot(x), x) }); const r = w.run(['install']); assert.equal(r.code, 0, r.text); return w; };
+
+test('robot job: off unless the config says so; on, its file is the Dispatcher-shaped job as orchestrate, every 60 s, robot-main.mjs with the copy\'s robot.json, its own logs', async () => {
+  const off = await world();
+  assert.deepEqual(jobsFor(off.cfg), ['review-updater', 'review-account', 'review-runner'], 'a config without "robot" places exactly what it did');
+  assert.equal(plistTexts(off.mac, off.cfg).plists.robot, undefined);
+  const w = await world({ robot: goodRobot });
+  assert.deepEqual(jobsFor(w.cfg), ['review-updater', 'review-account', 'review-runner', 'robot']);
+  const t = robotPlist(w.cfg); const R = `${BASE}/install/orchestrate`;
+  assert.equal(plistTexts(w.mac, w.cfg).plists.robot, t);
+  assert.ok(t.includes(`<key>Label</key><string>${ROBOT_LABEL}</string>`), t);
+  assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>${R}/wiring/robot-main.mjs</string><string>${R}/robot.json</string></array>`), t);
+  assert.ok(t.includes('<key>StartInterval</key><integer>60</integer>'), t);
+  assert.ok(t.includes(`<key>WorkingDirectory</key><string>${BASE}/home/orchestrate</string>`), t);
+  assert.ok(t.includes(`<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>${BASE}/home/orchestrate</string></dict>`), t);
+  assert.ok(t.includes('<key>Umask</key><integer>63</integer>'), t);
+  assert.deepEqual(jobLogs(t), { user: 'orchestrate', files: [`${BASE}/logs/robot.out.log`, `${BASE}/logs/robot.err.log`] });
+  if (process.platform === 'darwin') {
+    const f = join(w.ext, 'robot.plist'); writeFileSync(f, t);
+    const lint = spawnSync('/usr/bin/plutil', ['-lint', f], { encoding: 'utf8' }); assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+  }
+});
+
+test('robot job: "robot": true needs its robot.json among the extras; anything but true or false is refused', async () => {
+  const w = await world();
+  assert.throws(() => parseInstallConfig({ ...w.raw, robot: true }), new RegExp(ROBOT_NO_CONFIG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const bad of ['yes', 1, {}]) assert.throws(() => parseInstallConfig({ ...w.raw, robot: bad }), /config: robot must be true or false/, String(bad));
+  assert.equal(parseInstallConfig({ ...w.raw, robot: false }).robot, undefined);
+  for (const sub of ['place', 'load', 'check']) { const r = w.run(['daemons', sub, '--only', 'robot']); assert.equal(r.code, 2, r.text); assert.match(r.text, /does not turn the robot job on/); }
+});
+
+test('robot job: install carries robot.json into the copy; place, load and check take it with the other jobs; its logs are orchestrate\'s; twice does nothing', async () => {
+  const w = await robotWorld();
+  assert.ok(existsSync(join(w.root, 'robot.json')), 'the copy holds robot.json');
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  assert.equal(readFileSync(plistFile(w, 'robot'), 'utf8'), robotPlist(w.cfg));
+  for (const f of ['robot.out.log', 'robot.err.log']) assert.equal(w.mac.lstat(`${BASE}/logs/${f}`).uid, Number(w.mac.users.get('orchestrate').UniqueID), f);
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text);
+  assert.ok(w.mac.loaded.has(ROBOT_LABEL), 'the robot job is loaded');
+  const ck = w.run(['daemons', 'check']); assert.equal(ck.code, 0, ck.text);
+  assert.match(ck.text, /robot job's config in the copy \(robot\.json\) matches this setup/);
+  assert.equal(planPlace(w.mac, w.cfg).ops.length, 0); assert.equal(planLoad(w.mac, w.cfg).ops.length, 0);
+  assert.ok(list(w.mac, w.cfg).some((j) => j.label === ROBOT_LABEL && j.loaded));
+  const un = w.run(['daemons', 'unload', '--only', 'robot']); assert.equal(un.code, 0, un.text); assert.equal(w.mac.loaded.has(ROBOT_LABEL), false);
+});
+
+// Each clause of robotConfigProblem, planted one at a time in the copy's robot.json: load refuses and names it, check FAILs on it.
+const ROBOT_PLANTS = [
+  ['the wiring is not the copy\'s robot-wiring.mjs', (c) => ({ ...c, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
+  ['the Record\'s owner is not orchestrate', (c) => ({ ...c, ownerUid: c.ownerUid + 1 }), /ownerUid must be/],
+  ['the key folder is another one', (c) => ({ ...c, keyDir: `${c.keyDir}-other` }), /keyDir must be/],
+  ['another install named', (c) => ({ ...c, installRoot: `${c.installRoot}-other` }), /installRoot must be/],
+  ['its lock is the Dispatcher\'s', (c) => ({ ...c, lockFile: c.dispatcherLockFile }), /a lock of its own/],
+  ['a lock inside the install', (c) => ({ ...c, lockFile: `${c.installRoot}/robot.lock` }), /lockFile is inside the install/],
+  ['a lock that is not a full path', (c) => ({ ...c, dispatcherLockFile: 'dispatcher.lock' }), /dispatcherLockFile must be a full path/],
+  // L740, audit #292 M1 (A1–A3): a lock path the robot could never take, or one a worker could plant, is refused here, not at 03:00.
+  ['A1 a lock in a folder that does not exist', (c) => ({ ...c, lockFile: '/no-such-folder-audit/robot.lock' }), /lockFile must be .*home\/orchestrate\/robot\.lock, in orchestrate's home/],
+  ['A1 the Dispatcher\'s lock in a folder that does not exist', (c, { mac }) => ({ ...c, dispatcherLockFile: mac.at(`${BASE}/no-such-folder/dispatcher.lock`) }), /dispatcherLockFile: its folder \S*no-such-folder is missing/],
+  ['A2 both locks in /tmp, which anyone can write', (c) => ({ ...c, lockFile: '/tmp/robot.lock', dispatcherLockFile: '/tmp/dispatcher.lock' }), /lockFile must be .*orchestrate's home.*dispatcherLockFile: it is not under/],
+  ['A3 a lock that reaches the install through ..', (c) => ({ ...c, lockFile: `/tmp/..${c.installRoot}/robot.lock` }), /lockFile must be written plainly/],
+  // L738 self-review: root's folder that others can write (a 1777 one, as /tmp is), inside the prefix, so the mode check is reached.
+  ['A2 the Dispatcher\'s lock in a root folder others can write', (c, { mac }) => { mkdirSync(mac.at(`${BASE}/shared`)); chmodSync(mac.at(`${BASE}/shared`), 0o1777); mac.owners.set(`${BASE}/shared`, { uid: mac.rootUid, gid: 0 }); return { ...c, dispatcherLockFile: mac.at(`${BASE}/shared/dispatcher.lock`) }; }, /dispatcherLockFile: its folder \S*shared can be written by its group or others/],
+  ['A3 the Dispatcher\'s lock written with .. or a doubled /', (c) => ({ ...c, dispatcherLockFile: c.dispatcherLockFile.replace('/orchestrate/', '/orchestrate/../orchestrate//') }), /dispatcherLockFile must be written plainly/],
+  ['a key the robot does not take', (c) => ({ ...c, approvalsStateDir: '/x' }), /keys the robot job does not take: approvalsStateDir/],
+  ['a bad run deadline', (c) => ({ ...c, runDeadlineMs: -1 }), /runDeadlineMs must be a positive number/],
+  ['not JSON', () => '{ not json', /is not JSON/],
+  ['not an object', () => '[]', /is not a JSON object/],
+];
+for (const [what, edit, re] of ROBOT_PLANTS) {
+  test(`PLANT robot.json: ${what} → load refuses, check FAILs`, async () => {
+    const w = await robotWorld(edit);
+    placeRefuses(w, 'robot', re);
+    const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.match(ld.text, /so the robot job would not start/);
+    assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+    const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+  });
+}
+
+// L740, audit #292 M1 (A2): the lock folders themselves. Each planted on its own, after install: load refuses and names it, check FAILs.
+const LOCK_FOLDER_PLANTS = [
+  ['orchestrate\'s home written by others', (w) => chmodSync(w.mac.at(`${BASE}/home/orchestrate`), 0o777), /lockFile: its folder \S*home\/orchestrate can be written by its group or others/],
+  ['orchestrate\'s home owned by a worker', (w) => w.mac.owners.set(`${BASE}/home/orchestrate`, { uid: Number(w.mac.users.get('orchestrate').UniqueID) + 1, gid: 0 }), /lockFile: its folder \S*home\/orchestrate is owned by uid \d+, which may not hold this lock/],
+  ['orchestrate\'s home replaced by a link', (w) => { const h = w.mac.at(`${BASE}/home/orchestrate`); renameSync(h, `${h}-real`); symlinkSync(`${h}-real`, h); }, /lockFile: its folder \S*home\/orchestrate is a link/],
+  ['a folder above the locks that others can write', (w) => chmodSync(w.mac.at(`${BASE}/home`), 0o777), /lockFile: a folder above it: \S*home can be written by others than root/],
+];
+for (const [what, plant, re] of LOCK_FOLDER_PLANTS) {
+  test(`PLANT robot locks: ${what} → load refuses, check FAILs`, async () => {
+    const w = await robotWorld();
+    assert.equal(w.run(['daemons', 'place']).code, 0);
+    plant(w);
+    const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+    const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+    placeRefuses(w, 'robot', re);
+  });
+}
+
+test('PLANT robot.json: missing from the copy, or not root\'s alone → load refuses, check FAILs', async () => {
+  const w = await robotWorld();
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  chmodSync(join(w.root, 'robot.json'), 0o666);
+  let ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /robot\.json in the copy is not root's alone/);
+  rmSync(join(w.root, 'robot.json'));
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /robot\.json is not in the copy/);
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /robot\.json is not in the copy/);
+});
+
+test('robot job: a robot job file or loaded job the config leaves off, or one under an old label, fails a full check (each optional job, not only the watch job)', async () => {
+  const w = await installed();
+  assert.equal(w.run(['daemons', 'place']).code, 0); assert.equal(w.run(['daemons', 'load']).code, 0);
+  assert.equal(w.run(['daemons', 'check']).code, 0);
+  writeFileSync(plistFile(w, 'robot'), 'x');
+  let r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /no com\.example\.orch-test\.robot job is placed or loaded \(the config does not turn the robot job on\)/);
+  rmSync(plistFile(w, 'robot'));
+  w.mac.loaded.set(ROBOT_LABEL, { lastExit: '0', ageS: 5 });
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /it is loaded: take it out with sudo node setup\.mjs daemons unload --only robot, then delete /);
+  assert.ok(list(w.mac, w.cfg).some((j) => j.label === ROBOT_LABEL), 'list shows a loaded job the config leaves off');
+  // audit #292 m3 (A4): the command check names works while the config leaves the robot off, and takes out that job alone.
+  for (const sub of ['place', 'load', 'check']) { const x = w.run(['daemons', sub, '--only', 'robot']); assert.equal(x.code, 2, `${sub}: ${x.text}`); assert.match(x.text, /does not turn the robot job on/); }
+  const ls = w.run(['daemons', 'list', '--only', 'robot']); assert.equal(ls.code, 0, ls.text); assert.match(ls.text, new RegExp(`${ROBOT_LABEL.replace(/\./g, '\\.')}: loaded`));
+  const before = [...w.mac.loaded.keys()].filter((k) => k !== ROBOT_LABEL);
+  const one = w.run(['daemons', 'unload', '--only', 'robot']); assert.equal(one.code, 0, one.text);
+  assert.equal(w.mac.loaded.has(ROBOT_LABEL), false); assert.deepEqual([...w.mac.loaded.keys()], before, 'the other jobs stay loaded');
+  w.mac.loaded.set(ROBOT_LABEL, { lastExit: '0', ageS: 5 });
+  assert.equal(w.run(['daemons', 'unload']).code, 0); assert.equal(w.mac.loaded.has(ROBOT_LABEL), false, 'a plain unload takes it out too');
+  assert.equal(w.run(['daemons', 'load']).code, 0);
+  writeFileSync(w.mac.at('/Library/LaunchDaemons/com.example.oldlabel.robot.plist'), 'x');
+  r = w.run(['daemons', 'check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /oldlabel\.robot\.plist/);
+});
+
+// ───────────────────────────── the Dispatcher's config and job (dispatcher-setup.mjs; L757) ─────────────────────────────
+
+const D_LABEL = `${LABEL}.dispatcher`;
+const D_SRC = `${BASE}/dispatcher.json`;
+const dWorld = async (opts = {}) => {
+  const w = await world({ dispatcher: true, ...opts });
+  const c = w.run(['dispatcher-config']); assert.equal(c.code, 0, c.text);
+  const r = w.run(['install']); assert.equal(r.code, 0, r.text);
+  return w;
+};
+const dPlaced = async (opts) => { const w = await dWorld(opts); const p = w.run(['daemons', 'place']); assert.equal(p.code, 0, p.text); return w; };
+const copyConfig = (w) => join(w.root, 'dispatcher.json');
+
+test('Dispatcher job: off without its entry; on, the Dispatcher-shaped job as orchestrate, main.mjs with the copy\'s dispatcher.json, HOME, Umask, its own logs', async () => {
+  const off = await world();
+  assert.ok(!jobsFor(off.cfg).includes('dispatcher'));
+  assert.equal(plistTexts(off.mac, off.cfg).plists.dispatcher, undefined);
+  const w = await world({ dispatcher: true });
+  assert.deepEqual(jobsFor(w.cfg), ['review-updater', 'review-account', 'review-runner', 'dispatcher']);
+  const t = dispatcherPlist(w.cfg); const R = `${BASE}/install/orchestrate`; const H = `${BASE}/home/orchestrate`;
+  assert.equal(plistTexts(w.mac, w.cfg).plists.dispatcher, t);
+  assert.ok(t.includes(`<key>Label</key><string>${D_LABEL}</string>`), t);
+  assert.ok(t.includes(`<key>ProgramArguments</key><array><string>${R}/${NODE}</string><string>${R}/modules/M11-dispatcher/main.mjs</string><string>${R}/dispatcher.json</string></array>`), t);
+  assert.ok(t.includes('<key>StartInterval</key><integer>60</integer>'), t);
+  assert.ok(t.includes(`<key>UserName</key><string>orchestrate</string>`), t);
+  assert.ok(t.includes(`<key>WorkingDirectory</key><string>${H}</string>`), t);
+  assert.ok(t.includes(`<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>${H}</string></dict>`), t);
+  assert.ok(t.includes('<key>Umask</key><integer>63</integer>'), t);
+  assert.deepEqual(jobLogs(t), { user: 'orchestrate', files: [`${BASE}/logs/dispatcher.out.log`, `${BASE}/logs/dispatcher.err.log`] });
+  if (process.platform === 'darwin') {
+    const f = join(w.ext, 'dispatcher.plist'); writeFileSync(f, t);
+    const lint = spawnSync('/usr/bin/plutil', ['-lint', f], { encoding: 'utf8' }); assert.equal(lint.status, 0, lint.stdout + lint.stderr);
+  }
+  for (const sub of ['place', 'load', 'check']) { const r = off.run(['daemons', sub, '--only', 'dispatcher']); assert.equal(r.code, 2, r.text); assert.match(r.text, /does not turn the Dispatcher job on/); }
+});
+
+test('Dispatcher config: the entry takes only the owner\'s keys, plain full paths outside the install, a listed product, and needs hostLockPath', async () => {
+  const w = await world();
+  const raw = { ...w.raw, hostLockPath: DLOCK };
+  assert.equal(parseInstallConfig(raw).dispatcher, undefined);
+  assert.deepEqual({ ...parseInstallConfig({ ...raw, dispatcher: GOOD_DISPATCHER }).dispatcher }, GOOD_DISPATCHER);
+  assert.equal(parseInstallConfig({ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: 900000 } }).dispatcher.runDeadlineMs, 900000);
+  assert.equal(parseInstallConfig({ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: RUN_DEADLINE_MS } }).dispatcher.runDeadlineMs, RUN_DEADLINE_MS);
+  const bad = [
+    [{ ...w.raw, dispatcher: GOOD_DISPATCHER }, /needs hostLockPath/],
+    [{ ...raw, dispatcher: 'yes' }, /dispatcher must be an object/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, product: 'beta' } }, /product must be one of the config's products/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, lockFile: '/x' } }, /keys it does not take: "lockFile"/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, tokenFile: 'token' } }, /dispatcher\.tokenFile must be a full path/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, rulesStateDir: `${BASE}/home/../keys` } }, /rulesStateDir must be a full path, written plainly/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, productsFile: `${BASE}/install/orchestrate/products.json` } }, /must not be inside the install/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, approvalsStateDir: `${BASE}/home/orchestrate/approvals/` } }, /written plainly/],
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: -1 } }, /runDeadlineMs must be a positive whole number/],
+    // Longer than the default the robot judges a pass by: a healthy pass would read as stuck (self-review M1).
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, runDeadlineMs: RUN_DEADLINE_MS + 1 } }, new RegExp(`runDeadlineMs may be at most ${RUN_DEADLINE_MS}`)],
+    // The disk ignores case, so INSTALL is the install too (self-review c2).
+    [{ ...raw, dispatcher: { ...GOOD_DISPATCHER, productsFile: `${BASE}/INSTALL/orchestrate/products.json` } }, /must not be inside the install/],
+    // The name is reserved whether or not the entry is set, so an owner's file of that name never rides into the copy (c3).
+    [{ ...w.raw, extras: [...w.raw.extras, join(w.ext, 'dispatcher.json')] }, /extras must be full paths/],
+    [{ ...raw, dispatcher: GOOD_DISPATCHER, extras: [...w.raw.extras, join(w.ext, 'dispatcher.json')] }, /extras must be full paths/],
+  ];
+  for (const [r, re] of bad) assert.throws(() => parseInstallConfig(r), re, JSON.stringify(r.dispatcher));
+});
+
+test('Dispatcher config: every key the Dispatcher takes, from the layout and the entry; the Dispatcher\'s own check takes it', async () => {
+  const w = await world({ dispatcher: true });
+  const { config, problems } = dispatcherConfigFor(w.mac, w.cfg);
+  assert.deepEqual(problems, []);
+  assert.deepEqual(Object.keys(config), CONFIG_KEYS.filter((k) => k !== 'runDeadlineMs'));
+  assert.doesNotThrow(() => checkConfig(config));
+  const at = (p) => w.mac.at(p); const R = at(`${BASE}/install/orchestrate`);
+  const uid = (u) => Number(w.mac.users.get(u).UniqueID);
+  assert.deepEqual(config, {
+    installRoot: R, wiring: `${R}/wiring/dispatcher-wiring.mjs`, lockFile: at(`${BASE}/home/orchestrate/dispatcher.lock`),
+    product: 'alpha', recordRoot: at(`${BASE}/products/alpha/store`), ownerUid: uid('orchestrate'),
+    productsFile: at(GOOD_DISPATCHER.productsFile), rulesStateDir: at(GOOD_DISPATCHER.rulesStateDir), tokenFile: at(GOOD_DISPATCHER.tokenFile), approvalsStateDir: at(GOOD_DISPATCHER.approvalsStateDir),
+    reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
+    reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,
+    reviewRoot: at(`${BASE}/review`), mirror: at(`${BASE}/mirror`), sealRoot: at(`${BASE}/seals`), hostLockPath: at(DLOCK), hostLockUid: uid('sam'),
+  });
+  // The five worker keys are dispatcherKeys' (the one source), as the job sees them; host.lock's owner is the owner's uid.
+  const k = dispatcherKeysOn(w.mac, w.cfg);
+  for (const key of Object.keys(k)) assert.equal(config[key], key === 'hostLockUid' ? k[key] : at(k[key]), key);
+  assert.notEqual(config.hostLockUid, config.ownerUid, 'host.lock is the owner\'s, not the Dispatcher\'s');
+});
+
+test('Dispatcher config: install refuses until dispatcher-config wrote it; then the copy carries it, the updater keeps it; place, load, check pass; twice does nothing', async () => {
+  const w0 = await world({ dispatcher: true });
+  const early = w0.run(['install']); assert.equal(early.code, 1, early.text); assert.match(early.text, /run dispatcher-config first/);
+  const dry = w0.run(['dispatcher-config', '--dry-run']); assert.equal(dry.code, 0, dry.text); assert.match(dry.text, /would run: write \/Library\/orch-test\/dispatcher\.json/);
+  assert.equal(existsSync(w0.mac.at(D_SRC)), false, 'a dry run writes nothing');
+  const w = await dWorld();
+  const st = w.mac.lstat(D_SRC); assert.deepEqual([st.uid, st.mode & 0o7777], [w.mac.rootUid, 0o644]);
+  const want = dispatcherConfigText(dispatcherConfigFor(w.mac, w.cfg).config);
+  assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), want);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), want, 'the copy holds the same text');
+  assert.ok(JSON.parse(readFileSync(join(w.root, UPDATER_CONFIG), 'utf8')).keep.includes('dispatcher.json'), 'the updater keeps it');
+  assert.equal(planDispatcherConfig(w.mac, w.cfg, { jobLive: () => null }).ops.length, 0, 'twice does nothing');
+  assert.throws(() => planDispatcherConfig(w.mac, w.cfg), /needs jobLive/, 'a caller can not skip the live-job check by leaving it out');
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(D_LABEL));
+  const ck = w.run(['daemons', 'check']); assert.equal(ck.code, 0, ck.text);
+  assert.match(ck.text, /Dispatcher's config in the copy \(dispatcher\.json\) is the one this setup writes/);
+  { const c0 = w.run(['check']); assert.equal(c0.code, 0, `the base file is no stranger to check: ${c0.text.split('\n').filter((l) => /FAIL/.test(l)).join(' / ')}`); }
+  const un = w.run(['daemons', 'unload', '--only', 'dispatcher']); assert.equal(un.code, 0, un.text); assert.equal(w.mac.loaded.has(D_LABEL), false);
+});
+
+test('Dispatcher config: changed later, dispatcher-config rewrites both files; a copy made before the Dispatcher was set up says to install again', async () => {
+  const w = await dPlaced();
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 600000 }; w.cfg = parseInstallConfig(w.raw);
+  const ck0 = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck0.code, 1, ck0.text); assert.match(ck0.text, /not the config this setup writes now \(run dispatcher-config\)/);
+  const r = w.run(['dispatcher-config']); assert.equal(r.code, 0, r.text); assert.match(r.text, /all 2 items PASS/);
+  assert.equal(JSON.parse(readFileSync(copyConfig(w), 'utf8')).runDeadlineMs, 600000);
+  // An install from before: its updater's keep has no dispatcher.json.
+  const old = await installed();
+  old.raw.hostLockPath = DLOCK; old.raw.dispatcher = { ...GOOD_DISPATCHER }; old.cfg = parseInstallConfig(old.raw);
+  const r2 = old.run(['dispatcher-config']); assert.equal(r2.code, 1, r2.text); assert.match(r2.text, /does not keep dispatcher\.json .*install again/);
+  assert.equal(existsSync(copyConfig(old)), false, 'nothing is put in a copy that would drop it');
+});
+
+// Each clause, planted one at a time after a good install and place: load refuses and names it, nothing loads, check FAILs.
+const D_PLANTS = [
+  ['the copy\'s file differs by one value', (w) => { const f = copyConfig(w); const c = JSON.parse(readFileSync(f, 'utf8')); c.lockFile = '/tmp/dispatcher.lock'; chmodSync(f, 0o644); rmSync(f); writeFileSync(f, dispatcherConfigText(c)); chmodSync(f, 0o644); }, /not the config this setup writes now/],
+  ['the copy\'s file written by its group', (w) => chmodSync(copyConfig(w), 0o664), /not root's alone|has mode 664/],
+  ['the copy\'s file gone', (w) => rmSync(copyConfig(w)), /dispatcher\.json is not in the copy/],
+  // Root's alone yet not 644: orchestrate, which the job runs as, could not read it.
+  ['the copy\'s file mode 600', (w) => chmodSync(copyConfig(w), 0o600), /orchestrate\/dispatcher\.json has mode 600, want 644/],
+  // The file is fine but the copy's folder is not root's alone, so another user could swap it.
+  ['the copy\'s folder written by its group', (w) => chmodSync(w.root, 0o775), /dispatcher\.json in the copy is not root's alone: /],
+  // The file is there, but the copy's updater would drop it on the next update.
+  ['the copy\'s updater does not keep it', (w) => { const f = join(w.root, UPDATER_CONFIG); const u = JSON.parse(readFileSync(f, 'utf8')); u.keep = u.keep.filter((k) => k !== 'dispatcher.json'); chmodSync(f, 0o600); writeFileSync(f, JSON.stringify(u, null, 2) + '\n'); chmodSync(f, 0o644); }, /was made before the Dispatcher was set up, so its updater does not keep dispatcher\.json/],
+  ['the copy\'s file a link', (w) => { const f = copyConfig(w); renameSync(f, `${w.ext}/d.json`); symlinkSync(`${w.ext}/d.json`, f); }, /not root's alone|not a plain file/],
+  ['the copy\'s file with a second name', (w) => { linkSync(copyConfig(w), join(w.root, 'second.json')); }, /orchestrate\/dispatcher\.json has 2 names/],
+  ['the Dispatcher\'s lock folder writable by others', (w) => chmodSync(w.mac.at(`${BASE}/home/orchestrate`), 0o777), /the Dispatcher's lock \(lockFile\): its folder .* can be written by its group or others/],
+  ['check-dispatcher FAILs: no launches folder', (w) => rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true }), /check-dispatcher FAILs .*launches/],
+  ['check-dispatcher FAILs: host.lock orchestrate can\'t read', (w) => chmodSync(w.mac.at(DLOCK), 0o600), /check-dispatcher FAILs .*host\.lock/],
+];
+for (const [what, plant, re] of D_PLANTS) {
+  test(`PLANT Dispatcher: ${what} → place and load refuse, check FAILs`, async () => {
+    const w = await dPlaced();
+    plant(w);
+    const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re);
+    assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+    // daemons check FAILs on each, check-dispatcher's too (L807 m3).
+    const ck = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+    placeRefuses(w, 'dispatcher', re);
+  });
+}
+
+test('Dispatcher job: host.lock in a folder macOS guards is NOT TRIED in check-dispatcher, and does not stop the load (only the job can prove it)', async () => {
+  const lock = '/Users/sam/Library/CloudStorage/Sync/host.lock';
+  const w = await dPlaced({ lock });
+  const cd = w.run(['check-dispatcher']); assert.equal(cd.code, 1, cd.text); assert.match(cd.text, /NOT TRIED/);
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(D_LABEL));
+});
+
+// A robot.json naming the Dispatcher's Record and lock.
+const sameRobot = ({ mac, root, uid }) => ({ installRoot: root, wiring: `${root}/wiring/robot-wiring.mjs`, product: 'alpha', ownerUid: uid,
+  lockFile: mac.at(`${BASE}/home/orchestrate/robot.lock`), dispatcherLockFile: mac.at(`${BASE}/home/orchestrate/dispatcher.lock`),
+  recordRoot: mac.at(`${BASE}/products/alpha/store`), productsFile: mac.at(GOOD_DISPATCHER.productsFile), rulesStateDir: mac.at(GOOD_DISPATCHER.rulesStateDir),
+  tokenFile: mac.at(GOOD_DISPATCHER.tokenFile), keyDir: mac.at(`${BASE}/keys`) });
+
+test('Dispatcher with the robot job: robot.json must name the same Record and the Dispatcher\'s lock', async () => {
+  const same = sameRobot;
+  const w = await dPlaced({ robot: same });
+  const ok = w.run(['daemons', 'check', '--only', 'dispatcher']);
+  assert.match(ok.text, /PASS {2}the Dispatcher's config in the copy/, ok.text);
+  const w2 = await dWorld({ robot: (x) => ({ ...same(x), recordRoot: x.mac.at(`${BASE}/record`), dispatcherLockFile: x.mac.at(`${BASE}/home/orchestrate/other.lock`) }) });
+  const apart = /must name the same Record and lock; they differ in recordRoot, dispatcherLockFile/;
+  // Neither job file is put down, so a boot can't start the two apart (L807 M1).
+  placeRefuses(w2, 'dispatcher', apart); placeRefuses(w2, 'robot', apart);
+  const ld = w2.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text);
+  assert.match(ld.text, apart);
+  // Loading or checking only the Dispatcher holds the two together as well (L807 m2: planted, the Dispatcher-side match skipped).
+  const onlyD = w2.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(onlyD.code, 1, onlyD.text); assert.match(onlyD.text, apart);
+  const ckD = w2.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ckD.code, 1, ckD.text); assert.match(ckD.text, apart);
+  // Loading or checking only the robot holds the two together too (self-review M2).
+  const only = w2.run(['daemons', 'load', '--only', 'robot']); assert.equal(only.code, 1, only.text);
+  assert.match(only.text, /they differ in recordRoot, dispatcherLockFile.*so the robot job would not start/);
+  assert.equal(w2.mac.loaded.size, 0, 'nothing was loaded');
+  const ck = w2.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /they differ in recordRoot, dispatcherLockFile/);
+  assert.equal(w.run(['daemons', 'load', '--only', 'robot']).code, 0, 'the same Record and lock: the robot alone loads');
+  // A Dispatcher config that can't be built says why, so a robot-only load or check is not left without a reason (r2 m4).
+  w.mac.users.delete('orchestrate');
+  assert.match(robotMatchProblem(w.mac, w.cfg), /can't be built from this setup \(the orchestrate user does not exist \(run users-folders first\)\)/);
+});
+
+test('Dispatcher config: each file is written whole and renamed over its name; root writes in the copy only when it is root\'s alone', async () => {
+  const w = await dPlaced();
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 600000 }; w.cfg = parseInstallConfig(w.raw);
+  const from = w.mac.log.length;
+  const r = w.run(['dispatcher-config']); assert.equal(r.code, 0, r.text);
+  const log = w.mac.log.slice(from);
+  const copyFile = `${BASE}/install/orchestrate/dispatcher.json`;
+  for (const f of [D_SRC, copyFile]) {
+    const tmp = join(dirname(f), '.dispatcher.json.new');
+    assert.ok(log.includes(`rename ${tmp} ${f}`), `planted: a writer that removes ${f} first leaves a gap with no file (${log.join(' | ')})`);
+    assert.ok(!log.includes(`rm ${f}`), `${f} is never removed`);
+    assert.equal(existsSync(w.mac.at(tmp)), false, 'no temporary file is left');
+  }
+  // A copy with a file its group can write: root won't write in it.
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 500000 }; w.cfg = parseInstallConfig(w.raw);
+  chmodSync(join(w.root, UPDATER_CONFIG), 0o664);
+  const before = readFileSync(copyConfig(w), 'utf8');
+  const r2 = w.run(['dispatcher-config']); assert.equal(r2.code, 1, r2.text); assert.match(r2.text, /the installed copy is not root's alone .*so root won't write in it/);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), before, 'planted: a writer without the copy check writes here');
+  // The base file took the new text, so install is not refused for it and replaces the copy: no stuck state (r2 m1).
+  assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), dispatcherConfigText(dispatcherConfigFor(w.mac, w.cfg).config), 'the base file is written first');
+  assert.match(r2.text, /unload the jobs, remove .*\/install, run install/);
+  rmSync(w.mac.at(`${BASE}/install`), { recursive: true, force: true });
+  const inst = w.run(['install']); assert.equal(inst.code, 0, inst.text);
+  assert.equal(readFileSync(copyConfig(w), 'utf8'), readFileSync(w.mac.at(D_SRC), 'utf8'), 'the new copy carries the new text');
+  assert.equal(w.run(['dispatcher-config']).code, 0, 'and dispatcher-config then has nothing to do');
+  // A rename that fails leaves no side file behind, and the old file as it was (r2 m2).
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 400000 }; w.cfg = parseInstallConfig(w.raw);
+  const old = readFileSync(w.mac.at(D_SRC), 'utf8'); const real = w.mac.rename;
+  w.mac.rename = () => { const e = new Error('EIO: rename failed'); e.code = 'EIO'; throw e; };
+  const r3 = w.run(['dispatcher-config']); w.mac.rename = real; assert.equal(r3.code, 1, r3.text);
+  assert.equal(existsSync(w.mac.at(join(dirname(D_SRC), '.dispatcher.json.new'))), false, 'planted: a writer without the clean-up leaves the side file');
+  assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), old, 'the old file is unchanged');
+});
+
+test('Dispatcher job: daemons check reads a run as stuck only past the Dispatcher\'s deadline and the watchdog\'s margin', async () => {
+  assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 >= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS, 'a healthy pass is never stuck');
+  assert.ok(DISPATCHER_RUN_LIMIT_S * 1000 <= RUN_DEADLINE_MS + WATCHDOG_MARGIN_MS + 120_000, 'and a hung one is told soon after');
+  const w = await dPlaced();
+  const ld = w.run(['daemons', 'load', '--only', 'dispatcher']); assert.equal(ld.code, 0, ld.text);
+  const job = w.mac.loaded.get(D_LABEL); job.lastExit = '0';
+  // Past the review jobs' 30 minutes but inside the Dispatcher's own limit: a healthy pass, not stuck.
+  job.ageS = FIRST_RUN_LIMIT_S + 60; let ck = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck.code, 0, `planted: the Dispatcher judged by the review jobs' limit (${ck.text})`);
+  assert.match(ck.text, new RegExp(`current run is not stuck \\(at most ${Math.ceil(DISPATCHER_RUN_LIMIT_S / 60)} minutes\\)`));
+  job.ageS = DISPATCHER_RUN_LIMIT_S + 1; ck = w.run(['daemons', 'check', '--only', 'dispatcher']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /current run is not stuck.*has been going for/);
+  delete job.lastExit; job.ageS = FIRST_RUN_LIMIT_S + 60; assert.equal(w.run(['daemons', 'check', '--only', 'dispatcher']).code, 0, 'a first run is held to the same limit');
+});
+
+test('L807 M1: place refuses where load does for the review jobs (the install) and the watch job (its rules), and puts no job file down', async () => {
+  const w = await dPlaced();
+  chmodSync(w.root, 0o775);   // the copy's folder written by its group: the install check fails
+  for (const job of ['review-updater', 'review-account', 'review-runner']) placeRefuses(w, job, /the install check fails/);
+  chmodSync(w.root, 0o755);
+  const wr = await world({ rules: 'version: 1\n' }); assert.equal(wr.run(['install']).code, 0);
+  placeRefuses(wr, 'watch-only', /rules-draft\.yaml is not there \(run watch-rules first\)/);
+  assert.equal(wr.run(['daemons', 'place', '--only', 'review-runner']).code, 0, 'a job whose checks pass is placed on its own');
+});
+
+test('r1 M1: a refused full place names only the placed jobs whose own checks fail; a broken install names them all', async () => {
+  const w = await dPlaced();
+  rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true });   // only check-dispatcher fails: README Part 6 step 3
+  const r = w.run(['daemons', 'place']); assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /launches/);
+  assert.match(r.text, /dispatcher's job file .* is still in place and launchd starts it at boot/);
+  for (const job of JOBS) assert.doesNotMatch(r.text, new RegExp(`${job}'s job file`), `planted: a healthy ${job} is told to come out`);
+  chmodSync(w.root, 0o775);   // the install check fails: every job of the set is refused, and each placed one named
+  const all = w.run(['daemons', 'place']); assert.equal(all.code, 1, all.text);
+  for (const job of [...JOBS, 'dispatcher']) assert.match(all.text, new RegExp(`${job}'s job file .* is still in place`), job);
+});
+
+test('r1 m1, r2 N2-N4: daemons check names a half-written job file; this label\'s get a quoted rm line, another label\'s only a check-first line', async () => {
+  const w = await placed();
+  const D = '/Library/LaunchDaemons';
+  const row = (jobs) => checkDaemons(w.mac, w.cfg, jobs).find((i) => i.what.startsWith('no half-written job file'));
+  const put = (n) => writeFileSync(w.mac.at(`${D}/${n}`), 'x'); const del = (n) => rmSync(w.mac.at(`${D}/${n}`));
+  assert.equal(row().ok, true);
+  const mine = `.${LABEL}.review-runner.plist.new`; const theirs = '.old.label.dispatcher.plist.new';
+  const rmLine = `${D}/${mine}: left by a write that was cut off; delete it: sudo rm '${D}/${mine}'`;
+  const checkLine = `${D}/${theirs}: under another label than ${LABEL}; check it is setup's (a write cut off under an old label) before deleting it`;
+  put(mine); assert.deepEqual(row(), { ok: false, what: `no half-written job file in ${D}`, why: rmLine }, 'the whole line, each path quoted (N2)');
+  put(theirs); assert.equal(row().why, `${rmLine}; ${checkLine}`);
+  del(mine); assert.equal(row().why, checkLine, 'another label\'s file gets no rm line (N3)');
+  del(theirs); assert.equal(row().ok, true);
+  const two = `.${LABEL}.dispatcher.plist.new`; put(mine); put(two);
+  assert.equal(row().why, `${D}/${two}, ${D}/${mine}: left by a write that was cut off; delete them: sudo rm '${D}/${two}' '${D}/${mine}'`, 'several, sorted, each quoted');
+  // --only: this label's side file of a job checked is still named (N4); another job's, and another label's, are not.
+  assert.deepEqual(row(['review-runner']), { ok: false, what: `no half-written job file for review-runner in ${D}`, why: rmLine }, 'under --only, the checked job\'s side file');
+  del(mine); put(theirs);
+  assert.deepEqual(row(['review-runner']), { ok: true, what: `no half-written job file for review-runner in ${D}` }, 'under --only, another job\'s and another label\'s are left out');
+  del(two); del(theirs);
+  const also = '.older.label.review-runner.plist.new'; put(theirs); put(also);
+  assert.equal(row().why, `${D}/${theirs}, ${D}/${also}: under another label than ${LABEL}; check they are setup's (a write cut off under an old label) before deleting them`, 'several of another label\'s');
+  del(theirs); del(also);
+  // Names that are not a side file: the end anchor (K10) and other dot-files (K11).
+  for (const n of [`${mine}.bak`, `${mine}x`, `.${LABEL}.review-runner.plist`, '.DS_Store', '.old.label.notajob.plist.new', `${LABEL}.review-runner.plist.new`]) {
+    put(n); assert.equal(row().ok, true, n);
+    assert.equal(checkDaemons(w.mac, w.cfg).find((i) => i.what.startsWith('no job file in')).ok, true, `${n}: no job file under another label either`); del(n);
+  }
+});
+
+test('r1 c1: check counts the dispatcher entry on only when its parser takes it, so a broken one names a leftover base dispatcher.json', async () => {
+  const w = await installed();
+  writeFileSync(w.mac.at(D_SRC), '{}\n'); w.mac.owners.set(D_SRC, { uid: w.mac.rootUid, gid: 0 });
+  w.raw.dispatcher = { product: 'alpha', notAKey: 1 };
+  const r = w.run(['check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /holds an entry the setup did not make: dispatcher\.json/);
+});
+
+test('L807 m4: a job file is written whole beside its name and renamed over it; a failed rename leaves the old file and no side file', async () => {
+  const w = await placed();
+  const f = `/Library/LaunchDaemons/${LABEL}.review-runner.plist`; const side = `/Library/LaunchDaemons/.${LABEL}.review-runner.plist.new`;
+  writeFileSync(w.mac.at(f), 'old\n'); chmodSync(w.mac.at(f), 0o644);
+  const real = w.mac.rename; w.mac.rename = () => { const e = new Error('EIO: rename failed'); e.code = 'EIO'; throw e; };
+  const r = w.run(['daemons', 'place']); w.mac.rename = real; assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(w.mac.at(f), 'utf8'), 'old\n', 'planted: a writer that removes the file first leaves no job file');
+  assert.equal(existsSync(w.mac.at(side)), false, 'no side file is left');
+  const from = w.mac.log.length; assert.equal(w.run(['daemons', 'place']).code, 0);
+  const log = w.mac.log.slice(from);
+  assert.ok(log.includes(`rename ${side} ${f}`), log.join(' | ')); assert.ok(!log.some((l) => l.startsWith(`rm ${f}`)), 'the job file is never removed');
+  assert.equal(readFileSync(w.mac.at(f), 'utf8'), plistTexts(w.mac, w.cfg).plists['review-runner']);
+});
+
+test('L807 m4: the load record is written beside its name too; a failed rename keeps the old record and leaves no side file', async () => {
+  const w = await placed();
+  const f = `${BASE}/install/loaded-jobs.json`; const side = `${BASE}/install/.loaded-jobs.json.new`;
+  writeFileSync(w.mac.at(f), '{"old":"x"}\n');
+  const real = w.mac.rename; w.mac.rename = (a, b) => { if (b === f) { const e = new Error('EIO: rename failed'); e.code = 'EIO'; throw e; } return real.call(w.mac, a, b); };
+  const r = w.run(['daemons', 'load']); w.mac.rename = real; assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(w.mac.at(f), 'utf8'), '{"old":"x"}\n', 'planted: a writer that removes the record first loses it');
+  assert.equal(existsSync(w.mac.at(side)), false, 'no side file is left');
+  const from = w.mac.log.length; assert.equal(w.run(['daemons', 'load']).code, 0);
+  const steps = w.mac.log.slice(from).filter((l) => l.includes('loaded-jobs.json')).map((l) => l.split(' ')[0]);
+  for (const x of ['unlink', 'chown', 'chmod', 'rename']) assert.ok(steps.includes(x), `${x}: ${steps.join(' ')}`);
+  assert.ok(steps.indexOf('unlink') < steps.indexOf('chown'), steps.join(' '));
+  assert.ok(steps.indexOf('rename') > Math.max(steps.indexOf('chown'), steps.indexOf('chmod')), `secured before the rename: ${steps.join(' ')}`);
+});
+
+test('L807 m1: while the Dispatcher job is loaded or placed, dispatcher-config refuses a config load would refuse, and changes neither file', async () => {
+  const w = await dPlaced({ robot: sameRobot });
+  assert.equal(w.run(['daemons', 'load']).code, 0);
+  const files = () => [readFileSync(w.mac.at(D_SRC), 'utf8'), readFileSync(copyConfig(w), 'utf8')];
+  const before = files();
+  // The robot still names the old token file: the running Dispatcher and the robot would read different ones.
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, tokenFile: `${BASE}/keys/other-token` }; w.cfg = parseInstallConfig(w.raw);
+  let r = w.run(['dispatcher-config']); assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /the Dispatcher job is loaded and reads .*dispatcher\.json, and the new config would not start it: .*they differ in tokenFile/);
+  assert.match(r.text, /daemons unload --only dispatcher, then delete its job file/);
+  assert.deepEqual(files(), before, 'planted: a writer without the live check rewrites the file the running job reads');
+  // Unloaded but still placed: launchd starts it at boot, so the same.
+  assert.equal(w.run(['daemons', 'unload', '--only', 'dispatcher']).code, 0);
+  r = w.run(['dispatcher-config']); assert.equal(r.code, 1, r.text); assert.match(r.text, /the Dispatcher job is placed and reads/);
+  // check-dispatcher's FAILs hold it too.
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, runDeadlineMs: 600000 }; w.cfg = parseInstallConfig(w.raw);
+  rmSync(w.mac.at(`${BASE}/review/launches`), { recursive: true });
+  r = w.run(['dispatcher-config']); assert.equal(r.code, 1, r.text); assert.match(r.text, /is placed .*check-dispatcher FAILs .*launches/);
+  assert.deepEqual(files(), before);
+  // Taken out: the new text is written (its closing check still names the robot's mismatch, so the job can't be loaded on it).
+  rmSync(plistFile(w, 'dispatcher'));
+  w.raw.dispatcher = { ...GOOD_DISPATCHER, tokenFile: `${BASE}/keys/other-token` }; w.cfg = parseInstallConfig(w.raw);
+  r = w.run(['dispatcher-config']); assert.equal(r.code, 1, r.text); assert.match(r.text, /FAIL .*differ in tokenFile/);
+  assert.equal(JSON.parse(files()[1]).tokenFile, w.mac.at(`${BASE}/keys/other-token`));
+});
+
+test('#323 c1 / #318 c3: host.lock\'s owner may not have the uid of root, orchestrate, review or pages: dispatcher-config refuses and names it', async () => {
+  for (const [who, re] of [['root', /hostLockUid is root/], ['orchestrate', /hostLockUid is the Dispatcher's own user/], ['review', /hostLockUid is the review user/], ['pages', /has the pages user's uid/]]) {
+    const w = await world({ dispatcher: true });
+    const sam = w.mac.users.get('sam');
+    w.mac.users.set('sam', { ...sam, UniqueID: who === 'root' ? '0' : w.mac.users.get(who).UniqueID });
+    assert.match(dispatcherConfigFor(w.mac, w.cfg).problems.join(' '), re, who);
+    const r = w.run(['dispatcher-config']); assert.equal(r.code, 1, `${who}: ${r.text}`); assert.match(r.text, re);
+    assert.equal(existsSync(w.mac.at(D_SRC)), false, `${who}: nothing is written`);
+  }
+});
+
+test('L802: an entry that names only the product gets setup\'s own paths, printed; one it names is kept', async () => {
+  const w = await world({ dispatcher: { product: 'alpha' } });
+  assert.deepEqual({ ...w.cfg.dispatcher }, { product: 'alpha', productsFile: `${BASE}/private/products.json`, rulesStateDir: `${BASE}/private/rules-state`, tokenFile: `${BASE}/keys/watch-only-token`, approvalsStateDir: `${BASE}/private/approvals` });
+  const r = w.run(['dispatcher-config']); assert.equal(r.code, 0, r.text);
+  for (const k of ['productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir']) assert.match(r.text, new RegExp(`uses ${k}: ${BASE}/\\S+ \\(setup's default`), k);
+  const c = JSON.parse(readFileSync(w.mac.at(D_SRC), 'utf8')); assert.equal(c.rulesStateDir, w.mac.at(`${BASE}/private/rules-state`));
+  const own = await world({ dispatcher: { product: 'alpha', rulesStateDir: `${BASE}/home/orchestrate/rules` } });
+  assert.equal(own.cfg.dispatcher.rulesStateDir, `${BASE}/home/orchestrate/rules`);
+  const r2 = own.run(['dispatcher-config']); assert.equal(r2.code, 0, r2.text);
+  assert.match(r2.text, new RegExp(`uses rulesStateDir: ${BASE}/home/orchestrate/rules\\n`)); assert.match(r2.text, /uses tokenFile: .*\(setup's default/);
+  assert.throws(() => parseInstallConfig({ ...own.raw, dispatcher: { product: 'alpha', tokenFile: 'relative' } }), /dispatcher\.tokenFile must be a full path/);
+});
+
+test('L807 c2: without a dispatcher entry the base dispatcher.json is not setup\'s own, so check names a leftover one', async () => {
+  const w = await installed();
+  assert.ok(!rootMadeEntries(w.cfg).some((e) => e.endsWith('/dispatcher.json')));
+  writeFileSync(w.mac.at(D_SRC), '{}\n'); w.mac.owners.set(D_SRC, { uid: w.mac.rootUid, gid: 0 });
+  const r = w.run(['check']); assert.equal(r.code, 1, r.text); assert.match(r.text, /holds an entry the setup did not make: dispatcher\.json/);
+});
+
+// The base file is what install carries into the copy: each fault in it, planted after dispatcher-config, stops the install.
+for (const [what, plant] of [
+  ['owned by another user', (w) => w.mac.owners.set(D_SRC, { uid: 65001, gid: 20 })],
+  ['mode 666', (w) => chmodSync(w.mac.at(D_SRC), 0o666)],
+  ['with a second name', (w) => linkSync(w.mac.at(D_SRC), w.mac.at(`${BASE}/d2.json`))],
+  ['a link', (w) => { renameSync(w.mac.at(D_SRC), w.mac.at(`${BASE}/d2.json`)); symlinkSync(w.mac.at(`${BASE}/d2.json`), w.mac.at(D_SRC)); }],
+  ['other text', (w) => { const f = w.mac.at(D_SRC); chmodSync(f, 0o644); writeFileSync(f, '{}\n'); }],
+]) {
+  test(`PLANT Dispatcher: the base dispatcher.json ${what} → install refuses`, async () => {
+    const w = await world({ dispatcher: true });
+    const c = w.run(['dispatcher-config']); assert.equal(c.code, 0, c.text);
+    plant(w);
+    const r = w.run(['install']); assert.equal(r.code, 1, r.text); assert.match(r.text, /run dispatcher-config first/);
+    assert.equal(existsSync(copyConfig(w)), false, 'nothing reached a copy');
+  });
+}
 
 // add-to-install (L573, L574): the pinned Claude Code and the hooks go into the installed copy, in place.
 const PIN = '2.1.316';

@@ -39,7 +39,10 @@ export function makeAppJwt({ appId, privateKeyPem, now }) {
   return `${head}.${body}.${sig}`;
 }
 
-export async function mintInstallationToken({ keyDir, keyFile = 'robot-app.pem', appId, installationId, http, uid = process.getuid?.(), scriptsUid, now = Date.now } = {}) {
+/** The robot's key file's default name in the key folder (L734): tests name it from here, and token.test pins its value. */
+export const ROBOT_KEY_FILE = 'robot-app.pem';
+
+export async function mintInstallationToken({ keyDir, keyFile = ROBOT_KEY_FILE, appId, installationId, http, uid = process.getuid?.(), scriptsUid, now = Date.now } = {}) {
   const secrets = [];   // every secret text seen, scrubbed from any reason
   const no = (reason) => ({ ok: false, reason: scrub(reason, secrets) });
   try {

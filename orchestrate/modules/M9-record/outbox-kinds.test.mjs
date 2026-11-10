@@ -344,7 +344,7 @@ test('L162 m3: makeHistory counts as a caller in any source form, and yaml/yml/t
 test('L162: each kind\'s roles are pinned', () => {
   assert.deepEqual(Object.fromEntries(Object.entries(OUTBOX_KINDS).map(([k, s]) => [k, s.roles])), {
     'report-': ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], 'report-compact-': ['worker'], 'state-compact-': ['front_door'],
-    'handoff-': ['lead', 'learning'], 'handin-': ['worker'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
+    'handoff-': ['lead', 'learning'], 'handin-': ['worker', 'script'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
     'ask-request-': ['front_door', 'incident'], 'wish-': ['lead'], 'think-': ['lead'], 'scout-': ['lead'], 'write-': ['lead'],
     'plan-': ['lead'], 'roadmap-': ['lead'], 'history-': ['lead'], 'request-': ['front_door'], 'state-': ['front_door'], 'idea-': ['front_door', 'thinking'],
     'check-': ['learning'], 'prune-': ['learning'],

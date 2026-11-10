@@ -14,11 +14,15 @@
 //   add-to-install --pin <x.y.z> --sha256 <hex> [--dry-run]   the pinned Claude Code and the hooks into the installed copy, in
 //                                       place: no update, no job touched; safe to run again                    (root)
 //   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
+//   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
 //   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
+//                                       (place and load refuse on the same checks: a placed job starts at boot without load)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
-//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes  (read only)
+//                                       (the robot job, `robot`, is one of them only when the config says "robot": true; robot-setup.mjs;
+//                                       the Dispatcher job, `dispatcher`, only when the config has a "dispatcher" entry; dispatcher-setup.mjs)
+//   daemons check                       the job files are exact, no leftover jobs, each job loaded from the file as it is now, last exit 0, no run going over 30 minutes (the Dispatcher: its deadline plus the watchdog's margin, about 35)  (read only)
 //   daemons reload-account [--dry-run]  reload the account job; exits 1 ("Run: daemons load") when it is not loaded  (root)
 //   proposals  [--dry-run]  the proposals folders: parent root's, one per product  (root)
 //   check-proposals  owner, mode, access list; with sudo, who can read or write (read only)
@@ -44,12 +48,13 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
 import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
+import { DISPATCHER_JOB, checkDispatcherConfig, parseDispatcher, planDispatcherConfig } from './dispatcher-setup.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
 import { proofCommands, runProofs } from './proofs.mjs';
 import { checkInstall, parseInstallConfig, planAddToInstall, planInstall, rootMadeEntries, spawnUpdater } from './install.mjs';
-import { checkDaemons, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
+import { checkDaemons, jobLive, list, onlyJobs, planLoad, planPlace, planReloadAccount, planUnload } from './daemons.mjs';
 import { checkRulesCopy, checkWatchAppConfig, checkWatchRules, planWatchApp, planWatchRules, proveWatchAppChecks, watchConfigLine } from './watch-setup.mjs';
 import { reviewConfigCommand } from './review-config.mjs';
 import { readUser } from './users-folders.mjs';
@@ -62,9 +67,9 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-config|dispatcher-keys|review-config --pin <x.y.z> --input <file> --out <file> [--for-install]|add-to-install --pin <x.y.z> --sha256 <hex>|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'review-config', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-config', 'dispatcher-keys', 'review-config', 'add-to-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
 const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app', 'review-config'];
 
@@ -142,6 +147,7 @@ export function planCommand(io, cfg, o, { readSource = (p) => io.readSource(p), 
   const res = o.cmd === 'install' ? planInstall(io, cfg, { readSource, runUpdater })
     : o.cmd === 'add-to-install' ? planAddToInstall(io, cfg, { pin: o.claudePin, sha256: o.sha256, readSource })
     : o.cmd === 'token' ? planToken(io, cfg)
+    : o.cmd === 'dispatcher-config' ? planDispatcherConfig(io, cfg, { jobLive: () => jobLive(io, cfg, DISPATCHER_JOB) })
     : o.sub === 'place' ? planPlace(io, cfg, o.jobs) : o.sub === 'load' ? planLoad(io, cfg, o.jobs) : o.sub === 'reload-account' ? planReloadAccount(io, cfg) : planUnload(io, cfg, o.jobs);
   return guarded(io, cfg, res);
 }
@@ -166,11 +172,13 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
-    if (o.only !== null) o.jobs = onlyJobs(cfg, o.only);   // a name that is no job of this config is refused before anything runs
+    // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
+    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch { return false; } })();
+    if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
   if (o.cmd === 'review-config') return reviewConfigCommand(cfg, { pin: o.claudePin, input: o.input, out: o.out, dry: o.dry, forInstall: o.forInstall }, { euid: io.euid(), userOf: (n) => readUser(io, n), out, err });
-  if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }), out);
+  if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }), out);
   if (o.cmd === 'check-install') {
     const code = report(checkInstall(io, cfg, { main: o.main }), out);
     // The Dispatcher's lines are their own command (L748 r1 M1): `daemons load` and the watch cutover wait on check-install,
@@ -204,6 +212,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
 
   if (!o.dry) { const p = rootProblem(io); if (p) { err(`refused: ${p}`); return 2; } }
   const planned = planCommand(io, cfg, o, { runUpdater });
+  for (const n of planned.notes ?? []) out(`uses ${n}`);
   for (const p of planned.problems) err(`PROBLEM  ${p}`);
   if (planned.problems.length) { err('nothing was changed.'); return 1; }
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
@@ -217,7 +226,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   // A message that already says what to run next ("run: daemons load") is the one instruction; the generic "run it again" is only for the rest.
   try { apply(planned.ops, { log: (t) => out(`run: ${t}`) }); } catch (e) { const why = String(e.message).replace(/\.+$/, '');   // a message that ends in its own period gets one, not two
     err(/run: daemons load/i.test(e.message) ? `stopped: ${why}.` : `stopped: ${why}. Run it again after fixing that; it picks up where it stopped.`); return 1; }
-  const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
+  const after = o.cmd === 'users-folders' ? check(io, cfg, { alsoKnown: rootMadeEntries(cfg, { dispatcher: o.dispatcherOn }) }) : o.cmd === 'install' || o.cmd === 'add-to-install' ? checkInstall(io, cfg)
+    : o.cmd === 'dispatcher-config' ? checkDispatcherConfig(io, cfg)
     : o.cmd === 'proposals' ? checkProposals(io, cfg) : o.cmd === 'safe-directory' ? checkSafeDirectory(io, cfg) : o.cmd === 'token' ? checkToken(io, cfg) : o.cmd === 'watch-rules' ? checkRulesCopy(io, cfg) : o.cmd === 'watch-app' ? checkWatchAppConfig(io, cfg, o.app, o.pin)
     : o.sub === 'place' ? checkDaemons(io, cfg, o.jobs).filter((r) => /exactly the built job file$|under another label/.test(r.what)) : o.sub === 'load' ? checkDaemons(io, cfg, o.jobs).filter((r) => /is loaded$|loaded from the job file as it is now$/.test(r.what))
     : o.sub === 'reload-account' ? checkDaemons(io, cfg).filter((r) => /review-account (is loaded|was loaded from the job file as it is now)$/.test(r.what)) : null;
