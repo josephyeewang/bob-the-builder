@@ -47,12 +47,22 @@ test('account: a name is signed in, a current "nobody" is signed out, an old rea
   assert.equal(await setUp([signedIn('a', STALE_MIN + 1)]).account(), null);
 });
 
-test('a reading Sensors did not make does not count', async () => {
+test('a reading Sensors did not make does not count: the account, the Front Door and usage, each on its own', async () => {
   const made = recWith([]);
-  assert.equal(made.write({ actor: 'sensors', entity: 'fact', id: ACCOUNT_FACT, expectRev: 0, doc: { account: 'a', observed_at: seen() } }).ok, true);
-  const probesOf = (createdBy) => heartbeatProbes({ rec: { read: made.read.bind(made), meta: () => ({ createdBy }) }, rules: rules(), now: () => T0 });
-  assert.deepEqual(await probesOf('sensors').account(), { signedIn: true, login: 'a' });
-  assert.equal(await probesOf('ledger').account(), null);
+  for (const [id, doc] of [signedIn('a'), reach(true), usage(40, 10)]) {
+    const r = made.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc });
+    assert.equal(r.ok, true, `${id}: ${r.reason}`);
+  }
+  // Who made each fact, as the Record would say; one fact at a time is said to be someone else's (plant H10).
+  const probesOf = (by = {}) => heartbeatProbes({ rec: { read: made.read.bind(made), meta: (_e, id) => ({ createdBy: by[id] ?? 'sensors' }) },
+    rules: rules(), now: () => T0 });
+  const all = probesOf();
+  assert.deepEqual(await all.account(), { signedIn: true, login: 'a' });
+  assert.equal(await all.frontDoorReachable(), true);
+  assert.notEqual(await all.usage(), null);
+  assert.equal(await probesOf({ [ACCOUNT_FACT]: 'ledger' }).account(), null);
+  assert.equal(await probesOf({ [FACTS.reachable]: 'ledger' }).frontDoorReachable(), null);
+  assert.equal(await probesOf({ [USAGE_FACT('a')]: 'ledger' }).usage(), null);
 });
 
 test('rules with no age limit: nothing can be called current, so the account is not known, and it does not throw', async () => {

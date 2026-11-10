@@ -674,3 +674,17 @@ test('L600 PR 2 (L239): with the robot App a late Dispatcher is told by the hear
   assert.match(logs.join('\n'), /robot: alert: the Dispatcher has no full pass on record/);
   assert.ok(!queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), queued(rec).join(' | '));
 });
+
+test('L600 PR 2 (L239): with the robot App, a Dispatcher alert GitHub refuses is queued instead, so Joe is still told', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // GitHub refuses every new alert issue; the pinned heartbeat issue and its comments still go through, so the beat
+  // ends and reports the alert as not told (plant H5: the fallback skipped).
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {} });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
+  assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)), 'GitHub took no Dispatcher alert');
+  assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'the late alert is queued for deliver');
+});
