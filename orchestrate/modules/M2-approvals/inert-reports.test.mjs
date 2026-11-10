@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OUTBOX_KINDS } from '../../shared/record.mjs';
-import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
+import { outboxFile as m9file, outboxTag } from '../M9-record/fixtures.test-helper.mjs';
 import { env as m2env, must, PRODUCT } from './fixtures.test-helper.mjs';
 import { openResearchAsks } from './research-ask.mjs';
 import { openUndoFlags } from './undo-flag.mjs';
@@ -24,7 +24,7 @@ function storeAll(t) {
     for (const role of spec.roles) {
       for (const words of ASK_WORDS) {
         const sid = `I-${++n}`;
-        must(t.record.applyOutbox({ role, sessionId: sid }, m9file(t, role, sid, `${k}x${n}.json`, words)), `${role} ${k}`);
+        must(t.record.applyOutbox(outboxTag(role, sid), m9file(t, role, sid, `${k}x${n}.json`, words)), `${role} ${k}`);
       }
     }
   }

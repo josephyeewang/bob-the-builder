@@ -11,7 +11,7 @@
 //   rec.list('card')                             // → [{ id, doc, rev }, …]
 //   rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-12', expectRev: 3, doc, kind: 'claim' })
 //                                                // → { ok: true, rev, seq } or { ok: false, reason }
-//   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
+//   rec.applyOutbox({ role: 'worker', product: 'app', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
 //   rec.meta('card', 'C-12')                     // → { ts, stateSince, createdBy } (the Record's own clock: its last
@@ -36,8 +36,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { runnerOutbox } from './product-paths.mjs';
-import { RUNNER_ROLES } from './review-roles.mjs';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox } from './product-paths.mjs';
 import { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf } from './record-names.mjs';
 export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, isNotARecord, notARecord, outboxKindOf };
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
@@ -151,18 +150,22 @@ export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'i
 export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 
 // The folders of one session's outbox, outermost first, ending with the session's own (L71, L836): the one place every
-// outbox reader takes them from (L850-2). A tag naming a product is a worker runner session's, whose outbox is in that
-// product's folder, <outboxRoot>/<product>/<role>/<sessionId> (shared/product-paths.mjs runnerOutbox), so the product's
-// name may not climb out of it (`..`, `/`). A tag with no product keeps the layout from before L836,
-// <outboxRoot>/<role>/<sessionId>: the review runner's sessions and every session started outside the worker runner. Both
-// are only read; nothing is moved. Setup makes no product folder for a review runner role, so a tag giving one is refused.
-// → { ok: true, folders } | { ok: false, reason }
+// outbox reader takes them from (L850-2). The roles the worker runner starts (shared/product-paths.mjs
+// PRODUCT_OUTBOX_ROLES) have their outboxes only in a product's folder, <outboxRoot>/<product>/<role>/<sessionId>
+// (runnerOutbox, so the product's name may not climb out of it with `..` or `/`): their tag must name the product, and
+// one with none is refused, never read from the layout before L836 (L895 m1). Every other role keeps
+// <outboxRoot>/<role>/<sessionId> (the review runner's sessions, the Lead's) and may not name a product: setup makes it
+// no product folder. → { ok: true, folders } | { ok: false, reason }
 export function outboxFolders({ outboxRoot, tag }) {
   const no = (reason) => ({ ok: false, reason });
   if (!tag || !AI_ROLES.includes(tag.role) || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
   if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
-  if (tag.product == null) return { ok: true, folders: [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)] };
-  if (RUNNER_ROLES.includes(tag.role)) return no(`a ${tag.role} outbox has no product folder`);
+  const inProduct = PRODUCT_OUTBOX_ROLES.includes(tag.role);
+  if (tag.product == null) {
+    if (inProduct) return no(`a ${tag.role} outbox is in its product's folder, and the tag names no product`);
+    return { ok: true, folders: [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)] };
+  }
+  if (!inProduct) return no(`a ${tag.role} outbox has no product folder`);
   let session;
   try { session = runnerOutbox({ outboxRoot, product: tag.product, role: tag.role, sessionId: tag.sessionId }); } catch (e) { return no(`bad outbox tag: ${e.message}`); }
   return { ok: true, folders: [dirname(dirname(session)), dirname(session), session] };
