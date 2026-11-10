@@ -6,8 +6,8 @@
 // the rest of orchestrate's tests.
 
 import { test } from 'node:test';
-import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import assert from 'node:assert/strict';
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
