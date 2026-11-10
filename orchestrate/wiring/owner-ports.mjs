@@ -52,7 +52,7 @@ export const OWNER_PORTS = Object.freeze({
   stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows the launch request for that id used up (started and since stopped, refused, or cancelled by this stop request); a request the runner has not yet seen is never true, and the runner refuses a launch request older than the claim timeout. It saves nothing: a session that started late, under a claim that never moved to running, leaves its work in its copy, and cleanup asks Joe about it',
     'false or a throw: the claim stays, and the owner is told once a day (M9 lapseClaims)'),
   launch: ask('({ card, kind, product, sessionId })',
-    '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; pidStart is the UTC ISO start time M9 lock.mjs startTime reads (START_ISO); outbox is <outboxRoot>/<role>/<sessionId>, role worker or, for a script card, script (L767: its own outbox, so a script hands in only what the script role may), and copy <copiesRoot>/<card>',
+    '{ ok: true, sessionId, pid, pidStart, pgid, head, base, outbox, signin, configDir, copy }: the session started under the claimed id; pidStart is the UTC ISO start time M9 lock.mjs startTime reads (START_ISO); base (optional, 40 hex) is the commit the copy was started on (L825-2), left out when not known (null or any other value is refused); outbox is <outboxRoot>/<role>/<sessionId>, role worker or, for a script card, script (L767: its own outbox, so a script hands in only what the script role may), and copy <copiesRoot>/<card>',
     '{ ok: false, reason }: nothing was started (the claim is given back); a throw reads the same, so throw only before the request is written. Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
   stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid, kind } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone, and the runner has set stop_requested for it in a status written before it answers',
     '{ ok: false, reason }: it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out, so a session the Dispatcher stopped is never counted as a death', PORT_DEADLINE_MS),
@@ -77,7 +77,7 @@ export const OWNER_CLEANUP_PORTS = Object.freeze({
  * the push script's inputs (branch, outbox, attempt) are in the `session` record the Dispatcher writes at launch (#248,
  * L589), the one source for them. Read them there; the launch doc does not gain them.
  */
-export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
+export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'base', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
 export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'attempt']);
 
 /**
