@@ -103,10 +103,10 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
-export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped, names: { version: c.pin },
-  checksFor: (x) => workerChecks(workerCheckInputs(c, x, { log })),
+export const startDeps = (c, { stopped = () => false, log, productHeld, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+  checksFor: checksOf,
   beforeStart: async (x) => {
-    const k = workerChecks(workerCheckInputs(c, x, { log }));
+    const k = checksOf(x);
     for (const n of RECHECK) {
       if (typeof k[n] !== 'function') return `check ${n} has no port`;
       let a; try { a = await k[n](); } catch (e) { a = { ok: false, reason: e?.message ?? String(e) }; }
@@ -118,16 +118,49 @@ export const startDeps = (c, { stopped = () => false, log } = {}) => ({ stopped,
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false, log } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld } = {}) {
   return {
     ...processGroupPorts(),
-    start: startPort(c, startDeps(c, { stopped, log })),
+    start: startPort(c, startDeps(c, { stopped, log, productHeld })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     outboxDrained: drainedPort(),
     size: sizePort(),
     ...over,
   };
+}
+
+/**
+ * Each product's rules snapshot kept fresh for the runner's life (#369 r1 m2): the sessions' hooks refuse every call once
+ * it is 5 minutes old. A rewrite that fails stops its refresher (snapshot.mjs), failing safe. Until it is kept fresh again
+ * that product starts no session (#369 r2 m2): `held(product)` starts the refresher once more at each start and, while
+ * that fails too, answers why (told once with `log`), so the start is refused. Sessions already running are kept fresh
+ * again by the next start that succeeds in this. → { held(product) → reason | null, stop() }.
+ */
+export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } = {}) {
+  const kept = new Map(); const failed = new Map(); const told = new Set();
+  const wanted = (name) => { const p = c.products[name]; return typeof p?.render?.paths?.snapshot === 'string' && p.rules ? p : null; };
+  for (const name of Object.keys(c.products)) {
+    const p = wanted(name);
+    if (!p) continue;
+    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); } catch (e) { failed.set(name, e); told.add(name); log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
+  }
+  const held = (name) => {
+    const p = wanted(name);
+    if (!p) return null;
+    const k = kept.get(name);
+    let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
+    if (!e) return null;
+    if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }
+    try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); failed.delete(name); told.delete(name); log(`product ${name}'s rules snapshot is kept fresh again`); return null; } catch (x) {
+      failed.set(name, x);
+      const reason = `product ${name}'s rules snapshot is not kept fresh (${x?.code ?? x?.message}), so its sessions are not started`;
+      if (!told.has(name)) { told.add(name); log(reason); }
+      return reason;
+    }
+  };
+  const stop = () => { for (const [name, k] of kept) { try { k.stop(); if (k.error()) log(`product ${name}'s rules snapshot stopped being kept fresh (${k.error()?.code ?? k.error()?.message})`); } catch { /* stopped */ } } };
+  return { held, stop };
 }
 
 /**
@@ -146,19 +179,14 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
-  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2): the sessions' hooks refuse every call
-  // once it is 5 minutes old. A rewrite that fails stops its refresher; the snapshot then goes stale, failing safe.
-  const kept = [];
+  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots).
+  const snaps = keepSnapshots(c, { fresh, log });
   try {
-    for (const [name, p] of Object.entries(c.products)) {
-      if (typeof p.render.paths.snapshot !== 'string' || !p.rules) continue;
-      try { kept.push([name, fresh(p.render.paths.snapshot, p.rules)]); } catch (e) { log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
-    }
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping, log }), note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping, log, productHeld: snaps.held }), note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally {
-    for (const [name, k] of kept) { try { k.stop(); if (k.error()) log(`product ${name}'s rules snapshot stopped being kept fresh (${k.error()?.code ?? k.error()?.message})`); } catch { /* stopped */ } }
+    snaps.stop();
     try { l.release(held.nonce); } catch { /* gone */ }
   }
 }

@@ -24,8 +24,8 @@
 //        it: a choice not taken ("we chose not to", no expiry);
 //     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
 //        by runner-main.mjs; none by default); a check that applies and has no port is refused there. Just before
-//        claude starts, `beforeStart` runs check 2 again (runner-main.mjs startDeps; #369 M1), since checks 4 and 11
-//        run the branch's own code;
+//        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
+//        since checks 4 and 11 run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
 //        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
@@ -46,7 +46,7 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { spawn as childSpawn } from 'node:child_process';
 import { join } from 'node:path';
 import { RUNNER_ROLE_OF } from './owner-status.mjs';
@@ -172,6 +172,18 @@ function writeNew(file, text) {
  * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1).
  */
+/** Removes a folder whole (#369 r2 m1): its folders made writable again first (never through a link), then removed,
+ * once more on a failure; one still there is told with `log` and left for cleanup. → true when it is gone. */
+export function removeAll(fs, dir, log = () => {}) {
+  const writable = (p) => { let st; try { st = fs.lstat(p); } catch { return; } if (!st.isDirectory()) return;
+    try { fs.chmod(p, (st.mode & 0o7777) | 0o700); } catch { /* removal says */ } let names = []; try { names = fs.list(p); } catch { /* removal says */ }
+    for (const n of names) writable(join(p, n)); };
+  let last;
+  for (let i = 0; i < 2; i += 1) { writable(dir); try { fs.rm(dir, { recursive: true, force: true }); return true; } catch (e) { last = e; } }
+  log(`the baseline's throwaway copy ${dir} can't be removed (${last?.code ?? last?.message}); it is left for cleanup`);
+  return false;
+}
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
@@ -179,7 +191,8 @@ export function startPort(c, deps = {}) {
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
   } = deps;
-  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, ...(deps.fs ?? {}) };
+  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmod: chmodSync, ...(deps.fs ?? {}) };
+  const log = deps.log ?? (() => {});
   return async ({ card, kind, product, sessionId } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
@@ -193,6 +206,9 @@ export function startPort(c, deps = {}) {
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
     if (cd.doc.product !== product) return refuse(cd.doc.product === undefined ? 'the card names no product' : 'the card is another product\'s');
+    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call.
+    const held = deps.productHeld?.(product);
+    if (held) return refuse(held);
     const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product });
     if (typeof prompt !== 'string' || !prompt) return notWired('no worker prompt is given to the runner');
     const who = account();
@@ -212,11 +228,15 @@ export function startPort(c, deps = {}) {
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
     if (!(await sameMain())) return undo('main changed during launch; retry');
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
+    // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
+    // One that can't be removed is told and left; the new one has its own name, so the card is never stuck on it.
+    try { for (const n of fs.list(c.copiesRoot)) if (n === `${card}~baseline` || n.startsWith(`${card}~baseline-`)) removeAll(fs, join(c.copiesRoot, n), log); } catch { /* listed again below */ }
     let others; try { others = fs.list(c.copiesRoot).filter((n) => n !== card).map((n) => join(c.copiesRoot, n)); } catch (e) { return undo(`the copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other product's mirror (#364 r1 M1): known at start from the config.
     for (const [q, o] of Object.entries(c.products)) if (q !== product && typeof o?.mirror === 'string') others.push(o.mirror);
-    // The baseline's throwaway place (#369 r1 M1): `~` is in no card id (CARD_ID), so no card's copy is named so.
-    const spare = join(c.copiesRoot, `${card}~baseline`);
+    // The baseline's throwaway place (#369 r1 M1): `~` is in no card id (CARD_ID), so no card's copy is named so. Its
+    // name is this session's (#369 r2 m1), so one left behind never refuses a later start of the card.
+    const spare = join(c.copiesRoot, `${card}~baseline-${sessionId}`);
     if (!others.includes(spare)) others.push(spare);
     const r = p.render;
     const settingsFor = (at, box, deny) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
@@ -229,14 +249,13 @@ export function startPort(c, deps = {}) {
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {
       const spareSettings = join(c.settingsDir, `${sessionId}~baseline.json`);
-      const done = async () => { for (const f of [spare, spareSettings]) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } };
+      const done = async () => { removeAll(fs, spare, log); try { fs.rm(spareSettings, { force: true }); } catch (e) { log(`the baseline's settings file ${spareSettings} can't be removed (${e?.code ?? e?.message})`); } };
       const no = async (reason) => { await done(); return refuse(`the baseline's throwaway copy ${reason}`); };
       try { fs.mkdir(spare, { mode: 0o700 }); } catch (e) { return refuse(`the baseline's throwaway copy can't be made (${e?.code ?? e?.message})`); }
       const at = join(spare, 'copy'); const box = join(spare, 'outbox');
       const t = await prepare({ ...making, dest: at });
       if (!t?.ok) return no(`can't be made (${t?.reason ?? 'no answer'})`);
       if (t.head !== made.head) return no('holds another commit than the session\'s copy');
-      if (!(await sameMain())) { await done(); return refuse('main changed during launch; retry'); }
       try { fs.mkdir(box, { mode: 0o700 }); } catch (e) { return no(`has no outbox (${e?.code ?? e?.message})`); }
       const tw = settingsFor(at, box, [...others.filter((o) => o !== spare), copy, outbox]);
       if (!tw?.ok) return no(`is not walled (${tw?.reason ?? 'no answer'})`);
@@ -253,7 +272,8 @@ export function startPort(c, deps = {}) {
           // Checks 1, 2, 3 and 8 once more (#369 M1, r1 m1 and m2): checks 4 and 11 ran the branch's own code.
           if (beforeStart) {
             const p = await beforeStart(x);
-            if (p) return refuse(!(await sameMain()) ? 'main changed during launch; retry' : `a check failed again just before claude was to start, so it was not started: ${p}`);
+            // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
+            if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch)'}`);
           }
           return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
         } });

@@ -92,12 +92,16 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     assert.deepEqual(Object.keys(none).map(Number), [1, 5, 9]);
     // Check 12 is M11's own gate, with this session's kind.
     let seen; let given;
-    const budget = { rules: {} };
+    const budget = { rules: {}, filesOf: () => [] };
     const gateOf = (b) => { given = b; return (ctx) => { seen = ctx; return { ok: true }; }; };
     const p = workerChecks({ ...x, budget, kind: 'undo' }, { gateOf });
     assert.deepEqual(await p[12](), { ok: true });
     assert.equal(given, budget); assert.deepEqual(seen, { card: x.cardDoc, kind: 'undo', product: 'p1' });
     assert.match((await workerChecks({ ...x, budget, cardDoc: null }, { gateOf })[12]()).reason, /not in the Record/);
+    // #369 r2 m4: the budget carries the pass's filesOf; an undo with none is refused here, saying so. Other kinds don't need it.
+    seen = undefined;
+    assert.match((await workerChecks({ ...x, budget: { rules: {} }, kind: 'undo' }, { gateOf })[12]()).reason, /carries no filesOf/); assert.equal(seen, undefined);
+    assert.deepEqual(await workerChecks({ ...x, budget: { rules: {} }, kind: 'editing' }, { gateOf })[12](), { ok: true });
     assert.equal(typeof workerChecks({ ...x, bobFolder: '/b', bobManifest: { a: 'x' } })[13], 'function');
     assert.equal(workerChecks({ ...x, bobFolder: '/b', bobManifest: null })[13], undefined, 'no pinned list, no port');
     // Check 1 on the copy: this user's alone and holding the head.
@@ -147,8 +151,16 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
     const killed = [];
     const smoke = standIn([], { sandbox: true });
     const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
-    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g) });
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: (g) => g === 4322 });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, [4322]); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // #369 r2 c3: after the end, a group signal 0 no longer finds is not killed (its number may be another's).
+  {
+    const killed = [];
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: () => false });
+    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, []); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // #369 r1 m6: an empty exit file, one that is not a number, and a link to a file holding 0 are not exit 0.
   for (const [what, write] of [['empty', (f) => writeFileSync(f, '')], ['abc', (f) => writeFileSync(f, 'abc\n')],

@@ -51,7 +51,9 @@
 //                           not written", which fails safe (#369 m5). A script session has no shell (role-profiles.mjs),
 //                           so launch.mjs skips check 11 for it (#369 m6).
 //   12 budget               M11's own check12 with this session's kind (gate.mjs counts editing, undo and script
-//                           sessions themselves); no budget source, no port
+//                           sessions themselves). The budget is check12's own inputs, and carries the pass's `filesOf`
+//                           (#369 r2 m4): check12 works out an undo's exact reverse with it, so an undo is refused
+//                           here, saying so, when the budget has none. No budget source, no port
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 
@@ -149,8 +151,10 @@ export function baselineCommand(test, file) {
 
 // Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
 // time-out kills the tests it started too, not claude alone (#369 m2), and so does a normal end (#369 r1 M1): what the
-// tests left running in the group goes with it.
-function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL')) {
+// tests left running in the group goes with it. After the end, the group is killed only if signal 0 still finds it
+// (#369 r2 c3): an empty group's number is not signalled.
+const groupThere = (g) => { try { process.kill(-g, 0); return true; } catch { return false; } };
+function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere) {
   return new Promise((resolve, reject) => {
     let child;
     try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
@@ -160,7 +164,7 @@ function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(
       reject(new Error('it did not finish in time'));
     }, timeoutMs);
     child.on('error', (e) => { clearTimeout(t); reject(e); });
-    child.on('close', (code) => { clearTimeout(t); try { if (group()) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
+    child.on('close', (code) => { clearTimeout(t); try { if (group() && there(child.pid)) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
   });
 }
 
@@ -197,7 +201,7 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         if (!lr.ok) return lr;
         rmSync(f, { force: true });
         b = await baselineTest({ run: async () => {
-          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup);
+          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup, x.groupThere);
           // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
           let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
           return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
@@ -209,7 +213,11 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
   }
   if (x.budget) {
     const gate = gateOf(x.budget);
-    ports[12] = async () => (x.cardDoc ? gate({ card: x.cardDoc, kind: x.kind, product: x.product }) : refuse('the card is not in the Record'));
+    ports[12] = async () => {
+      if (!x.cardDoc) return refuse('the card is not in the Record');
+      if (x.kind === 'undo' && typeof x.budget.filesOf !== 'function') return refuse('the budget carries no filesOf (the pass\'s own), so the undo can\'t be shown an exact reverse');
+      return gate({ card: x.cardDoc, kind: x.kind, product: x.product });
+    };
   }
   if (x.bobManifest && has(x.bobFolder)) ports[13] = r[13];
   return ports;

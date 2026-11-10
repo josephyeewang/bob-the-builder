@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, checkRunnerConfig, listenStop, main, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, checkRunnerConfig, keepSnapshots, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
@@ -175,4 +175,36 @@ test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, 
     assert.deepEqual(during, [false], 'kept fresh while the loop runs'); assert.equal(kept[0].stopped, true, 'stopped at the end');
     assert.ok(logs.some((l) => /p1's rules snapshot stopped being kept fresh \(ENOSPC\)/.test(l)), logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#369 r2 m2: a product whose rules snapshot is not kept fresh is held back, saying why once, until its refresher starts again; each product its own', () => {
+  const rules = { production: { env_files: [], programs: [], hosts: [] } };
+  const c = { products: { p1: { rules, render: { paths: { snapshot: '/r/rules-p1.json' } } }, p2: { rules, render: { paths: { snapshot: '/r/rules-p2.json' } } }, p3: { render: { paths: {} } } } };
+  const logs = []; const made = []; const dead = new Set(); let p2Fails = 1;
+  const fresh = (path) => { if (path.endsWith('p2.json') && p2Fails-- > 0) throw Object.assign(new Error('x'), { code: 'EACCES' });
+    const k = { path, stopped: false }; made.push(k); return { stop: () => { k.stopped = true; }, error: () => (dead.has(k) ? Object.assign(new Error('x'), { code: 'ENOSPC' }) : null) }; };
+  const s = keepSnapshots(c, { fresh, log: (t) => logs.push(t) });
+  assert.equal(s.held('p1'), null); assert.equal(s.held('p3'), null, 'no rules: nothing to keep');
+  // p2's first write failed: the next start tries again, and it now works.
+  assert.equal(s.held('p2'), null); assert.ok(logs.some((l) => /p2's rules snapshot is kept fresh again/.test(l)));
+  // p1's refresher dies (p2's is untouched): its start tries again; while that fails too it is held back, told once.
+  dead.add(made[0]);
+  let n = 0; const realFresh = fresh;
+  const s2 = keepSnapshots(c, { fresh: (path, r) => { if (path.endsWith('p1.json') && ++n > 1) throw Object.assign(new Error('x'), { code: 'ENOSPC' }); return realFresh(path, r); }, log: (t) => logs.push(t) });
+  dead.add(made.at(-2));
+  logs.length = 0;
+  assert.match(s2.held('p1'), /p1's rules snapshot is not kept fresh \(ENOSPC\), so its sessions are not started/);
+  assert.match(s2.held('p1'), /not kept fresh/);
+  assert.equal(logs.filter((l) => /p1's rules snapshot is not kept fresh/.test(l)).length, 1, 'told once');
+  assert.equal(made.at(-2).stopped, true, 'the dead refresher is stopped');
+  assert.equal(s2.held('p2'), null, 'the other product starts');
+  s.stop(); s2.stop();
+});
+
+test('#369 r2 c2: a RECHECK check that throws is a failure with its reason, never a pass; one with no port is refused', async () => {
+  const ok = async () => ({ ok: true });
+  const of = (k) => startDeps({ pin: '1' }, { checksOf: () => k }).beforeStart({});
+  assert.equal(await of({ 1: ok, 2: ok, 3: ok, 8: ok }), null);
+  assert.equal(await of({ 1: ok, 2: async () => { throw new Error('git cat-file failed'); }, 3: ok, 8: ok }), 'check 2: git cat-file failed');
+  assert.equal(await of({ 1: ok, 2: ok, 3: ok }), 'check 8 has no port');
 });
