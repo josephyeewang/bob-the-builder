@@ -14,7 +14,7 @@ const d = rules.may('push_branch', { product, card, files });  // { decision: 'a
 rules.get('caps.editing_per_mac', { product });               // a value as the rules hold it (Mac-wide ones: strictest across products)
 rules.num('claims.stuck_min', { product });                   // a whole number or undefined: every number is read this way (L96)
 rules.dec('usage.pace_min_share', { product });               // a number ≥ 0 with an optional fraction, or undefined (L104)
-rules.flag('product.onboarded', { product });                 // exactly true or false, or undefined: every flag is read this way (L96)
+rules.flag('caps.shakedown', { product });                    // exactly true or false, or undefined: every flag is read this way (L96)
 rules.classify(change);                                       // { tier: 1|2, risky: [...RISKY_CLASSES], reasons, protected }
 rules.rev;                                                    // the rules version, stamped on diary lines
 ```

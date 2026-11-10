@@ -33,7 +33,7 @@ import { planCheckProblem } from '../../shared/plan-review.mjs';
 
 // What a change may edit in its own row file without a new go (M2-4): status only. Every other field is the plan.
 export const ROW_STATUS_FIELDS = Object.freeze(['status', 'done', 'receipts', 'progress', 'date', 'done_at']);
-export const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // the same pattern M10's lane rule uses
+export const ROW_FILE = /^docs\/blueprint\/rows\/([^/]+)\.yaml$/i;   // the one copy: M10's lane rule, M6, M11 and the wiring import it (c1-r2)
 export const rowFile = (id) => `docs/blueprint/rows/${id}.yaml`;
 const ROW_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
