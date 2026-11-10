@@ -82,7 +82,8 @@ export const lineIs = (marker) => (line) => line === marker;
  * Date header), in ms, or null when GitHub gave none. clockAhead → how far the robot's clock `t` is ahead of it, in ms,
  * or null when not known. A "told again once a day" check counts the day by GitHub's times, so a fast clock neither
  * tells the owner on every pass nor silences the daily reminder (L801 M1: holding it back silenced every reminder for as
- * long as the clock stayed wrong). A clock more than CLOCK_AHEAD_MS ahead is said in one log line while it stays so.
+ * long as the clock stayed wrong). A clock more than CLOCK_AHEAD_MS ahead is said in one log line per round while it
+ * stays so (each round makes its own makeAlerts).
  */
 export const CLOCK_AHEAD_MS = 5 * 60_000;
 export const clockAhead = (gh, t) => { const g = gh?.lastServerTime; return Number.isFinite(g) && Number.isFinite(t) ? t - g : null; };
@@ -160,8 +161,9 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return await gh.edit(n, bodyOf(id, { ...next, told: toldAt(c?.at, t) }, text, t)) !== false;
   }
 
-  // One log line while the robot's clock stays over CLOCK_AHEAD_MS ahead of GitHub's (L787, L801): said again only after
-  // it has been right. A log that throws holds nothing up.
+  // One log line per round (this makeAlerts) while the robot's clock is over CLOCK_AHEAD_MS ahead of GitHub's, however
+  // many alerts the round raises (L787, L801, r2 m1): each round makes a new makeAlerts, so a wrong clock is said once
+  // a round, and within a round again only after it has been right. A log that throws holds nothing up.
   let clockSaid = false;
   const sayClock = (t) => {
     const ahead = clockAhead(gh, t);

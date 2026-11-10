@@ -1141,18 +1141,45 @@ test('L768, L801 M1: a robot clock ahead of GitHub\'s, by minutes or days, remin
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS + 1), true);
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS), false);
   assert.equal(CLOCK_AHEAD_MS, 5 * 60_000, 'the limit is pinned (L801 m1): a few minutes, the most a kept clock drifts');
-  // Said once while wrong; said again after it has been right in between.
-  // Said once while wrong, and again only after it has been right in between.
+  // Said once per round (production makes a new makeAlerts each round, r2 m1), however many alerts the round raises;
+  // within a round, said again only after the clock has been right in between.
   let g = Date.parse('2026-11-03T08:00:00Z'); let ahead = 10 * 60000;
-  const lines = [];
+  const rec = memoryRecord();
   const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
-  const a = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: () => new Date(g + ahead), log: (s) => lines.push(s) });
-  for (const skew of [10, 10, 0, 10, 10]) { ahead = skew * 60000; await a.raise(standing); g += 60 * 60000; }
-  assert.equal(lines.length, 2, lines.join('\n'));
+  const other = { ...standing, key: alertKey('product 1', 'kind', 'y') };
+  const perRound = [];
+  for (const skew of [10, 10, 0, 10]) {
+    ahead = skew * 60000;
+    const lines = [];
+    const a = makeAlerts({ rec, gh, owner: 'owner-login', now: () => new Date(g + ahead), log: (s) => lines.push(s) });
+    await a.raise(standing); await a.raise(other);
+    perRound.push(lines.length);
+    g += 60 * 60000;
+  }
+  assert.deepEqual(perRound, [1, 1, 0, 1], 'one line a round while wrong, two alerts each round');
+  const lines = [];
+  const a = makeAlerts({ rec, gh, owner: 'owner-login', now: () => new Date(g + ahead), log: (s) => lines.push(s) });
+  for (const skew of [10, 0, 10]) { ahead = skew * 60000; await a.raise(standing); }
+  assert.equal(lines.length, 2, 'within a round, said again after being right');
   // The opening logs it too, not only the quiet reminder path (L801 self-review m4).
   const lines2 = [];
   const gh2 = fakeIssues({ now: () => new Date(g + 20 * 60000), serverNow: () => new Date(g) });
   const a2 = makeAlerts({ rec: memoryRecord(), gh: gh2, owner: 'owner-login', now: () => new Date(g + 20 * 60000), log: (s) => lines2.push(s) });
   assert.equal(await a2.raise(standing), 'opened');
   assert.equal(lines2.length, 1);
+});
+
+test('L801 r2 m2: a comment GitHub gives no time for is stamped by GitHub\'s time, so a clock 3 days fast still reminds once a day', async () => {
+  let t = Date.parse('2026-11-03T08:00:00Z');
+  const ahead = 3 * 24 * 60 * 60000;
+  const robot = () => new Date(t + ahead);
+  const base = fakeIssues({ now: robot, serverNow: () => new Date(t) });
+  const gh = Object.create(base);
+  gh.comment = async (...args) => { const c = await base.comment(...args); return c && typeof c === 'object' ? {} : c; };
+  const alerts = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: robot, log: () => {} });
+  const answers = [];
+  for (let h = 0; h <= 6 * 24; h++) { answers.push(await alerts.raise(standing)); t += 60 * 60000; }
+  const told = answers.map((a, i) => (a === 'reminded' ? i : null)).filter((i) => i !== null);
+  assert.ok(told.length >= 5 && told.length <= 6, `${told.length} reminders in 6 days`);
+  for (let i = 1; i < told.length; i++) assert.ok(told[i] - told[i - 1] >= 24, `never sooner than a day (hours ${told[i - 1]}, ${told[i]})`);
 });
