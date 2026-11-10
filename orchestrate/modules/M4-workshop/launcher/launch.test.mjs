@@ -319,11 +319,14 @@ test('check 10: the machine-wide file must carry the production guard and no esc
   const files = { '/fake/managed.json': JSON.stringify({ [S.hooks]: { [E.preToolUse]: [guard] } }) };
   // Not there, as readNoLink says it (the other managed sources are read through it too, L900).
   const readFile = (p) => { if (!(p in files)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return files[p]; };
-  assert.equal(checkMachineWide({ readFile, path: '/fake/managed.json', plist: () => null }).ok, true);
+  // No read of this Mac's /Library or $HOME (L906 m1).
+  const noMac = { listDir: () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }, plist: () => null, home: () => '/h', claudeFile: '/fake/managed.json' };
+  assert.equal(checkMachineWide({ readFile, path: '/fake/managed.json', ...noMac }).ok, true);
   const bad = {
     missing: null,
     'not JSON': '{',
     'no guard': JSON.stringify({ [S.hooks]: {} }),
+    'empty (the main file is never none)': '{}',
     'guard does not block': JSON.stringify({ [S.hooks]: { [E.preToolUse]: [{ ...guard, [H.hooks]: [{ ...guard[H.hooks][0], [H.onFailure]: 'ignore' }] }] } }),
     'guard on one tool only': JSON.stringify({ [S.hooks]: { [E.preToolUse]: [{ ...guard, [H.matcher]: 'Bash' }] } }),
     excludedCommands: JSON.stringify({ [S.hooks]: { [E.preToolUse]: [guard] }, [S.sandbox]: { [S.excludedCommands]: ['git'] } }),
@@ -332,7 +335,7 @@ test('check 10: the machine-wide file must carry the production guard and no esc
     'an extra host': JSON.stringify({ [S.hooks]: { [E.preToolUse]: [guard] }, [S.sandbox]: { [S.network]: { [S.allowedDomains]: ['example.com'] } } }),
   };
   for (const [what, text] of Object.entries(bad)) {
-    const r = checkMachineWide({ readFile: (p) => { if (text === null) throw new Error('missing'); return text; }, path: '/fake/managed.json' });
+    const r = checkMachineWide({ readFile: (p) => { if (text === null) throw new Error('missing'); return text; }, path: '/fake/managed.json', ...noMac });
     assert.equal(r.ok, false, what);
   }
 });
@@ -387,7 +390,7 @@ test('L900 check 10: when the config names another file, the one claude reads is
   w.files[C] = w.good;
   assert.deepEqual(w.run({ claudeFile: C }), { ok: true });
   const v = managedWorld();
-  v.dropIns.push('50-x.json'); v.files['/Library/Application Support/ClaudeCode/managed-settings.d/50-x.json'] = JSON.stringify({});
+  v.dropIns.push('50-x.json'); v.files['/Library/Application Support/ClaudeCode/managed-settings.d/50-x.json'] = JSON.stringify({ [S.hooks]: {} });
   v.files['/m/managed-settings.d/50-x.json'] = v.good;
   assert.match(v.run({ claudeFile: C }).reason, /not in force \(in \/Library\/Application Support\/ClaudeCode\/managed-settings\.d\/50-x\.json\)/);
 });
@@ -449,7 +452,10 @@ test('L900 check 10: the remote settings cache must pass when it is there; missi
   assert.deepEqual(w.run(), { ok: true }, 'no cache: passes, the gap the capability note names');
   w.files[CACHE] = JSON.stringify({ [S.sandbox]: { [S.excludedCommands]: ['git'] } });
   assert.deepEqual(w.run(), { ok: false, reason: `machine-wide settings hold excludedCommands (in ${CACHE})` });
+  // {} is what claude writes when the server has none: no source (L906 M1). Content without the guard still refuses.
   w.files[CACHE] = JSON.stringify({});
+  assert.deepEqual(w.run(), { ok: true });
+  w.files[CACHE] = JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } });
   assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${CACHE})` });
   w.files[CACHE] = '{';
   assert.deepEqual(w.run(), { ok: false, reason: `the remote settings cache ${CACHE} is not JSON` });
@@ -458,9 +464,31 @@ test('L900 check 10: the remote settings cache must pass when it is there; missi
   delete w.files[CACHE];
   // The second account's folder (its review sessions run with CLAUDE_CONFIG_DIR there).
   w.files[CACHE_B] = JSON.stringify({});
+  assert.deepEqual(w.run(), { ok: true });
+  w.files[CACHE_B] = JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } });
   assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${CACHE_B})` });
   delete w.files[CACHE_B];
   for (const home of [() => undefined, () => 'rel']) assert.deepEqual(w.run({ home }), { ok: false, reason: 'the remote settings cache can\'t be found (no home folder)' });
+});
+
+test('L906 M1: an empty source ({}) is none in every managed source but the configured main file', () => {
+  const set = {
+    'a drop-in': (w) => { w.dropIns.push('50-x.json'); w.files['/m/managed-settings.d/50-x.json'] = '{}'; },
+    'the user\'s managed preferences': (w) => { w.prefs[USER_PREFS] = '{}'; },
+    'the device\'s managed preferences': (w) => { w.prefs[DEVICE_PREFS] = '{}'; },
+    'the first account\'s remote cache': (w) => { w.files[CACHE] = '{}'; },
+    'the second account\'s remote cache': (w) => { w.files[CACHE_B] = '{}'; },
+    'claude\'s own file, when the config names another': (w) => { w.io.claudeFile = '/c/managed-settings.json'; w.files['/c/managed-settings.json'] = '{}'; },
+  };
+  for (const [what, put] of Object.entries(set)) { const w = managedWorld(); put(w); assert.deepEqual(w.run({ claudeFile: w.io.claudeFile }), { ok: true }, what); }
+  // Not empty: an array, or an object with one key, is content and must pass.
+  const w = managedWorld(); w.prefs[USER_PREFS] = '[]';
+  assert.equal(w.run().ok, false, 'an array is not an empty object');
+  w.prefs[USER_PREFS] = JSON.stringify({ [S.permissions]: {} });
+  assert.deepEqual(w.run(), { ok: false, reason: `the machine-wide production block is not in force (in ${USER_PREFS})` });
+  // The main file itself, empty, refuses.
+  const m = managedWorld(); m.files['/m/managed-settings.json'] = '{}';
+  assert.deepEqual(m.run(), { ok: false, reason: 'the machine-wide production block is not in force' });
 });
 
 test('L900 check 10: its default readers are the real ones', () => {

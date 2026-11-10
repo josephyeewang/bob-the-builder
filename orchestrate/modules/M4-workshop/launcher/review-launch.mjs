@@ -157,7 +157,8 @@ export function reviewChecks(x) {
       return isDeepStrictEqual(s.rules, x.rules) ? { ok: true } : refuse('the rules snapshot holds other rules than the runner\'s config');
     },
     9: async () => checkRoleEnv(x.env),
-    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide, ...x.managedReaders }),
+    // The remote caches are read under the session's own home (L906 m2), whatever HOME the runner has.
+    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide, home: () => x.reviewHome, ...x.managedReaders }),
     11: async () => {
       const f = smokeFiles(x);
       for (const p of Object.values(f)) rmSync(p, { force: true });

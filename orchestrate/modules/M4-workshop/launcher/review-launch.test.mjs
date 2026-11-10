@@ -100,8 +100,9 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
     hooksDir, hooksSource: source, reviewHome, settings: { file: settingsFile, settings: r.settings }, rules, snapshot, writeSnapshot,
     machineWide, busy: () => [], alert: (t) => alerts.push(t), spawn: fakeSpawn, ownUid: () => ME, uids: UIDS,
     cardDoc: null, budget: null, bobFolder, bobManifest: null, probeMs: 10_000,
-    // Check 10 never reads this Mac's /Library or $HOME here (L900): the test folder stands in for both.
-    managedReaders: { plist: () => null, user: () => 'role', home: () => reviewHome, claudeFile: machineWide },
+    // Check 10 never reads this Mac's /Library here (L900). No home reader: reviewChecks reads the caches
+    // under reviewHome itself (L906 m2), so every check-10 run here goes through that.
+    managedReaders: { plist: () => null, user: () => 'role', claudeFile: machineWide },
   };
   const flags = sessionArgs({ profile, settingsFile, sessionId: 'S-1', prompt: 'p' }).filter((a) => a.startsWith('--'));
   const names = { flags, version: PIN, confirmed: Object.fromEntries([...namesIn(r.settings), ...flags].map((n) => [n, { by: 'readback:stand-in', version: PIN }])) };
@@ -224,18 +225,22 @@ test('M-3 checks 9 and 10: no key in the session\'s environment; the machine-wid
   assert.match((await port(w.x, 10)).reason, /not in force/);
 });
 
-test('L900: check 10 reads the other managed sources through the real readers unless a test hands it fakes', async () => {
+// The live readers read this Mac's /Library managed folders: on a Mac that has either, this test can't say what it expects.
+const MAC_MANAGED = ['/Library/Application Support/ClaudeCode', '/Library/Managed Preferences'].filter((p) => existsSync(p));
+test('L900: check 10 reads the other managed sources through the real readers unless a test hands it fakes (reads this Mac\'s /Library managed folders; skipped where either exists)',
+  { skip: MAC_MANAGED.length ? `this Mac has ${MAC_MANAGED.join(' and ')}` : false }, async () => {
   const w = world();
   const cache = join(w.x.reviewHome, '.claude', 'remote-settings.json');
   mkdirSync(join(w.x.reviewHome, '.claude'), { recursive: true });
-  writeFileSync(cache, JSON.stringify({}));
-  assert.equal((await port(w.x, 10)).reason, `the machine-wide production block is not in force (in ${cache})`, 'the fake home is read');
-  // Left out, the live readers: $HOME as the process has it at the time.
+  writeFileSync(cache, JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } }));
+  const why = `the machine-wide production block is not in force (in ${cache})`;
+  assert.equal((await port(w.x, 10)).reason, why, 'the fakes read the session\'s home');
+  // Left out, the live readers; the caches are still the session's home (reviewHome), not the runner's HOME (L906 m2).
   const { managedReaders, ...live } = w.x;
-  const was = process.env.HOME;
-  process.env.HOME = w.x.reviewHome;
-  try { assert.match((await port(live, 10)).reason ?? '', new RegExp(`not in force \\(in ${cache.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`)); }
-  finally { process.env.HOME = was; }
+  assert.notEqual(process.env.HOME, w.x.reviewHome, 'here the two differ');
+  assert.equal((await port(live, 10)).reason, why);
+  writeFileSync(cache, '{}');   // what claude writes when the server has none (L906 M1)
+  assert.deepEqual(await port(live, 10), { ok: true });
 });
 
 // L900: the "parent" managed source (env-check.mjs MANAGED SOURCES). Check 10 doesn't read it: it holds only

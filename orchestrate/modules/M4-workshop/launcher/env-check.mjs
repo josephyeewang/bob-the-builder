@@ -45,17 +45,25 @@ export function checkRoleEnv(env) {
 //
 // CAPABILITY NOTE, checked on claude 2.1.322 (its bundled code): RECHECK ON EVERY UPGRADE of the pin.
 // A source a newer claude adds, moves or reorders gets past check 10 until this list follows it.
-// Sources, highest precedence first. By default ONLY the highest source with content applies, and the
+// This build has two overrides built out, which a newer one may build in: CLAUDE_CODE_MANAGED_SETTINGS_PATH
+// (another managed file) and CLAUDE_CODE_REMOTE_SETTINGS_PATH (another remote cache). It also has a
+// storage backend for the remote cache (the one CLAUDE_CODE_HOVER_REST pins) stubbed out (always none), so the cache is the file below only;
+// on an upgrade, look for the cache moving into that storage.
+// Sources, highest precedence first. By default ONLY the highest tier with content applies, and the
 // ones beneath it are not read for policy at all (unless a source sets managedSourcesBehavior "merge").
-// So any higher source with content displaces managed-settings.json and its guard hook, which is why
-// each source below must carry the guard itself, not only hold no escape.
+// So a remote cache or managed preferences with content displaces managed-settings.json and its guard
+// hook, which is why each must carry the guard itself, not only hold no escape. A source that is a
+// plain object with no keys ({}) is none, for claude and here alike (claude writes {} as its remote
+// cache when the server has no settings for the account); the configured main file is not a source
+// that may be empty: it is the one that must carry the guard.
 //   helper  a policyHelper or policyHelpers key in a managed source runs a program whose output is policy.
 //           Check 10 can't judge that output ahead of time: any source holding either key refuses.
 //   remote  server-managed settings, fetched at start for a signed-in organization that has some, and
 //           cached at <config home>/remote-settings.json. The config home is CLAUDE_CONFIG_DIR, else
 //           $HOME/.claude; a review session sets CLAUDE_CONFIG_DIR only for the second account
-//           (accounts.mjs accountEnv), so check 10 reads the cache in every account folder under $HOME
-//           (ACCOUNTS: .claude, .claude-b). The CLAUDE_CODE_REMOTE_SETTINGS_PATH override is not in this
+//           (accounts.mjs accountEnv), so check 10 reads the cache in every account folder under the
+//           session's home (ACCOUNTS: .claude, .claude-b; reviewChecks passes reviewHome, and the
+//           default reader is $HOME). The CLAUDE_CODE_REMOTE_SETTINGS_PATH override is not in this
 //           build. A readable cache must pass; an unreadable or non-JSON one refuses.
 //           KNOWN GAP: a missing cache passes. Settings the server sends at start are never seen by
 //           check 10, and since only the highest source applies, they would also displace the guard
@@ -67,10 +75,9 @@ export function checkRoleEnv(env) {
 //   file    /Library/Application Support/ClaudeCode/managed-settings.json (CLAUDE_FILE; the config's
 //           machineWide should name it, and when it names another file the fixed one is checked too) and
 //           every managed-settings.d/ entry beside each that is a file or a link named *.json, not starting
-//           with a dot, read in name order. Each must pass on its own. A linked drop-in refuses: the
-//           launcher reads every source without following a link.
-//   Every source, the empty one ({}) included, must carry the guard: check 10 doesn't copy claude's
-//   rules for which content counts.
+//           with a dot, read in name order. The drop-ins merge into this same tier, so they can't displace
+//           the guard, only add an escape; requiring the guard in each as well is stricter than needed, and
+//           kept on purpose. A linked drop-in refuses: the launcher reads every source without following a link.
 //   parent  --managed-settings <json>, or CLAUDE_CODE_MANAGED_SETTINGS_PATH: the launcher passes neither
 //           (pinned by review-launch.test.mjs).
 export const MANAGED_SOURCES_CHECKED_ON = '2.1.322';
@@ -109,6 +116,8 @@ const guardIn = (obj, guardScript) => {
 // One source's settings → null when it passes, else a refusal. `label` names the source in every reason but the main file's.
 function sourceProblem(obj, label, guardScript) {
   const tail = label ? ` (in ${label})` : '';
+  // {} is no source at all, as claude reads it (L906 M1); never the configured main file (label '').
+  if (label && obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length === 0) return null;
   if (obj && typeof obj === 'object' && HELPER_KEYS.some((k) => Object.hasOwn(obj, k))) return refuse(`machine-wide settings name a policy helper, whose output check 10 can't judge${tail}`);
   const c = checkSettings(obj, { machineWide: true });
   if (!c.ok) return refuse(`${c.reason}${tail}`);
