@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, readdirSyn
 import { takePassLock } from './pass-lock.mjs';
 import { RESTART_FACT, HANDOFF_NAME } from './lead-restart.mjs';
 import { leadLaunchHead } from '../../shared/record.mjs';
-import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT } from './pass.mjs';
+import { RULES_MISSING_FACT, STOP_FACT, PAUSE_FACT, UNDO_HELD_FACT, HOLD_FACT } from './pass.mjs';
 import { factFamilyOf } from '../M9-record/permissions.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { installedLayout } from '../../shared/job-config.test-helper.mjs';
@@ -26,6 +26,8 @@ import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-h
 import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
+// The wiring module is loaded by its computed path; one shared call keeps the M2 reach scan's count at 1 (consume-ask ALLOWED).
+const loadWiring = (path) => import(path);
 const ACCT = 'acct-a';
 const HEAD = 'h'.repeat(40);
 const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
@@ -54,7 +56,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
   const ports = {
     alert: (t) => calls.alerts.push(typeof t === 'string' ? t : t.text),
     board: () => [], healthy: () => true, resume: () => false,
-    outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
     // The launcher starts the session the claim names (L72), as M4's does.
@@ -82,7 +84,7 @@ test('MAT-1: one tick runs every step once, in the fixed order, and records the 
   const w = world([account(), usage()]);
   const r = await w.pass();
   assert.deepEqual(Object.keys(r.steps), STEPS);
-  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
+  assert.deepEqual(STEPS, ['stops', 'undo', 'undo-starts', 'outage', 'intake', 'proposals', 'research', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
   for (const s of STEPS) assert.equal(r.steps[s].ok, true, `${s}: ${r.steps[s].error}`);
   const last = w.rec.read('fact', LAST_PASS_FACT).doc;
   assert.equal(last.at, iso(T0));
@@ -145,13 +147,16 @@ test('L467: the plan-go step gets the same deadline as its product, so a short o
   assert.ok(w.calls.alerts.some((t) => /card C-3 was not reached/.test(t)), w.calls.alerts.join(' | '));
 });
 
+// The rows a plan-go card's pass test is set from (L698): one row whose test is the cards' own, so none is rewritten.
+const PLAN_ROWS = async () => ({ 'R-1': { id: 'R-1', done_when: 'tests pass' } });
+
 test('L440: the plan-go step starts a reviewer through the read-only gate, and an outage holds it and says so', async () => {
   const plan = { product: 'p2', state: 'draft', tier: 1, plan_sha256: 'e'.repeat(64), main_commit: 'a'.repeat(40), files: ['src/a.mjs'], done_when: 'tests pass' };
   const started = [];
   const seen = [];
   const rules = rulesWith({ ...M2_RULES, 'onboarding.state': 'active' }, allow);
   const stateDir = join(tempDir('m11-approvals-'), 'm2');
-  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
+  const planPorts = { approvals: () => [{ product: 'p2', stateDir }], planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-review' }; },
     planReviewAnswer: async (x) => { seen.push(x); return { ok: true }; } };
   const open = world([account(), usage(), card('C-3', plan), ['fact', OUTAGE_FACT, { state: 'open', opened_at: iso(T0 - MIN) }]]);
   const held = await open.pass(0, { rules, ports: planPorts });
@@ -178,7 +183,7 @@ test('L688: plan reviewers seen only in the review status count toward the read-
     const started = [];
     const stateDir = join(tempDir('m11-approvals-'), 'm2');
     const w = world([account(), usage(), card('C-3', plan)]);
-    await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-new' }; }, planReviewAnswer: async () => ({ ok: true }), ...over } });
+    await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x); return { ok: true, session: 'S-new' }; }, planReviewAnswer: async () => ({ ok: true }), ...over } });
     return { started, alerts: w.calls.alerts.join(' | ') };
   };
   const three = await go({ planReviewsRunning: () => reviewers(3) });
@@ -214,7 +219,7 @@ test('L726 M1 planted: 3 plan reviewers running, a cap of 4 and 3 Tier-1 cards w
     const stateDir = join(tempDir('m11-approvals-'), 'm2');
     const w = world([account(), usage(), card('C-3', plan('3')), card('C-4', plan('4')), card('C-5', plan('5')), ...facts]);
     await w.pass(0, { rules, ports: { approvals: () => [{ product: 'p2', stateDir }], planReviewsRunning: () => reviewers(running), planReviewAnswer: answer,
-      startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
+      planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
     return { started, alerts: w.calls.alerts.join(' | '), w };
   };
   const one = await go();
@@ -223,7 +228,7 @@ test('L726 M1 planted: 3 plan reviewers running, a cap of 4 and 3 Tier-1 cards w
   // The next pass, before the runner has started it: the asked-for one still counts, so nothing more starts.
   const started = [];
   await one.w.pass(1, { rules, ports: { approvals: () => [{ product: 'p2', stateDir: join(tempDir('m11-approvals-'), 'm2') }], planReviewsRunning: () => reviewers(3),
-    planReviewAnswer: async () => ({ ok: true }), startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
+    planReviewAnswer: async () => ({ ok: true }), planRows: PLAN_ROWS, startPlanReview: async (x) => { started.push(x.card); return { ok: true, session: `q-${x.card}` }; } } });
   assert.deepEqual(started, [], 'asked for, not yet answered: it counts');
   // Two running: two start, never three.
   assert.equal((await go({ running: 2 })).started.length, 2);
@@ -343,7 +348,7 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   const thrower = (what) => () => { throw new Error(`${what} broke`); };
   // The limits step reads the reviewer port for a card in review past its time (a claim with no session is M9's lapse now).
   const w = world([account(), usage(), card('C-9', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], {
-    over: { board: thrower('board'), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
+    over: { board: thrower('board'), proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
   mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
@@ -500,6 +505,45 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
   assert.equal((await runTick({ lockFile, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports })).ran, true);
 });
 
+test('L736 m5: a late pass with a low config deadline still queues the low-deadline alert, behind its own', async () => {
+  const L = installedLayout('m11-main-low-late-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
+  const wiring = L.path('wiring/wiring.mjs');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  // A launch that never answers holds the pass past its 300 ms; the step's own deadline (2 s) lets it go after.
+  writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
+import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
+export const seen = [];
+const now = ${T0};
+export const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FACT, { account: 'a', observed_at: new Date(now).toISOString() }],
+  ['fact', USAGE_FACT('a'), usageFact({ week: 30, h5: 20, account: 'a', now })],
+  ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 2000, alert: (t) => { seen.push(t); }, board: noop, healthy: () => true,
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    launch: () => new Promise(() => {}), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 300 }));
+  const logs = [];
+  assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 2, logs.join('\n'));
+  const mod = await loadWiring(wiring);
+  assert.match(logs.join('\n'), /runDeadlineMs \(300\) is below the pass's own sum/);
+  assert.equal(mod.seen.filter((t) => /did not finish within 300 ms/.test(String(t))).length, 1, 'the late pass sends its own alert');
+  // Behind the late pass's own alert: sent after it in the same send's time, or left queued for the next one.
+  const sentAt = mod.seen.findIndex((t) => /runDeadlineMs \(300\) is below the pass's own sum/.test(String(t)));
+  const queued = /runDeadlineMs \(300\) is below the pass's own sum/.test(JSON.stringify(mod.rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? null));
+  assert.ok(sentAt > mod.seen.findIndex((t) => /did not finish within 300 ms/.test(String(t))) || (sentAt === -1 && queued), mod.seen.join(' | '));
+  await new Promise((ok) => setTimeout(ok, 2100));
+});
+
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
   const L = installedLayout('m11-main-', { dirs: ['wiring'] });
   const self = selfIn(L);
@@ -513,6 +557,7 @@ export async function wire(config) {
   seen.push(config);
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: (t) => seen.push(t), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -527,10 +572,24 @@ export { rec };
   assert.equal(await main([config], { now: T0, log: (s) => logs.push(s) }), 1);
   assert.match(logs.pop(), /orchestrate\/modules\/M11-dispatcher\/main\.mjs is not inside the installed copy/);
   assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 0);
-  const mod = await import(wiring);
+  const mod = await loadWiring(wiring);
   assert.equal(mod.seen[0].wiring, wiring);
   assert.equal(mod.rec.read('fact', LAST_PASS_FACT).doc.at, iso(T0));
   assert.deepEqual(logs, []);
+  // L736 m5: a config deadline under the pass's own sum is said in the log, and queued for Joe after the pass, so the
+  // next pass's send carries it.
+  const low = L.path('low.json');
+  writeFileSync(low, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: RUN_DEADLINE_MS - 1 }));
+  assert.equal(await main([low], { self, now: T0 + MIN, log: (s) => logs.push(s) }), 0);
+  assert.match(logs.join('\n'), new RegExp(`runDeadlineMs \\(${RUN_DEADLINE_MS - 1}\\) is below the pass's own sum`));
+  assert.equal(mod.seen.filter((t) => /runDeadlineMs/.test(String(t))).length, 0, 'not ahead of the pass');
+  assert.equal(await main([low], { self, now: T0 + 2 * MIN, log: () => {} }), 0);
+  assert.equal(mod.seen.filter((t) => /runDeadlineMs .* is below the pass's own sum/.test(String(t))).length, 1, 'told to Joe');
+  assert.equal(typeof mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at, 'string');
+  // Fixed: the hold goes, so a deadline lowered again is told afresh.
+  assert.equal(await main([config], { self, now: T0 + 3 * MIN, log: (s) => logs.push(s) }), 0);
+  assert.equal(mod.rec.read('fact', HOLD_FACT('run-deadline-low'))?.doc?.told_at ?? null, null, 'cleared once the config is fixed');
+  logs.length = 0;
   // refusals: no argument, a relative path, a wiring with no wire()
   assert.equal(await main([], { self, log: (s) => logs.push(s) }), 1);
   const rel = L.path('rel.json');
@@ -576,6 +635,7 @@ process.on('exit', () => writeFileSync(${JSON.stringify(out)}, JSON.stringify(re
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -601,7 +661,7 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
   const root = tempDir('m11-ro-');
   const run = async (name, entries, over = {}, signedIn = true) => {
     const started = [];
-    const w = world([...(signedIn ? [account()] : []), ...entries], { over: { outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
+    const w = world([...(signedIn ? [account()] : []), ...entries], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => lead(join(root, name)), startReadonly: async (x) => { started.push(x.kind); return { ok: true }; }, ...over } });
     const r = await w.pass();
     return { started, fact: w.rec.read('fact', 'intake-applied-L-1-think-q1.md')?.doc, r };
   };
@@ -724,7 +784,7 @@ const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FA
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
-    outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -738,7 +798,11 @@ export async function wire() {
   assert.equal(r.signal, null, 'the script did not exit by itself');
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /did not finish within 300 ms/);
+  assert.match(r.stderr, /dispatcher: the Dispatcher config's runDeadlineMs \(300\) is below the pass's own sum/, 'L736 m5: a deadline under the sum is said in the log');
   assert.match(r.stderr, /ALERT a Dispatcher pass did not finish within 300 ms and was stopped/, 'Joe is told (L38)');
+  // The low deadline is queued behind the late pass's own alert (L736 m5): never sent ahead of it.
+  const lowAt = r.stderr.indexOf("ALERT the Dispatcher config's runDeadlineMs");
+  assert.ok(lowAt === -1 || lowAt > r.stderr.indexOf('ALERT a Dispatcher pass did not finish'), r.stderr);
   assert.ok(JSON.parse(readFileSync(lockFile, 'utf8')).pid, 'the stuck run left its lock');
   const l = takePassLock(lockFile);
   assert.equal(l.ok, true, l.reason);
@@ -813,7 +877,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
       sessions: () => running,
       stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; },
       mainSha: async () => 'a'.repeat(40),
-      outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
+      proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), product: 'p1' }],
       leads: () => [{ lead, outboxNames: readdirSync(outbox), questionOpen: false,
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
         send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
@@ -1151,6 +1215,7 @@ export async function wire() {
   // The session list blocks the thread for a minute: no promise or timer can cut it short.
   const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1187,6 +1252,7 @@ const rec = recWith();
 export async function wire() {
   const noop = () => [];
   return { rec, rules: rulesWith(), ports: { alert: () => {}, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1233,6 +1299,7 @@ export async function wire() {
   const noop = () => [];
   const block = () => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); return []; };
   return { rec, rules: rulesWith(), ports: { alert: async (t) => { appendFileSync(${JSON.stringify(sent)}, t + '\\n'); return true; }, board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: block, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1248,6 +1315,7 @@ export async function wire() {
   let got = '';
   try { got = readFileSync(sent, 'utf8'); } catch { /* nothing sent */ }
   assert.match(got, /was stopped before it finished/, 'the broken-lock alert reached the working port');
+  assert.doesNotMatch(got, /runDeadlineMs/, 'L736 m5: the low-deadline alert never stands ahead of a safety one');
 });
 
 // Audit 0b-6 r7 M2: a copy of an alert out while its cause clears marks nothing, so the next time the cause
@@ -1356,7 +1424,7 @@ test('L172 follow-up: an outage step that throws right after writing the open ou
   const w = world([account(), usage(), card('C-1', { state: 'running' }), card('C-2', { state: 'running' }), card('C-3', { state: 'running' }),
     card('R-1', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) }), ...mergeReady('V-1', 7)],
   { over: { board: () => board, healthy: () => false,
-    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox: dir, uid: process.getuid(), product: 'p1' }],
     startReadonly: async (x) => { started.push(x.kind); return { ok: true }; } } });
   // The test Record is frozen: the pass gets a copy of it whose write throws once, after the outage is written.
   let armed = true;
@@ -1494,6 +1562,7 @@ queueFor(real, fact, 'told_at', 'x', T0);
 export async function wire() {
   const noop = () => [];
   return { rec: writeLog(real, [], { refuseDrop: true }), rules: rulesWith(), ports: { alert: fakeAlert({ answer: false }), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     sessions: noop, probe: () => null, launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
     sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
@@ -1525,7 +1594,7 @@ test('L424: the tick asks the reviewEnded port before a review session\'s verdic
   writeFileSync(join(dir, name), 'not read past the ended check\n');
   const asked = [];
   const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
-  const w = world([account(), usage()], { over: { outboxSessions: () => [session],
+  const w = world([account(), usage()], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [session],
     reviewEnded: (s) => { asked.push(s.sessionId); return { ok: false, none: true }; },
     intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
   await w.pass();
@@ -1538,7 +1607,7 @@ test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, o
   const name = 'verdict-R-1.md';
   writeFileSync(join(dir, name), 'waits\n');
   const session = { sessionId: 'R-1', role: 'reviewer', outbox: dir, uid: process.getuid(), card: 'C-1', head: 'a'.repeat(40) };
-  const w = world([account(), usage()], { over: { outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
+  const w = world([account(), usage()], { over: { proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [session], reviewEnded: () => ({ ok: false, reason: 'not yet' }),
     intakeFs: { read: () => ({ ok: true, kind: 'verdict-', text: 'x' }) } } });
   const lines = () => w.rec.diary().filter((d) => d.kind === 'note' && /outbox|intake/.test(d.id ?? '')).map((d) => d.id);
   for (let min = 0; min < 50; min++) await w.pass(min);
@@ -1557,7 +1626,7 @@ function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000,
     send: async (t) => { to.push(t); return { outcome: 'sent' }; }, stopSession: async () => ({ ok: true }), startLead: async () => ({ ok: true, sessionId: 'L-9' }) });
   const w = world([account(), usage()], { over: {
     mainSha: async () => 'a'.repeat(40),
-    outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
     leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
       entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
   }, ...(rules ? { rules } : {}) });

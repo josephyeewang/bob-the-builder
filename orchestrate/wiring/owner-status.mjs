@@ -10,13 +10,16 @@
 // folders (a ruling for the lane that owns render-settings), and here every field that can be derived is checked against
 // what it must be (outbox, uid, role from kind), so a forged file can at worst lie about liveness, card or product, never
 // widen which file kinds or which outbox a session may use. The wiring cross-checks card against the launch record.
+// The bound (L769, #328 r1 M1): a forged status needs an unsandboxed process running as the owner; that is outside the
+// wall's job. Such a process could also forge answers (a launch refused, or a stop that never happened). The runner keeps
+// the window short by rewriting the status at least every RUNNER_STATUS_EVERY_MS (runner-files.mjs).
 //
 // The status file's folder is the runner's own, apart from the requests folder the Dispatcher writes into (that one
 // would fail the folder's write check). The owner and mode checks do not see macOS access lists; that is moot while the
 // workers share the owner's user (the runner wall, L751), and is a check to add once they do not.
 //
 // The status file (the runner writes it; this is the only reader):
-//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } } }
+//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
 //              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/worker/<id>, which exists
@@ -35,6 +38,16 @@
 //     once it is not; anything else makes the whole status "not known" (r1 audit m1). The runner
 //     keeps a used-up entry for at least RUNNER_KEEP_USED_UP_MS (the longest claim timeout plus the stale window), and marks
 //     a session that ends on its own 'stopped' once it is no longer live.
+//   - answers (step 2, owner-asks.mjs): the runner's answer to each ask request, keyed by the request file's name
+//     without .json (ANSWER_KEY). ANSWER: { ok: true|false, reason (a non-empty string when ok is false), ...the port's
+//     fields }. The asking port checks each answer against the rest of the same status before it trusts it. The runner
+//     keeps an answer as long as a used-up request entry. In every status that carries a launch ok (while 'started') or
+//     a stopGroup ok, the runner keeps that session listed, agreeing with the answer (#328 r1 m1): an ask reads an
+//     unlisted session as not borne out, and waits.
+//   - The runner refuses a request whose key it has already answered, one whose asked_at is older than
+//     RUNNER_KEEP_USED_UP_MS, and one whose body's verb or id does not match its file name (#328 r1 m2: a request file
+//     linked aside and put back is a replay, never a new ask).
+//   - The runner rewrites the status at least every RUNNER_STATUS_EVERY_MS, whether or not anything changed (L769).
 // The runner's probe answers only for its own sessions: the wiring routes each session to its own kind's probe.
 // The shared reader with review-runner's readReviewStatus is a later extraction that keeps behaviour (L739, L248).
 
@@ -53,10 +66,15 @@ export const RUNNER_ROLE_OF = Object.freeze({ editing: 'worker', undo: 'worker',
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
 /** How long the runner keeps a used-up request entry: a day, more than any claim timeout plus the stale window. */
 export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
+/** The runner rewrites its status at least this often (L769): a forged inode lasts no longer than one rewrite. */
+export const RUNNER_STATUS_EVERY_MS = 15_000;
 /** The largest status file read: a bigger one is not the runner's. */
 export const STATUS_MAX_BYTES = 1_000_000;
 /** How far ahead of this clock a status may be dated: a small clock difference, not the stale window. */
 export const CLOCK_SKEW_MS = 30_000;
+/** The ask verbs (owner-ports.mjs's async ports) and the name of an answer: <verb>-<a request id or product>[-<nonce>]. */
+export const ASK_VERBS = Object.freeze(['launch', 'stopGroup', 'saveWork', 'pauseLead']);
+export const ANSWER_KEY = /^(launch|stopGroup|saveWork|pauseLead)-[A-Za-z0-9._-]{1,140}$/;
 const SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files']);
 /** The activity tracker's states (send-safe/activity.mjs State): probe passes on no other. */
 const ACTIVITY_STATES = Object.freeze(Object.values(State));
@@ -86,7 +104,7 @@ export function openRead(file) {
 }
 
 // Running: its process group is known to be there, or nothing says it is gone or ended.
-const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
+export const live = (x) => x.alive === true || (x.alive !== false && x.ended !== true);
 const bad = (x, why) => { throw new Error(`session ${x.id} in the worker runner's status ${why}`); };
 function checkSession(x, { uid, outboxRoot, realpath }) {
   if (!x || typeof x !== 'object' || !REQUEST_ID.test(x.id ?? '')) throw new Error('a session in the worker runner\'s status is not what the runner writes');
@@ -140,7 +158,13 @@ export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = l
       if (!x.outbox_open) bad(x, 'is running with its outbox marked closed');
     } else if (state !== 'started' && state !== 'stopped') bad(x, state === undefined ? 'is listed with no launch request entry' : `is listed under a launch request marked ${state}`);
   }
-  return { sessions: s.sessions, requests: s.requests };
+  const answers = Object.hasOwn(s, 'answers') ? s.answers : {};
+  if (answers === null) throw new Error('the worker runner\'s answers are not what the runner writes');
+  if (typeof answers !== 'object' || Array.isArray(answers)) throw new Error('the worker runner\'s answers are not what the runner writes');
+  for (const [k, a] of Object.entries(answers)) {
+    if (!ANSWER_KEY.test(k) || !a || typeof a !== 'object' || typeof a.ok !== 'boolean' || (a.ok === false && (typeof a.reason !== 'string' || !a.reason))) throw new Error('an answer in the worker runner\'s status is not what the runner writes');
+  }
+  return { sessions: s.sessions, requests: s.requests, answers };
 }
 
 const pick = (x, fields) => Object.fromEntries(fields.map((f) => [f, x[f]]));
