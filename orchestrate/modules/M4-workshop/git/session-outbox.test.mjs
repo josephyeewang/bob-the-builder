@@ -42,3 +42,19 @@ test('with the root: the real folder must be <root>/worker/<session>, through an
   // A root of null is not known, as undefined; only the shape is checked.
   assert.equal(workerOutboxProblem('/outboxes/worker/S-1', SID, { root: null }), null);
 });
+
+test('L767: a script session\'s outbox is <root>/script/<session>; a role names one folder, a list any of its folders', () => {
+  assert.equal(workerOutboxProblem('/outboxes/script/S-1', SID, { role: 'script' }), null);
+  assert.match(workerOutboxProblem('/outboxes/worker/S-1', SID, { role: 'script' }), /is not a script outbox/);
+  assert.match(workerOutboxProblem('/outboxes/script/S-1', SID), /is not a worker outbox/, 'the default is the worker');
+  assert.equal(workerOutboxProblem('/outboxes/script/S-1', SID, { role: ['worker', 'script'] }), null);
+  assert.match(workerOutboxProblem('/outboxes/reviewer/S-1', SID, { role: ['worker', 'script'] }), /is not a worker or script outbox/);
+  for (const role of ['reviewer', 'lead', [], ['worker', 'reviewer'], null, 7]) assert.match(workerOutboxProblem('/outboxes/worker/S-1', SID, { role }), /no runner role/, JSON.stringify(role));
+  const root = realpathSync(tempDir('orch-outbox-'));
+  mkdirSync(join(root, 'script', SID), { recursive: true }); mkdirSync(join(root, 'worker', 'S-2'), { recursive: true });
+  assert.equal(workerOutboxProblem(join(root, 'script', SID), SID, { root, role: 'script' }), null);
+  assert.equal(workerOutboxProblem(join(root, 'script', SID), SID, { root, role: ['worker', 'script'] }), null);
+  // The real folder must be under the same role it is named under: a script name linked to a worker folder is refused.
+  symlinkSync(join(root, 'worker', 'S-2'), join(root, 'script', 'S-2'));
+  assert.match(workerOutboxProblem(join(root, 'script', 'S-2'), 'S-2', { root, role: ['worker', 'script'] }), /not inside the outbox root/);
+});

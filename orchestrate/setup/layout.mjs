@@ -128,6 +128,26 @@ export function proposalRows(cfg) {
   ];
 }
 
+/** Folders the table below makes that the review runner's config also names (review-config.mjs): one definition each. */
+export const keysPath = (cfg) => join(cfg.base, 'keys');
+export const privatePath = (cfg) => join(cfg.base, 'private');
+export const bobPath = (cfg) => join(cfg.base, 'bob');
+export const reviewCopiesPath = (cfg) => join(cfg.base, 'review-copies');
+export const workerCopiesPath = (cfg) => join(cfg.base, 'worker-copies');
+export const outboxRootPath = (cfg) => join(cfg.base, 'outboxes');
+/** A product's Record (the folder table's `products/<prod>/store`, and the runner's recordRoot). */
+export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store');
+// The rules snapshot the review runner writes for its sessions' hooks (M4 hooks/snapshot.mjs writeSnapshot: written_at,
+// hash, rules), in the runner's own folder. Its own name (L731 M2): M10's signed snapshot (snapshot.mjs SNAPSHOT_FILE) is
+// another format, not placed yet, and must never share a file name with this one.
+export const REVIEW_SNAPSHOT_FILE = 'review-rules-snapshot.json';
+// The two items add-to-install puts into the installed copy (L573): the pinned Claude Code (CLAUDE_CODE/<pin>/claude,
+// hooks-check.mjs pinnedBinary) and the hook scripts. One spelling each, for review-config and add-to-install alike.
+// M4's pinnedBinary spells claude-code once more, as a launcher may not depend on setup; review-config.test.mjs pins the two
+// as equal.
+export const COPY_CLAUDE_CODE = 'claude-code';
+export const COPY_HOOKS = 'hooks';
+
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
@@ -171,8 +191,8 @@ export function folderTable(cfg) {
     [cfg.base, 'root', 0o755, 'the base: root\'s, so the folders under it cannot be renamed away'],
     [p('home'), 'root', 0o755, 'the three users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
-    [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
-    [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
+    [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
+    [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
     [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
     [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
@@ -183,23 +203,23 @@ export function folderTable(cfg) {
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
     [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],
-    [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
+    [bobPath(cfg), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
     [p('review'), 'review', 0o755, 'the review runner\'s folder (its subfolders are made by the runner)'],
-    [p('review-copies'), 'review', 0o755, 'the review sessions\' copies of the code under review'],
-    [p('worker-copies'), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies); orchestrate lists, reads and deletes through one access-list entry (cleanup), never writes', [COPIES_CLEANUP_ACL]],
+    [reviewCopiesPath(cfg), 'review', 0o755, 'the review sessions\' copies of the code under review'],
+    [workerCopiesPath(cfg), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies); orchestrate lists, reads and deletes through one access-list entry (cleanup), never writes', [COPIES_CLEANUP_ACL]],
     [sealRootPath(cfg), 'orchestrate', 0o700, 'cleanup\'s sealed bundles (the Dispatcher\'s sealRoot): orchestrate\'s alone'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
-    [p('outboxes'), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
-    ...RUNNER_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
-    ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
+    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
+    ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
+    ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
       [p('products', prod), 'root', 0o755, `${prod}: its folders`],
-      [p('products', prod, 'store'), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
+      [storePath(cfg, prod), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
