@@ -3,7 +3,7 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId, live }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
@@ -178,7 +178,8 @@ export function productWallGap(settings, places) {
   const over = (dirs, f) => dirs.some((d) => f === d || f.startsWith(`${d.replace(/\/+$/, '')}/`));
   // Claude's form is Read(//path/**) (render-settings.mjs denyPair).
   const tool = (verb) => list(perms).map((e) => e.match(new RegExp(`^${verb}\\(/(/.*)/\\*\\*\\)$`))?.[1]).filter(Boolean);
-  for (const f of [places.copies, places.outboxes]) {
+  // The product's mirror too, when given (#378 self-review M1): every other product's mirror is denied as its copies are.
+  for (const f of [places.copies, places.outboxes, places.mirror].filter((v) => typeof v === 'string')) {
     if (!over(list(shell), f)) return `its shell may read ${f}`;
     for (const verb of ['Read', 'Edit']) if (!over(tool(verb), f)) return `its ${verb} may reach ${f}`;
   }
@@ -195,19 +196,19 @@ export const sessionSettingsOf = (settingsDir) => (id) => {
 /**
  * → null, or why product's start must wait (#378 r1 M1): a live session of another product whose settings do not deny
  * the product's folders whole. live: [{ id, product, unstarted? }]; `unstarted` marks a start not known to have reached
- * claude (a waiting request), whose settings file missing means no claude was started with it (it is written first).
+ * claude (a waiting request), whose settings file missing means no claude was started with it (it is written first),
+ * with or without a product named (a row from before rows named one). places: runnerPlaces and the product's mirror.
  * A session whose settings can't be read, or that names no product, can't be told about, so the start waits too.
  */
 export function liveWallProblem(live, product, places, read) {
   for (const s of Array.isArray(live) ? live : []) {
     if (s?.product === product) continue;
     const who = `session ${s?.id}`;
+    let set; let err;
+    try { set = read(s?.id); } catch (e) { err = e; }
+    if (err && s?.unstarted === true && err?.code === 'ENOENT') continue;
     if (typeof s?.product !== 'string') return `${who} names no product, so whether it may read product ${product}'s folders can't be told`;
-    let set;
-    try { set = read(s.id); } catch (e) {
-      if (s.unstarted === true && e?.code === 'ENOENT') continue;
-      return `${who}'s settings can't be read (${e?.code ?? e?.message}), so whether it may read product ${product}'s folders can't be told`;
-    }
+    if (err) return `${who}'s settings can't be read (${err?.code ?? err?.message}), so whether it may read product ${product}'s folders can't be told`;
     const gap = productWallGap(set, places);
     if (gap) return `${who} (product ${s.product}) started before product ${product}'s folders were on its deny list (${gap}); start product ${product}'s sessions once it has ended`;
   }
@@ -256,7 +257,7 @@ export function startPort(c, deps = {}) {
       copy = runnerCopy({ copiesRoot: c.copiesRoot, product, card });
       outbox = runnerOutbox({ outboxRoot: c.outboxRoot, product, role, sessionId });
     } catch (e) { return refuse(e.message); }
-    const wall = liveWallProblem(live, product, mine, readSettings);
+    const wall = liveWallProblem(live, product, { ...mine, mirror: p.mirror }, readSettings);
     if (wall) return refuse(wall);
     const settingsFile = join(c.settingsDir, `${sessionId}.json`);
     // Setup makes each product's folders (setup/layout.mjs, L836); the start never does, so one missing is refused here.

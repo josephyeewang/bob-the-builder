@@ -204,15 +204,28 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     assert.equal(await go({ sessions: [A], requests: {} }, () => false), 1);
     assert.match(logs.at(-1), new RegExp(`did not start: session ${SA} \\(product p1\\) started before product p2's folders were on its deny list`));
     assert.equal(await go({ sessions: [A] }, () => { throw new Error('can\'t tell'); }), 1, 'a group the port can\'t tell about is live');
-    // A waiting start of an earlier run is live too; with no settings file it started no claude.
-    assert.equal(await go({ sessions: [], requests: { [SA]: { state: 'waiting', card: 'C-1', product: 'p1' } } }, () => false), 1);
     assert.equal(ran, false);
+    // #378 self-review M2: a waiting start of an earlier run never keeps the runner down (it can't be shown gone); each
+    // start checks it instead (runner-ports.test.mjs).
+    assert.equal(await go({ sessions: [], requests: { [SA]: { state: 'waiting', card: 'C-1', product: 'p1' } } }, () => false), 0, logs.join('\n'));
+    ran = false;
     // A's group shown gone, or A ended: the runner starts.
     assert.equal(await go({ sessions: [A] }, () => true), 0, logs.join('\n'));
     assert.equal(await go({ sessions: [{ ...A, alive: false }] }, () => false), 0, logs.join('\n'));
     assert.equal(await go({ sessions: [], requests: { [SA.replace('0f', '9f')]: { state: 'waiting', card: 'C-2', product: 'p1' } } }, () => false), 0, logs.join('\n'));
     assert.equal(ran, true);
-    // A first run (no memory) and a memory that can't be read are not this check's to refuse.
+    // #378 self-review M3: no memory while earlier sessions' settings files are there: a session may run unknown.
+    assert.match(carriedOverProblem(c, {}, { groupGone: () => false }), new RegExp(`no memory, but its settings folder holds 1 earlier session's settings \\(${SA}\\.json\\)`));
+    assert.equal(await go({}, () => false), 1); assert.match(logs.at(-1), /did not start: it has no memory/);
+    // A first run (no memory, no settings files) starts.
+    rmSync(join(c.settingsDir, `${SA}.json`));
     assert.equal(carriedOverProblem(c, {}, { groupGone: () => false }), null);
+    // #378 self-review M1: B's copies and outboxes denied, but not B's mirror: still a gap.
+    const most = [...denied, join(d, 'copies', 'p2'), join(d, 'outboxes', 'p2')];
+    writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: most } }, permissions: { deny: most.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    assert.match(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), new RegExp(`shell may read ${join(d, 'mirror2')}$|shell may read ${join(d, 'mirror2')}\\)`));
+    const all = [...most, join(d, 'mirror2')];
+    writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
+    assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

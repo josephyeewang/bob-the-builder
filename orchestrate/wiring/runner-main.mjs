@@ -18,9 +18,11 @@
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
 // lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
 // Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
-// read back, or a start the loop must refuse).
+// read back, or a start the loop must refuse). It does not start when a copies or outbox root is missing or reached
+// through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
+// carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
-import { mkdirSync, realpathSync } from 'node:fs';
+import { mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
@@ -69,16 +71,24 @@ export function checkRunnerConfig(c) {
  * still waiting) whose settings do not deny some other product of this config whole, a product added after it started.
  * groupGone(s) is the process-group port; a group it can't tell about counts as live.
  */
-export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir) } = {}) {
+export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), listSettings = () => readdirSync(c.settingsDir) } = {}) {
+  // No memory (a first run, or one lost) while settings files of earlier sessions are there (#378 self-review M3): a
+  // session started with one may still run, and the runner knows nothing of it, so it can't be told about.
+  if (memory && typeof memory === 'object' && Object.keys(memory).length === 0) {
+    let files; try { files = listSettings().filter((n) => n.endsWith('.json')); } catch (e) { return `its settings folder can't be listed (${e?.code ?? e?.message})`; }
+    if (files.length) return `it has no memory, but its settings folder holds ${files.length} earlier session${files.length === 1 ? '\'s' : 's\''} settings (${files.slice(0, 3).join(', ')}${files.length > 3 ? ', …' : ''}); a session started with one may still run. Once none does, remove them from ${c.settingsDir}`;
+    return null;
+  }
   const live = [];
   for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
     if (!(s?.alive === true || (s?.alive !== false && s?.ended !== true))) continue;
     let gone = false; try { gone = groupGone(s) === true; } catch { gone = false; }
     if (!gone) live.push({ id: s.id, product: s.product });
   }
-  for (const [id, r] of Object.entries(memory?.requests ?? {})) if (r?.state === 'waiting') live.push({ id, product: r.product, unstarted: true });
+  // Waiting rows are not counted here (#378 self-review M2): no group of theirs can be shown gone, and they are never
+  // dropped, so the runner would stay down, serving no stop. Each start still checks them (worker-runner.mjs `live`).
   for (const q of Object.keys(c.products)) {
-    const why = liveWallProblem(live, q, runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), readSettings);
+    const why = liveWallProblem(live, q, { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror }, readSettings);
     if (why) return why;
   }
   return null;
@@ -124,8 +134,9 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
-  const P = realRunnerPorts(c, ports, { stopped: () => stopping });
+  let P;
   try {
+    P = realRunnerPorts(c, ports, { stopped: () => stopping });
     // A memory that can't be read is the loop's to refuse; one read is checked for carried-over sessions first.
     let m = null; try { m = memory(c.memoryFile, { uid: process.getuid() }); } catch { m = null; }
     const why = m ? carriedOverProblem(c, m, { groupGone: P.groupGone }) : null;

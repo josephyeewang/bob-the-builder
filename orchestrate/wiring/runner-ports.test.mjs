@@ -9,7 +9,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -421,6 +421,10 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     s[S.permissions][S.deny].push(`Read(/${join(w.copiesRoot, 'p2')}/**)`, `Read(/${join(w.outboxRoot, 'p2')}/**)`);
     writeFileSync(f, JSON.stringify(s));
     assert.match((await startB([A])).reason, /its Edit may reach/);
+    // #378 self-review M1: B's mirror too.
+    s[S.permissions][S.deny].push(`Edit(/${join(w.copiesRoot, 'p2')}/**)`, `Edit(/${join(w.outboxRoot, 'p2')}/**)`);
+    writeFileSync(f, JSON.stringify(s));
+    assert.match((await startB([A])).reason, new RegExp(`its shell may read ${join(w.d, 'mirror-p2')}\\)`));
     // A session that can't be told about holds B's start too: its settings gone or not JSON, or no product named.
     rmSync(f);
     assert.match((await startB([A])).reason, /settings can't be read \(ENOENT\)/);
@@ -447,6 +451,16 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
 test('#378 r1 M1: productWallGap takes a folder above as a deny, and no list as none', () => {
   const P = { copies: '/c/q', outboxes: '/o/q' };
   const all = (dirs) => ({ [S.sandbox]: { [S.filesystem]: { [S.denyRead]: dirs } }, [S.permissions]: { [S.deny]: dirs.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } });
+  // #378 self-review M1: the product's mirror, when given, is checked as its folders are.
+  assert.match(productWallGap(all(['/c/q', '/o/q']), { ...P, mirror: '/m/q' }), /shell may read \/m\/q$/);
+  assert.equal(productWallGap(all(['/c/q', '/o/q', '/m/q']), { ...P, mirror: '/m/q' }), null);
+  // #378 self-review M2 (c): a waiting row with no settings file started no claude, product named or not; a listed one
+  // naming none, or a waiting one whose settings are there but name none, can't be told about.
+  const enoent = () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); };
+  assert.equal(liveWallProblem([{ id: 'S-1', unstarted: true }], 'q', P, enoent), null);
+  assert.match(liveWallProblem([{ id: 'S-1' }], 'q', P, enoent), /names no product/);
+  assert.match(liveWallProblem([{ id: 'S-1', unstarted: true }], 'q', P, () => all([])), /names no product/);
+  assert.match(liveWallProblem([{ id: 'S-1', unstarted: true, product: 'p' }], 'q', P, () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); }), /can't be read \(EACCES\)/);
   assert.equal(productWallGap(all(['/c/q', '/o/q']), P), null);
   assert.equal(productWallGap(all(['/c', '/o/']), P), null, 'a folder above');
   assert.match(productWallGap(all(['/c/qq', '/o/q']), P), /shell may read \/c\/q$/, 'a longer name is not above');
