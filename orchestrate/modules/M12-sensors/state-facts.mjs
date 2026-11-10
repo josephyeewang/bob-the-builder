@@ -42,15 +42,36 @@ const relayed = (ours, theirs) => {
   return Date.parse(theirs) < Date.parse(ours) ? new Date(Date.parse(theirs)).toISOString() : ours;
 };
 
+// A usage window with a figure and a reset time; a window missing either says nothing about its window.
+const known = (w) => Number.isFinite(w?.used_pct) && timeOrNull(w?.resets_at) !== null;
+
+/**
+ * The usage fact. Never unknown over known (L757, audit #283 r3 M-1): while a stored window is still open (its reset time
+ * not passed), a reading that has nothing for that window (no reading at all, the loop's own unknown when the read failed
+ * or ran late, no row, or no reset time) hands on the stored window instead, and the fact keeps the earlier of the two
+ * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap, and a forged
+ * low reading after one is still refused; the handed-on reading ages as before, and M11 then reads usage as not known.
+ * Once the stored window's reset time passes, an unknown is written as unknown.
+ */
 export async function writeUsageFact(writer, readUsage, account, { now = () => new Date() } = {}) {
   if (!accountOk(account)) return { ok: false, reason: 'no known account to read usage for' };
   const started = stamp(now);
   const r = await readUsage(account);
   if (!r) return { ok: false, reason: `no usage reading for ${account}` };
-  const observed_at = relayed(started, r.observed_at);
+  let observed_at = relayed(started, r.observed_at);
   if (!observed_at) return { ok: false, reason: `the usage reading for ${account} has an observed_at that is not a time` };
   const win = (w) => ({ used_pct: w?.used_pct ?? null, resets_at: w?.resets_at ?? null });
-  return writer.put(USAGE_FACT(account), { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) });
+  let stored = null; try { stored = typeof writer.get === 'function' ? writer.get(USAGE_FACT(account)) : null; } catch { stored = null; }
+  const at = Date.parse(started);
+  const open = (w) => known(w) && Date.parse(w.resets_at) > at;
+  const doc = { kind: 'fact.usage', account, observed_at, source: r.source ?? null, h5: win(r.h5), week: win(r.week) };
+  const handedOn = stored && timeOrNull(stored.observed_at) ? ['h5', 'week'].filter((k) => !known(r[k]) && open(stored[k])) : [];
+  for (const k of handedOn) doc[k] = win(stored[k]);
+  if (handedOn.length) {
+    doc.observed_at = relayed(observed_at, stored.observed_at);
+    if (handedOn.length === 2) doc.source = stored.source ?? null;
+  }
+  return writer.put(USAGE_FACT(account), doc);
 }
 
 export async function writeSignedInAccount(writer, whoIsSignedIn, { now = () => new Date() } = {}) {

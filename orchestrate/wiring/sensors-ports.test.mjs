@@ -12,6 +12,7 @@ import { writeUsageFact, writeSignedInAccount } from '../modules/M12-sensors/sta
 import { readFact, USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { ACCOUNT_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { shapeFact } from '../modules/M12-sensors/fact-shapes.mjs';
+import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
 
 const T0 = Date.parse('2026-11-05T12:00:00Z');
 const UID = process.getuid();
@@ -357,3 +358,58 @@ test('L754 todo: a usage reading held after a refusal is told once with its caus
     assert.equal(told.length, 1, 'the held reading is told once, with its cause');
   } finally { w.done(); }
 });
+
+// L757 (audit #283 r3 M-1, the auditor's probe283r3 P2/P4 as tests): a run that hands on no reading, an answer about
+// another account, no row or no reset time no longer wipes the stored marks, so a forged low reading on the next run is
+// still refused. Real sensorsPorts, real sensorsPass, memoryRecord; each run is a new sensorsPorts (a new process).
+{
+  const H = (p, r = '2026-11-05T15:00:00.000Z') => ({ used_pct: p, resets_at: r });
+  const W = (p, r = '2026-11-07T22:59:59.000Z') => ({ used_pct: p, resets_at: r });
+  const setup = () => {
+    const dir = tempDir('orch-l757-'); chmodSync(dir, 0o755);
+    const file = join(dir, ANSWER_FILE); const rec = memoryRecord();
+    const put = (usage, n, extra = {}) => assert.equal(writeAnswer({ to: file, answer: { v: 1, account: 'a', signed_in: true, observed_at: new Date(T0 + n).toISOString(), usage, ...extra } }).ok, true);
+    const pass = async (n, over = {}) => {
+      const q = sensorsPorts({ file, ownerUid: UID, now: () => new Date(T0 + n), acl: noAcl, stored: storedUsage(rec) });
+      return sensorsPass({ rec, ports: { whoIsSignedIn: q.whoIsSignedIn, readUsage: q.readUsage, probes: {}, ...over }, now: () => new Date(T0 + n) });
+    };
+    const fact = () => rec.read('fact', USAGE_FACT('a'))?.doc;
+    return { put, pass, fact, done: () => rmSync(dir, { recursive: true, force: true }) };
+  };
+  const real = { h5: H(90), week: W(95), week_from: 'weekly_all' };
+  const gaps = [
+    ['no reading (usage null, with a reason)', (s, n) => s.put(null, n, { usage_reason: 'x' }), { h5: H(5), week: W(5), week_from: 'weekly_all' }],
+    ['an answer about another account between the two reads', (s, n) => s.put(real, n, { account: 'b' }), { h5: H(5), week: W(5), week_from: 'weekly_all' }, { whoIsSignedIn: async () => 'a' }],
+    ['no week row', (s, n) => s.put({ h5: H(90), week: null, week_from: null }, n), { h5: H(90), week: W(5), week_from: 'weekly_all' }],
+    ['no week reset time', (s, n) => s.put({ h5: H(90), week: W(95, null), week_from: 'weekly_all' }, n), { h5: H(90), week: W(5), week_from: 'weekly_all' }],
+    ['no 5-hour reset time', (s, n) => s.put({ h5: H(90, null), week: W(95), week_from: 'weekly_all' }, n), { h5: H(5), week: W(95), week_from: 'weekly_all' }],
+    ['the usage read failing (the loop\'s own unknown)', (s, n) => s.put(real, n), { h5: H(5), week: W(5), week_from: 'weekly_all' }, { readUsage: async () => { throw new Error('boom'); } }],
+  ];
+  for (const [name, gap, forged, over] of gaps) {
+    test(`L757 M-1: a run with ${name} hands the stored windows on, and a forged low reading after it is still refused`, async () => {
+      const s = setup(); try {
+        s.put(real, 0); await s.pass(0);
+        const first = s.fact(); assert.deepEqual([first.h5.used_pct, first.week.used_pct], [90, 95]);
+        gap(s, 60e3); await s.pass(60e3, over ?? {});
+        const between = s.fact();
+        assert.deepEqual([between.h5, between.week], [first.h5, first.week], `the marks are kept: ${JSON.stringify(between)}`);
+        assert.equal(between.observed_at, first.observed_at, 'a handed-on window keeps its own (earlier) time, so it ages');
+        s.put(forged, 120e3); await s.pass(120e3);
+        const f = s.fact();
+        assert.deepEqual([f.h5.used_pct, f.week.used_pct], [90, 95], `the forged 5% is not stored: ${JSON.stringify(f)}`);
+      } finally { s.done(); }
+    });
+  }
+  test('L757 M-1: once the stored window has passed, an unknown is written as unknown (nothing is held past its window)', async () => {
+    const rec = memoryRecord();
+    const t = (n) => () => new Date(T0 + n);
+    const w = (n) => makeFactWriter(rec, { now: t(n) });
+    assert.equal((await writeUsageFact(w(0), async () => ({ source: 's', ...real }), 'a', { now: t(0) })).ok, true);
+    const none = { source: null, h5: { used_pct: null, resets_at: null }, week: { used_pct: null, resets_at: null } };
+    assert.equal((await writeUsageFact(w(2 * 3600e3), async () => none, 'a', { now: t(2 * 3600e3) })).ok, true);   // 14:00: h5 open (15:00), week open
+    let d = rec.read('fact', USAGE_FACT('a')).doc; assert.deepEqual([d.h5.used_pct, d.week.used_pct, d.source], [90, 95, 's']);
+    assert.equal((await writeUsageFact(w(3 * 3600e3), async () => none, 'a', { now: t(3 * 3600e3) })).ok, true);   // 15:00: the 5-hour window has passed
+    d = rec.read('fact', USAGE_FACT('a')).doc; assert.deepEqual([d.h5.used_pct, d.h5.resets_at, d.week.used_pct], [null, null, 95]);
+    assert.equal(d.observed_at, new Date(T0).toISOString(), 'the week still handed on keeps the first time');
+  });
+}

@@ -32,8 +32,10 @@
 // M11 reads the week alone) a lower percent than one already seen is refused and said, and so is a reset time moved back or moved later
 // while the window seen is still open (L728 m1, L746 M-A and m-A); and a locked file goes stale within ANSWER_STALE_MS.
 // What was seen is the usage fact in the Record (`stored`), so it holds across runs, each of which is a new process; this
-// process's own marks are kept too. A refusal hands on the stored reading again with its own time, so the marks are never
-// wiped, and a passed reading keeps the window's first reset time, so they can't creep. A refusal lasts until the window
+// process's own marks are kept too. A refusal hands on the stored reading again with its own time, and the usage writer
+// (M12 writeUsageFact, L757) never writes unknown over a stored window still open: no reading, an answer about another
+// account, no row or no reset time all hand that window on, so a gap does not wipe the marks until its window has passed.
+// A passed reading keeps the window's first reset time, so they can't creep. A refusal lasts until the window
 // seen has passed (the weekly one can run for days): the stored fact then ages and M11 reads usage as not known, which
 // holds new starts back, never lets them run. The
 // owner's user can't reach the Record, the robot's key or merges: those are other users' files. Access lists on the folder and file are checked on every read
