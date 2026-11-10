@@ -402,3 +402,17 @@ test('#358 r2 m-a (P7): each port wait is followed by a write, and no write come
   assert.equal(ev[0], 'port:gg', ev.join(' '));
   for (let i = 0; i < ev.length; i++) if (ev[i].startsWith('port:')) assert.equal(ev[i + 1], 'write', ev.join(' '));
 });
+
+test('#364 r1 m3, m2: a start answered as running stays waiting with its claim; a started one keeps base in its row and answer', async () => {
+  const answers = [];
+  const mk = (start) => ({ uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0,
+    ports: { start, groupGone: async () => false, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => false },
+    write: (doc) => answers.push(doc) });
+  const req = [{ name: 'launch-S-1.json', body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' }, asked_at: new Date(T0).toISOString() } }];
+  const r = await workerRunnerPass({ ...mk(async () => ({ ok: false, running: true, pgid: 4001, reason: 'may run' })), state: {}, requests: req });
+  assert.equal(r.state.requests['S-1'].state, 'waiting', 'not refused, so the claim stays');
+  const B = 'c'.repeat(40);
+  const r2 = await workerRunnerPass({ ...mk(async (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), base: B, outbox: `/o/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/${x.card}` })), state: {}, requests: req });
+  assert.equal(r2.state.sessions[0].base, B);
+  assert.equal(JSON.stringify(answers.at(-1)).includes(B), true, 'the answer names base');
+});

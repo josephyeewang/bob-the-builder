@@ -6,6 +6,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
+import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { cardStartCommit, drainedPort, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
@@ -263,6 +265,10 @@ test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commi
   for (const doc of [{ tier: 1 }, { tier: 1, main_commit: 'abc' }, { main_commit: C.toUpperCase() }, {}, undefined]) {
     await assert.rejects(cardStartCommit({ mirror: '/m', cardDoc: doc }, { main }), /main_commit/, JSON.stringify(doc));
   }
+  // #364 r1 m1: a tier the Store would refuse is refused here too, never read as Tier 2.
+  for (const tier of ['1', '2', 0, 3, true, 1.5, -1]) {
+    await assert.rejects(cardStartCommit({ mirror: '/m', cardDoc: { tier, main_commit: C } }, { main }), /is not 1 or 2/, JSON.stringify(tier));
+  }
   // The answer's base is the commit the copy was made on.
   const w = world({ startCommit: undefined });
   delete w.deps.startCommit; w.card.tier = 1; w.card.main_commit = C;
@@ -270,5 +276,70 @@ test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commi
     const a = await w.start();
     assert.equal(a.ok, true, a.reason); assert.equal(a.base, C);
     assert.equal(w.calls.find((c) => c[0] === 'prepare')[1].card.commit, C);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#364 r1 m6: a Tier 2 card starts on the real mirror\'s main through the start port, and base names it', async () => {
+  const w = world();
+  delete w.deps.startCommit; w.card.tier = 2;
+  const src = join(w.d, 'src'); mkdirSync(src);
+  const o = { gitDir: join(src, '.git'), workTree: src, cwd: src };
+  try {
+    await gitOk(['init', '-q', '-b', 'main', src], o); writeFileSync(join(src, 'a.txt'), 'a\n');
+    await gitOk(['add', '-A'], o); await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'm'], o);
+    const M = (await gitOk(['rev-parse', 'HEAD'], o)).trim();
+    await initMirror(w.c.products.p1.mirror);
+    await gitOk(['fetch', '-q', src, 'refs/heads/main:refs/heads/main'], { gitDir: w.c.products.p1.mirror });
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(a.base, M);
+    assert.equal(w.calls.find((c) => c[0] === 'prepare')[1].card.commit, M);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror and every copy there at start, never its own', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  let got;
+  const w = world({ walled: (x) => { const r = walledLaunchSettings(x); got = r; return r; } });
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
+    deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
+  w.c.products.p1.render = render('p1');
+  w.c.products.p2 = { repo: 'o/p2', mirror: join(w.d, 'mirror-p2'), render: render('p2') };
+  mkdirSync(join(w.copiesRoot, 'C-7'));   // p2's card, made before this start
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const denyRead = got.settings[S.sandbox][S.filesystem][S.denyRead];
+    for (const p of [w.c.products.p2.mirror, join(w.copiesRoot, 'C-7'), join(w.copiesRoot, 'C-9'), '/w/record', '/h/.ssh', '/w/keys']) assert.ok(denyRead.includes(p), `${p} is denied`);
+    assert.equal(denyRead.includes(join(w.copiesRoot, 'C-1')), false, 'its own copy is not denied');
+    assert.equal(denyRead.includes(w.c.products.p1.mirror), false, 'its own product\'s mirror is not denied');
+    // And the other way: a p2 session denies p1's mirror.
+    const SID2 = SID.replace('0f', '2f');
+    w.card.claim.session_id = SID2; w.card.product = 'p2';
+    const b = await startPort(w.c, w.deps)({ card: 'C-2', kind: 'editing', product: 'p2', sessionId: SID2 });
+    assert.equal(b.ok, true, b.reason);
+    const dr2 = got.settings[S.sandbox][S.filesystem][S.denyRead];
+    assert.ok(dr2.includes(w.c.products.p1.mirror) && dr2.includes(join(w.copiesRoot, 'C-1')) && !dr2.includes(join(w.copiesRoot, 'C-2')));
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
+});
+
+test('#364 r1 m3: a claude whose start time can\'t be read and whose group can\'t be shown gone is answered as running, and its start keeps what it made', async () => {
+  const kills = [];
+  const s = await spawnLeader({ spawn: () => ({ pid: 4243, once: (ev, fn) => { if (ev === 'spawn') fn(); }, unref: () => {} }), bin: '/x', args: [], cwd: '/', env: {},
+    pidStartOf: () => null, kill: (g, sig) => kills.push([g, sig]), there: () => true, killWaitMs: 60 });
+  assert.deepEqual(kills, [[4243, 'SIGKILL']]);
+  assert.equal(s.ok, false); assert.equal(s.running, true); assert.equal(s.pgid, 4243);
+  const gone = await spawnLeader({ spawn: () => ({ pid: 4244, once: (ev, fn) => { if (ev === 'spawn') fn(); }, unref: () => {} }), bin: '/x', args: [], cwd: '/', env: {},
+    pidStartOf: () => null, kill: () => {}, there: () => false, killWaitMs: 60 });
+  assert.equal(gone.ok, false); assert.equal(gone.running, undefined); assert.match(gone.reason, /so its group was killed/);
+  const w = world({ pidStartOf: () => null, kill: () => {} });
+  w.deps.launchFn = async (x) => ({ ok: false, reason: 'start failed', started: await spawnLeader({ spawn: w.deps.spawn, bin: '/x', args: [], cwd: '/', env: {}, pidStartOf: () => null, kill: () => {}, there: () => true, killWaitMs: 60 }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.equal(a.running, true); assert.equal(a.pgid, 4242);
+    assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true }, 'nothing it made is removed while claude may run');
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });

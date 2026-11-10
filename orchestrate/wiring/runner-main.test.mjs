@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { checkRunnerConfig, main, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, checkRunnerConfig, listenStop, main, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
   outboxRoot: join(d, 'outboxes'), copiesRoot: join(d, 'copies'), home: join(d, 'home'), path: '/usr/bin:/bin', claudeBin: join(d, 'install', 'claude'),
-  recordRoot: join(d, 'record'), recordUid: 501, claimMs: 600_000, products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: {} } } }, ...over });
+  recordRoot: join(d, 'record'), recordUid: 501, claimMs: 600_000, products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), render: { paths: { deny: DENY(d) } } } }, ...over });
+const DENY = (d) => ({ record: join(d, 'record'), ssh: join(d, 'home', '.ssh'), gh: join(d, 'home', '.config', 'gh'), claudeHome: join(d, 'home', '.claude'),
+  robotKeys: join(d, 'keys'), secrets: [join(d, 'secrets'), join(d, 'approvals')] });
 
 test('step 5: the config is refused unless every path is full, the uids are uids, and each product has its repo, mirror and paths', () => {
   const c = checkRunnerConfig(config('/x'));
@@ -79,6 +81,7 @@ test('step 5: main does not start on a bad config, while another runner holds th
 test('step 5: the LaunchAgent file is loginJobPlist\'s, with its own logs, the owner\'s HOME and Umask 077, and no UserName', () => {
   const o = { label: 'org.example.worker-runner', node: '/usr/local/bin/node', script: '/i/wiring/runner-main.mjs', config: '/i/runner.json', path: '/usr/bin:/bin', logDir: '/logs', workDir: '/Users/o', home: '/Users/o' };
   assert.throws(() => workerRunnerPlist({ ...o, home: 'o' }), /home must be/);
+  for (const home of ['/', '//']) assert.throws(() => workerRunnerPlist({ ...o, home }), /not \/ itself/, home);
   assert.equal(RUNNER_JOB_UMASK, 0o077, 'what the runner makes is the owner\'s alone');
   // Before #292 lands, loginJobPlist has no home or umask option; the builder refuses rather than drop them.
   const hasHome = loginJobPlist({ ...o, home: '/h', umask: 0o77 }).includes('<key>HOME</key>');
@@ -99,4 +102,41 @@ test('#364 self-review m6: main never makes the runner\'s own folder (setup does
     assert.equal(existsSync(join(d, 'runner')), false);
     assert.match(logs.join('\n'), /did not start: .*ENOENT/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#364 r1 M2: a config whose product lacks any of the Record, key, home or secrets deny entries is refused', () => {
+  assert.equal(checkRunnerConfig(config('/x')).products.p1.render.paths.deny.record, '/x/record');
+  const withDeny = (deny) => config('/x', { products: { p1: { repo: 'o/p1', mirror: '/x/mirror', render: { paths: { deny } } } } });
+  assert.throws(() => checkRunnerConfig(config('/x', { products: { p1: { repo: 'o/p1', mirror: '/x/mirror', render: { paths: {} } } } })), /render\.paths\.deny\.record must be a full path/, 'an empty render.paths');
+  assert.deepEqual([...DENY_KEYS], ['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
+  for (const k of ['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']) {
+    for (const v of [undefined, '', 'rel', '/', '//']) {
+      assert.throws(() => checkRunnerConfig(withDeny({ ...DENY('/x'), [k]: v })), new RegExp(`deny\\.${k} must be a full path`), `${k}=${v}`);
+    }
+  }
+  for (const v of [undefined, [], ['rel'], ['/'], '/x/s']) assert.throws(() => checkRunnerConfig(withDeny({ ...DENY('/x'), secrets: v })), /deny\.secrets must list full paths/, JSON.stringify(v));
+});
+
+test('#364 r1 m4: every SIGTERM is heard, not only the first', () => {
+  let n = 0; const fn = () => { n += 1; };
+  const before = process.listenerCount('SIGTERM');
+  listenStop(fn);
+  try {
+    process.emit('SIGTERM'); process.emit('SIGTERM');
+    assert.equal(n, 2); assert.equal(process.listenerCount('SIGTERM'), before + 1, 'still listening after two');
+  } finally { process.removeListener('SIGTERM', fn); }
+});
+
+test('#364 r1 m4: main listens with listenStop by default, so a second SIGTERM in the run is heard too', async () => {
+  const d = tempDir('orch-rmain-');
+  const before = process.listeners('SIGTERM');
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    let heard = 0;
+    const code = await main(['/cfg.json'], { readConfig: () => config(d), log: () => {}, run: async (x) => {
+      process.emit('SIGTERM'); if (x.stopWhen()) heard += 1;
+      assert.equal(process.listeners('SIGTERM').length, before.length + 1, 'still listening after the first');
+    } });
+    assert.equal(code, 0); assert.equal(heard, 1);
+  } finally { for (const l of process.listeners('SIGTERM')) if (!before.includes(l)) process.removeListener('SIGTERM', l); rmSync(d, { recursive: true, force: true }); }
 });

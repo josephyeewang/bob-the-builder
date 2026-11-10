@@ -13,7 +13,7 @@ export const RUNNER_JOB_UMASK = 0o077;
 
 /** { label, node, script, config, path, logDir, workDir, home } → the plist text. Refuses what loginJobPlist refuses. */
 export function workerRunnerPlist({ label, node, script, config, path, logDir, workDir, home }) {
-  if (typeof home !== 'string' || !home.startsWith('/')) throw new Error('home must be the owner\'s home folder, a full path');
+  if (typeof home !== 'string' || !home.startsWith('/') || /^\/+$/.test(home)) throw new Error('home must be the owner\'s home folder, a full path, not / itself');
   const text = loginJobPlist({ label, node, script, config, path, logDir, workDir, logName: RUNNER_JOB_LOG, home, umask: RUNNER_JOB_UMASK });
   // A loginJobPlist without the home and umask options (before #292) would drop both without a word.
   if (!text.includes('<key>HOME</key>') || !text.includes(`<key>Umask</key><integer>${RUNNER_JOB_UMASK}</integer>`)) {
