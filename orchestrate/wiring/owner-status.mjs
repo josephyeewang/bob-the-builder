@@ -22,7 +22,7 @@
 //   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
 //              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
-//   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/<role>/<id> (L767), which exists
+//   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/<product>/<role>/<id> (L767, L836), which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
 //   - stop_requested: true once the runner acts on a stop it was asked for (a stop request or stopGroup), written before
@@ -57,6 +57,7 @@ import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
+import { runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -64,6 +65,8 @@ export const USED_UP = Object.freeze(['refused', 'stopped', 'cancelled']);
 /** The kinds the worker runner starts and the one role each runs (pass.mjs kindOf and startRole): nothing else. */
 export const RUNNER_ROLE_OF = Object.freeze({ editing: 'worker', undo: 'worker', script: 'script' });
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
+// The runner's places for one product (L836) live in shared/product-paths.mjs (L848), re-exported here for the callers.
+export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } from '../shared/product-paths.mjs';
 /** How long the runner keeps a used-up request entry: a day, more than any claim timeout plus the stale window. */
 export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
 /** The runner rewrites its status at least this often (L769): a forged inode lasts no longer than one rewrite. */
@@ -118,8 +121,10 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
   if (typeof x.card !== 'string' || !x.card) bad(x, 'has no card (every session the runner starts has one)');
   if (!Array.isArray(x.bundle_files)) bad(x, 'has bundle_files that are not a list');
   if (x.uid !== uid) bad(x, 'names a Mac user other than the owner\'s');
-  const wrong = workerOutboxProblem(x.outbox, x.id, x.outbox_open === true ? { root: outboxRoot, realpath, role: x.role } : { role: x.role }); if (wrong) bad(x, `has an outbox that ${wrong}`);
-  if (x.outbox !== join(outboxRoot, x.role, x.id)) bad(x, 'has an outbox that is not inside the outbox root');
+  let root; try { root = runnerPlaces({ copiesRoot: '/', outboxRoot, product: x.product }).outboxes; } catch (e) { bad(x, `has a product the runner's folders can't hold (${e.message})`); }
+  const wrong = workerOutboxProblem(x.outbox, x.id, x.outbox_open === true ? { root, realpath, role: x.role } : { role: x.role }); if (wrong) bad(x, `has an outbox that ${wrong}`);
+  let own; try { own = runnerOutbox({ outboxRoot, product: x.product, role: x.role, sessionId: x.id }); } catch { own = null; }
+  if (!own || x.outbox !== own) bad(x, 'has an outbox that is not inside the outbox root, in its product folder');
   if ('request' in x) bad(x, 'names a read-only request, which the runner never starts');
   for (const f of ['outbox_open', 'stop_requested']) if (typeof x[f] !== 'boolean') bad(x, `has no ${f}`);
   for (const f of ['alive', 'ended']) if (f in x && typeof x[f] !== 'boolean') bad(x, `has ${f} that is not true or false`);
@@ -176,7 +181,9 @@ const requestOf = (s, id) => (Object.hasOwn(s.requests, id) ? s.requests[id] : u
  * share only: the wiring merges them with every other kind before the tick sees them (owner-ports.mjs). `stopSession` may
  * write a stop request (`writeRequest(name, text)`, made exclusive by the caller) and never waits for it. `holds({ card,
  * sessionId })` is the Record's answer: is that card still claimed or running under that session's claim? A card it can't
- * read is a throw, never false; any answer but true or false makes the board "not known".
+ * read is a throw, never false; any answer but true or false makes the board "not known". `outboxRoot` is the runner's
+ * top outbox root, holding one folder per product (L836), not a product's Record root `<outboxRoot>/<product>` (#378 m2).
+ * The sessions are every product's: wiring that gives one product's Record its sessions picks them by `product` (#378 m3).
  */
 export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, stat, open, realpath, writeRequest, holds }) {
   if (typeof holds !== 'function') throw new Error('the board needs the Record\'s holds({ card, sessionId })');

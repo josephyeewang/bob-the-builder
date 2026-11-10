@@ -16,7 +16,7 @@ function world({ startAnswer, stopAnswer, gone = new Set(), drained = () => true
   const w = { now: T0, state: {}, saves: [], writes: [], notes: [], removed: [], started: [], stops: [], gone, status: null, n: 0 };
   w.ports = {
     start: async (x) => { w.started.push(x.sessionId); if (startAnswer) return startAnswer(x); w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.card}` }; },
+      return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid),
     stopGroup: async (s) => { w.stops.push({ id: s.id, flagWritten: w.writes.at(-1)?.sessions.find((x) => x.id === s.id)?.stop_requested === true });
       if (stopAnswer) return stopAnswer(s); w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
@@ -50,8 +50,8 @@ test('step 3: a launch asked through owner-asks starts once, is listed, and the 
   const w = world();
   await w.pass();
   // The product rule is M10's (as the ask checks it): a name with capitals, a dot and an underscore is taken.
-  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'P.1_x', sessionId: 'S-1' });
-  assert.equal(r.ok, true, r.reason); assert.equal(r.outbox, `${ROOT}/worker/S-1`); assert.equal(r.copy, `${COPIES}/C-1`);
+  const r = await w.asks().launch({ card: 'C-1', kind: 'editing', product: 'p1-x', sessionId: 'S-1' });
+  assert.equal(r.ok, true, r.reason); assert.equal(r.outbox, `${ROOT}/p1-x/worker/S-1`); assert.equal(r.copy, `${COPIES}/p1-x/C-1`);
   assert.deepEqual(w.started, ['S-1']);
   const s = w.read();
   assert.deepEqual([s.requests['S-1'].state, s.sessions.map((x) => [x.id, x.alive, x.stop_requested, x.outbox_open])], ['started', [['S-1', true, false, true]]]);
@@ -59,7 +59,7 @@ test('step 3: a launch asked through owner-asks starts once, is listed, and the 
   assert.equal('pid' in s.sessions[0], false, 'the status carries no field of the runner\'s own memory');
   // L767: a script launch's outbox is its own folder, and the ask trusts it.
   const sr = await w.asks().launch({ card: 'C-2', kind: 'script', product: 'p1', sessionId: 'S-2' });
-  assert.equal(sr.ok, true, sr.reason); assert.equal(sr.outbox, `${ROOT}/script/S-2`);
+  assert.equal(sr.ok, true, sr.reason); assert.equal(sr.outbox, `${ROOT}/p1/script/S-2`);
 });
 
 test('step 3: stopGroup writes stop_requested before it acts, answers ok only once the group is gone, and the session stays listed with that answer', async () => {
@@ -227,12 +227,12 @@ test('#384 m1: a start\'s base is handed on in its answer, and left out when the
 });
 
 test('self-review M2: a start answer the reader would refuse is never listed; it is stopped, then refused once its group is gone', async () => {
-  const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/script/S-1` },
+  const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/p1/script/S-1` },
     'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 },
     'no start time (step-4 review M3)': { pidStart: '' }, 'a leader not its group\'s (step-4 review M3)': { pgid: 4002 },
     'no commit (#358 r1 m1)': { head: 'not-a-sha' }, 'another card\'s copy (#358 r1 m1)': { copy: '/somewhere/else' } };
   for (const [what, more] of Object.entries(bad)) {
-    const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more }) });
+    const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/C-1`, ...more }) });
     await w.pass([launchReq('S-1')]);
     const s = w.read();
     assert.deepEqual(s.sessions, [], what);
@@ -328,7 +328,7 @@ test('#358 r1 M1: each write is stamped when it is made, no two writes are furth
   const gaps = [times[0] - t0, ...times.slice(1).map((x, i) => x - times[i])];
   assert.ok(Math.max(...gaps) < 50 * 1.9, `the widest gap is one port wait: ${gaps}`);
   // Step 0: starts that answered wrong are each stopped (a port wait or two), with a write after each.
-  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.card}` }))) });
+  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.product}/${x.card}` }))) });
   await u.pass([launchReq('S-1'), launchReq('S-2'), launchReq('S-3')]);
   go.forEach((f) => f()); await new Promise((r) => setImmediate(r));
   const settledAt = [];
@@ -408,7 +408,7 @@ test('#358 r1 m7: a stopGroup whose pgid is not the listed number (a string incl
 
 test('#358 r2 m-a (P7): each port wait is followed by a write, and no write comes before the first port', async () => {
   const ev = [];
-  const a = (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/${x.card}` });
+  const a = (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` });
   const ports = { start: async (x) => a(x), groupGone: async () => { ev.push('port:gg'); return false; }, stopGroup: async () => ({ ok: true }),
     saveWork: async () => { ev.push('port:save'); return { ok: true }; }, pauseLead: async () => ({ ok: true }), outboxDrained: async () => false };
   const base = { uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, ports, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0 };
@@ -418,4 +418,57 @@ test('#358 r2 m-a (P7): each port wait is followed by a write, and no write come
     requests: [{ name: 'saveWork-S-1-0123456789abcdef.json', body: { saveWork: { id: 'S-1' }, asked_at: new Date(T0).toISOString() } }] });
   assert.equal(ev[0], 'port:gg', ev.join(' '));
   for (let i = 0; i < ev.length; i++) if (ev[i].startsWith('port:')) assert.equal(ev[i + 1], 'write', ev.join(' '));
+});
+
+test('#364 r1 m3, m2: a start answered as running stays waiting with its claim; a started one keeps base in its row and answer', async () => {
+  const answers = [];
+  const mk = (start) => ({ uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0,
+    ports: { start, groupGone: async () => false, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => false },
+    write: (doc) => answers.push(doc) });
+  const req = [{ name: 'launch-S-1.json', body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' }, asked_at: new Date(T0).toISOString() } }];
+  const r = await workerRunnerPass({ ...mk(async () => ({ ok: false, running: true, pgid: 4001, reason: 'may run' })), state: {}, requests: req });
+  assert.equal(r.state.requests['S-1'].state, 'waiting', 'not refused, so the claim stays');
+  const B = 'c'.repeat(40);
+  const r2 = await workerRunnerPass({ ...mk(async (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), base: B, outbox: `/o/p1/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/p1/${x.card}` })), state: {}, requests: req });
+  assert.equal(r2.state.sessions[0].base, B);
+  assert.equal(JSON.stringify(answers.at(-1)).includes(B), true, 'the answer names base');
+});
+
+test('#364 r2 n2: a start answered as running keeps its process group in the waiting row and every note; a stop asked for it names the group and signals nothing', { timeout: 10_000 }, async () => {   // L842: a stop that falls through to a signal fails, never hangs
+  const notes = []; const stops = [];
+  const mk = (start, now) => ({ uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, pending: new Map(), realpath: (p) => p, keep: () => {}, now,
+    ports: { start, groupGone: async () => false, stopGroup: async (s) => { stops.push(s); return { ok: true }; }, saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => false },
+    write: () => {}, note: (t) => notes.push(t) });
+  const req = [{ name: 'launch-S-1.json', body: { launch: { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' }, asked_at: new Date(T0).toISOString() } }];
+  const r = await workerRunnerPass({ ...mk(async () => ({ ok: false, running: true, pgid: 4001, reason: 'may run' }), T0), state: {}, requests: req });
+  const row = r.state.requests['S-1'];
+  assert.equal(row.state, 'waiting'); assert.equal(row.running, true); assert.equal(row.pgid, 4001); assert.equal(row.card, 'C-1');
+  assert.match(notes.join('\n'), /S-1 may have left claude running in process group 4001 \(may run\)/);
+  // A later pass (a new runner: nothing held) names the group, not "was on when the runner last stopped".
+  notes.length = 0;
+  const later = await workerRunnerPass({ ...mk(async () => { throw new Error('not again'); }, T0 + RUNNER_NOTE_EVERY_MS + 1), state: structuredClone(r.state), requests: [] });
+  assert.match(notes.join('\n'), /S-1 may have left claude running in process group 4001; it stays waiting/);
+  assert.doesNotMatch(notes.join('\n'), /was on when the runner last stopped/);
+  // A stop asked for it: the group is named, nothing is signalled, the claim stays.
+  notes.length = 0;
+  const st = await workerRunnerPass({ ...mk(async () => { throw new Error('not again'); }, T0 + 1000), state: structuredClone(later.state), requests: [{ name: 'stop-S-1.json', body: { stop: 'S-1' } }] });
+  assert.deepEqual(stops, []);
+  assert.equal(st.state.requests['S-1'].state, 'waiting'); assert.equal(st.state.requests['S-1'].pgid, 4001);
+  assert.match(notes.join('\n'), /a stop was asked for S-1, but its start may have left claude running in process group 4001.*not signalled/);
+});
+
+test('#378 r1 M1, m3: a start is told the other live sessions (listed, and an earlier run\'s waiting starts, marked unstarted); a waiting row names its product; a product setup makes no folder for is refused', async () => {
+  let seen; let row;
+  const w = world({ startAnswer: (x) => { seen = x.live; row = structuredClone(w.kept.at(-1)?.requests?.[x.sessionId]);
+    w.n += 1; return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}` }; } });
+  await w.pass([launchReq('S-1')]);
+  assert.deepEqual(seen, [], 'the first start: none');
+  w.state = { ...w.state, requests: { ...w.state.requests, 'S-8': { state: 'waiting', at: T0, card: 'C-8', product: 'p2' } } };
+  await w.pass([launchReq('S-2', { product: 'p3' })]);
+  assert.deepEqual(seen, [{ id: 'S-1', product: 'p1' }, { id: 'S-8', product: 'p2', unstarted: true }]);
+  assert.equal(row.state, 'waiting'); assert.equal(row.product, 'p3');
+  seen = undefined;
+  await w.pass([launchReq('S-3', { product: 'Alpha' })]);
+  assert.equal(seen, undefined, 'not started');
+  assert.equal(w.state.requests['S-3'].state, 'refused');
 });

@@ -12,6 +12,8 @@
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
+// A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
+import { PRODUCT, productRoleClash, runnerPlaces } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
@@ -31,7 +33,6 @@ export const BASE_MARKER = '.made-by-setup';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
-const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
 // Folders other users can write; compared without regard to case (the Mac's disk treats /users and /Users as one).
 // The chain check (guard.mjs) is the real wall: it runs before root changes anything. This only gives a clear early error.
@@ -56,6 +57,10 @@ export function parseConfig(raw) {
   if (USERS.includes(owner) || owner === 'root') throw new Error(`config: owner must be the person's own Mac user, not ${owner}`);
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
+  }
+  // A product's outbox folder sits beside the role folders (L836), so no product may be named as a role.
+  if (products.some(productRoleClash)) {
+    throw new Error('config: a product may not be named as a role (its outbox folder would be that role\'s)');
   }
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
@@ -157,6 +162,8 @@ export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
  * outbox is review's; were it the workers' user's, a worker could write that role's answer.
  */
 export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
+/** The roles the worker runner starts, whose outboxes sit in a folder per product (L836; wiring/owner-status.mjs RUNNER_ROLE_OF). */
+export const PRODUCT_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
@@ -169,7 +176,9 @@ export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', per
 // pass, through this one entry, inherited by every file and folder made under it. No add or write. `list` on a folder is
 // `read` on the files it holds (an inherited entry shows "read"), and `delete_child` on every folder deletes anything below
 // it, so neither `read` (the Mac shows it as `list` on a folder, and the exact check would never pass) nor `delete` (which
-// would let orchestrate remove the empty copies folder itself) is in it.
+// would let orchestrate remove the empty copies folder itself) is in it. A product's own copies folder sits under it
+// (L836), so orchestrate can remove that one once it is empty (#378 m7); the start then refuses that product ("setup has
+// made no folder") until setup is run again: it fails safe.
 // Equal to ORCHESTRATE_READ_ACL's rights today on purpose; kept apart because the two may need to differ.
 export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
@@ -212,10 +221,19 @@ export function folderTable(cfg) {
     [sealRootPath(cfg), 'orchestrate', 0o700, 'cleanup\'s sealed bundles (the Dispatcher\'s sealRoot): orchestrate\'s alone'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
-    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
+    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): a folder per role and one per product (L836) under it'],
     ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
     ...WORKER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
+    // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
+    // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the
+    // role folders above (the runner starts worker and script sessions).
+    // Named by the one rule the runner uses (shared/product-paths.mjs runnerPlaces, #378 r1 m1).
+    ...cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]).flatMap(([prod, at]) => [
+      [at.copies, 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
+      [at.outboxes, 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
+      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(at.outboxes, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
+    ]),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
       [p('products', prod), 'root', 0o755, `${prod}: its folders`],
