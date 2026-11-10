@@ -177,20 +177,26 @@ test('L732 self-review: an issue closed between the search and the read gets no 
   assert.equal(gh.issues.get(1).comments.length, 0);
 });
 
-test('L768: the stop issue counts its day by GitHub\'s clock; a robot clock far ahead says nothing, never a comment each start', async () => {
+test('L768, L801 M1: the stop issue counts its day by GitHub\'s clock; a robot clock ahead still reminds once a day, never each start', async () => {
   const HOUR = 3600e3;
-  let g = Date.parse('2026-11-09T08:00:00Z');
-  const ahead = 3 * 24 * HOUR;
-  const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
-  const at = () => run({ gh, owner: 'owner-login' }, { now: () => g + ahead });
-  assert.equal((await at()).r, 'opened');
-  for (let i = 0; i < 4; i++) {
-    g += 25 * HOUR;
-    const a = await at();
-    assert.equal(a.r, 'already open');
-    assert.match(a.logs.join('\n'), /clock is 4320 minutes ahead of GitHub's/);
+  // The audit's probe: a start every hour for 6 days, the robot's clock fast by a fixed amount.
+  for (const ahead of [7 * 60e3, 30 * 60e3, 23 * HOUR, 3 * 24 * HOUR]) {
+    let g = Date.parse('2026-11-09T08:00:00Z');
+    const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
+    const at = () => run({ gh, owner: 'owner-login' }, { now: () => g + ahead });
+    assert.equal((await at()).r, 'opened');
+    const told = [];
+    for (let h = 1; h <= 6 * 24; h++) {
+      g += HOUR;
+      const a = await at();
+      if (a.r === 'reminded') told.push(h);
+      else assert.equal(a.r, 'already open');
+      assert.match(a.logs.join('\n'), new RegExp(`clock is ${Math.round(ahead / 60e3)} minutes ahead of GitHub's; the day is counted by GitHub's time`));
+    }
+    assert.ok(told.length >= 5 && told.length <= 6, `${ahead / 60e3} min ahead: ${told.length} reminders`);
+    for (let i = 1; i < told.length; i++) assert.ok(told[i] - told[i - 1] >= 24, `${ahead / 60e3} min ahead: once a day`);
+    assert.equal(gh.issues.get(1).comments.length, told.length);
   }
-  assert.equal(gh.issues.get(1).comments.length, 0);
   // A clock a few minutes ahead, or behind, counts the day by GitHub's times: the opening, then the last comment.
   for (const skew of [3 * 60e3, -2 * HOUR]) {
     let h = Date.parse('2026-11-09T08:00:00Z');

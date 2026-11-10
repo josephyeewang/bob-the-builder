@@ -16,8 +16,8 @@
 // fault coming back: every start would find it and say nothing. So a start that finds the issue open comments on it once
 // a day while the fault lasts: not when the robot commented in the last day, nor when the issue was opened in the last
 // day (GitHub's created_at says when; its body's "Opened at" line when GitHub gives none). The day is counted by GitHub's
-// clock, and a computer clock more than a few minutes ahead of it says nothing (L768). With no Date header from GitHub,
-// the computer's clock stands, as before. A comment that notifies is the point; the body is never edited.
+// clock, so a computer clock ahead or behind still reminds once a day (L768, L801 M1); one more than a few minutes ahead
+// is said in the log. With no Date header from GitHub, the computer's clock stands, as before. A comment that notifies is the point; the body is never edited.
 //
 // The reason is cut and fenced as a push reason is (L720 n2): local paths become <path>, a cut for length says so, and
 // the words are fenced as outside text. A look that fails opens nothing, as an unknown answer would otherwise flood the
@@ -78,14 +78,14 @@ export async function tellStoreStopped({ stop, product, channel, log, sendMs = A
 
   // Once a day at most, counting the opening itself; a look that fails says nothing rather than risk a flood. The day is
   // counted by GitHub's times (L768): its clock on the read, the issue's created_at and the comments' own times. A robot
-  // clock more than CLOCK_AHEAD_MS ahead of GitHub's can't count it, so it says nothing.
+  // clock more than CLOCK_AHEAD_MS ahead of GitHub's is logged, and still reminds once a day (L801 M1).
   async function remind(n) {
     const t = now();
     const issue = await inTime(sendMs, () => gh.read(n));
     if (!issue) { log(`robot: the stopped Record's issue #${n} could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
     if (issue.open === false) return 'already open';   // closed since the search: the next start opens a new one
     const ahead = clockAhead(gh, t);
-    if (ahead !== null && ahead > CLOCK_AHEAD_MS) { log(`robot: the stopped Record's issue #${n} is open; this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's, so the time since the owner was told is not known and it is not told again`); return 'already open'; }
+    if (ahead !== null && ahead > CLOCK_AHEAD_MS) log(`robot: the stopped Record's issue #${n} is open; this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's; the day is counted by GitHub's time. Set the clock right.`);
     const g = ahead === null ? t : t - ahead;   // GitHub's time now, or this computer's when GitHub gave none
     const opened = Date.parse(issue.created_at ?? OPENED.exec(issue.body)?.[1] ?? '');
     if (Number.isFinite(opened) && g - opened < STOP_REMIND_MS) return 'already open';

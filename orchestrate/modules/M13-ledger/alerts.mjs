@@ -80,13 +80,15 @@ export const lineIs = (marker) => (line) => line === marker;
 /**
  * The robot's clock against GitHub's (L768). A client's `lastServerTime` is GitHub's own time on its latest answer (its
  * Date header), in ms, or null when GitHub gave none. clockAhead → how far the robot's clock `t` is ahead of it, in ms,
- * or null when not known. A "told again once a day" check counts the day by GitHub's times, and when the robot's clock
- * is more than CLOCK_AHEAD_MS ahead the time since the last notice is not known, so nothing is told again (else a fast
- * clock would tell the owner on every pass).
+ * or null when not known. A "told again once a day" check counts the day by GitHub's times, so a fast clock neither
+ * tells the owner on every pass nor silences the daily reminder (L801 M1: holding it back silenced every reminder for as
+ * long as the clock stayed wrong). A clock more than CLOCK_AHEAD_MS ahead is said in one log line while it stays so.
  */
 export const CLOCK_AHEAD_MS = 5 * 60_000;
 export const clockAhead = (gh, t) => { const g = gh?.lastServerTime; return Number.isFinite(g) && Number.isFinite(t) ? t - g : null; };
 export const clockTooFast = (gh, t) => (clockAhead(gh, t) ?? 0) > CLOCK_AHEAD_MS;
+/** GitHub's time now, in ms: the robot's `t` less how far it is ahead; the robot's own when it is behind or GitHub gave no Date header. */
+export const githubNow = (gh, t) => t - Math.max(0, clockAhead(gh, t) ?? 0);
 
 export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
 
@@ -157,6 +159,18 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return await gh.edit(n, bodyOf(id, { ...next, told: toldAt(c?.at, t) }, text, t)) !== false;
   }
 
+  // One log line while the robot's clock stays over CLOCK_AHEAD_MS ahead of GitHub's (L787, L801): said again only after
+  // it has been right. A log that throws holds nothing up.
+  let clockSaid = false;
+  const sayClock = (t) => {
+    const ahead = clockAhead(gh, t);
+    if (ahead === null) return;
+    if (!clockTooFast(gh, t)) { clockSaid = false; return; }
+    if (clockSaid) return;
+    clockSaid = true;
+    try { log(`alerts: this computer's clock is ${Math.round(ahead / 60_000)} minutes ahead of GitHub's; daily reminders are counted by GitHub's time. Set the clock right.`); } catch { /* nothing held up */ }
+  };
+
   // The condition holds now. Returns what happened: opened | updated | changed | reminded (the 24 h comment) | suppressed
   // (the owner closed it), or false when GitHub lost it (L143), and then the next pass tries again.
   // `status` is the condition's stable state; only a change of it comments (and so notifies). A body that carries a
@@ -185,7 +199,8 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (at === false) return false;
     }
     if (!at) {
-      const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: t, cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
+      // The told stamp is GitHub's time, as every later one is (toldAt keeps a comment's own time): one clock counts the day.
+      const issue = await gh.open({ title, body: bodyOf(id, { status, since: t, told: new Date(githubNow(gh, Date.parse(t))).toISOString(), cleared: NONE, count: 1, owed: NONE, owed_at: NONE }, body, t), assignee: owner });
       if (!ISSUE(issue)) return false;
       cache(id, s, key, issue, 'open', false);
       return 'opened';
@@ -212,17 +227,13 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (owedNow) return tell(still, 'reminded');
       // Told again every 24 h while it stands (L315). stillWaiting can't see inside an async tell, so `did` is always
       // 'told' here; only told.answer says what happened. An unreadable told reads as due, never as told.
-      // A clock too far ahead of GitHub's can't count the 24 h (L768): the issue is kept up to date, and not told again;
-      // a reminder it holds back says so in one log line (L787), so the quiet is never unexplained.
-      const fast = clockTooFast(gh, Date.parse(t));
-      // The robot's clock counts the day here: the footer's told time is mostly its own stamp, so the two agree, and the
-      // check above keeps it within CLOCK_AHEAD_MS of GitHub's. With no Date header from GitHub that check can't run, and
-      // the count is as before L768 (GitHub always sends one).
-      const told = stillWaiting({ now: Date.parse(t), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => (fast ? 'held' : tell(still, 'reminded')) });
-      if (told.did !== 'quiet' && !fast) return told.answer;
-      if (fast && told.did !== 'quiet') {
-        try { log(`alerts: issue #${at.n}'s daily reminder is held: this computer's clock is ${Math.round(clockAhead(gh, Date.parse(t)) / 60_000)} minutes ahead of GitHub's, so the day can't be counted. Set the clock right.`); } catch { /* a log that throws holds nothing up */ }
-      }
+      // The day is counted by GitHub's time (L768, L801 M1). The told stamps are GitHub's too: the opening's is stamped by
+      // GitHub's time, and toldAt keeps each comment's own time from GitHub. So a robot clock ahead of GitHub's, by minutes
+      // or by days, neither tells on every pass nor holds a reminder back. With no Date header (GitHub always sends one)
+      // the robot's clock counts, as before L768. A clock over CLOCK_AHEAD_MS ahead is logged once while it stays so.
+      sayClock(Date.parse(t));
+      const told = stillWaiting({ now: githubNow(gh, Date.parse(t)), waiting: true, clear: () => {}, read: () => ({ told_at: f.told }), tell: () => tell(still, 'reminded') });
+      if (told.did !== 'quiet') return told.answer;
       return await gh.edit(at.n, bodyOf(id, next, body, t)) === false ? false : 'updated';
     })();
     if (at.f.old && answer !== false) cache(id, s, key, at.n, 'open', true);

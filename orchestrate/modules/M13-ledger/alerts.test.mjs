@@ -1102,7 +1102,7 @@ test('r5 m2: the three callers\' names are distinct; c1: the alert\'s title says
   assert.equal(troubleIssues(w.gh)[0].title, `p: the Record is refusing alert writes (${TROUBLE_SOURCES.WATCHER})`);
 });
 
-test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minutes ahead still does, and the day is GitHub\'s', async () => {
+test('L768, L801 M1: a robot clock ahead of GitHub\'s, by minutes or days, reminds once a day by GitHub\'s time, and says so once', async () => {
   const make = (aheadMin) => {
     let t = Date.parse('2026-11-03T08:00:00Z');
     const robot = { now: () => new Date(t + aheadMin * 60000) };
@@ -1111,15 +1111,18 @@ test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minute
     const alerts = makeAlerts({ rec: memoryRecord(), gh, owner: 'owner-login', now: robot.now, log: (s) => lines.push(s) });
     return { gh, alerts, lines, tick: (min) => { t += min * 60000; } };
   };
-  const far = make(3 * 24 * 60);
-  assert.equal(await far.alerts.raise(standing), 'opened');
-  far.tick(60);
-  assert.equal(await far.alerts.raise(standing), 'updated');
-  assert.deepEqual(far.lines, [], 'L787: no reminder due, so nothing held and nothing logged');
-  for (let i = 0; i < 5; i++) { far.tick(25 * 60); assert.equal(await far.alerts.raise(standing), 'updated', 'not known, so not told'); }
-  assert.equal(comments(far.gh), 0);
-  assert.equal(far.lines.length, 5, 'L787: each held reminder logs one line');
-  assert.match(far.lines[0], /^alerts: issue #1's daily reminder is held: this computer's clock is 4320 minutes ahead of GitHub's/);
+  // The audit's probe: the alert stands, raised every hour for 6 days, the robot's clock fast by a fixed amount.
+  for (const aheadMin of [0, 7, 30, 23 * 60, 3 * 24 * 60]) {
+    const w = make(aheadMin);
+    const answers = [];
+    for (let h = 0; h <= 6 * 24; h++) { answers.push(await w.alerts.raise(standing)); w.tick(60); }
+    const told = answers.map((a, i) => (a === 'reminded' ? i : null)).filter((i) => i !== null);
+    assert.ok(told.length >= 5 && told.length <= 6, `${aheadMin} min ahead: ${told.length} reminders in 6 days`);
+    for (let i = 1; i < told.length; i++) assert.ok(told[i] - told[i - 1] >= 24, `${aheadMin} min ahead: never sooner than a day by GitHub's clock (hours ${told[i - 1]}, ${told[i]})`);
+    assert.equal(comments(w.gh), told.length);
+    assert.equal(w.lines.length, aheadMin > 5 ? 1 : 0, `${aheadMin} min ahead: one log line while the clock stays wrong`);
+    if (aheadMin > 5) assert.match(w.lines[0], new RegExp(`^alerts: this computer's clock is ${aheadMin} minutes ahead of GitHub's; daily reminders are counted by GitHub's time`));
+  }
   const near = make(3);
   await near.alerts.raise(standing);
   near.tick(2 * 60);
@@ -1131,10 +1134,15 @@ test('L768: a robot clock far ahead of GitHub\'s tells no reminder, a few minute
   const edge = make(4);
   await edge.alerts.raise(standing);
   edge.tick(24 * 60 - 2);
-  assert.equal(await edge.alerts.raise(standing), 'updated', 'a day less 2 minutes by both clocks: the told stamp is the robot\'s own');
+  assert.equal(await edge.alerts.raise(standing), 'updated', 'a day less 2 minutes by GitHub\'s clock: the opening\'s told stamp is GitHub\'s');
   edge.tick(3);
   assert.equal(await edge.alerts.raise(standing), 'reminded');
   assert.equal(clockAhead({ lastServerTime: null }, 5), null, 'no Date header: not known, and the old count stands');
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS + 1), true);
   assert.equal(clockTooFast({ lastServerTime: 0 }, CLOCK_AHEAD_MS), false);
+  assert.equal(CLOCK_AHEAD_MS, 5 * 60_000, 'the limit is pinned (L801 m1): a few minutes, the most a kept clock drifts');
+  // Said once while wrong; said again after it has been right in between.
+  const again = make(10);
+  await again.alerts.raise(standing); again.tick(60); await again.alerts.raise(standing);
+  assert.equal(again.lines.length, 1);
 });
