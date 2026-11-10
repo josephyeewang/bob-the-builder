@@ -567,6 +567,16 @@ test('L600 PR 1: robotToken mints on the first ask only, keeps that one answer, 
   assert.equal(m, 1, 'a refused mint is not retried in the same process');
 });
 
+test('#288 r1 m1: a mint that throws a token-shaped message has it masked before the reason is kept', async () => {
+  const c = { keyDir: '/k', ownerUid: 501, ...APP };
+  const secret = `gh${'s'}_${'S'.repeat(36)}`;   // built here so no token-shaped text sits in the source
+  const r = await robotToken(c, { mint: () => { throw new Error(`upstream said ${secret}`); } })();
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /^token mint failed: upstream said /);
+  assert.equal(r.reason.includes(secret), false, 'the token-shaped text is masked');
+  assert.equal(r.reason.includes('SSSSSSSS'), false, 'no part of it is left');
+});
+
 test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints only when the channel is used', async () => {
   const logs = [];
   const log = (s) => logs.push(s);

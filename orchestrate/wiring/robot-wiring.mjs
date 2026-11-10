@@ -45,6 +45,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { CONFIG_KEYS as DISPATCHER_KEYS, checkConfig, privateFolder, recordAndRules, refusing, notWiredText, REVIEW_CONFIG_KEYS } from './dispatcher-wiring.mjs';
 import { caughtUpOnce, RETURN_GAP_MIN } from '../modules/M13-ledger/caught-up.mjs';
 import { makeFactWriter } from '../modules/M12-sensors/facts.mjs';
+import { makeMasker } from '../modules/M12-sensors/mask.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { holdAlert, HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { outbox, dropCause, ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
@@ -106,7 +107,9 @@ export function robotToken(c, { fetchFn = globalThis.fetch, uid = process.getuid
   let p = null;
   return () => (p ??= Promise.resolve()
     .then(() => mint({ keyDir: c.keyDir, appId: c.appId, installationId: c.appInstallation, http: appMintClient({ fetchFn }), uid, scriptsUid: c.ownerUid, now }))
-    .catch((e) => ({ ok: false, reason: `token mint failed: ${String(e?.message ?? e).slice(0, 200)}` })));
+    // A thrown message is masked before it is kept (#288 r1 m1): the reason reaches the job log and the alert queue, and
+    // token.mjs's own scrub only covers the mint that ships, not one swapped in. Masked first, then cut.
+    .catch((e) => ({ ok: false, reason: `token mint failed: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` })));
 }
 
 /**

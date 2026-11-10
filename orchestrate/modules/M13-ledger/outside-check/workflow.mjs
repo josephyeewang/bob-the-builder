@@ -16,8 +16,8 @@
 //   - no product data in any step: the product list comes from the PRODUCTS secret at run time and logs print only
 //     the slot label and a reason code.
 
-import { writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { writeFileSync, realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 export const CHECKS = Object.freeze(['heartbeat', 'audit-files', 'audit-run', 'deploys', 'permissions', 'robot-merges']);
 export const SLOTS = 3;
@@ -99,6 +99,11 @@ ${steps.join('\n')}
 `;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a link such as an installed copy (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so argv[1] is resolved before the two are compared.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) {
   writeFileSync(new URL('./.github/workflows/outside-check.yml', import.meta.url), workflowYaml());
 }

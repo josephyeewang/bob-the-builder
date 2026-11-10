@@ -9,9 +9,9 @@
 // than the check behind it.
 //
 //   node air-health.mjs <red count> <folder>     writes the file, prints its name
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 export const AIR_FILE = /^request-airhealth-(\d{8})-(\d{4})-air\.json$/;
 const FUTURE_SLACK_MS = 5 * 60e3;
@@ -51,7 +51,12 @@ export function airFactFromFile(doc, now = () => new Date(), stored = null) {
   return { kind: 'fact.air-health', red_count: doc.red_count, checked_at: new Date(t).toISOString() };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a link such as an installed copy (#261 r2 Minor 1): node gives import.meta.url as the
+// real file but keeps argv[1] as typed, so argv[1] is resolved before the two are compared.
+function isScript() {
+  try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; }
+}
+if (isScript()) {
   const [count, folder] = process.argv.slice(2);
   const f = airHealthFile({ red_count: /^\d+$/.test(count ?? '') ? Number(count) : NaN });
   if (!f.ok || !folder) { console.error(`air-health: ${f.ok ? 'no folder given' : f.reason}`); process.exitCode = 1; }

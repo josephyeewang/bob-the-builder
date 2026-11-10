@@ -9,7 +9,7 @@ import { fakeGitHub } from './fixtures/fake-github.mjs';
 import { makeGitView } from '../M10-rules/git-view.mjs';
 import { writeDoc, askStore } from './ask-store.mjs';
 import { openDecision, readDecision } from './decision.mjs';
-import { approveNeeded, doneBar, goCheck, goFingerprint, raiseGo, recordGo, recordRecheck, rowFile, tier1Changed } from './go.mjs';
+import { approveNeeded, doneBar, goCheck, goFingerprint, raiseGo, recordGo, recordRecheck, ROW_FILE, rowFile, tier1Changed } from './go.mjs';
 
 const MIN = 60_000;
 const row = (id, over = {}) => ({ id, what: `row ${id}`, module: 'M1', tier: 2, done_when: `tests pass for ${id}`, status: 'planned', ...over });
@@ -312,4 +312,14 @@ test('L205: a failed tree read in the go check is unreadable, not a go mismatch;
   const raised = await raiseGo(w2.t.ctx, { cardId: 'B', rows: rows2, view: down2, mainSha: w2.M0 });
   assert.deepEqual([raised.ok, raised.unreadable, raised.cause], [false, true, boom], 'the same shape as goCheck\'s (lane 1 note 2)');
   assert.equal(askStore(w2.t.record).asks().length, 0);
+});
+
+// c1-r2: the one row-file pattern (M10's lane rule, M6 and M11 import it). A row is one file directly in the rows folder,
+// the folder matched in any case; a file in a folder under it is not a row, and rowFile names the file the pattern reads.
+test('c1-r2: ROW_FILE takes a row file directly in the rows folder, in any case, and nothing deeper', () => {
+  assert.equal(ROW_FILE.exec(rowFile('R-1'))?.[1], 'R-1');
+  assert.equal(ROW_FILE.exec('Docs/Blueprint/Rows/R-1.yaml')?.[1], 'R-1');
+  for (const p of ['docs/blueprint/rows/sub/R-1.yaml', 'docs/blueprint/rows/R-1.yml', 'docs/blueprint/rows/.yaml', 'x/docs/blueprint/rows/R-1.yaml', 'docs/blueprint/rows/R-1.yaml/x']) {
+    assert.equal(ROW_FILE.exec(p), null, p);
+  }
 });

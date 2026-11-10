@@ -13,7 +13,9 @@
 // the hooks and helper in .claude/hooks/, their entries in .claude/settings.json, the reviewer in
 // .claude/agents/, the daily dropped-work check, the project-owned lists Bob creates once
 // (required checks, audit ledger, optional pointers), the Bob pointer in CLAUDE.md, two optional
-// templates, and whether the commit-time document check blocks or only warns.
+// templates, and whether the commit-time document check blocks or only warns. Two more are hand steps it reports
+// and never applies, because the project fills the file in itself (D-036): the Works column of its Capability
+// Traceability Matrix, and its copy of the wiring check (templates/wired.test.mjs, with its own CONFIG).
 //
 // For each piece it says one of: up to date · Bob has a newer version · missing (new in Bob) ·
 // changed here on purpose (listed in .bob/differences.md — left alone) · changed here, reason not
@@ -36,6 +38,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { findMatrix, projectFiles } from "./lib/capability-matrix.mjs";
 
 const BOB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CMD = 'node "$(realpath ~/.claude/skills/bob/..)/scripts/bob-upgrade.mjs"';
@@ -174,6 +177,10 @@ const PIECES = [
     what: "optional: the list of everything promised but not yet done" },
   { id: "commit-sweep", kind: "sweep", decisions: ["D-019"],
     what: "the document check that runs on every commit — blocks the commit, or only warns" },
+  { id: "capability-matrix-works", kind: "hand", decisions: ["D-036"],
+    what: "the Works and Evidence columns of the Capability Traceability Matrix: what the product can actually do, not only what was built" },
+  { id: "wiring-check", kind: "hand", source: "templates/wired.test.mjs", decisions: ["D-036"],
+    what: "the wiring check (wired.test.mjs): every finished unit of work is used by the running product (Phase Gate 17)" },
 ];
 const byId = Object.fromEntries(PIECES.map((p) => [p.id, p]));
 
@@ -387,7 +394,41 @@ const LABEL = {
   "sweep-ready": "Warning only — the check passes today, so it can safely be switched to stopping commits",
   "sweep-failing": "Warning only — the check finds serious problems today; fix them before switching it to stopping commits",
   "sweep-na": "Not used here (no docs/build-manifest.md)",
+  "hand-needed": "A hand step — the file is this project's own to fill in, so Bob says what to do and changes nothing",
+  "hand-newer": "Bob has a newer version of a file you copied and set up — copy it again by hand, keeping your settings",
+  "hand-changed": "Your copy differs from every version Bob has had — reason not written down",
+  "hand-done": "Present",
+  "hand-na": "Not used here (no Capability Traceability Matrix)",
 };
+// ── Hand steps (D-036): files the project fills in itself, so Bob says what to change and changes nothing ────
+// A copy of the wiring check is found by its first line; its CONFIG and UNWIRED blocks are the project's own, so
+// they are left out when it is compared with Bob's versions.
+const WIRED_MARK = "// wired.test.mjs — Phase Gate 17 (Bob D-036)";
+const wiredBody = (text) => text.replace(/^\/\/ ── Set these for your project ─+\n[\s\S]*?^\/\/ ─+\s*$/m, "");
+function wiredCopies() {
+  return projectFiles(PROJ, [".mjs", ".js", ".cjs"], { maxDepth: 5 }).filter((f) => (read(f) || "").startsWith(WIRED_MARK)).map((f) => f.slice(PROJ.length + 1));
+}
+// A phase report may record instead that there is nothing to check (Phase Gate 17).
+const gate17Recorded = () => projectFiles(PROJ, [".md"]).some((f) => /Gate 17: no units of work|no wiring check for \S/.test(read(f) || ""));
+function handStatus(piece) {
+  if (DIFFS[piece.id] !== undefined) return { status: "purpose" };
+  if (piece.id === "capability-matrix-works") {
+    const m = findMatrix(PROJ, { bobRoot: BOB_ROOT });
+    if (!m) return { status: "hand-na" };
+    return m.hasWorks ? { status: "hand-done" } : { status: "hand-needed", file: m.file };
+  }
+  const copies = wiredCopies();
+  if (!copies.length) return gate17Recorded() ? { status: "hand-done" } : { status: "hand-needed" };
+  const h = sha(wiredBody(read(pj(copies[0]))));
+  if (h === sha(wiredBody(read(join(BOB_ROOT, piece.source))))) return { status: "hand-done", file: copies[0] };
+  const log = git("log", "--format=%H", "--", piece.source);
+  for (const c of (log || "").trim().split("\n").filter(Boolean)) {
+    const old = git("show", `${c}:${piece.source}`);
+    if (old !== null && sha(wiredBody(old)) === h) return { status: "hand-newer", file: copies[0], since: c, others: copies.length - 1 };
+  }
+  return { status: "hand-changed", file: copies[0], others: copies.length - 1 };
+}
+
 let settingsWarn = false;
 function statusOf(piece, { runChecks = true } = {}) {
   const rec = manifest?.pieces?.[piece.id];
@@ -429,6 +470,7 @@ function statusOf(piece, { runChecks = true } = {}) {
     return { status: "owned-missing" };
   }
   if (piece.kind === "optional") return { status: existsSync(pj(piece.path)) ? "optional-present" : "optional-absent" };
+  if (piece.kind === "hand") return handStatus(piece);
   if (piece.kind === "pointer") {
     const text = (read(pj("CLAUDE.md")) || "") + (read(pj("AGENTS.md")) || "");
     if (/build-protocol(-core)?\.md|Bob the Builder|skills\/bob/i.test(text)) return { status: "pointer-present" };
@@ -532,7 +574,7 @@ function applySweep() {
   return "switched on: a commit with serious document problems is now stopped";
 }
 
-const UP_TO_DATE = new Set(["current", "owned-present", "pointer-present", "optional-present", "sweep-block"]);
+const UP_TO_DATE = new Set(["current", "owned-present", "pointer-present", "optional-present", "sweep-block", "hand-done", "hand-na"]);
 const OWN_NOTE = (own) => `this project has its own version (${own}) — left alone; if it's a deliberate difference, list it in .bob/differences.md`;
 const named = (p) => `${p.what} [${p.id}]`;
 function applyOne(piece, st, { explicit }) {
@@ -559,6 +601,7 @@ function applyOne(piece, st, { explicit }) {
     return res;
   }
   if (piece.kind === "owned" || piece.kind === "optional") return applyOwned(piece);
+  if (piece.kind === "hand") return "not changed — a hand step: Bob never edits this file for you. The report (run without --apply) says what to do.";
   if (piece.kind === "pointer") return applyPointer();
   if (piece.kind === "sweep") return applySweep();
   return null;
@@ -690,8 +733,8 @@ const reasonless = Object.entries(DIFFS).filter(([, r]) => !r).map(([id]) => id)
 if (reasonless.length) console.log(`⚠ .bob/differences.md lists ${reasonless.join(", ")} with no reason — add one line saying why.`);
 console.log("(\"Safety checks\" below are small programs Claude Code runs automatically before or after Claude acts [hooks]. Names in [brackets] are what you type to apply one.)");
 
-const GROUPS = ["owned-damaged", "newer", "missing", "removed", "owned-missing", "pointer-missing", "needs-testcmd", "own", "changed", "differs", "purpose", "sweep-failing", "sweep-ready", "sweep-block", "optional-absent", "current", "owned-present", "pointer-present", "optional-present", "sweep-na"];
-const QUIET = new Set(["current", "owned-present", "pointer-present", "optional-present", "sweep-na"]);
+const GROUPS = ["owned-damaged", "newer", "missing", "removed", "owned-missing", "pointer-missing", "needs-testcmd", "hand-needed", "hand-newer", "own", "changed", "differs", "hand-changed", "purpose", "sweep-failing", "sweep-ready", "sweep-block", "optional-absent", "current", "owned-present", "pointer-present", "optional-present", "hand-done", "sweep-na", "hand-na"];
+const QUIET = new Set(["current", "owned-present", "pointer-present", "optional-present", "hand-done", "sweep-na", "hand-na"]);
 // Groups that share a heading (two kinds of "Present") print as one.
 const byLabel = new Map();
 for (const g of GROUPS) {
@@ -728,6 +771,17 @@ for (const [label, rows] of byLabel) {
       console.log(`      Until these are fixed the commit check only warns. Then switch it on: --apply commit-sweep`);
     } else if (g === "sweep-ready") {
       console.log(`      Switch it on: --apply commit-sweep`);
+    } else if (g === "hand-needed" && p.id === "capability-matrix-works") {
+      console.log(`      Why Bob has it: ${explain(p.decisions)}`);
+      console.log(`      Open ${st.file} and add two columns to its table, Works and Evidence, as in Bob's templates/capability-traceability-matrix.md (its Works legend says what each value means). From the next phase on, put the scoreboard line in each phase report (Phase Gate 16).`);
+    } else if (g === "hand-needed") {
+      console.log(`      Why Bob has it: ${explain(p.decisions)}`);
+      console.log(`      In the next phase that builds a unit of work (a pass, step, job or handler), copy Bob's templates/wired.test.mjs into this project's tests and set its CONFIG (Phase Gate 17). With no units of work at all, write "Gate 17: no units of work" in the phase report instead; in another language, "no wiring check for <language>".`);
+    } else if (g === "hand-newer") {
+      console.log(`      Why Bob changed it: ${explain(decisionsSince(p, st.since))}`);
+      console.log(`      ${st.file} matches Bob's copy from commit ${short(st.since)}, apart from your settings. Copy Bob's templates/wired.test.mjs over it, then put back your CONFIG and UNWIRED blocks.${st.others ? ` (${st.others} more cop${st.others === 1 ? "y" : "ies"} found; check those too.)` : ""}`);
+    } else if (g === "hand-changed") {
+      console.log(`      ${st.file} was changed here outside its CONFIG and UNWIRED blocks.${st.others ? ` (${st.others} more cop${st.others === 1 ? "y" : "ies"} found.)` : ""} Keep yours: add a line to .bob/differences.md — "- ${p.id}: <why>". Take Bob's: copy templates/wired.test.mjs over it and put back your CONFIG and UNWIRED blocks.`);
     }
   }
 }
@@ -744,9 +798,11 @@ if (actionable.length) {
   console.log(`  Apply every safe update (${actionable.map((p) => p.id).join(", ")}):`);
   console.log(`    ${CMD} --apply all`);
 } else console.log("  Nothing is out of date that Bob can update safely.");
+const hand = PIECES.filter((p) => ["hand-needed", "hand-newer", "hand-changed"].includes(statuses[p.id].status));
+if (hand.length) console.log(`  By hand (Bob never edits these files; the steps are above): ${hand.map((p) => p.id).join(", ")}`);
 console.log(`  Apply only some:         ${CMD} --apply <item>,<item>`);
 console.log(`  Decide one at a time:    ${CMD} --interactive`);
-console.log("  Items marked \"changed here\", \"has its own version\", \"waiting for your test command\", \"damaged\" and anything optional are never touched unless you name them.");
+console.log("  Items marked \"changed here\", \"has its own version\", \"waiting for your test command\", \"damaged\" and anything optional are never touched unless you name them. Hand steps are never touched.");
 
 console.log("\nDoes this project do something better than Bob?");
 console.log("  If a rule, check, safety check or file here works better than Bob's version, bring it back to Bob so every project gets it:");
