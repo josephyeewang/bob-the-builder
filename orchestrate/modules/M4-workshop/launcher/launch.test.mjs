@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
 import { REFUSED_ENV, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
-import { renderRoleSettings, POLICY_HOOKS } from './render-settings.mjs';
+import { renderRoleSettings, POLICY_HOOKS, bobFolderDeny } from './render-settings.mjs';
 import { roleArgs, checkInit, readBack } from './readback.mjs';
 import { roleEnv, checkRoleEnv, checkMachineWide } from './env-check.mjs';
 import { HOOKS_SOURCE, installHooks, checkHooks, checkVersion, pinnedBinary, productionProbe, checkSnapshot } from './hooks-check.mjs';
@@ -557,9 +557,20 @@ test('check 13: the Bob folder matches the pin, holds no skill, and is read-only
   const bob = join(d, 'bob'); mkdirSync(join(bob, 'modes'), { recursive: true });
   writeFileSync(join(bob, 'rules.md'), 'r'); writeFileSync(join(bob, 'modes', 'audit.md'), 'a');
   const manifest = { 'rules.md': sha256(Buffer.from('r')), [join('modes', 'audit.md')]: sha256(Buffer.from('a')) };
-  const abs = bob.replace(/^\/+/, '');
-  const settings = { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } };
+  // L750: the Lead's and a worker's real rendered settings, passed through check 13 as they are, not a hand-built form.
+  const real = (role) => {
+    const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role],
+      paths: { ...N_PATHS, bobFolder: bob, deny: { ...N_PATHS.deny, proposals: ['/w/proposals'] } }, product: { commands: { test: 'npm test' } } });
+    assert.equal(r.ok, true, `${role}: ${r.reason}`);
+    return r.settings;
+  };
+  const settings = real('lead');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings }).ok, true);
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: real('worker') }).ok, true, 'worker');
+  // The one-slash form render-settings never writes is not taken for it, and neither is half the pair.
+  const abs = bob.replace(/^\/+/, '');
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } } }).ok, false, 'one slash');
+  assert.equal(checkBobFolder({ folder: bob, manifest, settings: { [S.permissions]: { [S.deny]: settings[S.permissions][S.deny].filter((r) => !r.startsWith('Write(')) } } }).ok, false, 'no Write rule');
   assert.equal(checkBobFolder({ folder: bob, manifest, settings: {} }).ok, false, 'not read-only');
   assert.equal(checkBobFolder({ folder: join(d, 'none'), manifest, settings }).ok, false, 'missing');
   assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).ok, false, 'no pin');
@@ -655,8 +666,7 @@ test('check 13: each Bob folder refusal gives its own reason', () => {
   const bob = join(d, 'bob'); mkdirSync(bob);
   writeFileSync(join(bob, 'rules.md'), 'r');
   const manifest = { 'rules.md': sha256(Buffer.from('r')) };
-  const abs = bob.replace(/^\/+/, '');
-  const settings = { [S.permissions]: { [S.deny]: [`Edit(/${abs}/**)`, `Write(/${abs}/**)`] } };
+  const settings = { [S.permissions]: { [S.deny]: bobFolderDeny(bob) } };   // the shared rules (L750)
   const file = join(d, 'a-file'); writeFileSync(file, 'x');
   assert.equal(checkBobFolder({ folder: file, manifest, settings }).reason, 'the Bob folder is not a plain folder');
   assert.equal(checkBobFolder({ folder: bob, manifest: {}, settings }).reason, 'no pinned Bob file list');
