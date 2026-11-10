@@ -17,21 +17,31 @@
 // "## Built", "### 1. Built" and "### Built ✅" are all "Built". A section line that starts "N/A", "None" or "No
 // divergences found" always counts as the section's own text.
 //
+// A [C] section whose condition names the Capability Traceability Matrix ("required once the project keeps a
+// Capability Traceability Matrix": the Capability Scoreboard, and Wiring and Simplicity) is required like an [A]
+// section when the project keeps one (D-036). The project is the git folder the report sits in, or the report's own
+// folder outside git; the matrix is found by its heading (lib/capability-matrix.mjs). --matrix FILE names it instead.
+// Until 2026-11-04 nothing made those sections required, so a report that left them out still passed.
+//
 // --abbreviated checks the short report the Minimum Viable Process allows ("Full Phase Report — use abbreviated"):
 // only the sections on the template's "Short report:" line are required (read from there, so the list has one home).
 //
-// Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md> [--abbreviated] [--template FILE]
-// Exit: 0 = complete · 1 = REFUSED (each problem listed) · 2 = cannot run (no report, or the template is missing).
+// Usage: node "$(realpath ~/.claude/skills/bob/..)/scripts/phase-report-check.mjs" <phase-report.md> [--abbreviated] [--template FILE] [--matrix FILE]
+// Exit: 0 = complete · 1 = REFUSED (each problem listed) · 2 = cannot run (no report, the template or a named matrix is missing).
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { findMatrix } from './lib/capability-matrix.mjs';
 
 const args = process.argv.slice(2);
 const ti = args.indexOf('--template');
+const mi = args.indexOf('--matrix');
 const ABBREVIATED = args.includes('--abbreviated');
-const TEMPLATE = ti >= 0 ? args[ti + 1] : path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'templates', 'phase-report.md');
-const report = args.filter((a, i) => !a.startsWith('--') && (ti < 0 || i !== ti + 1))[0];
+const BOB_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const TEMPLATE = ti >= 0 ? args[ti + 1] : path.join(BOB_ROOT, 'templates', 'phase-report.md');
+const report = args.filter((a, i) => !a.startsWith('--') && (ti < 0 || i !== ti + 1) && (mi < 0 || i !== mi + 1))[0];
 
 function cannot(message) {
   process.stderr.write(`phase-report-check: ${message}\n`);
@@ -40,6 +50,18 @@ function cannot(message) {
 if (!report) cannot('usage: phase-report-check.mjs <phase-report.md> [--template FILE]');
 if (!fs.existsSync(report)) cannot(`no report at ${report} — nothing to check is not a pass (Rule 29)`);
 if (!fs.existsSync(TEMPLATE)) cannot(`template not found at ${TEMPLATE}`);
+if (mi >= 0 && !fs.existsSync(args[mi + 1] ?? '')) cannot(`no matrix at ${args[mi + 1] ?? '(none named)'}`);
+
+// Does the project keep a Capability Traceability Matrix?
+function projectMatrix() {
+  if (mi >= 0) return args[mi + 1];
+  const dir = path.dirname(path.resolve(report));
+  const top = spawnSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+  const root = top.status === 0 ? top.stdout.trim() : dir;
+  const m = findMatrix(root, { bobRoot: BOB_ROOT });
+  return m ? path.join(root, m.file) : null;
+}
+const MATRIX = projectMatrix();
 
 // "### [A] Global Invariant Check *(use …)*" → { kind: 'A', name: 'global invariant check' }
 // Any of "## Built", "### 1. Built", "### Built ✅" or "#### [A] Built (phase 3)" is the section "built".
@@ -96,6 +118,12 @@ const required = tplSections.filter((s) => s.kind === 'A' && (!ABBREVIATED || SH
 for (const s of required)
   if (!mine.some((m) => same(m.name, s.name)))
     problems.push(`missing the "${s.name}" section — the template marks it [A], always required${ABBREVIATED ? ' (even in a short report)' : ''}`);
+// [C] sections whose condition is the matrix, read from the template's heading lines (one home for the list).
+const MATRIX_SECTIONS = tpl.split('\n').filter((l) => /Capability Traceability Matrix/.test(l)).map(heading).filter((h) => h?.kind === 'C').map((h) => h.name);
+if (MATRIX)
+  for (const n of MATRIX_SECTIONS)
+    if (!mine.some((m) => same(m.name, n)))
+      problems.push(`missing the "${n}" section — required because this project keeps a Capability Traceability Matrix (${path.relative(process.cwd(), MATRIX) || MATRIX}; Phase Gates 16–17)`);
 
 for (const m of mine) {
   const tplName = [...kindOf.keys()].find((n) => same(m.name, n));
@@ -122,4 +150,4 @@ if (problems.length) {
   for (const p of problems) console.log(`  ✗ ${p}`);
   process.exit(1);
 }
-console.log(`phase-report-check: OK — ${report} has every required section filled in`);
+console.log(`phase-report-check: OK — ${report} has every required section filled in${MATRIX && MATRIX_SECTIONS.length ? ` (including ${MATRIX_SECTIONS.map((n) => `"${n}"`).join(' and ')}, since the project keeps a capability matrix)` : ''}`);
