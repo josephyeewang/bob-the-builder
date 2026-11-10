@@ -15,7 +15,9 @@
 //   `{ ok: false, reason }` means the outcome is known and nothing (more) happened. A port never answers ok: false while
 //   the outcome is unknown: it keeps waiting and lets the tick's limit answer, because pass.mjs reads only that limit's
 //   answer as "it may still start" (a launch that answers its own time-out could put a card back to ready while a session
-//   may be starting). This holds whether or not pass.mjs also reads timedOut. The stub below is the one exception to "never throws": it refuses by throwing, as every unwired port does.
+//   may be starting). This holds whether or not pass.mjs also reads timedOut. An async port does not throw, except
+//   pauseLead (its failure is a throw) and launch before its request is written (a throw reads as refused). The stub
+//   below refuses by throwing, as every unwired port does.
 
 import { PORT_DEADLINE_MS, SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { refusing } from './not-wired.mjs';
@@ -25,7 +27,7 @@ export const STATUS_STALE_MS = 180_000;   // L248: a status file older than 3 mi
 const sync = (inp, out, notKnown) => Object.freeze({ sync: true, in: inp, out, notKnown, deadlineMs: null });
 const ask = (inp, out, fails, deadlineMs) => Object.freeze({ sync: false, in: inp, out, fails, deadlineMs });
 const NO = 'throws (a status file is stale or unreadable)';
-const SESSION = '{ id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files }';
+const SESSION = '{ id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files }';   // kind: one of gate.mjs's kinds, which the start caps count by
 
 /** Each owner-side port: what goes in, what comes out, how a failure is answered, and its default time limit. */
 export const OWNER_PORTS = Object.freeze({
@@ -35,18 +37,18 @@ export const OWNER_PORTS = Object.freeze({
     'throws; the stop step reads that as "not at a safe point" (the late hard stop still applies). Never a partial size'),
   board: sync('()', '[{ id, card, alive, ended, lastWriteAt }]: the sessions meant to run (the outage step); lastWriteAt is epoch ms. An alive or ended the runner does not know is left out, never false',
     `${NO}; the outage step fails and is told`),
-  outboxSessions: sync('()', '[{ sessionId, role, outbox, uid, card, product, request? }]: each running worker\'s outbox, as its launch named it; uid is the Mac user that must own the outbox\'s files',
+  outboxSessions: sync('()', '[{ sessionId, role, outbox, uid, card, product, request? }]: every running session with an outbox, Mac-wide (workers, Leads, read-only helpers), merged in the wiring as for sessions; outbox as its launch named it; uid is the Mac user that must own the outbox\'s files; request is there only for a read-only request session, and narrows its hand-ins to report- files',
     `${NO}; intake fails and is told`),
-  stopSession: sync('(sessionId)', 'true only when everything started under that id is stopped, or nothing ran under it',
+  stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows everything started under that id stopped, or nothing ran under it',
     'false or a throw: the claim stays, and the owner is told once a day (M9 lapseClaims)'),
   launch: ask('({ card, kind, product, sessionId })',
-    '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id, in its own copy',
-    '{ ok: false, reason }: nothing was started (the claim is given back). Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
+    '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; outbox is <outboxRoot>/worker/<sessionId> and copy <copiesRoot>/<card>',
+    '{ ok: false, reason }: nothing was started (the claim is given back); a throw reads the same, so throw only before the request is written. Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
   stopGroup: ask('(session): works from { id, pgid } alone (pass.mjs also stops a session it just launched, not yet in any status)', '{ ok: true, how }: the session\'s process group is gone',
     '{ ok: false, reason }: it may still run', PORT_DEADLINE_MS),
   saveWork: ask('(session)', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down)', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
-  pauseLead: ask('({ product })', 'resolves: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow)',
-    'throws (rejects): pass.mjs ignores what it resolves to, so a refusal answered as { ok: false } would read as asked', PORT_DEADLINE_MS),
+  pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow)',
+    'throws (rejects): today pass.mjs ignores what it resolves to, so a refusal answered as { ok: false } would read as asked', PORT_DEADLINE_MS),
 });
 
 /**
@@ -54,9 +56,9 @@ export const OWNER_PORTS = Object.freeze({
  * cleanupCopy puts no time limit on saveWork, so that port keeps its own.
  */
 export const OWNER_CLEANUP_PORTS = Object.freeze({
-  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start; the orchestrate user must be able to list and read it (cleanupPass reads it directly)',
-    notKnown: 'the read throws: cleanupPass would read a missing or unreadable folder as nothing to do', deadlineMs: null }),
-  saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox',
+  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate list, read and delete there (an access list, as on the worker outboxes)',
+    notKnown: 'the read throws, never a folder that reads as empty', deadlineMs: null }),
+  saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox, which is orchestrate\'s private staging folder: the runner writes the bundle where orchestrate can read it, and the port (orchestrate-side) copies it into outbox',
     '{ ok: false, reason }, or { ok: false, timedOut: true, reason } at its own limit', SAVE_DEADLINE_MS),
 });
 
@@ -77,7 +79,9 @@ export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'at
 export function ownerPorts({ requestsDir, statusFile, clock = Date.now } = {}) {
   void requestsDir; void statusFile; void clock;
   const ports = Object.fromEntries(Object.keys(OWNER_PORTS).map((k) => [k, refusing(k)]));
-  const cleanup = { saveWork: refusing('cleanup.saveWork') };
-  Object.defineProperty(cleanup, 'copiesRoot', { enumerable: true, get: refusing('cleanup.copiesRoot') });
+  // Every cleanup member refuses when read, as worker-ports.mjs's do (L745): cleanupPass reads a folder it can't use as
+  // nothing to do, so a stand-in must never be readable.
+  const cleanup = {};
+  for (const k of Object.keys(OWNER_CLEANUP_PORTS)) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return { ports, cleanup };
 }

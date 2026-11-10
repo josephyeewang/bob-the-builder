@@ -22,8 +22,7 @@ test('L741: the stub refuses each port with the same text wire() uses, and copie
   const { ports, cleanup } = ownerPorts({ requestsDir: '/r', statusFile: '/s' });
   assert.deepEqual(Object.keys(ports).sort(), Object.keys(OWNER_PORTS).sort());
   for (const k of Object.keys(OWNER_PORTS)) assert.throws(() => ports[k]({}), { message: notWiredText(k) }, k);
-  assert.throws(() => cleanup.saveWork({}), { message: notWiredText('cleanup.saveWork') });
-  assert.throws(() => cleanup.copiesRoot, { message: notWiredText('cleanup.copiesRoot') });
+  for (const k of Object.keys(OWNER_CLEANUP_PORTS)) assert.throws(() => cleanup[k], { message: notWiredText(`cleanup.${k}`) }, `${k} refuses when read`);
   assert.deepEqual(Object.keys(cleanup).sort(), ['copiesRoot', 'saveWork']);
 });
 
@@ -31,7 +30,7 @@ test('L741: every port says what goes in, what comes out, and how it fails; sync
   for (const [k, s] of Object.entries({ ...OWNER_PORTS, ...Object.fromEntries(Object.entries(OWNER_CLEANUP_PORTS).map(([n, v]) => [`cleanup.${n}`, v])) })) {
     assert.equal(typeof s.in, 'string', k); assert.equal(typeof s.out, 'string', k);
     assert.equal(typeof (s.sync ? s.notKnown : s.fails), 'string', k);
-    assert.equal(s.deadlineMs, s.sync ? null : s.deadlineMs, k);
+    if (s.sync) assert.equal(s.deadlineMs, null, k);
     if (!s.sync) assert.ok([PORT_DEADLINE_MS, SAVE_DEADLINE_MS].includes(s.deadlineMs), k);
   }
   assert.equal(OWNER_PORTS.saveWork.deadlineMs, SAVE_DEADLINE_MS);
@@ -48,7 +47,7 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.ok(start > 0);
   const end = pass.indexOf('\n}\n', start); assert.ok(end > start);   // the starts loop's own function, not the rest of the file
   const body = pass.slice(start, end);
-  assert.doesNotMatch(body, /=\s*l\s*[;,)]|\.\.\.l\b|\(l\)/, 'the launch answer is read only as l.<field>, never handed on or destructured');
+  assert.deepEqual([...body.matchAll(/\bl\b(?!\??\.\w)/g)].map((m) => m.index), [body.indexOf('l = ')], 'the launch answer is read only as l.<field>, never handed on or destructured');
   const read = new Set([...body.matchAll(/\bl\??\.(\w+)/g)].map((m) => m[1]));
   const said = new Set(OWNER_PORTS.launch.out.match(/\{([^}]*)\}/)[1].split(',').map((x) => x.trim().split(':')[0].trim()).concat(['reason', 'timedOut']));
   const unsaid = [...read].filter((f) => !said.has(f));
@@ -79,9 +78,10 @@ test('L741/L744: the launch doc is what writeLaunch writes; branch, outbox and a
 
 test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs; sessions: pass.mjs; board: outage.mjs; outboxSessions: outbox-intake.mjs)', () => {
   const t = code('transcript.mjs');
-  const ret = t.match(/return \{ tokens, compactions, turnEnded, endedAt: [^,]+, openTools: [^}]+\};/); assert.ok(ret, 'readSize returns { tokens, compactions, turnEnded, endedAt, openTools }');
+  const ret = t.match(/export function readSize[\s\S]*?\n  return (\{[^\n]*\});\n\}/); assert.ok(ret, 'readSize\'s return');
+  assert.deepEqual([...ret[1].matchAll(/[{,]\s*(\w+)/g)].map((m) => m[1]), ['tokens', 'compactions', 'turnEnded', 'endedAt', 'openTools'], 'readSize returns a field the interface does not name');
   assert.match(OWNER_PORTS.probe.out, /size: \{ tokens, compactions, turnEnded, endedAt, openTools: \[ids\] \}, activity: \{ state \}/);
-  const safe = t.slice(t.indexOf('export function atSafePoint'));
+  const from = t.indexOf('export function atSafePoint'); const safe = t.slice(from, t.indexOf('\n}\n', from));
   const reads = new Set([...safe.matchAll(/\b(size|activity)\??\.(\w+)/g)].map((m) => `${m[1]}.${m[2]}`));
   assert.deepEqual([...reads].sort(), ['activity.state', 'size.openTools', 'size.turnEnded']);
   const pass = code('pass.mjs');
@@ -93,9 +93,17 @@ test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs
   for (const f of fields(board)) assert.match(OWNER_PORTS.board.out, new RegExp(`\\b${f}\\b`), f);
   const intake = code('outbox-intake.mjs').match(/`sessions`: the Dispatcher's session map, \[(\{[^\]]*\})\]/)[1];
   for (const f of fields(intake)) assert.match(OWNER_PORTS.outboxSessions.out, new RegExp(`\\b${f.replace('?', '\\?')}`), f);
+  // Intake reads Leads' and read-only helpers' hand-ins from this same list (outbox-intake.mjs), so a list of workers only
+  // would leave them unread, in silence (second self-review M1).
+  const it = code('outbox-intake.mjs');
+  assert.match(it, /s\.role === 'lead'/); assert.match(it, /if \(entry\.request\) return \['report-'\];/);
+  assert.match(OWNER_PORTS.outboxSessions.out, /every running session with an outbox, Mac-wide \(workers, Leads, read-only helpers\)/);
+  assert.match(OWNER_PORTS.outboxSessions.out, /request is there only for a read-only request session, and narrows its hand-ins to report- files/);
 });
 
-test('L741: pauseLead fails by throwing, because the pass ignores what it resolves to', () => {
-  assert.match(code('pass.mjs'), /await pauseLead\(\{ product \}\); return \{ ok: true \};/);
-  assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
+test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a failed pause, whether or not the pass reads the answer', () => {
+  const pass = code('pass.mjs');
+  const at = pass.indexOf('await guarded(async () => { await pauseLead('); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
+  assert.match(pass.slice(at, at + 800), /'pause_lead_failed'/);
+  assert.match(OWNER_PORTS.pauseLead.out, /^resolves \{ ok: true \}/); assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
 });
