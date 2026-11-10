@@ -231,6 +231,39 @@ for (const closeBetween of [true, false]) {
   });
 }
 
+// #285 r1 n1 (the auditor's probe): one step further on the same walk, O → E → S (E's clear lost) → E (lost again) → S →
+// the clear lands. The value stands at S, which is not the baseline O, so S's issue must be open at the end. (Only with
+// nobody closing: when Joe closes S's issue himself he has been told S, and the baseline stays S, so that is his call.)
+{
+  const closeBetween = false;
+  test(`#285 n1: a value that comes back while another value's clear is lost keeps its issue open (nobody closes anything)`, async () => {
+    const t = setup();
+    const F = 'commandForIgnoringBuildStep';
+    const h = (v) => createHash('sha256').update(JSON.stringify(v)).digest('hex').slice(0, 16);
+    const subj = (v) => `project:${F}:${h(v)}`;
+    t.v.s.project[F] = 'O';
+    await t.pass();
+    t.v.s.project[F] = 'E';
+    await t.pass();
+    if (closeBetween) ownerClosesAll(t.gh);
+    const realClear = t.alerts.clear; let lose = true;
+    t.alerts.clear = async (a) => (lose && a.key.endsWith(`|${subj('E')}`) ? false : realClear(a));
+    t.v.s.project[F] = 'S'; await t.pass();
+    if (closeBetween) ownerClosesAll(t.gh);
+    t.v.s.project[F] = 'E'; await t.pass();
+    t.v.s.project[F] = 'S'; await t.pass();
+    lose = false;
+    await t.pass();
+    await t.pass();
+    const fact = t.writer.get(stateFactId('product 1'));
+    assert.deepEqual(fact.unclear, []);
+    assert.equal(fact.settings[F], h('S'));
+    const open = [...t.gh.issues.values()].filter((i) => !i.closed);
+    assert.equal(open.length, 1, `one issue open for S: ${JSON.stringify([...t.gh.issues.values()].map((i) => [i.title, i.closed]))}`);
+    assert.match(open[0].body, /commandForIgnoringBuildStep changed/);
+  });
+}
+
 const sysOff = (out) => out.filter((o) => o.kind === 'system-vars-off');
 test('L716 Minor 1, 2: the box off, not reported, or "false" at the first pass is told, with its own words', async () => {
   for (const [value, words] of [[false, /are off/], ['false', /are off/], [undefined, /did not report/], [null, /did not report/], ['yes', /did not report/]]) {
