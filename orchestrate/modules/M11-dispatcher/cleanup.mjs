@@ -310,7 +310,7 @@ export function sweepStaging(sealRoot, now) {
  *   product's folder that is a link: no product's work can be in it;
  * - a product folder whose product record can't be read or is damaged: its copies are kept, and may be that product's
  *   unpushed work, so the notice says never to delete them.
- * A product-shaped name the Record holds no product for is kept and not told: each product's Dispatcher has its own
+ * A product-shaped name the Record holds no product for is kept, in no notice: each product's Dispatcher has its own
  * Record, so that is most often another product's own folder.
  */
 export const COPIES_NOT_PRODUCT_CAUSE = 'copies-not-a-product';
