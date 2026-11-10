@@ -180,7 +180,8 @@ export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   // A job file placed before still starts at boot; say so (the gate's own lines stay first, as load's).
   const live = (j) => { try { return jobLive(io, cfg, j); } catch { return null; } };   // the gate already refuses; this line only helps
   // Only a job whose own checks fail: a healthy job starting at boot is fine, and taking the review runner out would stop
-  // the very run check-dispatcher waits on (r1 M1).
+  // the very run check-dispatcher waits on (r1 M1). The per-job lists together equal the whole-set gate (startProblems
+  // checks each job on its own, plus the install, which every job's list carries), so a broken install names every placed job, as the gate refuses them all (r2 c-1).
   const left = jobs.filter((j) => startProblems(io, cfg, [j]).length && live(j) !== null).map((j) => `${j}'s job file ${plistPath(cfg, j)} is still in place and launchd starts it at boot: sudo node setup.mjs daemons unload --only ${j}, then delete it`);
   return { ops: [], problems: [...gate, ...left] };
 }
@@ -337,13 +338,22 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
   // It is about the whole set, so a check narrowed with --only leaves it out.
   let names = []; try { names = io.list(DAEMON_DIR); } catch { /* the folder itself is checked by place */ }
   const subset = jobs.length < jobsFor(cfg).length;
-  const strayRe = new RegExp(`^(.+)\\.(${ALL_JOBS.join('|')})\\.plist$`);
+  const strayRe = new RegExp(`^([^.].*)\\.(${ALL_JOBS.join('|')})\\.plist$`);   // a hidden file is no job file (r2 review)
   const stray = subset ? [] : names.filter((n) => { const m = strayRe.exec(n); return m && m[1] !== cfg.label; });
   item(stray.length === 0, `no job file in ${DAEMON_DIR} under another label than ${cfg.label}`, `${stray.join(', ')}: a leftover set of jobs (take them out with daemons unload under the old label, then delete the files)`, subset);
-  // A side file a cut-off write left (writeAside: `.<label>.<job>.plist.new`), under any label (r1 m1).
+  // A side file a cut-off write left (writeAside: `.<label>.<job>.plist.new`) (r1 m1). This label's, for each job checked
+  // (under --only too, r2 N4), gets a paste-ready rm, each path single-quoted (r2 N2); another label's only under the whole
+  // set, and only named: setup cannot tell it wrote that one, so the line says to check first (r2 N3).
+  const ownSide = new Set((subset ? jobs : ALL_JOBS).map((j) => `.${cfg.label}.${j}.plist.new`));
   const sideRe = new RegExp(`^\\.(.+)\\.(${ALL_JOBS.join('|')})\\.plist\\.new$`);
-  const sides = subset ? [] : names.filter((n) => sideRe.test(n));
-  item(sides.length === 0, `no half-written job file in ${DAEMON_DIR}`, `${sides.join(', ')}: left by a write that was cut off; delete ${sides.length === 1 ? 'it' : 'them'} (sudo rm ${sides.map((n) => join(DAEMON_DIR, n)).join(' ')})`, subset);
+  const own = names.filter((n) => ownSide.has(n)).sort();
+  const other = subset ? [] : names.filter((n) => !ownSide.has(n) && sideRe.test(n)).sort();
+  const q = (p) => `'${p.replace(/'/g, `'\\''`)}'`;
+  const sideWhy = [
+    ...(own.length ? [`${own.map((n) => join(DAEMON_DIR, n)).join(', ')}: left by a write that was cut off; delete ${own.length === 1 ? 'it' : 'them'}: sudo rm ${own.map((n) => q(join(DAEMON_DIR, n))).join(' ')}`] : []),
+    ...(other.length ? [`${other.map((n) => join(DAEMON_DIR, n)).join(', ')}: under another label than ${cfg.label}; check ${other.length === 1 ? 'it is' : 'they are'} setup's (a write cut off under an old label) before deleting ${other.length === 1 ? 'it' : 'them'}`] : []),
+  ];
+  item(sideWhy.length === 0, `no half-written job file${subset ? ` for ${jobs.join(', ')}` : ''} in ${DAEMON_DIR}`, sideWhy.join('; '));   // --only: the row names its jobs, as every row then does
   // Each job the config leaves off: none placed or loaded (listed only when there is one).
   const offWhy = { 'watch-only': 'the config names no rules fingerprint', [ROBOT_JOB]: 'the config does not turn the robot job on', [DISPATCHER_JOB]: 'the config has no dispatcher entry' };
   for (const off of subset ? [] : OPTIONAL_JOBS.filter((j) => !jobsFor(cfg).includes(j))) {

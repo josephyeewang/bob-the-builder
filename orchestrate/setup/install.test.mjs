@@ -1543,17 +1543,34 @@ test('r1 M1: a refused full place names only the placed jobs whose own checks fa
   for (const job of [...JOBS, 'dispatcher']) assert.match(all.text, new RegExp(`${job}'s job file .* is still in place`), job);
 });
 
-test('r1 m1: daemons check names a half-written job file a cut-off write left, under any label', async () => {
+test('r1 m1, r2 N2-N4: daemons check names a half-written job file; this label\'s get a quoted rm line, another label\'s only a check-first line', async () => {
   const w = await placed();
-  const row = () => checkDaemons(w.mac, w.cfg).find((i) => i.what.startsWith('no half-written job file'));
+  const D = '/Library/LaunchDaemons';
+  const row = (jobs) => checkDaemons(w.mac, w.cfg, jobs).find((i) => i.what.startsWith('no half-written job file'));
+  const put = (n) => writeFileSync(w.mac.at(`${D}/${n}`), 'x'); const del = (n) => rmSync(w.mac.at(`${D}/${n}`));
   assert.equal(row().ok, true);
-  for (const name of [`.${LABEL}.review-runner.plist.new`, '.old.label.dispatcher.plist.new']) {
-    writeFileSync(w.mac.at(`/Library/LaunchDaemons/${name}`), 'x');
-    const i = row(); assert.equal(i.ok, false, name); assert.match(i.why, new RegExp(`${name.replace(/\./g, '\\.')}: left by a write that was cut off; delete it \\(sudo rm /Library/LaunchDaemons/`));
-    rmSync(w.mac.at(`/Library/LaunchDaemons/${name}`));
+  const mine = `.${LABEL}.review-runner.plist.new`; const theirs = '.old.label.dispatcher.plist.new';
+  const rmLine = `${D}/${mine}: left by a write that was cut off; delete it: sudo rm '${D}/${mine}'`;
+  const checkLine = `${D}/${theirs}: under another label than ${LABEL}; check it is setup's (a write cut off under an old label) before deleting it`;
+  put(mine); assert.deepEqual(row(), { ok: false, what: `no half-written job file in ${D}`, why: rmLine }, 'the whole line, each path quoted (N2)');
+  put(theirs); assert.equal(row().why, `${rmLine}; ${checkLine}`);
+  del(mine); assert.equal(row().why, checkLine, 'another label\'s file gets no rm line (N3)');
+  del(theirs); assert.equal(row().ok, true);
+  const two = `.${LABEL}.dispatcher.plist.new`; put(mine); put(two);
+  assert.equal(row().why, `${D}/${two}, ${D}/${mine}: left by a write that was cut off; delete them: sudo rm '${D}/${two}' '${D}/${mine}'`, 'several, sorted, each quoted');
+  // --only: this label's side file of a job checked is still named (N4); another job's, and another label's, are not.
+  assert.deepEqual(row(['review-runner']), { ok: false, what: `no half-written job file for review-runner in ${D}`, why: rmLine }, 'under --only, the checked job\'s side file');
+  del(mine); put(theirs);
+  assert.deepEqual(row(['review-runner']), { ok: true, what: `no half-written job file for review-runner in ${D}` }, 'under --only, another job\'s and another label\'s are left out');
+  del(two); del(theirs);
+  const also = '.older.label.review-runner.plist.new'; put(theirs); put(also);
+  assert.equal(row().why, `${D}/${theirs}, ${D}/${also}: under another label than ${LABEL}; check they are setup's (a write cut off under an old label) before deleting them`, 'several of another label\'s');
+  del(theirs); del(also);
+  // Names that are not a side file: the end anchor (K10) and other dot-files (K11).
+  for (const n of [`${mine}.bak`, `${mine}x`, `.${LABEL}.review-runner.plist`, '.DS_Store', '.old.label.notajob.plist.new', `${LABEL}.review-runner.plist.new`]) {
+    put(n); assert.equal(row().ok, true, n);
+    assert.equal(checkDaemons(w.mac, w.cfg).find((i) => i.what.startsWith('no job file in')).ok, true, `${n}: no job file under another label either`); del(n);
   }
-  assert.equal(row().ok, true);
-  assert.equal(checkDaemons(w.mac, w.cfg, ['review-runner']).find((i) => i.what.startsWith('no half-written')), undefined, 'a check narrowed with --only leaves it out, as the label row');
 });
 
 test('r1 c1: check counts the dispatcher entry on only when its parser takes it, so a broken one names a leftover base dispatcher.json', async () => {
