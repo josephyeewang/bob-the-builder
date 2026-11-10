@@ -7,11 +7,15 @@
   "tools": [
     "Read",
     "Glob",
-    "Grep"
+    "Grep",
+    "Write"
   ],
   "permission_mode": "dontAsk",
   "restricted_mode": false,
   "outbox_kinds": [],
+  "outbox_files": [
+    "answer.txt"
+  ],
   "auto_resume": false,
   "context": "context.plan_reviewer"
 }

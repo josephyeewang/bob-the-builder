@@ -86,7 +86,7 @@ import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
 import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
-import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
+import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -277,6 +277,34 @@ export function readCardFile({ recordRoot, recordUid, card }) {
 }
 
 /**
+ * Where a plan reviewer's plan is (L703): the Lead outbox file intake applied with this sha256, from the Record's own
+ * note of it (docs/fact/intake-applied-<session>-<name>.json, state `applied`). The path only says where to look: the
+ * runner reads that file once and refuses it unless its bytes hash to the card's plan_sha256 (review-runner.mjs
+ * packagePlan), so a note that points elsewhere starts nothing. → { ok: true, path } | { ok: false, reason }
+ */
+export function recordPlanFile({ recordRoot, recordUid, outboxRoot, plan_sha256 }) {
+  if (typeof plan_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(plan_sha256)) return { ok: false, reason: 'the card names no plan sha256' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'fact')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  const dir = join(recordRoot, 'docs', 'fact');
+  let names;
+  try { names = readdirSync(dir).filter((n) => n.startsWith('intake-applied-') && n.endsWith('.json')).sort(); } catch (e) { return { ok: false, reason: `the fact folder could not be listed (${e?.code ?? e?.message})` }; }
+  for (const n of names) {
+    const r = readRecordFile(join(dir, n), recordUid, 'fact', n.slice(0, -'.json'.length), 'it is gone');
+    const d = r.ok ? r.doc : null;
+    if (d?.state !== 'applied' || d.sha256 !== plan_sha256) continue;
+    if (typeof d.session !== 'string' || !SESSION_ID.test(d.session) || typeof d.name !== 'string' || !PLAN_NAME.test(d.name)) continue;
+    if (n !== `intake-applied-${d.session}-${d.name}.json`) continue;
+    return { ok: true, path: join(outboxRoot, 'lead', d.session, d.name) };
+  }
+  return { ok: false, reason: `the Record notes no plan applied with sha256 ${plan_sha256.slice(0, 12)}` };
+}
+// A plan file's name in a Lead's outbox (M9 OUTBOX_NAME, kind plan-): never a path.
+const PLAN_NAME = /^plan-[A-Za-z0-9-]+\.(md|json|txt)$/;
+
+/**
  * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
  * that role, card and head, whose file in review's outbox still reads true (M9 `verdictFromFile`). → { ok: true } |
  * { ok: false, reason }. A Record that can't be read throws. The runner only tells Joe what this says, and never starts
@@ -423,6 +451,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    planFile: ({ plan_sha256 }) => recordPlanFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, plan_sha256 }),
     // The Dispatcher's own rules key, for how long a request may go unrenewed (R-0b-171). The key is per product; a request
     // that names no card has none, so it takes the longest. With no budget module it throws, and the runner then ends
     // nothing on silence; no review starts then either, and each refusal says so.
@@ -432,6 +461,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const listed = budget.rec.list('product');
       return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
     },
+    // The Dispatcher's own read-only cap for a product (L735 M1), which the runner keeps for plan reviewers across every
+    // product. With no budget module it throws, and no plan reviewer starts.
+    planReviewCap: (product) => need(budget.rules, KEYS.readonlyPerSession, { product }),
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });

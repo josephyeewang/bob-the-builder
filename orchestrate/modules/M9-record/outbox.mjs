@@ -81,7 +81,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { CHECKLIST_LEVELS, FINDING_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
-import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
 export const MAX_OUTBOX_BYTES = 256 * 1024;
@@ -92,13 +92,15 @@ export const LAUNCH_NAME = /^([A-Za-z0-9-]{1,128})\.json$/;
 export const CARD_ID = /^(?!.*\.\.)[A-Za-z0-9._-]{1,200}$/;
 const HEX40 = /^[0-9a-f]{40}$/;
 
-// Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate.
+// Is the review user a separate Mac user? null when it is, else the reason (L44). Also used by the Merge Gate. Every role
+// the review runner starts runs as it (RUNNER_ROLES, L691), so the plan reviewer sharing it is not "shared"; verdicts
+// below still take REVIEW_ROLES only.
 export function reviewUserProblem(uids, role) {
-  if (!REVIEW_ROLES.includes(role)) return `${role} is not a review role`;
+  if (!RUNNER_ROLES.includes(role)) return `${role} is not a review role`;
   const own = uids?.[role];
   if (!Number.isInteger(own)) return `no review user configured for ${role}`;
   if (own === 0) return 'the review user may not be root';
-  const shared = Object.entries(uids ?? {}).filter(([r, u]) => !REVIEW_ROLES.includes(r) && u === own).map(([r]) => r);
+  const shared = Object.entries(uids ?? {}).filter(([r, u]) => !RUNNER_ROLES.includes(r) && u === own).map(([r]) => r);
   if (shared.length) return `the review user is not a separate Mac user (shared with ${shared.join(', ')})`;
   return null;
 }

@@ -19,9 +19,15 @@ import { fileURLToPath } from 'node:url';
 import { LABEL, SCRIPTS } from '../modules/M4-workshop/launcher/review-daemons.mjs';
 import { MODULE_HOMES, NODE, RUNNER_CONFIG, RUNNER_MODULES, STAMP, UPDATER_CONFIG, aclProblem, copyModuleProblem, currentCopy, installProblem, readInstallStamp } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { MUST_KEEP, RUNNER_NAMES } from '../modules/M4-workshop/launcher/review-updater.mjs';
+import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
+import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
+import { reviewUserProblem } from '../modules/M9-record/outbox.mjs';
+import { PLAN_REVIEW_ROLE, RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { parseConfig } from './layout.mjs';
+import { readUser } from './users-folders.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const KNOWN_ROLES = Object.freeze([...new Set([...Object.keys(DESIGN_PROFILES), ...RUNNER_ROLES])]);
 export const ORCH_ROOT = join(HERE, '..');   // this repository's orchestrate/ folder
 // The updater's module set, relative to orchestrate/ (review-updater.mjs imports the other two by these relative paths).
 const UPDATER_DIR = posix.dirname(SCRIPTS.updater);
@@ -94,6 +100,60 @@ export function updaterConfigFor(io, cfg) {
 }
 
 /**
+ * L726: the runner config's role-to-user map (`uids`), written by hand, must name every role the runner checks
+ * (M4's uidsProblem with the plan reviewer asked for: the design table and RUNNER_ROLES), and every role the runner starts
+ * must name the one `review` user, review's own uid. Each runner role also passes M9's reviewUserProblem, the rule the runner
+ * applies when it starts a session (not root, not shared with another role), and no other role may be root (L737 m1). A map
+ * without plan_reviewer would make the runner refuse every plan review on the Mini. When the review user can't be read the
+ * map can't be checked, and that is said, never passed (L737 m2). Null, or what to put right (never quoting the file).
+ */
+export function runnerUidsProblem(io, uids) { return runnerUids(io, uids).why; }
+
+/**
+ * runnerUidsProblem's answer with `unknownOnly`: true when the one thing wrong is a key no role is called, which the runner
+ * does not read as a role (check-install says so as a WARNING). A flag, never a match on the message, which quotes the
+ * keys as typed. A key no role is called that carries review's id is not harmless: the runner counts it as a second role
+ * sharing the review user and refuses every review (M9 reviewUid reads the whole map), so that FAILS.
+ */
+function runnerUids(io, uids) {
+  const said = (why) => ({ why, unknownOnly: false });
+  const fix = 'add each as "<role>": <its Mac user id> (every role the runner starts names review\'s)';
+  const why = uidsProblem(uids, { plan: true }); if (why) return said(`review.json: ${why}; ${fix}`);
+  const unknown = Object.keys(uids).filter((k) => !KNOWN_ROLES.includes(k));
+  const extra = unknown.length ? ` (it also names ${unknown.join(', ')}, which no role is called)` : '';
+  const ids = new Set(RUNNER_ROLES.map((r) => uids[r]));
+  if (ids.size !== 1) return said(`review.json: ${RUNNER_ROLES.join(', ')} must all name the one review user's id${extra}`);
+  const known = Object.fromEntries(Object.entries(uids).filter(([k]) => KNOWN_ROLES.includes(k)));   // a misspelt key is named below, never read as a role
+  for (const r of RUNNER_ROLES) { const bad = reviewUserProblem(known, r); if (bad) return said(`review.json: ${r}: ${bad}; every role the runner starts names review's id, which no other role names${extra}`); }
+  const root = Object.keys(uids).filter((k) => uids[k] === 0);
+  if (root.length) return said(`review.json: ${root.join(', ')} may not be root (0); name the owner's id${extra}`);
+  const review = readUser(io, 'review');
+  if (!review.exists) return said(`review.json: couldn't read the review user (${review.error ?? 'there is no Mac user called review'}), so the map can't be checked against it; run users-folders first, then this again`);
+  if (uids[RUNNER_ROLES[0]] !== review.uid) return said(`review.json: ${RUNNER_ROLES.join(', ')} must name ${review.uid}, review's id${extra}`);
+  const sharing = unknown.filter((k) => uids[k] === review.uid);
+  if (sharing.length) return said(`review.json: it names ${sharing.join(', ')}, which no role is called, with review's id ${review.uid}; the runner reads that as another role sharing the review user and refuses every review; take ${sharing.length > 1 ? 'them' : 'it'} out or fix the spelling`);
+  if (!unknown.length) return { why: null, unknownOnly: false };
+  return { why: `review.json: it names ${unknown.join(', ')}, which no role is called; take ${unknown.length > 1 ? 'them' : 'it'} out or fix the spelling`, unknownOnly: true };
+}
+
+/**
+ * L737 M1: an install made before the plan reviewer existed has a copy whose review.json leaves out only plan_reviewer, and
+ * the updater carries that file forward on every update. check-install says so as a WARNING, not a FAIL, so the jobs still
+ * load (the runner still does reviews and audits; it refuses plan reviews). Anything else wrong with the map stays a FAIL.
+ * Null (the map does not lack only plan_reviewer), { warn } with the steps that put it right, or { fail } when the rest
+ * of that old map is wrong too (the other problem first: adding plan_reviewer alone would not put it right).
+ */
+export function planReviewerOnlyMissing(io, uids, installRoot) {
+  if (!uids || typeof uids !== 'object' || (Number.isInteger(uids[PLAN_REVIEW_ROLE]) && uids[PLAN_REVIEW_ROLE] >= 0) || uidsProblem(uids) !== null) return null;
+  const rest = runnerUids(io, { ...uids, [PLAN_REVIEW_ROLE]: uids[RUNNER_ROLES[0]] });
+  if (rest.why !== null && !rest.unknownOnly) return { fail: `${rest.why} (it also leaves out ${PLAN_REVIEW_ROLE})` };
+  const also = rest.unknownOnly ? `. Also, ${rest.why.replace(/^review\.json: /, '')}` : '';
+  return { warn: `the copy's review.json leaves out ${PLAN_REVIEW_ROLE}, so the runner refuses every plan review (reviews and audits still run). `
+    + `Re-running install does not change it (the copy is kept, and every update carries its review.json forward). To put it right: add "${PLAN_REVIEW_ROLE}": <review's id> `
+    + `to the uids of your checked review.json, then sudo install -o root -g wheel -m 0644 <that file> ${installRoot}/${RUNNER_CONFIG}, then check-install again${also}` };
+}
+
+/**
  * What the install does: { ops, problems, installed }. Reads only. `readSource(path)` reads a file of this machine outside
  * the prefix (the runner config) and `runUpdater(io, {node, script, config, seed})` is the updater's first run (ports for a test).
  */
@@ -109,6 +169,7 @@ export function planInstall(io, cfg, { readSource, runUpdater }) {
   try { rcText = readSource(cfg.runnerConfig); } catch (e) { problems.push(`${e.message} (${cfg.runnerConfig})`); }   // the reader's messages never quote the file
   if (rcText !== null) { try { rc = JSON.parse(rcText); } catch { problems.push(`the runner config ${cfg.runnerConfig} is not valid JSON`); } }   // never the parser's message: it quotes the file
   if (rc && (typeof rc !== 'object' || rc.installRoot !== io.at(P.installRoot))) problems.push(`the runner config's installRoot must be ${io.at(P.installRoot)}`);
+  if (rc && typeof rc === 'object') { const why = runnerUidsProblem(io, rc.uids); if (why) problems.push(why); }
   const names = rc ? RUNNER_NAMES.filter((n) => typeof rc[n] === 'string') : [];
   const inCopy = io.at(P.installRoot);
   for (const n of names) {
@@ -185,6 +246,14 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   item(acl === null, `none of the ${dirs.length} install folders has an access list`, acl);
   let rc = null; try { rc = JSON.parse(io.readText(join(P.installRoot, RUNNER_CONFIG))); } catch { /* reported below */ }
   item(rc !== null && rc.installRoot === root, 'the copy\'s review.json is JSON and names this copy', 'unreadable or names another installRoot');
+  if (rc !== null) {
+    const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
+    const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);
+    // A key no role is called, with every real key right, is a WARNING, so the jobs still load: the runner does not read it
+    // as a role (unless it carries review's id, which runnerUids FAILS).
+    const now = old?.warn || old?.fail ? null : runnerUids(io, rc.uids);
+    if (old?.warn || now?.unknownOnly) out.push({ ok: true, warn: true, what, why: old?.warn ?? now.why }); else item((old?.fail ?? now.why) === null, what, old?.fail ?? now.why);
+  }
   for (const n of RUNNER_NAMES) if (rc && typeof rc[n] === 'string') { let here = true; try { io.lstatReal(rc[n]); } catch { here = false; } item(here, `review.json's ${n} exists in the copy`, `${rc[n]} is missing`); }
   return out;
 }
