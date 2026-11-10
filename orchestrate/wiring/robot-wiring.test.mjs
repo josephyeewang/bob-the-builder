@@ -574,6 +574,48 @@ test('L771 Minor 1: two takers over one dead lock: only one breaks it and holds;
   assert.deepEqual([r.ok, r.code], [false, 0], r.line);
   assert.equal(JSON.parse(readFileSync(f, 'utf8')).pid, 5001);
   a3.release();
+  // L785 M1: in order (b) the taker that holds tells the broken dead lock (above: a2). Re-run it and check `broke`.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const a4 = takePassLock(f, { pid: 5001, now: at, dead: (p) => { if (existsSync(f)) renameSync(f, bMoved); return isDead(p); } });
+  rmSync(bMoved, { force: true });
+  assert.deepEqual([a4.ok, a4.broke?.pid, a4.broke?.taken_at], [true, DEAD.pid, DEAD.taken_at], 'the holder tells the dead lock another taker broke');
+  a4.release();
+  // L785 m2: the re-check compares taken_at too. The dead pid is in a lock taken again (a reused pid, a new time) between the
+  // judgment and the move: that lock is put back, never deleted.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const again = { pid: DEAD.pid, taken_at: new Date(at).toISOString() };
+  const r2 = takePassLock(f, { pid: 5002, now: at, dead: (p) => { writeFileSync(f, JSON.stringify(again), { mode: 0o600 }); return isDead(p); } });
+  assert.equal(r2.ok, false, 'refused');
+  assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), again, 'the lock taken again is put back');
+  assert.deepEqual(leftover(), []);
+  rmSync(f, { force: true });
+});
+
+// L785 m1: a round whose take moved a live lock and could not put it back (two rounds may run) tells Joe, once a day.
+test('L785 m1: robot-main tells a moved, not-put-back live lock through the held alert', async () => {
+  const w = world();
+  const f = lockOf(w);
+  writeFileSync(f, JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }), { mode: 0o600 });
+  // At the take's move: another taker has just broken the dead lock and linked its own (A), and a third (C) links into the
+  // place as soon as A's lock is moved out, so the put-back finds C there.
+  const realRename = fs.renameSync; let moves = 0;
+  fs.renameSync = (src, dst, ...rest) => {
+    if (String(src) === f && String(dst).endsWith('.dead') && moves === 0) {
+      moves += 1;
+      writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date().toISOString() }));
+      realRename(src, dst, ...rest);
+      writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() + 1).toISOString() }));
+      return;
+    }
+    return realRename(src, dst, ...rest);
+  };
+  syncBuiltinESMExports();
+  const logs = []; let code;
+  try { code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => ({ sent: 0 }), fetchFn: fakeGitHubFetch(w.fake) } }); }
+  finally { fs.renameSync = realRename; syncBuiltinESMExports(); }
+  assert.equal(moves, 1, 'the take moved a lock');
+  assert.equal(code, 3, logs.join('\n'));
+  assert.ok(queued(readRecord(w)).some((t) => /two robot job rounds may be running at once/.test(t)), JSON.stringify(queued(readRecord(w))));
 });
 
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────

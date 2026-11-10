@@ -396,6 +396,11 @@ export async function runTick({ lockFile, lock = takePassLock, ...args }) {
   }
   if (!l.ok) {
     note(args.rec, 'pass-lock-note', `a pass did not run: ${l.reason}`, { now: args.now });
+    // A live lock moved while breaking a dead one and not put back: two passes may now run (L785 m1). Told, once a day.
+    if (l.moved_live) {
+      try { holdAlert({ rec: args.rec, cause: 'pass-lock-moved', text: `two Dispatcher passes may be running at once: ${l.reason}. If it repeats, check for two running passes`, alert: outbox(args.rec, args.now), now: args.now }); }
+      catch { /* the record is unwritable: the note above is what is left */ }
+    }
     return { ran: false, reason: l.reason };
   }
   try { return { ran: true, ...(await tick(args)) }; } finally { l.release(); }

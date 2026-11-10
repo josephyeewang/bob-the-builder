@@ -94,7 +94,8 @@ export function takeRoundLock(file, { now, maxHeldMs, state = pidState }) {
     return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${l.reason}, and ${why}; if no robot round is running (check pid ${l.held?.pid} is not one), delete ${file}` };
   }
   const cause = seen === 'foreign' ? `${l.reason}, a process that is not this job's user's` : l.reason;
-  return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}` };
+  // `moved_live`: a live lock moved while breaking a dead one and not put back, so two rounds may run (L785 m1).
+  return { ok: false, code: LOCK_REFUSED, line: `robot: cannot take its lock ${file}: ${cause}`, ...(l.moved_live ? { moved_live: true } : {}) };
 }
 
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
@@ -120,13 +121,17 @@ export async function main(argv, { now = () => Date.now(), log = (s) => process.
   const { rec, passes } = wired;
   const limit = config.runDeadlineMs ?? RUN_DEADLINE_MS;
   const taken = takeRoundLock(config.lockFile, { now: now(), maxHeldMs: limit + WATCHDOG_MARGIN_MS + 60_000 });
-  if (!taken.ok) { log(taken.line); dog?.terminate(); return taken.code; }
-  const l = taken.lock;
   // One tell, with its refusal logged (L130 m12): a queue that answers false or throws is never silent.
-  const tell = (what, text) => {
-    try { if (hold({ rec, cause: 'robot-run-late', text, alert: outbox(rec, now()), now: now() }) === false) log(`robot: ${what} ${NOT_QUEUED}`); }
+  const tell = (what, text, cause = 'robot-run-late') => {
+    try { if (hold({ rec, cause, text, alert: outbox(rec, now()), now: now() }) === false) log(`robot: ${what} ${NOT_QUEUED}`); }
     catch (e) { log(`robot: ${what} could not be told: ${e?.message ?? e}`); }
   };
+  if (!taken.ok) {
+    log(taken.line);
+    if (taken.moved_live) tell('the moved lock', `two robot job rounds may be running at once: ${taken.line}. If it repeats, check for two running rounds`, 'robot-lock-moved');
+    dog?.terminate(); return taken.code;
+  }
+  const l = taken.lock;
   let timer; let keepLock = false;
   try {
     if (l.broke) tell('the stopped round', `the last robot job round (taken ${l.broke.taken_at ?? 'at an unknown time'}) was stopped before it finished; this round runs as usual`);

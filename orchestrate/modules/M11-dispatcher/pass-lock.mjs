@@ -16,9 +16,14 @@
 // moved it first) tries the link again. One that moved a lock that is not the dead one (another broke it and linked a live
 // lock in between) puts it back and refuses. Deleting it after the check, as before, could delete a live lock another taker
 // had just linked, and both passes ran.
-// Known limits: a third taker that links in the instant a moved live lock is out of place, or a put-back that fails, leaves
-// two passes running; and a holder that releases in that instant has its lock put back, so a later pass breaks it and says
-// a pass was stopped. Each needs takers inside microseconds over a dead lock; a failed put-back says so (`moved_live`).
+// Known limits, each needing takers inside microseconds over one dead lock:
+// - A third taker that links in the instant a moved live lock is out of place, or a put-back that fails, leaves two passes
+//   running. The refusal carries `moved_live`, and both callers (tick.mjs runTick, robot-main) tell Joe, once a day (L785 m1).
+// - release() still reads, then deletes (L785 m3): a holder whose lock another taker moved after the read, while a third
+//   linked into the place, deletes that third's live lock, and the third runs with no lock in place.
+// - A put-back of a lock its holder has since released leaves that lock behind, so a later pass breaks it and says a pass
+//   was stopped (one false tell). It needs the mover to stall across the holder's whole pass: it read the dead lock before
+//   the holder broke it, and moved the holder's lock only after the holder released.
 
 import { openSync, writeSync, closeSync, readFileSync, unlinkSync, linkSync, renameSync } from 'node:fs';
 
@@ -56,7 +61,9 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
       const moved = `${file}.${pid}.dead`;
       try { unlinkSync(moved); } catch { /* none left from a crash */ }
       try { renameSync(file, moved); } catch (e) {
-        if (e?.code === 'ENOENT') continue;   // another taker moved it first: try the link again
+        // Another taker moved it first: try the link again. `held` was judged dead and a dead holder never releases, so
+        // only a breaker moved it: the dead lock was broken, and whichever taker holds tells it (L785 M1).
+        if (e?.code === 'ENOENT') { broke = held; continue; }
         return { ok: false, reason: 'could not break a dead pass lock' };
       }
       let was = null; try { was = JSON.parse(readFileSync(moved, 'utf8')); } catch { /* checked below */ }

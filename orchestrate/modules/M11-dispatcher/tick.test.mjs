@@ -1666,3 +1666,17 @@ test('L596 O7: a Lead whose send throws, not a rules error, is skipped by name, 
   assert.deepEqual(r.steps.leads.result[1], ['L-1', 'WRAP sent']);
   assert.ok(w.calls.alerts.some((a) => /the Lead L-B \(product p1\) was skipped this pass: the pane is gone/.test(a)), w.calls.alerts.join(' | '));
 });
+
+// L785 m1: a refusal that moved a live lock and could not put it back (two passes may run) is told to Joe through the held
+// alert, once a day, not only noted in the record.
+test('L785 m1: runTick tells a moved, not-put-back live lock (moved_live) once a day; a plain refusal is not told', async () => {
+  const w = world([account(), usage()]);
+  const told = () => (w.rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? []).filter((e) => /two Dispatcher passes may be running at once/.test(e.text)).length;
+  const plain = await runTick({ lockFile: '/unused', lock: () => ({ ok: false, reason: 'another pass runs (pid 7)' }), rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports });
+  assert.equal(plain.ran, false); assert.equal(told(), 0);
+  const moved = () => ({ ok: false, reason: 'another pass runs (pid 7); its lock was moved while breaking a dead one and a third took the place', moved_live: true });
+  assert.equal((await runTick({ lockFile: '/unused', lock: moved, rec: w.rec, rules: rulesWith({}, allow), now: T0, ports: w.ports })).ran, false);
+  assert.equal(told(), 1, 'told');
+  await runTick({ lockFile: '/unused', lock: moved, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports });
+  assert.equal(told(), 1, 'once a day');
+});
