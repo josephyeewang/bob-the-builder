@@ -49,6 +49,8 @@ import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, holdsDelivered, sendA
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { clearHeldFlag, heldCut, heldHolders, isOwnHolder, markSent, readHeldFlag, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { cleanOutside } from '../M12-sensors/escape.mjs';
+import { storeWords } from './store-stopped.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
 /** The record_locked issue's marker for one product (two products may share a repository). */
@@ -122,6 +124,8 @@ const once = (token) => {
  * latestOwnComment(n, since) → the robot's latest comment since that ISO time, as { at, body }; null when there is none;
  * false when GitHub refused a read or there are too many comments to read them all.
  * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell the owner what GitHub said.
+ * `lastServerTime` is GitHub's own time on its latest answer (its Date header), in ms, or null (L768). read also gives the
+ * issue's created_at, GitHub's time it was opened, or null.
  * `loginTrouble` says why the robot's login is unknown, in which case any bot counts as the robot; null when it is known,
  * and null until the first call: `ready` makes sure of one.
  * A missing token throws "alert channel not set up: …". Host fixed; the repository is checked once, here.
@@ -132,6 +136,7 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
   if (typeof token !== 'function') throw new Error('alert channel not set up: no token');
   const num = (n) => { if (!ISSUE(n)) throw new Error(`not an issue number: ${JSON.stringify(n)}`); return n; };
   let last = null;
+  let serverAt = null;
   let robot = null;
   let loginTrouble = null;
   async function bearer() {
@@ -152,6 +157,8 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
     let json = null;
     if (res.status >= 200 && res.status < 300) { try { json = await res.json(); } catch { json = null; } }
     last = `GitHub answered ${res.status} to ${method} ${path.split('?')[0]}`;
+    const d = Date.parse(res.headers?.get?.('date') ?? '');
+    serverAt = Number.isFinite(d) ? d : null;
     return { status: res.status, json };
   }
   async function comment(n, text) {
@@ -161,6 +168,7 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
   return Object.freeze({
     /** What GitHub answered to this client's latest call ("GitHub answered 422 to POST /issues"), or null. */
     get lastAnswer() { return last; },
+    get lastServerTime() { return serverAt; },
     get loginTrouble() { return loginTrouble; },
     /** Learns the login, for a pass that has made no call yet. A token that can't be had is the next call's to report. */
     async ready() { await bearer().catch(() => {}); },
@@ -181,7 +189,8 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
       const by = r.json.closed_by;
       const closed = r.json.state === 'closed';
       return { open: !closed, body: String(r.json.body ?? ''), ours: mine(r.json.user),
-        closedByOwner: closed && by?.type === 'User' && typeof by.login === 'string' && !mine(by) };
+        closedByOwner: closed && by?.type === 'User' && typeof by.login === 'string' && !mine(by),
+        created_at: typeof r.json.created_at === 'string' && Number.isFinite(Date.parse(r.json.created_at)) ? r.json.created_at : null };
     },
     async findOpen(test) {
       await bearer();
@@ -254,10 +263,12 @@ async function raiseWhy(alerts, gh, key, text, entryId) {
   } catch (e) { return msg(e); }
 }
 
-// The store's own alert as issue text (masked by makeAlerts before it is posted).
+// The store's own alert as issue text (masked by makeAlerts before it is posted). Each value is an error's or a caller's
+// words and can name the owner's folders, so it is cut and fenced as a push reason is (L720 n2, L732 m1): local paths
+// become <path>, a cut for length says so, and the words are fenced as outside text. Every store alert comes here.
 export function storeText(event, product) {
   const e = event && typeof event === 'object' ? event : {};
-  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 300)}`);
+  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${storeWords(v)}`);
   return [`${product}'s Record store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
 }
 

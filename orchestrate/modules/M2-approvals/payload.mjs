@@ -16,7 +16,7 @@
 // go lists its files itself (m3-5), so the list the owner reads is the list the go binds.
 
 import { createHash } from 'node:crypto';
-import { canonicalJson } from '../../shared/plan-fingerprint.mjs';
+import { UNPRINTED, canonicalJson } from '../../shared/plan-fingerprint.mjs';
 import { activeKind } from '../../shared/asks.mjs';
 import { STILL_OPEN_LINE } from './kinds.mjs';
 
@@ -33,7 +33,14 @@ export function askIdOf(question) {
   return m ? m[1] : null;
 }
 
-const oneLine = (s) => String(s).replace(/[\r\n]+/g, ' ').trim();
+// Every character a screen may break a line at (L787: U+2028, U+2029, NEL, VT and FF too, not only CR and LF), so a
+// title can't start a line of its own in the box, such as a forged "Still open" line or a second [ask] tag.
+export const LINE_BREAKS = /[\r\n\v\f\x85\u2028\u2029]/;
+// A title is shown on one line with nothing the box's screen has to interpret (L798): each run of line breaks is a space,
+// then every control and format character (C0, C1, U+0000, the bidi overrides and isolates, shared UNPRINTED) goes.
+const oneLine = (s) => String(s).replace(new RegExp(`(?:${LINE_BREAKS.source}|\\t)+`, 'g'), ' ').replace(new RegExp(UNPRINTED.source, 'gu'), '').trim();
+// Why a choice label or a file name can't be shown as given, or null.
+const unshown = (s, what) => (LINE_BREAKS.test(s) ? `${what} may not hold a line break` : UNPRINTED.test(s) ? `${what} may not hold a control or format character` : null);
 
 export function renderPayload({ askId, kind, card, title, choices, fingerprint, files } = {}) {
   const k = activeKind(kind);
@@ -43,6 +50,8 @@ export function renderPayload({ askId, kind, card, title, choices, fingerprint, 
   if (typeof card !== 'string' || !ID.test(card)) return { ok: false, reason: 'a question box names its card' };
   if (typeof title !== 'string' || !oneLine(title)) return { ok: false, reason: 'a question box names its card in plain words' };
   const labels = choices ?? k.choices;
+  // A break or a control character is named first, so a choice ending in one gets that reason, not the generic one.
+  if (Array.isArray(labels)) for (const l of labels) { const bad = typeof l === 'string' ? unshown(l, 'a choice') : null; if (bad) return { ok: false, reason: bad }; }
   if (!Array.isArray(labels) || labels.length < 2 || labels.length > 4 || new Set(labels).size !== labels.length
     || !labels.every((l) => typeof l === 'string' && l.trim() === l && l)) return { ok: false, reason: 'a box has 2 to 4 distinct choices' };
   let question = `[ask ${askId}] ${oneLine(title)} (${card})`;
@@ -50,6 +59,7 @@ export function renderPayload({ askId, kind, card, title, choices, fingerprint, 
   if (k.go) {
     if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) return { ok: false, reason: 'a go names its plan fingerprint' };
     if (!Array.isArray(files) || !files.length || files.length > MAX_FILES_SHOWN || !files.every((f) => typeof f === 'string' && f)) return { ok: false, reason: `a go lists its files (1 to ${MAX_FILES_SHOWN})` };
+    for (const f of files) { const bad = unshown(f, 'a file name'); if (bad) return { ok: false, reason: bad }; }
     question += ` — plan ${fingerprint.slice(0, 12)}`;
     options[0].description = `Files: ${files.join(', ')}`;
   }
