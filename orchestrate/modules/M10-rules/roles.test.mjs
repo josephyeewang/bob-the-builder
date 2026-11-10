@@ -55,9 +55,10 @@ test('every profile file matches the design table', () => {
   assert.ok(!r.profiles.lead.tools.includes('Bash'), 'the Lead has no shell');
 });
 
-test('never-list tools, Workflow outside script, unknown tools, unknown fields and bad outbox kinds are refused', () => {
+test('never-list tools (Workflow among them, in script too: L787), unknown tools, unknown fields and bad outbox kinds are refused', () => {
   for (const t of NEVER_TOOLS) assert.equal(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, t] })).ok, false, t);
-  assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, 'Workflow'] })).reason, /Workflow/);
+  assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, 'Workflow'] })).reason, /Workflow is never allowed/);
+  assert.match(withEdit('script', (p) => ({ ...p, tools: [...p.tools, 'Workflow'] })).reason, /Workflow is never allowed/, 'L787: script may not hold it either');
   assert.match(withEdit('worker', (p) => ({ ...p, tools: [...p.tools, 'bash'] })).reason, /unknown tool/);
   assert.match(withEdit('worker', (p) => ({ ...p, max_turns: 5 })).reason, /unknown field/);
   assert.match(withEdit('worker', (p) => ({ ...p, outbox_kinds: ['Report-'] })).reason, /bad outbox kind/);
@@ -108,9 +109,8 @@ test('the subagent tool is refused under both its names, at the profile and at t
     const init = { tools: [...w.tools, name], mcp_servers: [], plugins: [], skills: [...(w.skills ?? [])], setting_sources: ['flag'], permissionMode: w.mode, claude_code_version: PIN };
     assert.match(checkInit(init, { role: 'worker', profile: w }).reason, /never-list tools loaded/, name);
   }
-  // One list in two homes: M4's is M10's plus Workflow. M10 still lets a script profile name Workflow, but no published
-  // profile does (L770), because M4 never starts it; the test below holds every profile to M4's list.
-  assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS, 'Workflow'].sort());
+  // One list in two homes, the same in both (L787: Workflow too, which M4 never starts).
+  assert.deepEqual([...M4_NEVER].sort(), [...NEVER_TOOLS].sort());
 });
 
 test('L770: no published profile holds a tool M4 never starts, so a profile M10 loads is never refused at launch', () => {
