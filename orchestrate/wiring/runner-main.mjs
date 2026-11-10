@@ -161,7 +161,7 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
-    // and the session reader (L899), for the attempt whose push took the card's bundle (L898).
+    // The session reader (L899) gives the attempt whose push took the card's bundle (L898).
     outboxDrained: drainedPort({ readFact: (fact) => readFactFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, fact }), readSession: (session) => readSessionFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, session }) }),
     size: sizePort(),
     ...over,

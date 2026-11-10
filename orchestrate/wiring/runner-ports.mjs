@@ -110,14 +110,17 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
  * is read first and the file hashed only when its fact is done (#388 r1 m3), so a file never taken is never read.
  * The card's bundle (`bundle-<card>.bundle`, M4 push.mjs) is never an intake file: it counts as taken once the push of
  * this session's attempt (read from the Record's session doc, `readSession`, M4 readSessionFile) is `pushed` with the
- * sha256 of these bytes (`bundle_sha256`, L898). No session reader, no attempt, no such push, a refused one, an older
- * fact without the hash, or other bytes: it stays open.
+ * sha256 of these bytes (`bundle_sha256`, L898), for a worker or script session only. No session reader, no attempt, no
+ * such push, a refused one, one whose card head was not noted (head_refused), an older fact without the hash, or other
+ * bytes: it stays open.
  * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
  * M4 review-runner-main.mjs readFactFile answers (runner-main.mjs wires it). Left out, every read fails and an outbox
  * holding a file stays open: it fails safe, never closing one the Record has not taken.
  */
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
+// The roles whose sessions are a card's own work: 'waiting' is done for them (#388 r1 m2), and only theirs carry the
+// card's bundle (#388 r2 m1).
 const WAITING_DONE_FOR = new Set(['worker', 'script']);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
@@ -131,7 +134,8 @@ function bundlePushed(s, path, { readFact, readSession, hashOf }) {
   if (typeof att !== 'string' || !att) return false;
   let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return false; }
   const d = f?.ok === true ? f.doc : null;
-  if (d?.result !== 'pushed' || !SHA256.test(String(d.bundle_sha256))) return false;
+  // A push that could not note the card's head is not done (push.mjs reads it so too): it is pushed again (#388 r2 m2).
+  if (d?.result !== 'pushed' || d.head_refused || !SHA256.test(String(d.bundle_sha256))) return false;
   let hash; try { hash = hashOf(path); } catch { return false; }
   return hash === d.bundle_sha256;
 }
@@ -143,7 +147,7 @@ export function drainedPort({ list = readdirSync, readFact = noFactReader, readS
   return (s) => {
     let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
     for (const name of names) {
-      if (typeof s.card === 'string' && name === bundleName(s.card)) {
+      if (WAITING_DONE_FOR.has(s.role) && typeof s.card === 'string' && name === bundleName(s.card)) {
         if (!bundlePushed(s, join(s.outbox, name), { readFact, readSession, hashOf })) return false;
         continue;
       }

@@ -126,7 +126,7 @@ test('L898: the card\'s bundle counts as taken once the push of this session\'s 
     sdoc = { card: 'C-1', attempt: 'a2' }; assert.equal(drained(s), false, 'no push fact for this attempt');
     sdoc = { card: 'C-1', attempt: 'a1' };
     const push = facts.get('push.C-1.a1');
-    for (const v of [{ ...push, result: 'refused' }, { ...push, bundle_sha256: undefined }, { ...push, bundle_sha256: 'F'.repeat(64) }, { ...push, bundle_sha256: 'f'.repeat(64) }]) {
+    for (const v of [{ ...push, result: 'refused' }, { ...push, head_refused: 'the card head could not be noted' }, { ...push, bundle_sha256: undefined }, { ...push, bundle_sha256: 'F'.repeat(64) }, { ...push, bundle_sha256: 'f'.repeat(64) }]) {
       facts.set('push.C-1.a1', v); assert.equal(drained(s), false, JSON.stringify(v));
     }
     facts.set('push.C-1.a1', push);
@@ -142,6 +142,12 @@ test('L898: the card\'s bundle counts as taken once the push of this session\'s 
     writeFileSync(join(o, 'bundle-C-2.bundle'), 'x');
     assert.equal(drained(s), false, 'another card\'s bundle');
     assert.equal(drained({ ...s, card: undefined }), false, 'no card: no bundle is this session\'s');
+    // #388 r2 m1: only a worker's or script's session carries the card's bundle; another role's is an intake file, never taken.
+    rmSync(join(o, 'bundle-C-2.bundle'));
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a])); facts.set('push.C-1.a1', push);
+    assert.equal(drained(s), true, 'the worker\'s bundle, as pushed');
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s');
+    for (const role of ['lead', 'reviewer', undefined]) assert.equal(drained({ ...s, role }), false, `a ${role} session's bundle`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
