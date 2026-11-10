@@ -59,6 +59,8 @@ export const ENTITIES = Object.freeze(['card', 'ask', 'go', 'verdict', 'session'
 // verdict missing a line is no verdict (Merge Gate refusal 5). An auditor's verdict says its Material count instead.
 export const VERDICT_CHECKLIST = Object.freeze(['correct', 'well_built', 'works_for_user', 'holds_up']);
 export const CHECKLIST_LEVELS = Object.freeze(['clean', 'cosmetic', 'minor', 'material']);
+// What a verdict's finding may be, worst first.
+export const FINDING_LEVELS = Object.freeze(['material', 'minor', 'cosmetic']);
 
 // Fields a document must carry on every write, checked here so a fake record refuses what the real one would.
 // launch and merge_request are the Dispatcher's (D12, refusals 5 and 11); a verdict names the session and head it is

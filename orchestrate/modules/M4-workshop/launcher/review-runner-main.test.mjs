@@ -818,6 +818,12 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   assert.match((await prepareReviewCopy({ mirror: gd, card: '../x', head, dest: lost })).reason, /not a card id/);
 });
 
+test('L738 re-merge: the real ports hand the runner its finalize and handedIn (a missing one would skip the finding check unseen)', () => {
+  const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: process.getuid() }, recordRoot: '/x', recordUid: process.getuid(), mirror: '/m', claudeBin: '/c', ownerHome: '/h', ownerUid: process.getuid() };
+  const p = realPorts(c, {});
+  for (const k of ['finalize', 'handedIn']) assert.equal(typeof p[k], 'function', `${k} is wired`);
+});
+
 // L736 #306 m4: the Front Door's taps folder must be the runner's, compared on real paths.
 test('L736 m4 planted: the Front Door\'s taps folder is checked against the one the runner reads', () => {
   const base = realpathSync.native(tempDir('m4-taps-match-'));
