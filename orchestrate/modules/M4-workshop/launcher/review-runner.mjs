@@ -84,8 +84,9 @@ export const MAX_PENDING = 200;
 // with many of those as well can still cut the oldest.
 export const TAPS_TOLD_EACH = 10;
 const KEEP_SEEN = 500;
-// How far back the offers look for a session whose attempt was pruned (#307 r2 M1): a tree a push left and a revert
-// brings back is offered again within this. A tap needs no offer and has no window: tapCheck rebuilds its right from the
+// How far back the offers look for a session whose attempt was pruned (#307 r2 M1), counted from when it started, not
+// from when its tree came back: a tree a push left and a revert brings back is offered again only within this, though a
+// tap on it is still taken after. A tap needs no offer and has no window: tapCheck rebuilds its right from the
 // records whenever it comes.
 const OFFER_REBUILD_MS = 30 * 24 * 60 * 60_000;
 const KEEP_LIST = 50;
@@ -538,6 +539,7 @@ export async function runnerPass(ctx) {
   // A verdict dropped here comes back from its launch and ended records, if it is still not taken.
   keepGood('not_taken', goodNotTaken, 'hold_unread_at');
   keepGood('head_unread', stamp, 'hold_unread_at');
+  keepGood('tap_retry', (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && stamp(v.since) && typeof v.sid === 'string', 'entry_unread_at');
   for (const told of ['entry_unread_at', 'hold_unread_at']) if (now - (pastTime(state[told], now) ?? -Infinity) >= REFUSED_QUIET_MS) delete state[told];
   // Stamped on every pass while it holds, so a head put right stops being told at once.
   for (const [card, at] of Object.entries(state.head_unread ?? {})) if (!CARD_ID.test(card) || now - (pastTime(at, now) ?? -Infinity) >= HEAD_UNREAD_MS) delete state.head_unread[card];
@@ -651,9 +653,12 @@ export async function runnerPass(ctx) {
   // sha256, `none` or `refused`), and only that version counts. Written once, never over; one that can't be written
   // fails the pass, and the sweep below tries again. Only once the record is there is the session's review copy
   // removed (L77 m9, `removeCopy`): never before, so a session still running keeps the files it reads.
-  const markEnded = (doc, said, how) => {
+  // `outboxEmpty` (#307 r2 self-review M1): set only when the session ended with no verdict and nothing at all in its
+  // outbox, the one end that may be set aside. A tap whose attempt is gone reads it here, so a session held because its
+  // outbox was not empty stays held after the attempt is pruned and the outbox is emptied.
+  const markEnded = (doc, said, how, outboxEmpty = false) => {
     try {
-      writeLaunch(P.ended, doc.session_id, { session_id: doc.session_id, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), ended_at: iso(now), verdict_sha256: said, how });
+      writeLaunch(P.ended, doc.session_id, { session_id: doc.session_id, role: doc.role, card: doc.card, head: doc.head, ...(doc.tree ? { tree: doc.tree } : {}), ended_at: iso(now), verdict_sha256: said, how, ...(outboxEmpty ? { outbox_empty: true } : {}) });
     } catch (e) {
       if (e?.code !== 'EEXIST') {   // EEXIST: marked already
         fail(`session ${doc.session_id} could not be marked ended (${e?.code ?? e?.message})`);
@@ -683,12 +688,12 @@ export async function runnerPass(ctx) {
     else try { h = await ctx.handedIn({ role: doc.role, sessionId: doc.session_id, outbox: reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }), card: doc.card, head: doc.head }); } catch (e) { h = { ok: false, reason: `its verdict could not be read (${e?.message ?? e})` }; }
     const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
     const said = sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
-    if (!markEnded(doc, said, how)) return false;
+    const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }));
+    if (!markEnded(doc, said, how, said === 'none' && left.empty)) return false;
     if (state.packages) delete state.packages[doc.session_id];
     const done = { ...a, started: true, ended_at: iso(now), session_id: doc.session_id };
     const where = `card ${doc.card} at ${doc.head.slice(0, 7)}`;
     const offer = { action: 'review-again', session_id: doc.session_id };
-    const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }));
     if (sha) state.attempts[k] = { ...done, held: false };
     else if (said === 'none' && left.empty) {
       // The attempt names what it is for (L733); the offer itself takes card, role and head from the launch record (#307).
@@ -869,6 +874,7 @@ export async function runnerPass(ctx) {
     if (state.running.some((r) => r.session_id === sid)) return bad('that session is still running');
     const doc = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
     if (!doc) return bad(rl.refused.some((b) => b.sid === sid) ? 'its launch record fails its checks; that needs the builder, not a new review' : 'the runner launched no such session');
+    // M9 refuses such a launch record already; this keeps the tap's own test whole if that ever changes.
     if (!isHead(doc.head) || !REVIEW_ROLES.includes(doc.role)) return bad('that session reviewed no head, so it has no "review again"');
     const c = await cardOf(doc.card);
     if (c?.ok !== true && c?.missing === true) return bad(`card ${doc.card} is no longer in the Record, so no new review would start`);
@@ -891,10 +897,13 @@ export async function runnerPass(ctx) {
       if (asideIds.has(sid)) return bad('that session is already set aside');
       const tree = doc.tree ?? doc.head;
       const other = rl.launches.some(({ doc: d }) => d.session_id !== sid && d.card === doc.card && d.role === doc.role && (d.tree ?? d.head) === tree && !asideIds.has(d.session_id) && !stillNeverRan(d));
-      if (other) return bad('a later session already started for this card, tree and role; only the newest one can be set aside');
+      if (other) return bad('another session started for this card, tree and role, and only the one that counts can be set aside');
     }
     const e = runnerEnded({ root: P.ended, uid, role: doc.role, card: doc.card, head: doc.head, sessionId: sid });
     if (!e.ok || e.ended.verdict_sha256 !== 'none') return bad(`only a session that ended without handing in anything can be set aside (${e.ok ? 'its ended record names a verdict file' : e.reason})`);
+    // With no attempt, the ended record must say the outbox was empty at the end (#307 r2 self-review M1): one held because
+    // it was not is never set aside, even once the outbox is emptied. A record from before this was noted says neither.
+    if (a === undefined && e.ended.outbox_empty !== true) return bad('its ended record does not say its outbox was empty when it ended, so it may have been held for what it left there; that needs the builder');
     const walls = checkReviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid, uid });
     if (!walls.ok) return bad(`its outbox fails its checks, so what it holds can't be known (${walls.reason}); that needs the builder`);
     const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: sid }));
@@ -953,8 +962,8 @@ export async function runnerPass(ctx) {
     result.setAside.push({ session_id: sid, card: doc.card, role: doc.role });
   }
   state.tap_retry = tapRetry;
-  const longWait = Object.values(tapRetry).filter((v) => now - (pastTime(v.since, now) ?? now) >= STILL_WAITING_MS);
-  if (longWait.length) hold('tap-unreadable', `${longWait.length} of Joe's "review again" taps (session${longWait.length === 1 ? '' : 's'} ${longWait.slice(0, 5).map((v) => v.sid).join(', ')}${longWait.length > 5 ? ', …' : ''}) have waited a day or more, because the card or the tree of its head can't be read; each is read again every pass`);
+  const longWait = Object.values(tapRetry).filter((v) => now - (pastTime(v.since, now) ?? -Infinity) >= STILL_WAITING_MS);
+  if (longWait.length) hold('tap-unreadable', `${longWait.length} of Joe's "review again" taps (session${longWait.length === 1 ? '' : 's'} ${longWait.slice(0, 5).map((v) => v.sid).join(', ')}${longWait.length > 5 ? ', …' : ''}) have waited a day or more, because the card or the tree of its head can't be read; each is read again on every pass that can read the taps`);
   // Every refused tap is told (L736 m2): the first ones each with its cause, the rest in one line, all marked told.
   const untold = tapsRefused.filter((x) => !state.told.includes(x.id));
   for (const x of untold.slice(0, TAPS_TOLD_EACH)) alert(x.id, x.text);

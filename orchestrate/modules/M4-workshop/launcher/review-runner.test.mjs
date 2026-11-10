@@ -1654,7 +1654,7 @@ test('#307 r2 M1: with no attempt, a session that a later start on its tree repl
   // Even with its set-aside record gone, S-2's start on the same tree is the one that counts.
   unlinkSync(join(w.root, 'set-aside', 'S-1.json'));
   w.taps.push({ session_id: 'S-1', key: 'k-3' });
-  refusedFor(await runnerPass(w.ctx), /review again" for session S-1: a later session already started for this card, tree and role/);
+  refusedFor(await runnerPass(w.ctx), /review again" for session S-1: another session started for this card, tree and role/);
 });
 
 // #307 r2 m1: a tap whose card stays unreadable gives one refused line, not one a pass, and a day on it is a hold.
@@ -1684,6 +1684,121 @@ test('#307 r2 m1 planted: a tap that waits on an unreadable card is listed once,
   v.ctx.setAsideByJoe = () => [{ session_id: 'S-1', key: 'k-1' }];
   for (let i = 0; i < 3; i++) await runnerPass(v.ctx);
   assert.ok(!v.status().holds.some((h) => h.id === 'tap-unreadable'));
+});
+
+// #307 r2 self-review M1 (probe A): a session held because it left something in its outbox has no "review again", and
+// pruning its attempt and emptying its outbox must not give it one. Its ended record says whether the outbox was empty.
+test('#307 r2 M1 planted: a session held for what it left in its outbox stays held after a prune and an emptied outbox', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  writeFileSync(join(w.outboxRoot, 'reviewer', 'S-1', 'notes.txt'), 'thinking\n', { mode: 0o644 });
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'ended', 'S-1.json'), 'utf8')).outbox_empty, undefined);
+  assert.deepEqual(w.status().offers, []);
+  // A push drops the attempt, the outbox is emptied, and a revert brings the tree back.
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 });
+  w.heads.set('C-1', HEAD2);
+  await runnerPass(w.ctx);
+  unlinkSync(join(w.outboxRoot, 'reviewer', 'S-1', 'notes.txt'));
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD });
+  w.heads.set('C-1', HEAD);
+  await runnerPass(w.ctx);
+  assert.ok(!Object.keys(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).includes(`C-1:${TREE}:reviewer`));
+  assert.deepEqual(w.status().offers, [], 'not offered');
+  w.taps.push({ session_id: 'S-1', key: 'k-1' });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  refusedFor(r, /review again" for session S-1: its ended record does not say its outbox was empty when it ended/);
+  assert.deepEqual(r.setAside, []);
+  assert.deepEqual(r.started, []);
+  // A clean silent end is marked, and keeps its right through the same prune (the P1 test above).
+  const v = await ready();
+  v.ask();
+  await runnerPass(v.ctx);
+  v.end('S-1');
+  await runnerPass(v.ctx);
+  assert.equal(JSON.parse(readFileSync(join(v.root, 'ended', 'S-1.json'), 'utf8')).outbox_empty, true);
+});
+
+// #307 r2 self-review m1 and m3: the memory of taps that wait is kept only while the tap is listed (or the listing can't
+// be read), is cleared once the tap is used, and a bad entry is dropped, never a crash.
+test('#307 r2 m1 planted: the waiting-tap memory is dropped with its tap, kept while taps are unreadable, cleared on use, and a bad entry is dropped', async () => {
+  const mem = (w) => JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).tap_retry ?? {};
+  const setup = async () => {
+    const w = await ready();
+    w.ask();
+    await runnerPass(w.ctx);
+    w.end('S-1');
+    await runnerPass(w.ctx);
+    const read = w.ctx.readCard;
+    w.ctx.readCard = () => { throw new Error('the Record is busy'); };
+    let listing = [{ session_id: 'S-1', key: 'k-1' }];
+    w.ctx.setAsideByJoe = () => { if (listing === null) throw new Error('the Front Door is busy'); return listing.slice(); };
+    await runnerPass(w.ctx);
+    assert.deepEqual(Object.keys(mem(w)), ['k-1']);
+    return { w, read, list: (l) => { listing = l; } };
+  };
+  // Kept while the taps can't be read; dropped once the listing no longer has the tap.
+  const a = await setup();
+  a.list(null);
+  await runnerPass(a.w.ctx);
+  assert.deepEqual(Object.keys(mem(a.w)), ['k-1'], 'kept while the taps are unreadable');
+  a.list([]);
+  await runnerPass(a.w.ctx);
+  assert.deepEqual(mem(a.w), {}, 'dropped with its tap');
+  // Cleared when the card can be read again and the tap is used.
+  const b = await setup();
+  b.w.ctx.readCard = b.read;
+  b.w.ask();
+  const r = await runnerPass(b.w.ctx);
+  assert.deepEqual(r.setAside.map((x) => x.session_id), ['S-1']);
+  assert.deepEqual(mem(b.w), {}, 'cleared on use');
+  // Cleared when the tap is refused instead.
+  const c = await setup();
+  c.w.ctx.readCard = c.read;
+  c.w.cards.set('C-1', { ...c.w.cards.get('C-1'), state: 'closed' });
+  refusedFor(await runnerPass(c.w.ctx), /review again" for session S-1: card C-1 no longer needs a reviewer/);
+  assert.deepEqual(mem(c.w), {}, 'cleared on refusal');
+  // A bad entry, or one whose time can't be read, is dropped and the pass goes on.
+  for (const bad of [null, 'x', { since: 'not a time', sid: 'S-1' }, { since: new Date(T0).toISOString() }]) {
+    const d = await setup();
+    d.list(null);
+    const file = join(d.w.root, 'state.json');
+    const st = JSON.parse(readFileSync(file, 'utf8'));
+    st.tap_retry = { 'k-1': bad };
+    writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
+    const rr = await runnerPass(d.w.ctx);
+    assert.ok(!/Cannot read/.test(rr.error ?? ''), rr.error);
+    assert.deepEqual(mem(d.w), {}, `dropped: ${JSON.stringify(bad)}`);
+    assert.ok(d.w.status().holds !== undefined, 'the status is written');
+  }
+});
+
+// #307 r2 self-review m2: the offers look back 30 days from the start; a tap on the session is still taken after that.
+test('#307 r2 m2: past 30 days from its start, a pruned session is no longer offered, though a tap on it is taken', async () => {
+  const w = await ready();
+  w.ask();
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  await runnerPass(w.ctx);
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD2 });
+  w.heads.set('C-1', HEAD2);
+  await runnerPass(w.ctx);
+  w.cards.set('C-1', { ...w.cards.get('C-1'), head: HEAD });
+  w.heads.set('C-1', HEAD);
+  w.clock.t += 29 * 24 * 60 * MIN;
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers.map((o) => o.session_id), ['S-1'], 'offered within 30 days');
+  w.clock.t += 2 * 24 * 60 * MIN;
+  await runnerPass(w.ctx);
+  assert.deepEqual(w.status().offers, [], 'not offered past 30 days');
+  w.taps.push({ session_id: 'S-1', key: 'k-1' });
+  w.ask();
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(r.setAside.map((x) => x.session_id), ['S-1']);
+  assert.deepEqual(r.started.map((x) => x.session_id), ['S-2']);
 });
 
 // #307 r1 m1 (probe B): an offer passes the tap loop's own test, so a session whose outbox now holds a fail is no offer.
