@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tempDir } from '../../../shared/test-tmp.mjs';
@@ -231,6 +231,18 @@ test('R-0b-141: a failed second rename puts the old folder back and refuses', as
   assert.equal(n, 3, 'the old folder is renamed back');
   assert.equal(readFileSync(join(w.folder, 'extra.md'), 'utf8'), 'x\n', 'the old folder is back in place');
   assert.deepEqual(readdirSync(join(w.folder, '..')).filter((x) => /^\.bob\.(old|new)-/.test(x)), [], 'nothing left beside it');
+  // Even when clearing the half-made new folder throws, the old one is put back first.
+  chmodSync(w.folder, 0o755); writeFileSync(join(w.folder, 'extra2.md'), 'y\n'); chmodSync(w.folder, 0o555);
+  n = 0;
+  const r2 = await fetchBobMethod({ ...w, address: s.src, rename, remove: (p) => { if (/\.bob\.new-/.test(p)) throw new Error('planted rm'); } });
+  assert.match(r2.reason ?? '', /could not be written: planted: the second rename fails$/);
+  assert.equal(readFileSync(join(w.folder, 'extra2.md'), 'utf8'), 'y\n', 'put back although the cleanup threw');
+  // And when the put-back itself fails, the refusal names where the old folder sits.
+  n = 0;
+  const r3 = await fetchBobMethod({ ...w, address: s.src, rename: (a, b) => { n += 1; if (n >= 2) throw new Error('planted: the second rename fails'); renameSync(a, b); } });
+  assert.match(r3.reason ?? '', /the old folder is left at .*\.bob\.old-/);
+  const r4 = await fetchBobMethod({ ...w, address: s.src });
+  assert.equal(r4.ok, true, r4.reason);
 });
 
 // r1 audit of #316, m-4: the new folder is in place, so a failed cleanup of the old one is a warning, and the fetch is ok.
@@ -246,8 +258,16 @@ test('R-0b-141: a failed cleanup of the old folder after a good swap answers ok 
   assert.equal(r.fetched, true);
   assert.match(r.warning ?? '', /the old Bob folder .*\.bob\.old-.* could not be removed: planted: cannot remove/);
   assert.equal(readFileSync(join(w.folder, 'build-protocol-core.md'), 'utf8'), '# core v2\n');
-  const clean = await fetchBobMethod({ ...w, address: s.src });
+  // Kept warning while it is there, never kept quietly; the next fetch that can clear it does, and stops warning.
+  const still = await fetchBobMethod({ ...w, rules: fakeRules({ values: { 'bob.pin': p2, 'bob.method_files': METHOD } }), address: s.src, remove });
+  assert.match(still.warning ?? '', /\.bob\.old-.* could not be removed/, 'still warned at the next fetch');
+  const clean = await fetchBobMethod({ ...w, rules: fakeRules({ values: { 'bob.pin': p2, 'bob.method_files': METHOD } }), address: s.src });
   assert.equal(clean.warning, undefined, 'a clean fetch carries no warning');
+  assert.deepEqual(readdirSync(join(w.folder, '..')).filter((x) => /^\.bob\.(old|new)-/.test(x)), [], 'the leftover is cleared');
+  // A remove that answers but leaves the folder is warned about too.
+  const p3 = s.commit({ 'build-protocol-core.md': '# core v3\n' });
+  const quiet = await fetchBobMethod({ ...w, rules: fakeRules({ values: { 'bob.pin': p3, 'bob.method_files': METHOD } }), address: s.src, remove: (p) => { if (!/\.bob\.old-/.test(p)) rmSync(p, { recursive: true, force: true }); } });
+  assert.match(quiet.warning ?? '', /\.bob\.old-.* could not be removed$/);
 });
 
 // r1 audit of #316, m-1: an access list (ACL) can open a folder to others while its bits look shut. macOS only.
@@ -270,5 +290,14 @@ test('R-0b-141: an access list on the folder above, on the mirror or on the Bob 
   const r = await fetchBobMethod({ ...w, address: s.src });
   assert.equal(r.ok, true, r.reason);
   assert.equal(r.fetched, true, 'a Bob folder with an access list is rewritten, never kept');
+  // Inside it too: a sub-folder, and a file.
+  for (const inner of [join(w.folder, 'templates', 'deep'), join(w.folder, 'templates', 'a.md')]) {
+    const d = join(inner, '..'); chmodSync(d, 0o755); chmodSync(inner, 0o755);
+    spawnSync('/bin/chmod', ['+a', 'everyone allow write', inner]);
+    chmodSync(inner, inner.endsWith('.md') ? 0o444 : 0o555); chmodSync(d, 0o555);
+    const ri = await fetchBobMethod({ ...w, address: s.src });
+    assert.equal(ri.ok, true, ri.reason);
+    assert.equal(ri.fetched, true, `${inner}: an access list inside is rewritten`);
+  }
   assert.equal(spawnSync('/bin/ls', ['-lde', w.folder], { encoding: 'utf8' }).stdout.includes('allow'), false);
 });

@@ -127,7 +127,7 @@ export function folderMatches(folder, manifest, owner, { acl = aclProblem } = {}
     };
     if (!modesOk(folder)) return false;
     // An access list (ACL) can open a folder to others while its bits look shut (r1 audit of #316, m-1).
-    return acl([folder, ...[...listDirs(folder)]]) === null;
+    return acl([folder, ...listDirs(folder), ...[...have.values()]]) === null;
   } catch { return false; }
 }
 
@@ -224,7 +224,12 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
     const manifest = {};
     for (const f of picked.files) manifest[f.path] = sha256(blobs.blobs.get(f.oid));
 
-    if (folderMatches(folder, manifest, owner, { acl })) return { ok: true, commit: pin, manifest, fetched: false };
+    // Leftovers of an earlier fetch (a cleanup that failed, a run that stopped) are cleared each time; one that can't be
+    // is warned about every time, never kept quietly (review of the r1 fixes).
+    const leftovers = () => readdirSync(dirname(folder)).filter((n) => n.startsWith(`.${basename(folder)}.old-`) || n.startsWith(`.${basename(folder)}.new-`)).map((n) => join(dirname(folder), n));
+    for (const p of leftovers()) { try { remove(p); } catch { /* warned below */ } }
+    const stale = () => { const l = leftovers(); return l.length ? { warning: `the old Bob folder ${l.join(', ')} could not be removed` } : {}; };
+    if (folderMatches(folder, manifest, owner, { acl })) return { ok: true, commit: pin, manifest, fetched: false, ...stale() };
 
     const tag = `${process.pid}-${now()}`;
     const fresh = join(dirname(folder), `.${basename(folder)}.new-${tag}`);
@@ -244,16 +249,17 @@ export async function fetchBobMethod({ rules, product, folder, mirror, address, 
       try { lstatSync(folder); old = join(dirname(folder), `.${basename(folder)}.old-${tag}`); rename(folder, old); } catch (e) { if (e.code !== 'ENOENT') throw e; old = null; }
       rename(fresh, folder);
     } catch (e) {
-      remove(fresh);
-      // A swap that failed half way puts the old folder back (review of #316).
-      if (old) { try { lstatSync(folder); } catch { try { rename(old, folder); } catch { /* told below */ } } }
-      return refuse(`the Bob folder could not be written: ${e.message}`);
+      // A swap that failed half way puts the old folder back first (review of #316), then clears the new one.
+      let stranded = '';
+      if (old) { try { lstatSync(folder); } catch { try { rename(old, folder); } catch { stranded = `; the old folder is left at ${old}`; } } }
+      try { remove(fresh); } catch { /* cleared at the next fetch */ }
+      return refuse(`the Bob folder could not be written: ${e.message}${stranded}`);
     }
     // The new folder is in place: a failed cleanup of the old one is a warning for the caller to tell, not a refusal
     // (r1 audit of #316, m-4).
     if (old) { try { remove(old); lstatSync(old); warning = `the old Bob folder ${old} could not be removed`; } catch (e) { if (e.code !== 'ENOENT') warning = `the old Bob folder ${old} could not be removed: ${e.message}`; } }
     if (!folderMatches(folder, manifest, owner, { acl })) return refuse('the Bob folder does not read back as the pinned files');
-    return { ok: true, commit: pin, manifest, fetched: true, ...(warning ? { warning } : {}) };
+    return { ok: true, commit: pin, manifest, fetched: true, ...(warning ? { warning } : stale()) };
   } catch (e) {
     return refuse(`the Bob fetch stopped: ${String(e?.message ?? e).slice(0, 300)}`);
   }
