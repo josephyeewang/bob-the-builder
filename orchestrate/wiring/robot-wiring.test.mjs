@@ -7,6 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import { spawnSync } from 'node:child_process';
 import fs, { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -604,7 +605,7 @@ test('L754: a holder that releases while the round looks is still a running roun
 
 const ALERT_REPO = 'alerts-owner/alerts-repo';
 const APP = Object.freeze({ appId: 12345, appInstallation: 678, alertRepo: ALERT_REPO, alertOwner: 'owner-login' });
-const KEY_NAME = 'robot-app.pem';   // token.mjs's default key file name
+const KEY_NAME = ROBOT_KEY_FILE;   // token.mjs's default key file name (L734: imported, not copied)
 
 // The robot App's key, in the key folder under token.mjs's default name, the scripts' user's own, mode 600.
 let KEY_TEXT = null;
