@@ -16,7 +16,7 @@ function world({ startAnswer, stopAnswer, gone = new Set(), drained = () => true
   const w = { now: T0, state: {}, saves: [], writes: [], notes: [], removed: [], started: [], stops: [], gone, status: null, n: 0 };
   w.ports = {
     start: async (x) => { w.started.push(x.sessionId); if (startAnswer) return startAnswer(x); w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 4000 + w.n, pidStart: `start-${w.n}`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.card}` }; },
+      return { ok: true, pid: 4000 + w.n, pidStart: `2026-11-10T12:${String(w.n % 60).padStart(2, '0')}:00Z`, pgid: 4000 + w.n, head: 'a'.repeat(40), outbox: `${ROOT}/${role}/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid),
     stopGroup: async (s) => { w.stops.push({ id: s.id, flagWritten: w.writes.at(-1)?.sessions.find((x) => x.id === s.id)?.stop_requested === true });
       if (stopAnswer) return stopAnswer(s); w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
@@ -215,7 +215,7 @@ test('self-review M2: a start answer the reader would refuse is never listed; it
     'no start time (step-4 review M3)': { pidStart: '' }, 'a leader not its group\'s (step-4 review M3)': { pgid: 4002 },
     'no commit (#358 r1 m1)': { head: 'not-a-sha' }, 'another card\'s copy (#358 r1 m1)': { copy: '/somewhere/else' } };
   for (const [what, more] of Object.entries(bad)) {
-    const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more }) });
+    const w = world({ startAnswer: (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/C-1`, ...more }) });
     await w.pass([launchReq('S-1')]);
     const s = w.read();
     assert.deepEqual(s.sessions, [], what);
@@ -224,7 +224,7 @@ test('self-review M2: a start answer the reader would refuse is never listed; it
     assert.match(s.answers['launch-S-1'].reason, /it was stopped/, what);
   }
   // One whose group can't be shown gone stays waiting (the session may run), so its claim stays.
-  const v = world({ startAnswer: () => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: '/c' }), stopAnswer: () => ({ ok: false, reason: 'EPERM' }) });
+  const v = world({ startAnswer: () => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: '/c' }), stopAnswer: () => ({ ok: false, reason: 'EPERM' }) });
   await v.pass([launchReq('S-1')]);
   assert.deepEqual([v.read().requests['S-1'].state, v.read().sessions, v.sync().stopSession('S-1')], ['waiting', [], false]);
 });
@@ -311,7 +311,7 @@ test('#358 r1 M1: each write is stamped when it is made, no two writes are furth
   const gaps = [times[0] - t0, ...times.slice(1).map((x, i) => x - times[i])];
   assert.ok(Math.max(...gaps) < 50 * 1.9, `the widest gap is one port wait: ${gaps}`);
   // Step 0: starts that answered wrong are each stopped (a port wait or two), with a write after each.
-  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.card}` }))) });
+  let go = []; const u = world({ startAnswer: (x) => new Promise((r) => go.push(() => r({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'x', outbox: '/elsewhere', signin: 's', configDir: '/c', copy: `${COPIES}/${x.card}` }))) });
   await u.pass([launchReq('S-1'), launchReq('S-2'), launchReq('S-3')]);
   go.forEach((f) => f()); await new Promise((r) => setImmediate(r));
   const settledAt = [];
@@ -391,7 +391,7 @@ test('#358 r1 m7: a stopGroup whose pgid is not the listed number (a string incl
 
 test('#358 r2 m-a (P7): each port wait is followed by a write, and no write comes before the first port', async () => {
   const ev = [];
-  const a = (x) => ({ ok: true, pid: 4001, pidStart: 's', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/${x.card}` });
+  const a = (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `/o/worker/${x.sessionId}`, signin: 's', configDir: '/c', copy: `/copies/${x.card}` });
   const ports = { start: async (x) => a(x), groupGone: async () => { ev.push('port:gg'); return false; }, stopGroup: async () => ({ ok: true }),
     saveWork: async () => { ev.push('port:save'); return { ok: true }; }, pauseLead: async () => ({ ok: true }), outboxDrained: async () => false };
   const base = { uid: 501, outboxRoot: '/o', copiesRoot: '/copies', claimMs: 600000, portMs: 50, ports, pending: new Map(), realpath: (p) => p, keep: () => {}, now: T0 };

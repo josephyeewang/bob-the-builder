@@ -9,7 +9,7 @@ import { iso, must, product, readyCard, claimCard, runCard, seed, setup } from '
 
 const MIN = 60_000;
 const err = (code) => Object.assign(new Error(code), { code });
-const deadProbe = { kill: () => { throw err('ESRCH'); }, pidStart: () => 'Thu Oct  1 11:00:00 2026' };
+const deadProbe = { kill: () => { throw err('ESRCH'); }, pidStart: () => '2026-10-01T11:00:00Z' };
 const plants = (now) => [['unreadable', 'not a time'], ['1 h ahead', iso(now + 60 * MIN)]];
 // The card's claim with claimed_at replaced, put straight into the store (the writer always stamps it itself).
 const plantClaim = (env, id, claimed_at) => {
@@ -49,7 +49,7 @@ for (const [name, at] of plants(Date.parse('2026-10-01T12:00:00Z'))) {
     runCard(env, 'C-1');
     const t = env.clock.t;
     env.clock.t = t - 600 * MIN;   // the session record was last written 10 hours ago
-    seed(env, 'session', 'S-1', { state: 'ended', role: 'worker', pid: 4242, pid_start: 'Thu Oct  1 11:00:00 2026', card: null, last_activity: at === 'not a time' ? at : iso(t + 60 * MIN) });
+    seed(env, 'session', 'S-1', { state: 'ended', role: 'worker', pid: 4242, pid_start: '2026-10-01T11:00:00Z', card: null, last_activity: at === 'not a time' ? at : iso(t + 60 * MIN) });
     env.clock.t = t;
     must(env.record.breakIfDead({ card: 'C-1' }), 'broken');
     assert.equal(env.record.read('card', 'C-1').doc.state, 'ready');
