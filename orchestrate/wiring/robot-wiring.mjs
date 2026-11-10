@@ -213,22 +213,27 @@ export function dispatcherLate(rec, { nowMs, lateMin = DISPATCHER_LATE_MIN, hold
 
 /**
  * The Dispatcher is on time: every late alert still queued leaves unsent (L130, audit 0b-6 r7 M2; audit #137 M5), so the owner
- * is not told of stops that have ended. → whether every drop was written.
+ * is not told of stops that have ended. → whether every drop was written. Why not is logged here, by its own line: an
+ * unreadable queue (with the Record's reason) or a drop that was not written (audit #346 m2).
  */
-export function dropLateAlerts(rec) {
+export function dropLateAlerts(rec, { log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const prefix = HOLD_FACT(LATE_CAUSE(''));
   // A hold fact is written only once its alert is delivered (pass.mjs holdAlert), so the causes are read from the queue
   // itself: its waiting entries and its listed drops. A queue that can't be read answers false: it is not known that
   // every drop was written (L797; the Record's read never throws, so a failure comes back as a corrupt row, not an error).
   const facts = new Set();
   const q = readDoc(rec, 'fact', ALERT_QUEUE_FACT);
-  if (q.state === 'failed') return false;
+  if (q.state === 'failed') {
+    log(`robot: the Dispatcher is on time, but the alert queue could not be read (${String(q.reason).slice(0, 200)}), so its old late alerts were not cleared`);
+    return false;
+  }
   const d = q.state === 'found' ? q.doc : null;
   for (const m of [...(d?.entries ?? []).map((e) => e?.mark?.fact), ...(d?.dropped_causes ?? []).map((c) => c?.fact)]) {
     if (typeof m === 'string' && m.startsWith(prefix)) facts.add(m);
   }
   let ok = true;
   for (const f of facts) ok = dropCause(rec, f) && ok;
+  if (!ok) log('robot: the Dispatcher is on time, but its old late alerts could not all be cleared from the queue (a drop was not written)');
   return ok;
 }
 
@@ -269,7 +274,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
         tell = 'the Dispatcher-late alert could not be queued';
         log(`robot: ${tell}`);
       }
-    } else if (!dropLateAlerts(rec)) log('robot: the Dispatcher is on time, but its old late alerts could not be cleared from the queue');
+    } else dropLateAlerts(rec, { log });   // logs why, when it answers false
     throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
   };
   passes['caught-up'] = async () => {

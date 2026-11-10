@@ -636,6 +636,9 @@ test('L797: dropLateAlerts answers false and drops nothing when the alert queue 
   assert.equal(dropLateAlerts(rec), true, 'no queue at all: nothing to drop');
   failQueue = true;
   assert.equal(rec.read('fact', ALERT_QUEUE_FACT)?.corrupt, true, 'the real wrapper answers a corrupt row, not a throw');
-  assert.equal(dropLateAlerts(rec), false);
+  const logs = [];
+  assert.equal(dropLateAlerts(rec, { log: (l) => logs.push(l) }), false);
   assert.equal(writes, 0, 'nothing written or dropped');
+  // Its own line, with the Record's reason, never the drop-failed one (audit #346 m2).
+  assert.deepEqual(logs, ['robot: the Dispatcher is on time, but the alert queue could not be read (record error: SQLITE_BUSY), so its old late alerts were not cleared']);
 });

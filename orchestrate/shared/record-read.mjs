@@ -19,13 +19,19 @@ export class RecordReadError extends Error {
  * or no Record at all. Never throws.
  */
 export function readDoc(rec, entity, id) {
-  let row;
-  try { row = rec.read(entity, id); } catch (e) { return { state: 'failed', reason: `record error: ${String(e?.message ?? e).slice(0, 300)}` }; }
-  if (row == null) return { state: 'absent' };
-  if (row.corrupt) return { state: 'failed', reason: row.reason ?? 'corrupt' };
-  if (row.doc == null || typeof row.doc !== 'object') return { state: 'failed', reason: 'no document' };
-  return { state: 'found', doc: row.doc, rev: row.rev ?? null };
+  // One try round the whole read (audit #346 m1): a thrown value with no text form, or a row whose fields throw when read,
+  // is a failed read too, never an exception.
+  try {
+    let row;
+    try { row = rec.read(entity, id); } catch (e) { return { state: 'failed', reason: `record error: ${errText(e)}` }; }
+    if (row == null) return { state: 'absent' };
+    if (row.corrupt) return { state: 'failed', reason: row.reason ?? 'corrupt' };
+    if (row.doc == null || typeof row.doc !== 'object') return { state: 'failed', reason: 'no document' };
+    return { state: 'found', doc: row.doc, rev: row.rev ?? null };
+  } catch (e) { return { state: 'failed', reason: `the read's answer could not be checked: ${errText(e)}` }; }
 }
+
+function errText(e) { try { return String(e?.message ?? e).slice(0, 300); } catch { return 'unreadable error'; } }
 
 /** The document, or null when the Record holds none; throws RecordReadError when the read failed. */
 export function docOrThrow(rec, entity, id, what = `${entity} ${id}`) {

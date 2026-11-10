@@ -36,6 +36,14 @@ test('readDoc: a Record that throws, a row with no doc, and no Record at all are
   assert.equal(readDoc(null, 'fact', 'usage-a').state, 'failed');
 });
 
+test('readDoc never throws (audit #346 m1, m3): a thrown value with no text form, a row whose corrupt field throws; rev is null when the row has none', () => {
+  assert.deepEqual(readDoc({ read: () => { throw Object.create(null); } }, 'fact', 'usage-a'), { state: 'failed', reason: 'record error: unreadable error' });
+  const trap = { read: () => ({ id: 'x', doc: { a: 1 }, get corrupt() { throw Object.create(null); } }) };
+  assert.deepEqual(readDoc(trap, 'fact', 'usage-a'), { state: 'failed', reason: "the read's answer could not be checked: unreadable error" });
+  assert.throws(() => docOrThrow(trap, 'fact', 'usage-a', 'the mark'), RecordReadError, 'docOrThrow still throws only its own error');
+  assert.deepEqual(readDoc({ read: () => ({ id: 'x', doc: { a: 1 } }) }, 'fact', 'usage-a'), { state: 'found', doc: { a: 1 }, rev: null });
+});
+
 test('readDoc: the store\'s own corrupt answer (no throw) is failed with its reason; an entity M9 does not know is absent', () => {
   const rec = makeRecord({ read: (e, id) => ({ id, entity: e, corrupt: true, reason: 'not a plain readable file' }), list: () => [], diary: () => [] });
   assert.deepEqual(readDoc(rec, 'fact', 'usage-a'), { state: 'failed', reason: 'not a plain readable file' });
