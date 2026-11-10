@@ -137,15 +137,24 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
     let q = p; let real;
     for (;;) {
       try { real = realpath(q); break; } catch (e) {
-        let there = true; try { lstat(q); } catch { there = false; }
-        if (there || e?.code !== 'ENOENT' || q === '/') return refuse(`the session's path ${p} can't be resolved (${q}: ${e?.code ?? e}); a link that leads nowhere yet could be made to lead into the runner's folders`);
+        let there = true;
+        try { lstat(q); } catch (le) {
+          if (le?.code !== 'ENOENT') return refuse(`the session's path ${p} can't be checked (${q}: ${le?.code ?? le})`);
+          there = false;
+        }
+        const why = there ? '; a link that leads nowhere yet could be made to lead into the runner\'s folders' : '';
+        if (there || e?.code !== 'ENOENT' || q === '/') return refuse(`the session's path ${p} can't be resolved (${q}: ${e?.code ?? e})${why}`);
         q = dirname(q);
       }
     }
     if (isFolder && real !== q && foldKey(real) === foldKey(q)) return refuse(`the session's folder ${p} is not spelled in the case the disk holds (${real}); the wall's rules name spellings`);
     if (isFolder && real !== q) return refuse(`the session's folder ${p} is reached through a link (${q} is ${real}); the wall's rules name spellings, so a session folder must be its real path`);
     const resolved = q === p ? real : posix.join(real, posix.relative(q, p));
-    if (w.dirs.some((dir) => !apart(resolved, dir))) return refuse(`the session's path ${p} resolves to ${resolved}, which is not apart from the worker runner's folders`);
+    // Both sides come from the disk (the runner folders are their real paths, checked above), so a path-step prefix
+    // compare, with no letter-set rule: a node at Cellar/node@22/... or under a folder with a space is fine (#423 r1 m3).
+    // Folded, so a tail not made yet can't slip by in another case.
+    const under = (a, b) => { const [x, y] = [foldKey(a), foldKey(b)]; return x === y || x.startsWith(y.endsWith('/') ? y : `${y}/`); };
+    if (w.dirs.some((dir) => under(resolved, dir) || under(dir, resolved))) return refuse(`the session's path ${p} resolves to ${resolved}, which is not apart from the worker runner's folders`);
   }
   return { ok: true };
 }

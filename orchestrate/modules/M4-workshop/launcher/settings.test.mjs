@@ -647,10 +647,30 @@ test('link card: checkRunnerWall refuses a session folder that is a link, or one
   symlinkSync(join(runner.requestsDir, 'later'), join(d, 's', 'dangling'));
   symlinkSync(join(d, 's', 'loop'), join(d, 's', 'loop'));
   for (const notes of [join(d, 's', 'dangling'), join(d, 's', 'dangling', 'x'), join(d, 's', 'loop'), join(d, 's', 'loop', 'x')])
-    assert.match(wall({ ...own, notes }).reason ?? '', /can't be resolved/, notes);
+    assert.match(wall({ ...own, notes }).reason ?? '', /can't be (resolved|checked)/, notes);
   // Another case from the disk's is named as such, not as a link (#423 r1 m1).
   mkdirSync(join(d, 's', 'CaseDir'));
-  assert.match(wall({ ...own, notes: join(d, 's', 'casedir') }).reason ?? '', /not spelled in the case the disk holds/);
+  if (existsSync(join(d, 's', 'casedir'))) assert.match(wall({ ...own, notes: join(d, 's', 'casedir') }).reason ?? '', /not spelled in the case the disk holds/);
+  // A snapshot below a link into either runner folder resolves not apart (#423 r1 m1: the second folder too).
+  symlinkSync(join(d, 'runner', 'state'), join(d, 's', 'st'));
+  symlinkSync(runner.requestsDir, join(d, 's', 'rq'));
+  for (const snapshot of [join(d, 's', 'st', 'rules.json'), join(d, 's', 'rq', 'rules.json')])
+    assert.match(wall({ ...own, snapshot }).reason ?? '', /not apart from the worker runner's folders/, snapshot);
+  // An lstat error that is not "nothing there" is refused (#423 r1 m2); the "leads nowhere" clause only for a link.
+  const lstatEacces = (p) => { throw Object.assign(new Error('no'), { code: p === own.notes ? 'EACCES' : 'ENOENT' }); };
+  assert.match(checkRunnerWall({ settings: render('worker', { paths: { ...own, workerRunner: runner } }).settings, workerRunner: runner, paths: own, lstat: lstatEacces }).reason ?? '', /can't be checked .*EACCES/);
+  assert.match(wall({ ...own, notes: join(d, 's', 'dangling') }).reason ?? '', /leads nowhere yet/);
+  const eaccesReal = (p) => { if (p === own.notes) throw Object.assign(new Error('no'), { code: 'EACCES' }); return realpathSync.native(p); };
+  const noLink = (p) => { throw Object.assign(new Error('no'), { code: 'ENOENT' }); };
+  assert.doesNotMatch(checkRunnerWall({ settings: render('worker', { paths: { ...own, workerRunner: runner } }).settings, workerRunner: runner, paths: own, realpath: eaccesReal, lstat: noLink }).reason ?? '', /leads nowhere/, 'no link there: no link clause');
+  // A node whose real path holds an @ or a space, outside the runner's folders, is fine (#423 r1 m3).
+  for (const dir of ['Cellar/node@22/22.1.0/bin', 'Program Files/node/bin']) {
+    mkdirSync(join(d, 'elsewhere', dir), { recursive: true });
+    writeFileSync(join(d, 'elsewhere', dir, 'node'), '');
+    const link = join(d, 's', `node-${dir.split('/')[0].replace(' ', '-')}`);
+    symlinkSync(join(d, 'elsewhere', dir, 'node'), link);
+    assert.deepEqual(wall({ ...own, node: link }), { ok: true }, dir);
+  }
   // Called directly with a path the render would refuse first: the check's own spelling rule (#423 r1 m3).
   const okSettings = render('worker', { paths: { ...own, workerRunner: runner } }).settings;
   for (const notes of [`${join(d, 's')}/x/../notes`, `${join(d, 's')}/./notes`, `${join(d, 's', 'notes')}/`, join(d, 's') + '//notes'])
