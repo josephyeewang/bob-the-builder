@@ -111,7 +111,7 @@ test('A1: a wait it can\'t read waits no time', { timeout: 5000 }, async (t) => 
 
 test('A1, A2: the port file answers exactly what it took off its list', () => {
   const answered = Object.keys(reviewPorts({ gh: client(), entry: ENTRY, rec: { read: () => null }, config: reviewConfig(temp()), now: Date.now, selfUid: SELF }));
-  assert.deepEqual(answered.sort(), ['hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
+  assert.deepEqual(answered.sort(), ['filesOf', 'hasReviewer', 'mainSha', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'wait']);
   for (const k of answered) assert.ok(!NOT_WIRED_REVIEW.includes(k), k);
 });
 

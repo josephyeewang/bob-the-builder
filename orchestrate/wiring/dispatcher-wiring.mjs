@@ -42,6 +42,15 @@
 //   reviewRunnerLog    the runner's log file (M4 review-daemons.mjs RUNNER_LOG in its log folder), named in an alert
 //   reviewInstallRoot  the reviewers' installed copy, which root's updater keeps (review-updater.mjs installRoot). Its
 //                  own key: the Dispatcher's installRoot may be a copy of this user's, so the two can differ (L639)
+//   reviewRoot     the review runner's own folder (review-runner-main.mjs root), whose ended/ records reviewEnded reads.
+//                  Its own key, not reviewRequestsDir's parent (L739). It must be there at start; its owner (reviewUid)
+//                  is checked on each call, as the other review ports check theirs (L674)
+//   mirror         the product's git mirror (setup layout.mjs mirrorPath: orchestrate's, 0755): cleanup and filesOf read
+//                  it. At start it must be a plain folder of this user's that no one else can write (worker-ports.mjs)
+//   sealRoot       where cleanup seals a copy's bundle it could not prove safe: made if missing, and refused at start
+//                  unless a plain folder of this user's, private and writable, the approvals folder's check (L295)
+//   hostLockPath   Joe's host.lock (~/Dropbox/99.0 Claude Sync/host.lock in the owner's home, L739). No file there is
+//                  "no host claimed"; a file or folder that can't be read is "not known", told, never "no host"
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -51,7 +60,7 @@
 // product's subfolder; L309 MAT-2), and the step stays ok. No `push`: no phone channel exists, so M2 says so per ask
 // (approvals_no_push), on the same terms.
 
-import { accessSync, constants, lstatSync, mkdirSync } from 'node:fs';
+import { privateFolder } from './private-folder.mjs';
 import { isAbsolute, join } from 'node:path';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { makeReader, readProducts, PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
@@ -67,9 +76,11 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
 // The review runner's (L615, L639; review-ports.mjs reviewRunner). The Dispatcher's alone: the robot config refuses them.
 export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewStatusFile', 'reviewUid', 'reviewRunnerLog', 'reviewInstallRoot']);
+// The worker and cleanup ports' (worker-ports.mjs, and filesOf in review-ports.mjs, L739). The Dispatcher's alone too.
+export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'hostLockPath']);
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
-  ...REVIEW_CONFIG_KEYS]);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid')]);
+  ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid'), ...WORKER_CONFIG_KEYS]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
 // on a list throws when called: never a stand-in answer. To wire one, change its port file; this file doesn't change.
@@ -99,24 +110,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   return c;
 }
 
-/**
- * Refuses unless `path` is a plain folder (not a link) owned by `uid` with no group or other access, and, with
- * `writable`, one this process can write. With `create`, a missing folder is made first (mode 700, its parent must
- * exist); a make that fails refuses. The one check for a private folder: robot-wiring.mjs checkUser uses it for the
- * robot key folder, wire() below for the approvals state folder (L295 MAT-1). → path
- */
-export function privateFolder({ path, uid, what, create = false, writable = false, lstat = lstatSync }) {
-  let st;
-  try { st = lstat(path); } catch (e) {
-    if (!(create && e?.code === 'ENOENT')) throw new Error(`${what} ${path} can't be read (${e?.code ?? e})`);
-    try { mkdirSync(path, { mode: 0o700 }); st = lstat(path); } catch (m) { throw new Error(`${what} ${path} is missing and could not be made (${m?.code ?? m})`); }
-  }
-  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${what} ${path} is not a plain folder`);
-  if (st.uid !== uid) throw new Error(`${what} ${path} belongs to uid ${st.uid}, not to this job's uid ${uid}`);
-  if (st.mode & 0o077) throw new Error(`${what} ${path} can be read by others (mode ${(st.mode & 0o777).toString(8)}); it must be 700`);
-  if (writable) { try { accessSync(path, constants.W_OK | constants.X_OK); } catch (e) { throw new Error(`${what} ${path} can't be written (${e?.code ?? e})`); } }
-  return path;
-}
+// privateFolder lives in private-folder.mjs (L739: worker-ports.mjs uses it too, without importing this file).
+export { privateFolder };
 
 /** The product's own approvals folder, <approvalsStateDir>/<product>, checked (and made) with its parent at boot. */
 export function approvalsDir(c, { uid = process.getuid() } = {}) {
