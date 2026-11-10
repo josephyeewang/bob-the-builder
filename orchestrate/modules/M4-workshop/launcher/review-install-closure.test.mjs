@@ -42,6 +42,7 @@ import { NODE, UPDATER_CONFIG, RUNNER_CONFIG, STAMP, SOURCE, OUTSIDE_FILES, TEST
 import { loginJobPlist } from '../../M11-dispatcher/login-job.mjs';
 import { watchPlist } from '../../../setup/watch-setup.mjs';
 import { robotPlist, ROBOT_MAIN } from '../../../setup/robot-setup.mjs';
+import { dispatcherPlist } from '../../../setup/dispatcher-setup.mjs';
 import { sensorsJobPlist } from '../../M12-sensors/sensors-job.mjs';
 import { workerRunnerPlist } from '../../../wiring/runner-job.mjs';
 import { updateOnce, MAIN } from './review-updater.mjs';
@@ -91,6 +92,8 @@ const JOB_BUILDERS = Object.freeze({
   // L734: the robot job's file is built through loginJobPlist, so its module never names a start command itself and the
   // tripwire below can't find it; it is listed by hand, and its script (robot-main) is started like the others.
   'setup/robot-setup.mjs': () => [robotPlist({ base: SAMPLE_BASE, label: LABEL })],
+  // L877: setup's Dispatcher job (#343) is built the same way, through loginJobPlist.
+  'setup/dispatcher-setup.mjs': () => [dispatcherPlist({ base: SAMPLE_BASE, label: LABEL })],
   // L734 self-review M1: the Sensors loop's job is built the same way, through loginJobPlist.
   'modules/M12-sensors/sensors-job.mjs': () => [sensorsJobPlist({ label: LABEL, node: join(SAMPLE_ROOT, NODE), script: join(SAMPLE_ROOT, SENSORS_LOOP),
     config: join(SAMPLE_BASE, 'sensors.json'), path: '/usr/bin:/bin', logDir: join(SAMPLE_BASE, 'logs'), workDir: SAMPLE_BASE })],
@@ -109,7 +112,7 @@ function startedScript(text) {
 }
 // Builders that write their start command through another listed builder (so they never name one themselves), each with
 // the builder it uses; the tripwire checks each still imports it.
-const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs' });
+const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'setup/dispatcher-setup.mjs': 'modules/M11-dispatcher/login-job.mjs', 'modules/M12-sensors/sensors-job.mjs': 'modules/M11-dispatcher/login-job.mjs', 'wiring/runner-job.mjs': 'modules/M11-dispatcher/login-job.mjs' });
 // The functions that build a job file's text, each with the module that exports it (L734 self-review M1; #352 m1, r2 M1).
 // The scan reads each module of the copy through lex() below, so comments, strings and template text are never read as
 // code. A module that brings a builder in, by a named import or re-export (`import { … } from`, `import d, { … } from`,
@@ -131,7 +134,7 @@ const BUILT_THROUGH = Object.freeze({ 'setup/robot-setup.mjs': 'modules/M11-disp
 //   when node ships import defer).
 const JOB_FILE_FNS = Object.freeze({ loginJobPlist: 'modules/M11-dispatcher/login-job.mjs', watchPlist: 'setup/watch-setup.mjs',
   reviewDaemonPlists: 'modules/M4-workshop/launcher/review-daemons.mjs', updaterPlist: 'modules/M4-workshop/launcher/review-daemons.mjs',
-  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs' });
+  sensorsJobPlist: 'modules/M12-sensors/sensors-job.mjs', robotPlist: 'setup/robot-setup.mjs', dispatcherPlist: 'setup/dispatcher-setup.mjs', workerRunnerPlist: 'wiring/runner-job.mjs' });
 const USES_JOB_FILES = Object.freeze({ 'setup/daemons.mjs': 'places the job files the listed builders make; it builds none of its own' });
 /**
  * The job-file functions module `r`'s real imports bring in, each with the module (copy-relative) it imports them
