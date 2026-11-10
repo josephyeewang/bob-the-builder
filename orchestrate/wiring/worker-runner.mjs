@@ -36,21 +36,32 @@
 //   4. The status is written. In every status that carries a launch ok or a stopGroup ok, the session stays listed.
 // A 'waiting' entry left by a runner that stopped mid-start (so no pending start is held for it) is left as it is: its
 // session may have started, so the request is never used up, stopSession never answers true for it, and the claim stays
-// until Joe is told (M9 lapseClaims); it is noted each pass.
-// Time (self-review M4, step-4 review M4): the status is written after every port wait, each session's check and each
-// request, and no port is waited on longer than RUNNER_PORT_MS, so no two writes in a pass are further apart than one
-// port's wait (a port that blocks the process itself, a synchronous one, is bounded only by its own limit). The caller runs a pass at least
-// every RUNNER_STATUS_EVERY_MS (L769).
+// until Joe is told (M9 lapseClaims). It, and a start still on, is noted at most every RUNNER_NOTE_EVERY_MS (#358 r1 m6).
+// A start leaves `pending` only once a memory holding its result has been kept (#358 r1 m3, #362 r1 M1): a keep that
+// fails leaves it there, so the next pass settles it again from the memory last kept.
+// A launch for a card that already has a live session, or a start still waiting, is refused (#358 r1 m4).
+// The ports' contract (#358 r1 m5), which the real ports (runner-loop.mjs processGroupPorts) keep: every port is async
+// (a synchronous one blocks the pass past RUNNER_PORT_MS); groupGone answers true only when the leader (pid and pid_start)
+// is certainly gone, false when it is there, and throws when it can't tell; EPERM (another user's process) is never gone;
+// stopGroup signals only a group whose leader's pid_start is the session's.
+// Time (self-review M4, step-4 review M4, #358 r1 M1): the status is written after every port wait (a start's: by the request's own write),
+// each step-0 settle, each session's check and each request, and no port is waited on longer than RUNNER_PORT_MS, so no
+// two writes in a pass are further apart than one port's wait (a port that blocks the process itself, a synchronous one,
+// is bounded only by its own limit). Each write is stamped written_at from the clock at that write, not the pass's start;
+// `now` stays the pass's one time for the age rules. The caller runs a pass at least every RUNNER_STATUS_EVERY_MS (L769).
 
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, USED_UP, checkSession } from './owner-status.mjs';
+import { launchAnswerWrong } from './owner-asks.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
 export const RUNNER_PORT_MS = 10_000;
 if (RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
+/** How often a start still on, or a 'waiting' entry with none held, is noted again (#358 r1 m6). */
+export const RUNNER_NOTE_EVERY_MS = 10 * 60_000;
 /** The status's session fields (owner-status.mjs SESSION), in its order: nothing of the runner's own memory. */
 export const STATUS_SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files',
   'outbox', 'uid', 'outbox_open', 'stop_requested', 'alive', 'ended', 'last_write_at', 'size', 'activity']);
@@ -97,33 +108,42 @@ const isLive = (s) => s.alive === true || (s.alive !== false && s.ended !== true
 
 /**
  * One pass. ctx: { state, requests: [{ name, body }] (read by readRequest, oldest first), now, uid, outboxRoot, copiesRoot,
- * claimMs, portMs?, ports: { start, groupGone, stopGroup, saveWork, pauseLead, outboxDrained, size? }, write(statusDoc),
+ * claimMs, portMs?, clock? (the time of each write; default the pass's now), ports: { start, groupGone, stopGroup, saveWork, pauseLead, outboxDrained, size? }, write(statusDoc),
  * keep(state) (called before every write), pending (a Map the caller holds across passes: starts still on), realpath?,
  * remove(name), note(text) }. → { state, status } (the state to keep, the status last written).
  */
 export async function workerRunnerPass(ctx) {
-  const { requests = [], now, uid, outboxRoot, claimMs, portMs = RUNNER_PORT_MS, ports, write, keep, pending, realpath, remove = () => {}, note = () => {} } = ctx;
+  const { requests = [], now, uid, outboxRoot, copiesRoot, claimMs, portMs = RUNNER_PORT_MS, ports, write, keep, pending, realpath, remove = () => {}, note = () => {} } = ctx;
+  const clock = typeof ctx.clock === 'function' ? ctx.clock : () => now;
   if (typeof keep !== 'function') throw new Error('the worker runner has nowhere to keep its memory');
   if (!(pending instanceof Map)) throw new Error('the worker runner holds no list of starts still on');
   if (!Number.isFinite(now)) throw new Error('the worker runner has no clock');
   if (!Number.isInteger(uid) || uid < 0) throw new Error('the worker runner does not know the owner\'s uid');
   if (typeof outboxRoot !== 'string' || !outboxRoot.startsWith('/')) throw new Error('the worker runner has no outbox root');
   if (!Number.isFinite(claimMs) || claimMs <= 0) throw new Error('the worker runner has no claim timeout');
+  if (typeof copiesRoot !== 'string' || !copiesRoot.startsWith('/')) throw new Error('the worker runner has no copies root, so a start\'s copy can\'t be checked');
   const state = structuredClone(ctx.state ?? {});
   state.sessions ??= []; state.requests ??= {}; state.answers ??= {}; state.seen ??= {};
   const find = (id) => state.sessions.find((s) => s.id === id);
   const answer = (key, a) => { state.answers[key] = { ...a, at: now }; };
-  const statusDoc = () => ({ written_at: new Date(now).toISOString(), sessions: state.sessions.map(project),
+  const statusDoc = () => ({ written_at: new Date(Math.max(now, clock())).toISOString(), sessions: state.sessions.map(project),
     requests: Object.fromEntries(Object.entries(state.requests).map(([id, r]) => [id, { state: r.state }])),
     answers: Object.fromEntries(Object.entries(state.answers).map(([k, { at, ...a }]) => [k, a])) });
   // The memory is kept first, then the status written: a status never runs ahead of what the runner will remember.
-  const flush = () => { keep(structuredClone(state)); const doc = statusDoc(); write(doc); return doc; };
+  // A settled start leaves `pending` only after a keep that holds it succeeded (#358 r1 m3, #362 r1 M1).
+  const settled = new Set();
+  const flush = () => { keep(structuredClone(state)); for (const id of settled) pending.delete(id); settled.clear(); const doc = statusDoc(); write(doc); return doc; };
   // Every port wait is followed by a write (step-4 review M4), so no two writes are further apart than one port's wait.
   const wait = async (fn) => { const r = await within(portMs, fn); flush(); return r; };
 
   // 0. Starts that answered since the last pass; a 'waiting' entry with no start held for it is told.
-  for (const [id, p] of [...pending]) if (p.done) { pending.delete(id); await settle(p); }
-  for (const [id, r] of Object.entries(state.requests)) if (r.state === 'waiting' && !pending.has(id)) note(`the start of ${id} was on when the runner last stopped; it stays waiting, so its claim stays until the owner is told`);
+  for (const [id, p] of [...pending]) if (p.done) { await settle(p); settled.add(id); flush(); }
+  // Noted at most every RUNNER_NOTE_EVERY_MS, whether a start is still held or none is (#358 r1 m6).
+  for (const [id, r] of Object.entries(state.requests)) {
+    if (r.state !== 'waiting' || (Number.isFinite(r.told) && now - r.told < RUNNER_NOTE_EVERY_MS)) continue;
+    r.told = now;
+    note(pending.has(id) ? `the start of ${id} is still on; it stays waiting, so its claim stays` : `the start of ${id} was on when the runner last stopped; it stays waiting, so its claim stays until the owner is told`);
+  }
 
   // 1. The sessions as they are now. Ended is final (M1).
   async function check(s) {
@@ -160,7 +180,7 @@ export async function workerRunnerPass(ctx) {
     if (Object.hasOwn(state.answers, k.key) || Object.hasOwn(state.seen, k.key)) { note(`request ${name} was answered before; a replay is not read`); continue; }
     if (k.verb !== 'stop' && (!Number.isFinite(asked) || now - asked > RUNNER_KEEP_USED_UP_MS)) { note(`request ${name} is older than the runner keeps answers; not read`); continue; }
     if (k.verb !== 'stop' && asked - now > CLOCK_SKEW_MS) { note(`request ${name} is dated later than now; not read`); continue; }
-    if (k.verb !== 'stop') state.seen[k.key] = now;
+    if (k.verb !== 'stop') state.seen[k.key] = Math.max(now, asked); // kept a day past its own date too (#358 r1 m2)
     if (k.verb === 'stop') await stopRequest(k.id);
     else if (k.verb === 'launch') await launch(k, body.launch, asked);
     else if (k.verb === 'stopGroup') await stopGroup(k, body.stopGroup);
@@ -191,15 +211,17 @@ export async function workerRunnerPass(ctx) {
     if (now - asked > claimMs) return refuse('the launch request is older than the claim timeout');
     if (!RUNNER_KINDS.includes(l.kind)) return refuse(`the worker runner does not start ${JSON.stringify(l.kind)} sessions`);
     if (typeof l.card !== 'string' || !CARD_ID.test(l.card) || l.card.startsWith('.') || !productName(l.product)) return refuse('the launch names no card or product the runner takes');
-    state.requests[id] = { state: 'waiting', at: now }; flush();
+    // One session per card's copy (#358 r1 m4): a live listed one, or a start that may be on, holds it.
+    if (state.sessions.some((s) => s.card === l.card && isLive(s)) || Object.values(state.requests).some((r) => r.state === 'waiting' && r.card === l.card)) return refuse(`card ${l.card} already has a session the runner started, or a start still on`);
+    state.requests[id] = { state: 'waiting', at: now, card: l.card }; flush();
     // The start is held across passes: one still on after portMs is settled by a later pass (step 0), never lost.
     const p = { key: k.key, id, l, done: false, a: undefined };
     p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(id, p);
     await Promise.race([p.on, late(portMs)]);
-    if (!p.done) { note(`the start of ${id} is still on; it stays waiting, so its claim stays`); return; }
-    pending.delete(id); await settle(p);
+    if (!p.done) { state.requests[id].told = now; note(`the start of ${id} is still on; it stays waiting, so its claim stays`); return; }
+    await settle(p); settled.add(id);
   }
   // A start's answer: listed only when the reader would take it (M2); one it would refuse is stopped, then refused.
   async function settle({ key, id, l, a }) {
@@ -211,7 +233,7 @@ export async function workerRunnerPass(ctx) {
       pid: a.pid, pid_start: a.pidStart, head: a.head, copy: a.copy, started_at: now };
     let wrong = null;
     try { checkSession(project(s), { uid, outboxRoot, realpath }); } catch (e) { wrong = e.message; }
-    if (!wrong && !(Number.isInteger(a.pid) && a.pid > 1)) wrong = `session ${id}'s start named no process`;
+    if (!wrong) wrong = launchAnswerWrong(a, { sessionId: id, kind: l.kind, card: l.card, outboxRoot, copiesRoot });
     // The runner tells a reused process group number from its own only by the leader's start time (step-4 review M3).
     if (!wrong && !(a.pid === a.pgid && typeof a.pidStart === 'string' && a.pidStart)) wrong = `session ${id}'s start named no group leader with a start time`;
     if (!wrong) {
@@ -228,7 +250,7 @@ export async function workerRunnerPass(ctx) {
   async function stopGroup(k, g) {
     const s = find(k.id);
     if (!s) return answer(k.key, { ok: false, reason: 'the worker runner did not start that session, or it has left the listing' });
-    if (Number.isInteger(g?.pgid) && g.pgid !== s.pgid) return answer(k.key, { ok: false, reason: 'the stop names another process group than the session\'s' });
+    if (g?.pgid !== undefined && g.pgid !== null && g.pgid !== s.pgid) return answer(k.key, { ok: false, reason: 'the stop names another process group than the session\'s' });
     if (!isLive(s)) { s.stop_requested = true; return answer(k.key, { ok: true, how: 'already gone' }); }
     const r = await stopping(s);
     if (!isLive(s) && s.alive === false) return answer(k.key, { ok: true, how: typeof r?.how === 'string' && r.how ? r.how : 'stopped' });

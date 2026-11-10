@@ -49,6 +49,24 @@ const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
 
 /**
+ * What is wrong with a start's answer, or null: the one definition both sides use (#358 r1 m1), the runner before it
+ * lists a session and the Dispatcher's launch ask before it trusts one. sessionId the asked one, pid and pgid real, a
+ * leader start time, head a commit id, outbox <outboxRoot>/<role>/<sessionId>, copy <copiesRoot>/<card>, signin and
+ * configDir non-empty.
+ */
+export function launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copiesRoot }) {
+  if (a?.sessionId !== undefined && a.sessionId !== sessionId) return 'the answer names another session';
+  if (!realPid(a?.pid)) return 'the start named no process';
+  if (!realPid(a.pgid)) return 'the start named no process group';
+  if (!name(a.pidStart)) return 'the start named no start time for its process';
+  if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
+  if (!Object.hasOwn(RUNNER_ROLE_OF, kind) || a.outbox !== join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId)) return 'the start named another outbox than the session\'s own';
+  if (typeof copiesRoot !== 'string' || a.copy !== join(copiesRoot, card)) return 'the start named another copy than the card\'s';
+  if (!name(a.signin) || !name(a.configDir)) return 'the start named no sign-in';
+  return null;
+}
+
+/**
  * The four async owner ports. `writeRequest(name, text)` is requestWriter(requestsDir); `sleep(ms)` waits; `nonce()`
  * gives a fresh hex word. stat, open and realpath go to readOwnerStatus as in step 1.
  */
@@ -90,8 +108,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
-        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
-          && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
+        const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copiesRoot });
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
@@ -107,7 +124,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         if (a.ok === false) return told(a);
         const x = s.sessions.find((y) => y.id === id);
         // Gone by the status's own rule (review M1: no alive field is not gone), and the group that was asked to stop.
-        return x && x.stop_requested === true && !live(x) && (!Number.isInteger(pgid) || x.pgid === pgid) && name(a.how) ? { ok: true, how: a.how } : undefined;
+        return x && x.stop_requested === true && !live(x) && (pgid === undefined || pgid === null || x.pgid === pgid) && name(a.how) ? { ok: true, how: a.how } : undefined;
       });
     },
     saveWork: async (session) => {
