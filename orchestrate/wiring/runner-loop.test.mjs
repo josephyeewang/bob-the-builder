@@ -21,7 +21,7 @@ function world() {
   w.gone = new Set();
   w.ports = {
     start: async (x) => { w.n += 1; const role = x.kind === 'script' ? 'script' : 'worker';
-      return { ok: true, pid: 7000 + w.n, pidStart: 's', pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
+      return { ok: true, pid: 7000 + w.n, pidStart: '2026-11-10T12:00:01Z', pgid: 7000 + w.n, head: 'a'.repeat(40), outbox: join(w.outboxRoot, role, x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }; },
     groupGone: async (s) => w.gone.has(s.pgid), stopGroup: async (s) => { w.gone.add(s.pgid); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }), outboxDrained: async () => true,
   };
