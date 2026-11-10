@@ -309,6 +309,41 @@ test('G1 (a): a reused pid (other start time) is a dead process, but the claim s
   must(env.record.breakIfDead({ card: 'C-1' }), 'all three agree');
 });
 
+// L845: a claim names its Mac's hardware id, so a host name change after a crash does not leave it unbreakable. The
+// same either-matches test as locks (lock.mjs onThisMachine); an older claim with no id is judged by host name alone.
+test('L845: a claim from this Mac under its old host name is broken; another Mac\'s, or an old claim with no id from another host, never', () => {
+  const env = setup({ prefix: 'm9-claim-', probe: fakeProbe({ dead: [4242] }), extra: { machine: 'MAC-A-ID' } });
+  board(env, ['C-1', 'C-2', 'C-3', 'C-4']);
+  runCard(env, 'C-1', sessionClaim({ host: 'old-name', machine: 'MAC-A-ID', session_id: 'S-1' }));
+  session(env, 'S-1', { state: 'ended', ago: 600 });
+  runCard(env, 'C-2', sessionClaim({ host: 'mac-b', machine: 'MAC-B-ID', session_id: 'S-2' }));
+  session(env, 'S-2', { state: 'ended', ago: 600 });
+  runCard(env, 'C-3', sessionClaim({ host: 'mac-b', session_id: 'S-3' }));
+  session(env, 'S-3', { state: 'ended', ago: 600 });
+  runCard(env, 'C-4', sessionClaim({ host: 'mac-a', session_id: 'S-4' }));
+  session(env, 'S-4', { state: 'ended', ago: 600 });
+  assert.equal(env.record.read('card', 'C-1').doc.claim.machine, 'MAC-A-ID', 'the claim keeps its machine id');
+  must(env.record.breakIfDead({ card: 'C-1' }), 'this Mac, renamed: broken');
+  assert.match(env.record.breakIfDead({ card: 'C-2' }).reason, /host mac-b; never broken from here/, 'another Mac');
+  assert.match(env.record.breakIfDead({ card: 'C-3' }).reason, /host mac-b; never broken from here/, 'an old claim with no id, another host');
+  must(env.record.breakIfDead({ card: 'C-4' }), 'an old claim with no id, this host: broken, as before');
+  // A Mac whose own id could not be read never matches a claim that has none.
+  const env2 = setup({ prefix: 'm9-claim-', probe: fakeProbe({ dead: [4242] }), extra: { machine: null } });
+  board(env2);
+  runCard(env2, 'C-1', sessionClaim({ host: 'mac-b', session_id: 'S-1' }));
+  session(env2, 'S-1', { state: 'ended', ago: 600 });
+  assert.match(env2.record.breakIfDead({ card: 'C-1' }).reason, /host mac-b; never broken from here/);
+});
+
+test('L845: a claim\'s machine, when given, is a non-empty text; nothing else joins it at claimed -> running', () => {
+  const env = setup({ prefix: 'm9-claim-' });
+  board(env, ['C-1', 'C-2']);
+  for (const bad of ['', 7, null]) assert.match(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'claimed', claim: claimOnly(sessionClaim({ machine: bad })) }).reason, /claim.machine names the Mac/, String(bad));
+  claimCard(env, 'C-2', sessionClaim({ machine: 'MAC-A-ID' }));
+  const c = env.record.read('card', 'C-2').doc.claim;
+  assert.ok(!put(env.record, 'dispatcher', 'card', 'C-2', { state: 'running', claim: { ...c, machine: 'OTHER', pid: 4242, pid_start: '2026-10-01T11:00:00Z' } }).ok, 'the id never changes');
+});
+
 test('G1: no session record, another host, or no stuck_min in the rules: nothing is broken', () => {
   const env = setup({ prefix: 'm9-g1-', probe: fakeProbe({ dead: [4242] }) });
   board(env, ['C-1', 'C-2']);
