@@ -543,6 +543,35 @@ test('L352 MAT-1: a kept refusal whose target can\'t be read now, or could not b
   assert.equal(tellRefused({ rec: b.rec, alert: b.alert, now: T0 + 26 * H, refused: new Map(), taken: new Map([['park', new Set(['card/C-1'])]]), ran: () => true }).find(([c]) => c === 'park')[1], 'cleared');
 });
 
+test('L797 planted: a kept refusal whose target the store reports corrupt is still refused, and one refused while corrupt keeps that', () => {
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  // The store's own answer for a corrupt document (store.mjs read: { id, entity, corrupt: true, reason }).
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => (e === 'card' ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : a.rec.read(e, id)) });
+  assert.equal(a.tell(blind, T0 + 25 * H), 'told');
+  assert.equal(a.fact().doc.items.length, 1);
+  // Refused while corrupt, the card then read as it was: still refused.
+  const b = keptWorld();
+  const bBlind = Object.create(b.rec);
+  Object.defineProperty(bBlind, 'read', { value: (e, id) => (e === 'card' ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : b.rec.read(e, id)) });
+  const r = watchWrites(bBlind);
+  r.rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-1', expectRev: 99, doc: { state: 'parked' }, kind: 'park_paused' });
+  const kept = r.refused.get('park') ?? [];
+  assert.equal(kept[0]?.from, 'unreadable', JSON.stringify(kept));
+});
+
+test('L797 self-review M1 planted: a kept list the store reports corrupt is told, never read as nothing kept', () => {
+  const a = keptWorld();
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  const blind = Object.create(a.rec);
+  Object.defineProperty(blind, 'read', { value: (e, id) => (e === 'fact' && id === REFUSED_FACT('park') ? { id, entity: e, corrupt: true, reason: 'bad bytes' } : a.rec.read(e, id)) });
+  assert.throws(() => tellRefused({ rec: blind, alert: a.alert, now: T0 + 25 * H, refused: new Map(), ran: () => true }), /park: its kept list could not be read \(bad bytes\)/);
+  // Also on a pass whose steps did not all run, when nothing would be cleared.
+  assert.throws(() => tellRefused({ rec: blind, alert: a.alert, now: T0 + 26 * H, refused: new Map(), ran: () => false }), /park: its kept list could not be read/);
+  assert.equal(a.fact().doc.items.length, 1, 'the kept list is not cleared');
+});
+
 test('L352 MAT-2: a kept list that is not a list, or holds an entry that can\'t be read, is told as unreadable, not cleared', () => {
   for (const items of ['garbage', { a: 1 }, [{ entity: 'card', id: 'C-1' }]]) {
     const w = keptWorld();

@@ -62,6 +62,7 @@ const stateOf = (rec, entity, id) => {
   let cur;
   try { cur = rec.read(entity, id); } catch { return 'unreadable'; }
   if (cur == null) return 'absent';
+  if (cur.corrupt) return 'unreadable';  // L797: the store reports a corrupt document this way; it has not been seen to move
   return entity === 'card' ? JSON.stringify([cur.doc?.state ?? null, cur.doc?.wait?.who ?? null, cur.doc?.wait?.what ?? null]) : `rev ${cur.rev}`;
 };
 const keyOf = (x) => `${x.entity}/${x.id}`;
@@ -147,6 +148,8 @@ const stillRefused = (rec, k) => {
 function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
   const fact = REFUSED_FACT(cause);
   const cur = rec.read('fact', fact);
+  // L797 self-review M1: a kept list the store reports corrupt is not "nothing kept"; the pass tells it (tick.mjs).
+  if (cur?.corrupt) throw new Error(`its kept list could not be read (${cur.reason ?? 'corrupt'})`);
   const { kept, over: keptOver, more: prior, unreadable } = keptOf(cur?.doc);
   if (!fresh.length && !kept.length && !keptOver.length && !prior && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
   // A write refused twice in a pass is one refusal, the latest (L366 m-A).
@@ -170,6 +173,7 @@ function tellCause({ rec, alert, now, cause, fresh, taken, ran }) {
       const d = dropAnswer(rec, fact);
       if (!d.ok) throw new Error('its queued alert could not be dropped');
       const c = rec.read('fact', fact);
+      if (c?.corrupt) throw new Error(`its kept list could not be read (${c.reason ?? 'corrupt'})`);
       // Written when something shows or was queued, so a mark on its way conflicts (L449 m1, m2); this runs every pass.
       if (!d.removed && c?.doc?.told_at == null && !(c?.doc?.items ?? []).length && !(c?.doc?.over ?? []).length && !c?.doc?.more) return;
       // Through writeFrom (L454): a mark that lands during this write is a lost race to try again, and told_at must win.
