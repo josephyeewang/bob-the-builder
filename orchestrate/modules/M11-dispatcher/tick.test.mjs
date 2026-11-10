@@ -21,7 +21,7 @@ import { OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { KEYS as K } from './keys.mjs';
 import { rulesWith, recWith, seed, change, setClock, usageFact, undoEntries, filesOfCommits, T0, MIN, iso } from './fixtures.test-helper.mjs';
-import { writeLog, queueFor, assertDropFirst, lateMark } from './fixtures.test-helper.mjs';
+import { writeLog, queueFor, assertDropFirst, lateMark, handoffNote } from './fixtures.test-helper.mjs';
 import { FACTS, FD_RESTART_FACT } from './phone-link.mjs';
 import { goFingerprint } from '../M2-approvals/go.mjs';
 
@@ -733,7 +733,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
     assert.ok(requested(w.rec, 'U-1'), `${band}: the undo merge was not requested`);
     assert.deepEqual(r1.steps.leads.result, [['L-1', 'WRAP sent']], `${band}: ${JSON.stringify(r1.steps.leads.result)}`);
     assert.match(sent[0], /queued in your outbox do not carry over/);
-    writeFileSync(join(outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+    writeFileSync(join(outbox, HANDOFF_NAME('L-1')), handoffNote());
     endedAt = T0 + MIN;
     const r2 = await w.pass(2);
     assert.deepEqual(r2.steps.leads.result, [['L-1', 'restarted']], `${band}: ${JSON.stringify(r2.steps.leads.result)}`);
@@ -1485,7 +1485,7 @@ for (const [name, product, why] of [
   ['a product the rules don\'t have', 'gone', /\(handoff-L-1\.md, product gone\) could not be checked: .*context\.handoff_cap\.role/],
 ]) {
   test(`L584 M1: a handoff from a session with ${name} is told to the owner with its true cause, daily, and clears once it can be checked`, async () => {
-    const w = leadsWorld({ hand: 'the hand-off', product, rules: rulesWithout('gone') });
+    const w = leadsWorld({ hand: handoffNote(), product, rules: rulesWithout('gone') });
     const r = await w.pass(0);
     assert.deepEqual(r.steps.leads.result, [['L-1', `waiting: outbox file ${HANDOFF_NAME('L-1')} not used yet`]]);
     const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked'));
@@ -1508,7 +1508,7 @@ test('L584 M1: after WRAP the Lead and the owner hear the true cause, not "missi
   const w = leadsWorld({ product: null });
   await w.pass(0);
   assert.match(w.sent[0], /^WRAP/);
-  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote());
   w.state.endedAt = T0 + 2 * MIN;
   const r = await w.pass(3);
   assert.deepEqual(r.steps.leads.result, [['L-1', 're-asked']]);
@@ -1524,7 +1524,7 @@ test('L584 M1: after WRAP the Lead and the owner hear the true cause, not "missi
 test('L584: the tick passes the vet, so an oversize handoff is refused and the Lead hears its size', async () => {
   const w = leadsWorld();
   await w.pass(0);
-  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'x'.repeat(33_000));
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote(33_000));
   w.state.endedAt = T0 + 2 * MIN;
   const r = await w.pass(3);
   assert.match(r.steps.intake.result[0].refused, /8250 tokens, over the 8000 cap/);
@@ -1570,19 +1570,19 @@ test('L584 M2: a skipped Lead that can\'t be told fails the step, so it is told 
 });
 
 test('L596 m-b: an oversize handoff before WRAP holds nothing: the Lead gets its WRAP, and a rewrite restarts it', async () => {
-  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  const w = leadsWorld({ hand: handoffNote(40_000) });
   const r = await w.pass(0);
   assert.match(r.steps.intake.result[0].refused, /over the 8000 cap/);
   assert.deepEqual(r.steps.leads.result, [['L-1', 'WRAP sent']]);
   assert.match(w.sent[0], /under 8000 tokens/);
-  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote());
   w.state.endedAt = T0 + 2 * MIN;
   const again = await w.pass(3);
   assert.deepEqual(again.steps.leads.result, [['L-1', 'restarted']]);
 });
 
 test('L596 m-b: a Lead that leaves the file oversize hears its size, and the owner hears the give-up', async () => {
-  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  const w = leadsWorld({ hand: handoffNote(40_000) });
   await w.pass(0);
   w.state.endedAt = T0 + 2 * MIN;
   await w.pass(3);
@@ -1593,7 +1593,7 @@ test('L596 m-b: a Lead that leaves the file oversize hears its size, and the own
 });
 
 test('L596 m-b: another file still in flight holds the WRAP, though the handoff can be rewritten', async () => {
-  const w = leadsWorld({ hand: 'x'.repeat(40_000) });
+  const w = leadsWorld({ hand: handoffNote(40_000) });
   writeFileSync(join(w.outbox, '.half-written'), 'x');
   const r = await w.pass(0);
   assert.deepEqual(r.steps.leads.result, [['L-1', 'waiting: outbox file .half-written not used yet']]);
@@ -1602,7 +1602,7 @@ test('L596 m-b: another file still in flight holds the WRAP, though the handoff 
 test('L596 m-a: once the Lead has given up, the daily line says so, and that a restart needs a person', async () => {
   const w = leadsWorld({ product: null });
   await w.pass(0);
-  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off');
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote());
   for (const [end, at] of [[2, 3], [5, 6]]) { w.state.endedAt = T0 + end * MIN; await w.pass(at); }
   assert.match(w.calls.alerts.find((a) => a.includes('could not be checked: the session names')), /a Lead's restart waits on it/, 'before the give-up');
   assert.equal(w.rec.read('fact', RESTART_FACT('L-1')).doc.phase, 'gave_up');
@@ -1644,7 +1644,7 @@ test('L596 O1: a throw while reading what a Lead has in flight skips that Lead a
 });
 
 test('L596 O3: a file that can\'t be checked is told afresh if it comes back the same day, once it had gone', async () => {
-  const w = leadsWorld({ hand: 'the hand-off', product: null, tokens: 100 });
+  const w = leadsWorld({ hand: handoffNote(), product: null, tokens: 100 });
   const told = () => w.calls.alerts.filter((a) => a.includes('could not be checked')).length;
   await w.pass(0);
   assert.equal(told(), 1);
@@ -1652,7 +1652,7 @@ test('L596 O3: a file that can\'t be checked is told afresh if it comes back the
   assert.equal(told(), 1, 'once inside the day');
   rmSync(join(w.outbox, HANDOFF_NAME('L-1')));
   await w.pass(10);
-  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), 'the hand-off, again');
+  writeFileSync(join(w.outbox, HANDOFF_NAME('L-1')), handoffNote(0, 'again '));
   await w.pass(15);
   assert.equal(told(), 2);
 });
