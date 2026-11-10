@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ENTITIES, REQUIRED_FIELDS, SCRIPT_ACTORS } from '../../shared/record.mjs';
-import { CARD_CREATORS, FACT_FAMILIES, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { CARD_CREATORS, FACT_FAMILIES, PLAN_INPUTS, WRITERS, fieldsAllowed, mayCreateKind } from './permissions.mjs';
+import { draftPlanGrant } from './writer.mjs';
 import { HEAD, PRODUCT, iso, seed, setup } from './fixtures.test-helper.mjs';
 
 const ACTORS = SCRIPT_ACTORS.filter((a) => a !== 'joe');
@@ -95,6 +96,20 @@ test('the Lead changes plan inputs only on a draft; never on a fix card (R2-M12,
   assert.ok(fieldsAllowed('card', 'lead:L-1', { state: 'draft' }).has('files'));
   assert.ok(!fieldsAllowed('card', 'lead:L-1', { state: 'ready' }).has('files'));
   assert.ok(!fieldsAllowed('card', 'worker:S-1', { state: 'running' }).has('needs_joe'));
+});
+
+// L729: the writer's own grant check, called past the field gate (which refuses these writes first, so a weakened
+// check would otherwise go unseen): done_when alone is granted; done_when with any other plan input is not.
+test('L729: the draft plan grant covers a write only when every changed plan input is granted', () => {
+  const draft = { state: 'draft', kind: 'ordinary' };
+  assert.equal(draftPlanGrant('dispatcher', draft, ['done_when']), true);
+  for (const other of PLAN_INPUTS.filter((f) => f !== 'done_when')) {
+    assert.equal(draftPlanGrant('dispatcher', draft, ['done_when', other]), false, `done_when with ${other}`);
+    assert.equal(draftPlanGrant('dispatcher', draft, [other]), false, other);
+  }
+  assert.equal(draftPlanGrant('dispatcher', { state: 'ready', kind: 'ordinary' }, ['done_when']), false, 'past draft');
+  assert.equal(draftPlanGrant('dispatcher', { state: 'draft', kind: 'lead_daily_card' }, ['done_when']), false, 'a go-free kind');
+  assert.equal(draftPlanGrant('worker', draft, ['done_when']), false, 'a role with no grant');
 });
 
 // L722 (L698 design b, L699): the Dispatcher may set a card's done_when while the card is a draft, and never after;
