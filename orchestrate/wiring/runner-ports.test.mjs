@@ -3,11 +3,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { drainedPort, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { cardStartCommit, drainedPort, pauseLeadPort, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { walledLaunchSettings } from './runner-launch.mjs';
+import { leaderStart } from './runner-loop.mjs';
+import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { sessionArgs } from '../modules/M4-workshop/launcher/review-launch.mjs';
 
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const HEAD = 'b'.repeat(40);
@@ -69,6 +73,7 @@ test('step 5: spawnLeader starts its own process group with a start time; one wh
     const pg = Number(spawnSync('/bin/ps', ['-o', 'pgid=', '-p', String(a.pid)]).stdout.toString().trim());
     assert.equal(pg, a.pid, 'claude leads its own group');
     assert.equal(typeof a.pidStart, 'string'); assert.ok(a.pidStart);
+    assert.equal(a.pidStart, leaderStart(a.pid), 'read by the runner\'s one reader, the one the stop checks against');
   } finally { try { process.kill(-a.pid, 'SIGKILL'); } catch { /* gone */ } }
   let child;
   const b = await spawnLeader({ spawn: (...x) => (child = spawn(...x)), bin: '/bin/sleep', args: ['30'], cwd: '/', env: { PATH: '/usr/bin:/bin' }, pidStartOf: () => null });
@@ -109,7 +114,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
   const w = world();
   try {
     const a = await w.start();
-    assert.deepEqual(a, { ok: true, pid: 4242, pgid: 4242, pidStart: 'Tue Nov 10 12:00:00 2026', head: HEAD, outbox: join(w.outboxRoot, 'worker', SID),
+    assert.deepEqual(a, { ok: true, pid: 4242, pgid: 4242, pidStart: 'Tue Nov 10 12:00:00 2026', head: HEAD, base: HEAD, outbox: join(w.outboxRoot, 'worker', SID),
       signin: 'a', configDir: join(w.d, 'home', '.claude'), copy: join(w.copiesRoot, 'C-1') });
     const prep = w.calls.find((c) => c[0] === 'prepare')[1];
     assert.deepEqual(prep.card, { id: 'C-1', repo: 'o/p1', commit: HEAD, branch: 'card/c-1' });
@@ -125,10 +130,18 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     assert.equal(sp[1], '/bin/sleep'); assert.equal(sp[3].cwd, join(w.copiesRoot, 'C-1')); assert.equal(sp[3].detached, true);
     assert.ok(sp[2].includes(f) && sp[2].includes(SID) && sp[2].at(-1) === 'do the card');
     assert.equal(sp[3].env.HOME, w.c.home); assert.equal(sp[3].env.PATH, '/usr/bin:/bin');
-    // A second start for the same card is refused, and leaves the first one's copy alone.
-    const b = await startPort(w.c, { ...w.deps, prepare: (x) => import('../modules/M4-workshop/launcher/worker-copy.mjs').then((m) => m.prepareWorkerCopy(x)) })({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: SID.replace('0f', '1f') });
-    assert.equal(b.ok, false);
-    assert.equal(w.left().copy, true);
+    // Launch check 0 is given the very flags claude is started with (#364 self-review m5).
+    const ln = w.calls.find((c) => c[0] === 'launch')[1];
+    assert.deepEqual(ln.names.flags, sp[2].filter((x) => x.startsWith('--')));
+    assert.deepEqual(ln.names.flags, sessionArgs({ profile: ln.profile, settingsFile: f, sessionId: SID, prompt: 'p' }).filter((x) => x.startsWith('--')));
+    // A second start for the same card, claimed by that second session, is refused by the copy already there, and
+    // leaves the first one's copy, outbox and settings alone (#364 self-review M3).
+    const SID2 = SID.replace('0f', '1f');
+    w.card.claim.session_id = SID2;
+    const b = await startPort(w.c, { ...w.deps, prepare: (x) => import('../modules/M4-workshop/launcher/worker-copy.mjs').then((m) => m.prepareWorkerCopy(x)) })({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: SID2 });
+    assert.equal(b.ok, false); assert.match(b.reason, /already exists/);
+    assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true });
+    assert.equal(existsSync(join(w.outboxRoot, 'worker', SID2)), false);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
@@ -145,6 +158,9 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a card claimed by another session', { readCard: () => ({ ok: true, doc: { state: 'claimed', claim: { session_id: 'x' } } }) }, /not claimed for this session/],
     ['a card not in the Record', { readCard: () => ({ ok: false, reason: 'no such card' }) }, /no such card/],
     ['another product\'s card', { readCard: () => ({ ok: true, doc: { state: 'claimed', claim: { session_id: SID }, product: 'p2' } }) }, /another product's/],
+    ['a card naming no product', { readCard: () => ({ ok: true, doc: { state: 'claimed', claim: { session_id: SID } } }) }, /names no product/],
+    ['a Tier 1 card with no main_commit', { startCommit: cardStartCommit }, /main_commit/],
+    ['a runner that is stopping', { stopped: () => true }, /is stopping$/],
     ['no prompt', { promptFor: () => null }, /^not wired: no worker prompt/],
     ['no sign-in', { account: () => ({ account: null, reason: 'not set up' }) }, /not set up/],
     ['no start commit', { startCommit: async () => { throw new Error('no main'); } }, /no main/],
@@ -204,5 +220,55 @@ test('step 5: a real start\'s group is gone once killed (the leader the answer n
     assert.ok(alive(a.pid));
     process.kill(-a.pgid, 'SIGKILL');
     assert.ok(await until(() => !alive(a.pid)));
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#364 self-review M4: with M4\'s own launch(), names that pass check 0 and no worker checks, check 1 refuses and nothing starts', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  const confirmed = {};
+  const w = world({ launchFn: launch, walled: (x) => { const r = walledLaunchSettings(x); if (r.ok) for (const n of namesIn(r.settings)) confirmed[n] = { by: 'readback:stand-in', version: '2.1.300' }; return r; },
+    names: { version: '2.1.300', confirmed } });
+  for (const f of Object.values(FLAGS)) if (f.startsWith('--')) confirmed[f] = { by: 'readback:stand-in', version: '2.1.300' };
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
+    deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals'] };
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /^launch check 1 \(fresh copy\): no check is wired/);
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
+});
+
+test('#364 self-review M1: a stop that comes while a start runs its checks spawns nothing, and the start removes what it made', async () => {
+  let stopping = false;
+  const w = world({ stopped: () => stopping, launchFn: async (x) => { stopping = true; return { ok: true, started: await x.start() }; } });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /stopping, so claude was not started/);
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {
+  const C = 'c'.repeat(40); const M = 'd'.repeat(40);
+  const main = async (m) => { assert.equal(m, '/m'); return M; };
+  assert.equal(await cardStartCommit({ mirror: '/m', cardDoc: { tier: 1, main_commit: C } }, { main }), C);
+  assert.equal(await cardStartCommit({ mirror: '/m', cardDoc: { main_commit: C } }, { main }), C);
+  assert.equal(await cardStartCommit({ mirror: '/m', cardDoc: { tier: 2, main_commit: null } }, { main }), M);
+  for (const doc of [{ tier: 1 }, { tier: 1, main_commit: 'abc' }, { main_commit: C.toUpperCase() }, {}, undefined]) {
+    await assert.rejects(cardStartCommit({ mirror: '/m', cardDoc: doc }, { main }), /main_commit/, JSON.stringify(doc));
+  }
+  // The answer's base is the commit the copy was made on.
+  const w = world({ startCommit: undefined });
+  delete w.deps.startCommit; w.card.tier = 1; w.card.main_commit = C;
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(a.base, C);
+    assert.equal(w.calls.find((c) => c[0] === 'prepare')[1].card.commit, C);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });

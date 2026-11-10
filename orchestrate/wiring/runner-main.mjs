@@ -15,7 +15,8 @@
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
 // lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
-// Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or its memory could not be read.
+// Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
+// read back, or a start the loop must refuse).
 
 import { mkdirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -51,11 +52,11 @@ export function checkRunnerConfig(c) {
     workerRunner: { requestsDir: c.requestsDir, statusFile: c.statusFile } };
 }
 
-/** The ports from the config; `over` replaces any (a test's fakes). */
-export function realRunnerPorts(c, over = {}) {
+/** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
+export function realRunnerPorts(c, over = {}, { stopped = () => false } = {}) {
   return {
     ...processGroupPorts(),
-    start: startPort(c),
+    start: startPort(c, { stopped }),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
     outboxDrained: drainedPort(),
@@ -68,12 +69,13 @@ export function realRunnerPorts(c, over = {}) {
  * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for).
  * → the exit code.
  */
-export async function main(argv, { readConfig = (f) => readJobConfig(f, { code: [], self: selfPath() }), lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
+export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = (fn) => process.once('SIGTERM', fn) } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   let l; let held;
-  try { mkdirSync(c.settingsDir, { mode: 0o700, recursive: true }); l = lock(c.ownDir); held = l.acquire(); } catch (e) {
+  // The runner's own folder is setup's, with the access the Dispatcher's reads need: only settings/ is made here (#364 m6).
+  try { try { mkdirSync(c.settingsDir, { mode: 0o700 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; } l = lock(c.ownDir); held = l.acquire(); } catch (e) {
     log(`the worker runner did not start: ${/busy/.test(e?.message ?? '') ? 'another worker runner is running' : e?.message ?? e}`); return 1;
   }
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
@@ -81,7 +83,7 @@ export async function main(argv, { readConfig = (f) => readJobConfig(f, { code: 
   onStop(() => { stopping = true; });
   try {
     await run({ requestsDir: c.requestsDir, statusFile: c.statusFile, memoryFile: c.memoryFile, orchestrateUid: c.orchestrateUid, uid: process.getuid(),
-      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports), note: log, stopWhen: () => stopping });
+      outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: c.claimMs, ports: realRunnerPorts(c, ports, { stopped: () => stopping }), note: log, stopWhen: () => stopping });
     return 0;
   } catch (e) { log(`the worker runner stopped: ${e?.message ?? e}`); return 1; } finally { try { l.release(held.nonce); } catch { /* gone */ } }
 }

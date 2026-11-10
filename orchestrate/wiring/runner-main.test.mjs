@@ -43,7 +43,9 @@ test('step 5: main runs the loop with the config\'s paths, holds one lock for it
     const code = await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), onStop: (fn) => { stop = fn; },
       run: async (x) => { ctx = x; assert.ok(existsSync(join(d, 'runner', 'lock')), 'the lock is held while the loop runs');
         assert.throws(() => makeLock({ dir: join(d, 'runner'), timeoutMs: 50 }).acquire(), /busy/, 'a second runner can\'t take it');
-        assert.equal(x.stopWhen(), false); stop(); assert.equal(x.stopWhen(), true); } });
+        assert.equal(x.stopWhen(), false); stop(); assert.equal(x.stopWhen(), true);
+        // The start port is told: once stopping, it starts nothing (#364 self-review M1).
+        assert.match((await x.ports.start({})).reason, /is stopping$/); } });
     assert.equal(code, 0, logs.join('\n'));
     assert.equal(ctx.memoryFile, join(d, 'runner', 'memory.json')); assert.equal(ctx.statusFile, join(d, 'runner', 'status.json'));
     assert.equal(ctx.uid, process.getuid()); assert.equal(ctx.orchestrateUid, 501); assert.equal(ctx.claimMs, 600_000);
@@ -87,4 +89,14 @@ test('step 5: the LaunchAgent file is loginJobPlist\'s, with its own logs, the o
   assert.ok(t.includes(`/logs/${RUNNER_JOB_LOG}.out.log`) && t.includes(`/logs/${RUNNER_JOB_LOG}.err.log`));
   assert.ok(!t.includes('UserName'), 'the owner\'s own LaunchAgent');
   assert.match(t, /<array><string>\/usr\/local\/bin\/node<\/string><string>\/i\/wiring\/runner-main.mjs<\/string><string>\/i\/runner.json<\/string><\/array>/);
+});
+
+test('#364 self-review m6: main never makes the runner\'s own folder (setup does, with the access the Dispatcher needs)', async () => {
+  const d = tempDir('orch-rmain-');
+  try {
+    const logs = [];
+    assert.equal(await main(['/cfg.json'], { readConfig: () => config(d), log: (s) => logs.push(s), run: async () => {}, onStop: () => {} }), 1);
+    assert.equal(existsSync(join(d, 'runner')), false);
+    assert.match(logs.join('\n'), /did not start: .*ENOENT/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });

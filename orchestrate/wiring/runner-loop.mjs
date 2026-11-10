@@ -150,7 +150,8 @@ const PORTS = ['start', 'groupGone', 'stopGroup', 'saveWork', 'pauseLead', 'outb
 
 /**
  * One tick. ctx: { state, pending, requestsDir, statusFile, memoryFile, orchestrateUid, uid, outboxRoot, copiesRoot,
- * claimMs, ports, clock?, note?, files? ({ list, stat, read, remove, write }) }. → the state to keep for the next tick.
+ * claimMs, ports, clock?, note?, files? ({ list, stat, read, remove, write }), readNone? (the stop's last tick: no request
+ * is read, so only the starts still on are settled) }. → the state to keep for the next tick.
  */
 export async function runnerTick(ctx) {
   const { requestsDir, statusFile, memoryFile, orchestrateUid, ports, clock = Date.now, note = () => {}, files = {} } = ctx;
@@ -158,7 +159,7 @@ export async function runnerTick(ctx) {
   const read = files.read ?? ((f) => readRequest(f, { orchestrateUid }));
   const write = files.write ?? ((f, text, mode) => writeStatus(f, text, { mode }));
   let names = [];
-  try { names = listRequests(requestsDir, files); } catch (e) { note(`the worker runner's requests can't be listed (${e?.code ?? e?.message}); this pass reads none`); }
+  if (!ctx.readNone) try { names = listRequests(requestsDir, files); } catch (e) { note(`the worker runner's requests can't be listed (${e?.code ?? e?.message}); this pass reads none`); }
   const requests = names.map((name) => ({ name, body: read(join(requestsDir, name)) }));
   // The pass's one time for its age rules, and the clock for each write's written_at (#358 r1 M1, #362 r1 m7).
   const r = await workerRunnerPass({ ...ctx, requests, now: clock(), clock, note,
@@ -173,7 +174,7 @@ export async function runnerTick(ctx) {
  * the loop goes on (the next tick rewrites the status); the memory failing to load stops it before any tick.
  */
 export async function runRunner(ctx) {
-  const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory } = ctx;
+  const { memoryFile, uid, sleep = sleepFor, stopWhen = () => false, note = () => {}, everyMs = RUNNER_TICK_MS, load = loadMemory, drainMs = RUNNER_PORT_MS } = ctx;
   // A cadence given in place of RUNNER_TICK_MS is held to the same bound (#362 r1 c2).
   if (!(everyMs > 0) || everyMs + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('the worker runner\'s tick must leave a port wait under the status cadence');
   let state = load(memoryFile, { uid, note });
@@ -186,6 +187,16 @@ export async function runRunner(ctx) {
     }
     if (stopWhen()) break;
     await sleep(everyMs);
+  }
+  // A start still on when the stop came (#364 self-review M1): the start port refuses to spawn once the runner is
+  // stopping, so each start ends soon; it is waited for up to drainMs, then one last tick that reads no request settles
+  // it, so a session that did start is listed in the memory the next runner reads. One still on after that is noted:
+  // its request stays 'waiting', as a start on when a runner crashed does.
+  if (pending.size) {
+    let t; const late = new Promise((r) => { t = setTimeout(r, drainMs); });
+    await Promise.race([Promise.all([...pending.values()].map((p) => p.on)), late]); clearTimeout(t);
+    try { state = await runnerTick({ ...ctx, state, pending, readNone: true }); } catch (e) { note(`the worker runner's last tick failed (${e?.message ?? e})`); }
+    for (const id of pending.keys()) note(`the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`);
   }
   return state;
 }

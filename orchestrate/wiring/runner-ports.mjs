@@ -3,22 +3,28 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId }) → { ok: true, pid, pgid, pidStart, head, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
-//     2. the copy's start commit comes from `startCommit` (default: the mirror's main, as a fresh copy is), then M4's
-//        prepareWorkerCopy makes <copiesRoot>/<card> (never over a folder that is there);
+//     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
+//        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main), then M4's
+//        prepareWorkerCopy makes <copiesRoot>/<card> (never over a folder that is there). The answer's `base` names that
+//        commit; the launch record has no field for it yet (writeLaunch, lane 2), so until it does only the runner's
+//        status shows it;
 //     3. the outbox <outboxRoot>/<role>/<sessionId> is made, 0o700 (the role folder's access list lets intake read it);
 //     4. the session's settings: walledLaunchSettings (step 2's wall) with the product's fixed paths from the config and
-//        this session's copy and outbox, the other cards' copies denied, written 0o600 under the runner's own folder,
-//        which the wall denies to every session;
+//        this session's copy and outbox, the other cards' copies that are there at this start denied, written 0o600
+//        under the runner's own folder, which the wall denies to every session. KNOWN GAP (#364 self-review M2): a copy
+//        made after this start is not in this session's list (a deny on all of <copiesRoot> would deny its own copy too,
+//        and a deny wins over an allow). What closes it is the copies folder's access list (L751, lane 3's draft), so
+//        each session's user reaches only its own copy; until then this list is defence in depth only;
 //     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (not built yet: lane 4's next step,
 //        reusing review-launch.mjs's ports); a check that applies and has no port is refused there;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
-//        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once (M9
-//        pidStart); one that can't be read gets the group killed and the start refused, since the runner tells its own
+//        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
+//        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
 //        group from a reused number only by that time (step-4 review M3).
-//     A refusal after step 2 removes the copy, the outbox and the settings file this start made (claude never ran in
+//     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
 //     them as a session), so the card's next start is not refused for a copy left over.
 //   saveWork(session): M4 save-work (createSaveWork) on the session's copy, into its outbox. It runs only through the
 //     lock-down runner (`runLocked`), which is not built; without it save-work refuses, as it says it must.
@@ -41,7 +47,7 @@ import { RUNNER_ROLE_OF } from './owner-status.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
-import { pidStart as readPidStart } from '../modules/M9-record/lock.mjs';
+import { leaderStart } from './runner-loop.mjs';
 import { readTranscriptFile } from '../modules/M11-dispatcher/transcript.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
@@ -99,7 +105,7 @@ export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up nee
  * Spawns claude as the leader of its own process group and reads its start time. `kill(pgid, signal)` signals a group.
  * → { ok: true, pid, pgid, pidStart } | { ok: false, reason }
  */
-export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = readPidStart, kill = (g, sig) => process.kill(-g, sig) }) {
+export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pidStartOf = leaderStart, kill = (g, sig) => process.kill(-g, sig) }) {
   const s = await spawnClaude(spawn, bin, args, { cwd, env });
   if (!s.ok) return s;
   let at = null;
@@ -109,6 +115,18 @@ export async function spawnLeader({ spawn = childSpawn, bin, args, cwd, env, pid
     return refuse('claude started, but its start time could not be read, so its group was killed');
   }
   return { ok: true, pid: s.pid, pgid: s.pid, pidStart: at };
+}
+
+/**
+ * The commit a card's copy starts on (L825): a Tier 1 card's plan names it (main_commit, 40 hex; a fix card may carry no
+ * tier, L228, and is held to the same rule); any other card starts on the mirror's main. → the commit, or a throw.
+ */
+export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain } = {}) {
+  if (cardDoc?.tier === undefined || cardDoc?.tier === null || cardDoc.tier === 1) {
+    if (typeof cardDoc?.main_commit !== 'string' || !SHA.test(cardDoc.main_commit)) throw new Error('a Tier 1 card needs its plan\'s main_commit (40 hex)');
+    return cardDoc.main_commit;
+  }
+  return main(mirror);
 }
 
 /** The mirror's main, as a fresh copy starts on it. → the commit, or a throw. */
@@ -130,18 +148,20 @@ function writeNew(file, text) {
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
  * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
- * promptFor(x) → text, names ({ flags, version, confirmed? }, launch check 0), account, spawn, pidStartOf, kill, launchFn,
- * walled, fs ({ mkdir, rm, writeNew, list }), ownUid.
+ * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, launchFn,
+ * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
+ * #364 self-review M1).
  */
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
-    startCommit = ({ mirror }) => mirrorMain(mirror), prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
-    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = readPidStart, kill, launchFn = launch,
-    walled = walledLaunchSettings, ownUid = () => process.getuid(),
+    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
+    names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, launchFn = launch,
+    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, ...(deps.fs ?? {}) };
   return async ({ card, kind, product, sessionId } = {}) => {
+    if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
     if (!Object.hasOwn(RUNNER_ROLE_OF, kind)) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
@@ -152,7 +172,7 @@ export function startPort(c, deps = {}) {
     const cd = readCard(card);
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
-    if (cd.doc.product !== undefined && cd.doc.product !== product) return refuse('the card is another product\'s');
+    if (cd.doc.product !== product) return refuse(cd.doc.product === undefined ? 'the card names no product' : 'the card is another product\'s');
     const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product });
     if (typeof prompt !== 'string' || !prompt) return notWired('no worker prompt is given to the runner');
     const who = account();
@@ -176,12 +196,14 @@ export function startPort(c, deps = {}) {
     const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid };
     let l;
     try {
-      l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, settings: w.settings }, ownUid,
-        start: () => spawnLeader({ spawn, bin: c.claudeBin, args: sessionArgs({ profile, settingsFile, sessionId, prompt }), cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}) }) });
+      // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
+      const args = sessionArgs({ profile, settingsFile, sessionId, prompt });
+      l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
+        start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}) }) });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     if (!l?.ok) return undo(l?.reason ?? 'the launch gave no answer');
     const s = l.started;
     if (!s?.ok) return undo(s?.reason ?? 'claude was not started');
-    return { ok: true, pid: s.pid, pgid: s.pgid, pidStart: s.pidStart, head: made.head, outbox, signin: who.account, configDir: who.dir, copy };
+    return { ok: true, pid: s.pid, pgid: s.pgid, pidStart: s.pidStart, head: made.head, base: commit, outbox, signin: who.account, configDir: who.dir, copy };
   };
 }

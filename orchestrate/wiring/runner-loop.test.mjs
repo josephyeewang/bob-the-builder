@@ -266,3 +266,20 @@ test('#358 r1 M1 through the loop: each write carries the clock at that write', 
   await runnerTick({ ...v.ctx({ files: vfiles, portMs: 30 }), clock: undefined, state: st, pending: new Map() });
   assert.ok(vat.at(-1) - vat[0] >= 50, `the stamps move with the clock: ${vat}`);
 });
+
+test('#364 self-review M1: a start still on when the stop comes is waited for and settled by a last tick that reads no request', async () => {
+  const w = world(); let n = 0; let release;
+  w.ports.start = (x) => new Promise((r) => { release = () => r({ ok: true, pid: 7001, pidStart: 's', pgid: 7001, head: 'a'.repeat(40), outbox: join(w.outboxRoot, 'worker', x.sessionId), signin: 's', configDir: '/cfg', copy: `/copies/${x.card}` }); });
+  w.ask(...launch('S-1'));
+  const state = await runRunner({ ...w.ctx({ portMs: 30 }), stopWhen: () => n >= 1, sleep: async () => { w.ask(...launch('S-2')); setTimeout(() => release(), 50); n += 1; } });
+  assert.deepEqual(state.sessions.map((s) => s.id), ['S-1']);
+  assert.deepEqual(loadMemory(w.memoryFile, { uid: UID }).sessions.map((s) => s.id), ['S-1'], 'the memory the next runner reads lists it');
+  assert.ok(existsSync(join(w.requestsDir, 'launch-S-2.json')), 'the last tick reads no request');
+  // One that does not end in time is noted, and stays waiting.
+  const v = world(); let m = 0;
+  v.ports.start = () => new Promise(() => {});
+  v.ask(...launch('S-1'));
+  const st = await runRunner({ ...v.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => m >= 1, sleep: async () => { m += 1; } });
+  assert.equal(st.requests['S-1'].state, 'waiting');
+  assert.ok(v.notes.some((t) => /still on when the worker runner stopped/.test(t)), v.notes.join('\n'));
+});
