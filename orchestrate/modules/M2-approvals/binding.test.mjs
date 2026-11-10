@@ -367,4 +367,8 @@ test('L787: a title is one line in the box, whatever line break it holds', () =>
     }
     assert.equal(r.payload.questions[0].question, '[ask A-1] Ship it [ask B-2] forged (C-1)', JSON.stringify(br));
   }
+  // Choice labels and a go's file names may not hold a line break either (self-review m2).
+  for (const br of ['\n', '\u2028']) {
+    assert.equal(renderPayload({ askId: 'A-1', kind: 'tap_yes_no', card: 'C-1', title: 'Ship it', choices: ['Yes', `No${br}Yes`] }).ok, false, JSON.stringify(br));
+  }
 });

@@ -35,7 +35,8 @@ export function askIdOf(question) {
 
 // Every character a screen may break a line at (L787: U+2028, U+2029, NEL, VT and FF too, not only CR and LF), so a
 // title can't start a line of its own in the box, such as a forged "Still open" line or a second [ask] tag.
-const oneLine = (s) => String(s).replace(/[\r\n\v\f\x85\u2028\u2029]+/g, ' ').trim();
+export const LINE_BREAKS = /[\r\n\v\f\x85\u2028\u2029]/;
+const oneLine = (s) => String(s).replace(new RegExp(`${LINE_BREAKS.source}+`, 'g'), ' ').trim();
 
 export function renderPayload({ askId, kind, card, title, choices, fingerprint, files } = {}) {
   const k = activeKind(kind);
@@ -46,12 +47,12 @@ export function renderPayload({ askId, kind, card, title, choices, fingerprint, 
   if (typeof title !== 'string' || !oneLine(title)) return { ok: false, reason: 'a question box names its card in plain words' };
   const labels = choices ?? k.choices;
   if (!Array.isArray(labels) || labels.length < 2 || labels.length > 4 || new Set(labels).size !== labels.length
-    || !labels.every((l) => typeof l === 'string' && l.trim() === l && l)) return { ok: false, reason: 'a box has 2 to 4 distinct choices' };
+    || !labels.every((l) => typeof l === 'string' && l.trim() === l && l && !LINE_BREAKS.test(l))) return { ok: false, reason: 'a box has 2 to 4 distinct choices' };
   let question = `[ask ${askId}] ${oneLine(title)} (${card})`;
   const options = labels.map((label) => ({ label, description: '' }));
   if (k.go) {
     if (typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) return { ok: false, reason: 'a go names its plan fingerprint' };
-    if (!Array.isArray(files) || !files.length || files.length > MAX_FILES_SHOWN || !files.every((f) => typeof f === 'string' && f)) return { ok: false, reason: `a go lists its files (1 to ${MAX_FILES_SHOWN})` };
+    if (!Array.isArray(files) || !files.length || files.length > MAX_FILES_SHOWN || !files.every((f) => typeof f === 'string' && f && !LINE_BREAKS.test(f))) return { ok: false, reason: `a go lists its files (1 to ${MAX_FILES_SHOWN})` };
     question += ` — plan ${fingerprint.slice(0, 12)}`;
     options[0].description = `Files: ${files.join(', ')}`;
   }
