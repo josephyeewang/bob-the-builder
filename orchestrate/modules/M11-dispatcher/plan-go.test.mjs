@@ -17,7 +17,7 @@ import { move } from './moves.mjs';
 import { intakePass } from './outbox-intake.mjs';
 import { recordLeadLaunch } from './lead-restart.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
+import { GO_REASK_MS, namedSession, planAuthor, planGoPass, PLAN_ASK_FACT, PLAN_CHANGED_FACT, PLAN_PORT_MS, PLAN_REVIEW_FACT, PLAN_REVIEW_LEAD, PLAN_REVIEW_SLOW_MS, PLAN_SLOW_FACT, PLAN_START_HOLD_MS, PLAN_TURN_FACT } from './plan-go.mjs';
 import { approvalsStep, approvalsAlerts, APPROVALS_PRODUCT_MS } from './tick.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 import { planRows } from '../../wiring/review-ports.mjs';
@@ -115,8 +115,12 @@ test('A3a: the wired planRows reads rows M2 asks a go on; a drifted, missing or 
   const w2 = world();
   card(w2, 'A', { files });
   await pass(w2, { planRows: githubRows(w2, { 'R-1': yaml('R-1', 'a different test') }) });
-  assert.equal(asks(w2).length, 0);
-  assert.ok(w2.sent.some((s) => /card A could not be asked for a go: the card's done_when is not its rows' pass tests/.test(s)), w2.sent.join(' | '));
+  assert.equal(asks(w2).length, 0, 'the pass that sets the card\'s pass test asks nothing');
+  // L698: the Dispatcher sets the card's pass test from the row it read (M9's grant, #296), never asked on the old text;
+  // the next pass asks on the row's.
+  assert.equal(w2.t.record.read('card', 'A').doc.done_when, 'a different test');
+  await pass(w2, { planRows: githubRows(w2, { 'R-1': yaml('R-1', 'a different test') }) });
+  assert.equal(asks(w2).length, 1, w2.sent.join(' | '));
   const w3 = world();
   card(w3, 'A', { files });
   await pass(w3, { planRows: githubRows(w3, {}) });
@@ -266,6 +270,83 @@ test('a reviewer that can\'t start is told, is tried again, and nothing is raise
   assert.equal(asks(w).length, 0);
 });
 
+// #294 r3 m1: a plan the runner holds at the cap has no reviewer yet, so it is told as waiting for a slot, after the
+// same hour, and never as a reviewer that has not answered.
+test('a plan waiting at the plan reviewers\' cap is told as waiting for a slot, not as a silent reviewer', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  const told = w.t.clock.t + PLAN_REVIEW_SLOW_MS; // when the slot message goes out
+  const startedAt = (ago) => new Date(told - ago).toISOString();
+  const slot = { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', started_at: startedAt(0), holders: [{ card: 'A', started_at: startedAt(3 * 3600_000), older_plan: true }, { card: 'C-8', started_at: startedAt(20 * 60_000) }, { card: 'C-9' }, { card: 'C-10', started_at: '2999-01-01T00:00:00.000Z' }] }) };
+  later(w, PLAN_REVIEW_SLOW_MS - 1);
+  await pass(w, slot);
+  assert.equal(w.sent.filter((s) => /plan review hasn't started/.test(s)).length, 0, 'not before the hour');
+  later(w, 1);
+  await pass(w, slot);
+  // #335 r1 M1: the holders are named, with since when, and no "it starts once one ends".
+  assert.deepEqual(w.sent.filter((s) => /plan review hasn't started/.test(s)), ["card A's plan review hasn't started: the most plan reviews allowed at once are already running (card A, on an older plan, running for 3 hours; card C-8 running for 20 minutes; card C-9; card C-10). Until one finishes, card A can't be asked for a go"]);
+  assert.equal(w.sent.filter((s) => /has not answered yet|starts once one ends/.test(s)).length, 0);
+  assert.equal(asks(w).length, 0);
+  // A status that lists no holders still says so plainly.
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2);
+  later(w2, PLAN_REVIEW_SLOW_MS);
+  await pass(w2, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot' }) });
+  assert.equal(w2.sent.filter((s) => /already running \(the runner's status names none of them\)\. Until one finishes, card B/.test(s)).length, 1);
+});
+
+// #335 r2 m3, c1: at most 10 holders are named, the rest counted; a long card id is cut at 40 characters; "1 minute".
+test('#335 r2 m3 planted: past 10 holders the rest are counted, a long card id is cut, and one minute is "1 minute"', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  const told = w.t.clock.t + PLAN_REVIEW_SLOW_MS;
+  const long = `C-${'x'.repeat(60)}`;
+  const holders = [{ card: long, started_at: new Date(told - 60_000).toISOString() }, null, { card: 7 }, ...Array.from({ length: 11 }, (_, i) => ({ card: `C-${i + 1}` }))];
+  later(w, PLAN_REVIEW_SLOW_MS);
+  await pass(w, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', holders }) });
+  const [msg] = w.sent.filter((s) => /plan review hasn't started/.test(s));
+  assert.ok(msg.includes(`(card ${long.slice(0, 40)} running for 1 minute; card C-1; `), msg);
+  assert.ok(!msg.includes(long.slice(0, 41)), 'cut at 40');
+  assert.ok(msg.includes('; card C-9; and 2 more)'), msg);
+  assert.ok(!msg.includes('card C-10'), msg);
+  // Exactly 10: all named, and no "more".
+  const v = world();
+  t1(v, 'A');
+  await pass(v);
+  later(v, PLAN_REVIEW_SLOW_MS);
+  await pass(v, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot', holders: Array.from({ length: 10 }, (_, i) => ({ card: `C-${i + 1}` })) }) });
+  const [ten] = v.sent.filter((s) => /plan review hasn't started/.test(s));
+  assert.ok(ten.includes('; card C-10)'), ten);
+  assert.ok(!/more\)/.test(ten), ten);
+});
+
+// #335 r1 m1: once a long wait for a slot ends, the hour runs from the reviewer's own start, not from the request.
+test('after a long wait for a slot, "slow" is counted from when the reviewer started', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w);
+  later(w, 3 * PLAN_REVIEW_SLOW_MS);
+  await pass(w, { planReviewAnswer: async () => ({ ok: true, waiting: 'slot' }) });
+  const startedAt = new Date(w.t.clock.t).toISOString();
+  const running = { planReviewAnswer: async () => ({ ok: true, started_at: startedAt }) };
+  later(w, PLAN_REVIEW_SLOW_MS - 1);
+  await pass(w, running);
+  assert.equal(w.sent.filter((s) => /has not answered yet/.test(s)).length, 0, 'not an hour after its reviewer started');
+  later(w, 1);
+  await pass(w, running);
+  assert.equal(w.sent.filter((s) => /the plan reviewer on card A has not answered yet/.test(s)).length, 1);
+  // A start time that can't be used (later than now) falls back to the request's time.
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2);
+  later(w2, PLAN_REVIEW_SLOW_MS);
+  await pass(w2, { planReviewAnswer: async () => ({ ok: true, started_at: '2999-01-01T00:00:00.000Z' }) });
+  assert.equal(w2.sent.filter((s) => /the plan reviewer on card B has not answered yet/.test(s)).length, 1);
+});
+
 test('a reviewer silent for over an hour is told; before that it is not', async () => {
   const w = world();
   t1(w, 'A');
@@ -309,14 +390,73 @@ test('planAuthor: the latest write that changed the plan, not the latest write',
   for (const a of ['dispatcher', 'lead:', ':S', null]) assert.equal(namedSession(a), null);
 });
 
-test('a refused raise is told once a day and the next card still runs', async () => {
+test('a row with no pass test is told once a day and the next card still runs', async () => {
   const w = world();
-  card(w, 'A', { done_when: 'not the bar' });
+  card(w, 'A');
   card(w, 'B');
-  await pass(w);
-  await pass(w);
+  // A's row has no pass test (L726 m4), so A is refused each pass.
+  const rows = async ({ card: c }) => (c === 'A' ? { 'R-1': row('R-1', { done_when: '' }) } : ROWS);
+  await pass(w, { planRows: rows });
+  await pass(w, { planRows: rows });
   assert.equal(w.sent.filter((s) => /card A could not be asked for a go/.test(s)).length, 1, w.sent.join(' | '));
   assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
+});
+
+// #295 r2 c2: raiseGo's own refusal, past the rows' pass tests, is told under 'raise' once a day.
+test('a refused raise is told once a day and the next card still runs', async () => {
+  const w = world();
+  card(w, 'A');
+  card(w, 'B');
+  // A's row has its pass test but names itself as another row, which only raiseGo's checkRows refuses.
+  const rows = async ({ card: c }) => (c === 'A' ? { 'R-1': row('R-1', { id: 'R-2' }) } : ROWS);
+  for (let i = 0; i < 3; i++) await pass(w, { planRows: rows });
+  assert.deepEqual(w.sent.filter((s) => /card A could not be asked for a go/.test(s)), ['card A could not be asked for a go: row R-1 names itself R-2'], w.sent.join(' | '));
+  assert.deepEqual(asks(w).map((a) => a.doc.card), ['B']);
+});
+
+// #295 r2 c3: a Tier-1 card with no rows is refused before its plan review, so no reviewer is started for it.
+test('a card with no rows is refused before its plan review, with raiseGo\'s words', async () => {
+  const w = world();
+  t1(w, 'A');
+  await pass(w, { planRows: async () => ({}) });
+  assert.deepEqual(w.started, []);
+  assert.ok(w.sent.some((s) => s === 'card A could not be asked for a go: a go names at least one row'), w.sent.join(' | '));
+  const w2 = world();
+  t1(w2, 'B');
+  await pass(w2, { planRows: async () => null });
+  assert.deepEqual(w2.started, []);
+  assert.ok(w2.sent.some((s) => s === 'card B could not be asked for a go: the rows the card names are missing'), w2.sent.join(' | '));
+});
+
+// #295 r2 m1: a run-of-changes note the Record refuses is told, never silent.
+test('a run-of-changes note that can\'t be written is told under its own cause', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'newer' });
+  const id = PLAN_CHANGED_FACT('A');
+  const refusing = (r) => ({ ...r, list: (e) => (e === 'card' ? r.list('card').map((c) => (c.id === 'A' ? stale : c)) : r.list(e)),
+    write: (x) => (x?.entity === 'fact' && x.id === id ? { ok: false, reason: 'refused for the test' } : r.write(x)) });
+  const rec = refusing(w.t.record);
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(w.sent.some((s) => /card A's run of passes where it changed between reading and writing could not be noted.*refused for the test/.test(s)), w.sent.join(' | '));
+});
+
+// #295 r2 m1: a run-of-changes note that can't be read is told too, and is never written over.
+test('a run-of-changes note that can\'t be read is told, and not written over', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'newer' });
+  const id = PLAN_CHANGED_FACT('A');
+  const factWrites = [];
+  const r0 = w.t.record;
+  const rec = { ...r0, list: (e) => (e === 'card' ? r0.list('card').map((c) => (c.id === 'A' ? stale : c)) : r0.list(e)),
+    read: (e, i) => { if (e === 'fact' && i === id) throw new Error('unreadable for the test'); return r0.read(e, i); },
+    write: (x) => { if (x?.entity === 'fact' && x.id === id) factWrites.push(x); return r0.write(x); } };
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(w.sent.some((s) => /card A's run of passes where it changed between reading and writing could not be noted.*unreadable for the test/.test(s)), w.sent.join(' | '));
+  assert.deepEqual(factWrites, [], 'not written over');
 });
 
 test('one card whose port throws does not stop the next, and it is told', async () => {
@@ -1752,4 +1892,131 @@ test('L486: each ask is its own cause, and only the refused write is held', asyn
   say({ type: 'approvals_config', reason: 'bad' });
   await send();
   assert.equal(w.sent.filter((s) => s.includes('approvals config')).length, 2, 'only the write refusal is held here');
+});
+
+// L698 design b (L699): the Dispatcher sets a draft card's done_when to doneBar(rows) before the Tier-1 review and the
+// ask. These run on the real Record, with lane 1's M9 grant (#296: the Dispatcher may set done_when on a draft card,
+// and that write gets past the Record's plan-change guard).
+const ROWS2 = { 'R-1': row('R-1'), 'R-2': row('R-2', { done_when: 'the second row passes' }) };
+
+test('L698: a draft card\'s pass test is set from its rows, the Lead\'s words stay in its brief, and the go is asked on the rows\' test', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'the Lead\'s own words', brief: { goal: 'g', done_when: 'the Lead\'s own words' } });
+  const r1 = await pass(w, { planRows: async () => ROWS2 });
+  assert.ok(r1.events.includes('done_when A'), `${JSON.stringify(r1.events)} ${w.sent.join(' | ')}`);
+  assert.equal(asks(w).length, 0, 'the pass that sets it stops there: nothing asked on the old text');
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.done_when, doneBar(ROWS2));
+  assert.equal(doc.brief.done_when, 'the Lead\'s own words', 'the Lead\'s wording is kept where the task brief reads it');
+  assert.equal(doc.state, 'draft');
+  await pass(w, { planRows: async () => ROWS2 });
+  assert.equal(asks(w).length, 1, w.sent.join(' | '));
+  assert.deepEqual(asks(w)[0].doc.fingerprint_inputs.done_bar, [doneBar(ROWS2)], 'Joe\'s go shows the rows\' pass tests');
+  // Nothing more is written once it agrees.
+  const rev = w.t.record.read('card', 'A').rev;
+  const r3 = await pass(w, { planRows: async () => ROWS2 });
+  assert.ok(!r3.events.some((e) => e.startsWith('done_when')));
+  assert.equal(w.t.record.read('card', 'A').rev, rev);
+});
+
+test('L698: a Tier-1 card\'s plan reviewer sees the card with the rows\' pass test, never the Lead\'s free text', async () => {
+  const w = world();
+  t1(w, 'A', { done_when: 'free text' });
+  await pass(w, { planRows: async () => ROWS });
+  assert.equal(w.started.length, 0, 'no reviewer before the pass test is set');
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+  await pass(w, { planRows: async () => ROWS });
+  assert.equal(w.started.length, 1);
+  assert.equal(w.started[0].inputs.done_bar[0], doneBar(ROWS), 'the reviewer reads the rows\' pass test, then the Tier-1 audit bar');
+  assert.ok(!w.started[0].inputs.done_bar.includes('free text'));
+});
+
+test('L698: a card waiting on its ask reads no rows: each pass costs it no call', async () => {
+  const w = world();
+  card(w, 'A');
+  await pass(w, { planRows: async () => ROWS });
+  assert.equal(asks(w).length, 1);
+  let called = 0;
+  await pass(w, { planRows: async () => { called += 1; return ROWS2; } });
+  assert.equal(called, 0);
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+});
+
+test('L698: with no rows, nothing is written and the go\'s own refusal is told', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const r = await pass(w, { planRows: async () => ({}) });
+  assert.ok(!r.events.some((e) => e.startsWith('done_when')));
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'free text');
+  assert.ok(w.sent.some((s) => /card A could not be asked for a go: a go names at least one row/.test(s)), w.sent.join(' | '));
+});
+
+test('L698: a write the Record refuses is told loudly: once a day, nothing asked, the card stays in draft', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  // Only the refusal is made up here: every read is the real Record's.
+  const rec = { ...w.t.record, write: (x) => (x?.kind === 'done_when_from_rows' ? { ok: false, reason: 'refused for the test' } : w.t.record.write(x)) };
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  const told = w.sent.filter((s) => /card A could not be asked for a go: its pass test could not be set from its rows \(refused for the test\)/.test(s));
+  assert.equal(told.length, 1, w.sent.join(' | '));
+  assert.equal(asks(w).length, 0);
+  const doc = w.t.record.read('card', 'A').doc;
+  assert.equal(doc.done_when, 'free text');
+  assert.equal(doc.state, 'draft');
+});
+
+// L726 m4: a row with no pass test is named, and nothing is written.
+test('L726 m4 planted: a row with no done_when is named, the card keeps its text and nothing is asked', async () => {
+  for (const bad of [{ done_when: undefined }, { done_when: '  ' }, { done_when: 7 }]) {
+    const w = world();
+    card(w, 'A', { done_when: 'free text' });
+    const rev = w.t.record.read('card', 'A').rev;
+    await pass(w, { planRows: async () => ({ 'R-1': row('R-1'), 'R-2': row('R-2', bad) }) });
+    assert.ok(w.sent.some((s) => /card A could not be asked for a go: row R-2 has no pass test \(done_when\)/.test(s)), `${JSON.stringify(bad)}: ${w.sent.join(' | ')}`);
+    assert.equal(w.t.record.read('card', 'A').rev, rev, 'nothing written');
+    assert.equal(asks(w).length, 0);
+  }
+});
+
+// L726 m5: the write is checked against the card as it was compared, not a fresh read. L733: a pass event; Joe is told
+// only when the same card hits it 3 passes in a row.
+test('L726 m5 planted: a card that changed after it was compared is not written, and is tried again next pass', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  // The pass lists the card as it was; the Record has moved on since.
+  const stale = w.t.record.read('card', 'A');
+  // #295 r2 m2: the Lead changes done_when, a field the Dispatcher may write too, so only the rev check stops the write.
+  seed(w.t, 'card', 'A', { ...stale.doc, done_when: 'the Lead\'s newer text' });
+  assert.notEqual(w.t.record.read('card', 'A').rev, stale.rev);
+  const rec = { ...w.t.record, list: (e) => (e === 'card' ? w.t.record.list('card').map((c) => (c.id === 'A' ? stale : c)) : w.t.record.list(e)) };
+  const changed = /card A's pass test was not set from its rows: the card changed between reading and writing on 3 passes in a row; trying again next pass/;
+  for (let i = 1; i <= 2; i++) {
+    const r = await pass(w, { planRows: async () => ROWS }, { record: rec });
+    assert.ok(r.events.includes('done_when-changed A'), JSON.stringify(r.events));
+    assert.ok(!w.sent.some((s) => /card A/.test(s)), `pass ${i}: a pass event only: ${w.sent.join(' | ')}`);
+  }
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, 'the Lead\'s newer text', 'the newer card is kept');
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.equal(w.sent.filter((s) => changed.test(s)).length, 1, `third in a row: told: ${w.sent.join(' | ')}`);
+  // Next pass, on the card as it now is: set, and the run of changes ends.
+  await pass(w, { planRows: async () => ROWS });
+  assert.equal(w.t.record.read('card', 'A').doc.done_when, doneBar(ROWS));
+  assert.equal(w.t.record.read('fact', PLAN_CHANGED_FACT('A')).doc.streak, 0);
+});
+
+test('L733: changes that are not in a row are never told', async () => {
+  const w = world();
+  card(w, 'A', { done_when: 'free text' });
+  const stale = w.t.record.read('card', 'A');
+  seed(w.t, 'card', 'A', { ...stale.doc, brief: { goal: 'newer' } });
+  const rec = { ...w.t.record, list: (e) => (e === 'card' ? w.t.record.list('card').map((c) => (c.id === 'A' ? stale : c)) : w.t.record.list(e)) };
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  // A pass in between that is not a change (the row has no pass test: told for that), then two more changes.
+  await pass(w, { planRows: async () => ({ 'R-1': row('R-1', { done_when: '' }) }) });
+  assert.equal(w.t.record.read('fact', PLAN_CHANGED_FACT('A')).doc.streak, 0);
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  await pass(w, { planRows: async () => ROWS }, { record: rec });
+  assert.ok(!w.sent.some((s) => /the card changed/.test(s)), w.sent.join(' | '));
 });
