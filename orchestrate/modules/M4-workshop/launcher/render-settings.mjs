@@ -82,6 +82,11 @@ export const bobFolderDeny = (folder) => [`Edit(/${abs(folder)}/**)`, `Write(/${
 /** The shell sandbox's write wall on the Bob folder (L763): the folder and everything in it. */
 export const bobFolderShell = (folder) => [folder, `${folder}/**`];
 
+/** A session's own paths, the one list the render's apart check and checkRunnerWall both use: [path, isFolder]. The node
+ * binary and the rules snapshot are files (node is often a link to its install), so only where they resolve is checked. */
+export const sessionOwnPaths = (paths) => [['outbox', true], ['copy', true], ['notes', true], ['hooksDir', true], ['snapshot', false], ['node', false], ['bobFolder', true]]
+  .filter(([k]) => typeof paths?.[k] === 'string').map(([k, f]) => [paths[k], f]);
+
 /** The worker runner's folders (L751): its requests folder and its status file's folder, or a refusal. */
 export function runnerWallDirs(workerRunner) {
   const wr = workerRunner ?? {};
@@ -104,9 +109,11 @@ export const runnerWallShell = (dir) => [dir, `${dir}/**`];
 /**
  * The launch-time check of the runner wall (L751, review of #320 M1, M2): the role file denies each runner folder to the
  * tools and the shell, and each folder is spelled as its real path. A deny through a link is one macOS's sandbox ignores.
+ * paths: the session's own paths (sessionOwnPaths), required: each folder is reached through no link, and each path
+ * resolves apart from the runner's folders (the link card).
  * The launcher calls it for every role the runner starts (all but the Lead and the review roles), before the start.
  */
-export function checkRunnerWall({ settings, workerRunner, realpath = (p) => realpathSync.native(p) }) {
+export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) => realpathSync.native(p) }) {
   const w = runnerWallDirs(workerRunner);
   if (!w.ok) return w;
   const deny = settings?.[S.permissions]?.[S.deny] ?? [];
@@ -116,6 +123,21 @@ export function checkRunnerWall({ settings, workerRunner, realpath = (p) => real
     if (real !== dir) return refuse(`the worker runner's folder ${dir} is not its real path (${real}); a deny through a link is not kept`);
     if (!runnerWallDeny(dir).every((r) => deny.includes(r))) return refuse(`the role file does not deny the tools the worker runner's folder ${dir}`);
     if (!(fs[S.denyRead] ?? []).includes(dir) || !runnerWallShell(dir).every((r) => (fs[S.denyWrite] ?? []).includes(r))) return refuse(`the role file does not deny the shell the worker runner's folder ${dir}`);
+  }
+  // The session's own folders, as the disk resolves them (the link card): apart compares spellings, so a notes folder
+  // that is a link into the requests folder passed the render's apart check. Each folder (and each folder above it)
+  // must be spelled as its real path, and each own path, folder or file, must resolve apart from every runner folder.
+  // A path not made yet is resolved through the nearest folder above it that is.
+  if (!paths || typeof paths !== 'object') return refuse('the wall check was not given the session\'s own folders');
+  for (const [p, isFolder] of sessionOwnPaths(paths)) {
+    if (wallPath(p) !== p) return refuse(`the session's path ${p} is not a plain absolute path, spelled as it resolves`);
+    let q = p; let real;
+    for (;;) {
+      try { real = realpath(q); break; } catch { if (q === '/') return refuse(`the session's path ${p} can't be resolved`); q = dirname(q); }
+    }
+    if (isFolder && real !== q) return refuse(`the session's folder ${p} is reached through a link (${q} is ${real}); a link can lead into the runner's folders`);
+    const resolved = q === p ? real : posix.join(real, posix.relative(q, p));
+    if (w.dirs.some((dir) => !apart(resolved, dir))) return refuse(`the session's path ${p} resolves to ${resolved}, which is not apart from the worker runner's folders`);
   }
   return { ok: true };
 }
@@ -176,7 +198,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (paths.workerRunner !== undefined && role !== 'lead' && !REVIEW_ROLES.includes(role)) {
     const w = runnerWallDirs(paths.workerRunner);
     if (!w.ok) return w;
-    const own = [paths.outbox, paths.copy, paths.notes, paths.hooksDir, paths.snapshot, paths.node, paths.bobFolder].filter((x) => typeof x === 'string');
+    const own = sessionOwnPaths(paths).map(([p]) => p);
     // Say which folder is badly spelled, before apart refuses it as not apart (PR #420 review m1).
     const odd = own.find((x) => wallPath(x) !== x);
     if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);

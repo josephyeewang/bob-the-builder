@@ -27,7 +27,7 @@ export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSe
   if (!pc.ok) return refuse(pc.reason);
   const r = render({ ...rest, role, paths: { ...paths, workerRunner } });
   if (!r?.ok) return refuse(`the ${role} settings can't be made (${r?.reason ?? 'no answer'})`);
-  const c = check({ settings: r.settings, workerRunner, ...(realpath ? { realpath } : {}) });
+  const c = check({ settings: r.settings, workerRunner, paths, ...(realpath ? { realpath } : {}) });
   if (!c?.ok) return refuse(c?.reason ?? 'the wall check gave no answer');
   return { ok: true, role, settings: r.settings };
 }

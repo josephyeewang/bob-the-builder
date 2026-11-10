@@ -3,7 +3,7 @@
 // The sandbox, network and compaction behaviour themselves are live checks (owner steps).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync, mkdirSync, realpathSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, existsSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
@@ -380,18 +380,18 @@ test('L751: checkRunnerWall passes a rendered worker file with real runner folde
   for (const p of [runner.requestsDir, join(d, 'runner', 'state')]) mkdirSync(p, { recursive: true });
   const r = render('worker', { paths: { ...PATHS, workerRunner: runner } });
   assert.equal(r.ok, true, r.reason);
-  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
+  assert.deepEqual(checkRunnerWall({ paths: PATHS, settings: r.settings, workerRunner: runner }), { ok: true });
   const bare = render('worker');
-  assert.match(checkRunnerWall({ settings: bare.settings, workerRunner: runner }).reason ?? '', /does not deny the tools/, 'a file rendered without the wall');
+  assert.match(checkRunnerWall({ paths: PATHS, settings: bare.settings, workerRunner: runner }).reason ?? '', /does not deny the tools/, 'a file rendered without the wall');
   const noShell = structuredClone(r.settings);
   noShell[S.sandbox][S.filesystem][S.denyWrite] = noShell[S.sandbox][S.filesystem][S.denyWrite].filter((p) => !p.startsWith(join(d, 'runner', 'state')));
-  assert.match(checkRunnerWall({ settings: noShell, workerRunner: runner }).reason ?? '', /does not deny the shell/);
+  assert.match(checkRunnerWall({ paths: PATHS, settings: noShell, workerRunner: runner }).reason ?? '', /does not deny the shell/);
   const noRead = structuredClone(r.settings);
   noRead[S.sandbox][S.filesystem][S.denyRead] = noRead[S.sandbox][S.filesystem][S.denyRead].filter((p) => !p.startsWith(join(d, 'runner')));
-  assert.match(checkRunnerWall({ settings: noRead, workerRunner: runner }).reason ?? '', /does not deny the shell/, 'the shell read wall too');
-  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner, realpath: (p) => `/private${p}` }).reason ?? '', /not its real path/, 'a linked spelling, as /tmp for /private/tmp');
-  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: { ...runner, requestsDir: join(d, 'gone') } }).reason ?? '', /is missing/);
-  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: null }).reason ?? '', /not a plain absolute path/);
+  assert.match(checkRunnerWall({ paths: PATHS, settings: noRead, workerRunner: runner }).reason ?? '', /does not deny the shell/, 'the shell read wall too');
+  assert.match(checkRunnerWall({ paths: PATHS, settings: r.settings, workerRunner: runner, realpath: (p) => `/private${p}` }).reason ?? '', /not its real path/, 'a linked spelling, as /tmp for /private/tmp');
+  assert.match(checkRunnerWall({ paths: PATHS, settings: r.settings, workerRunner: { ...runner, requestsDir: join(d, 'gone') } }).reason ?? '', /is missing/);
+  assert.match(checkRunnerWall({ paths: PATHS, settings: r.settings, workerRunner: null }).reason ?? '', /not a plain absolute path/);
 });
 
 // L763 (#320 m1): every rule is needed. Drop any single one, for either folder, and the check refuses (plant Q5: every -> some).
@@ -409,9 +409,9 @@ test('L763: checkRunnerWall refuses when any one runner-wall rule is dropped', (
   assert.equal(dirs.length, 2);
   let n = 0;
   for (const dir of dirs) {
-    for (const rule of runnerWallDeny(dir)) { n++; assert.match(checkRunnerWall({ settings: without(tools, rule), workerRunner: runner }).reason ?? '', /does not deny the tools/, rule); }
-    n++; assert.match(checkRunnerWall({ settings: without(read, dir), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyRead ${dir}`);
-    for (const rule of runnerWallShell(dir)) { n++; assert.match(checkRunnerWall({ settings: without(write, rule), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyWrite ${rule}`); }
+    for (const rule of runnerWallDeny(dir)) { n++; assert.match(checkRunnerWall({ paths: PATHS, settings: without(tools, rule), workerRunner: runner }).reason ?? '', /does not deny the tools/, rule); }
+    n++; assert.match(checkRunnerWall({ paths: PATHS, settings: without(read, dir), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyRead ${dir}`);
+    for (const rule of runnerWallShell(dir)) { n++; assert.match(checkRunnerWall({ paths: PATHS, settings: without(write, rule), workerRunner: runner }).reason ?? '', /does not deny the shell/, `denyWrite ${rule}`); }
   }
   assert.equal(n, 12, 'three tool rules, one read and two write rules, for each of the two folders');
 });
@@ -443,7 +443,7 @@ test('L760: the script profile renders with the worker\'s walls, passes checkRun
   // It asks nobody (dontAsk), and with no shell it reaches no host, even with the rules' hosts given (#331 audit m2).
   assert.equal(r.settings[S.permissions][S.defaultMode], 'dontAsk');
   assert.deepEqual(r.settings[S.sandbox][S.network][S.allowedDomains], []);
-  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner }), { ok: true });
+  assert.deepEqual(checkRunnerWall({ paths: PATHS, settings: r.settings, workerRunner: runner }), { ok: true });
   const w = render('worker', { paths: { ...PATHS, workerRunner: runner } });
   const deny = r.settings[S.permissions][S.deny];
   const fs = r.settings[S.sandbox][S.filesystem];
@@ -609,4 +609,41 @@ test('#420 r1 c2: the runner folders refuse a `.` or empty step, as they refuse 
   for (const [k, v] of [['requestsDir', '/u/runner/./requests'], ['requestsDir', '/u//runner/requests'], ['statusFile', '/u/runner/./state/status.json'], ['statusFile', '/u//runner/state/status.json'], ['requestsDir', '/u/runner/../requests']])
     assert.match(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, [k]: v } } }).reason ?? '', new RegExp(`worker runner's ${k} is not a plain absolute path`), v);
   assert.equal(render('worker', { paths: { ...PATHS, workerRunner: { ...RUNNER, requestsDir: '/u/runner/requests/' } } }).ok, true, 'one trailing slash is dropped');
+});
+
+// The link card: apart compares spellings, so a session folder that is a link into a runner folder passed the render.
+// checkRunnerWall resolves each of the session's own paths on the disk, with real links.
+test('link card: checkRunnerWall refuses a session folder that is a link, or one that resolves into a runner folder', () => {
+  const d = realpathSync(tempDir('orch-lane4-ownlink-'));
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state'), join(d, 's', 'outbox'), join(d, 'elsewhere')]) mkdirSync(p, { recursive: true });
+  const own = { ...PATHS, outbox: join(d, 's', 'outbox'), notes: join(d, 's', 'notes') };
+  symlinkSync(runner.requestsDir, join(d, 's', 'notes-link'));
+  symlinkSync(join(d, 'runner'), join(d, 's', 'up'));
+  symlinkSync(join(d, 'elsewhere'), join(d, 's', 'away'));
+  writeFileSync(join(runner.requestsDir, 'fake-node'), '');
+  symlinkSync(join(runner.requestsDir, 'fake-node'), join(d, 's', 'node-in'));
+  writeFileSync(join(d, 'elsewhere', 'real-node'), '');
+  symlinkSync(join(d, 'elsewhere', 'real-node'), join(d, 's', 'node-out'));
+  const wall = (paths, role = 'worker') => {
+    const r = render(role, { paths: { ...paths, workerRunner: runner } });
+    assert.equal(r.ok, true, `${role}: the render's spelling check lets it by (${r.reason})`);
+    return checkRunnerWall({ settings: r.settings, workerRunner: runner, paths });
+  };
+  assert.deepEqual(wall(own), { ok: true }, 'real folders, and a notes folder not made yet');
+  // Every role the runner can start with a notes folder, the worker and each one the card names.
+  for (const role of ['worker', 'script', 'scout', 'writer', 'incident', 'thinking', 'learning']) {
+    assert.match(wall({ ...own, notes: join(d, 's', 'notes-link') }, role).reason ?? '', /notes-link is reached through a link/, role);
+    assert.match(wall({ ...own, notes: join(d, 's', 'up', 'requests', 'notes') }, role).reason ?? '', /is reached through a link/, `${role}: a folder below a link`);
+  }
+  // A link that leads elsewhere is refused too: the wall's deny rules name spellings.
+  assert.match(wall({ ...own, notes: join(d, 's', 'away') }).reason ?? '', /is reached through a link/);
+  for (const k of ['outbox', 'copy', 'hooksDir', 'bobFolder']) assert.match(wall({ ...own, [k]: join(d, 's', 'notes-link') }).reason ?? '', /is reached through a link/, k);
+  // The node binary may be a link (an install's own), but not one that resolves into a runner folder.
+  assert.deepEqual(wall({ ...own, node: join(d, 's', 'node-out') }), { ok: true });
+  assert.match(wall({ ...own, node: join(d, 's', 'node-in') }).reason ?? '', /node-in resolves to .*fake-node, which is not apart from the worker runner's folders/);
+  assert.match(wall({ ...own, snapshot: join(d, 's', 'node-in') }).reason ?? '', /not apart from the worker runner's folders/, 'the rules snapshot alike');
+  // No session paths: refused, not skipped.
+  const r = render('worker', { paths: { ...own, workerRunner: runner } });
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner }).reason ?? '', /not given the session's own folders/);
 });
