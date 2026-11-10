@@ -144,3 +144,19 @@ test('a limit wait with no run_started (not parked from a run) waits on Joe at o
   await w.pass(T0 + 7 * MIN);
   assert.equal(w.tellsFor('R').length, 1, 'told once');
 });
+
+// L781 class sweep: the keep rule's read goes through the real Record wrapper, whose read answers a store error as
+// `corrupt`, never by throwing. A failed read is no stored hit: the write is refused and the reset time still ahead stays.
+test('L781: a limit hit with no time, whose stored hit cannot be read, writes nothing over a reset time still ahead', async () => {
+  const { memoryRecord, makeRecord } = await import('../../shared/record.mjs');
+  const real = memoryRecord(); let fail = false;
+  const rec = makeRecord(new Proxy({}, { get: (_, k) => (k === 'read' ? (e, id) => { if (fail) throw new Error('SQLITE_BUSY'); return real.read(e, id); } : typeof real[k] === 'function' ? real[k].bind(real) : real[k]) }));
+  const at = new Date(Date.parse('2026-11-05T12:00:00Z'));
+  const ahead = '2026-11-05T15:00:00.000Z';
+  assert.equal((await writeLimitHit(makeFactWriter(rec), { account: 'a', resets_at: ahead, source: 'worker-exit' }, { now: () => at })).ok, true);
+  fail = true;
+  const r = await writeLimitHit(makeFactWriter(rec), { account: 'a', resets_at: null, source: 'worker-exit' }, { now: () => new Date(at.getTime() + 60e3) });
+  fail = false;
+  assert.equal(r.ok, false); assert.match(r.reason, /could not be read, so nothing was written over it/);
+  assert.equal(real.read('fact', LIMIT_FACT('a'))?.doc?.resets_at, ahead);
+});

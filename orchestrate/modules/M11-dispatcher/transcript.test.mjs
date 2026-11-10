@@ -60,6 +60,10 @@ test('M7: the safe point for a worker and for the Lead', () => {
   assert.equal(atSafePoint({ role: 'worker', size: free, activity: { state: 'blocked' } }), false);
   assert.equal(atSafePoint({ role: 'worker', size: null }), false);
   assert.equal(atSafePoint({ role: 'worker', size: busy, activity: { state: 'exited' } }), true);
+  // L759: a script session changes files, so it follows the worker's rule, not the Lead's.
+  assert.equal(atSafePoint({ role: 'script', size: free, activity: { state: 'active' } }), true);
+  assert.equal(atSafePoint({ role: 'script', size: busy }), false);
+  assert.equal(atSafePoint({ role: 'script', size: free, activity: { state: 'blocked' } }), false);
   const done = { openTools: [], turnEnded: true };
   assert.equal(atSafePoint({ role: 'lead', size: done, activity: { state: 'idle' } }), true);
   assert.equal(atSafePoint({ role: 'lead', size: done, activity: { state: 'waiting_input' } }), false);
