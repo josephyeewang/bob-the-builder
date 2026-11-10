@@ -153,7 +153,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     let raw; try { raw = JSON.parse(text); } catch { throw new Error('the config is not valid JSON'); }   // never the parser's own message: it quotes the file
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
-    o.dispatcherOn = raw?.dispatcher !== undefined;   // check reads the plain config, which drops the entry (L807 c2)
+    o.dispatcherOn = raw?.dispatcher !== null && typeof raw?.dispatcher === 'object';   // check reads the plain config, which drops the entry (L807 c2)
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 

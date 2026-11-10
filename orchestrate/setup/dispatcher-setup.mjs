@@ -57,9 +57,9 @@ const OWNER_PATHS = Object.freeze(OWNER_KEYS.filter((k) => k !== 'product'));
  * (orchestrate's keys folder), the rest in orchestrate's private folder, which only it reads (products.json is put there by root).
  * The entry may still name any of them; `dispatcher-config` prints what it uses.
  */
-export const dispatcherDefaults = (base) => Object.freeze({
-  productsFile: join(base.base, 'private', 'products.json'), rulesStateDir: join(base.base, 'private', 'rules-state'),
-  tokenFile: tokenPath(base), approvalsStateDir: join(base.base, 'private', 'approvals'),
+export const dispatcherDefaults = (cfg) => Object.freeze({
+  productsFile: join(cfg.base, 'private', 'products.json'), rulesStateDir: join(cfg.base, 'private', 'rules-state'),
+  tokenFile: tokenPath(cfg), approvalsStateDir: join(cfg.base, 'private', 'approvals'),
 });
 const PLAIN_PATH = (p) => typeof p === 'string' && p.startsWith('/') && p !== '/' && posix.normalize(p) === p && !p.endsWith('/') && !/[\u0000-\u001f\u007f]/.test(p) && p.length <= 300;
 const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -180,7 +180,9 @@ export function writeAside(io, f, text) {
  * `jobLive()` → 'loaded', 'placed' or null: whether the Dispatcher job runs now or starts at boot (daemons.mjs jobLive; setup.mjs
  * passes it in, since daemons.mjs imports this file).
  */
-export function planDispatcherConfig(io, cfg, { jobLive = () => null } = {}) {
+// `jobLive` is required: a caller that left it out would skip the live-job check (L807 m1).
+export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
+  if (typeof jobLive !== 'function') throw new Error('planDispatcherConfig needs jobLive (whether the Dispatcher job is loaded or placed)');
   const { config, problems } = dispatcherConfigFor(io, cfg);
   if (problems.length) return { ops: [], problems };
   const text = dispatcherConfigText(config); const ops = [];

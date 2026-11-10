@@ -148,6 +148,10 @@ const plistFile = (w, job) => w.mac.at(`/Library/LaunchDaemons/${LABEL}.${job}.p
 // L807 M1: launchd starts a placed job at boot with no load to refuse it, so place refuses wherever load does, on the one list
 // both use (startProblems), and puts no job file down. `re` names the planted reason.
 const placeRefuses = (w, job, re) => {
+  if (existsSync(plistFile(w, job))) {   // one placed before: the refusal says it still starts at boot (L807 r1 m6)
+    const p = w.run(['daemons', 'place', '--only', job]); assert.equal(p.code, 1, p.text);
+    assert.match(p.text, new RegExp(`${job}'s job file .* is still in place and launchd starts it at boot: sudo node setup\\.mjs daemons unload --only ${job}, then delete it`));
+  }
   rmSync(plistFile(w, job), { force: true });
   const gate = startProblems(w.mac, w.cfg, [job]); assert.match(gate.join(' '), re);
   assert.deepEqual(planPlace(w.mac, w.cfg, [job]), { ops: [], problems: gate }, 'place refuses on exactly the start checks');
@@ -1374,7 +1378,8 @@ test('Dispatcher config: install refuses until dispatcher-config wrote it; then 
   assert.equal(readFileSync(w.mac.at(D_SRC), 'utf8'), want);
   assert.equal(readFileSync(copyConfig(w), 'utf8'), want, 'the copy holds the same text');
   assert.ok(JSON.parse(readFileSync(join(w.root, UPDATER_CONFIG), 'utf8')).keep.includes('dispatcher.json'), 'the updater keeps it');
-  assert.equal(planDispatcherConfig(w.mac, w.cfg).ops.length, 0, 'twice does nothing');
+  assert.equal(planDispatcherConfig(w.mac, w.cfg, { jobLive: () => null }).ops.length, 0, 'twice does nothing');
+  assert.throws(() => planDispatcherConfig(w.mac, w.cfg), /needs jobLive/, 'a caller can not skip the live-job check by leaving it out');
   assert.equal(w.run(['daemons', 'place']).code, 0);
   const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(D_LABEL));
   const ck = w.run(['daemons', 'check']); assert.equal(ck.code, 0, ck.text);
@@ -1533,6 +1538,21 @@ test('L807 m4: a job file is written whole beside its name and renamed over it; 
   const log = w.mac.log.slice(from);
   assert.ok(log.includes(`rename ${side} ${f}`), log.join(' | ')); assert.ok(!log.some((l) => l.startsWith(`rm ${f}`)), 'the job file is never removed');
   assert.equal(readFileSync(w.mac.at(f), 'utf8'), plistTexts(w.mac, w.cfg).plists['review-runner']);
+});
+
+test('L807 m4: the load record is written beside its name too; a failed rename keeps the old record and leaves no side file', async () => {
+  const w = await placed();
+  const f = `${BASE}/install/loaded-jobs.json`; const side = `${BASE}/install/.loaded-jobs.json.new`;
+  writeFileSync(w.mac.at(f), '{"old":"x"}\n');
+  const real = w.mac.rename; w.mac.rename = (a, b) => { if (b === f) { const e = new Error('EIO: rename failed'); e.code = 'EIO'; throw e; } return real.call(w.mac, a, b); };
+  const r = w.run(['daemons', 'load']); w.mac.rename = real; assert.equal(r.code, 1, r.text);
+  assert.equal(readFileSync(w.mac.at(f), 'utf8'), '{"old":"x"}\n', 'planted: a writer that removes the record first loses it');
+  assert.equal(existsSync(w.mac.at(side)), false, 'no side file is left');
+  const from = w.mac.log.length; assert.equal(w.run(['daemons', 'load']).code, 0);
+  const steps = w.mac.log.slice(from).filter((l) => l.includes('loaded-jobs.json')).map((l) => l.split(' ')[0]);
+  for (const x of ['unlink', 'chown', 'chmod', 'rename']) assert.ok(steps.includes(x), `${x}: ${steps.join(' ')}`);
+  assert.ok(steps.indexOf('unlink') < steps.indexOf('chown'), steps.join(' '));
+  assert.ok(steps.indexOf('rename') > Math.max(steps.indexOf('chown'), steps.indexOf('chmod')), `secured before the rename: ${steps.join(' ')}`);
 });
 
 test('L807 m1: while the Dispatcher job is loaded or placed, dispatcher-config refuses a config load would refuse, and changes neither file', async () => {

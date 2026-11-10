@@ -176,7 +176,11 @@ export function jobLive(io, cfg, job) {
 /** `daemons place`: launchd starts every job file in its folder at boot, with no load to refuse it, so a job file is placed only when load would start the job (L807 M1). */
 export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const gate = startProblems(io, cfg, jobs);
-  return gate.length ? { ops: [], problems: gate } : placeSteps(io, cfg, jobs);
+  if (!gate.length) return placeSteps(io, cfg, jobs);
+  // A job file placed before still starts at boot; say so (the gate's own lines stay first, as load's).
+  const live = (j) => { try { return jobLive(io, cfg, j); } catch { return null; } };   // the gate already refuses; this line only helps
+  const left = jobs.filter((j) => live(j) !== null).map((j) => `${j}'s job file ${plistPath(cfg, j)} is still in place and launchd starts it at boot: sudo node setup.mjs daemons unload --only ${j}, then delete it`);
+  return { ops: [], problems: [...gate, ...left] };
 }
 
 /** The job files and their log files, without the start checks: only planPlace calls it outside the tests of the log files. */
