@@ -2,14 +2,14 @@
 // worker checks, the prompt) and on real files for what it makes; spawnLeader runs a real process group.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -100,6 +100,7 @@ function world(over = {}) {
   w.deps = {
     readCard: () => ({ ok: true, doc: w.card }),
     startCommit: async () => HEAD,
+    mainOf: async () => 'c'.repeat(40),
     prepare: async (x) => { w.calls.push(['prepare', x]); mkdirSync(x.dest); return { ok: true, dest: x.dest, head: HEAD }; },
     promptFor: () => 'do the card',
     account: () => ({ account: 'a', dir: join(d, 'home', '.claude'), env: {} }),
@@ -125,7 +126,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9')] }, 'every other card\'s copy of this product is denied');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -256,6 +257,137 @@ test('#364 self-review M1: a stop that comes while a start runs its checks spawn
     assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
     assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
   } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#369 M1: check 2 runs once more just before claude starts; setup files changed by the checks\' runs stop the start', async () => {
+  const seen = [];
+  const w = world({ beforeStart: async (x) => { seen.push([x.copy, x.product, x.sessionId]); return 'the copy holds .claude/settings.local.json, which main does not'; },
+    launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /a check failed again just before claude was to start, so it was not started: the copy holds \.claude\/settings\.local\.json/);
+    assert.equal(seen.length, 1); assert.equal(typeof seen[0][0], 'string');
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const ok = world({ beforeStart: async () => null, launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try { assert.equal((await ok.start()).ok, true); assert.equal(ok.calls.some((c) => c[0] === 'spawn'), true); } finally { rmSync(ok.d, { recursive: true, force: true }); }
+});
+
+test('#369 r1 m3, r2 m3: main moving during a launch is said as such, and never hides a check\'s own reason; checks get the main the copy was restored from', async () => {
+  const A = 'a'.repeat(40); const B = 'e'.repeat(40);
+  for (const [when, re] of [['after prepare', /^main changed during launch; retry$/], ['before start', /^a check failed again just before claude was to start, so it was not started: the copy's \.mcp\.json is not main's \(main also moved during launch, or can't be read\)$/]]) {
+    let mains = [A];
+    let seen;
+    const w = world({ mainOf: async () => mains.shift() ?? B, checksFor: (x) => { seen = x.mainAt; return {}; },
+      beforeStart: async () => 'the copy\'s .mcp.json is not main\'s', launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+    if (when === 'before start') mains = [A, A];
+    try {
+      const a = await w.start();
+      assert.equal(a.ok, false); assert.match(a.reason, re, when);
+      if (when === 'before start') assert.equal(seen, A, 'the checks compare with the main read before the copy was made');
+      assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
+test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apart from the session\'s copy and outbox, and removed', async () => {
+  let t; let x0;
+  const w = world({ checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}..baseline.json`) });
+    const preps = w.calls.filter((c) => c[0] === 'prepare').map((c) => c[1]);
+    assert.equal(preps.length, 2); assert.deepEqual(preps[1].card, preps[0].card, 'the same card and commit'); assert.equal(preps[1].dest, join(spare, 'copy'));
+    const [own, theirs] = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    assert.ok(own.paths.deny.otherCopies.includes(spare), 'the session denies the throwaway place');
+    assert.equal(theirs.paths.copy, join(spare, 'copy')); assert.equal(theirs.paths.outbox, join(spare, 'outbox'));
+    for (const p of [join(w.mine.copies, 'C-1'), join(w.mine.outboxes, 'worker', SID), join(w.mine.copies, 'C-9')]) assert.ok(theirs.paths.deny.otherCopies.includes(p), `the baseline denies ${p}`);
+    assert.equal(theirs.paths.deny.otherCopies.includes(spare), false, 'never its own place');
+    assert.equal(existsSync(t.settingsFile), true); assert.equal(statSync(spare).mode & 0o077, 0);
+    await t.done();
+    assert.equal(existsSync(spare), false); assert.equal(existsSync(t.settingsFile), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Another commit than the session's copy: refused, and nothing is left.
+  {
+    let r; let x1;
+    const v = world({ prepare: async (x) => { mkdirSync(x.dest); return { ok: true, dest: x.dest, head: x.dest.endsWith(`..baseline-${SID}/copy`) ? 'f'.repeat(40) : HEAD }; },
+      checksFor: (x) => { x1 = x; return {}; }, launchFn: async () => { r = await x1.throwaway(); return { ok: false, reason: 'stop here' }; } });
+    try { await v.start(); assert.equal(r.ok, false); assert.match(r.reason, /holds another commit than the session's copy/); assert.equal(existsSync(join(v.mine.copies, `C-1..baseline-${SID}`)), false); } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+  // #369 r2 m3: main moving while the throwaway is made refuses nothing there (its setup files come from main, trusted).
+  {
+    let r; let x1;
+    const v = world({ mainOf: (() => { let n = 0; return async () => (++n > 2 ? 'e'.repeat(40) : 'c'.repeat(40)); })(), checksFor: (x) => { x1 = x; return {}; },
+      launchFn: async () => { r = await x1.throwaway(); await r.done?.(); return { ok: false, reason: 'stop here' }; } });
+    try { await v.start(); assert.equal(r.ok, true, r.reason); } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+});
+
+test('#369 r2 m1: a throwaway left by an earlier start of the card (one made read-only inside, too) is removed; one that can\'t be is told, and never stops the card starting', async () => {
+  let t; let x0;
+  const logs = [];
+  const w = world({ log: (s) => logs.push(s), checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  const old = join(w.mine.copies, 'C-1..baseline-S-9'); const earlier = join(w.mine.copies, 'C-1..baseline-S-0');
+  const other = join(w.mine.copies, 'C-10..baseline-S-7');
+  for (const f of [join(old, 'copy'), join(earlier, 'copy', 'ro'), other]) mkdirSync(f, { recursive: true });
+  writeFileSync(join(earlier, 'copy', 'ro', 'f'), 'x'); chmodSync(join(earlier, 'copy', 'ro'), 0o555); chmodSync(join(earlier, 'copy'), 0o555);
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(t.ok, true, t.reason);
+    assert.deepEqual([existsSync(old), existsSync(earlier), existsSync(other)], [false, false, true], 'this card\'s leftovers only');
+    // A folder made read-only inside the throwaway itself is removed by done() too.
+    mkdirSync(join(t.copy, 'ro')); writeFileSync(join(t.copy, 'ro', 'f'), 'x'); chmodSync(join(t.copy, 'ro'), 0o555);
+    await t.done();
+    assert.equal(existsSync(join(w.mine.copies, `C-1..baseline-${SID}`)), false);
+    assert.deepEqual(logs, []);
+  } finally { chmodSync(w.copiesRoot, 0o700); rmSync(w.d, { recursive: true, force: true }); }
+  // Self-review m1: a link inside a throwaway is never followed; the read-only folder it points to outside is unchanged.
+  {
+    const d = tempDir('orch-rports-');
+    try {
+      const out = join(d, 'outside'); mkdirSync(join(out, 'sub'), { recursive: true }); chmodSync(join(out, 'sub'), 0o555); chmodSync(out, 0o555);
+      const spare = join(d, 'C-1..baseline-S-0'); mkdirSync(join(spare, 'ro'), { recursive: true }); writeFileSync(join(spare, 'ro', 'f'), 'x');
+      symlinkSync(out, join(spare, 'ro', 'link')); chmodSync(join(spare, 'ro'), 0o555);
+      const fs = { rm: rmSync, chmodTree };
+      assert.equal(removeAll(fs, spare), true);
+      assert.equal(existsSync(spare), false);
+      assert.deepEqual([statSync(out).mode & 0o777, statSync(join(out, 'sub')).mode & 0o777], [0o555, 0o555]);
+    } finally { execFileSync('/bin/chmod', ['-R', 'u+rwx', d]); rmSync(d, { recursive: true, force: true }); }
+  }
+  // One that can't be removed: told once (after a second try), left, and the start still goes on under the session's own name.
+  const logs2 = []; let t2; let x2;
+  const fails = (p) => p.includes('..baseline');
+  const v = world({ log: (s) => logs2.push(s), checksFor: (x) => { x2 = x; return {}; }, launchFn: async (x) => { t2 = await x2.throwaway(); return { ok: true, started: await x.start() }; },
+    fs: { rm: (p, o) => { if (fails(p) && !p.endsWith('.json')) throw Object.assign(new Error('busy'), { code: 'ENOTEMPTY' }); return rmSync(p, o); } } });
+  mkdirSync(join(v.mine.copies, 'C-1..baseline-S-0'));
+  try {
+    const a = await v.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(t2.ok, true, t2.reason);
+    assert.equal(t2.copy, join(v.mine.copies, `C-1..baseline-${SID}`, 'copy'));
+    assert.ok(logs2.some((l) => /C-1..baseline-S-0 can't be removed \(ENOTEMPTY\); it is left until this card's next start/.test(l)), logs2.join('\n'));
+    await t2.done();
+    assert.ok(logs2.some((l) => new RegExp(`C-1..baseline-${SID} can't be removed`).test(l)), logs2.join('\n'));
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
+});
+
+test('#369 r2 m2: a product the runner holds back (its rules snapshot not kept fresh) starts nothing, saying why', async () => {
+  const w = world({ productHeld: (p) => (p === 'p1' ? 'product p1\'s rules snapshot is not kept fresh (ENOSPC), so its sessions are not started' : null) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /p1's rules snapshot is not kept fresh/);
+    assert.equal(w.calls.some((c) => c[0] === 'prepare'), false, 'nothing is made');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Self-review m4: held back during the checks (a refresher that died in the baseline): claude is not started.
+  let n = 0;
+  const v = world({ productHeld: () => (n++ === 0 ? null : 'product p1\'s rules snapshot is not kept fresh (ENOSPC), so its sessions are not started'), beforeStart: async () => null });
+  try {
+    const a = await v.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /not kept fresh/);
+    assert.equal(v.calls.some((c) => c[0] === 'spawn'), false, 'not started');
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
 });
 
 test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {
@@ -480,4 +612,29 @@ test('#378 r1 M1: productWallGap takes a folder above as a deny, and no list as 
   assert.match(productWallGap(all(['/c/q']), P), /shell may read \/o\/q$/);
   assert.match(productWallGap({}, P), /shell may read/);
   assert.match(productWallGap(null, P), /shell may read/);
+});
+
+test('L889: the baseline\'s throwaway settings pass the real renderer: its folder names keep to the plain path letters', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  const got = [];
+  let t; let x0;
+  const w = world({ walled: (x) => { const r = walledLaunchSettings(x); got.push(r); return r; },
+    checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
+    deny: { proposals: ['/w/p1/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(t?.ok, true, t?.reason);
+    assert.equal(got.length, 2, 'the session\'s settings and the baseline\'s');
+    for (const r of got) assert.equal(r.ok, true, r.reason);
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.equal(got[1].settings.permissions.additionalDirectories[0], join(spare, 'outbox'));
+    assert.ok(/^[A-Za-z0-9._/-]+$/.test(spare) && /^[A-Za-z0-9._/-]+$/.test(t.settingsFile), 'plain path letters only');
+    await t.done();
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });
