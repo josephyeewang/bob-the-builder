@@ -20,7 +20,7 @@ function world(script = () => {}, { giveUpMs = ASK_GIVE_UP_MS } = {}) {
     giveUpMs, stat: () => st({ dir: true }), open, realpath: (p) => p, writeRequest: (n, t) => w.writes.push([n, JSON.parse(t)]) });
   return w;
 }
-const startedAt = (n) => (i, w) => { if (i === n) { w.doc = { sessions: [session('S-1')], requests: { 'S-1': { state: 'started' } }, answers: { 'launch-S-1': { ...LAUNCHED } } }; } };
+const startedAt = (n) => (i, w) => { if (i === n) { w.doc = { sessions: [session('S-1', { pgid: 4242 })], requests: { 'S-1': { state: 'started' } }, answers: { 'launch-S-1': { ...LAUNCHED } } }; } };
 const LAUNCH = { card: 'C-1', kind: 'editing', product: 'p1', sessionId: 'S-1' };
 
 test('L759 step 2: launch writes one request and answers the runner\'s started session, LAUNCH fields only', async () => {
@@ -141,4 +141,38 @@ test('L759 step 2: the status answers are checked whole; the ports need their wr
   const base = { statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, writeRequest: () => {} };
   assert.throws(() => ownerAsyncPorts({ ...base, writeRequest: undefined }), /writer/);
   for (const copiesRoot of [undefined, '', 'copies']) assert.throws(() => ownerAsyncPorts({ ...base, copiesRoot }), /copies folder is not known/);
+});
+
+test('step 2 review M1, M2: an answer that contradicts the session its own status lists is not trusted', async () => {
+  const listed = (more, state = 'started') => (i, x) => { x.doc = { sessions: more === null ? [] : [session('S-1', { pgid: 4242, ...more })], requests: { 'S-1': { state } }, answers: { 'launch-S-1': { ...LAUNCHED } } }; };
+  for (const more of [null, { card: 'C-9' }, { product: 'OTHER' }, { kind: 'undo' }, { pgid: 77 }, { signin: 'x' }, { config_dir: '/elsewhere' }]) {
+    const w = world(listed(more), { giveUpMs: 2_000 });
+    assert.equal((await w.ports.launch(LAUNCH)).timedOut, true, `started, ${JSON.stringify(more)}`);
+  }
+  // Since stopped: it may have left the listing; if it is still listed, it must agree.
+  assert.equal((await world(listed(null, 'stopped')).ports.launch(LAUNCH)).ok, true);
+  assert.equal((await world(listed({ alive: false, ended: true }, 'stopped')).ports.launch(LAUNCH)).ok, true);
+  assert.equal((await world(listed({ alive: false, ended: true, card: 'C-9' }, 'stopped'), { giveUpMs: 2_000 }).ports.launch(LAUNCH)).timedOut, true);
+  // Unlisted, the answer alone is checked: its outbox must still be the one this runner makes.
+  const elsewhere = (i, x) => { listed(null, 'stopped')(i, x); x.doc.answers['launch-S-1'].outbox = `${ROOT}/worker/S-2`; };
+  assert.equal((await world(elsewhere, { giveUpMs: 2_000 }).ports.launch(LAUNCH)).timedOut, true, 'unlisted, wrong outbox');
+  for (const card of ['../x', 'a/b', 'C..1']) await assert.rejects(world().ports.launch({ ...LAUNCH, card }), /no card or product/, card);
+  // stopGroup: no alive field is not gone (it is live by the status's own rule), and the group must be the one asked.
+  const stop = (more, state = 'stopped') => (i, x) => { x.doc = { sessions: [session('S-1', { stop_requested: true, ...more })], requests: { 'S-1': { state } }, answers: { 'stopGroup-S-1-n1': { ok: true, how: 'killed' } } }; };
+  for (const [more, state] of [[{ alive: undefined, ended: undefined }, 'started'], [{ alive: false, ended: true, pgid: 78 }, 'stopped']]) {
+    const w = world(stop(more, state), { giveUpMs: 2_000 });
+    assert.equal((await w.ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).timedOut, true, JSON.stringify(more));
+  }
+  const unlisted = (i, x) => { stop({})(i, x); x.doc.sessions = []; };
+  assert.equal((await world(unlisted, { giveUpMs: 2_000 }).ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).timedOut, true, 'a stop the status does not list');
+  assert.equal((await world(stop({ alive: false, ended: undefined })).ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).ok, true, 'alive false is gone');
+  assert.equal((await world(stop({ alive: undefined, ended: true })).ports.stopGroup({ id: 'S-1', pgid: 77, kind: 'editing' })).ok, true, 'ended with no alive is not live');
+});
+
+test('step 2 review c4: nothing after the request is written throws; a failing clock is waited through and the reads count the time', async () => {
+  let calls = 0; const writes = [];
+  const p = ownerAsyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, clock: () => { calls += 1; if (calls > 1) throw new Error('clock'); return T0; }, sleep: async () => {}, giveUpMs: 4_000,
+    stat: () => st({ dir: true }), open: () => ({ st: st(), text: '{}' }), realpath: (x) => x, writeRequest: (n) => writes.push(n) });
+  const r = await p.launch(LAUNCH);
+  assert.equal(r.timedOut, true); assert.deepEqual(writes, ['launch-S-1.json']);
 });

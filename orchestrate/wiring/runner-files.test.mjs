@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { closeSync, linkSync, mkdtempSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, linkSync, mkdtempSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { REQUEST_MAX_BYTES, readRequest, writeStatus } from './runner-files.mjs';
@@ -61,6 +61,10 @@ test('L763: a request is read only when it is a plain file with one name, the or
     // A file too big by its size is never read at all.
     const stBig = { isFile: () => true, nlink: 1, uid: ME, size: REQUEST_MAX_BYTES + 1 };
     assert.match(readRequest(f, { orchestrateUid: ME, fstat: () => stBig, read: () => { throw new Error('must not read'); } }).refused, /larger than any/);
+    const open = join(d, 'open.json'); writeFileSync(open, '{}'); chmodSync(open, 0o666);
+    assert.match(readRequest(open, { orchestrateUid: ME }).refused, /written by others/);
+    chmodSync(open, 0o664); assert.match(readRequest(open, { orchestrateUid: ME }).refused, /written by others/);
+    for (const body of ['null', '7', '[]', '"x"', '{"refused":"no"}']) { writeFileSync(join(d, 'v.json'), body); assert.match(readRequest(join(d, 'v.json'), { orchestrateUid: ME }).refused, /not what the Dispatcher writes/, body); }
     const bad = join(d, 'bad.json'); writeFileSync(bad, '{');
     assert.match(readRequest(bad, { orchestrateUid: ME }).refused, /can't be read/);
     assert.match(readRequest(join(d, 'gone.json'), { orchestrateUid: ME }).refused, /can't be opened \(ENOENT\)/);
@@ -71,5 +75,17 @@ test('L763: a request is read only when it is a plain file with one name, the or
     assert.equal(spawnSync('/usr/bin/mkfifo', [fifo]).status, 0);
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import { readRequest } from ${JSON.stringify(new URL('./runner-files.mjs', import.meta.url).href)}; console.log(JSON.stringify(readRequest(${JSON.stringify(fifo)}, { orchestrateUid: ${ME} })));`], { encoding: 'utf8', timeout: 20_000 });
     assert.equal(r.status, 0, r.stderr); assert.match(JSON.parse(r.stdout).refused, /not a plain file/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('step 2 review m1: a failed rename closes the new file once, never twice, and removes it', () => {
+  const d = dir();
+  try {
+    const f = join(d, 'status.json'); writeStatus(f, 'old\n');
+    const closes = [];
+    const fs = { openSync, writeSync, fsyncSync: () => {}, unlinkSync, closeSync: (fd) => { closes.push(fd); closeSync(fd); }, renameSync: () => { throw new Error('EXDEV'); } };
+    assert.throws(() => writeStatus(f, 'new\n', { fs, tag: () => 't3' }), /EXDEV/);
+    assert.equal(closes.length, 1, `closed ${JSON.stringify(closes)}`);
+    assert.deepEqual(readdirSync(d), ['status.json']); assert.equal(readFileSync(f, 'utf8'), 'old\n');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

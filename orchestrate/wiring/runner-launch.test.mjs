@@ -43,7 +43,11 @@ test('L757 / #320 M3: a script launch is refused until the script role has a des
   const { d, runner } = runnerDirs();
   try {
     assert.equal(Object.hasOwn(DESIGN_PROFILES, 'script'), false, 'when lane 2 adds a script profile, this test changes to expect the wall');
-    assert.match(walledLaunchSettings(input('script', runner)).reason, /^not walled: the script settings can't be made \(no such role "script"\)/);
+    assert.match(walledLaunchSettings(input('script', runner)).reason, /^not walled: no such role "script"/);
+    // The profile must be the kind's role's (review m4): never another role's tools or mode.
+    assert.match(walledLaunchSettings(input('editing', runner, { profile: DESIGN_PROFILES.lead })).reason, /^not walled: profile for worker /);
+    assert.match(walledLaunchSettings(input('editing', runner, { profile: undefined })).reason, /^not walled: profile for worker is malformed/);
+    assert.match(walledLaunchSettings(input(['editing'], runner)).reason, /does not start/, 'a kind that is not text');
     for (const kind of ['review', 'lead', 'overnight', undefined, 'constructor', '__proto__']) assert.match(walledLaunchSettings(input(kind, runner)).reason, /^not walled: the worker runner does not start/, String(kind));
     assert.match(walledLaunchSettings(input('editing', runner, { paths: undefined })).reason, /no session paths/);
   } finally { rmSync(d, { recursive: true, force: true }); }

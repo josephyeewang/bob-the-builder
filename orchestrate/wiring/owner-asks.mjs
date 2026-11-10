@@ -15,8 +15,11 @@
 // known, so it never answers { ok: false }):
 //   - launch ok: the request is 'started' (or since 'stopped'), and every field is what this runner must make:
 //     sessionId the asked one, outbox <outboxRoot>/worker/<id>, copy <copiesRoot>/<card>, pid and pgid real, pid_start
-//     a non-empty string, head a commit id, signin and configDir non-empty. launch ok: false: the request is 'refused'.
-//   - stopGroup ok: the session is listed with stop_requested and not alive (its process group is gone).
+//     a non-empty string, head a commit id, signin and configDir non-empty. The session it started is listed while
+//     'started' (and may be after), and the listing agrees: card, product, kind, pgid, signin, config_dir and outbox.
+//     launch ok: false: the request is 'refused'.
+//   - stopGroup ok: the session is listed with stop_requested, no longer live by the status's own rule, and with the
+//     process group that was asked to stop.
 // A status that can't be read is waited through the same way. The tick's limit (pass.mjs guarded) answers first. So that
 // a port the tick has given up on does not poll for ever, each ask stops at its own limit, giveUpMs (default 10 minutes,
 // past every tick limit), and answers there as the tick's limit does: { ok: false, timedOut: true, reason }, which
@@ -29,7 +32,8 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { PRODUCT_NAME } from '../modules/M10-rules/reader.mjs';
-import { RUNNER_KINDS, readOwnerStatus } from './owner-status.mjs';
+import { CARD_ID } from '../modules/M9-record/outbox.mjs';
+import { RUNNER_KINDS, live, readOwnerStatus } from './owner-status.mjs';
 
 /** The kinds whose sessions have no work copy, so a stop never reads as unsaved work (owner-ports.mjs saveWork). */
 export const NO_COPY_KINDS = Object.freeze(['review', 'audit', 'readonly', 'lead', 'front_door']);
@@ -56,17 +60,21 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
 
   // Write the request, then wait for an answer `accept` takes. accept(answer, status) -> the port's answer, or undefined
   // while the status does not yet agree.
+  // Nothing after the request is written throws: a clock that fails is waited through, and the reads alone count the time
+  // (so a stuck or failing clock still stops at the limit).
   async function ask(key, body, accept) {
-    writeRequest(`${key}.json`, `${JSON.stringify({ ...body, asked_at: new Date(clock()).toISOString() })}\n`);
     const start = clock();
+    writeRequest(`${key}.json`, `${JSON.stringify({ ...body, asked_at: new Date(start).toISOString() })}\n`);
     let last = 'no answer yet';
-    for (;;) {
+    for (let n = 0; ; n += 1) {
+      let waited = n * pollMs;
       try {
         const s = status();
         const a = Object.hasOwn(s.answers, key) ? s.answers[key] : undefined;
         if (a) { const out = accept(a, s); if (out) return out; last = 'an answer the rest of its status does not bear out'; }
       } catch (e) { last = e?.message ?? String(e); }
-      if (clock() - start >= giveUpMs) return { ok: false, timedOut: true, reason: `the worker runner did not answer ${key} within ${giveUpMs} ms (${last})` };
+      try { const t = clock() - start; if (t > waited) waited = t; } catch { /* the reads alone count */ }
+      if (waited >= giveUpMs) return { ok: false, timedOut: true, reason: `the worker runner did not answer ${key} within ${giveUpMs} ms (${last})` };
       await sleep(pollMs);
     }
   }
@@ -77,13 +85,17 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       // Before the request is written a throw reads as refused (owner-ports.mjs).
       if (!REQUEST_ID.test(sessionId ?? '')) throw new Error('the launch names no session id the runner takes');
       if (!RUNNER_KINDS.includes(kind)) throw new Error(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
-      if (!name(card) || !productName(product)) throw new Error('the launch names no card or product');
+      if (!CARD_ID.test(card ?? '') || !productName(product)) throw new Error('the launch names no card or product');
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
         const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
           && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
-        return right ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
+        // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
+        const x = s.sessions.find((y) => y.id === sessionId);
+        const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
+          && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
+        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
       });
     },
     stopGroup: async (session) => {
@@ -93,7 +105,8 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       return ask(`stopGroup-${id}-${nonce()}`, { stopGroup: { id, pgid, kind } }, (a, s) => {
         if (a.ok === false) return told(a);
         const x = s.sessions.find((y) => y.id === id);
-        return x && x.stop_requested === true && x.alive !== true && name(a.how) ? { ok: true, how: a.how } : undefined;
+        // Gone by the status's own rule (review M1: no alive field is not gone), and the group that was asked to stop.
+        return x && x.stop_requested === true && !live(x) && (!Number.isInteger(pgid) || x.pgid === pgid) && name(a.how) ? { ok: true, how: a.how } : undefined;
       });
     },
     saveWork: async (session) => {

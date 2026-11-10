@@ -7,6 +7,7 @@
 // (script, until lane 2 adds one: L757) can't be rendered, so it is refused here: no script session runs unwalled.
 
 import { checkRunnerWall, renderRoleSettings } from '../modules/M4-workshop/launcher/render-settings.mjs';
+import { checkProfile } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { RUNNER_ROLE_OF } from './owner-status.mjs';
 
 const refuse = (reason) => ({ ok: false, reason: `not walled: ${reason}` });
@@ -17,9 +18,12 @@ const refuse = (reason) => ({ ok: false, reason: `not walled: ${reason}` });
  * → { ok: true, role, settings } | { ok: false, reason }
  */
 export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSettings, check = checkRunnerWall, realpath, paths, ...rest }) {
-  if (!Object.hasOwn(RUNNER_ROLE_OF, kind ?? '')) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
+  if (typeof kind !== 'string' || !Object.hasOwn(RUNNER_ROLE_OF, kind)) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
   const role = RUNNER_ROLE_OF[kind];
   if (!paths || typeof paths !== 'object') return refuse('the launch has no session paths');
+  // The profile must be this role's, inside its design ceiling (review m4): never another role's tools or mode.
+  const pc = checkProfile(role, rest.profile);
+  if (!pc.ok) return refuse(pc.reason);
   const r = render({ ...rest, role, paths: { ...paths, workerRunner } });
   if (!r?.ok) return refuse(`the ${role} settings can't be made (${r?.reason ?? 'no answer'})`);
   const c = check({ settings: r.settings, workerRunner, ...(realpath ? { realpath } : {}) });
