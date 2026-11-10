@@ -1410,4 +1410,13 @@ test('L736 m2 planted: 60 refused taps in one pass are all told: the first each 
   const ports = reviewPorts({ requests: join(w.root, 'requests'), status: join(w.root, 'status.json'), reviewUid: ME, now: () => w.clock.t });
   assert.equal(ports.reviewAlerts().filter((a) => /^tap-refused-/.test(a.id)).length, TAPS_TOLD_EACH + 1);
   assert.equal(w.status().refused.filter((x) => /review again/.test(x.reason)).length, 50, 'the status keeps the last 50 causes');
+  // Told is told: the same 60 taps on the next pass tell nothing again (a keyed tap is read once, by its key).
+  w.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(w.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).map((a) => a.id), []);
+  // Taps with no key are read again each pass: the summarised ones are marked told too, so none is told a second time.
+  const k = await ready();
+  k.ctx.setAsideByJoe = () => Array.from({ length: TAPS_TOLD_EACH + 5 }, (_, i) => ({ session_id: `S-${200 + i}` }));
+  assert.equal((await runnerPass(k.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).length, TAPS_TOLD_EACH + 1);
+  k.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(k.ctx)).alerts.filter((a) => /^tap-refused-/.test(a.id)).map((a) => a.id), []);
 });
