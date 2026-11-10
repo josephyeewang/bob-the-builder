@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { writeFileSync, chmodSync, symlinkSync, mkdirSync, readdirSync, readFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeAppJwt, mintInstallationToken } from './token.mjs';
+import { makeAppJwt, mintInstallationToken, ROBOT_KEY_FILE } from './token.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const PEM = privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -21,8 +21,8 @@ function keyFolder(mode = 0o600) {
   const dir = tempDir('m6-token-');
   const key = join(dir, 'keys');
   mkdirSync(key, { mode: 0o700 });
-  writeFileSync(join(key, 'robot-app.pem'), PEM, { mode: 0o600 });
-  chmodSync(join(key, 'robot-app.pem'), mode);
+  writeFileSync(join(key, ROBOT_KEY_FILE), PEM, { mode: 0o600 });
+  chmodSync(join(key, ROBOT_KEY_FILE), mode);
   return { dir, key };
 }
 
@@ -122,13 +122,13 @@ test('a key file others can read, or a key file that is a link, is refused', asy
   const { key } = keyFolder();
   const linked = join(tempDir('m6-token-link-'), 'keys');
   mkdirSync(linked, { mode: 0o700 });
-  symlinkSync(join(key, 'robot-app.pem'), join(linked, 'robot-app.pem'));
+  symlinkSync(join(key, ROBOT_KEY_FILE), join(linked, ROBOT_KEY_FILE));
   const r = await mintInstallationToken(args(linked, fakeGitHub()));
   assert.equal(r.ok, false);
   assert.match(r.reason, /is a link/);
   const missing = await mintInstallationToken(args(key, fakeGitHub(), { keyFile: 'other.pem' }));
   assert.equal(missing.ok, false);
-  const pathy = await mintInstallationToken(args(key, fakeGitHub(), { keyFile: '../keys/robot-app.pem' }));
+  const pathy = await mintInstallationToken(args(key, fakeGitHub(), { keyFile: `../keys/${ROBOT_KEY_FILE}` }));
   assert.equal(pathy.ok, false);
   assert.match(pathy.reason, /plain name/);
 });
@@ -199,4 +199,10 @@ test("L246: 'eyJ' in a file beside the key does not trip the no-request-on-disk 
   writeFileSync(join(dir, 'leak.txt'), gh.seen[0].jwt);
   assert.equal(anyFileHolds(dir, gh.seen[0].jwt), true);
   assert.equal(anyFileHolds(dir, RS256_HEAD), true);
+});
+
+// L734 self-review m2: the one pin of the key file's name. Setup installs the key under it, so a rename here would leave
+// every installed key orphaned: change it only with a step that moves the installed key.
+test('L734: the robot key file keeps its installed name', () => {
+  assert.equal(ROBOT_KEY_FILE, 'robot-app.pem');
 });
