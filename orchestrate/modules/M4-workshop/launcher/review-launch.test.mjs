@@ -21,7 +21,7 @@ import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smoke
 const PIN = '2.1.300';
 const ME = process.getuid();
 // The review roles run as this test's own user; every other role as someone else (the review user is separate).
-const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
+const UIDS = { ...Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000])), plan_reviewer: ME };
 
 const initFor = (role, over = {}) => {
   const p = DESIGN_PROFILES[role];
@@ -250,10 +250,9 @@ test('M-3 check 13: the Bob folder against the pinned list the config names', as
   assert.match((await port({ ...w.x, bobManifest: manifest }, 13)).reason, /holds a skill/);
 });
 
-// Found while wiring L83 M-3: render-settings writes the Bob folder's read-only rules in Claude's "//path" form
-// (`Edit(//Users/.../**)`), and launch.mjs checkBobFolder looks for the one-slash form, so check 13 refuses every real
-// rendered role file. launch.mjs is lane 2's; the exact change is in the L83 report. Take off `todo` once it lands.
-test('M-3 check 13: a real rendered role file with the right Bob folder passes', { todo: 'lane 2: checkBobFolder must read the "//path" rules render-settings writes' }, async () => {
+// Found while wiring L83 M-3: check 13 once looked for a one-slash form of the Bob folder's rules that render-settings
+// never writes. Both sides now use render-settings' bobFolderDeny (L750), so a real rendered role file passes.
+test('M-3 check 13: a real rendered role file with the right Bob folder passes', async () => {
   const w = world();
   const manifest = { 'rules.md': sha256(readFileSync(join(w.x.bobFolder, 'rules.md'))) };
   assert.deepEqual(await port({ ...w.x, bobManifest: manifest }, 13), { ok: true });

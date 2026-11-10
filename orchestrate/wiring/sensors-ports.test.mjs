@@ -103,16 +103,21 @@ test('L614: a file or folder not the owner\'s, writable by others, a link, too b
     chmodSync(w.dir, 0o777); assert.match(read().reason, /can be written by others/); chmodSync(w.dir, 0o755);
     assert.match(read({ acl: (paths) => `${paths[1]} has an access list (ACL)` }).reason, /access list/);
     assert.equal(read({ acl: undefined }).ok, true, 'the real access-list check passes a clean file');
-    const other = '/Library/Preferences/com.apple.AppleFileServer.plist';
-    const theirs = join(w.dir, 'theirs.json');
-    linkSync(other, theirs);
-    assert.match(readOwnerAnswer({ file: theirs, ownerUid: UID, acl: noAcl }).reason, /theirs\.json is not the owner's/, 'a root file in the owner\'s folder');
-    rmSync(theirs);
+    // A root-owned file hard-linked into the owner's folder. This needs macOS: the file is a Mac system file,
+    // and Linux refuses hard links to files the user does not own (fs.protected_hardlinks). The macOS CI job runs it.
+    if (process.platform === 'darwin') {
+      const other = '/Library/Preferences/com.apple.AppleFileServer.plist';
+      const theirs = join(w.dir, 'theirs.json');
+      linkSync(other, theirs);
+      assert.match(readOwnerAnswer({ file: theirs, ownerUid: UID, acl: noAcl }).reason, /theirs\.json is not the owner's/, 'a root file in the owner\'s folder');
+      rmSync(theirs);
+    }
     const twin = join(w.dir, 'twin.json');
     linkSync(w.file, twin);
     assert.match(read().reason, /one name/);
     rmSync(twin);
-    assert.match(readOwnerAnswer({ file: '/private/etc/hosts', ownerUid: UID, acl: noAcl }).reason, /\/private\/etc is not the owner's/);
+    if (process.platform === 'darwin') assert.match(readOwnerAnswer({ file: '/private/etc/hosts', ownerUid: UID, acl: noAcl }).reason, /\/private\/etc is not the owner's/);
+    else assert.match(readOwnerAnswer({ file: '/etc/hosts', ownerUid: UID, acl: noAcl }).reason, /\/etc is not the owner's/);
     const link = join(w.dir, 'link.json');
     symlinkSync(w.file, link);
     assert.match(readOwnerAnswer({ file: link, ownerUid: UID, acl: noAcl }).reason, /is a link/);

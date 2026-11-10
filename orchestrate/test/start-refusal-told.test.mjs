@@ -55,7 +55,7 @@ function mac(entries, { state = 'active', usage = GREEN, rules = {}, answers = a
   const ports = {
     alert,
     approvals: () => [], board: () => [], healthy: () => true, resume: () => false,
-    outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
     sessions: () => [...sessions], probe: () => active,
     launch: launchOver ?? (async ({ card: c, kind, product, sessionId: id }) => { launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, outbox: `/outbox-root/worker/${id}`, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD }; }),

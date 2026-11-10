@@ -9,7 +9,9 @@
 //     ctx: one product's Approvals context (tick.mjs approvalsStep). The ports take { product, card, ... }:
 //     startPlanReview({ lead, product, card, fingerprint, plan_sha256, inputs, wording, key }) → { ok: true, session } | { ok: false, reason }
 //       key is the same for a card's plan: a port that can use it gives a repeated start the same session
-//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true } while it works | { ok: false, reason }
+//     planReviewAnswer({ product, card, fingerprint, session }) → { ok: true, answer } | { ok: true, started_at? } while it
+//       works (started_at: when its reviewer started, if known) | { ok: true, waiting: 'slot', holders: [{ card, started_at? }] }
+//       while it waits at the plan reviewers' cap, none started yet, holders being the plan reviewers that run | { ok: false, reason }
 //     planRows({ product, card }) → { <row id>: row }      planView({ product }) → a repo view      mainSha({ product }) → sha
 //     replyToLead({ lead, text }) → { ok: true } | { ok: false, reason }      leaves a note for the Lead whose session wrote the plan
 //   Each port call has a time limit (PLAN_PORT_MS), and so has each call raiseGo makes: the repo view's isDir and the close
@@ -73,6 +75,37 @@ const PLAN_LAST_CALL = 1.2;
 export const PLAN_SLOW_FACT = (card) => HOLD_FACT(`plan-slow-${card}`);
 export const PLAN_TURN_FACT = (card) => HOLD_FACT(`plan-turn-${card}`);
 export const PLAN_START_HOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The plan reviews the Dispatcher has asked for that may be running or about to (L726 M1), for the read-only limit: the
+ * review runner lists only the reviewers it has started, and it starts a request on its own next pass. One per card's
+ * plan-review fact from the last PLAN_START_HOLD_MS: a start marked but never confirmed (it may have started), or a
+ * request whose answer is not in yet (`planReviewAnswer` says it works; a read that throws counts it too). An answer,
+ * or an end without one, is not running. `except` is the card being started now. Only `product`'s cards: a Dispatcher
+ * runs one product and may read only its plans' answers, so another product's asked-for ones are not counted here: this
+ * count is a first wall only. The review runner keeps the cap itself across every product's requests (L735 M1), so two
+ * Dispatchers each under it can't put it over between them. → [{ id, card }] (id: the request).
+ */
+export async function plansAwaitingAnswer({ rec, now, product, planReviewAnswer, except = null }) {
+  const prefix = PLAN_REVIEW_FACT('');
+  const out = [];
+  for (const f of rec.list('fact')) {
+    if (typeof f?.id !== 'string' || !f.id.startsWith(prefix)) continue;
+    const card = f.id.slice(prefix.length);
+    const d = f.doc ?? {};
+    if (card === except || typeof d.fingerprint !== 'string') continue;
+    let cp; try { cp = rec.read('card', card)?.doc?.product; } catch { cp = product; }
+    if (cp !== undefined && cp !== product) continue;
+    const hasSession = typeof d.session === 'string' && d.session !== '';
+    const at = pastTime(hasSession ? d.started_at : d.starting_at, now);
+    if (at === null || now - at >= PLAN_START_HOLD_MS) continue;
+    if (!hasSession) { out.push({ id: `starting-${card}`, card }); continue; }
+    let a;
+    try { a = await planReviewAnswer({ product, card, fingerprint: d.fingerprint, session: d.session }); } catch { a = { ok: true }; }
+    if (a?.ok === true && (a.answer === undefined || a.answer === null)) out.push({ id: d.session, card });
+  }
+  return out;
+}
 const PLAN_PORTS = ['startPlanReview', 'planReviewAnswer', 'planRows', 'planView', 'mainSha', 'replyToLead'];
 // The words every unwired port throws (wiring/dispatcher-wiring.mjs): told once per product, not once per card.
 const NOT_WIRED = /not wired yet: /;
@@ -84,6 +117,16 @@ const whole = (product) => `product.${product}`;
 // The step's one write: its notes on a card's plan facts.
 const noteFact = (rec, id, rev, doc) => rec.write({ actor: 'dispatcher', entity: 'fact', id, expectRev: rev, doc });
 const short = (v) => String(v ?? 'no reason given').replace(/\s+/g, ' ').slice(0, 300);
+// The plan reviewers holding the slots, as the runner's status lists them: "card A, on an older plan, for 3 hours, card B
+// for 20 minutes". A start time that can't be read, or is in the future, gives no time (#335 self-review m2).
+const runFor = (ms) => (ms < 2 * 60 * 60_000 ? `for ${Math.max(1, Math.round(ms / 60_000))} minutes` : ms < 2 * 24 * 60 * 60_000 ? `for ${Math.round(ms / (60 * 60_000))} hours` : `for ${Math.round(ms / (24 * 60 * 60_000))} days`);
+const slotHolders = (holders, now) => {
+  const list = (Array.isArray(holders) ? holders : []).filter((h) => typeof h?.card === 'string').slice(0, 10).map((h) => {
+    const at = pastTime(h.started_at, now);
+    return `card ${short(h.card).slice(0, 40)}${h.older_plan === true ? ', on an older plan,' : ''}${at === null ? '' : ` running ${runFor(now - at)}`}`;
+  });
+  return list.length ? list.join('; ') : "the runner's status names none of them";
+};
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 // The session after the `role:` of an actor; a script actor, or a role with no session, names none.
@@ -156,8 +199,15 @@ async function reviewed(ctx, ports, tell, c, fp) {
   const a = await ports.planReviewAnswer({ product: ctx.product, card: c.id, fingerprint: fp.fingerprint, session: f.session });
   if (a?.ok !== true) { tell(c.id, 'answer', `the plan reviewer's answer on card ${c.id} could not be read: ${short(a?.reason)}`); return null; }
   if (a.answer === undefined || a.answer === null) {
-    const since = pastTime(f.started_at, ctx.now());
-    if (since === null || ctx.now() - since >= PLAN_REVIEW_SLOW_MS) tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
+    // The hour runs from the plan's request while it waits for a slot, and from its reviewer's own start once one runs
+    // (#335 r1 m1): a plan that waited three hours is not told "slow" a minute after its reviewer starts.
+    const slot = a.waiting === 'slot';
+    const since = (slot ? null : pastTime(a.started_at, ctx.now())) ?? pastTime(f.started_at, ctx.now());
+    if (since !== null && ctx.now() - since < PLAN_REVIEW_SLOW_MS) return null;
+    // At the cap no reviewer has started, so "has not answered" would point at one that isn't there (#294 r3 m1). The
+    // slots' holders are named, since one stuck on an old plan holds its slot until its session ends (#335 r1 M1).
+    if (slot) tell(c.id, 'slot', `card ${c.id}'s plan review hasn't started: the most plan reviews allowed at once are already running (${slotHolders(a.holders, ctx.now())}). Until one finishes, card ${c.id} can't be asked for a go`);
+    else tell(c.id, 'slow', `the plan reviewer on card ${c.id} has not answered yet, so it can't be asked for a go`);
     return null;
   }
   const review = readPlanReview(a.answer);
@@ -279,7 +329,11 @@ function limited(ports) {
     const r = await guarded(async () => ({ value: await f() }), portMs);
     counted.ms += Date.now() - from;
     if ('value' in r) return r.value;
-    if (!/^it did not answer within /.test(r.reason)) throw new Error(`${name}: ${r.reason}`);
+    // Late is known by `timedOut` (guarded's own late answer), the wording only as a backstop (L755), so it is counted
+    // and told as a timeout whatever words it carries. The wording half is an untested backstop by ruling (L771 Q1): guarded
+    // always marks its own late answer `timedOut`, and a timeout and a failure end the same way here (both throw the same
+    // message; the only difference, `counted.timeouts`, feeds ownSlow, which a real timeout's time already sets).
+    if (r.timedOut !== true && !/^it did not answer within /.test(r.reason ?? '')) throw new Error(`${name}: ${r.reason}`);
     counted.timeouts += 1;
     throw new TimedOut(`${name}: ${r.reason}`);
   };

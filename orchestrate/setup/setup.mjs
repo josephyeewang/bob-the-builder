@@ -8,6 +8,8 @@
 //                                       settings, launcher... or read the keys                                 (root, read only)
 //   install              [--dry-run]    the link layout, then the updater's first run                          (root)
 //   check-install        [--main <sha>] the copy, its link, every install folder, access lists                 (read only)
+//   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
+//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //   daemons list                        loaded or not, per job                                                 (read only)
 //   daemons place|load|unload|list|check --only <job>   that one job only (e.g. watch-only); an unknown name is refused
@@ -36,6 +38,7 @@
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { ROOT_CONFIG_PATH, parseConfig } from './layout.mjs';
+import { checkDispatcherKeys, dispatcherKeysOn } from './dispatcher-check.mjs';
 import { realIo, rootProblem } from './mac.mjs';
 import { guarded } from './guard.mjs';
 import { apply, check, plan } from './users-folders.mjs';
@@ -52,11 +55,11 @@ const TOKEN_PAGE_NOTE = [
   '  - Repository access: only the one repository named in the config;',
   '  - Permissions: Metadata = Read-only (GitHub adds it by itself; fine if absent), Contents = Read-only (GitHub may call it "code"), Pull requests = Read-only, Commit statuses = Read-only (the watch job reads it to judge a merge), and nothing else. (Not Checks: the job reads check runs with the watcher App, which holds Checks: read.)',
 ];
-const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
+const USAGE = 'usage: node setup.mjs <users-folders|check|proofs|install|check-install|check-dispatcher|dispatcher-keys|daemons place|load|unload|list|check [--only <job>]|daemons reload-account|prove-token|proposals|check-proposals|safe-directory|check-safe-directory|token|check-token|watch-rules|check-watch-rules|watch-app> [--config <file>, without sudo only] [--dry-run] [--main <commit>]';
 const DAEMON_SUBS = ['place', 'load', 'unload', 'list', 'check', 'reload-account'];
-const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
-const READ_ONLY = ['check', 'check-install', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
-const PLAIN_CONFIG = ['users-folders', 'check', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const COMMANDS = ['users-folders', 'check', 'proofs', 'install', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'daemons', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
+const READ_ONLY = ['check', 'check-install', 'check-dispatcher', 'dispatcher-keys', 'check-proposals', 'check-safe-directory', 'check-token', 'prove-token', 'check-watch-rules'];
+const PLAIN_CONFIG = ['users-folders', 'check', 'check-dispatcher', 'dispatcher-keys', 'proofs', 'proposals', 'check-proposals', 'safe-directory', 'check-safe-directory', 'token', 'check-token', 'prove-token', 'watch-rules', 'check-watch-rules', 'watch-app'];
 
 export function parseArgs(argv) {
   const cmd = argv[0];
@@ -100,10 +103,10 @@ export function parseArgs(argv) {
 
 function report(res, out) {
   // NOT TRIED is not a pass: it counts as a FAIL (L707 c1).
-  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
-  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length;
+  for (const r of res) out(r.skip ? `NEEDS ROOT  ${r.what} — ${r.why}` : r.notTried ? `NOT TRIED  ${r.what} — ${r.why}` : r.warn ? `WARNING  ${r.what} — ${r.why}` : r.ok ? `PASS  ${r.what}` : `FAIL  ${r.what} — ${r.why}`);
+  const bad = res.filter((r) => !r.ok).length; const skipped = res.filter((r) => r.skip).length; const warned = res.filter((r) => r.warn).length;
   // A check that could not look is not a pass: with any NEEDS ROOT line the summary says so and the exit code is not 0.
-  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : `all ${res.length} PASS`}`);
+  out(`${bad ? `${bad} of ${res.length} FAILED` : skipped ? `${res.length - skipped} PASS, but ${skipped} could not be checked without root (run it again with sudo)` : warned ? `${res.length - warned} PASS and ${warned} WARNING (not a failure, but something does not work until it is put right)` : `all ${res.length} PASS`}`);
   return bad ? 1 : skipped ? 3 : 0;
 }
 
@@ -148,7 +151,15 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
   if (o.cmd === 'check') return report(check(io, cfg, { alsoKnown: rootMadeEntries(cfg) }), out);
-  if (o.cmd === 'check-install') return report(checkInstall(io, cfg, { main: o.main }), out);
+  if (o.cmd === 'check-install') {
+    const code = report(checkInstall(io, cfg, { main: o.main }), out);
+    // The Dispatcher's lines are their own command (L748 r1 M1): `daemons load` and the watch cutover wait on check-install,
+    // and a host.lock the Dispatcher can't read must not stop the review or watch jobs. Once the config names it, say where to look.
+    if (cfg.hostLockPath !== undefined) out('the Dispatcher\'s folders and host.lock: run check-dispatcher (sudo to read host.lock as orchestrate)');
+    return code;
+  }
+  if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg), out);
+  if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);
   if (o.cmd === 'check-token') return report(checkToken(io, cfg), out);
@@ -193,7 +204,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!after) { out('done.'); return 0; }
   const bad = after.filter((r) => !r.ok);
   for (const r of bad) err(`FAIL  ${r.what} — ${r.why}`);
-  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS.`);
+  for (const r of after.filter((x) => x.warn)) out(`WARNING  ${r.what} — ${r.why}`);   // a WARNING is never summed up as a plain pass (L737 M1)
+  out(bad.length ? `${bad.length} item(s) still FAIL after the run.` : `done: all ${after.length} items PASS${after.some((x) => x.warn) ? ', with the WARNING above' : ''}.`);
   return bad.length ? 1 : 0;
 }
 

@@ -45,7 +45,7 @@ function mergeOf(rec, cardId, commit) {
 }
 
 /**
- * One pass. `filesOf(merge_commit)` -> [paths] the commit changed (read from the mirror) or null. `alert(text)`.
+ * One pass. `filesOf(merge_commit)` -> [paths] the commit changed (read from the mirror); it never answers null: a read that fails or finds nothing throws. `alert(text)`.
  * Returns [[askId or card id, what happened]]. Each tap is read on its own (audit 0b-6 r4 MAT-4): one that throws holds
  * no other. A tap that is not acted on is told to Joe, once per tap and reason and again each day (L38: no silent hold).
  */
