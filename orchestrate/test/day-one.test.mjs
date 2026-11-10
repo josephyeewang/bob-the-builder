@@ -458,7 +458,9 @@ test('a research report whose card can\'t go ready or land is told to Joe, every
 
 // L736 m6 (R4): the tick hands the research handler its own alert. A report taken in while the product is active lands in
 // the handler, and only the handler says that nothing copies it yet (researchPass leaves a landed card alone).
-test('a research report taken in by the tick is told, from the handler, that nothing copies it yet; once', async () => {
+// The handler tells it as it lands the card, and the research step of the same tick tells it again if that alert was
+// not queued: either way Joe hears it once.
+test('a research report taken in by the tick is told that nothing copies it yet; once', async () => {
   const { w, dir, proposals } = researchWorld();
   askOpened(w);
   writeFileSync(join(dir, 'research-R-1.md'), REPORT);

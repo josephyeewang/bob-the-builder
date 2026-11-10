@@ -407,6 +407,43 @@ test('M16: two ticks started together: one runs, one exits with a diary line; th
   assert.equal((await runTick({ lockFile, rec: w.rec, rules: rulesWith({}, allow), now: T0 + MIN, ports: w.ports })).ran, true);
 });
 
+test('L736 m5: a late pass with a low config deadline still queues the low-deadline alert, behind its own', async () => {
+  const L = installedLayout('m11-main-low-late-', { dirs: ['wiring'] });
+  const self = selfIn(L);
+  const dir = L.base;
+  const wiring = L.path('wiring/wiring.mjs');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  // A launch that never answers holds the pass past its 300 ms; the step's own deadline (2 s) lets it go after.
+  writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
+import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
+import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
+export const seen = [];
+const now = ${T0};
+export const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FACT, { account: 'a', observed_at: new Date(now).toISOString() }],
+  ['fact', USAGE_FACT('a'), usageFact({ week: 30, h5: 20, account: 'a', now })],
+  ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
+export async function wire() {
+  const noop = () => [];
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 2000, alert: (t) => { seen.push(t); }, board: noop, healthy: () => true,
+    proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    launch: () => new Promise(() => {}), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
+    sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }),
+    cleanup: { copiesRoot: ${JSON.stringify(dir)}, sealRoot: ${JSON.stringify(dir)}, mirrorFor: () => null }, approvals: () => [] } };
+}
+`);
+  const config = L.path('config.json');
+  writeFileSync(config, JSON.stringify({ installRoot: L.installRoot, wiring, lockFile: join(dir, 'pass.lock'), runDeadlineMs: 300 }));
+  const logs = [];
+  assert.equal(await main([config], { self, now: T0, log: (s) => logs.push(s) }), 2, logs.join('\n'));
+  const mod = await import(wiring);
+  assert.match(logs.join('\n'), /runDeadlineMs \(300\) is below the pass's own sum/);
+  assert.equal(mod.seen.filter((t) => /did not finish within 300 ms/.test(String(t))).length, 1, 'the late pass sends its own alert');
+  assert.equal(mod.seen.filter((t) => /runDeadlineMs/.test(String(t))).length, 0, 'one send: its own');
+  assert.match(JSON.stringify(mod.rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? null), /runDeadlineMs \(300\) is below the pass's own sum/, 'queued for the next send');
+  await new Promise((ok) => setTimeout(ok, 2100));
+});
+
 test('main.mjs: runs one tick through a wiring module named in the config; a bad config or wiring exits 1', async () => {
   const L = installedLayout('m11-main-', { dirs: ['wiring'] });
   const self = selfIn(L);
