@@ -21,7 +21,8 @@
 // - An async port writes one request and waits for the runner's answer. The time limit is the tick's (pass.mjs guarded(),
 //   portDeadlineMs or saveDeadlineMs, which the tick may override); the port sets none of its own except where noted.
 //   `{ ok: false, reason }` means the outcome is known and nothing (more) happened. Except where noted (stopGroup's
-//   ok: false means it may still run; cleanup.saveWork answers timedOut at its own limit), a port never answers ok: false
+//   ok: false means it may still run; cleanup.saveWork answers timedOut at its own limit; the worker runner's asks, owner-asks.mjs, stop waiting at a limit past
+//   every tick limit and answer there as the tick's limit does, { ok: false, timedOut: true }), a port never answers ok: false
 //   while the outcome is unknown: it keeps waiting and lets the tick's limit answer, because pass.mjs reads only that limit's
 //   answer as "it may still start" (a launch that answers its own time-out could put a card back to ready while a session
 //   may be starting). This holds whether or not pass.mjs also reads timedOut. An async port does not throw, except

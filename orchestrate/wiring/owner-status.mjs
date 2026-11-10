@@ -12,7 +12,7 @@
 // widen which file kinds or which outbox a session may use. The wiring cross-checks card against the launch record.
 //
 // The status file (the runner writes it; this is the only reader):
-//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } } }
+//   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
 //              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/worker/<id>, which exists
@@ -26,6 +26,10 @@
 //     or 'cancelled' (a stop request reached it first). A launch request the runner has not seen has no entry. The runner
 //     keeps a used-up entry for at least RUNNER_KEEP_USED_UP_MS (the longest claim timeout plus the stale window), and marks
 //     a session that ends on its own 'stopped'.
+//   - answers (step 2, owner-asks.mjs): the runner's answer to each ask request, keyed by the request file's name
+//     without .json (ANSWER_KEY). ANSWER: { ok: true|false, reason (a non-empty string when ok is false), ...the port's
+//     fields }. The asking port checks each answer against the rest of the same status before it trusts it. The runner
+//     keeps an answer as long as a used-up request entry.
 // The runner's probe answers only for its own sessions: the wiring routes each session to its own kind's probe.
 // The shared reader with review-runner's readReviewStatus is a later extraction that keeps behaviour (L739, L248).
 
@@ -47,6 +51,9 @@ export const RUNNER_KEEP_USED_UP_MS = 24 * 3_600_000;
 export const STATUS_MAX_BYTES = 1_000_000;
 /** How far ahead of this clock a status may be dated: a small clock difference, not the stale window. */
 export const CLOCK_SKEW_MS = 30_000;
+/** The ask verbs (owner-ports.mjs's async ports) and the name of an answer: <verb>-<a request id or product>[-<nonce>]. */
+export const ASK_VERBS = Object.freeze(['launch', 'stopGroup', 'saveWork', 'pauseLead']);
+export const ANSWER_KEY = /^(launch|stopGroup|saveWork|pauseLead)-[A-Za-z0-9._-]{1,140}$/;
 const SESSION_FIELDS = Object.freeze(['id', 'product', 'kind', 'card', 'lead', 'role', 'pgid', 'signin', 'config_dir', 'bundle_files']);
 const SIZE_FIELDS = Object.freeze(['tokens', 'compactions', 'turnEnded', 'endedAt', 'openTools']);
 
@@ -116,7 +123,13 @@ export function readOwnerStatus({ file, now, uid, outboxRoot, realpath, stat = l
   const ids = new Set();
   for (const x of s.sessions) { checkSession(x, { uid, outboxRoot, realpath }); if (ids.has(x.id)) bad(x, 'is listed twice'); ids.add(x.id); }
   for (const [id, r] of Object.entries(s.requests)) if (!REQUEST_ID.test(id) || !REQUEST_STATES.includes(r?.state)) throw new Error('a request in the worker runner\'s status is not what the runner writes');
-  return { sessions: s.sessions, requests: s.requests };
+  const answers = Object.hasOwn(s, 'answers') ? s.answers : {};
+  if (answers === null) throw new Error('the worker runner\'s answers are not what the runner writes');
+  if (typeof answers !== 'object' || Array.isArray(answers)) throw new Error('the worker runner\'s answers are not what the runner writes');
+  for (const [k, a] of Object.entries(answers)) {
+    if (!ANSWER_KEY.test(k) || !a || typeof a !== 'object' || typeof a.ok !== 'boolean' || (a.ok === false && (typeof a.reason !== 'string' || !a.reason))) throw new Error('an answer in the worker runner\'s status is not what the runner writes');
+  }
+  return { sessions: s.sessions, requests: s.requests, answers };
 }
 
 const pick = (x, fields) => Object.fromEntries(fields.map((f) => [f, x[f]]));
