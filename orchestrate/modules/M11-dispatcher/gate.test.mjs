@@ -401,7 +401,10 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   const rec = recWith([product('p1', 'paused'),
     ['card', 'T-1', { state: 'merged', product: 'p1', tier: 2, files: ['src/a.js'], merge_commit: SHA }],
     ['merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p1' }],
-    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }]]);
+    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }],
+    // The undo cards themselves, as the Record holds them: check12 asks that the id names one (L875 m2).
+    ['card', 'U-1', { state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, product: 'p1', tier: 2, files: ['src/a.js'] }],
+    ['card', 'U-2', { state: 'ready', kind: 'exact_reverse', source: { ask: 'A-9' }, product: 'p1', tier: 2, files: ['src/a.js'] }]]);
   const rules = rulesWith();
   const undo = { id: 'U-1', state: 'ready', kind: 'exact_reverse', source: { ask: 'A-1' }, product: 'p1', tier: 2, files: ['src/a.js'] };
   const filesOf = () => ['src/a.js'];
@@ -411,13 +414,13 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   assert.equal(viaPass.ok, true, 'control: the pass starts this undo on a paused product');
   assert.deepEqual(await ask(check12({ ...base, filesOf })), viaPass);
   for (const [why, port, card] of [['no filesOf', check12(base), undo], ['files differ', check12({ ...base, filesOf: () => ['src/b.js'] }), undo],
-    ['filesOf throws', check12({ ...base, filesOf: () => { throw new Error('x'); } }), undo], ['no merge', check12({ ...base, filesOf }), { ...undo, source: { ask: 'A-9' } }]]) {
+    ['filesOf throws', check12({ ...base, filesOf: () => { throw new Error('x'); } }), undo], ['no merge', check12({ ...base, filesOf }), { ...undo, id: 'U-2', source: { ask: 'A-9' } }]]) {
     const r = await ask(port, card);
     assert.equal(r.ok, false, why);
     assert.match(r.reason, /^it is not an exact reverse: /, why);
   }
   // On an active product with room too: the pass refuses a not-exact undo whatever the caps say, and so does the launch.
-  const active = recWith([product('p1'), ...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; })]);
+  const active = recWith([product('p1'), ...['T-1', 'MG-1', 'A-1', 'U-1'].map((id) => { const e = id === 'T-1' || id === 'U-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; })]);
   const onActive = { ...base, rec: active };
   assert.equal((await ask(check12({ ...onActive, filesOf }))).ok, true, 'control: exact on an active product');
   for (const [why, port] of [['no filesOf', check12(onActive)], ['files differ', check12({ ...onActive, filesOf: () => ['src/b.js'] })]]) {
@@ -429,7 +432,8 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   // L863 m1: at launch the undo is already claimed. With its id it is told from another undo and starts; a card doc
   // with no id is refused for that, never counted as "an undo is already running" by its own claim.
   const claimed = recWith([...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; }),
-    product('p1', 'paused'), ['card', 'U-1', { ...undo, id: undefined, state: 'claimed' }]]);
+    product('p1', 'paused'), ['card', 'U-1', { ...undo, id: undefined, state: 'claimed' }],
+    ['card', 'U-9', { ...undo, id: undefined, state: 'ready', source: { ask: 'A-7' } }], ['card', 'E-1', { state: 'ready', product: 'p1', tier: 2, files: ['src/e.js'] }]]);
   const atLaunch = check12({ ...base, rec: claimed, filesOf });
   assert.equal((await atLaunch({ card: { ...undo, state: 'claimed' }, kind: 'undo', product: 'p1' })).ok, true, 'with its id: its own claim is not another undo');
   const { id: _, ...noId } = { ...undo, state: 'claimed' };
@@ -438,6 +442,21 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
   assert.match(r.reason, /the undo's card names no id/);
   assert.doesNotMatch(r.reason, /already running/);
   for (const id of ['', 7]) assert.match((await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' })).reason, /the undo's card names no id/, String(id));
+  // L875 m2: a blank id, a padded one, or one naming another card (another undo's, a plain card, or none) is refused
+  // too, and never as "already running".
+  for (const id of [' ', ' U-1']) assert.match((await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' })).reason, /the undo's card names no id/, JSON.stringify(id));
+  for (const id of ['U-9', 'E-1', 'U-404']) {
+    const w = await atLaunch({ card: { ...noId, id }, kind: 'undo', product: 'p1' });
+    assert.equal(w.ok, false, id);
+    assert.match(w.reason, new RegExp(`the undo's card id ${id} names no card of its kind, product and source`), id);
+    assert.doesNotMatch(w.reason, /already running/, id);
+  }
+  // L875 c1 (plant G8): an id is asked only of an undo; a card of any other kind with no id goes to startGate as before.
+  const plain = { product: 'p1', tier: 2, files: ['src/x.js'] };
+  for (const kind of ['editing', 'script']) {
+    assert.deepEqual(await atLaunch({ card: plain, kind, product: 'p1' }),
+      startGate({ rules, rec: claimed, card: plain, kind, product: 'p1', b: GREEN, running: [] }), kind);
+  }
   // Every other kind is unchanged: exact or not is asked only for an undo.
   const ed = { id: 'new', product: 'p1', tier: 2, files: ['src/new.js'] };
   assert.deepEqual(await check12({ ...base, filesOf })({ card: ed, kind: 'editing', product: 'p1' }), startGate({ rules, rec, card: ed, kind: 'editing', product: 'p1', b: GREEN, running: [] }));

@@ -620,8 +620,31 @@ test('#367 r1 self-review m1, m2 planted: the restore write is never taken; a li
     return b.rec.read(e, id);
   } });
   Object.defineProperty(bad, 'write', { value: (x) => (x?.kind === 'write_refused_kept' && x.expectRev !== Number.MAX_SAFE_INTEGER ? { ok: false, reason: 'refused for the test' } : b.rec.write(x)) });
-  assert.throws(() => tellRefused({ rec: bad, alert: b.alert, now: T0 + H, refused: new Map([['park', [b.item('C-2')]]]), ran: () => true }),
-    (e) => /it was restored from the Record's diary, then its list could not be kept \(refused for the test\)/.test(e.message) && /C-2 \(r\)/.test(e.message));
+  // L875 M1: that keep write saves them nowhere, so every one is named, past REFUSED_LIST_MAX too, once each; and the
+  // check write's alert is said to be expected (L875 m1).
+  const many = Array.from({ length: REFUSED_LIST_MAX + 5 }, (_, i) => `C-${i + 1}`);
+  for (const id of many.slice(2)) b.rec.write({ actor: 'dispatcher', entity: 'card', id, expectRev: 0, doc: { state: 'running' } });
+  let msg = '';
+  assert.throws(() => tellRefused({ rec: bad, alert: b.alert, now: T0 + H, refused: new Map([['park', many.map((id) => b.item(id))]]), ran: () => true }), (e) => { msg = e.message; return true; });
+  assert.match(msg, /it was restored from the Record's diary, then its list could not be kept \(refused for the test\)/);
+  for (const id of many) assert.equal(msg.split(`; ${id} (r)`).length + msg.split(`: ${id} (r)`).length - 2, 1, `${id} is named once`);
+  assert.doesNotMatch(msg, /more/, 'none is only counted');
+  assert.match(msg, /is this check, not a lost write/);
+});
+
+// L875 m3: on the normal path too, a keep write refused when no reminder is due saves this pass's refusals nowhere, so
+// the error names every one.
+test('L875 m3: a refused keep write with no reminder due names every refusal this pass', () => {
+  const many = Array.from({ length: REFUSED_LIST_MAX + 5 }, (_, i) => `C-${i + 1}`);
+  const a = keptWorld(many);
+  assert.equal(a.tell(a.rec, T0, new Map([['park', [a.item('C-1')]]])), 'told');
+  const bad = Object.create(a.rec);
+  Object.defineProperty(bad, 'write', { value: (x) => (x?.kind === 'write_refused_kept' ? { ok: false, reason: 'refused for the test' } : a.rec.write(x)) });
+  let msg = '';
+  assert.throws(() => tellRefused({ rec: bad, alert: a.alert, now: T0 + H, refused: new Map([['park', many.map((id) => a.item(id))]]), ran: () => true }), (e) => { msg = e.message; return true; });
+  assert.match(msg, /its list could not be kept \(refused for the test\)/);
+  for (const id of many) assert.ok(msg.includes(`${id} (r)`), `${id} is named`);
+  assert.doesNotMatch(msg, /more/);
 });
 
 // #367 r2 m1, m2 (plants Q4, Q7): when the kept list can't be read or restored, nothing is kept, so the error names every
