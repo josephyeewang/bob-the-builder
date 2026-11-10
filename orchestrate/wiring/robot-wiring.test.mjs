@@ -13,12 +13,13 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
+import { makeRecord, memoryRecord } from '../shared/record.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -620,4 +621,25 @@ test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints onl
   assert.equal(gh.issues.size, 1);
   assert.match(gh.issues.get(1).body, /store_layout/);
   assert.deepEqual(gh.issues.get(1).assignees, [APP.alertOwner]);
+});
+
+// L797: the Record's read never throws, so a queue it can't read came back as a corrupt row, which read as an empty
+// queue: nothing was dropped and the pass answered true ("every drop written"). It must answer false and drop nothing.
+test('L797: dropLateAlerts answers false and drops nothing when the alert queue cannot be read; an absent queue is true', () => {
+  const real = memoryRecord();
+  let failQueue = false; let writes = 0;
+  const rec = makeRecord({
+    read: (e, id) => { if (failQueue && e === 'fact' && id === ALERT_QUEUE_FACT) throw new Error('SQLITE_BUSY'); return real.read(e, id); },
+    list: (e) => real.list(e),
+    write: (w) => { writes++; return real.write(w); },
+    diary: (o) => real.diary(o),
+  });
+  assert.equal(dropLateAlerts(rec), true, 'no queue at all: nothing to drop');
+  failQueue = true;
+  assert.equal(rec.read('fact', ALERT_QUEUE_FACT)?.corrupt, true, 'the real wrapper answers a corrupt row, not a throw');
+  const logs = [];
+  assert.equal(dropLateAlerts(rec, { log: (l) => logs.push(l) }), false);
+  assert.equal(writes, 0, 'nothing written or dropped');
+  // Its own line, with the Record's reason, never the drop-failed one (audit #346 m2).
+  assert.deepEqual(logs, ['robot: the Dispatcher is on time, but the alert queue could not be read (record error: SQLITE_BUSY), so its old late alerts were not cleared']);
 });
