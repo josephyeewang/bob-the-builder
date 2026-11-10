@@ -40,7 +40,7 @@ function NAMES(role, over = {}) {
 }
 
 // Stand-in Mac user ids (L44): the review roles have a user of their own; the launcher runs as 501.
-const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503 };
+const UIDS = { lead: 501, worker: 501, front_door: 501, learning: 501, writer: 501, incident: 501, scout: 501, thinking: 501, reviewer: 503, auditor: 503, plan_reviewer: 503 };
 
 // ---- the order (§14.1.3) ----
 
