@@ -38,7 +38,11 @@ export function takePassLock(file, { pid = process.pid, now = Date.now(), dead =
     if (linked !== true) {
       if (linked?.code !== 'EEXIST') return { ok: false, reason: `could not take the pass lock: ${linked?.code ?? linked}` };
       let held;
-      try { held = JSON.parse(readFileSync(file, 'utf8')); } catch { return { ok: false, reason: 'the pass lock is unreadable; another pass may run' }; }
+      // A lock gone between the link and the read was released (or broken) just then: try the link again, never "unreadable".
+      try { held = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+        if (e?.code === 'ENOENT') continue;
+        return { ok: false, reason: 'the pass lock is unreadable; another pass may run' };
+      }
       if (!dead(held?.pid)) return { ok: false, reason: `another pass runs (pid ${held?.pid})`, held };
       try { unlinkSync(file); } catch { return { ok: false, reason: 'could not break a dead pass lock' }; }
       broke = held;

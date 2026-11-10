@@ -524,6 +524,17 @@ test('L754: a holder that releases while the round looks is still a running roun
   finally { fs.openSync = real; syncBuiltinESMExports(); }
   assert.ok(opened.length >= 1, 'the take was seen');
   assert.ok(!opened.includes(f), `the lock is linked into place, never opened to be written: ${opened.join(', ')}`);
+  // A holder that releases between the refused link and the read (self-review Minor): the take tries the link again and gets
+  // the lock, never "unreadable" (which was exit 3 for a round of ours).
+  writeFileSync(f, JSON.stringify({ pid: 4545, taken_at: new Date(at).toISOString() }));
+  const realRead = fs.readFileSync; let gone = 0;
+  fs.readFileSync = (path, ...rest) => { if (String(path) === f && gone === 0) { gone += 1; rmSync(f, { force: true }); } return realRead(path, ...rest); };
+  syncBuiltinESMExports();
+  let again;
+  try { again = takePassLock(f, { pid: 4646, now: at, dead: () => false }); } finally { fs.readFileSync = realRead; syncBuiltinESMExports(); }
+  assert.equal(gone, 1, 'the release happened between the link and the read');
+  assert.equal(again.ok, true, again.reason);
+  again.release();
 });
 
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────
