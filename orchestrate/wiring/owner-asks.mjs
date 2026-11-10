@@ -43,7 +43,7 @@ export const ASK_GIVE_UP_MS = 600_000;
 // A product as a request file may name it: M10's product name (never a path), at most 64 characters.
 const productName = (p) => typeof p === 'string' && p.length <= 64 && PRODUCT_NAME.test(p);
 const HEAD = /^[0-9a-f]{40}$/;
-const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'outbox', 'signin', 'configDir', 'copy']);
+const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'base', 'outbox', 'signin', 'configDir', 'copy']);
 
 const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
@@ -91,12 +91,13 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
         if (a.ok === false) return state === 'refused' ? told(a) : undefined;
         const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && realPid(a.pid) && realPid(a.pgid) && name(a.pidStart)
-          && HEAD.test(a.head ?? '') && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
+          // base (L825-2): the commit the copy was started on. Optional until every runner answers it, but never malformed.
+          && HEAD.test(a.head ?? '') && (a.base === undefined || HEAD.test(a.base)) && a.outbox === join(outboxRoot, 'worker', sessionId) && a.copy === join(copiesRoot, card) && name(a.signin) && name(a.configDir);
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
           && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
-        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
+        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
       });
     },
     stopGroup: async (session) => {
