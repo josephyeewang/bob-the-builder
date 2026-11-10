@@ -389,3 +389,7 @@ test('R-1-89: every launch record names its folder; a switch leaves the running 
   assert.deepEqual(w.f.st.a.sessions, []);
   assert.deepEqual(w.f.st.b.sessions.map((s) => s.id), [l2.session_id]);
 });
+
+// L778: the caller hazards of the account layer, written into the contract; each is a test owed once the ports are wired.
+test.todo('L778: acrossLeads over a folder whose Lead list is async gives a Promise, which the tick\'s for...of over leads() can\'t read');
+test.todo('L778: frontDoorAlive answers a silent null when the account in use can\'t be read, where L63 m1 asks for an error naming why');

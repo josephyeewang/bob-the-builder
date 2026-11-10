@@ -322,6 +322,19 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
       if (w.ok) prev = rec.read('fact', id);
       return w;
     };
+    // The used note on the bytes' own fact (L736 m3): its time, or null. Written only for bytes this product handed in.
+    // The note names the file and is no older than its claim: the bytes fact is shared by every name with these bytes,
+    // so another name's use is never read as this one's (self-review m2). It goes once the mark is made.
+    const usedMark = (h, since) => { try { const o = rec.read('fact', bytesFactId(h)); return o && !o.corrupt && o.doc?.product === product && o.doc.used_name === name && typeof o.doc.used_at === 'string' && typeof since === 'string' && o.doc.used_at >= since ? o.doc.used_at : null; } catch { return null; } };
+    const noteUsed = (h, on = true) => {
+      try {
+        const o = rec.read('fact', bytesFactId(h));
+        if (!o || o.corrupt || o.doc?.product !== product) return false;
+        const { used_at: _a, used_name: _n, ...rest } = o.doc;
+        if (!on && _a === undefined && _n === undefined) return true;
+        return rec.write({ actor: 'dispatcher', entity: 'fact', id: bytesFactId(h), expectRev: o.rev, doc: on ? { ...rest, used_name: name, used_at: new Date(now).toISOString() } : rest, kind: 'proposal_bytes' }).ok === true;
+      } catch { return false; }
+    };
     // The record refused this file's own fact: the tell is marked on its told fact instead, so it is told once per
     // cause, not every pass (L233 M-3, m4). `daily`: told again once its told time is 24 h old, as stillWaiting does
     // (L702 minor 5), for a wait that goes on.
@@ -407,6 +420,17 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     const file = readProposalFile(dir, name, { ownerUid, kind: parsed.kind, ...(fs ? { fs } : {}) });
     if (!file.ok) { refuse(file.reason); continue; }
     const hash = file.sha256;
+    // A pass that used the file but could not mark it applied left that on the bytes' own fact (L736 m3): the mark is
+    // tried again now, and nothing is told as an interruption, since the file is known to have been used.
+    const usedAt = prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat' ? usedMark(prev.doc.sha256, prev.doc.at) : null;
+    if (usedAt) {
+      const usedSha = prev.doc.sha256;
+      const m = put({ sha256: usedSha, state: 'applied', applied_at: usedAt }, 'proposal_applied');
+      if (m.ok && !noteUsed(usedSha, false)) note(`proposals ${product}: ${shown}: its "used" note could not be taken off the bytes record; it is left, and never read for a later claim, which is newer`);
+      r.marked = m.ok ? 'used in an earlier pass; marked applied now' : `used in an earlier pass, and still could not be marked applied (${plainError(String(m.reason))}); tried again next pass`;
+      // Never used twice: still unmarked, it is left for the next pass.
+      if (!m.ok) { r.already = true; note(`proposals ${product}: ${shown}: ${r.marked}`); continue; }
+    }
     if (prev?.doc?.state === 'applying' && parsed.kind !== 'heartbeat') {
       // A pass that stopped between its claim and the hand-over (outbox-intake's MAT-7): whether the file was used is
       // not known, so it is never used twice. Told once. A heartbeat is a poll, so it is simply taken again.
@@ -561,8 +585,16 @@ export async function proposalsPass({ rec, rules, products, ownerUid, wait, aler
     let done;
     try { done = await use(); } catch (e) { done = { ok: false, reason: e.message }; }
     if (done?.ok) {
-      put({ sha256: hash, state: 'applied', applied_at: new Date(now).toISOString() }, 'proposal_applied');
       r.applied = true;
+      // The mark's answer is read (L736 m3): refused, the file was still used, so that goes on the bytes' own fact and
+      // the next pass marks it then; said in this pass's lines, never left to read as an interruption.
+      const m = put({ sha256: hash, state: 'applied', applied_at: new Date(now).toISOString() }, 'proposal_applied');
+      if (!m.ok) {
+        const why = plainError(String(m.reason));
+        const kept = parsed.kind !== 'heartbeat' && noteUsed(hash);
+        r.unmarked = `used, but it could not be marked applied (${why}); ${kept ? 'the mark is tried again next pass' : 'that could not be noted either, so the next pass says it was interrupted'}`;
+        note(`proposals ${product}: ${shown}: ${r.unmarked}`);
+      }
     } else refuse(done?.reason ?? 'no answer', hash, parsed.kind === 'proposal' ? { card_key: proposalCardKey(rec, parsed.id) } : null);
   }
   // Files of a kind nothing takes in yet sit in the folder: told once per product and kind, and cleared when none wait.

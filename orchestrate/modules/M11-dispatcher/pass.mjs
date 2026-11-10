@@ -503,7 +503,8 @@ export async function dispatcherPass({ rec, rules, now, clock = () => now, accou
     if (pf?.doc?.state === 'asked') continue;
     if (running.some((s) => s.product === product && parkable(s))) continue;
     // A failing port is that product's problem, told once, not a failed pass (audit 0b-6 r3 MIN-2).
-    const asked = await guarded(async () => { await pauseLead({ product }); return { ok: true }; }, portDeadlineMs);
+    // The port's answer is read (L744 2): an ok:false is a failure, told like a throw, never counted as asked.
+    const asked = await guarded(async () => { const a = await pauseLead({ product }); return a?.ok === false ? { ok: false, reason: String(a.reason || 'the port said no') } : { ok: true }; }, portDeadlineMs);
     if (!asked.ok) {
       // Once per reason (its numbers out; audit 0b-6 r5 m4), and again each day it fails (L38); told only once sent (r5 MAT-2).
       const cause = String(asked.reason).replace(/\d+/g, 'N');
@@ -724,7 +725,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
     const l = await guarded(() => launch({ card, kind, product, sessionId }), portDeadlineMs);
-    if (!l?.ok && l?.reason === `it did not answer within ${portDeadlineMs} ms`) {
+    // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
+    if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);
       holdAlert({ rec, cause: `launch-late-${id}`, text: `card ${id}: the launcher ${l.reason}; the card stays claimed so it cannot start twice (it lapses at claims.unlaunched_min once its session is stopped)`, alert, now });
       continue;

@@ -212,7 +212,7 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase =
     if (st.isSymbolicLink() || !st.isDirectory()) { problems.push(`${row.path} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed`); continue; }
     // A folder under the base is root's or the one user it is for (NEW-1): one owned by anyone else was put there by someone
     // else, and is not adopted (that would hand root's later work, and the next owner, to whoever made it).
-    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}; it was not made by this setup and is not taken over. Nothing was changed`); continue; }
+    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}, so it is not taken over: someone else could have put files in it. Look inside it, remove it by hand, then run users-folders again. Nothing was changed`); continue; }
     const wantGid = wantGidOf(row, want);
     const group = [];
     if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid) || (st.mode & 0o7777) !== row.mode) group.push(modeDo(wantGid, { ino: st.ino, dev: st.dev }));
