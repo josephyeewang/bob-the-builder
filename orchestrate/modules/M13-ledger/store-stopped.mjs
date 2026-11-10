@@ -35,6 +35,14 @@ export const STORE_KEEPS = Object.freeze(['recovery_stopped']);
 export const stopMarker = (product, type, key) => `<!-- orch:store_stopped ${product} ${createHash('sha256').update(`${type}\n${key}`).digest('hex').slice(0, 16)} -->`;
 
 const msg = (e) => String(e?.message ?? e).slice(0, 200);
+/**
+ * A store reason or value as GitHub text, the one form for the stop issue and the store's alerts (L732 m1, self-review m1
+ * m2): a quoted path is cut whole (a folder name with a space in it, such as "Application Support", would otherwise leak
+ * its tail), line breaks become spaces (so no line of it can pass for the issue's own "Opened at" line), then pushReason
+ * cuts other local paths and the length, and the words are fenced as outside text.
+ */
+export const storeWords = (v) => cleanOutside(pushReason(String(typeof v === 'string' ? v : JSON.stringify(v))
+  .replace(/(['"])\/[^'"\n]*\1/g, '$1<path>$1').replace(/[\r\n]+/g, ' ')), 'log-line');
 export const STOP_REMIND_MS = 24 * 60 * 60 * 1000;
 const OPENED = /^Opened at (\d{4}-\d\d-\d\dT[\d:.]+Z)\.$/m;
 function inTime(ms, f) {
@@ -55,7 +63,7 @@ export async function tellStoreStopped({ stop, product, channel, log, sendMs = A
   if (!channel?.gh) return notTold('no way to write to GitHub yet (robot.issues, R-0b-02)');
   const { gh, owner } = channel;
   const marker = stopMarker(product, stop.type, stop.key ?? stop.reason);
-  const said = cleanOutside(pushReason(stop.reason), 'log-line');
+  const said = storeWords(stop.reason);
   try {
     const found = await inTime(sendMs, () => gh.findOpen(lineIs(marker)));
     if (found === false) return notTold(gh.lastAnswer ?? 'the open issues could not be read');
@@ -73,7 +81,8 @@ export async function tellStoreStopped({ stop, product, channel, log, sendMs = A
     if (last === false) { log(`robot: the stopped Record's issue #${n} is open; its comments could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
     if (last) return 'already open';
     const issue = await inTime(sendMs, () => gh.read(n));
-    if (!issue || issue === false) { log(`robot: the stopped Record's issue #${n} could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
+    if (!issue) { log(`robot: the stopped Record's issue #${n} could not be read: ${gh.lastAnswer ?? 'no answer'}`); return 'already open'; }
+    if (issue.open === false) return 'already open';   // closed since the search: the next start opens a new one
     const opened = Date.parse(OPENED.exec(issue.body)?.[1] ?? '');
     if (Number.isFinite(opened) && t - opened < STOP_REMIND_MS) return 'already open';
     const c = await inTime(sendMs, () => gh.comment(n, `Still stopped (${stop.type}): ${said}`));

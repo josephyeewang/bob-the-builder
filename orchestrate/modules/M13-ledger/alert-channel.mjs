@@ -50,7 +50,7 @@ import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { clearHeldFlag, heldCut, heldHolders, isOwnHolder, markSent, readHeldFlag, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { cleanOutside } from '../M12-sensors/escape.mjs';
-import { pushReason } from '../M11-dispatcher/proposal-route.mjs';
+import { storeWords } from './store-stopped.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
 /** The record_locked issue's marker for one product (two products may share a repository). */
@@ -261,7 +261,7 @@ async function raiseWhy(alerts, gh, key, text, entryId) {
 // become <path>, a cut for length says so, and the words are fenced as outside text. Every store alert comes here.
 export function storeText(event, product) {
   const e = event && typeof event === 'object' ? event : {};
-  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${cleanOutside(pushReason(typeof v === 'string' ? v : JSON.stringify(v)), 'log-line')}`);
+  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${storeWords(v)}`);
   return [`${product}'s Record store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
 }
 

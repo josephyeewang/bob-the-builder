@@ -413,7 +413,7 @@ export function openStore({ root, ownerUid, alert = () => false, now = () => Dat
   }
 
   function recover() {
-    if (faultAt === 'recover_fails') { const p = join(P.tmp, `${process.pid}-w-${Math.random().toString(16).slice(2, 10)}.json`); throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES', path: p }); }
+    if ((typeof faultAt === 'string' ? faultAt : faultAt?.step) === 'recover_fails') { const p = join(P.tmp, `${process.pid}-w-${Math.random().toString(16).slice(2, 10)}.json`); throw Object.assign(new Error(`EACCES: permission denied, open '${p}'`), { code: 'EACCES', path: p }); }
     const report = { cut: 0, rolledForward: [], restored: [], quarantined: [], skipped: [], tempsRemoved: 0 };
     // 1. A torn last line (no newline, or not JSON) is cut.
     const all = readFileSync(P.diary);

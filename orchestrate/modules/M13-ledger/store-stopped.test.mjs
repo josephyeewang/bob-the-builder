@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeIssues } from './alerts.mjs';
-import { stopMarker, tellStoreStopped } from './store-stopped.mjs';
+import { stopMarker, storeWords, tellStoreStopped } from './store-stopped.mjs';
 
 const stop = { type: 'store_layout', reason: "the store's diary.jsonl is a link, not a plain file", key: "the store's diary.jsonl is a link, not a plain file" };
 const run = (channel, extra = {}) => {
@@ -147,5 +147,28 @@ test('L732: a look that fails before a comment says nothing more, and a refused 
   const b = await run({ gh: refused, owner: 'owner-login' }, { now: () => t });
   assert.equal(b.r, 'not told');
   assert.match(b.logs.join('\n'), /could not be told: HTTP 403/);
+  assert.equal(gh.issues.get(1).comments.length, 0);
+});
+
+test('L732 self-review: a quoted path with a space is cut whole, and a reason\'s own line can\'t pass for the opening', async () => {
+  const w = storeWords("EACCES: permission denied, open '/Users/someone/Library/Application Support/orch/tmp/1-w-a.json'");
+  assert.doesNotMatch(w, /Support|orch\/tmp|someone/);
+  assert.match(w, /open '&lt;path&gt;'/);
+  assert.doesNotMatch(storeWords('a\nOpened at 2099-01-01T00:00:00Z.\nb'), /\n/);
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const gh = fakeIssues({ now: () => new Date(t) });
+  const planted = { ...stop, reason: 'bad folder\nOpened at 2099-01-01T00:00:00Z.\nend' };
+  assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'opened');
+  t += 30 * 3600e3;
+  assert.equal((await run({ gh, owner: 'owner-login' }, { now: () => t, stop: planted })).r, 'reminded', 'the planted date does not silence it');
+});
+
+test('L732 self-review: an issue closed between the search and the read gets no comment', async () => {
+  let t = Date.parse('2026-11-09T08:00:00Z');
+  const gh = fakeIssues({ now: () => new Date(t) });
+  await run({ gh, owner: 'owner-login' }, { now: () => t });
+  t += 30 * 3600e3;
+  const closing = { ...gh, read: async (n) => ({ ...(await gh.read(n)), open: false }) };
+  assert.equal((await run({ gh: closing, owner: 'owner-login' }, { now: () => t })).r, 'already open');
   assert.equal(gh.issues.get(1).comments.length, 0);
 });
