@@ -104,6 +104,8 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   if (unguarded.length) return refuse(`the rules list production files the role file does not deny: ${unguarded.join(', ')}`);
   if (proposalOutboxes === undefined && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders were not given');
   if (proposalOutboxes !== undefined && !Array.isArray(proposalOutboxes)) return refuse('the rules\' proposals folders are not a list');
+  // An empty list would leave the role with no proposals wall at all (audit R-0b-148 slice 1, m1; L746).
+  if (Array.isArray(proposalOutboxes) && !proposalOutboxes.length && !REVIEW_ROLES.includes(role)) return refuse('the rules\' proposals folders are an empty list, so nothing would deny them');
   const open = (proposalOutboxes ?? []).filter((f) => !denied(f));
   if (open.length) return refuse(`the rules' proposals folders are not all on the read-deny list: ${open.join(', ')}`);
   const deny = denyPaths.flatMap(denyPair);
