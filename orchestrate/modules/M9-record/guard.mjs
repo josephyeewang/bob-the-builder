@@ -99,7 +99,7 @@ export function guardWrite({ entity, id, actor, old, doc, createdBy }) {
   const keys = new Set([...Object.keys(old), ...Object.keys(out)]);
   // On an entity with no states (a fact), `state` is an ordinary field: a change to it alone is a change.
   const changed = [...keys].filter((k) => !(stateful && k === 'state') && !cleared.includes(k) && !same(old[k], out[k]));
-  const allowed = fieldsAllowed(entity, actor, { state: from });
+  const allowed = fieldsAllowed(entity, actor, { state: from, kind: old.kind });
   if (!allowed) return no(`${name} may not change ${entity}`);
   if (allowed !== '*') { const bad = changed.filter((f) => !allowed.has(f)); if (bad.length) return no(`${name} may not change ${bad.join(', ')} on ${entity}${id === undefined ? '' : ` ${id}`}`); }
   if (entity === 'card' && changed.includes('attempts')) { const p = attemptsProblem(name, old.attempts, out.attempts); if (p) return no(p); }
