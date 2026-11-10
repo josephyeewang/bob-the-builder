@@ -55,7 +55,7 @@ import { outbox, tellThen, sendAlerts, clearCause, writeFrom, alertFields, liste
 import { takePassLock } from './pass-lock.mjs';
 import { dueToTell } from '../../shared/still-waiting.mjs';
 import { schedulePass } from '../M2-approvals/schedule.mjs';
-import { planGoPass, PLAN_REVIEW_LEAD } from './plan-go.mjs';
+import { planGoPass, plansAwaitingAnswer, PLAN_REVIEW_LEAD } from './plan-go.mjs';
 
 export const STEPS = Object.freeze(['stops', 'undo', 'undo-starts', 'outage', 'intake', 'leads', 'approvals', 'plan-go', 'pass', 'limits', 'merges', 'waits', 'lost-cards', 'stuck-cards', 'phone', 'cleanup']);
 // One product's Approvals pass gets this long (or the port `approvalsProductMs`); a hung one counts as failed and the
@@ -290,6 +290,9 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   if (!outageOpen) outageOpen = outageInRecord();
   // A Lead's read-only helper goes through the one start gate (audit 0b-6 r2 MAT-2): the red band, the
   // read-only cap per Lead and an outage hold it here, whatever the wiring port does.
+  // The plan reviews let through in this pass (L726 M1): the runner starts them on its own next pass, so its list
+  // can't hold them yet. Request ids, so one counted twice is counted once.
+  const planAsked = new Map();
   const gatedReadonly = (start) => async (x) => {
     if (outageOpen) return { ok: false, reason: 'outage: nothing starts' };
     const acct = signedInAccount({ rec, rules, now });
@@ -301,13 +304,21 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     try {
       running = [...p.sessions()];
       if (x.lead === PLAN_REVIEW_LEAD) {
+        // Running as the runner says, asked for and not yet answered (the Record's plan-review facts), and asked for
+        // in this pass: each request once, by its id (the runner's list names it too).
         const ids = new Set(running.map((s) => s?.id));
-        for (const r of p.planReviewsRunning()) if (!ids.has(r.session_id)) running.push({ id: r.session_id, kind: 'readonly', lead: PLAN_REVIEW_LEAD, card: r.card });
+        const add = (id, card) => { if (!ids.has(id)) { ids.add(id); running.push({ id, kind: 'readonly', lead: PLAN_REVIEW_LEAD, card }); } };
+        for (const r of p.planReviewsRunning()) add(r.request_id ?? r.session_id, r.card);
+        for (const r of await plansAwaitingAnswer({ rec, now, product: x.product, planReviewAnswer: (y) => p.planReviewAnswer(y), except: x.card })) add(r.id, r.card);
+        for (const [id, card] of planAsked) if (card !== x.card) add(id, card);
       }
     } catch (e) { return { ok: false, reason: `the running sessions could not be counted, so no read-only session starts (${String(e?.message ?? e).slice(0, 200)})` }; }
     const g = startGate({ rules, rec, card: null, kind: 'readonly', product: x.product, b: currentBands({ rec, rules, account: acct.account, now }), running, lead: x.lead });
     if (!g.ok && g.missing) missing.push(g.missing);
-    return g.ok ? start(x) : { ok: false, reason: g.reason };
+    if (!g.ok) return { ok: false, reason: g.reason };
+    const r = await start(x);
+    if (x.lead === PLAN_REVIEW_LEAD && r?.ok === true) planAsked.set(typeof r.session === 'string' && r.session ? r.session : `asked-${x.card}`, x.card);
+    return r;
   };
   const startReadonly = gatedReadonly((x) => p.startReadonly(x));
   let intaken = [];
