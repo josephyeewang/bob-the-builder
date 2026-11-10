@@ -220,7 +220,11 @@ test('M-3 checks 9 and 10: no key in the session\'s environment; the machine-wid
   assert.deepEqual(await port(w.x, 9), { ok: true });
   assert.match((await port({ ...w.x, env: { ...w.x.env, ANTHROPIC_API_KEY: 'x' } }, 9)).reason, /ANTHROPIC_API_KEY/);
   assert.deepEqual(await port(w.x, 10), { ok: true });
-  assert.match((await port({ ...w.x, machineWide: join(w.root, 'gone.json') }, 10)).reason, /missing or not JSON/);
+  // The fixed file missing refuses (L909: the test names it through the injected reader, not this Mac's).
+  const gone = join(w.root, 'gone.json');
+  assert.match((await port({ ...w.x, machineWide: gone, managedReaders: { ...w.x.managedReaders, claudeFile: gone } }, 10)).reason, /missing or not JSON/);
+  // Any machineWide but the fixed file refuses (L909).
+  assert.match((await port({ ...w.x, machineWide: gone }, 10)).reason, /^machine-wide settings must be .*managed\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
   writeFileSync(w.x.machineWide, JSON.stringify({ [S.hooks]: {} }));
   assert.match((await port(w.x, 10)).reason, /not in force/);
 });
@@ -236,7 +240,8 @@ test('L900: check 10 reads the other managed sources through the real readers un
   const why = `the machine-wide production block is not in force (in ${cache})`;
   assert.equal((await port(w.x, 10)).reason, why, 'the fakes read the session\'s home');
   // Left out, the live readers; the caches are still the session's home (reviewHome), not the runner's HOME (L906 m2).
-  const { managedReaders, ...live } = w.x;
+  // Only the fixed file is still named for the test (L909: machineWide must be it), so /Library's fixed managed-settings.json is not read.
+  const live = { ...w.x, managedReaders: { claudeFile: w.x.machineWide } };
   assert.notEqual(process.env.HOME, w.x.reviewHome, 'here the two differ');
   assert.equal((await port(live, 10)).reason, why);
   writeFileSync(cache, '{}');   // what claude writes when the server has none (L906 M1)

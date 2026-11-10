@@ -54,7 +54,7 @@ export function checkRoleEnv(env) {
 // So a remote cache or managed preferences with content displaces managed-settings.json and its guard
 // hook, which is why each must carry the guard itself, not only hold no escape. A source that is a
 // plain object with no keys ({}) is none, for claude and here alike (claude writes {} as its remote
-// cache when the server has no settings for the account); the configured main file is not a source
+// cache when the server has no settings for the account); the fixed main file is not a source
 // that may be empty: it is the one that must carry the guard.
 //   helper  a policyHelper or policyHelpers key in a managed source runs a program whose output is policy.
 //           Check 10 can't judge that output ahead of time: any source holding either key refuses.
@@ -72,9 +72,11 @@ export function checkRoleEnv(env) {
 //   plist   MDM: /Library/Managed Preferences/<user>/com.anthropic.claudecode.plist, then
 //           /Library/Managed Preferences/com.anthropic.claudecode.plist, converted with
 //           /usr/bin/plutil -convert json -o - --. Each one present must pass; one that can't be read refuses.
-//   file    /Library/Application Support/ClaudeCode/managed-settings.json (CLAUDE_FILE; the config's
-//           machineWide should name it, and when it names another file the fixed one is checked too) and
-//           every managed-settings.d/ entry beside each that is a file or a link named *.json, not starting
+//   file    /Library/Application Support/ClaudeCode/managed-settings.json (CLAUDE_FILE), the only main
+//           managed-settings file this build reads (its override is built out, above). The config's machineWide must name it:
+//           any other path refuses, since its guard would never apply (L909). It must be there and carry the
+//           guard; missing or {} refuses. Then
+//           every managed-settings.d/ entry beside it that is a file or a link named *.json, not starting
 //           with a dot, read in name order. The drop-ins merge into this same tier, so they can't displace
 //           the guard, only add an escape; requiring the guard in each as well is stricter than needed, and
 //           kept on purpose. A linked drop-in refuses: the launcher reads every source without following a link.
@@ -102,7 +104,8 @@ export function readPlist(p) {
     { encoding: 'utf8', timeout: 5000, maxBuffer: 2 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-// The readers check 10 uses for the sources beyond the main file, as live code runs it. A test passes fakes
+// The readers check 10 uses for the sources beyond the main file, and claudeFile, the one path machineWide must
+// name, as live code runs it. A test passes fakes
 // (review-launch's reviewChecks takes them as x.managedReaders); nothing else does.
 export const MANAGED_READERS = Object.freeze({ listDir: listDropIns, plist: readPlist, user: () => userInfo().username,
   home: () => process.env.HOME, claudeFile: CLAUDE_FILE });
@@ -116,7 +119,7 @@ const guardIn = (obj, guardScript) => {
 // One source's settings → null when it passes, else a refusal. `label` names the source in every reason but the main file's.
 function sourceProblem(obj, label, guardScript) {
   const tail = label ? ` (in ${label})` : '';
-  // {} is no source at all, as claude reads it (L906 M1); never the configured main file (label '').
+  // {} is no source at all, as claude reads it (L906 M1); never the fixed main file (label '').
   if (label && obj && typeof obj === 'object' && !Array.isArray(obj) && Object.keys(obj).length === 0) return null;
   if (obj && typeof obj === 'object' && HELPER_KEYS.some((k) => Object.hasOwn(obj, k))) return refuse(`machine-wide settings name a policy helper, whose output check 10 can't judge${tail}`);
   const c = checkSettings(obj, { machineWide: true });
@@ -128,28 +131,19 @@ function sourceProblem(obj, label, guardScript) {
 /**
  * Check 10. `readFile(path)` returns the text of the machine-wide settings file, and of its drop-ins and the remote
  * cache (it throws with code ENOENT or ENOTDIR for one that isn't there). The other readers default to the real ones.
+ * `path` must equal `claudeFile` (CLAUDE_FILE live); any other refuses before anything is read (L909).
  */
 export function checkMachineWide({ readFile, path, guardScript = 'production-write-guard.mjs',
   listDir = MANAGED_READERS.listDir, plist = MANAGED_READERS.plist, user = MANAGED_READERS.user, home = MANAGED_READERS.home,
   claudeFile = MANAGED_READERS.claudeFile }) {
+  // Claude reads only its fixed file (L909): a guard in any other file would never apply. Nothing is read first.
+  if (path !== claudeFile) return refuse(`machine-wide settings must be ${claudeFile}, not ${path}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   let obj;
   try { obj = JSON.parse(readFile(path)); } catch { return refuse('machine-wide settings are missing or not JSON'); }
   const main = sourceProblem(obj, '', guardScript);
   if (main) return main;
-  const firstDropIns = dropInsProblem(path, { readFile, listDir, guardScript });
-  if (firstDropIns) return firstDropIns;
-  // The file claude itself reads, when the config named another one: absent is none, present must pass.
-  if (claudeFile !== path) {
-    let text = null;
-    try { text = readFile(claudeFile); } catch (e) { if (!ABSENT.has(e?.code)) return refuse(`the machine-wide settings ${claudeFile} can't be read (${e?.code ?? e?.message})`); }
-    if (text !== null) {
-      let d; try { d = JSON.parse(text); } catch { return refuse(`the machine-wide settings ${claudeFile} are not JSON`); }
-      const bad = sourceProblem(d, claudeFile, guardScript);
-      if (bad) return bad;
-    }
-    const more = dropInsProblem(claudeFile, { readFile, listDir, guardScript });
-    if (more) return more;
-  }
+  const dropIns = dropInsProblem(path, { readFile, listDir, guardScript });
+  if (dropIns) return dropIns;
 
   let who; try { who = user(); } catch {}
   if (typeof who !== 'string' || !who || who.includes('/')) return refuse('the user\'s managed preferences can\'t be named (no user name)');

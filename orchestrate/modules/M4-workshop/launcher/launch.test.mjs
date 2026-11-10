@@ -375,24 +375,26 @@ test('L900 check 10: with only a good managed-settings.json it passes, and it lo
   assert.deepEqual(w.run(), { ok: true });
 });
 
-test('L900 check 10: when the config names another file, the one claude reads is checked too, with its drop-ins', () => {
-  const C = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// L909 reverses L900's "the config names another file, and claude's own is checked too; none there passes" on
+// purpose: claude 2.1.322 reads only its fixed file, so a guard anywhere else never applies, and "nothing there"
+// can't pass for the file that must carry it.
+test('L909 check 10: machineWide must be claude\'s fixed file; another path refuses before anything is read', () => {
   const w = managedWorld();
-  assert.deepEqual(w.run({ claudeFile: undefined }), { ok: true }, 'none there: the default names claude\'s own file');
-  assert.ok(w.read.includes(C), 'the fixed file was read');
-  assert.ok(w.listed.includes('/Library/Application Support/ClaudeCode/managed-settings.d'));
-  w.files[C] = JSON.stringify({ [S.hooks]: {} });
-  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide production block is not in force (in ${C})` });
-  w.files[C] = '{';
-  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide settings ${C} are not JSON` });
-  w.files[C] = Object.assign(new Error('x'), { code: 'EACCES' });
-  assert.deepEqual(w.run({ claudeFile: C }), { ok: false, reason: `the machine-wide settings ${C} can't be read (EACCES)` });
-  w.files[C] = w.good;
-  assert.deepEqual(w.run({ claudeFile: C }), { ok: true });
-  const v = managedWorld();
-  v.dropIns.push('50-x.json'); v.files['/Library/Application Support/ClaudeCode/managed-settings.d/50-x.json'] = JSON.stringify({ [S.hooks]: {} });
-  v.files['/m/managed-settings.d/50-x.json'] = v.good;
-  assert.match(v.run({ claudeFile: C }).reason, /not in force \(in \/Library\/Application Support\/ClaudeCode\/managed-settings\.d\/50-x\.json\)/);
+  w.files['/x/other.json'] = w.good;
+  assert.deepEqual(w.run({ path: '/x/other.json' }), { ok: false,
+    reason: 'machine-wide settings must be /m/managed-settings.json, not /x/other.json: claude 2.1.322 reads only that file' });
+  // The default names claude's real fixed file; nothing on this Mac is read to say so.
+  assert.deepEqual(w.run({ claudeFile: undefined }), { ok: false,
+    reason: 'machine-wide settings must be /Library/Application Support/ClaudeCode/managed-settings.json, not /m/managed-settings.json: claude 2.1.322 reads only that file' });
+  assert.deepEqual([w.read, w.listed, w.asked], [[], [], []], 'nothing read, listed or converted');
+});
+
+test('L909 check 10: the fixed file missing or {} refuses: the guard has to apply', () => {
+  const w = managedWorld();
+  delete w.files['/m/managed-settings.json'];
+  assert.deepEqual(w.run(), { ok: false, reason: 'machine-wide settings are missing or not JSON' });
+  w.files['/m/managed-settings.json'] = '{}';
+  assert.deepEqual(w.run(), { ok: false, reason: 'the machine-wide production block is not in force' });
 });
 
 test('L900 check 10: a drop-in without the guard, with an escape, unreadable or not JSON refuses and names it', () => {
@@ -471,16 +473,15 @@ test('L900 check 10: the remote settings cache must pass when it is there; missi
   for (const home of [() => undefined, () => 'rel']) assert.deepEqual(w.run({ home }), { ok: false, reason: 'the remote settings cache can\'t be found (no home folder)' });
 });
 
-test('L906 M1: an empty source ({}) is none in every managed source but the configured main file', () => {
+test('L906 M1: an empty source ({}) is none in every managed source but the fixed main file', () => {
   const set = {
     'a drop-in': (w) => { w.dropIns.push('50-x.json'); w.files['/m/managed-settings.d/50-x.json'] = '{}'; },
     'the user\'s managed preferences': (w) => { w.prefs[USER_PREFS] = '{}'; },
     'the device\'s managed preferences': (w) => { w.prefs[DEVICE_PREFS] = '{}'; },
     'the first account\'s remote cache': (w) => { w.files[CACHE] = '{}'; },
     'the second account\'s remote cache': (w) => { w.files[CACHE_B] = '{}'; },
-    'claude\'s own file, when the config names another': (w) => { w.io.claudeFile = '/c/managed-settings.json'; w.files['/c/managed-settings.json'] = '{}'; },
   };
-  for (const [what, put] of Object.entries(set)) { const w = managedWorld(); put(w); assert.deepEqual(w.run({ claudeFile: w.io.claudeFile }), { ok: true }, what); }
+  for (const [what, put] of Object.entries(set)) { const w = managedWorld(); put(w); assert.deepEqual(w.run(), { ok: true }, what); }
   // Not empty: an array, or an object with one key, is content and must pass.
   const w = managedWorld(); w.prefs[USER_PREFS] = '[]';
   assert.equal(w.run().ok, false, 'an array is not an empty object');
@@ -896,7 +897,7 @@ test('check 6 and 10: a start message missing a field, and a machine-wide file t
     const i = goodInit('worker'); delete i[k];
     assert.equal(checkInit(i, { role: 'worker', profile: DESIGN_PROFILES.worker }).reason, `start message has no ${k}`);
   }
-  assert.equal(checkMachineWide({ readFile: () => '{', path: '/w/managed.json' }).reason, 'machine-wide settings are missing or not JSON');
+  assert.equal(checkMachineWide({ readFile: () => '{', path: '/w/managed.json', claudeFile: '/w/managed.json' }).reason, 'machine-wide settings are missing or not JSON');
 });
 
 test('round 3 MIN-4 (round 2 MIN-1): an empty or partial role file handed to the names check refuses before check 1', async () => {
