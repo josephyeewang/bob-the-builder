@@ -314,5 +314,7 @@ test('#358 r1 M1 through the loop: each write carries the clock at that write', 
   const vat = []; v.ports.groupGone = () => new Promise(() => {});
   const vfiles = { write: (f, text, mode) => { if (f === v.statusFile) vat.push(Date.parse(JSON.parse(text).written_at)); writeStatus(f, text, { mode }); } };
   await runnerTick({ ...v.ctx({ files: vfiles, portMs: 30 }), clock: undefined, state: st, pending: new Map() });
-  assert.ok(vat.at(-1) - vat[0] >= 50, `the stamps move with the clock: ${vat}`);
+  // At least one hung port's wait (portMs 30) lies between the first and last stamps. The ports may wait side by side, so
+  // don't count on two waits in a row (CI saw 42 ms; L855).
+  assert.ok(vat.at(-1) - vat[0] >= 25, `the stamps move with the clock: ${vat}`);
 });
