@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -685,6 +685,60 @@ test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
   assert.equal(gone.how, 'gone');
 });
 
+test('L822 planted: a stop its caller aborted sends nothing more: not before SIGTERM, not during the wait, not SIGKILL', async () => {
+  const sent = [];
+  const kill = (p, s) => sent.push(s);
+  // Aborted before it starts: nothing is sent.
+  const before = new AbortController();
+  before.abort();
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: before.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, []);
+  // Aborted while it waits (the caller's port limit): SIGTERM only, no SIGKILL, and it stops waiting.
+  const mid = new AbortController();
+  let t = 0;
+  const sleep = async (ms) => { t += ms; if (t >= 3000) mid.abort(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep, signal: mid.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual([sent, t], [['SIGTERM'], 3000]);
+  // Aborted on the last wait, just before SIGKILL.
+  sent.length = 0;
+  const last = new AbortController();
+  let u = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async (ms) => { u += ms; if (u >= 10_000) last.abort(); }, signal: last.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // #372 m1: the abort and the group's exit at the same step: the exit is told, not 'abandoned'.
+  sent.length = 0;
+  const both = new AbortController();
+  let gone = false;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => !gone, sleep: async () => { gone = true; both.abort(); }, signal: both.signal }), { ok: true, how: 'SIGTERM' });
+  sent.length = 0;
+  const atEnd = new AbortController();
+  let v = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => v < 10_000, sleep: async (ms) => { v += ms; if (v >= 10_000) atEnd.abort(); }, signal: atEnd.signal }), { ok: true, how: 'SIGTERM' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // Never aborted: the same as with no signal.
+  sent.length = 0;
+  assert.equal((await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: new AbortController().signal })).how, 'SIGKILL');
+  assert.deepEqual(sent, ['SIGTERM', 'SIGKILL']);
+});
+
+test('#372 m2: guarded aborts the signal it hands its port when it gives up, and never when the port answers', async () => {
+  let seen;
+  const late = await guarded((signal) => { seen = signal; return new Promise(() => {}); }, 20);
+  assert.equal(late.timedOut, true);
+  assert.equal(seen.aborted, true);
+  let quick;
+  assert.deepEqual(await guarded((signal) => { quick = signal; return { ok: true }; }, 20), { ok: true });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(quick.aborted, false);
+  // The stops hand the pass's signal to the port.
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const got = [];
+  w.setCard('C-1', { state: 'cancelled' });
+  await w.pass(1, { stopGroup: async (s, o) => { got.push(o?.signal instanceof AbortSignal); return { ok: true, how: 'SIGTERM' }; } });
+  assert.deepEqual(got, [true]);
+});
+
 test('M7: a stop that fails alerts and leaves the card as it was; a failed save alerts but the stop stands', async () => {
   const w = world([card('C-1')]);
   await w.pass(0);
@@ -849,6 +903,20 @@ test('audit 0b-6 r2 / L27: a running session of a kind the Dispatcher does not k
   // An unknown role waits for the stricter safe point (a finished turn); the stop is wanted all the same.
   assert.deepEqual(r.stopping, [['X-1', 'red']]);
   assert.equal(w.rec.read('fact', STOP_FACT('X-1')).doc.reason, 'red');
+});
+
+test('L759 (m4): a script session follows the worker safe point, whether it reports role script or no role; only open tools hold its stop', async () => {
+  for (const role of ['script', undefined]) {
+    const w = world([card('C-1')], { usage: RED });
+    w.sessions.push({ id: 'S-1', product: 'p1', kind: 'script', card: 'C-1', ...(role ? { role } : {}) });
+    w.probes.set('S-1', busy);
+    let r = await w.pass(0);
+    assert.deepEqual(r.stopping, [['S-1', 'red']], `${role}: mid-tool waits`);
+    // Its turn has not ended (idle.size.turnEnded is false): the Lead's rule would wait; a worker's does not.
+    w.probes.set('S-1', idle);
+    r = await w.pass(1);
+    assert.deepEqual(r.stopped, [['S-1', 'red']], `${role}: no open tool is a safe point`);
+  }
 });
 
 test('audit 0b-6 r2 MAT-8 (P4): in amber a card with no tier sorts as Tier 1, ahead of Tier 2 and with the Tier-1 hold', async () => {
@@ -1984,4 +2052,16 @@ test('L744 2: a pauseLead that answers ok:false is told once and not counted as 
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'ok:false with no reason is a failure too');
   await w.pass(3);
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+});
+
+test('L767: a script card\'s outbox is <root>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+  const ok = world([card('C-2', { kind: 'script' })]);
+  ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');
+  const wrong = world([card('C-2', { kind: 'script' })]);
+  const r = await wrong.pass();
+  assert.deepEqual(r.started, []); assert.match(r.refused.map(([, x]) => x).join('\n'), /is not a script outbox/);
+  const editing = world([card('C-2')]);
+  editing.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/script/${x.sessionId}` }));
+  assert.match((await editing.pass()).refused.map(([, x]) => x).join('\n'), /is not a worker outbox/);
 });

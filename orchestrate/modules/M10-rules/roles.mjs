@@ -17,16 +17,21 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OUTBOX_KINDS, OUTBOX_KIND_PATTERN } from '../../shared/record.mjs';
+import { OUTBOX_FILE, PLAN_ANSWER_NAME } from '../M4-workshop/launcher/role-profiles.mjs';
 
 // The one path of the role files folder (roles/ beside this file); every module that loads the profiles uses it (L235).
 export const ROLES_DIR = fileURLToPath(new URL('./roles', import.meta.url));
 
-// plan_reviewer (L683, L687): the fresh read-only reviewer of a Tier-1 card's plan before its go, started by the review
-// runner as the review user. It reads and cannot write: its answer comes back through the runner's status.
+// plan_reviewer (L683, L687, L710, L722): the fresh reviewer of a Tier-1 card's plan before its go, started by the review
+// runner as the review user. It reads, and writes one file only: its answer, in its own outbox, which the runner reads.
 export const ROLE_FILES = Object.freeze(['lead', 'worker', 'reviewer', 'incident', 'scout', 'writer', 'front_door',
   'thinking', 'script', 'explore', 'plan_reviewer']);
-// A read-only role may hold only these tools and hand in nothing, so a widened file is refused at load, not only by a test.
-export const READ_ONLY = Object.freeze({ plan_reviewer: Object.freeze(['Read', 'Glob', 'Grep']) });
+// A one-file role may hold only these tools, writes exactly these outbox files (no path, so nothing outside its own
+// outbox) and hands in no outbox kinds, so a widened file is refused at load, not only by a test (L722). The file name is
+// M4's (PLAN_ANSWER_NAME), and a name must pass the hooks' one rule, OUTBOX_FILE.
+export const ONE_FILE_ROLES = Object.freeze({
+  plan_reviewer: Object.freeze({ tools: Object.freeze(['Read', 'Glob', 'Grep', 'Write']), files: Object.freeze([PLAN_ANSWER_NAME]) }),
+});
 export const ROLE_ALIASES = Object.freeze({ auditor: 'reviewer' });
 export const NEVER_STARTED = Object.freeze(['learning']);
 
@@ -45,7 +50,7 @@ const MODELS = ['main', 'sonnet', 'haiku', 'per_task'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'per_row', 'as_asked'];
 const MODES = ['acceptEdits', 'dontAsk'];
 const FIELDS = new Set(['role', 'model', 'effort', 'effort_floor', 'effort_max', 'tools', 'permission_mode',
-  'restricted_mode', 'outbox_kinds', 'auto_resume', 'context', 'skills', 'enforced']);
+  'restricted_mode', 'outbox_kinds', 'outbox_files', 'auto_resume', 'context', 'skills', 'enforced']);
 
 const byTier = (v, ok) => ok(v) || (v && typeof v === 'object' && !Array.isArray(v)
   && Object.keys(v).sort().join() === '1,2' && ok(v['1']) && ok(v['2']));
@@ -66,18 +71,27 @@ export function checkProfile(role, p) {
     if (!KNOWN_TOOLS.includes(t)) no(`unknown tool ${JSON.stringify(t)}`);
   }
   if (new Set(p.tools).size !== p.tools.length) no('a tool is listed twice');
-  if (Object.hasOwn(READ_ONLY, role)) {
-    const extra = p.tools.filter((t) => !READ_ONLY[role].includes(t));
-    if (extra.length) no(`a read-only role may not hold ${extra.join(', ')}`);
-  }
+  const one = Object.hasOwn(ONE_FILE_ROLES, role) ? ONE_FILE_ROLES[role] : null;
+  if (one) {
+    const extra = p.tools.filter((t) => !one.tools.includes(t));
+    if (extra.length) no(`a one-file role may not hold ${extra.join(', ')}`);
+    if (!Array.isArray(p.outbox_files)) no('a one-file role must list its outbox_files');
+    for (const f of p.outbox_files) {
+      if (typeof f !== 'string' || !OUTBOX_FILE.test(f)) no(`outbox file ${JSON.stringify(f)} is not a plain name in its own outbox`);
+    }
+    if (p.outbox_files.length !== one.files.length || p.outbox_files.some((f) => !one.files.includes(f))) {
+      no(`a one-file role writes exactly ${one.files.join(', ')}, not ${JSON.stringify(p.outbox_files)}`);
+    }
+  } else if (p.outbox_files !== undefined) no('only a one-file role names outbox_files');
   if (!MODES.includes(p.permission_mode)) no('bad permission_mode');
   if (typeof p.restricted_mode !== 'boolean') no('restricted_mode must be true or false');
   if (!Array.isArray(p.outbox_kinds)) no('outbox_kinds must be a list');
+  // Before the kind table: a one-file role hands in no kind even if the shared table someday lists one for it.
+  if (one && p.outbox_kinds.length) no('a one-file role hands in no outbox kinds, only its one file');
   for (const k of p.outbox_kinds) {
     if (typeof k !== 'string' || !OUTBOX_KIND_PATTERN.test(k)) no(`bad outbox kind ${JSON.stringify(k)}`);
     if (!Object.hasOwn(OUTBOX_KINDS, k) || !OUTBOX_KINDS[k].roles.includes(role)) no(`outbox kind ${k} is not listed for ${role}`);
   }
-  if (Object.hasOwn(READ_ONLY, role) && p.outbox_kinds.length) no('a read-only role hands in nothing, so it has no outbox kinds');
   if (!byTier(p.auto_resume, (b) => typeof b === 'boolean')) no('bad auto_resume');
   if (p.context !== `context.${role}`) no('context must name this role\'s rules key');
   if (p.skills !== undefined && !(Array.isArray(p.skills) && p.skills.every((s) => s === 'orchestrate') && role === 'front_door')) no('only the front_door may name a skill, and only orchestrate');

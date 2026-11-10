@@ -49,6 +49,8 @@ import { ALERT_BUDGET_MS, ALERT_QUEUE_FACT, ALERT_SEND_MS, holdsDelivered, sendA
 import { holderDead, readHolder, sleepMs } from '../M9-record/lock.mjs';
 import { clearHeldFlag, heldCut, heldHolders, isOwnHolder, markSent, readHeldFlag, readUnsent } from '../M9-record/unsent.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
+import { cleanOutside } from '../M12-sensors/escape.mjs';
+import { storeWords } from './store-stopped.mjs';
 
 export const RECORD_LOCKED_MIN = DISPATCHER_LATE_MIN;
 /** The record_locked issue's marker for one product (two products may share a repository). */
@@ -254,10 +256,12 @@ async function raiseWhy(alerts, gh, key, text, entryId) {
   } catch (e) { return msg(e); }
 }
 
-// The store's own alert as issue text (masked by makeAlerts before it is posted).
+// The store's own alert as issue text (masked by makeAlerts before it is posted). Each value is an error's or a caller's
+// words and can name the owner's folders, so it is cut and fenced as a push reason is (L720 n2, L732 m1): local paths
+// become <path>, a cut for length says so, and the words are fenced as outside text. Every store alert comes here.
 export function storeText(event, product) {
   const e = event && typeof event === 'object' ? event : {};
-  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 300)}`);
+  const lines = Object.entries(e).filter(([k]) => k !== 'type').map(([k, v]) => `${k}: ${storeWords(v)}`);
   return [`${product}'s Record store: ${String(e.type ?? 'alert').slice(0, 100)}`, ...lines].join('\n');
 }
 

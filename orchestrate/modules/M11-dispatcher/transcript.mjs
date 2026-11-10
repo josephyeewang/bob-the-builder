@@ -68,7 +68,7 @@ export function readTranscriptFile(path, { read = (p) => readFileSync(p, 'utf8')
 }
 
 /**
- * The safe point (M7). A worker is at one when no tool call is in progress: the transcript has no
+ * The safe point (M7). A worker (and a script session, which changes files like one: L759) is at one when no tool call is in progress: the transcript has no
  * open tool_use and the activity tracker (send-safe/activity.mjs) does not show a tool running.
  * The Lead and the Front Door are at one when their turn has ended and they are not waiting on an
  * answer (the tracker's needs-input states, which sendSafe also refuses on).
@@ -77,7 +77,7 @@ export function atSafePoint({ role, size, activity }) {
   if (!size) return false;
   const state = activity?.state;
   if (state === 'exited') return true;
-  if (role === 'worker' || role === 'writer' || role === 'reviewer' || role === 'auditor' || role === 'scout') {
+  if (role === 'worker' || role === 'script' || role === 'writer' || role === 'reviewer' || role === 'auditor' || role === 'scout') {
     return size.openTools.length === 0 && state !== 'blocked';
   }
   return size.turnEnded && state !== 'waiting_input' && state !== 'blocked' && state !== 'active';

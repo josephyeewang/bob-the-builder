@@ -110,7 +110,7 @@ test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs
 
 test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a failed pause, whether or not the pass reads the answer', () => {
   const pass = code('pass.mjs');
-  const at = pass.indexOf('await guarded(async () => { await pauseLead('); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
+  const at = pass.search(/await guarded\(async \(\) => \{ (const a = )?await pauseLead\(/); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
   assert.match(pass.slice(at, at + 800), /'pause_lead_failed'/);
   assert.match(OWNER_PORTS.pauseLead.out, /^resolves \{ ok: true \}/); assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
 });
@@ -121,9 +121,27 @@ test('#317 audit r1 M1: stop and save take any session sessions() lists, routed 
   const pass = code('pass.mjs');
   const sr = pass.slice(pass.indexOf('function stopReason'), pass.indexOf('\n}\n', pass.indexOf('function stopReason')));
   assert.ok(sr.indexOf("return 'cancel'") > 0 && sr.indexOf("return 'cancel'") < sr.indexOf('parkable(s)'), 'a cancel is decided before parkable');
-  assert.match(pass, /guarded\(\(\) => stopGroup\(s\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
+  assert.match(pass, /guarded\(\(signal\) => stopGroup\(s, \{ signal \}\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
   for (const k of ['probe', 'stopGroup', 'saveWork']) assert.match(OWNER_PORTS[k].in, /^\(session\): any session sessions\(\) lists, routed by kind/, k);
-  assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save \(any session but a worker's\), so a stop never reads as unsaved work/);
+  assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save: only the kinds named here, review, audit, readonly, lead and front_door \(by kind, never by role/);
+  assert.match(OWNER_PORTS.saveWork.out, /editing, undo, script and overnight save/);
+  assert.match(OWNER_PORTS.saveWork.out, /any kind not named \(merge and undo_merge included, until it is settled that they have no copy\) is \{ ok: false, reason: no runner saves that kind \}/);
+  assert.match(OWNER_PORTS.stopGroup.out, /the runner has set stop_requested for it in a status written before it answers/);
+  assert.match(OWNER_PORTS.stopGroup.fails, /it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out/, 'L764 m1, #328 r1 c3');
+  assert.match(OWNER_PORTS.saveWork.out, /a worker kind whose copy is missing or unreadable is \{ ok: false, reason \}/);
+  assert.match(OWNER_PORTS.stopGroup.in, /it needs only \{ id, pgid, kind \}/);
+  // r2 n1: the routing map names every kind gate.mjs knows, once, with its runner; a kind no runner owns is never a silent ok.
+  const head = readFileSync(new URL('./owner-ports.mjs', import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).join('\n');
+  assert.match(head.replace(/\n\/\/\s*/g, ' '), /the worker runner's asks, owner-asks\.mjs, stop waiting at a limit past every tick limit and answer there as the tick's limit does, \{ ok: false, timedOut: true \}/, 'L759: the asks\' own limit is a noted exception');
+  assert.match(head, /the worker kinds, editing, undo and script, to this runner \(overnight, an editing kind gate\.mjs counts, too/);
+  assert.match(head, /the wiring routes each by kind to the runner that started it, never all to this one/);
+  assert.match(head, /review and audit to the review runner;/);
+  assert.match(head, /lead, readonly, front_door, merge and undo_merge each to the runner that starts that kind\./);
+  assert.match(head, /A kind no runner owns is never a silent ok: probe throws and stopGroup answers \{ ok: false, reason \}/);
+  assert.match(head, /stopSession takes\n\/\/ only an id: the wiring routes it by the claim's session id to the runner that received its launch request/);
+  const gate = code('gate.mjs');
+  const kinds = new Set([...gate.match(/kind is ([a-z_ |]+)\./)[1].split('|').map((k) => k.trim()), ...[...gate.matchAll(/s\.kind === '(\w+)'/g)].map((m) => m[1])]);
+  for (const k of kinds) assert.match(head, new RegExp(`\\b${k}\\b`), `the routing map names ${k}`);
 });
 
 test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count, safe points, hand-ins and the copies are pinned', () => {
@@ -141,5 +159,5 @@ test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count,
   const cr = OWNER_CLEANUP_PORTS.copiesRoot.out;
   assert.match(cr, /list, search, read \(file contents and attributes, so a copy can be hashed\) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass's checks/);
   assert.doesNotMatch(cr, /as on the worker outboxes/);
-  assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(write|add)\b/, 'no other grant of add or write');
+  assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(writ|add)\w*/i, 'no other grant of add or write (writes, adds, written too)');
 });
