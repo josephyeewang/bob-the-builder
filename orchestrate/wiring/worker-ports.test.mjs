@@ -276,7 +276,9 @@ test('C (L763 r1 M1): a link in the folders above host.lock never reads another 
 test('C (L763 r1 M1): a hard link made and removed between the open and the check never reads another user\'s file', (t) => {
   const w = mirrorWorld();
   const victim = foreignFile(w.base);
-  if (!victim) { t.skip('no file of another user can be hard-linked here, so the race can\'t be made'); return; }
+  // A Mac lets a user hard-link another user's file; Linux (the CI job) does not (protected_hardlinks), so there this test
+  // skips and the folder-link test above is the guard. Its proof is from a Mac run.
+  if (!victim) { t.skip('runs only on a Mac: no file of another user can be hard-linked here, so the race can\'t be made'); return; }
   const path = join(w.base, 'owner', 'host.lock');
   mkdirSync(join(w.base, 'owner'));
   // The owner's side: link the victim to host.lock and remove it, over and over (the r1 race, scratchpad race.mjs).
@@ -291,7 +293,7 @@ test('C (L763 r1 M1): a hard link made and removed between the open and the chec
       if (got === null) seen.none++; else seen.text++;
     }
     // Before L763 the hard-link check came after the open, and 44 of 400 reads got the victim's text.
-    assert.equal(seen.text, 0, `planted: the old order reads the victim's text (${JSON.stringify(seen)})`);
+    assert.equal(seen.text, 0, `planted: a reader without the owner check reads the victim's text (${JSON.stringify(seen)})`);
     assert.ok(seen.refused > 0, `the race ran: some reads saw the link (${JSON.stringify(seen)})`);
   } finally { atk.kill('SIGKILL'); }
 });

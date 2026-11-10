@@ -53,7 +53,8 @@
 //                  "no host claimed"; a file or folder that can't be read is "not known", told, never "no host"
 //   hostLockUid    the owner's Mac user id: host.lock is read only when the opened file is that user's, so a link, a hard
 //                  link or a swap in the owner's folder never puts another user's file in the Record (L763). It may not
-//                  be the Dispatcher's own user, which could then write who the host is
+//                  be the Dispatcher's own user (which could then write who the host is), root or the review user; it is
+//                  checked before the start makes anything (L805)
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -73,7 +74,7 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, cleanupProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -102,7 +103,7 @@ export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'fil
   'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 
 // `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
-export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
+export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = process.getuid() } = {}) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config: must be an object');
   // A misspelt key would be ignored and its default used instead, so an unknown key stops the start.
   const extra = Object.keys(c).filter((k) => !keys.includes(k));
@@ -110,6 +111,9 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS } = {}) {
   if (typeof c.product !== 'string' || !PRODUCT_NAME.test(c.product)) throw new Error('config: product must be a product name (a letter or digit, then letters, digits, . _ -)');
   for (const k of paths) if (typeof c[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (!Number.isSafeInteger(c.ownerUid) || c.ownerUid < 0) throw new Error('config: ownerUid must be a Mac user id');
+  // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
+  // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
+  if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
   return c;
 }
 
