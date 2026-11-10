@@ -33,6 +33,12 @@
 // NOT HERE: `gateAlive` asks whether the Merge Gate is running, and it runs in the robot job's gate pass, which is not
 // wired; it has no sign of life to read yet. It moves to whoever wires that pass, which writes a "gate last ran at"
 // mark for it (L639).
+// NOT YET (A4, L615 grant 3): `proposals()` → { products, ownerUid }, for the tick's proposals step (proposals-intake.mjs).
+// The products are this Dispatcher's one; the intake's ownerUid must be Joe's own Mac uid, whose proposals folders are
+// (setup layout.mjs makes them his), and it is never read from the folder itself (L78 n6). The Dispatcher config's
+// ownerUid is orchestrate's uid, the Record's owner; Joe's uid (the workers' user, L238) has no config key yet. It gets
+// its own, `proposalsUid`, filled from setup's `owner` (L736): until then the port stays listed, and refuses (CONFIG_KEYS
+// and root's config write, lane 4's setup).
 // NOT HERE: `filesOf` answers at once (undo.mjs calls it without waiting), from the local mirror, so it is not a GitHub
 // read; it stays listed until the mirror is wired.
 
@@ -46,7 +52,7 @@ import { pastTime } from '../shared/still-waiting.mjs';
 import { readRowAt } from '../modules/M6-merge-gate/gather.mjs';
 import { ROW_FILE } from '../modules/M2-approvals/go.mjs';
 
-export const NOT_WIRED_REVIEW = Object.freeze(['filesOf', 'gateAlive', 'healthy', 'resume']);
+export const NOT_WIRED_REVIEW = Object.freeze(['filesOf', 'gateAlive', 'healthy', 'resume', 'proposals']);
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -133,12 +139,13 @@ export function mainSeen({ installRoot, now, owner = 0, top = '/' }) {
 /**
  * The review runner's ports, from the config's review keys (dispatcher-wiring.mjs). `selfUid` is the Dispatcher's own
  * user; a test stands in for it, since a test can't make files another user owns. The review user must be neither the
- * Dispatcher's nor the workers' (ownerUid): either could then write the status that says a reviewer runs (L668, L674).
+ * Dispatcher's nor the Record owner's (ownerUid, orchestrate's uid; Joe's uid, the workers' user, L238, has no config key
+ * yet): either could then write the status that says a reviewer runs (L668, L674).
  */
 export function reviewRunner({ config: c, now, owner = 0, top = '/', selfUid = process.getuid() }) {
   if (!Number.isSafeInteger(c.reviewUid) || c.reviewUid < 0) throw new Error('config: reviewUid must be a Mac user id');
   if (c.reviewUid === selfUid) throw new Error('config: reviewUid is the Dispatcher\'s own user; the review user must be its own');
-  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the workers\' user (ownerUid); the review user must be its own');
+  if (c.reviewUid === c.ownerUid) throw new Error('config: reviewUid is the Record owner\'s (ownerUid); the review user must be its own');
   const main = mainSeen({ installRoot: c.reviewInstallRoot, now, owner, top });
   return runnerPorts({ requests: c.reviewRequestsDir, status: c.reviewStatusFile, reviewUid: c.reviewUid, runnerLog: c.reviewRunnerLog, now,
     mainHead: mainSeenHead({ installRoot: c.reviewInstallRoot, main, owner, top }) });

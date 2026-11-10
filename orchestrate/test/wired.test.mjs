@@ -76,10 +76,7 @@ export const UNWIRED = Object.freeze({
   heartbeatOnce: 'L221: R-0b-162 wiring, lane 4',
   watchOnce: 'L221: R-0b-162 wiring, lane 4',
   installStep: 'L221: R-0b-162 wiring (a worker launch with an install phase), lane 4',
-  proposalsPass: 'L233: R-0b-162 wiring, lane 4',
-  researchPass: 'R-0b-135: R-0b-162 wiring beside proposalsPass, lane 4',
   researchCopyPass: 'L286: R-0b-162 wiring beside researchPass, with the push script\'s pushResearch, lane 4',
-  researchHandler: 'R-0b-135: R-0b-162 wiring, handed to proposalsPass as its research handler, lane 4 (L303)',
   proposalRoutePass: 'L549: R-0b-162 wiring beside proposalsPass, with the push script\'s pushProposal and createToReview as its toReview; a toReview wired without this pass leaves cards claimed, lane 4',
 });
 // ────────────────────────────────────────────────────────────────────────────
@@ -599,7 +596,7 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M6-merge-gate/': { files: 4, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624)' },
   'modules/M9-record/': { files: 1, why: 'L86: required-keys, lead to place' },
   'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
-  'modules/M11-dispatcher/': { files: 4, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job; L233 proposals-intake (proposal-route and research-intake are reached by the robot job through M13 store-stopped, which cuts a stop reason with pushReason, L724)' },
+  'modules/M11-dispatcher/': { files: 3, why: 'R-0b-162 C: account-ports, headless-result (worker exit); R-0b-65 login-job' },
   'modules/M12-sensors/': { files: 15, why: 'R-0b-169: the Sensors job wiring and its probes' },
   'modules/M13-ledger/': { files: 1, why: 'R-0b-77 waiting (alert-channel.mjs reached through the robot job since #288, L730; alerts.mjs since #184, L428)' },
 });
