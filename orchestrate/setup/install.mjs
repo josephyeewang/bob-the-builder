@@ -132,7 +132,7 @@ export function runnerUidsProblem(io, uids) {
  * of that old map is wrong too (the other problem first: adding plan_reviewer alone would not put it right).
  */
 export function planReviewerOnlyMissing(io, uids, installRoot) {
-  if (!uids || typeof uids !== 'object' || Number.isInteger(uids[PLAN_REVIEW_ROLE]) || uidsProblem(uids) !== null) return null;
+  if (!uids || typeof uids !== 'object' || (Number.isInteger(uids[PLAN_REVIEW_ROLE]) && uids[PLAN_REVIEW_ROLE] >= 0) || uidsProblem(uids) !== null) return null;
   const rest = runnerUidsProblem(io, { ...uids, [PLAN_REVIEW_ROLE]: uids[RUNNER_ROLES[0]] });
   if (rest !== null) return { fail: `${rest} (it also leaves out ${PLAN_REVIEW_ROLE})` };
   return { warn: `the copy's review.json leaves out ${PLAN_REVIEW_ROLE}, so the runner refuses every plan review (reviews and audits still run). `
@@ -236,7 +236,10 @@ export function checkInstall(io, cfg, { main = null } = {}) {
   if (rc !== null) {
     const what = 'review.json names a Mac user for every role, and every role the runner starts (the plan reviewer too) names review';
     const old = planReviewerOnlyMissing(io, rc.uids, P.installRoot);
-    if (old?.warn) out.push({ ok: true, warn: true, what, why: old.warn }); else { const why = old?.fail ?? runnerUidsProblem(io, rc.uids); item(why === null, what, why); }
+    const why = old?.warn ? null : old?.fail ?? runnerUidsProblem(io, rc.uids);
+    // A key no role is called, with every real key right, is harmless to the runner: a WARNING, so the jobs still load.
+    const onlyUnknown = why !== null && /^review\.json: it names .*, which no role is called; /.test(why);
+    if (old?.warn || onlyUnknown) out.push({ ok: true, warn: true, what, why: old?.warn ?? why }); else item(why === null, what, why);
   }
   for (const n of RUNNER_NAMES) if (rc && typeof rc[n] === 'string') { let here = true; try { io.lstatReal(rc[n]); } catch { here = false; } item(here, `review.json's ${n} exists in the copy`, `${rc[n]} is missing`); }
   return out;

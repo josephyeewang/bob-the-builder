@@ -249,7 +249,7 @@ test('install: refuses a runner config for another place, or one that names thin
   assert.equal(w.mac.log.length, before);
 });
 
-test('L726 PLANT: a review.json whose uids leaves out plan_reviewer (or names it apart from review) → install refuses, nothing changed; the same in the copy → check-install FAILS', async () => {
+test('L726 PLANT: a review.json whose uids leaves out plan_reviewer (or names it apart from review) → install refuses, nothing changed; the same in the copy → check-install WARNS (L737 M1)', async () => {
   const w = await world(); const before = w.mac.log.length;
   const good = JSON.parse(readFileSync(w.cfg.runnerConfig, 'utf8'));
   const reviewUid = good.uids.reviewer;
@@ -311,6 +311,15 @@ test('L737 M1: an install made before the plan reviewer → WARNING (the jobs st
   // The named step: the checked file, with plan_reviewer, put in the copy as root's 0644 → check-install has no WARNING.
   writeFileSync(f, JSON.stringify(good)); chmodSync(f, 0o644);
   r = w.run(['check-install']); assert.equal(r.code, 0, r.text); assert.doesNotMatch(r.text, /WARNING/); assert.match(r.text, /all \d+ PASS/);
+  // A misspelt extra key in the copy, every real key right: a WARNING, and the jobs still load (install still refuses it).
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, bogus: 1 } })); chmodSync(f, 0o644);
+  const extra = checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what));
+  assert.equal(extra?.warn, true, JSON.stringify(extra)); assert.match(extra.why, /it names bogus, which no role is called/);
+  r = w.run(['daemons', 'unload']); assert.equal(r.code, 0, r.text);
+  r = w.run(['daemons', 'load']); assert.equal(r.code, 0, r.text);
+  // A negative plan_reviewer is as missing as none: the same WARNING.
+  writeFileSync(f, JSON.stringify({ ...good, uids: { ...good.uids, plan_reviewer: -1 } })); chmodSync(f, 0o644);
+  assert.equal(checkInstall(w.mac, w.cfg).find((x) => /names review$/.test(x.what))?.warn, true);
 });
 
 test('L737 m1: a runner role sharing an id with another role, or any role naming root, is refused at install, as the runner would refuse it later', async () => {
