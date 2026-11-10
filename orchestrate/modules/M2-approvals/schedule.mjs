@@ -13,7 +13,8 @@
 //
 //   await schedulePass(ctx) → { ok, events } | { ok: false, reason, events }    one pass; the dispatcher runs it often
 //     first makes the product's record when its rules file says `onboarding.state: active` and it has none (onboard.mjs),
-//     then applies the owner's pause and trip requests (state-request.mjs)
+//     then applies the owner's pause and trip requests (state-request.mjs), and opens the owner's research asks and
+//     sends each one's "on your waiting list" push (research-ask.mjs, R-0b-136, M1 join item 10)
 //   await readApprove(ctx, askId, { view, catchUps }) → { ok, counted, head? }  a risky_approve ask's GitHub Approve
 //   await approvalStands(ctx, askId, { head, view, catchUps }) → { ok } | { ok: false, reason }   may this head merge on it now?
 //     + unreadable: true, cause when a GitHub read threw (L205); the Merge Gate classes `cause`
@@ -38,6 +39,7 @@ import { CLOSE_DUE, closeDecisionPr, closePr, openDecision } from './decision.mj
 import { goText, goView, undoPushText } from './go-view.mjs';
 import { onboard, onboardNotices } from './onboard.mjs';
 import { stateRequestStep } from './state-request.mjs';
+import { markResearchPushSent, openResearchAsks } from './research-ask.mjs';
 import { countApprove, requestReview } from './github-review.mjs';
 import { GO_REPUSH_MS, MERGE_APPROVE_MS, TIME_REASKED_LINE, UNDO_OPEN_QUESTION_LINE, URGENT_REPUSH_MS, dueWindow, lapseAt, outsideTime, readConfig, zoneFor } from './kinds.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
@@ -275,6 +277,25 @@ async function push(ctx, a, { urgent, win, anyBound, nowMs, once }, events) {
   if (write(ctx, a, next, events, { type: 'pushed', ask: a.id, card: doc.card, kind: doc.kind, pr: doc.pr })) once.pushed(a.id);
 }
 
+// The owner's research asks (R-0b-136, M1 join item 10): each Front Door "find out X" report becomes a research ask on
+// the waiting list, and its push goes out at once, not in a window: it only confirms what the owner just asked for, and
+// says how to run it. The push is marked sent only once the phone took it, so one not sent (no phone channel, a refusal,
+// a throw) is handed back and tried every pass, and told once per ask and cause, then daily, like any ask's (askOnce).
+async function researchAsks(ctx, once, events) {
+  const r = openResearchAsks(ctx);
+  for (const { id, push: view } of r.opened) {
+    if (typeof ctx.push !== 'function') { once.alert(id, { type: 'approvals_no_push', ask: id }); continue; }
+    let sent = false;
+    try { sent = (await ctx.push({ ask: id, card: null, kind: 'research', urgent: false, view })) === true; } catch { sent = false; }
+    if (!sent) { once.alert(id, { type: 'push_not_sent', ask: id }); continue; }
+    const m = markResearchPushSent(ctx, id);
+    // Sent but not marked: it goes again next pass (a second copy of a confirmation, never a lost one), and Joe is told.
+    if (!m.ok) { ctx.alert({ type: 'approvals_write_refused', ask: id, reason: m.reason }); continue; }
+    once.pushed(id);
+    events.push({ type: 'pushed', ask: id, kind: 'research' });
+  }
+}
+
 export async function schedulePass(ctx) {
   const events = [];
   const cfg = readConfig(ctx.rules, ctx.product);
@@ -328,6 +349,8 @@ export async function schedulePass(ctx) {
     else due = win !== null && !raisedThisRound(doc) && (since === null || since <= win.start);
     if (due) await push(ctx, a, { urgent, win, anyBound, nowMs, once }, events);
   }
+  // A throw here (the Record's list, as the state step reads it too) never stops the pass or its saved marks (L515 m3).
+  try { await researchAsks(ctx, once, events); } catch (e) { events.push({ type: 'research_step_failed', error: String(e?.message ?? e) }); }
   // Marks are kept only for asks still waiting to be pushed; re-read, since a push moved some on.
   once.save(new Set(askStore(ctx.record).asks().filter((a) => a.doc.state === 'open' || a.doc.state === 'pushed').map((a) => a.id)));
   return { ok: true, events };

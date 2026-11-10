@@ -13,7 +13,8 @@
 //                           a refused report is never opened; it is alerted once per report and reason (kept in
 //                           ctx.stateDir, like schedule.mjs's config alert), or on every pass when there is no stateDir.
 //                           `opened` is every open research ask whose push is not marked sent, this pass's or an earlier
-//                           one's: the caller sends each push, then calls markResearchPushSent(ctx, id). Anything not
+//                           one's: the caller (schedule.mjs schedulePass, each pass, M1 join item 10) sends each push,
+//                           then calls markResearchPushSent(ctx, id). Anything not
 //                           marked is handed back next pass, so a push lost to a throw (the alert sink, a later write,
 //                           the caller itself) goes out then (L95, audit stack r3 Minor 1; L117 M-1). A report that
 //                           throws is refused with a fixed reason and the message in `error`, and the pass goes on.

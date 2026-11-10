@@ -16,6 +16,7 @@ import { fenceFor } from '../M11-dispatcher/proposals-intake.mjs';
 import { blobSha } from '../M10-rules/reader.mjs';
 import { GO_FREE_KEY } from '../M9-record/ready.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { schedulePass } from './schedule.mjs';
 import { landResearch, markResearchPushSent, openResearchAsks, researchBrief, researchFileName, runLine, safeAlert } from './research-ask.mjs';
 
 const SKILL = readFileSync(new URL('../M1-front-door/skill/orchestrate/SKILL.md', import.meta.url), 'utf8');
@@ -207,4 +208,68 @@ test('L163: a promise is no answer yet, so safeAlert counts it as lost and it is
   assert.equal(safeAlert({ alert: fakeAlert({ rejects: 'down later', delay: 1 }) }, late)({ type: 't' }), false, 'a promise that will reject');
   assert.equal(safeAlert({ alert: fakeAlert({ answer: () => Promise.resolve(true) }) }, late)({ type: 't' }), false, 'a promise, even a good one, is not an answer yet');
   assert.equal(late.n, 2);
+});
+
+// M1 join item 10 (R-0b-136): the production caller. M2's schedule pass, which the Dispatcher's approvals step runs for
+// each product every tick, opens the research asks and sends each push; nothing here calls openResearchAsks itself.
+function scheduled(t, phone) {
+  const pushes = [];
+  Object.assign(t.ctx, { stateDir: join(t.base, 'm2-state'),
+    push: phone === null ? undefined : async (e) => { const a = phone.answer(e); if (a === 'throws') throw new Error('the phone is down'); if (a === true) pushes.push(e); return a; } });
+  return { pushes, pass: () => schedulePass(t.ctx) };
+}
+const RESEARCH_PUSH_R1 = 'On your waiting list: research ask R-1 for sample-app: find out how the top three rivals price their annual plan. To run it, open a desktop session on the Mini and say "run research ask R-1".';
+
+test('join 10: the schedule pass opens the research ask, sends its push once, and it stays on "waiting on you"', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  const r = await s.pass();
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(s.pushes, [{ ask: 'R-1', card: null, kind: 'research', urgent: false, view: RESEARCH_PUSH_R1 }]);
+  assert.ok(r.events.some((e) => e.type === 'pushed' && e.ask === 'R-1' && e.kind === 'research'));
+  assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at, 'marked sent');
+  assert.match(waitingLines(waitingItems(t.record))[0], /^ask R-1: waits on joe for "run research ask R-1" in a desktop session on the Mini: find out how/);
+  // Next passes: no second ask, no second push, and it still waits on the owner.
+  await s.pass(); await s.pass();
+  assert.equal(s.pushes.length, 1);
+  assert.equal(t.record.list('ask').length, 1);
+  assert.equal(waitingLines(waitingItems(t.record)).length, 1);
+  assert.deepEqual(t.alerts, []);
+});
+
+test('join 10: a push the phone did not take is not marked, is told once, and goes out on a later pass', async () => {
+  for (const answer of [false, 'throws', undefined]) {
+    const t = m2env();
+    const phone = { answer: () => answer };
+    const s = scheduled(t, phone);
+    fileAsk(t, 'find out how the top three rivals price their annual plan');
+    await s.pass(); await s.pass();
+    assert.equal(askStore(t.record).ask('R-1').doc.push_sent_at, undefined, `${answer}: not marked`);
+    assert.deepEqual(t.alerts.filter((a) => a.ask === 'R-1').map((a) => a.type), ['push_not_sent'], `${answer}: told once`);
+    phone.answer = () => true;
+    await s.pass();
+    assert.deepEqual(s.pushes.map((e) => e.view), [RESEARCH_PUSH_R1], `${answer}: sent once the phone takes it`);
+    assert.ok(askStore(t.record).ask('R-1').doc.push_sent_at);
+  }
+});
+
+test('join 10: with no phone channel the ask still waits on the owner, and Joe is told it could not be pushed', async () => {
+  const t = m2env();
+  const s = scheduled(t, null);
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  await s.pass(); await s.pass();
+  assert.equal(waitingLines(waitingItems(t.record)).length, 1);
+  assert.deepEqual(t.alerts.map((a) => [a.type, a.ask]), [['approvals_no_push', 'R-1']]);
+  assert.equal(askStore(t.record).ask('R-1').doc.push_sent_at, undefined);
+});
+
+test('join 10: a pass for another product neither opens nor pushes this product\'s research ask', async () => {
+  const t = m2env();
+  const s = scheduled(t, { answer: () => true });
+  fileAsk(t, 'find out how the top three rivals price their annual plan');
+  t.ctx.product = 'other-app';
+  await s.pass();
+  assert.deepEqual(s.pushes, []);
+  assert.equal(t.record.list('ask').length, 0);
 });
