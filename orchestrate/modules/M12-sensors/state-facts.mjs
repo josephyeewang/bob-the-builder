@@ -51,7 +51,8 @@ const known = (w) => Number.isFinite(w?.used_pct) && timeOrNull(w?.resets_at) !=
  * or ran late, no row, or no reset time) hands on the stored window instead, and the fact keeps the earlier of the two
  * times. So the marks the owner's-answer check compares against (sensors-ports.mjs) are never wiped by a gap, and a forged
  * low reading after one is still refused; the handed-on reading ages as before, and M11 then reads usage as not known.
- * Once the stored window's reset time passes, an unknown is written as unknown.
+ * Once the stored window's reset time passes, an unknown is written as unknown. A write that hands a window on says which
+ * (`handedOn: ['h5' | 'week']`), so the pass summary shows it as kept, not as newly known (L771).
  */
 export async function writeUsageFact(writer, readUsage, account, { now = () => new Date() } = {}) {
   if (!accountOk(account)) return { ok: false, reason: 'no known account to read usage for' };
@@ -74,7 +75,9 @@ export async function writeUsageFact(writer, readUsage, account, { now = () => n
     doc.observed_at = relayed(observed_at, stored.observed_at);
     if (handedOn.length === 2) doc.source = stored.source ?? null;
   }
-  return writer.put(USAGE_FACT(account), doc);
+  const w = writer.put(USAGE_FACT(account), doc);
+  // Which windows were handed on, so the pass summary says "kept", never "known", for them (L771).
+  return handedOn.length && w?.ok === true ? { ...w, handedOn } : w;
 }
 
 export async function writeSignedInAccount(writer, whoIsSignedIn, { now = () => new Date() } = {}) {
