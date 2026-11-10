@@ -44,7 +44,7 @@ export const ASK_GIVE_UP_MS = 600_000;
 // A product as a request file may name it: M10's product name (never a path), at most 64 characters.
 const productName = (p) => typeof p === 'string' && p.length <= 64 && PRODUCT_NAME.test(p);
 const HEAD = /^[0-9a-f]{40}$/;
-const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'outbox', 'signin', 'configDir', 'copy']);
+const LAUNCH_FIELDS = Object.freeze(['sessionId', 'pid', 'pidStart', 'pgid', 'head', 'base', 'outbox', 'signin', 'configDir', 'copy']);
 
 const name = (x) => typeof x === 'string' && x.length > 0;
 const realPid = (n) => Number.isInteger(n) && n > 1;
@@ -60,7 +60,9 @@ export function launchAnswerWrong(a, { sessionId, kind, card, outboxRoot, copies
   if (!realPid(a?.pid)) return 'the start named no process';
   if (!realPid(a.pgid)) return 'the start named no process group';
   if (typeof a.pidStart !== 'string' || !START_ISO.test(a.pidStart)) return 'the start named no UTC start time for its process (M9 startTime)';
-  if (!HEAD.test(a.head ?? '')) return 'the start named no commit for its copy';
+  if (typeof a.head !== 'string' || !HEAD.test(a.head)) return 'the start named no commit for its copy';
+  // base (L825-2): the commit the copy was started on. Optional until every runner answers it, but never malformed.
+  if (a.base !== undefined && (typeof a.base !== 'string' || !HEAD.test(a.base))) return 'the start named a malformed base commit';
   if (!Object.hasOwn(RUNNER_ROLE_OF, kind) || a.outbox !== join(outboxRoot, RUNNER_ROLE_OF[kind], sessionId)) return 'the start named another outbox than the session\'s own';
   if (typeof copiesRoot !== 'string' || a.copy !== join(copiesRoot, card)) return 'the start named another copy than the card\'s';
   if (!name(a.signin) || !name(a.configDir)) return 'the start named no sign-in';
@@ -114,7 +116,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
           && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
-        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.map((f) => [f, a[f]])) } : undefined;
+        return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
       });
     },
     stopGroup: async (session) => {

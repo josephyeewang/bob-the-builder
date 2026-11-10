@@ -192,8 +192,8 @@ export const putFact = (rec, id, doc, kind, base, force = []) => writeFrom(rec, 
 // The fields a told mark writes on the facts cleared here (L354 item 3).
 const TOLD = ['told_cause', 'told_at'];
 /** The launch record (shape below, at the start loop). One writer: a research copy's run is recorded the same way. */
-export const writeLaunch = (rec, { sessionId, role, kind, card, head, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
-  doc: { session_id: sessionId, role, kind, card, head: head ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
+export const writeLaunch = (rec, { sessionId, role, kind, card, head, base, rev, product, signin, configDir, copy, now }) => rec.write({ actor: 'dispatcher', entity: 'launch', id: sessionId, expectRev: 0, kind: 'launch',
+  doc: { session_id: sessionId, role, kind, card, head: head ?? null, base: base ?? null, rev: rev ?? null, product: product ?? null, signin: signin ?? null, config_dir: configDir ?? null, copy: copy ?? null, launched_at: iso(now) } });
 
 // A stronger reason replaces a pending weaker one (audit MIN-2): cancel > needs_split > the rest.
 const RANK = { cancel: 3, needs_split: 2, card_ended: 1, red: 1, paused: 1 };
@@ -371,7 +371,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * One pass. Ports:
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, outbox, reason, signin, configDir }
+ *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
@@ -783,11 +783,12 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     const started = move(rec, 'card', id, { state: 'running', claim: { ...rec.read('card', id)?.doc?.claim, pid: l.pid, pid_start: l.pidStart } }, { kind: 'started' });
     if (!started.ok) holdAlert({ rec, cause: `started-${id}`, text: `card ${id}: session ${sessionId} started but the card could not be marked running (${started.reason})`, alert, now });
     // The launch record (R-0b-55, D12): the Merge Gate merges only a head made by a session it names
-    // (refusal 5). `head` is the commit the copy started from; `rev` the card's rev once running; `signin` and
+    // (refusal 5). `head` is the commit the copy started from; `base` the commit the launcher chose to start it on (L825-2:
+    // a Tier 1 card's main_commit, else the mirror's main; null when the launch port does not say); `rev` the card's rev once running; `signin` and
     // `config_dir` the sign-in folder the session started in (R-1-89; null when the launch port does not say); `copy` the
     // worker's copy folder, which cleanup checks it deletes (null when the port does not say).
     // role 'worker' for script cards too (L759): they change files, and the Merge Gate's workerLaunches reads 'worker'.
-    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
+    const lr = writeLaunch(rec, { sessionId, role: 'worker', kind, card: id, head: l.head, base: l.base, rev: started.rev, product, signin: l.signin, configDir: l.configDir, copy: l.copy, now });
     // A notice only: the merge refusal catches it later; a lost one is in the pass's notes (L130 m4).
     if (!lr.ok && alert(`card ${id}: session ${sessionId} started but its launch was not recorded (${lr.reason}); its merge will be refused`) === false) { out.notes.push(`card ${id}: the launch-not-recorded alert could not be queued`); failureLog(`card ${id}: the launch-not-recorded alert could not be queued`); }
     // The session record (L204-a). M4's push script takes its inputs from it alone (product, card, branch, outbox,
