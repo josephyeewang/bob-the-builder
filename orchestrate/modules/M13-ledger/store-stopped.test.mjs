@@ -176,3 +176,39 @@ test('L732 self-review: an issue closed between the search and the read gets no 
   assert.equal((await run({ gh: closing, owner: 'owner-login' }, { now: () => t })).r, 'already open');
   assert.equal(gh.issues.get(1).comments.length, 0);
 });
+
+test('L768, L801 M1: the stop issue counts its day by GitHub\'s clock; a robot clock ahead still reminds once a day, never each start', async () => {
+  const HOUR = 3600e3;
+  // The audit's probe: a start every hour for 6 days, the robot's clock fast by a fixed amount.
+  for (const ahead of [7 * 60e3, 30 * 60e3, 23 * HOUR, 3 * 24 * HOUR]) {
+    let g = Date.parse('2026-11-09T08:00:00Z');
+    const gh = fakeIssues({ now: () => new Date(g + ahead), serverNow: () => new Date(g) });
+    const at = () => run({ gh, owner: 'owner-login' }, { now: () => g + ahead });
+    assert.equal((await at()).r, 'opened');
+    const told = [];
+    for (let h = 1; h <= 6 * 24; h++) {
+      g += HOUR;
+      const a = await at();
+      if (a.r === 'reminded') told.push(h);
+      else assert.equal(a.r, 'already open');
+      assert.match(a.logs.join('\n'), new RegExp(`clock is ${Math.round(ahead / 60e3)} minutes ahead of GitHub's; the day is counted by GitHub's time`));
+    }
+    assert.ok(told.length >= 5 && told.length <= 6, `${ahead / 60e3} min ahead: ${told.length} reminders`);
+    for (let i = 1; i < told.length; i++) assert.ok(told[i] - told[i - 1] >= 24, `${ahead / 60e3} min ahead: once a day`);
+    assert.equal(gh.issues.get(1).comments.length, told.length);
+  }
+  // A clock a few minutes ahead, or behind, counts the day by GitHub's times: the opening, then the last comment.
+  for (const skew of [3 * 60e3, -2 * HOUR]) {
+    let h = Date.parse('2026-11-09T08:00:00Z');
+    const gh2 = fakeIssues({ now: () => new Date(h + skew), serverNow: () => new Date(h) });
+    const go = () => run({ gh: gh2, owner: 'owner-login' }, { now: () => h + skew });
+    await go();
+    h += 23 * HOUR;
+    assert.equal((await go()).r, 'already open', `${skew}: not a day yet by GitHub`);
+    h += 2 * HOUR;
+    assert.equal((await go()).r, 'reminded', String(skew));
+    h += 24 * HOUR - 2 * 60e3;   // 2 minutes short of a day by GitHub, which a clock 3 minutes ahead would count as past
+    assert.equal((await go()).r, 'already open', `${skew}: once a day`);
+    assert.equal(gh2.issues.get(1).comments.length, 1);
+  }
+});
