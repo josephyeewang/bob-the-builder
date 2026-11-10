@@ -1,7 +1,7 @@
 // The one outbox (alerts.mjs, LEAD-CALLS L47): the sender on its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, tellThen, isQueued, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX } from './alerts.mjs';
+import { queueAlert, sendAlerts, outbox, dropCause, settleAlert, droppedCount, writeFrom, tellThen, isQueued, ALERT_QUEUE_FACT, ALERT_QUEUE_MAX, ALERT_UNTRIED_MAX, heldMark, plain } from './alerts.mjs';
 import { holdAlert } from './pass.mjs';
 import { recWith, T0 } from './fixtures.test-helper.mjs';
 
@@ -731,4 +731,33 @@ test('#217 r1 M3: a new fact that replaces an entry while its send is out is sti
   for (const m of [1, 2, 3]) await sendAlerts(rec, (t) => { got.push(t); return true; }, T0 + m * MIN, { sendMs: 50 });
   assert.deepEqual(got.filter((t) => /^refused:/.test(t)), ['refused: fact B'], 'B is told once, not lost when the mark saves');
   assert.equal(queue(real).length, 0);
+});
+
+test('#403 r3: a held retry writes the mark that went out; its own when the text is what went out, or when none was kept', () => {
+  const A = { fact: 'f', fields: { n: 'A' } };
+  const B = { fact: 'f', fields: { n: 'B' } };
+  assert.equal(heldMark({ text: 'b', mark: B, delivered_text: 'a', delivered_mark: A }), A, 'replaced: what went out');
+  assert.equal(heldMark({ text: 'a', mark: B, delivered_text: 'a', delivered_mark: A }), B, 'the same text: its own, newer mark');
+  assert.equal(heldMark({ text: 'b', mark: B, delivered_text: 'a' }), B, 'held before delivered_mark was kept');
+});
+
+test('#403 r3: a replacing entry carries no delivered_mark key when the held one had none', () => {
+  const rec = recWith([]);
+  const mark = { fact: 'g', fields: { told_at: 'x' }, kind: 'k' };
+  queueAlert(rec, 'one', { now: T0, mark });
+  const doc = rec.read('fact', ALERT_QUEUE_FACT).doc;
+  const held = { ...doc, entries: doc.entries.map((e) => ({ ...e, delivered_at: new Date(T0).toISOString(), delivered_text: 'one' })) };
+  rec.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: rec.read('fact', ALERT_QUEUE_FACT).rev, doc: held, kind: 'alert_queued' });
+  queueAlert(rec, 'two', { now: T0, mark });
+  const e = rec.read('fact', ALERT_QUEUE_FACT).doc.entries[0];
+  assert.equal(e.text, 'two');
+  assert.equal(e.delivered_text, 'one');
+  assert.ok(!('delivered_mark' in e), JSON.stringify(e));
+});
+
+test('#403 r3 m2: plain() puts a space for every control character, separator, and direction or zero-width mark', () => {
+  for (const c of ['\n', '\r', '\t', '\v', '\f', '\u0085', '\u001b', '\u2028', '\u2029', '\u200B', '\u200E', '\u202E', '\u2066', '\u061C', '\uFEFF']) {
+    assert.equal(plain(`a${c}b`), 'a b', JSON.stringify(c));
+  }
+  assert.equal(plain('plain words, kept'), 'plain words, kept');
 });

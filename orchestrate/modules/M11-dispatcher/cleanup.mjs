@@ -375,11 +375,17 @@ export async function cleanupPass({ rec, rules, now, copiesRoot, sealRoot, mirro
     const names = [...stray].sort();
     let had = [];
     try { had = namesInMark(rec.read('fact', STRAY_FACT)?.doc); } catch { /* an unreadable mark holds no names: sent now */ }
-    if (names.some((n) => !had.includes(n))) {
+    const fresh = names.filter((n) => !had.includes(n));
+    if (fresh.length) {
+      // Quoted, so a name can't read as part of the sentence (plain() keeps each on one line), and the new ones first, so
+      // the cap never hides a name this notice is for (#403 r3 m2, m3).
+      const q = (list) => listed(list.map((n) => `"${plain(n, 120).replace(/"/g, "'")}"`));
+      const old = names.filter((n) => had.includes(n));
+      const shown = old.length ? `new since the last notice ${q(fresh)}; still there from before ${q(old)}` : q(fresh);
       const mine = rec.list('product').map((x) => x?.id).filter((x) => typeof x === 'string').sort();
       const by = mine.length ? `the Dispatcher for ${many(mine.length, 'product', 'products')} ${listed(mine)}` : 'a Dispatcher';
       const one = names.length === 1;
-      const text = `${by}: the worker copies folder ${plain(copiesRoot, 400)} holds ${one ? 'a folder' : `${names.length} folders`} that ${one ? "doesn't" : "don't"} belong to any product: ${listed(names)}. ${one ? 'It is' : 'Each is'} a card folder from before copies were kept in each product's own folder, a folder named after a role such as worker, or a link. ${one ? 'It is' : 'They are'} kept as ${one ? 'it is' : 'they are'} and never looked inside. ${one ? 'It' : 'They'} may hold a card's unpushed work, so do not move or delete ${one ? 'it' : 'them'}: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted. Nothing else for you to do: this is told again only when a new folder appears.`;
+      const text = `${by}: the worker copies folder ${plain(copiesRoot, 400)} holds ${one ? 'a folder' : `${names.length} folders`} that ${one ? "doesn't" : "don't"} belong to any product: ${shown}. ${one ? 'It is' : 'Each is'} a card folder from before copies were kept in each product's own folder, a folder named after a role such as worker, or a link (a product's own folder that is a link counts too). ${one ? 'It is' : 'They are'} kept as ${one ? 'it is' : 'they are'} and never looked inside. ${one ? 'It' : 'They'} may hold a card's unpushed work, so do not move or delete ${one ? 'it' : 'them'}: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted. Nothing else for you to do: this is told again only when a new folder appears.`;
       // Marked told, with the names, only once delivered (tellThen; audit 0b-6 r5 MAT-2).
       try { await tellThen(alert, text, { fact: HOLD_FACT(COPIES_NOT_PRODUCT_CAUSE), fields: { text, told_names: JSON.stringify(names), told_at: iso(now) }, kind: 'hold_alert' }); }
       catch (e) { alert(`the Dispatcher could not tell a kept copies folder: ${e?.message ?? e}`); }
