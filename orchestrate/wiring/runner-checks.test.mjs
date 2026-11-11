@@ -12,7 +12,7 @@ import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.m
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
-import { RECHECK, checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
+import { RECHECK, checkRunnerConfig, lockedWiring, startDeps, workerCheckInputs } from './runner-main.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
 // #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
@@ -113,6 +113,58 @@ test('step 6: a port for each check whose inputs are there, none for one whose i
     chmodSync(x.copy, 0o755);
     assert.match((await workerChecks(x)[1]()).reason, /alone/);
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// L969: check 4 runs the product's install through runLocked, between the install-phase settings and the session's again.
+test('L969, check 4: a port only with runLocked, an install command and both settings ports; the install runs between the two settings writes', async () => {
+  const { d, x } = inputs();
+  try {
+    const log = [];
+    const session = { permissions: { allow: [] }, sandbox: { network: { allowedDomains: ['api.example.com'] } } };
+    const during = { permissions: { allow: [] }, sandbox: { network: { allowedDomains: ['api.example.com', 'registry.npmjs.org'] } } };
+    const four = { runLocked: async (j) => { log.push(['run', j]); return { ok: true }; }, installCommand: 'npm ci', registryHosts: ['registry.npmjs.org'],
+      renderPhase: (ph) => { log.push(['render', ph]); return { ok: true, settings: ph === 'install' ? during : session }; }, writeSettings: (st) => { log.push(['write', st]); return { ok: true }; } };
+    for (const k of ['runLocked', 'installCommand', 'renderPhase', 'writeSettings']) assert.equal(workerChecks({ ...x, ...four, [k]: undefined })[4], undefined, `no ${k}, no check 4`);
+    assert.equal(workerChecks({ ...x, ...four, installCommand: '' })[4], undefined, 'an empty install command, no check 4');
+    const p = workerChecks({ ...x, ...four });
+    assert.deepEqual(await p[4](), { ok: true });
+    assert.deepEqual(log.map((l) => (l[0] === 'run' ? 'run' : l[0] === 'write' ? (l[1] === during ? 'write install' : 'write session') : `render ${l[1]}`)),
+      ['render install', 'write install', 'run', 'render session', 'write session'], 'the install runs under the install settings, and the session settings are put back');
+    const job = log.find((l) => l[0] === 'run')[1];
+    assert.deepEqual(job, { job: 'install', command: 'npm ci', sessionId: SID, role: 'worker', settingsFile: x.settings.file, cwd: x.copy }, 'in the copy, under the session\'s settings file');
+    // A failed install, or one that throws, is refused once the session settings are back.
+    log.length = 0;
+    const failed = await workerChecks({ ...x, ...four, runLocked: async () => { throw new Error('the install job did not finish inside the lock-down (it did not finish in time)'); } })[4]();
+    assert.match(failed.reason, /the install failed: the install job did not finish inside the lock-down/);
+    assert.equal(log.at(-1)[1], session, 'the session settings were written back first');
+    // The registry left allowed in the session settings is refused.
+    const leaky = await workerChecks({ ...x, ...four, renderPhase: () => ({ ok: true, settings: during }) })[4]();
+    assert.match(leaky.reason, /the registry is still allowed after the install: registry\.npmjs\.org/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+// #456 r1 m3: save-work and launch check 4 come from ONE runLocked, so a launch is never possible while its work can't be saved.
+test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked feeds them', async () => {
+  const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1,
+    products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
+  const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
+  const session = { id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: '/c/C-1', outbox: '/ob/p1/worker/x' };
+  // Off: no runLocked. Save-work refuses (it runs only in the lock-down) and no worker has check 4.
+  const off = lockedWiring(c, { runLocked: null });
+  assert.equal(off.runLocked, null);
+  assert.equal(off.startDeps.checksFor(wx)[4], undefined, 'no check 4');
+  assert.deepEqual(await off.saveWork(session), { ok: false, reason: 'save-work runs only inside the worker\'s lock-down' });
+  // On: the same function reaches both.
+  const seen = [];
+  const runLocked = async (j) => { seen.push(j.job); return j.job === 'install' ? { ok: true } : { ok: false, reason: 'stand-in' }; };
+  const on = lockedWiring(c, { runLocked });
+  assert.equal(on.runLocked, runLocked);
+  assert.deepEqual(await on.startDeps.checksFor(wx)[4](), { ok: true });
+  assert.deepEqual(await on.saveWork(session), { ok: false, reason: 'stand-in' });
+  assert.deepEqual(seen, ['install', 'save-work'], 'one runLocked ran both');
+  // By default it is built from the config's claude: one there, both on.
+  assert.equal(typeof lockedWiring(c).runLocked, 'function');
 });
 
 test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {
@@ -243,6 +295,11 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} } };
   assert.deepEqual(Object.keys(sd.checksFor(wx)).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10], 'no throwaway port, no check 11');
   assert.deepEqual(Object.keys(sd.checksFor({ ...wx, throwaway: async () => ({}) })).map(Number), [1, 2, 3, 5, 6, 7, 8, 9, 10, 11]);
+  // L969: the install command and the registry hosts come from the product's render; runLocked from the one wiring.
+  const withInstall = { ...c, products: { p1: { ...c.products.p1, render: { ...c.products.p1.render, product: { commands: { install: 'npm ci' } }, registryHosts: ['registry.npmjs.org'] } } } };
+  const j = workerCheckInputs(withInstall, { product: 'p1', sessionId: SID }, { runLocked: async () => ({ ok: true }) });
+  assert.deepEqual([j.installCommand, j.registryHosts, typeof j.runLocked], ['npm ci', ['registry.npmjs.org'], 'function']);
+  assert.equal(workerCheckInputs(c, { product: 'p1', sessionId: SID }).runLocked, null, 'none given: none');
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
