@@ -21,6 +21,7 @@ import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
+import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
 import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
@@ -1278,4 +1279,27 @@ test('#451 r1 m2: an alert GitHub lost is a failed item of the heartbeat pass, w
   const w2 = withKey(world({ extra: APP }));
   const ok = await (await wire(w2.config, { fetchFn: appGitHub(w2).fetchFn, log: () => {} })).passes.heartbeat();
   assert.equal(ok.failed, undefined, JSON.stringify(ok));
+});
+
+test('#451 L967: an alert lost outside the per-kind list (usage) still makes the pass one failed item, which robot-main logs', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // GitHub refuses only the usage alert; every per-kind alert (dispatcher, rules, front door, signed out) goes out.
+  const usagePost = (init) => { try { return init.method === 'POST' && /Claude usage past/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (usagePost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {} });
+  const at = new Date().toISOString();
+  const sense = (id, doc) => { const r = rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }); assert.ok(r.ok, `${id}: ${r.reason}`); };
+  assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at, started_at: at, steps: {} }, kind: 'full_pass' }).ok);
+  sense('signed-in-account', { account: 'a', signed_in: true, observed_at: at });
+  sense(USAGE_FACT('a'), { account: 'a', observed_at: at, h5: { used_pct: 60, resets_at: new Date(Date.now() + 3600e3).toISOString() },
+    week: { used_pct: 10, resets_at: new Date(Date.now() + 2 * 86400e3).toISOString() } });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
+  assert.match(pinnedOf(gh).body, /usage: 60 %/, 'the usage reading was current, so its alert was the one asked for');
+  assert.equal(out.failed, 1, JSON.stringify(out));
+  const logs = [];
+  await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn } });
+  assert.match(logs.join('\n'), /robot: heartbeat ran, and 1 of its items failed/);
 });
