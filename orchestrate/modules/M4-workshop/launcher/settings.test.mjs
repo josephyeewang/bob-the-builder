@@ -576,7 +576,9 @@ test('L881: the shell\'s write wall between sessions: the only added folders are
   const hardened = { [S.hooks]: { [E.preToolUse]: [guard] }, [S.permissions]: { [S.deny]: ['Read(//w/held/**)', 'Edit(//w/held/**)'] },
     [S.sandbox]: { [S.sandboxEnabled]: true, [S.failIfUnavailable]: true, [S.allowUnsandboxedCommands]: false, [S.network]: { [S.strictAllowlist]: true },
       [S.filesystem]: { [S.denyRead]: ['/w/held'], [S.denyWrite]: ['/w/held'] } } };
-  assert.deepEqual(checkMachineWide({ readFile: () => JSON.stringify(hardened), path: '/fake/managed.json' }), { ok: true });
+  // No read of this Mac's /Library or $HOME (L906 m1).
+  assert.deepEqual(checkMachineWide({ readFile: () => JSON.stringify(hardened), path: '/fake/managed.json',
+    listDir: () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); }, plist: () => null, home: () => '/h', claudeFile: '/fake/managed.json' }), { ok: true });
 });
 
 test('#410 r3 m1: apart is one rule, both ways, without regard to case; a shared prefix is apart, a trailing slash is not', () => {

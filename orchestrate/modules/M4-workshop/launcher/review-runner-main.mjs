@@ -35,7 +35,7 @@
 //                                                   folder (which the deny list covers whole). All five are checked at
 //                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
 //     "pin": "x.y.z", "machineWide": "/abs",       the Claude Code version the rules pin (launch checks 0, 6, 7) and the
-//                                                   machine-wide settings file (check 10)
+//                                                   machine-wide settings file (check 10; CLAUDE_FILE only, L913)
 //     "bobManifest": "/abs", "budget": "/abs.mjs",  optional, inside installRoot and root's: the pinned Bob folder's file
 //                                                   list { path: sha256 } (check 13), and a module exporting
 //                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
@@ -89,6 +89,7 @@ import { writeSnapshot } from '../hooks/snapshot.mjs';
 import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
 import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
 import { TOOLS_CHECKED } from '../../M10-rules/roles.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from './env-check.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
@@ -115,6 +116,8 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
+  // L913 (a): claude reads only its fixed managed file; any other would refuse every review at check 10 instead.
+  if (c.machineWide !== CLAUDE_FILE) throw new Error(`config: machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
   if (typeof c.pin !== 'string' || !PIN.test(c.pin)) throw new Error('config: pin must be the Claude Code version the rules pin (x.y.z)');
   // m-5 (L599, L709): the pin is the one the role tool lists were checked on. add-to-install wrote this pin, and the
