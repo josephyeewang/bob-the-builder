@@ -73,6 +73,11 @@ test('L935: the real stop ends the session\'s whole process group, and refuses a
   assert.throws(() => stopGroupOf(4242, { ps: () => ({ status: 0, stdout: ' 4000\n' }), kill: (...a) => sent.push(a) }), /does not lead its own process group \(its group is 4000\)/);
   assert.throws(() => stopGroupOf(4242, { ps: () => ({ status: 1, stdout: '' }), kill: (...a) => sent.push(a) }), /is gone/);
   for (const bad of [0, 1, -5, 1.5, '7']) assert.throws(() => stopGroupOf(bad, { kill: (...a) => sent.push(a) }), /not a process id/);
+  // Trying again can't help a pid that leads no group, or is no pid (final, so the runner tells Joe once); a gone one may.
+  const err = (f) => { try { f(); } catch (e) { return e; } return null; };
+  assert.equal(err(() => stopGroupOf(4242, { ps: () => ({ status: 0, stdout: ' 4000\n' }), kill: () => {} })).final, true);
+  assert.equal(err(() => stopGroupOf(0, { kill: () => {} })).final, true);
+  assert.equal(err(() => stopGroupOf(4242, { ps: () => ({ status: 1, stdout: '' }), kill: () => {} })).final, undefined);
   assert.deepEqual(sent, []);
   stopGroupOf(4242, { ps: () => ({ status: 0, stdout: '4242\n' }), kill: (...a) => sent.push(a) });
   assert.deepEqual(sent, [[-4242, 'SIGTERM']]);
