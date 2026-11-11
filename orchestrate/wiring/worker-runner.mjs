@@ -133,12 +133,16 @@ export async function workerRunnerPass(ctx) {
   if (typeof copiesRoot !== 'string' || !copiesRoot.startsWith('/')) throw new Error('the worker runner has no copies root, so a start\'s copy can\'t be checked');
   const state = structuredClone(ctx.state ?? {});
   state.sessions ??= []; state.requests ??= {}; state.answers ??= {}; state.seen ??= {};
-  // A drain_held in memory the status reader would refuse is rewritten before any status is written, so one bad field
-  // can't make the whole status unreadable (#425 r1 m4): held still (it was told), its cause kept when it is one.
+  // A drain_held in memory the status reader would refuse is dropped before any status is written, so one damaged field
+  // can't make every status read fail (#425 r1 m4, r2 m2): it stands only as a cause and a time, on an ended session
+  // whose outbox is open (owner-status.mjs checkSession). On such a session it was told, so its first sight is set past
+  // the limit and heldOpen holds the real cause in this same pass; nothing else is published first (r2 c1).
   for (const s of state.sessions) {
-    if (s?.drain_held === undefined || drainHeldOk(s.drain_held)) continue;
-    if (s.outbox_open !== true) { delete s.drain_held; continue; }
-    s.drain_held = { cause: DRAIN_CAUSES.includes(s.drain_held?.cause) ? s.drain_held.cause : 'other', since: new Date(now).toISOString() };
+    if (s?.drain_held === undefined) continue;
+    const open = s.outbox_open === true && !isLive(s);
+    if (open && drainHeldOk(s.drain_held)) continue;
+    delete s.drain_held;
+    if (open) s.undrained_since = now - RUNNER_DRAIN_HELD_MS;
   }
   const find = (id) => state.sessions.find((s) => s.id === id);
   const answer = (key, a) => { state.answers[key] = { ...a, at: now }; };

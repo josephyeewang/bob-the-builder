@@ -20,7 +20,7 @@ import { waitOnJoe } from './joe-waits.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts, keepReviewHolds } from './review-requests.mjs';
-import { DRAIN_UNKNOWN_FACT, relayDrainHolds } from './drain-alerts.mjs';
+import { relayDrainHolds } from './drain-alerts.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
 import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks, plain } from './alerts.mjs';
 import { refusalReport } from './pass.mjs';
@@ -292,7 +292,8 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
     const report = refusalReport({ rec, alert, now, lines: [], failureLog });
     // A relay that throws (a queue that refuses, say) is reported as itself, never as the time limits failing: the
-    // step still ends as it would have, and a review-status error is still the one thrown (#425 r1 M2).
+    // step still ends as it would have, and a review-status error is still the one thrown (#425 r1 M2). Each relay's
+    // throw has its own hold, so it never holds back the relay's own reports, nor they it (r2 c2).
     try { if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report); }
     catch (e) { report(`the review alert relay failed: ${plain(e?.message ?? e)}`, 'review-relay'); }
   }
@@ -302,7 +303,7 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     try { held = await drainHolds(); } catch (e) { error = e?.message ?? String(e); }
     const report = refusalReport({ rec, alert, now, lines: [], failureLog });
     try { relayDrainHolds({ rec, held, error, alert, now, report }); }
-    catch (e) { report(`the undrained-outbox relay failed: ${plain(e?.message ?? e)}`, DRAIN_UNKNOWN_FACT); }
+    catch (e) { report(`the undrained-outbox relay failed: ${plain(e?.message ?? e)}`, 'drain-relay'); }
   }
   if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;

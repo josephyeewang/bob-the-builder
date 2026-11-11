@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { timeLimits } from './merges.mjs';
 import { DRAIN_CAUSES, DRAIN_HOLD_FACT, DRAIN_UNKNOWN_FACT, relayDrainHolds } from './drain-alerts.mjs';
+import { HOLD_FACT } from './pass.mjs';
 import { rulesWith, recWith, T0, MIN, withAlerts } from './fixtures.test-helper.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
 
@@ -146,6 +147,10 @@ test('#425 r1 M2: a drain or review relay that throws is reported, and changes n
     assert.equal(logged.length, 1, lead);
     assert.match(logged[0], lead === 'worker runner:' ? /^the undrained-outbox relay failed: queue write refused$/ : /^the review alert relay failed: queue write refused$/);
     assert.ok(got.some((t) => t.startsWith('the Dispatcher: the ')), `${lead} the failure is told`);
+    // r2 c2: each relay's throw is told on its own hold, never on the drain status's or the relay's own reports'.
+    const own = HOLD_FACT(`report-${lead === 'worker runner:' ? 'drain' : 'review'}-relay`);
+    assert.ok(rec.read('fact', own)?.doc?.told_at, `${lead} told on ${own}`);
+    assert.equal(rec.read('fact', HOLD_FACT(`report-${DRAIN_UNKNOWN_FACT}`)), null, `${lead} not on the drain status's report hold`);
     // With a review-status error too, that error is still the one thrown.
     await assert.rejects(() => withAlerts(recWith(), T0, () => true, (alert) => timeLimits({ rec: recWith(), ...base, ...over,
       hasReviewer: () => { throw new Error('the review runner\'s status is 4 minutes old'); },
