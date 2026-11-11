@@ -10,7 +10,8 @@
 //   { sessions: [SESSION + { pid, pid_start, head, copy, started_at, ended_at? }], requests: { <sessionId>: { state, at } },
 //     answers: { <key>: { ...answer, at } }, seen: { <key>: at } }
 // A pass, in order:
-//   0. Starts that were still on when an earlier pass ended (`pending`, kept by the caller in memory) are settled.
+//   0. Starts and saves that were still on when an earlier pass ended (`pending`, kept by the caller in memory) are
+//      settled.
 //   1. Each session is checked: a process group that is gone (groupGone true) is alive false and ended, and its launch
 //      request 'stopped'; one the port can't tell about keeps no alive field (so it still counts as live). Ended is
 //      final: an ended session is never checked again (a reused process group must not bring it back, self-review M1).
@@ -34,7 +35,11 @@
 //      - stopGroup-<id>-<nonce>: stop_requested is set and the status written before the stop (L762), and the answer is
 //        ok only once the group is gone; a stop that fails or times out answers ok: false with the flag still set; one
 //        that names another process group than the listed one is refused;
-//      - saveWork-<id>-<nonce>, pauseLead-<product>-<nonce>: the port's answer, or ok: false at portMs.
+//      - saveWork-<id>-<nonce>: the port's answer. A save runs a lock-down job (runner-locked.mjs, up to LOCKED_SAVE_MS),
+//        so one still on after portMs is held in `pending` as a start is (key `save:<id>`) and answered by a later pass
+//        (step 0); the status cadence (L769) is kept. A second save of a session whose save is still on is refused at
+//        once ("still running"), so two never run in one copy (#456 runLocked self-review M1);
+//      - pauseLead-<product>-<nonce>: the port's answer, or ok: false at portMs.
 //   3. Used-up request entries, answers and seen keys older than RUNNER_KEEP_USED_UP_MS are dropped.
 //   4. The status is written. In every status that carries a launch ok or a stopGroup ok, the session stays listed.
 // A 'waiting' entry left by a runner that stopped mid-start (so no pending start is held for it) is left as it is: its
@@ -66,6 +71,8 @@ import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
 export const RUNNER_PORT_MS = 10_000;
 if (RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('RUNNER_PORT_MS must be under RUNNER_STATUS_EVERY_MS');
+/** The `pending` key of a save still on (a start's is its session id, which this can't be). */
+export const saveKey = (id) => `save:${id}`;
 /** How often a start still on, or a 'waiting' entry with none held, is noted again (#358 r1 m6). */
 export const RUNNER_NOTE_EVERY_MS = 10 * 60_000;
 /** How long an ended session's outbox may stay undrained before its cause is listed for the owner (L896): intake takes a
@@ -157,7 +164,7 @@ export async function workerRunnerPass(ctx) {
   const wait = async (fn) => { const r = await within(portMs, fn); flush(); return r; };
 
   // 0. Starts that answered since the last pass; a 'waiting' entry with no start held for it is told.
-  for (const [id, p] of [...pending]) if (p.done) { await settle(p); settled.add(id); flush(); }
+  for (const [id, p] of [...pending]) if (p.done) { if (p.save) settleSave(p); else await settle(p); settled.add(id); flush(); }
   // Noted at most every RUNNER_NOTE_EVERY_MS, whether a start is still held or none is (#358 r1 m6).
   for (const [id, r] of Object.entries(state.requests)) {
     if (r.state !== 'waiting' || (Number.isFinite(r.told) && now - r.told < RUNNER_NOTE_EVERY_MS)) continue;
@@ -319,9 +326,17 @@ export async function workerRunnerPass(ctx) {
   async function save(k) {
     const s = find(k.id);
     if (!s) return answer(k.key, { ok: false, reason: 'the worker runner did not start that session, so it has no copy to save' });
-    const r = await wait(() => ports.saveWork(s));
-    answer(k.key, r?.ok === true ? { ok: true } : { ok: false, reason: failed(r, 'the save') });
+    const held = saveKey(s.id);
+    if (pending.has(held)) return answer(k.key, { ok: false, reason: `a save of ${s.id} is still running` });
+    const p = { save: true, key: k.key, id: s.id, done: false, a: undefined };
+    p.on = Promise.resolve().then(() => ports.saveWork(s))
+      .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
+    pending.set(held, p);
+    await Promise.race([p.on, late(portMs)]);
+    if (!p.done) { note(`the save of ${s.id} is still on; it is answered when it ends`); return; }
+    settleSave(p); settled.add(held);
   }
+  function settleSave({ key, a }) { answer(key, a?.ok === true ? { ok: true } : { ok: false, reason: failed(a, 'the save') }); }
   async function pause(k, p) {
     const r = await wait(() => ports.pauseLead({ product: p.product }));
     answer(k.key, r?.ok === true ? { ok: true } : { ok: false, reason: failed(r, 'the pause') });

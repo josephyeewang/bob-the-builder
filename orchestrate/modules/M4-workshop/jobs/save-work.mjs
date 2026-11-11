@@ -12,5 +12,8 @@ try {
   if (typeof b64 !== 'string' || typeof out !== 'string' || !out.startsWith('/')) throw new Error('the save-work job is run as: node save-work.mjs <arguments> <result file>');
   answer = await saveWorkJob(JSON.parse(Buffer.from(b64, 'base64').toString('utf8')));
 } catch (e) { answer = { ok: false, reason: String(e?.message ?? e).slice(0, 500) }; }
-if (typeof out === 'string' && out.startsWith('/')) writeFileSync(out, `${JSON.stringify(answer)}\n`, { flag: 'wx', mode: 0o600 });
-process.exitCode = answer.ok ? 0 : 1;
+// A result file already there (not removed, or written by someone else first) is never written through: exit 2, and the
+// runner reads no answer of this job's.
+let wrote = false;
+if (typeof out === 'string' && out.startsWith('/')) try { writeFileSync(out, `${JSON.stringify(answer)}\n`, { flag: 'wx', mode: 0o600 }); wrote = true; } catch { /* exit 2 */ }
+process.exitCode = !wrote ? 2 : answer.ok ? 0 : 1;

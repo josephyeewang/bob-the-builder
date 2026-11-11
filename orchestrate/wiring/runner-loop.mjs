@@ -207,7 +207,7 @@ export async function runRunner(ctx) {
     let t; const late = new Promise((r) => { t = setTimeout(r, drainMs); });
     await Promise.race([Promise.all([...pending.values()].map((p) => p.on)), late]); clearTimeout(t);
     try { state = await runnerTick({ ...ctx, state, pending, readNone: true }); } catch (e) { note(`the worker runner's last tick failed (${e?.message ?? e})`); }
-    for (const id of pending.keys()) note(`the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`);
+    for (const [id, p] of pending) note(p.save ? `the save of ${p.id} was still on when the worker runner stopped; it is not answered, so the Dispatcher asks again` : `the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`);
   }
   return state;
 }

@@ -12,7 +12,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, LOCKED_JOBS, jobFile, lockedRunner } from './runner-locked.mjs';
+import { JOBS_DIR, LOCKED_JOBS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, jobFile, lockedRunner } from './runner-locked.mjs';
 
 const ASK = 'Run exactly this shell command once and report its exit code: ';
 // claude, stood in for: the command it is asked to run, by /bin/sh, in its folder, with its environment and group.
@@ -67,17 +67,22 @@ test('L969: save-work believes no answer alone: the bundle must be a plain, non-
   const d = tempDir('orch-locked-');
   const outbox = join(d, 'outbox'); mkdirSync(outbox);
   const want = join(outbox, bundleName('C-1'));
-  const save = (bundle) => createSaveWork({ runLocked: async () => ({ ok: true, bundle }) })({ clone: join(d, 'clone'), mirror: join(d, 'm.git'), card: 'C-1', branch: 'card/c-1', outbox });
+  // The stand-in job writes what it is given (or nothing) as the bundle, then answers ok naming `bundle`.
+  const save = (bundle, writes, card = 'C-1') => createSaveWork({ runLocked: async () => { if (writes) writes(); return { ok: true, bundle }; } })({ clone: join(d, 'clone'), mirror: join(d, 'm.git'), card, branch: `card/${card.toLowerCase()}`, outbox });
   const no = { ok: false, reason: 'the save-work job answered, but no bundle of the card is in the outbox' };
   assert.deepEqual(await save(want), no, 'none there');
-  writeFileSync(want, '');
-  assert.deepEqual(await save(want), no, 'an empty one');
-  writeFileSync(want, 'x');
-  assert.deepEqual(await save(join(outbox, 'other.bundle')), no, 'the answer names another file');
-  assert.deepEqual(await save(want), { ok: true, bundle: want });
+  assert.deepEqual(await save(want, () => writeFileSync(want, '')), no, 'an empty one');
+  assert.deepEqual(await save(join(outbox, 'other.bundle'), () => writeFileSync(want, 'x')), no, 'the answer names another file');
+  assert.deepEqual(await save(want, () => writeFileSync(want, 'x')), { ok: true, bundle: want });
+  // #456 runLocked self-review m1: a bundle left from before is removed first, so a job that writes none is refused.
+  assert.ok(existsSync(want));
+  assert.deepEqual(await save(want), no, 'an old bundle never passes as this save\'s');
+  assert.equal(existsSync(want), false);
   const other = join(d, 'elsewhere'); writeFileSync(other, 'x');
-  const link = join(outbox, bundleName('C-2')); symlinkSync(other, link);
-  assert.deepEqual(await createSaveWork({ runLocked: async () => ({ ok: true, bundle: link }) })({ clone: join(d, 'clone'), mirror: join(d, 'm.git'), card: 'C-2', branch: 'card/c-2', outbox }), no, 'a link');
+  const link = join(outbox, bundleName('C-2'));
+  assert.deepEqual(await save(link, () => symlinkSync(other, link), 'C-2'), no, 'a link');
+  mkdirSync(want);
+  assert.match((await save(want)).reason, /the card's old bundle can't be removed/, 'a folder in its place');
 });
 
 test('L969: every way runLocked can fail is a throw with a plain reason, and nothing is run for one found before claude', async () => {
@@ -107,7 +112,9 @@ test('L969: every way runLocked can fail is a throw with a plain reason, and not
   assert.deepEqual(LOCKED_JOBS, ['save-work', 'install']);
   // After claude: no result, a result that is not the job's form, claude failing to start.
   const quiet = (write) => (bin, args, opts) => childSpawn('/bin/sh', ['-c', write ? `printf '%s' '${write}' > '${jobFile({ cwd, job: args.at(-1).includes('save-work.mjs') ? 'save-work' : 'install', sessionId: 'S-1' })}'` : 'exit 0'], opts);
-  await assert.rejects(runner({ spawn: quiet() })(base), /the install job's result was not written \(claude exited 0\)/);
+  await assert.rejects(runner({ spawn: quiet() })(base), /the install job's result was not written \(claude exited 0; ENOENT\)/);
+  const big = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `head -c ${RESULT_MAX_BYTES + 1} /dev/zero > '${jobFile({ cwd, job: 'install', sessionId: 'S-1' })}'`], opts);
+  await assert.rejects(runner({ spawn: big })(base), new RegExp(`the install job's result was not written \\(claude exited 0; over ${RESULT_MAX_BYTES} bytes\\)`), 'a result over the limit is refused unread');
   await assert.rejects(runner({ spawn: quiet('x') })(base), /the install's exit code is not a number \(x\)/);
   const save = { ...base, job: 'save-work', args: {} };
   await assert.rejects(runner({ spawn: quiet() })(save), /the save-work job's result was not written/);
@@ -126,4 +133,17 @@ test('L969: a job past its time limit is refused and its whole process group is 
   let alive = true;
   for (let n = 0; n < 50 && alive; n += 1) { try { process.kill(-g, 0); await new Promise((r) => setTimeout(r, 20)); } catch { alive = false; } }
   assert.equal(alive, false, 'no process of the group is left');
+});
+
+test('#456 runLocked self-review M1: save-work has its own time limit, under the Dispatcher\'s save deadline; the install keeps its own', async () => {
+  const { cwd, settingsFile } = world();
+  const calls = [];
+  // Whatever the job, the stand-in claude runs past any short limit.
+  const slow = (bin, args, opts) => { const child = childSpawn('/bin/sh', ['-c', 'sleep 30'], opts); calls.push(child); return child; };
+  const run = runner({ spawn: slow, ms: 60_000, saveMs: 300 });
+  const t = Date.now();
+  await assert.rejects(run({ job: 'save-work', args: {}, sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /the save-work job did not finish inside the lock-down \(it did not finish in time\)/);
+  assert.ok(Date.now() - t < 10_000, 'killed at saveMs, not at the install\'s ms');
+  assert.throws(() => runner({ saveMs: LOCKED_SAVE_MS + 1 }), /save-work's limit can't pass/);
+  for (const bad of [{ ms: 0 }, { saveMs: -1 }, { ms: 1.5 }]) assert.throws(() => runner(bad), /is not a time limit/, JSON.stringify(bad));
 });

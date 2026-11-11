@@ -172,3 +172,15 @@ test('#439 r1 c1: the launch hands the render and the check the same lstat and r
     assert.deepEqual(seen, { render: [realpath, lstat], check: [realpath, lstat] });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
+
+test('#456 runLocked self-review M2: check 4\'s install phase, rendered and checked for real, keeps the runner wall and allows the registry\'s hosts', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const s = walledLaunchSettings(input('editing', runner));
+    const i = walledLaunchSettings(input('editing', runner, { phase: 'install', registryHosts: ['registry.npmjs.org'] }));
+    assert.equal(i.ok, true, i.reason);
+    assert.ok(i.settings[S.sandbox][S.filesystem][S.denyRead].includes(runner.requestsDir), 'the wall stays on for the install');
+    assert.ok(JSON.stringify(i.settings).includes('registry.npmjs.org'), 'the registry is allowed');
+    assert.equal(JSON.stringify(s.settings).includes('registry.npmjs.org'), false, 'and only for the install');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});

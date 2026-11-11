@@ -71,9 +71,12 @@ export async function saveWorkJob({ clone, mirror, card, branch, outbox }) {
 /**
  * `runLocked(job)` runs the save-work job inside the worker's lock-down (wiring/runner-locked.mjs): it gets
  * { job: 'save-work', args, run }, where `run` is the in-process body for a stand-in (a test) only; the real runner runs
- * the job script in its own process and never calls it. Required: without it save-work refuses. Its answer is checked
- * again here on the disk (the bundle a plain, non-empty file in the outbox, by the card's name), since the job's answer
- * comes back through a file. Returns { ok: true, bundle } or { ok: false, reason }.
+ * the job script in its own process and never calls it. Required: without it save-work refuses. The card's bundle is
+ * removed first, so one left from before never passes as this save's; the answer is then checked again on the disk (the
+ * bundle a plain, non-empty file in the outbox, by the card's name), since it comes back through a file. That is a
+ * sanity check, not a wall: the worker can write both the outbox and the result file, so a forged "ok" with a bundle of
+ * its own is possible, and push.mjs's bundle verify and its fetch of the card branch only are what bound it.
+ * Returns { ok: true, bundle } or { ok: false, reason }.
  */
 export function createSaveWork({ runLocked }) {
   return async function saveWork({ clone, mirror, card, branch, outbox }) {
@@ -81,10 +84,11 @@ export function createSaveWork({ runLocked }) {
     if (!CARD.test(String(card))) return refuse('bad card id');
     if (branch !== cardBranch(card) || !BRANCH.test(branch)) return refuse('bad card branch');
     const args = { clone, mirror, card, branch, outbox };
+    const out = join(outbox, bundleName(card));
     try {
+      try { rmSync(out, { force: true }); } catch (e) { return refuse(`the card's old bundle can't be removed (${e?.code ?? e?.message})`); }
       const r = await runLocked({ job: 'save-work', args, run: () => saveWorkJob(args) });
       if (!r?.ok) return refuse(String(r?.reason ?? 'the save-work job gave no answer'));
-      const out = join(outbox, bundleName(card));
       const b = st(out);
       if (r.bundle !== out || !b?.isFile() || b.isSymbolicLink() || b.size === 0) return refuse('the save-work job answered, but no bundle of the card is in the outbox');
       return { ok: true, bundle: out };

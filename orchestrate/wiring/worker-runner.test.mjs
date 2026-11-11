@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_STATUS_EVERY_MS, ownerSyncPorts, readOwnerStatus } from './owner-status.mjs';
 import { ownerAsyncPorts } from './owner-asks.mjs';
-import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, saveKey, workerRunnerPass } from './worker-runner.mjs';
 import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
@@ -634,4 +634,29 @@ test('L896: a drain check that is late, fails or answers no known cause is held 
     w.now += RUNNER_DRAIN_HELD_MS; await w.pass();
     assert.equal(w.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, cause, why);
   }
+});
+
+test('#456 runLocked self-review M1: a save still on after portMs is held, answered by a later pass, and a second save of that session meanwhile is refused at once', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  let end; const runs = [];
+  w.ports.saveWork = (s) => { runs.push(s.id); return new Promise((r) => { end = r; }); };
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  const t = Date.now();
+  await w.pass([ask(N1)]);
+  assert.ok(Date.now() - t < 1000, 'the pass does not wait on the save past portMs (the status cadence, L769)');
+  assert.equal(w.read().answers[`saveWork-S-1-${N1}`], undefined, 'not answered while it runs');
+  assert.ok(w.pending.has(saveKey('S-1')));
+  assert.match(w.notes.join('\n'), /the save of S-1 is still on/);
+  await w.pass([ask(N2)]);
+  assert.deepEqual(runs, ['S-1'], 'never two saves in one copy');
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N2}`], { ok: false, reason: 'a save of S-1 is still running' });
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true }, 'answered by the next pass once it ended');
+  assert.equal(w.pending.has(saveKey('S-1')), false, 'and no longer held');
+  // A held save that fails is answered with its reason; one that answers within portMs is answered in its own pass.
+  w.ports.saveWork = async () => { throw new Error('boom'); };
+  const n3 = '00112233445566ff'; await w.pass([ask(n3)]);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
 });

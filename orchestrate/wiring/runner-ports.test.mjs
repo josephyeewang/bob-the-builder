@@ -807,3 +807,37 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
     await t.done();
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });
+
+test('#456 runLocked self-review M2: check 4\'s real settings steps write the install settings with the registry hosts, then put the session\'s back byte for byte', async () => {
+  let x0; const seen = {};
+  const walled = (x) => ({ ok: true, role: 'worker', settings: { phase: x.phase ?? 'session', hosts: x.registryHosts ?? null } });
+  const w = world({ walled, checksFor: (x) => { x0 = x; return {}; },
+    launchFn: async (x) => {
+      const f = x0.settings.file; seen.first = readFileSync(f, 'utf8');
+      const i = x0.renderPhase('install'); seen.install = i;
+      seen.wroteInstall = x0.writeSettings(i.settings); seen.during = readFileSync(f, 'utf8');
+      const s = x0.renderPhase('session'); seen.wroteSession = x0.writeSettings(s.settings); seen.after = readFileSync(f, 'utf8');
+      seen.next = existsSync(`${f}.next`); seen.bad = x0.renderPhase('other');
+      return { ok: true, started: await x.start() };
+    } });
+  w.c.products.p1.render.registryHosts = ['registry.npmjs.org'];
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.deepEqual(JSON.parse(seen.during), { phase: 'install', hosts: ['registry.npmjs.org'] }, 'the install runs under the install phase, with the registry\'s hosts');
+    assert.deepEqual([seen.wroteInstall, seen.wroteSession], [{ ok: true }, { ok: true }], 'each read back as written');
+    assert.equal(seen.after, seen.first, 'the session\'s settings put back byte for byte, as check 5 reads them');
+    assert.equal(seen.next, false, 'no .next file left');
+    assert.equal(seen.bad.ok, false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // A move that fails leaves no .next file, and says why; the session's settings file is untouched.
+  let y0; let r;
+  const v = world({ walled, fs: { rename: () => { const e = new Error('no'); e.code = 'EXDEV'; throw e; } }, checksFor: (x) => { y0 = x; return {}; },
+    launchFn: async () => { const f = y0.settings.file; const before = readFileSync(f, 'utf8'); r = y0.writeSettings({ x: 1 }); r.same = readFileSync(f, 'utf8') === before; r.next = existsSync(`${f}.next`); return { ok: false, reason: 'stop here' }; } });
+  v.c.products.p1.render.registryHosts = ['registry.npmjs.org'];
+  try {
+    await v.start();
+    assert.equal(r.ok, false); assert.match(r.reason, /not written \(EXDEV\)/);
+    assert.deepEqual([r.same, r.next], [true, false]);
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
+});

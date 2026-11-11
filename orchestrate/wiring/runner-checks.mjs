@@ -22,7 +22,10 @@
 //   4  dependencies         the install inside the lock-down (launch.mjs installStep), through the lock-down runner
 //                           (runner-locked.mjs `runLocked`, L969), with the product's declared install command
 //                           (render.product.commands.install) and its registry hosts (render.registryHosts). No runLocked
-//                           or no install command, no port: launch() refuses a worker here. A script session skips check 4.
+//                           or no install command, no port: launch() refuses a worker here, so a product with nothing
+//                           to install launches no worker until it declares one (a cutover item; a no-op such as
+//                           `true` passes). A script session skips check 4. A process an install script moves into its
+//                           own session (setsid) outlives the group kill, in the copy (runner-locked.mjs; Mini proof 9.8).
 //   5  role file            reviewChecks' 5: the settings file read back without following a link, byte for byte what
 //                           the start port wrote (the same text form as review-settings.mjs templateText), and
 //                           checkSettings passes it

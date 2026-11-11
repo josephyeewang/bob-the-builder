@@ -331,12 +331,13 @@ export function liveWallProblem(live, product, places, read) {
 /**
  * The start port. c (the runner's config, checked by runner-main.mjs): { copiesRoot, outboxRoot, settingsDir, home, path,
  * claudeBin, recordRoot, recordUid, workerRunner: { requestsDir, statusFile },
- * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
+ * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes, registryHosts? } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
- * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
+ * promptFor(x) → text (asked once the copy and outbox exist, with { head, outbox }; may be async, and may answer
+ * { ok: false, reason }, which undoes the start), names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
  * mainOf(mirror) → the mirror's main commit (read before and after the copy is made, #369 r1 m3), beforeStart(x) → null
  * or the reason claude must not start,
- * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
+ * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree, rename }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
  * readSettings(id) → a live session's settings (#378 r1 M1).

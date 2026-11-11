@@ -168,7 +168,13 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
   let made; lockedOf({ ...c, lockedMs: 5000 }, { make: (o) => { made = o; return () => {}; } });
   assert.deepEqual([made.claudeBin, made.ms, typeof made.envOf], ['/i/claude', 5000, 'function']);
   assert.equal(lockedOf({ ...c, claudeBin: undefined }), null, 'no claude: none, so both off');
-  assert.throws(() => checkRunnerConfig({ ...c, products: c.products, lockedMs: 0 }), /lockedMs must be/);
+  for (const bad of [0, 15 * 60_000 + 1]) assert.throws(() => checkRunnerConfig({ ...c, products: c.products, lockedMs: bad }), /lockedMs must be/, String(bad));
+  // The job's environment (#456 runLocked self-review m5): the sign-in's, HOME and PATH from the config, held to check 9.
+  const envOf = (who, base = { PATH: '/elsewhere', TERM: 'x' }) => { let o; lockedOf(c, { who: () => who, base, make: (m) => { o = m; return () => {}; } }); return o.envOf; };
+  assert.throws(() => envOf({ reason: 'not signed in' })(), /not signed in/);
+  const got = envOf({ account: 'a', env: { CLAUDE_CONFIG_DIR: '/cfg' } })();
+  assert.deepEqual([got.HOME, got.PATH, got.CLAUDE_CONFIG_DIR], [c.home, c.path, '/cfg']);
+  assert.throws(() => envOf({ account: 'a', env: { SOME_API_TOKEN: 't' } })(), /key-like variables/, 'a key-like variable fails check 9 here too');
 });
 
 test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {

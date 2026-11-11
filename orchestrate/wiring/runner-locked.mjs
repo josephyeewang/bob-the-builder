@@ -15,7 +15,11 @@
 // Fails closed, each a throw with a plain reason (save-work and installStep read a throw as a refusal): a job not on the
 // list, a session id the Dispatcher does not make, a settings file that is not a plain JSON file, no role profile, no
 // sign-in (envOf), a result file left from before that can't be removed, the time limit (the whole process group is
-// killed), and no result, or one that is not the job's form ("not written"). The result file sits in the copy, where
+// killed: LOCKED_SAVE_MS for save-work, under the Dispatcher's SAVE_DEADLINE_MS so one ask can be answered; LOCKED_MS
+// for the install), and no result, one over RESULT_MAX_BYTES, or one that is not the job's form ("not written").
+// The group kill reaches what stayed in claude's process group only: a process an install's script moved into its own
+// session (setsid) outlives it, in the session's own copy. Checks 1, 2, 3 and 8 run again after the install, but such a
+// leftover can act after them; that is a limit of the install step, proven on the Mini (live proof 9). The result file sits in the copy, where
 // the branch's own code (an install's scripts) could forge it: like the baseline's (#369 m1), it is a sanity check, not a
 // wall; save-work's answer is checked again on the disk by createSaveWork (the bundle a plain file in the outbox).
 //
@@ -31,15 +35,27 @@ import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { groupThere } from './runner-ports.mjs';
+import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
+import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 
 export const LOCKED_JOBS = Object.freeze(['save-work', 'install']);
 export const LOCKED_MS = 15 * 60_000;
+/** save-work's own limit: with the runner's pickup (under RUNNER_STATUS_EVERY_MS) it ends before the Dispatcher stops waiting. */
+export const LOCKED_SAVE_MS = 45_000;
+if (LOCKED_SAVE_MS + RUNNER_STATUS_EVERY_MS >= SAVE_DEADLINE_MS) throw new Error('LOCKED_SAVE_MS must leave the runner\'s pickup inside SAVE_DEADLINE_MS');
+/** The most a job's result file may hold: an exit code or one JSON answer, never more. */
+export const RESULT_MAX_BYTES = 64 * 1024;
 export const JOBS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'modules', 'M4-workshop', 'jobs');
 
-/** Reads a plain file without following a link. */
-export function readNoLink(p) {
+/** Reads a plain file without following a link; one over `max` bytes (when given) is refused unread. */
+export function readNoLink(p, { max } = {}) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return readFileSync(fd); } finally { closeSync(fd); }
+  try {
+    const f = fstatSync(fd);
+    if (!f.isFile()) throw new Error('not a plain file');
+    if (max !== undefined && f.size > max) throw new Error(`over ${max} bytes`);
+    return readFileSync(fd);
+  } finally { closeSync(fd); }
 }
 
 /** One shell word: a path or argument in single quotes; one holding a quote, a NUL or a line break is refused. */
@@ -94,9 +110,11 @@ const settingsProblem = (file) => {
  * { ok, reason? } from the exit code. `run`, a stand-in's in-process body (createSaveWork passes it for tests), is never
  * called here.
  */
-export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = process.execPath, jobsDir = JOBS_DIR, ms = LOCKED_MS, killGroup, groupThere: there, rm = rmSync, read = readNoLink }) {
+export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = process.execPath, jobsDir = JOBS_DIR, ms = LOCKED_MS, saveMs = LOCKED_SAVE_MS, killGroup, groupThere: there, rm = rmSync, read = readNoLink }) {
   if (typeof claudeBin !== 'string' || !claudeBin.startsWith('/')) throw new Error('the lock-down runner needs the pinned claude\'s path');
   if (typeof envOf !== 'function') throw new Error('the lock-down runner needs the sign-in environment');
+  for (const [k, v] of [['ms', ms], ['saveMs', saveMs]]) if (!Number.isInteger(v) || v <= 0) throw new Error(`the lock-down runner's ${k} is not a time limit`);
+  if (saveMs > LOCKED_SAVE_MS) throw new Error(`save-work's limit can't pass ${LOCKED_SAVE_MS} ms (the Dispatcher's save deadline)`);
   return async function runLocked({ job, args, command, sessionId, role, settingsFile, cwd } = {}) {
     if (!LOCKED_JOBS.includes(job)) throw new Error(`${JSON.stringify(job)} is not a lock-down job`);
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new Error('the lock-down job names no session the Dispatcher makes');
@@ -112,8 +130,8 @@ export function lockedRunner({ claudeBin, envOf, spawn = childSpawn, node = proc
     let env; try { env = envOf(); } catch (e) { throw new Error(`no sign-in to run the ${job} job with (${e?.message ?? e})`); }
     try { rm(file, { force: true }); } catch (e) { throw new Error(`the ${job} job's old result can't be removed (${e?.code ?? e?.message})`); }
     try {
-      let r; try { r = await runLockedCommand({ spawn, claudeBin, settingsFile, command: cmd, profile, cwd, env, ms, killGroup, groupThere: there }); } catch (e) { throw new Error(`the ${job} job did not finish inside the lock-down (${e?.message ?? e})`); }
-      let text; try { text = read(file).toString('utf8').trim(); } catch { throw new Error(`the ${job} job's result was not written (claude exited ${r?.exitCode})`); }
+      let r; try { r = await runLockedCommand({ spawn, claudeBin, settingsFile, command: cmd, profile, cwd, env, ms: job === 'install' ? ms : saveMs, killGroup, groupThere: there }); } catch (e) { throw new Error(`the ${job} job did not finish inside the lock-down (${e?.message ?? e})`); }
+      let text; try { text = read(file, { max: RESULT_MAX_BYTES }).toString('utf8').trim(); } catch (e) { throw new Error(`the ${job} job's result was not written (claude exited ${r?.exitCode}; ${e?.code ?? e?.message})`); }
       if (job === 'install') {
         if (!/^\d{1,3}$/.test(text)) throw new Error(`the install's exit code is not a number (${text.slice(0, 20)})`);
         return Number(text) === 0 ? { ok: true } : { ok: false, reason: `the install exited ${Number(text)}` };
