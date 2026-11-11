@@ -631,7 +631,9 @@ test('L726 m3 planted: a map without plan_reviewer refuses plan starts with the 
 });
 
 // #455 r2 m1 (P10): a plan reviewer whose end could not be recorded has ended, so it holds no slot under the cap.
-test('#455 r2 m1: a plan reviewer whose end is pending holds no cap slot', async () => {
+// It locks the ended folder with macOS's chflags, keeping its 0755 (the runner checks the mode, so chmod can't stand in).
+// The runner only runs on a Mac; on another system this one test is skipped, never passed.
+test('#455 r2 m1: a plan reviewer whose end is pending holds no cap slot', { skip: process.platform !== 'darwin' && 'needs macOS chflags' }, async () => {
   const w = await ready({ planReviewCap: () => 1 });
   w.cards.set('C-3', card());
   w.ask();
