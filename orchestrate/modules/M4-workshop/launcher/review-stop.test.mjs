@@ -97,7 +97,8 @@ test('L935 condition: the request id is proof only while no worker shares a uid 
     // The review runner's folder is review's, and the workers' outboxes the owner's.
     const rows = folderTable(cfg);
     assert.ok(rows.some((r) => r.path === join(base, 'review') && r.owner === 'review' && r.mode === 0o755));
-    for (const role of WORKER_ROLES) assert.ok(rows.some((r) => r.path === join(outboxRootPath(cfg), role) && r.owner === 'owner'), role);
+    // Flat, or per product for the worker runner's roles (L914).
+    for (const role of WORKER_ROLES) assert.ok(rows.some((r) => (r.path === join(outboxRootPath(cfg), role) || r.path === join(outboxRootPath(cfg), 'acme', role)) && r.owner === 'owner'), role);
     // The Record is orchestrate's but readable (0755): for a worker the read-deny is the wall, so every product's
     // sessions must have it (the worker runner refuses a config without).
     assert.ok(rows.some((r) => r.path === storePath(cfg, 'acme') && r.owner === 'orchestrate'));
