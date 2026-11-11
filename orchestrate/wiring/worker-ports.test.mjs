@@ -21,6 +21,8 @@ import { pauseLeadPort, saveWorkPort, startPort } from './runner-ports.mjs';
 import { NO_COPY_KINDS } from './owner-asks.mjs';
 import { writeNewReadable } from './owner-status.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
+import { CLOCK_SKEW_MS } from './owner-status.mjs';
+import { STOP_STAMP_SKEW_MS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 
 const ME = process.getuid();
 const run = limitedSync(spawnSync);
@@ -406,6 +408,9 @@ test('L925 rule 1: sessions() is every product\'s worker sessions and the review
     'Mac-wide (another product\'s too), and the plan reviewer left out: planReviewsRunning counts it');
   assert.deepEqual(ports.sessions()[2], { id: 'R-1', product: null, kind: 'review', card: 'C-7', head: HEAD, lead: null, role: 'reviewer', pgid: null, signin: null, config_dir: null, bundle_files: [] });
   assert.deepEqual({ ...REVIEW_KIND_OF }, { reviewer: 'review', auditor: 'audit' });
+  // The stop stamps are read against the ports' own clock (#458 self-review m3): one ahead of it past the skew is refused.
+  const ahead = { running: [{ card: 'C-7', head: HEAD, role: 'reviewer', session_id: 'R-1', started_at: 't', stop_wanted: new Date(T + CLOCK_SKEW_MS + 1000).toISOString() }] };
+  assert.throws(() => syncWorld({ review: ahead }).ports.sessions(), /R-1 .* has a stop_wanted that is not a time/);
   // Either status not known: the whole list is not known.
   assert.throws(() => syncWorld({ review: () => { throw new Error('the review runner\'s status is missing'); } }).ports.sessions(), /review runner's status is missing/);
   assert.throws(() => syncWorld({ statusText: '{' }).ports.sessions(), /worker runner's status can't be read/);
@@ -422,6 +427,27 @@ test('L925 rule 1: sessions() is every product\'s worker sessions and the review
   assert.ok(readFileSync(new URL('../modules/M4-workshop/launcher/review-runner.mjs', import.meta.url), 'utf8').includes(`hold('${REVIEW_STATE_CORRUPT}',`), 'the id the review runner lists');
   assert.throws(() => syncWorld({ review: { running: [], holds: [{ id: 'state-corrupt', text: 'x' }] } }).ports.sessions(), /can't read its own memory/);
   assert.deepEqual(reviewSessions({ running: [], holds: [{ id: 'other', text: 'x' }] }), [], 'another hold is not this');
+});
+
+// L968: the stop the review runner shows on a row reaches the stop step as runner_stop; one that is not a time is not the runner's.
+test('L968: a review row\'s stop_wanted, stop_failed or stopped_by_request is its runner_stop; a malformed one refuses the list', () => {
+  const t = '2026-11-11T12:00:00.000Z';
+  const base = { card: 'C-7', head: HEAD, role: 'reviewer', session_id: 'R-1', started_at: t };
+  const one = (more, now = Date.parse(t)) => reviewSessions({ running: [{ ...base, ...more }] }, { now })[0];
+  assert.equal(Object.hasOwn(one({}), 'runner_stop'), false, 'nothing shown: no runner_stop');
+  assert.equal(one({ stop_wanted: t }).runner_stop, 'wanted');
+  assert.equal(one({ stop_failed: t }).runner_stop, 'failed');
+  assert.equal(one({ stopped_by_request: t }).runner_stop, 'stopped');
+  assert.equal(one({ stop_wanted: t, stopped_by_request: t }).runner_stop, 'stopped', 'made wins');
+  assert.equal(one({ stop_wanted: t, stop_failed: t }).runner_stop, 'failed');
+  // #458 r1 m-c: ISO to the millisecond only, and not later than now by more than CLOCK_SKEW_MS.
+  const ahead = (ms) => new Date(Date.parse(t) + ms).toISOString();
+  assert.equal(one({ stop_wanted: ahead(CLOCK_SKEW_MS) }).runner_stop, 'wanted', 'inside the skew');
+  for (const bad of [{ stop_wanted: 'soon' }, { stop_failed: 7 }, { stopped_by_request: null }, { stop_wanted: '' }, { stop_wanted: '2026' }, { stop_failed: '2026-11-11' },
+    { stopped_by_request: '2026-11-11T12:00:00Z' }, { stop_wanted: 'Wed, 11 Nov 2026 12:00:00 GMT' }, { stop_wanted: '2026-02-30T12:00:00.000Z' }, { stop_failed: ahead(CLOCK_SKEW_MS + 1) }]) {
+    assert.throws(() => one(bad), /review session R-1 in the review runner's status has a (stop_\w+|stopped_by_request) that is not a time/, JSON.stringify(bad));
+  }
+  assert.equal(STOP_STAMP_SKEW_MS, CLOCK_SKEW_MS, 'one skew for the runner\'s stamps and the Dispatcher\'s reader');
 });
 
 test('L925 rule 2: probe answers for the kinds the worker runner starts; a review, audit or any other kind throws', () => {
