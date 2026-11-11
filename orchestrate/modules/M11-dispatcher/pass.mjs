@@ -51,9 +51,9 @@ export const REVIEW_STOP_FACT = (sid) => `stop-review-${sid}`;
 // While the session is still listed, the stop is asked again after this long (the runner stops at once, or tells Joe
 // itself when a stop it made does not take, review-runner.mjs STOP_IGNORED_MS).
 export const REVIEW_STOP_AGAIN_MS = 5 * 60_000;
-// The asks a session gets before the stop step gives up on it (L962 m5): the runner's status lists no per-session
-// stop_failed, and a session it did stop leaves its running list, so one still listed after this many stop files is
-// one the runner could not stop (it tells Joe itself, review-runner.mjs stop_failed). Said once, then left alone.
+// The asks a session gets before the stop step gives up on it (L962 m5). Since L968 the runner's row shows its own answer
+// (runner_stop), which ends the asking first; this cap is the backstop for a runner that never shows one (an install
+// older than L968, or a stop file it never reached), so such a session is not asked for ever. Said once, then left alone.
 export const REVIEW_STOP_MAX_ASKS = 6;
 // The one daily tell for every review stop that can't be asked (one broken folder fails them all): `stop-reviews-`, not
 // `stop-review-`, so the done sweep over REVIEW_STOP_FACT never reads it.
@@ -371,6 +371,8 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
 }
 
 const REVIEW_KINDS = ['review', 'audit'];
+// What a review session shows of the runner's own stop (L968, worker-ports.mjs reviewSessions runner_stop).
+const RUNNER_STOP = Object.freeze(['stopped', 'wanted', 'failed']);
 // Only a cancel or an ended card ends a reviewer (L947): red, paused and a split don't (reviewers are free of the caps and
 // report no size), and a card waiting on Joe may be waiting on this very review. Ended is M9's REVIEW_OVER (L960), the
 // states whose verdict M9 throws away, not FINAL_STATES: an auditor on a closed card (closed can still move to reverted)
@@ -387,9 +389,15 @@ const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVI
  * failure log on each pass; Joe is told once for all of them (REVIEW_STOP_TELL_FACT), again each day it lasts, and the
  * tell still queued is dropped on a pass with none failing, but told_at stays (L962 m1), so a stop that fails, works
  * and fails again is told once a day, not each time. A session still listed after REVIEW_STOP_MAX_ASKS stop files is
- * given up on (said once; the runner tells Joe its own stop_failed). A fact write the Record refuses is said in the
+ * given up on: said once, and told to Joe once (#458 r1 m-b). A fact write the Record refuses is said in the
  * notes and the failure log (L962 m2). A stop asked for a session no longer listed is marked done. Results go in
- * out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed' | 'given_up'].
+ * out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed' | 'given_up' | 'runner_stopped' | 'runner_wanted' |
+ * 'runner_failed'].
+ * L968: once the runner's row shows its own answer (runner_stop), nothing more is asked: the fact is 'taken', with what it
+ * showed. REVIEW_STOP_MAX_ASKS stays as the backstop for a runner that never shows one: an installed copy older than
+ * this change, or a stop file it never reached (a folder it can't read, a target it reads as none running while the
+ * Dispatcher's list still shows the session). Without it such a session would be asked every REVIEW_STOP_AGAIN_MS for
+ * as long as it is listed.
  */
 async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, failureLog, report, out, portDeadlineMs }) {
   const say = (line) => { out.notes.push(line); failureLog(line); };
@@ -412,9 +420,22 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
     const key = REVIEW_STOP_FACT(s.id);
     const was = factDoc(rec, key)?.doc;
     if (was?.state === 'given_up') { out.reviewStops.push([s.id, why, 'given_up']); continue; }
+    // L968: the runner's own answer on the row ends the asking: a stop made ('stopped', the session not gone yet), one it
+    // tries again itself ('wanted'), or one it gave up on and told Joe ('failed'). Written once per answer it shows.
+    if (RUNNER_STOP.includes(s.runner_stop)) {
+      if (was?.state !== 'taken' || was.runner !== s.runner_stop) {
+        write(key, { ...(was ?? {}), reason: why, card: s.card, role: s.role, head: s.head, since: was?.since ?? iso(now), state: 'taken', runner: s.runner_stop, taken_at: iso(now), last_reason: null }, 'review_stop_taken', was);
+      }
+      out.reviewStops.push([s.id, why, `runner_${s.runner_stop}`]);
+      continue;
+    }
     if ((was?.asks ?? 0) >= REVIEW_STOP_MAX_ASKS) {
-      say(`stops: the ${s.role} ${s.id} for ${word(why)} card ${s.card} is still running after ${was.asks} stop requests; it is not asked again (the review runner tells Joe a stop it could not make)`);
-      write(key, { ...was, state: 'given_up', given_up_at: iso(now) }, 'review_stop_given_up', was);
+      const gaveUp = `the ${s.role} ${s.id} for ${word(why)} card ${s.card} is still running after ${was.asks} stop requests; it is not asked again`;
+      say(`stops: ${gaveUp}`);
+      const kept = write(key, { ...was, state: 'given_up', given_up_at: iso(now) }, 'review_stop_given_up', was);
+      // Told to Joe once (#458 r1 m-b): this runner shows no stop of its own on the row, so nothing else tells him. Only
+      // once the fact says given_up, so a pass that could not write it neither tells twice nor stops asking.
+      if (kept?.ok === true) tellThen(alert, `${gaveUp}; the review runner showed no answer to them, so it may still be using the account. Stop it by hand if it should not run`, { fact: key, fields: { given_up_told_at: iso(now) }, kind: 'review_stop_given_up_told' });
       out.reviewStops.push([s.id, why, 'given_up']);
       continue;
     }
@@ -428,7 +449,9 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
   const failing = [];
   due.forEach(({ s, why, key, was }, n) => {
     const r = answers[n];
-    const base = { ...(was ?? {}), reason: why, card: s.card, role: s.role, head: s.head, since: was?.since ?? iso(now), tries: (was?.tries ?? 0) + 1 };
+    // A runner answer that has since gone from the row (L968 r1 c4) is not kept on a fact that is asking again.
+    const { runner: _shown, taken_at: _takenAt, ...prev } = was ?? {};
+    const base = { ...prev, reason: why, card: s.card, role: s.role, head: s.head, since: was?.since ?? iso(now), tries: (was?.tries ?? 0) + 1 };
     if (r?.ok) {
       write(key, { ...base, state: 'asked', asked_at: iso(now), asks: (was?.asks ?? 0) + 1, last_reason: null }, 'review_stop_asked', was);
       out.reviewStops.push([s.id, why, 'asked']);
@@ -448,7 +471,7 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
     clearCause(rec, REVIEW_STOP_TELL_FACT, () => {}, report, { hold: false });
   }
   for (const f of rec.list('fact')) {
-    if (!f.id.startsWith(REVIEW_STOP_FACT('')) || !['asked', 'failing', 'given_up'].includes(f.doc?.state)) continue;
+    if (!f.id.startsWith(REVIEW_STOP_FACT('')) || !['asked', 'failing', 'given_up', 'taken'].includes(f.doc?.state)) continue;
     if (listed.has(f.id.slice(REVIEW_STOP_FACT('').length))) continue;
     write(f.id, { ...f.doc, state: 'done', done_at: iso(now) }, 'review_stop_done', f.doc);
   }
@@ -493,7 +516,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
 
 /**
  * One pass. Ports:
- *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files }] (head: a review session's, L946)
+ *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files, runner_stop }] (head: a review session's, L946;
+ *                                    runner_stop: a review session's only, 'stopped' | 'wanted' | 'failed', the stop its runner shows, L968)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
  *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
