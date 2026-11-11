@@ -1516,7 +1516,7 @@ export async function runnerPass(ctx) {
         }
       }
       // Started, ended, and nothing counted: no later request starts it again, so it is a hold under its own cause, told
-      // from a day on (the session's end was told at the time). A not-taken hold on this card and head says it already.
+      // from a day on (the session's end was told at the time, unless it was a stop by card, role and head, L962 m6). A not-taken hold on this card and head says it already.
       const key = `${card} ${role}`;
       const madeDoc = newestFirst(rl.launches, now).map((l) => l.doc).find((d) => d.card === card && d.role === role && (d.head === head || d.tree === tree) && !asideIds.has(d.session_id) && !stillNeverRan(d));
       const session = madeDoc?.session_id ?? sid;

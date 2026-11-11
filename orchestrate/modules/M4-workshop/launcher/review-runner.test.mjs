@@ -2547,6 +2547,7 @@ test('L962 m6: a stop by card, role and head ends as a failure with no alert to 
   assert.equal(at.last_reason, 'stopped at the Dispatcher\'s request');
   assert.deepEqual(st.alerts.filter((x) => /^stopped-/.test(x.id)), [], 'nor kept to tell later');
   assert.deepEqual(w.status().offers, []);
+  assert.equal(w.status().stopped_by_request.length, 1, 'the status line stays after the end');
   // A stop by id, in a world of its own, still tells.
   const v = await stopWorld();
   v.w.ask({ request_id: 'id-1' });
