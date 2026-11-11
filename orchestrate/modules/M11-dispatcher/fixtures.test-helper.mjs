@@ -192,9 +192,9 @@ export function parkOnLimit(rec, id, { ranAt = T0, parkedAt = ranAt, account, ca
 const clocks = new WeakMap();
 /** Moves the Record's clock of a recWith record (ms): its later writes are stamped then. */
 export const setClock = (rec, ms) => { clocks.get(rec).t = ms; };
-export function recWith(entries = [], { now = T0, dead = null } = {}) {
+export function recWith(entries = [], { now = T0, dead = null, outboxRoot } = {}) {
   const clock = { t: now };
-  const rec = memoryRecord({ now: () => clock.t, dead });
+  const rec = memoryRecord({ now: () => clock.t, dead, outboxRoot });
   clocks.set(rec, clock);
   for (const [entity, id, doc] of entries) seed(rec, entity, id, doc);
   return rec;

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeRecord, memoryRecord, outboxKind, isActor, isNotARecord, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { makeRecord, memoryRecord, outboxKind, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
 import { tempDir } from './test-tmp.mjs';
 import { PRODUCT_OUTBOX_ROLES } from './product-paths.mjs';
 
@@ -180,11 +180,12 @@ test('L151 m7: the stand-in refuses a missing file, a link and the wrong folder 
   assert.equal(rec.applyOutbox(lead, join(root, 'lead', 'L-1', 'think-3.md')).reason, 'file is a link');
   assert.match(rec.applyOutbox(lead, file('lead', 'L-2', 'think-4.md')).reason, /not directly inside the lead outbox of session L-1/);
   assert.equal(memoryRecord({ outboxRoot: '' }).applyOutbox(lead, think).reason, 'no outbox root configured', 'an empty root: refused, as M9');
-  // With no root at all (M11's fixture), the folder cannot be checked, but a missing file or a link is still refused.
+  // With no root at all, every file is refused, as M9 refuses one: a real file in its own folder, a missing one, a link,
+  // and a worker's in its product's folder (L910: no test hands in a file the real Record would not find).
   const bare = memoryRecord();
-  assert.equal(bare.applyOutbox(lead, `${think}.missing`).reason, 'file not found');
-  assert.equal(bare.applyOutbox(lead, join(root, 'lead', 'L-1', 'think-3.md')).reason, 'file is a link');
-  assert.ok(isNotARecord(bare.applyOutbox(lead, think)));
+  for (const f of [think, `${think}.missing`, join(root, 'lead', 'L-1', 'think-3.md')]) assert.equal(bare.applyOutbox(lead, f).reason, 'no outbox root configured', f);
+  assert.equal(bare.applyOutbox({ role: 'worker', product: PROD, sessionId: 'S-4' }, file('worker', 'S-4', 'report-C-1.md')).reason, 'no outbox root configured');
+  assert.equal(bare.diary().length, 0);
   assert.equal(rec.diary().length, 0);
 });
 

@@ -3031,15 +3031,6 @@ function outboxPlace({ outboxRoot, tag, file }) {
   return { ok: true, real, folders };
 }
 
-// The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
-function fileOnly(file) {
-  const given = typeof file === 'string' ? file : '';
-  if (!given) return { ok: false, reason: 'no file' };
-  let real;
-  try { real = realpathSync(given); } catch { return { ok: false, reason: 'file not found' }; }
-  return basename(given) === basename(real) ? { ok: true, real } : { ok: false, reason: 'file is a link' };
-}
-
 function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
   const m = /^([a-z_]+):(.+)$/s.exec(String(a));
@@ -3180,12 +3171,11 @@ function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) 
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
-      // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
-      // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
+      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. With no
+      // outbox root it refuses every file, as M9 does, so no test hands in a file the real Record would not find (L910).
       // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
       // (L850-2); a tag's product still picks the folder through outboxPlace.
-      const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
+      const place = outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();

@@ -304,9 +304,9 @@ async function messages(mirror, shas, names, about) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
- *   outboxRoot              this product's own outbox folder, <runner outbox root>/<product> (L836), not the runner's
- *                           outbox root above it: a worker's outbox must really be <root>/worker/<session id>
- *                           (<root>/script/<session id> for a script card, L767)
+ *   outboxRoot              the TOP outboxes folder (<base>/outboxes), not a product's folder under it: a worker's
+ *                           outbox must really be <root>/<product>/worker/<session id> (<root>/<product>/script/<session id>
+ *                           for a script card; L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
