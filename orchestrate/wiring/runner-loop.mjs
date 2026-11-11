@@ -167,7 +167,7 @@ const PORTS = ['start', 'groupGone', 'stopGroup', 'saveWork', 'pauseLead', 'outb
 export async function runnerTick(ctx) {
   const { requestsDir, statusFile, memoryFile, orchestrateUid, ports, clock = Date.now, note = () => {}, files = {} } = ctx;
   for (const p of PORTS) if (typeof ports?.[p] !== 'function') throw new Error(`the worker runner has no ${p} port`);
-  const read = files.read ?? ((f) => readRequest(f, { orchestrateUid }));
+  const read = files.read ?? ((f) => readRequest(f, { orchestrateUid, now: clock() }));
   const write = files.write ?? ((f, text, mode) => writeStatus(f, text, { mode }));
   let names = [];
   if (!ctx.readNone) try { names = listRequests(requestsDir, files); } catch (e) { note(`the worker runner's requests can't be listed (${e?.code ?? e?.message}); this pass reads none`); }

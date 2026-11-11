@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
@@ -187,6 +187,16 @@ test('step 1: a request file is written exclusively; the same ask twice is one f
   w('stop-s1.json', 'a'); w('stop-s1.json', 'b');
   assert.deepEqual([...made], [['/req/stop-s1.json', 'a']]);
   assert.throws(() => requestWriter('/req', () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); })('x.json', ''), /EACCES/, 'any other failure is told');
+});
+
+test('PR A self-review M1: a request is 0644 under the Dispatcher job\'s umask 077, so the runner (another user) can read it', () => {
+  const d = tempDir('orch-req-'); const old = process.umask(0o077);
+  try {
+    const w = requestWriter(d);
+    w('stop-s1.json', 'a\n'); w('stop-s1.json', 'b\n');
+    assert.equal(statSync(join(d, 'stop-s1.json')).mode & 0o777, 0o644);
+    assert.equal(readFileSync(join(d, 'stop-s1.json'), 'utf8'), 'a\n', 'the first ask stands');
+  } finally { process.umask(old); }
 });
 
 test('#324 r1 m1, m4, c1, c2: a status that contradicts itself is not known; a live session stays on the board whatever stop_requested says', () => {

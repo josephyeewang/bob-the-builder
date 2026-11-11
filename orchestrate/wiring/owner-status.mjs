@@ -53,7 +53,7 @@
 // The runner's probe answers only for its own sessions: the wiring routes each session to its own kind's probe.
 // The shared reader with review-runner's readReviewStatus is a later extraction that keeps behaviour (L739, L248).
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
@@ -244,8 +244,19 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
   };
 }
 
+/**
+ * A new file, exclusively, 0644 whatever the umask: the Dispatcher's job runs with umask 077 (setup/dispatcher-setup.mjs),
+ * which would leave a request 0600, orchestrate's alone, and the runner (the owner's user, which reads it through no
+ * access list: setup/layout.mjs WORKER_REQUESTS_ACL) could not open it (PR A self-review M1). Set by handle, as
+ * runner-files.mjs writeStatus does.
+ */
+export function writeNewReadable(path, text, { flag = 'wx', mode = 0o644 } = {}) {
+  const fd = openSync(path, flag, mode);
+  try { fchmodSync(fd, mode); writeFileSync(fd, text); } finally { closeSync(fd); }
+}
+
 /** The Dispatcher's write of one request file: exclusive, so a second ask for the same thing is the same file. */
-export function requestWriter(requestsDir, write = writeFileSync) {
+export function requestWriter(requestsDir, write = writeNewReadable) {
   return (name, text) => {
     try { write(join(requestsDir, name), text, { flag: 'wx', mode: 0o644 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; }
   };

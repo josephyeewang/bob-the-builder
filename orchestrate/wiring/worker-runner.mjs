@@ -207,6 +207,8 @@ export async function workerRunnerPass(ctx) {
 
   // 2. The requests.
   for (const { name, body } of requests) {
+    // One still being written (#433 r1 m1, runner-files.mjs REQUEST_SETTLE_MS) is left as it is, for the next pass.
+    if (body?.notYet) continue;
     // Removed before it is acted on (its body was read by the caller), so it is never acted on twice; one that can't be
     // removed is left for the owner and not acted on (m6).
     try { remove(name); } catch (e) { note(`request ${String(name).slice(0, 80)} could not be removed (${e?.message ?? e}); not read`); continue; }
