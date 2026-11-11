@@ -12,7 +12,7 @@ import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.m
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
-import { RECHECK, checkRunnerConfig, lockedWiring, startDeps, workerCheckInputs } from './runner-main.mjs';
+import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, startDeps, workerCheckInputs } from './runner-main.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
 // #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
@@ -163,8 +163,12 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
   assert.deepEqual(await on.startDeps.checksFor(wx)[4](), { ok: true });
   assert.deepEqual(await on.saveWork(session), { ok: false, reason: 'stand-in' });
   assert.deepEqual(seen, ['install', 'save-work'], 'one runLocked ran both');
-  // By default it is built from the config's claude: one there, both on.
+  // By default it is built from the config's claude: one there, both on, with the config's time limit.
   assert.equal(typeof lockedWiring(c).runLocked, 'function');
+  let made; lockedOf({ ...c, lockedMs: 5000 }, { make: (o) => { made = o; return () => {}; } });
+  assert.deepEqual([made.claudeBin, made.ms, typeof made.envOf], ['/i/claude', 5000, 'function']);
+  assert.equal(lockedOf({ ...c, claudeBin: undefined }), null, 'no claude: none, so both off');
+  assert.throws(() => checkRunnerConfig({ ...c, products: c.products, lockedMs: 0 }), /lockedMs must be/);
 });
 
 test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline runs only once it passes, and must exit 0', async () => {

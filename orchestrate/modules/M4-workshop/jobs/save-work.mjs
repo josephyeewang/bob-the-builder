@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // The save-work job (L969): run only by the lock-down runner (wiring/runner-locked.mjs), inside a worker's lock-down, as
 // `node <this file> <base64 JSON arguments> <result file>`. It runs M4's saveWorkJob and writes its answer, as one JSON
 // line, into the result file (new, never through a link). It is orchestrate's code, outside every copy; it imports only

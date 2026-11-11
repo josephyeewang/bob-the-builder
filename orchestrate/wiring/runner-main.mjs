@@ -9,7 +9,7 @@
 // descriptor, inside the installed copy, and owned by root or this user alone. It names every path:
 //   { "installRoot": "/abs", "requestsDir": "/abs", "statusFile": "/abs", "orchestrateUid": <uid>,
 //     "outboxRoot": "/abs", "copiesRoot": "/abs", "home": "/abs", "path": "/abs:/abs", "claudeBin": "/abs",
-//     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
+//     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>, "lockedMs": <ms>? (the lock-down jobs' limit, runner-locked.mjs LOCKED_MS),
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
 //     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913) }
@@ -69,6 +69,7 @@ export function checkRunnerConfig(c) {
   for (const k of UIDS) if (!Number.isInteger(c[k]) || c[k] < 0) fail(`${k} must be a uid`);
   if (typeof c.path !== 'string' || !c.path || !c.path.split(':').every(fullPath)) fail('path must be full folders in their simplest form joined by ":"');
   if (!Number.isFinite(c.claimMs) || c.claimMs <= 0) fail('claimMs must be the claim timeout in ms');
+  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0)) fail('lockedMs must be the lock-down jobs\' time limit in ms (left out: 15 minutes)');
   if (!c.products || typeof c.products !== 'object' || Array.isArray(c.products) || !Object.keys(c.products).length) fail('products must name at least one product');
   for (const [name, p] of Object.entries(c.products)) {
     if (!productName(name)) fail(`product ${JSON.stringify(name)} is not a product name`);
@@ -188,7 +189,7 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
  */
 export function lockedOf(c, { make = lockedRunner } = {}) {
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return null;
-  return make({ claudeBin: c.claudeBin, envOf: () => {
+  return make({ claudeBin: c.claudeBin, ...(c.lockedMs !== undefined ? { ms: c.lockedMs } : {}), envOf: () => {
     const who = accountInUse({ home: c.home });
     if (!who?.account) throw new Error(who?.reason ?? 'no answer');
     return roleEnv(process.env, { path: c.path, extra: { ...who.env, HOME: c.home } });

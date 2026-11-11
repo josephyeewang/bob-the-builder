@@ -20,7 +20,7 @@
 // wall; save-work's answer is checked again on the disk by createSaveWork (the bundle a plain file in the outbox).
 //
 // Proven on the Mini only (a capability claim tied to the pinned claude version, void on a pin move; the Mini checklist,
-// LANES-MINI-CHECKLIST.md "runLocked"): that claude runs the job's command under dontAsk with the worker hooks; that
+// modules/M4-workshop/README.md "Live proofs still to run", item 9): that claude runs the job's command under dontAsk with the worker hooks; that
 // node can read orchestrate's code from inside the sandbox; that safe-git's temporary folder is writable there.
 import { closeSync, constants, fstatSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';

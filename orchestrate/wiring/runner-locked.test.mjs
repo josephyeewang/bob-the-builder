@@ -63,6 +63,23 @@ test('L969: a real save-work job (M4\'s own script, run by node) makes the card\
   assert.equal(existsSync(jobFile({ cwd: w.clone, job: 'save-work', sessionId: 'S-1' })), false, 'the result file is removed');
 });
 
+test('L969: save-work believes no answer alone: the bundle must be a plain, non-empty file of the card in the outbox', async () => {
+  const d = tempDir('orch-locked-');
+  const outbox = join(d, 'outbox'); mkdirSync(outbox);
+  const want = join(outbox, bundleName('C-1'));
+  const save = (bundle) => createSaveWork({ runLocked: async () => ({ ok: true, bundle }) })({ clone: join(d, 'clone'), mirror: join(d, 'm.git'), card: 'C-1', branch: 'card/c-1', outbox });
+  const no = { ok: false, reason: 'the save-work job answered, but no bundle of the card is in the outbox' };
+  assert.deepEqual(await save(want), no, 'none there');
+  writeFileSync(want, '');
+  assert.deepEqual(await save(want), no, 'an empty one');
+  writeFileSync(want, 'x');
+  assert.deepEqual(await save(join(outbox, 'other.bundle')), no, 'the answer names another file');
+  assert.deepEqual(await save(want), { ok: true, bundle: want });
+  const other = join(d, 'elsewhere'); writeFileSync(other, 'x');
+  const link = join(outbox, bundleName('C-2')); symlinkSync(other, link);
+  assert.deepEqual(await createSaveWork({ runLocked: async () => ({ ok: true, bundle: link }) })({ clone: join(d, 'clone'), mirror: join(d, 'm.git'), card: 'C-2', branch: 'card/c-2', outbox }), no, 'a link');
+});
+
 test('L969: every way runLocked can fail is a throw with a plain reason, and nothing is run for one found before claude', async () => {
   const { d, cwd, settingsFile } = world();
   const calls = [];

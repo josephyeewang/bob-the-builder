@@ -208,6 +208,13 @@ test('step 5: save-work refuses without the lock-down runner, and the pause is n
   const seen = [];
   await saveWorkPort({ mirrorOf: () => '/m', make: () => async (x) => { seen.push(x); return { ok: true }; } })(s);
   assert.deepEqual(seen, [{ clone: '/copies/C-1', mirror: '/m', card: 'C-1', branch: 'card/c-1', outbox: `/o/worker/${SID}` }]);
+  // L969: runLocked is bound to the session: its id, role, own settings file and copy.
+  const jobs = [];
+  let given;
+  await saveWorkPort({ mirrorOf: () => '/m', settingsDir: '/st', runLocked: async (j) => { jobs.push(j); return { ok: true }; },
+    make: ({ runLocked }) => { given = runLocked; return async (x) => runLocked({ job: 'save-work', args: x }); } })({ ...s, id: SID, kind: 'editing' });
+  assert.equal(typeof given, 'function');
+  assert.deepEqual(jobs, [{ job: 'save-work', args: seen[0], sessionId: SID, role: 'worker', settingsFile: `/st/${SID}.json`, cwd: '/copies/C-1' }]);
   const p = await pauseLeadPort()({ product: 'p1' });
   assert.equal(p.ok, false); assert.match(p.reason, /^not wired: /);
 });
@@ -304,6 +311,19 @@ test('step 5: a script card gets the script outbox', async () => {
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
+// L970: lane 1's prompt builder needs the copy's head and the session's outbox, so it is asked once both exist.
+test('L970: the prompt is asked for with the copy\'s head and the outbox, once both are made', async () => {
+  const asked = [];
+  const w = world({ promptFor: async (q) => { asked.push({ ...q, copyThere: existsSync(join(w.mine.copies, 'C-1')), outboxThere: existsSync(q.outbox) }); return 'do the card'; } });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(asked.length, 1);
+    assert.deepEqual([asked[0].head, asked[0].outbox, asked[0].copyThere, asked[0].outboxThere, asked[0].card, asked[0].role, asked[0].kind, asked[0].product],
+      [HEAD, join(w.mine.outboxes, 'worker', SID), true, true, 'C-1', 'worker', 'editing', 'p1']);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
 test('step 5: a start refused before the copy makes nothing; one refused after it removes what it made', async () => {
   const cases = [
     ['a card claimed by another session', { readCard: () => ({ ok: true, doc: { state: 'claimed', claim: { session_id: 'x' } } }) }, /not claimed for this session/],
@@ -312,7 +332,6 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a card naming no product', { readCard: () => ({ ok: true, doc: { state: 'claimed', claim: { session_id: SID } } }) }, /names no product/],
     ['a Tier 1 card with no main_commit', { startCommit: cardStartCommit }, /main_commit/],
     ['a runner that is stopping', { stopped: () => true }, /is stopping$/],
-    ['no prompt', { promptFor: () => null }, /^not wired: no worker prompt/],
     ['no sign-in', { account: () => ({ account: null, reason: 'not set up' }) }, /not set up/],
     ['no start commit', { startCommit: async () => { throw new Error('no main'); } }, /no main/],
     ['a copy that can\'t be made', { prepare: async () => ({ ok: false, reason: 'copy folder already exists' }) }, /already exists/],
@@ -336,6 +355,10 @@ test('step 5: a start refused before the copy makes nothing; one refused after i
     ['a launch that throws', { launchFn: async () => { throw new Error('boom'); } }, /boom/],
     ['claude not spawned', { spawn: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); } }, /could not be spawned/],
     ['no start time', { pidStartOf: () => null, kill: () => {}, there: () => false }, /start time could not be read/],   // #364 r2 n3: no real group is signalled
+    // L970: the prompt is asked for once the copy and the outbox are made; none takes both away and says the builder's reason.
+    ['no prompt', { promptFor: () => null }, /^not wired: no worker prompt is given to the runner$/],
+    ['a prompt refused', { promptFor: () => ({ ok: false, reason: 'the card has no plan' }) }, /^not wired: no worker prompt is given to the runner \(the card has no plan\)$/],
+    ['a prompt builder that throws', { promptFor: async () => { throw new Error('boom in builder'); } }, /^not wired: no worker prompt is given to the runner \(boom in builder\)$/],
   ];
   for (const [what, over, re] of after) {
     const w = world(over);
