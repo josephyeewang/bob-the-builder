@@ -19,9 +19,10 @@
 //                           Checks 1, 2, 3 and 8 run once more just before claude starts (#369 M1, r1 m1 and m2;
 //                           runner-main.mjs startDeps `beforeStart`), since checks 4 and 11 run the branch's own code.
 //   3  outbox emptied       reviewChecks' 3 (emptyOutbox, with `busy` the "what holds this folder" port)
-//   4  dependencies         NO PORT: the install runs inside the lock-down (launch.mjs installStep), through the
-//                           lock-down runner (`runLocked`), which is not built (save-work waits on it too). Until it is,
-//                           launch() refuses a worker here and no worker starts. A script session skips check 4.
+//   4  dependencies         the install inside the lock-down (launch.mjs installStep), through the lock-down runner
+//                           (runner-locked.mjs `runLocked`, L969), with the product's declared install command
+//                           (render.product.commands.install) and its registry hosts (render.registryHosts). No runLocked
+//                           or no install command, no port: launch() refuses a worker here. A script session skips check 4.
 //   5  role file            reviewChecks' 5: the settings file read back without following a link, byte for byte what
 //                           the start port wrote (the same text form as review-settings.mjs templateText), and
 //                           checkSettings passes it
@@ -58,15 +59,14 @@
 //   13 Bob method folder    reviewChecks' 13 against the pinned file list; no list, no port
 // The inputs come from the start port's `x` and the runner's config (runner-main.mjs workerCheckInputs).
 
-import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, constants } from 'node:fs';
+import { lstatSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { reviewChecks } from '../modules/M4-workshop/launcher/review-launch.mjs';
-import { lockedRunCommand, baselineTest } from '../modules/M4-workshop/launcher/launch.mjs';
-import { roleArgs } from '../modules/M4-workshop/launcher/readback.mjs';
+import { baselineTest, installStep } from '../modules/M4-workshop/launcher/launch.mjs';
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
-import { groupThere } from './runner-ports.mjs';
+import { exitCodeCommand, readNoLink, runLockedCommand } from './runner-locked.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -144,36 +144,9 @@ export async function setupFilesProblem({ copy, mirror, mainAt }, { run = git } 
   return missing.length ? `main's ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} not put back in the copy` : null;
 }
 
-function readNoLink(p) {
-  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return readFileSync(fd); } finally { closeSync(fd); }
-}
-
-const q = (p) => { if (/['\0\n]/.test(p)) throw new Error('a baseline path holds a quote or a line break'); return `'${p}'`; };
-/** The baseline's file (in the copy) its exit code is written to, and the one shell command. */
+/** The baseline's file (in the copy) its exit code is written to, and the one shell command (runner-locked.mjs's form). */
 export const baselineFile = ({ copy, sessionId }) => join(copy, `.orch-baseline-${sessionId}`);
-export function baselineCommand(test, file) {
-  if (typeof test !== 'string' || !test.trim() || /[\0\n]/.test(test)) throw new Error('the product declares no one-line test command');
-  return `( ${test} ); /bin/echo $? > ${q(file)}`;
-}
-
-// Runs one claude to its end (or the time limit). → { exitCode }, or a throw. It leads its own process group, so a
-// time-out kills the tests it started too, not claude alone (#369 m2), and so does a normal end (#369 r1 M1): what the
-// tests left running in the group goes with it. After the end, the group is killed only if signal 0 still finds it
-// (#369 r2 c3; runner-ports.mjs groupThere, the one test of a group): an empty group's number is not signalled.
-function runToEnd(spawn, bin, args, opts, timeoutMs, kill = (g) => process.kill(-g, 'SIGKILL'), there = groupThere) {
-  return new Promise((resolve, reject) => {
-    let child;
-    try { child = spawn(bin, args, { ...opts, detached: true, stdio: ['ignore', 'ignore', 'ignore'] }); } catch (e) { reject(e); return; }
-    const group = () => Number.isInteger(child.pid) && child.pid > 1;
-    const t = setTimeout(() => {
-      try { if (group()) kill(child.pid); else child.kill('SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
-      reject(new Error('it did not finish in time'));
-    }, timeoutMs);
-    child.on('error', (e) => { clearTimeout(t); reject(e); });
-    child.on('close', (code) => { clearTimeout(t); try { if (group() && there(child.pid)) kill(child.pid); } catch { /* none of the group is left */ } resolve({ exitCode: code }); });
-  });
-}
+export const baselineCommand = (test, file) => exitCodeCommand(test, file, 'test command');
 
 /**
  * The ports for one worker-runner session. x: the start port's { role, profile, kind, sessionId, card, cardDoc, product,
@@ -204,11 +177,10 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
       try {
         const f = baselineFile({ copy: t.copy, sessionId: x.sessionId });
         let cmd; try { cmd = baselineCommand(x.testCommand, f); } catch (e) { return refuse(e.message); }
-        const lr = lockedRunCommand({ claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, roleArgs, profile: x.profile });
-        if (!lr.ok) return lr;
         rmSync(f, { force: true });
         b = await baselineTest({ run: async () => {
-          await runToEnd(x.spawn, lr.bin, lr.args, { cwd: t.copy, env: x.env }, x.baselineMs ?? BASELINE_MS, x.killGroup, x.groupThere);
+          await runLockedCommand({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, profile: x.profile, cwd: t.copy, env: x.env,
+            ms: x.baselineMs ?? BASELINE_MS, killGroup: x.killGroup, groupThere: x.groupThere });
           // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
           let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
           return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
@@ -217,6 +189,13 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
       if (!b.ok) return b;
       return smoke;
     };
+  }
+  // Check 4 (L969): the product's install inside the lock-down, through installStep (the install-phase settings with the
+  // registry's hosts, then the session's again, the registry shown gone). Only with the runner's runLocked, which
+  // save-work has too (runner-main.mjs lockedWiring: one value, so a launch is never possible while a save is not, #456 r1 m3).
+  if (typeof x.runLocked === 'function' && has(x.installCommand) && typeof x.renderPhase === 'function' && typeof x.writeSettings === 'function') {
+    ports[4] = () => installStep({ render: x.renderPhase, write: x.writeSettings, registryHosts: Array.isArray(x.registryHosts) ? x.registryHosts : [],
+      install: () => x.runLocked({ job: 'install', command: x.installCommand, sessionId: x.sessionId, role: x.role, settingsFile: x.settings?.file, cwd: x.copy }) });
   }
   if (x.budget) {
     const gate = gateOf(x.budget);

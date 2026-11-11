@@ -541,11 +541,14 @@ function asksWorld({ runner = {}, session = true } = {}) {
   // A session the runner started earlier, still running: what a save or a stop is asked about.
   const listed = { id: LIVE, product: P, kind: 'editing', card: 'C-9', lead: null, role: 'worker', pgid: 4321, signin: 's', config_dir: '/cfg', bundle_files: [], outbox, uid: OWNER,
     outbox_open: true, stop_requested: false, alive: true, ended: false, pid: 4321, pid_start: '2026-11-11T11:00:00Z', head: HEAD, copy: join(c.copiesRoot, P, 'C-9'), started_at: AT - 60_000 };
+  // The product's folders, as setup makes them (L836).
+  for (const f of [join(c.copiesRoot, P), join(c.outboxRoot, P, 'worker')]) mkdirSync(f, { recursive: true, mode: 0o700 });
   const x = { now: AT, nonces: 0, notes: [], stops: [], state: session ? { sessions: [listed], requests: { [LIVE]: { state: 'started', at: AT - 60_000 } }, answers: {}, seen: {} } : {}, pending: new Map() };
-  const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
+  const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, settingsDir: join(w.base, 'worker-runner', 'runner', 'settings'), products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
   x.ports = {
     // Real: the start port as runner-main.mjs makes it, less what it reads first (the card, claimed for the asked session).
-    start: startPort(rc, { readCard: () => ({ ok: true, doc: { state: 'claimed', product: P, claim: { session_id: x.sid } } }) }),
+    // The start commit and the sign-in are stood in for too (L970: the prompt is asked for once the copy and the outbox are made).
+    start: startPort(rc, { readCard: () => ({ ok: true, doc: { state: 'claimed', product: P, claim: { session_id: x.sid } } }), startCommit: async () => w.first, account: () => ({ account: 's', env: {} }) }),
     saveWork: saveWorkPort({ mirrorOf: () => w.mirror }),
     pauseLead: pauseLeadPort(),
     groupGone: async (g) => x.stops.includes(g.pgid),

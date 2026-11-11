@@ -735,7 +735,7 @@ async function boobyTrap(w) {
   return { markers, fired: () => readdirSync(markers) };
 }
 
-const lockedRunner = () => { const r = { calls: 0 }; r.run = async (fn) => { r.calls++; return fn(); }; return r; };
+const lockedRunner = () => { const r = { calls: 0 }; r.run = async (j) => { r.calls++; r.job = j.job; return j.run(); }; return r; };
 const underClone = (w, c) => [c.gitDir, c.cwd, c.workTree].some((p) => p && (p === w.clone || p.startsWith(w.clone + '/')));
 
 test('R-0b-46: a booby-trapped clone: save-work, the push, the launch check and the restart check run none of its programs', async () => {

@@ -16,7 +16,9 @@
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
 // pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
-// first at check 4 (no install port), a script session at check 12.
+// first at check 4 when its product declares no install command (render.product.commands.install; its registry hosts in
+// render.registryHosts), a script session at check 12. Check 4 and save-work run through one lock-down runner
+// (lockedWiring, L969, #456 r1 m3), so neither is ever on without the other.
 // Each product's render.paths.deny must name the Record, ~/.ssh, the gh config, ~/.claude and the robot keys (full paths,
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
@@ -45,7 +47,9 @@ import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/s
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
-import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
+import { lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
@@ -124,9 +128,9 @@ export function checkRunnerConfig(c) {
 }
 
 /** What the launch checks read for one start (runner-checks.mjs workerChecks): the start port's x and the config's. */
-export function workerCheckInputs(c, x, { log = () => {} } = {}) {
+export function workerCheckInputs(c, x, { log = () => {}, runLocked = null } = {}) {
   const p = c.products[x.product];
-  return { ...x, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
+  return { ...x, runLocked, installCommand: p.render.product?.commands?.install, registryHosts: p.render.registryHosts, mirror: p.mirror, pin: c.pin, hooksDir: p.render.paths.hooksDir, rules: p.rules, snapshot: p.render.paths.snapshot, writeSnapshot,
     machineWide: c.machineWide, busy: holdersOf, alert: (t) => log(`worker runner: ${x.sessionId}: ${t}`), spawn: childSpawn, home: c.home,
     testCommand: p.render.product?.commands?.test, budget: null, bobFolder: p.render.paths.bobFolder, bobManifest: null };
 }
@@ -136,7 +140,7 @@ export function workerCheckInputs(c, x, { log = () => {} } = {}) {
 export const RECHECK = Object.freeze([1, 2, 3, 8]);
 /** The start port's ports from the config: the stop flag, check 0's pinned version, the worker launch checks, and the
  * RECHECK checks once more just before claude starts. */
-export const startDeps = (c, { stopped = () => false, log, productHeld, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
+export const startDeps = (c, { stopped = () => false, log, productHeld, runLocked = null, checksOf = (x) => workerChecks(workerCheckInputs(c, x, { log, runLocked })) } = {}) => ({ stopped, log, productHeld, names: { version: c.pin },
   checksFor: checksOf,
   beforeStart: async (x) => {
     const k = checksOf(x);
@@ -178,15 +182,41 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   return null;
 }
 
+/**
+ * The one lock-down runner of this runner (L969): null when the config names no claude to run a job with. The sign-in is
+ * read for each job, as the start port reads it for each start.
+ */
+export function lockedOf(c, { make = lockedRunner } = {}) {
+  if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return null;
+  return make({ claudeBin: c.claudeBin, envOf: () => {
+    const who = accountInUse({ home: c.home });
+    if (!who?.account) throw new Error(who?.reason ?? 'no answer');
+    return roleEnv(process.env, { path: c.path, extra: { ...who.env, HOME: c.home } });
+  } });
+}
+
+/**
+ * Save-work and launch check 4 from ONE runLocked (#456 r1 m3): a launch is never possible while its work could not be
+ * saved. Without one, save-work refuses ("lock-down") and no worker passes check 4 (no port); with one, both run.
+ */
+export function lockedWiring(c, { runLocked = lockedOf(c), stopped, log, productHeld } = {}) {
+  return {
+    runLocked,
+    saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror, runLocked, settingsDir: c.settingsDir }),
+    startDeps: startDeps(c, { stopped, log, productHeld, runLocked }),
+  };
+}
+
 /** Every SIGTERM is listened for, not only the first (#364 r1 m4): a second one during the drain must not end the run. */
 export const listenStop = (fn) => { process.on('SIGTERM', fn); };
 
 /** The ports from the config; `over` replaces any (a test's fakes). `stopped` tells the start port the runner is stopping. */
-export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld } = {}) {
+export function realRunnerPorts(c, over = {}, { stopped = () => false, log, productHeld, runLocked } = {}) {
+  const locked = lockedWiring(c, { stopped, log, productHeld, ...(runLocked !== undefined ? { runLocked } : {}) });
   return {
     ...processGroupPorts(),
-    start: startPort(c, startDeps(c, { stopped, log, productHeld })),
-    saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
+    start: startPort(c, locked.startDeps),
+    saveWork: locked.saveWork,
     pauseLead: pauseLeadPort(),
     // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
     // The session reader (L899) gives the attempt whose push took the card's bundle (L898).

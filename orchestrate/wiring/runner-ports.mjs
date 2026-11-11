@@ -40,7 +40,8 @@
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in
 //     them as a session), so the card's next start is not refused for a copy left over.
 //   saveWork(session): M4 save-work (createSaveWork) on the session's copy, into its outbox. It runs only through the
-//     lock-down runner (`runLocked`), which is not built; without it save-work refuses, as it says it must.
+//     lock-down runner (runner-locked.mjs `runLocked`, L969), under the session's own settings file; without it save-work
+//     refuses, as it says it must. runner-main.mjs lockedWiring gives it the same runLocked as launch check 4.
 //   pauseLead({ product }): the Lead's WRAP flow (lead-restart.mjs through sendSafe) needs the activity tracker's feed,
 //     which nothing gives the runner yet; it refuses ("not wired").
 //   outboxDrained(session): true when the outbox is gone, or every file in it (dot files count) has the Record's intake
@@ -54,7 +55,7 @@
 // each character but a letter or digit made "-">/<session id>.jsonl) is CHECKED AGAINST NOTHING YET, as transcript.mjs's
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
-import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
+import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -192,12 +193,15 @@ export function drainedPort({ list = readdirSync, readFact = noFactReader, readS
 }
 
 /** saveWork(session) → M4 save-work's answer. `runLocked` is the lock-down runner; left out, save-work refuses. */
-export function saveWorkPort({ mirrorOf, runLocked, make = createSaveWork } = {}) {
-  const saveWork = make({ runLocked });
+export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSaveWork } = {}) {
   return async (s) => {
     const mirror = mirrorOf?.(s.product);
     if (typeof mirror !== 'string' || !mirror) return refuse(`product ${s.product} has no mirror in the runner's config`);
-    return saveWork({ clone: s.copy, mirror, card: s.card, branch: cardBranch(s.card), outbox: s.outbox });
+    // The save runs under the session's own settings (its copy and outbox writable, no network), as the session ran.
+    const bound = typeof runLocked === 'function'
+      ? (j) => runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, `${s.id}.json`) : undefined, cwd: s.copy })
+      : undefined;
+    return make({ runLocked: bound })({ clone: s.copy, mirror, card: s.card, branch: cardBranch(s.card), outbox: s.outbox });
   };
 }
 
@@ -346,7 +350,7 @@ export function startPort(c, deps = {}) {
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir),
   } = deps;
-  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, ...(deps.fs ?? {}) };
+  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, rename: renameSync, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
   return async ({ card, kind, product, sessionId, live = [] } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
@@ -364,8 +368,6 @@ export function startPort(c, deps = {}) {
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
     if (cd.doc.product !== product) return refuse(cd.doc.product === undefined ? 'the card names no product' : 'the card is another product\'s');
-    const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product });
-    if (typeof prompt !== 'string' || !prompt) return notWired('no worker prompt is given to the runner');
     const who = account();
     if (!who?.account) return refuse(`no sign-in to start with (${who?.reason ?? 'no answer'})`);
     let commit; try { commit = await startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }); } catch (e) { return refuse(`the copy's start commit can't be read (${e?.message ?? e})`); }
@@ -391,6 +393,14 @@ export function startPort(c, deps = {}) {
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
     if (!(await sameMain())) return undo('main changed during launch; retry');
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
+    // The worker's prompt (L970): built once the copy's head and the outbox exist, since the builder names both. A string,
+    // or { ok: false, reason }; either way no prompt takes the copy and the outbox away again, and says the builder's reason.
+    let given; try { given = await promptFor({ role, kind, card, cardDoc: cd.doc, product, head: made.head, outbox }); } catch (e) { given = { ok: false, reason: e?.message ?? String(e) }; }
+    if (typeof given !== 'string' || !given) {
+      const why = given && typeof given === 'object' && typeof given.reason === 'string' && given.reason ? ` (${given.reason.slice(0, 300)})` : '';
+      return undo(`not wired: no worker prompt is given to the runner${why}`);
+    }
+    const prompt = given;
     // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
     // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
     try { for (const n of fs.list(mine.copies)) if (n.startsWith(`${card}..baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
@@ -416,7 +426,7 @@ export function startPort(c, deps = {}) {
     others.push(spare);
     others = [...new Set(others)];
     const r = p.render;
-    const settingsFor = (at, box, deny) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
+    const settingsFor = (at, box, deny, phase = {}) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes, ...phase,
       paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny] } } });
     const w = settingsFor(copy, outbox, others);
     if (!w?.ok) return undo(w?.reason ?? 'not walled: no answer');
@@ -439,7 +449,18 @@ export function startPort(c, deps = {}) {
       try { fs.writeNew(spareSettings, `${JSON.stringify(tw.settings, null, 2)}\n`); } catch (e) { return no(`has no settings file (${e?.code ?? e?.message})`); }
       return { ok: true, copy: at, settingsFile: spareSettings, done };
     };
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway };
+    // Check 4 (L969, installStep): 'install' renders the same walled settings with the product's registry hosts; 'session'
+    // is the very settings written above, so the file put back after the install is byte for byte what check 5 reads back.
+    const renderPhase = (phase) => (phase === 'session' ? { ok: true, settings: w.settings }
+      : phase === 'install' ? settingsFor(copy, outbox, others, { phase: 'install', registryHosts: Array.isArray(r.registryHosts) ? r.registryHosts : [] }) : refuse('bad phase'));
+    const writeSettings = (settings) => {
+      const text = `${JSON.stringify(settings, null, 2)}\n`;
+      const next = `${settingsFile}.next`;
+      try { fs.rm(next, { force: true }); fs.writeNew(next, text); fs.rename(next, settingsFile); } catch (e) { try { fs.rm(next, { force: true }); } catch { /* left */ } return refuse(`not written (${e?.code ?? e?.message})`); }
+      let back; try { back = readSettings(sessionId); } catch (e) { return refuse(`not read back (${e?.code ?? e?.message})`); }
+      return `${JSON.stringify(back, null, 2)}\n` === text ? { ok: true } : refuse('not read back as written');
+    };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway, renderPhase, writeSettings };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
