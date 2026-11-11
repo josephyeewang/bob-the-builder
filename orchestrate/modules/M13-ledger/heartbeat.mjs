@@ -30,8 +30,11 @@
 //                     window → one alert per window, its body naming the highest threshold (a higher one comments
 //                     once; the next window clears it).
 // Push requests are facts `push-request-<key>` for the Front Door to deliver (join item with lane 2).
-// Returns { red, body, told }: `told` maps each kind raised or cleared this pass to what alerts.mjs answered (false =
-// GitHub lost it), so a caller can tell which alert went out, never just whether every one did (L730 m4).
+// Returns { red, body, told, posted, postedWhy }: `told` maps each kind raised or cleared this pass to what alerts.mjs
+// answered (false = GitHub lost it), so a caller can tell which alert went out, never just whether every one did (L730
+// m4). `posted` is true only when GitHub took the pinned issue's new body (an edit or an open answered yes); false, with
+// `postedWhy`, when every read, find, edit or open was refused, so a caller fails the pass rather than calling it done
+// (#451 r1 m1).
 
 import { createHash } from 'node:crypto';
 import { lineIs, wasTold } from './alerts.mjs';
@@ -89,7 +92,7 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   await set('dispatcher', dRed, dLine, dBody, `red:dispatcher:${since === null ? 'never' : new Date(since).toISOString()}`);
 
   const r = await probe(probes.rulesReadable);
-  await set('rules', !(r.ok && r.v === true), `M10 Rules readable: ${r.ok && r.v === true ? 'yes' : 'no'}`,
+  await set('rules', !(r.ok && r.v === true), `M10 Rules usable: ${r.ok && r.v === true ? 'yes' : 'no'}`,
     'The M10 Rules file could not be read or parsed. Everything that checks a rule refuses until it is fixed.');
 
   const f = await probe(probes.frontDoorReachable);
@@ -183,15 +186,18 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   const pinned = () => `${render()}${heartbeatMarker(product)}\n`;
   const issueId = ISSUE_FACT(product);
   const known = writer.get(issueId)?.issue;
-  if (ISSUE(known) && (await gh.read(known))?.open) await gh.edit(known, pinned());
+  let posted = false;
+  if (ISSUE(known) && (await gh.read(known))?.open) posted = (await gh.edit(known, pinned())) !== false;
   else {
     // The issue is found again by its marker, so a number the Record refused to keep never means a new issue each pass
     // (L393). A list GitHub refused opens nothing this pass: the next one looks again.
     const found = await gh.findOpen(lineIs(heartbeatMarker(product)));
-    if (ISSUE(found)) await gh.edit(found, pinned());
+    if (ISSUE(found)) posted = (await gh.edit(found, pinned())) !== false;
     // An open with no issue number is not saved, so the next pass opens it again (L152 m3).
     const issue = found === false || ISSUE(found) ? found : await gh.open({ title: 'Orchestrate heartbeat (pinned)', body: pinned(), assignee: owner, labels: ['orchestrate-heartbeat'] });
     if (ISSUE(issue)) {
+      // A new issue opens with the body, so it is posted; an edit after is only the Record's number refused.
+      if (!ISSUE(found)) posted = true;
       const put = writer.put(issueId, { kind: 'fact.heartbeat-issue', product, issue });
       if (!wasSaved(put)) {
         notSaved(`the Record refused to save the pinned issue's number: ${String(put?.reason ?? 'no reason given').slice(0, 200)}`);
@@ -199,5 +205,5 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
       }
     }
   }
-  return { red, body: render(), told: toldOf };
+  return { red, body: render(), told: toldOf, posted, postedWhy: posted ? null : String(gh.lastAnswer ?? 'GitHub took no edit or open of the pinned issue').slice(0, 200) };
 }

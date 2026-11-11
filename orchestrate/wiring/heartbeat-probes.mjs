@@ -41,6 +41,10 @@ const whoOf = (d) => {
   return d.signed_in === false || d.signed_in === null ? null : { account: d.account };
 };
 
+// A read of the Record that throws is not known (null), never "not reachable" or "signed out": heartbeatOnce counts a
+// probe that throws as red, which for these would be a loud false alarm (#451 r1 m3).
+const orNull = (fn) => async () => { try { return await fn(); } catch { return null; } };
+
 export function heartbeatProbes({ rec, rules, now, labels = {} }) {
   // No age limit in the rules means no reading can be called current, so all of them are not known.
   const staleMs = () => { try { return minutes(rules, KEYS.staleAfterMin); } catch { return null; } };
@@ -51,24 +55,24 @@ export function heartbeatProbes({ rec, rules, now, labels = {} }) {
   };
   return {
     dispatcherLastGood: async () => rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? null,
-    frontDoorReachable: async () => {
+    frontDoorReachable: orNull(() => {
       const d = sensorsFact(rec, FACTS.reachable)?.doc;
       if (!d || !current(d.observed_at, now(), READING_MAX_AGE_MS)) return null;
       return d.value === true || d.value === false ? d.value : null;
-    },
-    account: async () => {
+    }),
+    account: orNull(() => {
       const who = whoOf(reading());
       if (who === null) return null;
       if (who === 'out') return { signedIn: false, login: null };
       return { signedIn: true, login: Object.hasOwn(labels, who.account) ? labels[who.account] : who.account };
-    },
-    usage: async () => {
+    }),
+    usage: orNull(() => {
       // Only for an account the reading says is signed in (whoOf, as account() above).
       const account = whoOf(reading())?.account;
       if (!account) return null;
       const r = readFact(sensorsFact(rec, USAGE_FACT(account)), { account, now: now(), staleMs: staleMs() });
       if (!r.ok) return null;
       return r.h5 > r.week ? { window: '5-hour', pct: r.h5 } : { window: 'weekly', pct: r.week };
-    },
+    }),
   };
 }

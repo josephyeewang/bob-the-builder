@@ -57,7 +57,7 @@ import { readDoc } from '../shared/record-read.mjs';
 import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { RUN_DEADLINE_MS as DISPATCHER_RUN_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { aclProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
-import { DISPATCHER_LATE_MIN, heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
+import { DISPATCHER_LATE_MIN, NOT_TOLD, heartbeatOnce } from '../modules/M13-ledger/heartbeat.mjs';
 import { makeAlerts } from '../modules/M13-ledger/alerts.mjs';
 import { heartbeatProbes } from './heartbeat-probes.mjs';
 import { deliverWith, githubIssues, repoProblem } from '../modules/M13-ledger/alert-channel.mjs';
@@ -284,7 +284,10 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
 
   const ledger = makeFactWriter(rec, { actor: 'ledger', now: () => new Date(now()) });
   const passes = Object.fromEntries(Object.entries(NOT_WIRED_PASSES).map(([p, port]) => [p, refusing(port)]));
-  // The robot's token, minted on its first use and shared by every pass that writes, so at most one mint a round.
+  // The robot's token, minted on its first use and shared by every pass that writes, so at most one mint a round. One
+  // refused mint therefore fails both deliver and the heartbeat this round, on purpose: robotToken keeps the refusal
+  // (a 401 or a bad key does not mend in seconds), both passes fail and are told through the queue, and the next round
+  // mints afresh (#451 r1 m4).
   const token = c.appId !== undefined ? robotToken(c, { fetchFn, uid, now, mint }) : null;
   if (deliver) passes.deliver = () => deliver({ rec, now });
   else if (token) {
@@ -297,7 +300,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   if (token) {
     const issues = githubIssues({ repo: c.alertRepo, token, fetchFn });
     const when = () => new Date(now());
-    // "Rules readable": the product has usable rules (M10's `rules.adopted`: adopted now, or the last good kept after a
+    // "Rules usable": the product has usable rules (M10's `rules.adopted`: adopted now, or the last good kept after a
     // newer file was refused; nothing refuses in either state).
     const probes = { ...heartbeatProbes({ rec, rules, now }), rulesReadable: async () => rules.get('rules.adopted', { product: c.product }) !== undefined };
     // The pass's own dispatcherLate answer decides the heartbeat's Dispatcher line too: one rule for "late", so a live
@@ -329,6 +332,9 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     if (beat) { try { beaten = await beat(late); } catch (e) { failed = e; } }
     // Told per alert (L730 m4): only what the Dispatcher alert itself answered counts, not whether every alert went out.
     const answer = beaten?.told?.dispatcher;
+    // Any string but 'suppressed' is told: 'opened', 'changed' and 'reminded' reached Joe now, and 'updated' is the same
+    // alert issue still open, which Joe was told of when it opened (its body is edited, silently, by design); a queued copy
+    // on top would tell it twice (L239). 'suppressed' (Joe closed it while it lasts) and false (GitHub lost it) are not.
     const toldByBeat = typeof answer === 'string' && answer !== 'suppressed';
     if (late && toldByBeat) {
       const fact = HOLD_FACT(LATE_CAUSE(late.since));
@@ -342,6 +348,11 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     // Neither queued nor told by the heartbeat (GitHub lost it, or Joe closed it while it lasts): the pass fails with the
     // tell, as above, so robot-main logs it as not told and the round's result says so (L738 review m1).
     if (late && tell && !toldByBeat) throw Object.assign(new Error('the Dispatcher-late alert was neither queued nor told by the heartbeat'), { tell });
+    // A pinned issue GitHub took no edit or open of is a failed pass, as deliver's `refused` is (#451 r1 m1).
+    if (beaten.posted === false) throw Object.assign(new Error(`the pinned heartbeat issue was not posted: ${beaten.postedWhy}`), tell && !toldByBeat ? { tell } : {});
+    // An alert GitHub lost is a failed item, which robot-main logs as deliver's are (#451 r1 m2).
+    const failedItems = Object.values(beaten.told ?? {}).filter((v) => v === false).length;
+    if (beaten.red.includes(NOT_TOLD)) return { red: beaten.red, failed: Math.max(1, failedItems) };
     return { red: beaten.red };
   };
   passes['caught-up'] = async () => {

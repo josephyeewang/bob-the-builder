@@ -790,3 +790,28 @@ test('L730 m4: told is per alert: one lost alert does not make the others not to
   assert.ok(r.red.includes('alert-not-told'), 'the lost one still shows on the pinned issue');
   assert.equal(r.told.rules, 'none', 'a green kind answers its clear');
 });
+
+test('#451 r1 m1: posted says whether GitHub took the pinned body: opened, edited, or found again by its marker and edited', async () => {
+  const world = { refuse: true };   // the Record keeps no issue number, so each pass finds the issue by its marker
+  const h = setup({ wrap: refusingPin(world) });
+  const first = await h.pass();
+  assert.equal(first.posted, true, 'a new issue opens with the body');
+  assert.equal(first.postedWhy, null);
+  const r = await h.pass();
+  assert.equal(r.posted, true, "found again by its marker and edited");
+  const edit = h.gh.edit;
+  h.gh.edit = async () => false;
+  const refused = await h.pass();
+  assert.equal(refused.posted, false, 'found again, but GitHub refused the edit');
+  assert.equal(typeof refused.postedWhy, 'string');
+  world.refuse = false; h.gh.edit = edit;
+  await h.pass();                    // the number is kept now
+  h.gh.edit = async () => false;
+  assert.equal((await h.pass()).posted, false, 'the kept issue, its edit refused');
+  const blind = setup();
+  blind.gh.findOpen = async () => false;
+  assert.equal((await blind.pass()).posted, false, 'a list GitHub refused opens nothing and posts nothing');
+  const shut = setup();
+  shut.gh.open = async () => false;
+  assert.equal((await shut.pass()).posted, false, 'an open GitHub refused posts nothing');
+});

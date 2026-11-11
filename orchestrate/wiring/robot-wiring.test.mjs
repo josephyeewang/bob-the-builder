@@ -989,7 +989,7 @@ test('L600 PR 2: with the robot App the heartbeat runs: its pinned issue in the 
   assert.ok(pinned, 'the pinned heartbeat issue is in the alert repository');
   assert.match(pinned.body, /Front Door reachable from the phone: unknown/);
   assert.match(pinned.body, /signed-in account: unknown/);
-  assert.match(pinned.body, /M10 Rules readable: yes/);
+  assert.match(pinned.body, /M10 Rules usable: yes/);
   const rec = readRecord(w);
   assert.ok(!rec.list('fact').some((x) => x.id.startsWith('signed-out-') && x.doc?.signed_out === true), 'not known is never signed out');
   assert.equal(gh.mints(), 1, 'the heartbeat and deliver share the round\'s one mint');
@@ -1207,7 +1207,7 @@ test('L955: markToldByBeat writes nothing over a hold fact whose read failed, an
 });
 
 // L955 plants P7 and P9 (the fold of #289): the rules line and a heartbeat that fails.
-test('L955: rules that could not be read and adopted are "M10 Rules readable: no" on the heartbeat, never yes', async () => {
+test('L955: rules that could not be read and adopted are "M10 Rules usable: no" on the heartbeat, never yes', async () => {
   const w = withKey(world({ extra: APP }));
   const gh = appGitHub(w);
   // Every read of the product's repository fails, so no rules are adopted; the alert repository and the mint still work.
@@ -1215,7 +1215,7 @@ test('L955: rules that could not be read and adopted are "M10 Rules readable: no
     return path.startsWith('/repos/') && !path.startsWith(`/repos/${ALERT_REPO}`) ? Promise.resolve({ status: 500, json: async () => ({}) }) : gh.fetchFn(url, init); };
   const { passes } = await wire(w.config, { fetchFn, log: () => {} });
   await passes.heartbeat();
-  assert.match(pinnedOf(gh).body, /M10 Rules readable: no/);
+  assert.match(pinnedOf(gh).body, /M10 Rules usable: no/);
 });
 
 test('L955: a heartbeat that fails makes the pass fail with its reason, and the late Dispatcher stays queued', async () => {
@@ -1239,4 +1239,43 @@ test('L738 review m1: a late alert the queue refused and the heartbeat did not t
   const w2 = withKey(world({ extra: APP }));
   const told = await wire(w2.config, { fetchFn: appGitHub(w2).fetchFn, hold: () => false, log: () => {} });
   await told.passes.heartbeat();
+});
+
+test('#451 r1 m1: a pinned issue GitHub will not open, or will not edit, fails the heartbeat pass', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let refuse = 'open';
+  const isPinned = (init) => { try { return /mini_alive_at:/.test(JSON.parse(init.body).body ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => {
+    const no = isPinned(init) && ((refuse === 'open' && init.method === 'POST') || (refuse === 'edit' && init.method === 'PATCH'));
+    return no ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init);
+  };
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {} });
+  await assert.rejects(passes.heartbeat(), /the pinned heartbeat issue was not posted/);
+  assert.equal(pinnedOf(gh), undefined, 'GitHub really took no pinned issue');
+  assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)) || [...gh.issues.values()].some((i) => /heartbeat red: dispatcher/.test(i.title)), 'the late alert is still told one way');
+  refuse = null;
+  await passes.heartbeat();
+  const before = pinnedOf(gh).body;
+  refuse = 'edit';
+  await assert.rejects(passes.heartbeat(), /the pinned heartbeat issue was not posted/);
+  assert.equal(pinnedOf(gh).body, before, 'the edit was really refused');
+});
+
+test('#451 r1 m2: an alert GitHub lost is a failed item of the heartbeat pass, which robot-main logs', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { passes } = await wire(w.config, { fetchFn, log: () => {} });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'));
+  assert.ok(out.failed >= 1, JSON.stringify(out));
+  const logs = [];
+  await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn } });
+  assert.match(logs.join('\n'), /robot: heartbeat ran, and \d+ of its items failed/);
+  // An all-told pass names no failed items.
+  const w2 = withKey(world({ extra: APP }));
+  const ok = await (await wire(w2.config, { fetchFn: appGitHub(w2).fetchFn, log: () => {} })).passes.heartbeat();
+  assert.equal(ok.failed, undefined, JSON.stringify(ok));
 });

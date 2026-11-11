@@ -99,3 +99,23 @@ test('the Dispatcher\'s last good pass is its own fact, or nothing', async () =>
   const at = iso(T0);
   assert.equal(await setUp([[LAST_PASS_FACT, { at }]]).dispatcherLastGood(), at);
 });
+
+test('#451 r1 m3: a Record read or meta that throws is not known, never "not reachable" or "signed out"', async () => {
+  const boom = () => { throw new Error('the store could not be read'); };
+  // Each fact present and current, so a read that did not throw would say true, signed in and a usage.
+  const full = () => {
+    const rec = recWith([]);
+    for (const [id, doc] of [reach(true), signedIn('a'), usage(10, 20)]) assert.equal(rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc }).ok, true);
+    return rec;
+  };
+  const good = heartbeatProbes({ rec: full(), rules: rules(), now: () => T0 });
+  assert.equal(await good.frontDoorReachable(), true, 'the control reads every fact');
+  assert.equal((await good.account())?.signedIn, true);
+  assert.ok(await good.usage());
+  for (const rec of [{ read: boom, meta: boom }, { ...full(), read: boom }, { ...full(), meta: boom }]) {
+    const p = heartbeatProbes({ rec, rules: rules(), now: () => T0 });
+    assert.equal(await p.frontDoorReachable(), null);
+    assert.equal(await p.account(), null);
+    assert.equal(await p.usage(), null);
+  }
+});
