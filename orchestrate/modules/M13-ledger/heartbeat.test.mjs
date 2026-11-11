@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { makeAlerts, fakeIssues } from './alerts.mjs';
-import { heartbeatOnce, DISPATCHER_LATE_MIN } from './heartbeat.mjs';
+import { heartbeatOnce, DISPATCHER_LATE_MIN, STATUS_FACT } from './heartbeat.mjs';
 
 // `wrap` lets a test change what the pass reads from the record (#98 r2 P6: a saved record with no time).
 function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
@@ -24,7 +24,7 @@ function setup({ wrap = (w) => w, alertWrap = (w) => w } = {}) {
   let planned = null;
   const pass = () => heartbeatOnce({ product: 'product 1', writer, gh, alerts, owner: 'owner', probes, plannedSwitch: planned, now });
   const tick = (min) => { t += min * 60e3; };
-  return { rec, gh, writer, world, pass, tick, plan: (p) => { planned = p; }, now };
+  return { rec, gh, writer, world, probes, pass, tick, plan: (p) => { planned = p; }, now };
 }
 const refusingPin = (world) => (w) => ({ get: w.get, put: (id, doc, kind) => (world.refuse && doc.kind === 'fact.heartbeat-issue' ? { ok: false, reason: 'the store is full' } : w.put(id, doc, kind)) });
 const pinnedIssues = (gh) => [...gh.issues.values()].filter((i) => /heartbeat \(pinned\)/.test(i.title));
@@ -32,6 +32,7 @@ const alertIssues = (gh) => [...gh.issues.values()].filter((i) => !/heartbeat \(
 
 test('all green: one pinned heartbeat issue whose body is rewritten every 10 min with mini_alive_at', async () => {
   const h = setup();
+  h.world.usage = { window: 'weekly', pct: 10 }; // every line known: all green needs a usage reading too (L730 M2)
   for (let i = 0; i < 12; i++) { await h.pass(); h.tick(10); }
   assert.equal(h.gh.issues.size, 1);
   const hb = h.gh.issues.get(1);
@@ -122,11 +123,17 @@ test('usage warnings at 50/75/90/95: one issue per window, one comment per highe
   assert.equal(al[0].closed, true);
 });
 
-test('no usage fact (R-0b-66 not built yet) → "usage: unknown", not red', async () => {
+test('no usage fact (R-0b-66 not built yet) → "usage: unknown", not red, and never all green (L730 #289 M2)', async () => {
   const h = setup();
   const { red, body } = await h.pass();
   assert.deepEqual(red, []);
   assert.match(body, /usage: unknown/);
+  // Audit probe B: everything else current, no usage reading. Not known is never a pass.
+  assert.doesNotMatch(body, /ok {4}usage/);
+  assert.doesNotMatch(body, /All green/);
+  assert.match(body, /Nothing red; not known: usage\./);
+  assert.equal(h.writer.get(STATUS_FACT('product 1')).usage ?? null, null);
+  assert.equal(alertIssues(h.gh).length, 0);
 });
 
 test('if the pinned issue is closed, the next pass opens a fresh one rather than editing a closed issue', async () => {
@@ -684,4 +691,127 @@ test('L402: the Record refusing alert writes: red on the pinned issue every pass
   assert.ok(!r.red.includes('alert-not-saved'));
   assert.equal(issuesFor(h, /refusing alert writes/)[0].closed, true);
   assert.equal(issuesFor(h, /red: front-door/).length, 1);
+});
+
+test('L604: a probe that answers null says not known: no alert, no signed-out fact, and not "All green"', async () => {
+  const h = setup();
+  h.world.fd = null; h.world.account = null;
+  await h.pass();
+  const s = h.writer.get(STATUS_FACT('product 1'));
+  assert.deepEqual([s.front_door_reachable, s.signed_in, s.login, s.red], [null, null, null, []]);
+  assert.ok(!h.writer.get('signed-out-product-1'));
+  const [{ body }] = pinnedIssues(h.gh);
+  assert.match(body, /Nothing red; not known: front door, account, usage\./);
+  assert.doesNotMatch(body, /All green/);
+  assert.match(body, /Front Door reachable from the phone: unknown/);
+  assert.match(body, /signed-in account: unknown/);
+  assert.equal(alertIssues(h.gh).length, 0);
+});
+
+test('L604: signed out and then not known: the fact and its alert stay as they were', async () => {
+  const h = setup();
+  h.world.account = { signedIn: false, login: null };
+  await h.pass();
+  h.world.account = null; h.tick(10); await h.pass();
+  assert.equal(h.writer.get('signed-out-product-1').signed_out, true);
+  assert.deepEqual(alertIssues(h.gh).map((i) => i.closed), [false]);
+});
+
+test('L604: a probe that throws is still red, not unknown', async () => {
+  const h = setup();
+  h.probes.frontDoorReachable = async () => { throw new Error('broken'); };
+  await h.pass();
+  const s = h.writer.get(STATUS_FACT('product 1'));
+  assert.equal(s.front_door_reachable, false);
+  assert.ok(s.red.includes('front-door'));
+});
+
+// ── L730 (#289 r1): one rule for "late", the stop in the status, told per alert ───────────────────────────────────────
+
+test('L730 m2: with a dispatcherLate answer, that one rule decides: a live pass inside its limit is not red', async () => {
+  const h = setup();
+  h.world.usage = { window: 'weekly', pct: 10 };
+  let late = null;
+  h.probes.dispatcherLate = async () => late;
+  // Audit probe D: the last full pass is 20 minutes old, and a live pass holds the lock (the caller's rule says on time).
+  h.world.dispatcherRunning = false; h.world.stoppedAt = new Date(h.now().getTime() - 20 * 60e3).toISOString();
+  const r = await h.pass();
+  assert.ok(!r.red.includes('dispatcher'), JSON.stringify(r.red));
+  assert.equal(alertIssues(h.gh).length, 0, 'no "heartbeat red: dispatcher" issue');
+  assert.match(r.body, /last good Dispatcher pass: 20 min ago \(a pass is running, inside its time limit\)/);
+  // The caller's rule says late: red, with its own text.
+  late = { since: Date.parse(h.world.stoppedAt), text: 'the Dispatcher\'s last full pass was 20 minutes ago' };
+  h.tick(10);
+  const r2 = await h.pass();
+  assert.ok(r2.red.includes('dispatcher'));
+  assert.match(alertIssues(h.gh)[0].body, /last full pass was 20 minutes ago/);
+  // A dispatcherLate that throws is red: whether it is running could not be read.
+  h.probes.dispatcherLate = async () => { throw new Error('lock unreadable'); };
+  h.tick(10);
+  assert.ok((await h.pass()).red.includes('dispatcher'));
+});
+
+test('L730 m3: a new stop after Joe closed the last one is a new notice; the same stop he closed stays quiet here', async () => {
+  const h = setup();
+  await h.pass();
+  h.world.dispatcherRunning = false; h.world.stoppedAt = h.now().toISOString();
+  h.tick(20);
+  const first = await h.pass();
+  assert.equal(first.told.dispatcher, 'opened');
+  const [al] = alertIssues(h.gh);
+  h.gh.ownerCloses(al.number ?? [...h.gh.issues.entries()].find(([, i]) => i === al)[0]);
+  h.tick(10);
+  assert.equal((await h.pass()).told.dispatcher, 'suppressed', 'the caller hears it was not told, and tells it its own way');
+  // The Dispatcher ran once between two beats and stopped again: no green pass cleared the alert, but it is a new stop
+  // (a new start time in the status), so it is a new notice, though Joe closed the last one.
+  h.world.stoppedAt = new Date(h.now().getTime() - 16 * 60e3).toISOString();
+  h.tick(1);
+  assert.equal((await h.pass()).told.dispatcher, 'opened', 'a new stop with no green pass between');
+  assert.equal(alertIssues(h.gh).filter((i) => !i.closed).length, 1);
+  h.gh.ownerCloses([...h.gh.issues.entries()].find(([, i]) => !i.closed && /red: dispatcher/.test(i.title))[0]);
+  // Back, then a second stop: its own start time, so a new status and a new issue, though Joe closed the first.
+  h.world.dispatcherRunning = true; h.tick(10); await h.pass();
+  h.world.dispatcherRunning = false; h.world.stoppedAt = h.now().toISOString();
+  h.tick(20);
+  assert.equal((await h.pass()).told.dispatcher, 'opened');
+  assert.equal(alertIssues(h.gh).filter((i) => !i.closed).length, 1);
+});
+
+test('L730 m4: told is per alert: one lost alert does not make the others not told', async () => {
+  const h = setup();
+  h.world.usage = { window: 'weekly', pct: 10 };
+  h.world.dispatcherRunning = false; h.world.stoppedAt = new Date(h.now().getTime() - 30 * 60e3).toISOString();
+  h.world.fd = false;
+  const open = h.gh.open.bind(h.gh);
+  h.gh.open = async (x) => (/red: front-door/.test(x.title) ? false : open(x));
+  const r = await h.pass();
+  assert.equal(r.told.dispatcher, 'opened');
+  assert.equal(r.told['front-door'], false);
+  assert.ok(r.red.includes('alert-not-told'), 'the lost one still shows on the pinned issue');
+  assert.equal(r.told.rules, 'none', 'a green kind answers its clear');
+});
+
+test('#451 r1 m1: posted says whether GitHub took the pinned body: opened, edited, or found again by its marker and edited', async () => {
+  const world = { refuse: true };   // the Record keeps no issue number, so each pass finds the issue by its marker
+  const h = setup({ wrap: refusingPin(world) });
+  const first = await h.pass();
+  assert.equal(first.posted, true, 'a new issue opens with the body');
+  assert.equal(first.postedWhy, null);
+  const r = await h.pass();
+  assert.equal(r.posted, true, "found again by its marker and edited");
+  const edit = h.gh.edit;
+  h.gh.edit = async () => false;
+  const refused = await h.pass();
+  assert.equal(refused.posted, false, 'found again, but GitHub refused the edit');
+  assert.equal(typeof refused.postedWhy, 'string');
+  world.refuse = false; h.gh.edit = edit;
+  await h.pass();                    // the number is kept now
+  h.gh.edit = async () => false;
+  assert.equal((await h.pass()).posted, false, 'the kept issue, its edit refused');
+  const blind = setup();
+  blind.gh.findOpen = async () => false;
+  assert.equal((await blind.pass()).posted, false, 'a list GitHub refused opens nothing and posts nothing');
+  const shut = setup();
+  shut.gh.open = async () => false;
+  assert.equal((await shut.pass()).posted, false, 'an open GitHub refused posts nothing');
 });

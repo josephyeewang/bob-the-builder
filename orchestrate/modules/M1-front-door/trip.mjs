@@ -41,10 +41,10 @@ export function miniCheck({ facts, heartbeatProduct, now = () => new Date() }) {
   const pwFresh = pw && ageMin(pw.at, t) <= FRESH_MIN;
   const stale = 'unknown (no fact from the last hour)';
   const items = [
-    ['online', !hbFresh ? null : hb.front_door_reachable === true,
-      !hbFresh ? stale : hb.front_door_reachable === true ? `yes, heartbeat ${Math.round(ageMin(hb.at, t))} min ago, Front Door reachable` : 'NO: the Front Door does not answer through the phone link'],
-    ['logged in', !hbFresh ? null : Boolean(hb.signed_in && hb.login),
-      !hbFresh ? stale : hb.signed_in && hb.login ? `yes, as ${hb.login}` : 'NO: the Mini is signed out of Claude'],
+    ['online', !hbFresh || hb.front_door_reachable == null ? null : hb.front_door_reachable === true,
+      !hbFresh ? stale : hb.front_door_reachable == null ? `unknown: heartbeat ${Math.round(ageMin(hb.at, t))} min ago, with no current Front Door reading` : hb.front_door_reachable === true ? `yes, heartbeat ${Math.round(ageMin(hb.at, t))} min ago, Front Door reachable` : 'NO: the Front Door does not answer through the phone link'],
+    ['logged in', !hbFresh || hb.signed_in == null ? null : Boolean(hb.signed_in && hb.login),
+      !hbFresh ? stale : hb.signed_in == null ? 'unknown: no current reading of who is signed in' : hb.signed_in && hb.login ? `yes, as ${hb.login}` : 'NO: the Mini is signed out of Claude'],
     ['battery backup', !pwFresh || pw.ups_present === null || pw.ups_present === undefined ? null : pw.ups_present === true,
       !pwFresh || pw.ups_present == null ? stale : pw.ups_present ? `yes${pw.on_ups_power ? ' (running on it now)' : ''}` : 'NO: no battery backup seen'],
   ].map(([name, green, text]) => ({ name, state: green === null ? 'unknown' : green ? 'green' : 'red', text }));

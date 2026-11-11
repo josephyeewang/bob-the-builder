@@ -404,14 +404,17 @@ test('L925 rule 1: sessions() is every product\'s worker sessions and the review
   const { ports } = syncWorld({ review: rv });
   assert.deepEqual(ports.sessions().map((x) => [x.id, x.product, x.kind]), [['S-1', P, 'editing'], ['S-9', 'other-app', 'editing'], ['R-1', null, 'review'], ['A-1', null, 'audit']],
     'Mac-wide (another product\'s too), and the plan reviewer left out: planReviewsRunning counts it');
-  assert.deepEqual(ports.sessions()[2], { id: 'R-1', product: null, kind: 'review', card: 'C-7', lead: null, role: 'reviewer', pgid: null, signin: null, config_dir: null, bundle_files: [] });
+  assert.deepEqual(ports.sessions()[2], { id: 'R-1', product: null, kind: 'review', card: 'C-7', head: HEAD, lead: null, role: 'reviewer', pgid: null, signin: null, config_dir: null, bundle_files: [] });
   assert.deepEqual({ ...REVIEW_KIND_OF }, { reviewer: 'review', auditor: 'audit' });
   // Either status not known: the whole list is not known.
   assert.throws(() => syncWorld({ review: () => { throw new Error('the review runner\'s status is missing'); } }).ports.sessions(), /review runner's status is missing/);
   assert.throws(() => syncWorld({ statusText: '{' }).ports.sessions(), /worker runner's status can't be read/);
   // One entry the review runner does not write: not known either, never the entries that could be read.
   for (const [bad, re] of [[null, /not what the runner writes/], [{ role: 'worker', session_id: 'X', card: 'C' }, /role "worker", which the review runner does not start/],
-    [{ role: 'reviewer', card: 'C' }, /no session id/], [{ role: 'auditor', session_id: 'A-2' }, /A-2 .* has no card/]]) {
+    [{ role: 'reviewer', card: 'C' }, /no session id/], [{ role: 'auditor', session_id: 'A-2' }, /A-2 .* has no card/],
+    // L946: the stop step asks by card, role and head, so a row with no head of 40 hex is not the runner's either.
+    [{ role: 'auditor', session_id: 'A-3', card: 'C' }, /A-3 .* names no head \(40 hex\)/], [{ role: 'reviewer', session_id: 'R-3', card: 'C', head: 'ABC' }, /R-3 .* names no head/],
+    [{ role: 'reviewer', session_id: 'R-4', card: 'C', head: HEAD.toUpperCase() }, /R-4 .* names no head/]]) {
     assert.throws(() => syncWorld({ review: { running: [rv.running[0], bad] } }).ports.sessions(), re, JSON.stringify(bad));
   }
   assert.deepEqual(reviewSessions({ running: [] }), []);
