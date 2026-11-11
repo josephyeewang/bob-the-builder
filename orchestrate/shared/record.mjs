@@ -11,7 +11,7 @@
 //   rec.list('card')                             // → [{ id, doc, rev }, …]
 //   rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-12', expectRev: 3, doc, kind: 'claim' })
 //                                                // → { ok: true, rev, seq } or { ok: false, reason }
-//   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
+//   rec.applyOutbox({ role: 'worker', product: 'app', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
 //   rec.meta('card', 'C-12')                     // → { ts, stateSince, createdBy } (the Record's own clock: its last
@@ -36,8 +36,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { runnerOutbox } from './product-paths.mjs';
-import { RUNNER_ROLES } from './review-roles.mjs';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox } from './product-paths.mjs';
 import { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf } from './record-names.mjs';
 export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, isNotARecord, notARecord, outboxKindOf };
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
@@ -151,18 +150,22 @@ export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'i
 export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 
 // The folders of one session's outbox, outermost first, ending with the session's own (L71, L836): the one place every
-// outbox reader takes them from (L850-2). A tag naming a product is a worker runner session's, whose outbox is in that
-// product's folder, <outboxRoot>/<product>/<role>/<sessionId> (shared/product-paths.mjs runnerOutbox), so the product's
-// name may not climb out of it (`..`, `/`). A tag with no product keeps the layout from before L836,
-// <outboxRoot>/<role>/<sessionId>: the review runner's sessions and every session started outside the worker runner. Both
-// are only read; nothing is moved. Setup makes no product folder for a review runner role, so a tag giving one is refused.
-// → { ok: true, folders } | { ok: false, reason }
+// outbox reader takes them from (L850-2). The roles the worker runner starts (shared/product-paths.mjs
+// PRODUCT_OUTBOX_ROLES) have their outboxes only in a product's folder, <outboxRoot>/<product>/<role>/<sessionId>
+// (runnerOutbox, so the product's name may not climb out of it with `..` or `/`): their tag must name the product, and
+// one with none is refused, never read from the layout before L836 (L895 m1). Every other role keeps
+// <outboxRoot>/<role>/<sessionId> (the review runner's sessions, the Lead's) and may not name a product: setup makes it
+// no product folder. → { ok: true, folders } | { ok: false, reason }
 export function outboxFolders({ outboxRoot, tag }) {
   const no = (reason) => ({ ok: false, reason });
   if (!tag || !AI_ROLES.includes(tag.role) || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
   if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
-  if (tag.product == null) return { ok: true, folders: [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)] };
-  if (RUNNER_ROLES.includes(tag.role)) return no(`a ${tag.role} outbox has no product folder`);
+  const inProduct = PRODUCT_OUTBOX_ROLES.includes(tag.role);
+  if (tag.product == null) {
+    if (inProduct) return no(`a ${tag.role} outbox is in its product's folder, and the tag names no product`);
+    return { ok: true, folders: [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)] };
+  }
+  if (!inProduct) return no(`a ${tag.role} outbox has no product folder`);
   let session;
   try { session = runnerOutbox({ outboxRoot, product: tag.product, role: tag.role, sessionId: tag.sessionId }); } catch (e) { return no(`bad outbox tag: ${e.message}`); }
   return { ok: true, folders: [dirname(dirname(session)), dirname(session), session] };
@@ -189,15 +192,6 @@ export function outboxPlace({ outboxRoot, tag, file }) {
   // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
   if (basename(given) !== basename(real)) return no('file is a link');
   return { ok: true, real, folders };
-}
-
-// The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
-function fileOnly(file) {
-  const given = typeof file === 'string' ? file : '';
-  if (!given) return { ok: false, reason: 'no file' };
-  let real;
-  try { real = realpathSync(given); } catch { return { ok: false, reason: 'file not found' }; }
-  return basename(given) === basename(real) ? { ok: true, real } : { ok: false, reason: 'file is a link' };
 }
 
 export function isActor(a) {
@@ -286,7 +280,11 @@ export function makeRecord(impl) {
 // The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
 export const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
 
-export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) {
+// The Record's refusal of another product's outbox: one wording for M9's Store Writer and the stand-in (L850-2, L938 m2).
+export const otherProductReason = (product, other) => `this record is product ${product}'s, and the outbox is product ${other}'s`;
+
+// product: the product this stand-in is the Record of (as M9's); a tag naming another product is refused, as M9 refuses it.
+export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null, product = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
@@ -340,12 +338,11 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
-      // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
-      // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
-      // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
-      // (L850-2); a tag's product still picks the folder through outboxPlace.
-      const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
+      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. With no
+      // outbox root it refuses every file, as M9 does, so no test hands in a file the real Record would not find (L910).
+      // Given its product, it refuses another product's tag first, as the Store Writer does (L850-2, L938 m2).
+      if (product != null && tag?.product != null && tag.product !== product) return refused(otherProductReason(product, tag.product));
+      const place = outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();

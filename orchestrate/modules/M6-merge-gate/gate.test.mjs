@@ -75,7 +75,7 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const head = g.commit([g.main], files, { from: g.main });
   g.openPull({ number: pr, head, files });
   must(put(env.record, 'workshop', 'card', id, { head }), 'head');
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
   const sid = `R-${id}`;
   runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;

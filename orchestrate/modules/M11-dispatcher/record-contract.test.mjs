@@ -47,7 +47,7 @@ function world() {
   const pass = () => withAlerts(rec, env.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: env.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
+    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   return { env, rec, rules, dead, launched, pass, refuseLaunch: (f) => { answer = f; } };
@@ -148,7 +148,7 @@ async function inReview(w) {
   await w.pass();
   const [l] = w.launched;
   must(put(w.rec, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
-  must(w.rec.applyOutbox({ role: 'worker', sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
+  must(w.rec.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'in_review');
   return l;
 }

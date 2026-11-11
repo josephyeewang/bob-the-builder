@@ -1,24 +1,33 @@
 ---
 name: design-gallery
-description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Proven on a data product build (55 mockups → lock → wired product) and a consumer AI app. Bob Step 5.5."
+description: "The design-gallery machinery: explore a product's look-and-feel as a rated gallery of mockups, converge through rounds to a LOCKED design, then transfer it into the real product EXACTLY (no re-creation-from-description drift). Four lanes: HTML mockups for product UI/dashboards where exactness must survive the transfer to code; AI-image comps (via the design-mockups skill) for art direction, heroes, moodboards, brand; code-drawn SVG concept boards for logos/marks; a landing-page scroll-story lane (via the scroll-craft plugin) for marketing pages where scroll is the storytelling device. Includes the agent/chat-surface primitives checklist. Use when the user wants to explore visual directions for a dashboard/app/website, run a design gallery, audition palettes/parameters live, lock a design, or push a locked design through to the real product. Bob Step 5.5."
 user-invocable: true
 ---
 
 # design-gallery — explore as a gallery, lock exactly, transfer exactly
 
-Reusable machinery for the full arc: **breadth → feedback-by-number → remix rounds → live
-playground → LOCK → exact transfer**. The arc has two failure modes, both observed in the field
-and both designed against here: *generic output* (fixed by exploring wide with real content and
-strong reference classes) and *transfer drift* (a locked design re-created from prose at ~70%
-fidelity — fixed by the mock-is-canonical discipline in `templates/fidelity-protocol.md`).
+Reusable machinery for **breadth → feedback-by-number → remix rounds → live playground → LOCK
+→ exact transfer**. Explore distinct directions with representative content, then prevent transfer
+drift by treating the winning mock file as canonical (`templates/fidelity-protocol.md`).
+
+## Standalone execution
+
+When invoked to create or refine designs, create the requested gallery and inspect its outputs;
+do not only narrate these steps. Keep generated designs, feedback and locks in the target project,
+never in the installed skill. Pause at the explicit pick/lock checkpoints and respect the user's
+rules for publishing, external services and paid work.
+
+This module works without Bob or a particular assistant. Resolve resources relative to this
+SKILL.md. Set DESIGN_GALLERY_DIR to that resolved absolute folder for the command examples;
+never assume an assistant-specific home path. See DEPENDENCIES.md for tools and optional lanes.
 
 ## Pick the lane (they combine)
 | Lane | For | Machinery |
 |---|---|---|
 | **HTML mockups** | Product UI, dashboards, data-dense surfaces — anything that must transfer to code EXACTLY | Numbered self-contained `.html` files on REAL product content + the rating board (`templates/gallery-index.html`) + live playground (`templates/playground-controls.html`) |
-| **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The **design-mockups** skill (Nano Banana funnel, theme→variation, refs-by-number) — invoke it for this lane |
+| **Image comps** | Art direction, homepage/hero, moodboards, brand feel, logo *exploration* | The optional **design-mockups** module (theme→variation, refs-by-number), or a user-approved image tool; if unavailable, use supplied images or continue in HTML and state the omitted generation |
 | **SVG logo board** | Converging a mark once direction is known | One HTML file: each concept is a parameterized inline-SVG function, rendered across context tiles (light/dark, sizes, in-context lockups). The winner ships as ONE canonical component — hard-coded colors, **no font dependency** (a type-set mark breaks in favicon/OG/email; draw the glyphs as geometry), exported to favicon/OG from the same SVG. **Full procedure + scripts: `logo-kit/LOGO-LANE.md`** — brief → 8–12 one-line concepts → build 3 in SVG black-first → audit + render-and-look loop → concept sheet, then STOP for a pick → kit (favicon/app-icon/web-icon set, mono/reversed variants) |
-| **Scroll story** | Marketing pages ONLY (homepage, launch page, a personal site) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The **scroll-craft** plugin (`/nateherk-design:scroll-craft`), run AFTER the lock, with user-specific overrides in `references/scroll-story-lane.md` |
+| **Scroll story** | Marketing pages ONLY (homepage, launch page, a personal site) where the visitor's scroll tells the story — feeling curve, page grammar, scroll devices, one signature move, scroll QA | The optional **scroll-craft** plugin, run AFTER the lock, with project-specific integration guidance in `references/scroll-story-lane.md` |
 
 Rule of thumb: image lane to FIND a direction cheaply; HTML lane the moment the surface is a
 real product UI (image comps can't be transferred exactly — HTML mockups ARE the spec).
@@ -26,22 +35,19 @@ Scroll-story lane only for a marketing page, only after its lock exists — it o
 and must never redefine tokens. Agent/chat surfaces: walk `references/agent-ui-primitives.md`
 before mocking so every state (thinking, streaming, awaiting approval, failed) is on the board.
 
-Two more proven uses of the HTML lane beyond look-and-feel: **dataviz concept labs** (N ways to
-visualize one analytical idea, interactive, on real-shaped data — a data product build ran 8-concept and
-2-lab explorations this way) and **strategy/positioning galleries** (N written directions side by
-side for the user to pick — same board, prose instead of pixels).
+The HTML lane also supports dataviz concept labs (several visualizations of one analytical idea)
+and strategy/positioning galleries (written directions side by side). Use fictional or approved
+content and label illustrative figures.
 
-**Sequencing (the expensive lesson):** run the gallery BEFORE building any real UI. The data product's
-first UI was built with no gallery — a full editorial-serif pass the user rejected on sight,
-redirected mid-review, and paid for twice. One gallery round costs less than one thrown-away
-build round. That is why this sits at Bob Step 5.5, ahead of the first line of product code.
+Run the gallery before building production UI so the user can choose a direction before the
+implementation depends on it. In Bob this is Step 5.5; the same ordering works independently.
 
-## The HTML-lane funnel (proven shape: ~4 rounds, 45-55 files)
+## The HTML-lane funnel (adapt round sizes to the brief and budget)
 0. **Round 0 — real reference sites (DEFAULT, don't ask).** For any website/marketing page
    (and, smaller, for dashboards), pull ~10 real shipped sites that fit the brief from **Inspo**
    (`inspo` MCP server — search, never `recommend`; trust its fonts/sizes/spacing, never its
    colours), rate them by number, then build half of Round 1 from the LIKEd sites' real type and
-   spacing. Skip for 🔴 client work or if the tools are missing — say so in one line. Full
+   spacing. Skip for confidential work without an approved data route, or if the tools are missing — say so in one line. Full
    procedure, skip rules and the self-scoring trial: `references/inspo-round-zero.md`.
 1. **Round 1 — breadth.** 12-24 numbered mockups (`designs/01-….html` …), each a full page of the
    REAL product with real-shaped content (actual metrics, actual table rows, honest empty states)
@@ -60,23 +66,17 @@ build round. That is why this sits at Bob Step 5.5, ahead of the first line of p
    collision), and paste `templates/playground-controls.html` into a copy: swatch rows live-set
    the CSS variables so the user auditions 15 accents × 9 triads on the real design in minutes.
    One playground beats twenty static variants. "Copy palette" emits the lock string.
-5. **Micro-variant rounds (when diffs get subtle).** Whole-page boards stop working once
-   variants differ in one element — the user "can't tell the differences without scrolling both
-   the whole way" (three comparison UIs were rejected before this one worked). Switch to the
-   **feature-lab pattern**: isolate the ONE varying element, show 4-5 variants side by side,
-   CROP each to the differing region, and label what differs on each. Offer options, never a
-   single answer — "I like X but more Y" gets 4-5 variations of X in the same file, with the
-   prior round kept visible for comparison (an under-provisioned axis takes 4 rounds instead
-   of 1; a color choice once burned 4 rounds / 15+ options).
+5. **Micro-variant rounds (when diffs get subtle).** Switch from full-page boards to a
+   feature lab: isolate the varying element, crop to its region, show several alternatives side
+   by side and label the differences. Keep previous candidates visible for comparison. Let the
+   user combine preferred ingredients rather than asking them to remember separate pages.
 6. **LOCK.** Write `LOCKED-DESIGN.md` from `templates/LOCKED-DESIGN.template.md` — exact values
    only, opening with the mock-is-canonical banner, closing with the **pinned decisions &
    deliberate exceptions** list. **Validate the lock on the DENSEST surface first** — a look
-   that sings on a hero can fail on the data-heavy report (a full style port was reverted from
-   one surface but kept on another, leaving two visual languages coexisting); mock the hardest
-   surface before locking globally. Set the playground's defaults to the locked choice so the
+   that works on a hero may fail on a dense report. Mock the hardest surface before locking globally. Set the playground's defaults to the locked choice so the
    file reopens showing the decision.
 
-## The transfer (where it always broke — now mechanical)
+## The transfer (make the transfer mechanical)
 Follow `templates/fidelity-protocol.md` for every build/restyle task after the lock. The five
 rules, compressed: **(1)** read the mock FILE, never build from prose (delegation passes literal
 values + file paths, never summaries); **(2)** mock sample content never ports as defaults or
@@ -87,27 +87,24 @@ the CI token gate (off-lock radii + raw palette literals fail the build) and rew
 self-descriptions (a "clean modern fintech, white" comment surviving a dark Swiss lock is a
 counterfeit spec that mis-briefs every future session).
 
-## Hard-won heuristics
+## Working heuristics
 - **Real content beats lorem.** Mockups carrying the product's true numbers, table rows, and
   edge states get decisive feedback; pretty-but-empty comps get "looks nice."
 - **Tokenize from mockup one.** Every color through `:root` variables — playgrounds, palette
   swaps, and the eventual token transfer all fall out of this one discipline.
-- **Separate brand from data color early** (data products). The accent-vs-signal split was the
-  single highest-leverage design decision of the data product arc.
+- **Separate brand from data color early** (data products). The accent-vs-signal split keeps
+  brand decoration distinct from the meaning of a result.
 - **Numbers are the shared vocabulary.** Files, board cards, and feedback all speak "#45";
   curation sections cite prior numbers ("like #117"); image-lane refs resolve from them.
 - **Keep everything on the board.** Curate by reordering/starring, never by deleting.
 - **A live parameter playground is the convergence accelerator** — build it as soon as the
   structural base is chosen; palette/type/radius decisions collapse from rounds into minutes.
-- **The lock is values, not vibes.** "Clean grotesk, ~8-10px, font TBD" produced the 70% drift;
-  "Archivo 700/800/900, panels 3px, tags 2px, NOT rounded-full" produced an exact product.
-- **The loop shape: one big autonomous pass, then the user picks from boards.** Not
-  surgical-note ping-pong — do a full pass, render every ambiguous axis as an inline
-  mini-gallery of 3-4 options, and let the user scroll once and answer "badge B, pill B, nav A"
-  (the user's own redirect of a drifting iteration loop).
-- **Codify rejections as standing hard rules.** "No offset block shadows", "priority is the
-  PILL, not a colored edge", "mono font banned in report UI" — each user rejection becomes a
-  written rule in the lock doc, or it WILL be re-tried by a later session (each of these was).
+- **The lock is values, not vibes.** Record actual type families, weights, spacing and radii
+  from the selected mock. A range or an unresolved font choice is not a finished lock.
+- **Offer comparisons at the right scale.** Render ambiguous choices as a small inline gallery
+  and let the user select or combine them before another production change.
+- **Codify rejections as standing project rules.** Keep the user's approved constraints in the
+  project's lock so later iterations do not silently reopen settled decisions.
 - **Logos: generate wide in the image lane, converge in code.** The SVG board renders every
   candidate at favicon size and on dark BEFORE choosing, and no mark is done until
   `logo-kit/scripts/preview_sheet.py` has been run and looked at (one-colour, reversed, app icon,
@@ -120,7 +117,7 @@ counterfeit spec that mis-briefs every future session).
 - `templates/LOCKED-DESIGN.template.md` — the lock doc
 - `templates/fidelity-protocol.md` — the transfer discipline + CI gate snippet + checklist
 - `references/scroll-story-lane.md` — lane 4: when to use scroll-craft, how it sequences with
-  the lock, the overrides for the user's setup (assets via design-mockups, hero preference optional)
+  the lock, optional asset/motion integrations (design-mockups when available, hero preference optional)
 - `references/inspo-round-zero.md` — Round 0: real reference sites from Inspo (default for every
   website gallery), skip rules, and the trial; results logged in the project's `docs/design/inspo-trial-log.md` (header: `references/inspo-trial-log.md`)
 - `references/agent-ui-primitives.md` — the 24-piece checklist for agent/chat surfaces (from
@@ -129,7 +126,7 @@ counterfeit spec that mis-briefs every future session).
   `logo-kit/scripts/` (svg_audit, render_png, concept_sheet, preview_sheet, export_variants — plain
   Python, no installs); `logo-kit/references/critique.md` (logo scorecard); `logo-kit/tests/` (two
   self-tests); harvested from kaankiziltug/logo-design-skill (MIT, `logo-kit/LICENSE`)
-- Image lane: `skills/design-mockups/` (own SKILL.md; includes `references/build-bridge.md`
+- Optional image lane: the separately installed `design-mockups` module (own SKILL.md; includes `references/build-bridge.md`
   for the comp→code handoff, motion stack, and DESIGN.md spec layer)
 
 ## Bob the Builder integration

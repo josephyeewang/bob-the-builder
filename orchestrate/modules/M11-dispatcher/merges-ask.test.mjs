@@ -37,7 +37,7 @@ function world({ refuseWait = false, refuseIf = null } = {}) {
   let n = 0;
   const pass = () => withAlerts(rec, E.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
-    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
+    launch: async (x) => { n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId }); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   const delivered = [];
@@ -64,7 +64,7 @@ async function verifiedCard(w) {
   await w.pass();
   const [l] = w.launched;
   must(put(w.rec, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
-  must(w.rec.applyOutbox({ role: 'worker', sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.E, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
+  must(w.rec.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.E, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
   passingVerdict(w.E, 'C-1', 'R-1', HEAD);
   must(put(w.E.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   must(w.rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: 0, doc: { type: 'pr', head_sha: HEAD, state: 'open', merged: false, at: iso(w.E.clock.t), observed_at: iso(w.E.clock.t) } }), 'pr reading');

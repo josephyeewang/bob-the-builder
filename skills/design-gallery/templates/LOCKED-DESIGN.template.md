@@ -1,11 +1,8 @@
 # PROJECT — Locked UI Design (the outcome of the gallery exploration)
 
-> **THE MOCK FILES ARE CANONICAL — this doc is only a map to them.** Never build or restyle a
-> surface from this doc's text: that is exactly how transfer degrades into a ~70% re-creation
-> (it happened twice on a data product build — a component library built from "font TBD, ~8-10px radius"
-> prose while the mock file sat unread). Read the winning mock's literal CSS, match every value,
-> and finish with an adversarial diff of your output against the mock — see the skill's
-> `fidelity-protocol.md`.
+> **THE MOCK FILES ARE CANONICAL — this doc is only a map to them.** Read the winning mock's
+> literal CSS, match each value and finish with a value-level and rendered comparison. Do not
+> rebuild a surface from this document's prose. See the skill's `fidelity-protocol.md`.
 
 **Design base:** gallery design **NN** (`<name>`) — `designs/NN-<name>.html`
 (+ the interactive playground `designs/MM-playground.html` if one was used to converge parameters).
@@ -30,9 +27,8 @@
 **Surfaces — dark (the toggle):** <!-- name the reference mock, list values; accent+signals usually stay constant -->
 
 ## Typography / rounding / shading — EXACT values from design NN (do not paraphrase; match these)
-<!-- Every value verbatim from the mock's CSS. The template that caused the 70% drift said
-     "one clean grotesk, final family TBD" — the fix said "Archivo at 700/800/900 (not 600)".
-     Be the fix, not the drift. -->
+<!-- Record every value verbatim from the winning mock. Resolve font choices and exact weights;
+     do not leave approximate ranges in a finished lock. Examples below are fictional placeholders. -->
 - **Type:** families + WHERE each is used + exact weights. Numerals: tabular?
 - **Marquee sizes:** each hero/score/title element with px + weight (e.g. "KPI value 32px/800").
 - **Radius:** exact px per element class (e.g. "panels 3px, tags/pills 2px — NOT 8-10px, NOT rounded-full").
@@ -40,11 +36,9 @@
 - Shadows, borders, chart stroke widths/fills/legends — literal values or "see mock lines N-M".
 
 ## Pinned decisions & deliberate exceptions (do NOT re-litigate)
-<!-- Every place the PRODUCT intentionally deviates from the mock, and every closed ruling a
-     later session might be tempted to "fix" or tidy away. Without this list, fidelity audits
-     un-fix approved exceptions and fresh sessions re-open settled debates (both happened).
-     e.g. "the page-level graph-paper background STAYS even though gallery pages render white
-     (user ruling, <date>)" · "the skin overlay architecture is deliberate, not a kludge". -->
+<!-- List each intentional deviation and its approval source. Do not reopen a settled decision
+     during a fidelity audit without checking its basis. Use project-owned records, not copied
+     decisions from another product. -->
 - …
 
 ## Build note

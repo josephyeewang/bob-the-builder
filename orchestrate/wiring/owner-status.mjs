@@ -21,7 +21,9 @@
 // The status file (the runner writes it; this is the only reader):
 //   { written_at: ISO, sessions: [SESSION], requests: { <sessionId>: { state } }, answers?: { <ask>: ANSWER } }
 //   SESSION: { id, product, kind, card, lead, role, pgid, signin, config_dir, bundle_files, outbox, uid, outbox_open,
-//              stop_requested, alive?, ended?, last_write_at?, size?, activity? }
+//              stop_requested, alive?, ended?, last_write_at?, size?, activity?, drain_held? }
+//   - drain_held (L896): { cause: a DRAIN_CAUSES name (M11 drain-alerts.mjs), since: ISO }, only on a session not live
+//     whose outbox is still open, once it has stayed undrained past the runner's limit. drainHolds() hands them on.
 //   - kind: one of RUNNER_KINDS, and role exactly RUNNER_ROLE_OF[kind]; outbox <outboxRoot>/<product>/<role>/<id> (L767, L836), which exists
 //     while outbox_open (a closed one must still be named exactly so); uid the owner's. product, signin, config_dir non-empty; lead a string or null.
 //   - outbox_open: true while the outbox may hold a file intake has not taken or told (listed after the end until then).
@@ -51,19 +53,23 @@
 // The runner's probe answers only for its own sessions: the wiring routes each session to its own kind's probe.
 // The shared reader with review-runner's readReviewStatus is a later extraction that keeps behaviour (L739, L248).
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { STATUS_STALE_MS } from './owner-ports.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
+import { drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
 export const USED_UP = Object.freeze(['refused', 'stopped', 'cancelled']);
 /** The kinds the worker runner starts and the one role each runs (pass.mjs kindOf and startRole): nothing else. */
-export const RUNNER_ROLE_OF = Object.freeze({ editing: 'worker', undo: 'worker', script: 'script' });
+// Each role is one of shared PRODUCT_OUTBOX_ROLES, the one list of the roles whose outboxes sit in a product's folder
+// (L895 m2): a role not on it throws when this file loads, so the two can't drift.
+export const productRole = (r) => { if (!PRODUCT_OUTBOX_ROLES.includes(r)) throw new Error(`RUNNER_ROLE_OF: ${r} is not one of PRODUCT_OUTBOX_ROLES`); return r; };
+export const RUNNER_ROLE_OF = Object.freeze({ editing: productRole('worker'), undo: productRole('worker'), script: productRole('script') });
 export const RUNNER_KINDS = Object.freeze(Object.keys(RUNNER_ROLE_OF));
 // The runner's places for one product (L836) live in shared/product-paths.mjs (L848), re-exported here for the callers.
 export { PRODUCT, productRoleClash, runnerPlaces, runnerCopy, runnerOutbox } from '../shared/product-paths.mjs';
@@ -129,6 +135,11 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
   for (const f of ['outbox_open', 'stop_requested']) if (typeof x[f] !== 'boolean') bad(x, `has no ${f}`);
   for (const f of ['alive', 'ended']) if (f in x && typeof x[f] !== 'boolean') bad(x, `has ${f} that is not true or false`);
   if ('last_write_at' in x && !Number.isFinite(x.last_write_at)) bad(x, 'has last_write_at that is not a time in ms');
+  if ('drain_held' in x) {
+    const h = x.drain_held;
+    if (!drainHeldOk(h)) bad(x, 'has a drain_held that is not a cause and a time');
+    if (live(x) || x.outbox_open !== true) bad(x, 'has a drain_held but is running or its outbox is closed');
+  }
 }
 
 /**
@@ -217,6 +228,9 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
       if (!ACTIVITY_STATES.includes(x.activity?.state)) throw new Error(`session ${x.id} has no activity state the tracker gives in the worker runner's status`);
       return { size: pick(z, SIZE_FIELDS), activity: { state: x.activity.state } };
     },
+    // Every ended session whose outbox stays undrained past the runner's limit, with why (L896). A status that can't be
+    // read throws, so the relay says so and never reads it as "nothing held".
+    drainHolds: () => status().sessions.filter((x) => x.drain_held).map((x) => ({ session: x.id, card: x.card, product: x.product, cause: x.drain_held.cause, since: x.drain_held.since })),
     stopSession: (sessionId) => {
       if (!REQUEST_ID.test(sessionId ?? '')) return false;
       const s = status();
@@ -230,8 +244,19 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
   };
 }
 
+/**
+ * A new file, exclusively, 0644 whatever the umask: the Dispatcher's job runs with umask 077 (setup/dispatcher-setup.mjs),
+ * which would leave a request 0600, orchestrate's alone, and the runner (the owner's user, which reads it through no
+ * access list: setup/layout.mjs WORKER_REQUESTS_ACL) could not open it (PR A self-review M1). Set by handle, as
+ * runner-files.mjs writeStatus does.
+ */
+export function writeNewReadable(path, text, { flag = 'wx', mode = 0o644 } = {}) {
+  const fd = openSync(path, flag, mode);
+  try { fchmodSync(fd, mode); writeFileSync(fd, text); } finally { closeSync(fd); }
+}
+
 /** The Dispatcher's write of one request file: exclusive, so a second ask for the same thing is the same file. */
-export function requestWriter(requestsDir, write = writeFileSync) {
+export function requestWriter(requestsDir, write = writeNewReadable) {
   return (name, text) => {
     try { write(join(requestsDir, name), text, { flag: 'wx', mode: 0o644 }); } catch (e) { if (e?.code !== 'EEXIST') throw e; }
   };

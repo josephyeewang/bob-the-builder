@@ -49,7 +49,7 @@ import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { BRANCH, cardBranch } from './branch.mjs';
-import { WORKER_OUTBOX_ROLES, workerOutboxProblem } from './session-outbox.mjs';
+import { WORKER_OUTBOX_ROLES, outboxProblemFor } from './session-outbox.mjs';
 import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
@@ -138,7 +138,8 @@ function checkFolder(folder, folderUid) {
 }
 
 /**
- * Copies the bundle, never following a link, into `dir`; returns the copy's path. The bundle must be owned by `uid`
+ * Copies the bundle, never following a link, into `dir`; returns { copy, sha256 }: the copy's path and the sha256 of the
+ * bytes copied (#388 r1 m1, L898: a worker's pushed fact keeps it, so the drain can tell this bundle taken). The bundle must be owned by `uid`
  * (the caller's: the worker's for an outbox, Joe's for a proposals folder; L77 m2), checked on the handle it is read
  * through. With `folderUid`, the folder must be owned by that user too, and be no looser than 750. With `sha256`, the copy's bytes must hash to it.
  */
@@ -170,9 +171,10 @@ function stageBundle(outbox, card, dir, cap, { uid, folderUid, sha256, fstat = f
     }
     // The bytes checked are the bytes copied, from the one handle (L233 M-5): a swap after the intake read is refused.
     // The file changed after the intake held it: the next pass judges the bytes there now, so this may pass (L597 (2)).
-    if (sha256 !== undefined && hash.digest('hex') !== sha256) later('the bundle\'s bytes are not the ones the intake recorded');
+    const got = hash.digest('hex');
+    if (sha256 !== undefined && got !== sha256) later('the bundle\'s bytes are not the ones the intake recorded');
+    return { copy, sha256: got };
   } finally { closeSync(fd); if (out !== undefined) closeSync(out); }
-  return copy;
 }
 
 /**
@@ -302,8 +304,9 @@ async function messages(mirror, shas, names, about) {
  *   afterStage()            tests only: runs right after the private copy is taken, so a test can
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
- *   outboxRoot              the outboxes' root folder: a worker's outbox must really be <root>/worker/<session id>
- *                           (<root>/script/<session id> for a script card, L767)
+ *   outboxRoot              the TOP outboxes folder (<base>/outboxes), not a product's folder under it: a worker's
+ *                           outbox must really be either runner role's folder, <root>/<product>/{worker|script}/<session id>
+ *                           (L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).
@@ -319,6 +322,8 @@ export function createPushScript(deps) {
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
   if (uids.worker === ownerUid) throw new Error('createPushScript: the worker user and the owner must be different users');
+  // #403 r1 M1: a push must find the outbox in its own product's folder under the real root, never by shape alone.
+  if (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot)) throw new Error('createPushScript: outboxRoot must be the outboxes\' full path');
 
   /** A worker's inputs, from the session record only (step 1). */
   function workerInputs(sessionId) {
@@ -330,9 +335,10 @@ export function createPushScript(deps) {
     if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
     // The record says role worker for a script card too (L759), so either runner role's folder is this session's own (L767).
     // Taking either here is safe because of an earlier check, not this one (#358 c3): the Dispatcher wrote this outbox
-    // into the record only after checking it under the session's own role (M11 pass.mjs, workerOutboxProblem with
-    // startRole(kind)), so a worker's record never names the script folder, nor a script's the worker one.
-    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot, role: WORKER_OUTBOX_ROLES });
+    // into the record only after checking it under the session's own role (M11 pass.mjs, startRole(kind)), so a
+    // worker's record never names the script folder, nor a script's the worker one. In the session's own product's
+    // folder (L836: <root>/<product>/<role>/<id>).
+    const badOutbox = outboxProblemFor(outbox, sessionId, { outboxRoot, product, role: WORKER_OUTBOX_ROLES });
     if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }
@@ -425,7 +431,8 @@ export function createPushScript(deps) {
       // 2. The private copy, its header and its check against the mirror.
       // (A research copy has no bundle: its report is read here, and its commit made once main is fresh.)
       const report = research ? readReport(folder, research, { uid, folderUid, fstat, now: now() }) : null;
-      const copy = research ? null : stageBundle(folder, card, work, bundleCap, { uid, folderUid, sha256, fstat });
+      const staged = research ? null : stageBundle(folder, card, work, bundleCap, { uid, folderUid, sha256, fstat });
+      const copy = staged?.copy ?? null;
       await afterStage?.();
       let tip = research ? null : readBundleHeader(copy, branch);
 
@@ -530,7 +537,7 @@ export function createPushScript(deps) {
       let pr;
       try { pr = await pullRequests.upsert({ repo, branch, base, title: String(card_doc.what ?? card), body: String(card_doc.summary ?? ''), token }); } catch { pr = null; }
       await gitDo(['update-ref', `refs/heads/${branch}`, tip], { gitDir: mirror, purpose: 'push-mirror-branch' }, PLACE, 'pushed, but the mirror\'s copy of the branch could not be moved');
-      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries };
+      return { ok: true, product, card, branch, tip, commits: shas.length, pr: pr ?? null, binaries: scan.binaries, ...(staged ? { bundle_sha256: staged.sha256 } : {}) };
     } finally {
       await run(['update-ref', '-d', holding], { gitDir: mirror, purpose: 'push-cleanup' });
       rmSync(work, { recursive: true, force: true });
@@ -575,6 +582,8 @@ export function createPushScript(deps) {
     // A refusal never erases a recorded push of the same attempt (#170 r1): it is added to it as the last refusal.
     if (!res.ok && cur?.doc?.result === 'pushed' && !cur.corrupt) doc = { ...cur.doc, last_refusal: { reason: res.reason, at: doc.at } };
     if (headRefused) doc.head_refused = headRefused;
+    // A worker's pushed bundle, by the bytes staged and pushed (L898): the runner's drain counts the bundle taken by it.
+    if (res.ok && !from && typeof res.bundle_sha256 === 'string') doc.bundle_sha256 = res.bundle_sha256;
     if (from) doc.from = from;
     // The product pushed for: bytes already pushed answer again only for the same product (#170 r1 m1).
     if (res.ok && from) doc.product = res.product;

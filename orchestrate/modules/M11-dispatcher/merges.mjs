@@ -20,8 +20,9 @@ import { waitOnJoe } from './joe-waits.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts, keepReviewHolds } from './review-requests.mjs';
+import { relayDrainHolds } from './drain-alerts.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks, plain } from './alerts.mjs';
 import { refusalReport } from './pass.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
@@ -108,7 +109,8 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  * One pass of the time limits. Ports: `gateAlive()` (the Merge Gate's process), `alert(text)`, and the review
  * runner's (L65, review-requests.mjs): `hasReviewer(cardId, role, head)` (throws when the runner's status can't be
  * trusted), `requestReview({ card, head, role })` -> { ok } | { ok: false, reason } (a request the runner checks; the
- * Dispatcher never starts a review itself), and `reviewAlerts()` (the runner's alerts, each told once, and its holds, told each day they last). A card in
+ * Dispatcher never starts a review itself), and `reviewAlerts()` (the runner's alerts, each told once, and its holds, told each day they last); and the
+ * worker runner's `drainHolds()` (L896: its outboxes stuck undrained, each told once per cause, then daily). A card in
  * review needs a reviewer, and an auditor too on Tier 1 (m-6). `b` = this pass's bands and `running` = the running
  * sessions: a review request goes through the same start gate as every other start (audit MAT-5), so red holds it
  * unless the rules' red_runs lists reviews. `missing` collects rules values the gate lacked, for the tick to tell Joe.
@@ -118,7 +120,7 @@ const sensorsFact = (rec, id) => fromSensors(rec, id, 'pr-');
  */
 // `clock` (ms): read again for a wait written after the reviewer calls, one card after another (L321: the Store Writer
 // refuses a since more than 60 s off its clock). Left out, it is `now`.
-export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, alert, startsHeld = null, missing = [], failureLog }) {
+export async function timeLimits({ rec, rules, now, clock = () => now, b, running = [], gateAlive, hasReviewer, requestReview, reviewAlerts, drainHolds, alert, startsHeld = null, missing = [], failureLog }) {
   const done = [];
   const statusErrors = [];
   done.push(...retellReconciles(rec, { alert, now }));
@@ -289,7 +291,19 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     let list = null;
     try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
     const report = refusalReport({ rec, alert, now, lines: [], failureLog });
-    if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report);
+    // A relay that throws (a queue that refuses, say) is reported as itself, never as the time limits failing: the
+    // step still ends as it would have, and a review-status error is still the one thrown (#425 r1 M2). Each relay's
+    // throw has its own hold, so it never holds back the relay's own reports, nor they it (r2 c2).
+    try { if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report); }
+    catch (e) { report(`the review alert relay failed: ${plain(e?.message ?? e)}`, 'review-relay'); }
+  }
+  // The worker runner's outboxes stuck undrained (L896, drain-alerts.mjs): a status that can't be read is told as such.
+  if (drainHolds) {
+    let held = null; let error;
+    try { held = await drainHolds(); } catch (e) { error = e?.message ?? String(e); }
+    const report = refusalReport({ rec, alert, now, lines: [], failureLog });
+    try { relayDrainHolds({ rec, held, error, alert, now, report }); }
+    catch (e) { report(`the undrained-outbox relay failed: ${plain(e?.message ?? e)}`, 'drain-relay'); }
   }
   if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;

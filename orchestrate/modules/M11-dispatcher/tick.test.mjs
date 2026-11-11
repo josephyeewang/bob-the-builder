@@ -47,8 +47,9 @@ const undoReady = (id, n) => [...undoEntries(id, { state: 'verified', head: head
 const requested = (rec, id) => rec.list('merge_request').find((q) => q.doc.card === id) ?? null;
 
 /** A world with every port faked; `over` replaces ports. */
-function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
-  const rec = recWith([['product', 'p1', { state: 'active' }], ...entries]);
+function world(entries = [], { over = {}, rules = rulesWith({}, allow), outboxRoot } = {}) {
+  // outboxRoot: the root the stand-in Record reads outbox files under, as M9 does (L910); a world with none takes no file.
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...entries], { outboxRoot });
   const calls = { alerts: [], launched: [], reviewers: [], order: [] };
   const sessions = [];
   let n = 0;
@@ -60,7 +61,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
     leads: () => [],
     sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
     // The launcher starts the session the claim names (L72), as M4's does.
-    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${id}` }; },
+    launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${product}/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => false, requestReview: ({ card }) => { calls.reviewers.push(card); return { ok: true, requestId: `Q-${++n}` }; },
     filesOf: filesOfCommits,
@@ -349,7 +350,7 @@ test('MAT-1: every step is guarded, not only the first', async () => {
   // The limits step reads the reviewer port for a card in review past its time (a claim with no session is M9's lapse now).
   const w = world([account(), usage(), card('C-9', { state: 'in_review', changed_at: iso(T0 - 60 * MIN) })], {
     over: { board: thrower('board'), proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: thrower('outbox'), leads: thrower('leads'), sessions: thrower('sessions'), hasReviewer: thrower('hasReviewer') } });
-  mkdirSync(join(w.ports.cleanup.copiesRoot, 'C-9'));
+  mkdirSync(join(w.ports.cleanup.copiesRoot, 'p1', 'C-9'), { recursive: true });   // L836: <copiesRoot>/<product>/<card>
   w.ports.cleanup.mirrorFor = thrower('mirror');
   const r = await w.pass();
   // An unreadable session list fails the stops and the undo starts too: neither acts on a guess.
@@ -870,8 +871,9 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
   };
   const root = tempDir('m11-l31-');
   for (const [band, facts] of Object.entries(bands)) {
-    const outbox = join(root, band.replace(' ', '-'));
-    mkdirSync(outbox);
+    const bandRoot = join(root, band.replace(' ', '-'));
+    const outbox = join(bandRoot, 'lead', 'L-1');
+    mkdirSync(outbox, { recursive: true });
     writeFileSync(join(outbox, 'think-q1.md'), 'Is A safe?');
     const sent = [];
     const starts = [];
@@ -892,7 +894,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
         send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
         stopSession: async () => ({ ok: true }), startLead: async (x) => { starts.push(x); return { ok: true, sessionId: 'L-2' }; } }],
-    } });
+    }, outboxRoot: bandRoot });
     const r1 = await w.pass(0);
     assert.ok(stops.includes('S-X'), `${band}: the cancel did not stop`);
     assert.equal(stops.includes('S-E'), band === 'red', `${band}: the red park`);
@@ -1177,7 +1179,7 @@ test('#219 M-1: the tick gives both start paths the stop port and the outbox roo
   const run = async (entries) => {
     const stopped = [];
     const w = world([account(), usage(), ...entries], { over: {
-      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }),
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, pgid: 200, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }),
       stopGroup: async (s) => { stopped.push(s.card); return { ok: true, how: 'SIGTERM' }; },
       outboxRoot: '/no-such-outbox-root' } });
     await w.pass();
@@ -1628,7 +1630,9 @@ test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, o
 
 // A Lead for the tick's `leads` port, with a real outbox folder for the file checks.
 function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000, rules } = {}) {
-  const outbox = tempDir('m11-tick-lead-');
+  const root = tempDir('m11-tick-lead-');
+  const outbox = join(root, 'lead', 'L-1');
+  mkdirSync(outbox, { recursive: true });
   if (hand) writeFileSync(join(outbox, HANDOFF_NAME('L-1')), hand);
   const sent = [];
   const state = { product, tokens, endedAt: T0 };
@@ -1639,7 +1643,7 @@ function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
     leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
       entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
-  }, ...(rules ? { rules } : {}) });
+  }, outboxRoot: root, ...(rules ? { rules } : {}) });
   return { ...w, sent, outbox, state };
 }
 const untouched = /missing or over the cap/;

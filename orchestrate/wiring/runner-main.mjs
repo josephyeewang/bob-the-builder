@@ -12,7 +12,7 @@
 //     "recordRoot": "/abs", "recordUid": <uid>, "claimMs": <ms>,
 //     "products": { "<name>": { "repo": "owner/name", "mirror": "/abs", "render": { "paths": {...}, "product": {...},
 //                   "rulesHosts": [], "productionFiles": [], "proposalOutboxes": [] }, "rules": {...}? } },
-//     "pin": "<claude version>"?, "machineWide": "/abs"? }
+//     "pin": "<claude version>"?, "machineWide": "/Library/Application Support/ClaudeCode/managed-settings.json"? (that file only, L913) }
 // The launch checks (runner-checks.mjs, step 6) read pin, machineWide and each product's rules; one that is left out
 // leaves its check without a port, so launch() refuses there and no session starts. The budget (check 12) and the
 // pinned Bob file list (check 13) have no config field yet, so no session starts until they do; a worker is refused
@@ -21,14 +21,17 @@
 // not /), and list the secrets with the approvals and rules state (#364 r1 M2): a config missing any is refused.
 // The runner's own folder is the status file's folder: it holds the status, the memory (memory.json, 0o600), the
 // sessions' settings files (settings/) and the one-runner lock (M9 makeLock: a second runner stops at once; a dead one's
-// lock is broken). The wall (step 2) denies that folder and the requests folder to every session.
+// lock is broken). The wall (step 2) denies that folder and the requests folder to every session, so each product's rules
+// snapshot (render.paths.snapshot), which its sessions' hooks read, sits in a folder of its own apart from both (L916),
+// a real folder only the runner can write, under folders no one else can change (L926): checked before the lock, a
+// missing one holding its product until it is made.
 // Exit 0 when launchd stopped it (SIGTERM), 1 when it could not start or stopped on an error (its memory could not be
 // read back, or a start the loop must refuse). It does not start when a copies or outbox root is missing or reached
 // through a link (#378 r1 m4), when a session it carries over may read a product's folders (#378 r1 M1,
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
-import { mkdirSync, readdirSync, realpathSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
@@ -37,11 +40,13 @@ import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
 import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
-import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
+import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
-import { spawn as childSpawn } from 'node:child_process';
+import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
 
 const ABS = ['installRoot', 'requestsDir', 'statusFile', 'outboxRoot', 'copiesRoot', 'home', 'claudeBin', 'recordRoot'];
 const UIDS = ['orchestrateUid', 'recordUid'];
@@ -49,6 +54,9 @@ const UIDS = ['orchestrateUid', 'recordUid'];
 export const DENY_KEYS = Object.freeze(['record', 'ssh', 'gh', 'claudeHome', 'robotKeys']);
 // The product rule is setup's (shared/product-paths.mjs PRODUCT, #378 M1): each product's folders are setup's, named as on disk.
 const productName = (p) => PRODUCT.test(p);
+
+// The session's own folders in render.paths that the config may give (L915).
+export const RENDER_PATHS = Object.freeze(['node', 'hooksDir', 'notes', 'bobFolder']);
 
 /** The config's fields, checked after the reader has checked the file. → the config with the runner's own paths added, or a throw. */
 export function checkRunnerConfig(c) {
@@ -74,20 +82,40 @@ export function checkRunnerConfig(c) {
     const d = p.render.paths.deny;
     for (const k of DENY_KEYS) if (!fullPath(d?.[k])) fail(`product ${name}: render.paths.deny.${k} must be a full path in its simplest form, not / itself`);
     if (!Array.isArray(d.secrets) || !d.secrets.length || !d.secrets.every(fullPath)) fail(`product ${name}: render.paths.deny.secrets must list full paths in their simplest form (the secrets, and the approvals and rules state)`);
+    // L915 (#420 m2): the session's own folders, when given, in their simplest form here, at load, rather than
+    // every launch refused later by render-settings.
+    for (const k of RENDER_PATHS) if (p.render.paths[k] !== undefined && !fullPath(p.render.paths[k])) fail(`product ${name}: render.paths.${k} must be a full path in its simplest form, not / itself`);
   }
   if (c.pin !== undefined && (typeof c.pin !== 'string' || !/^\d+\.\d+\.\d+$/.test(c.pin))) fail('pin must be a Claude Code version');
-  if (c.machineWide !== undefined && !fullPath(c.machineWide)) fail('machineWide must be a full path in its simplest form');
+  // L913 (a): claude reads only its fixed managed file, so it is the one value taken, spelled exactly (its name has a
+  // space, which the full-path rule refuses elsewhere); any other would refuse every session at check 10 instead. Any
+  // other value, a near miss too, is told the fixed file (#419 r3 c1).
+  if (c.machineWide !== undefined && c.machineWide !== CLAUDE_FILE) fail(`machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   const own = dirname(c.statusFile);
-  if (own === c.requestsDir) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
-  // Each product's rules snapshot is the runner's own file, in its own folder outside every copy, one per product
-  // (#369 m4; as review-runner-main.mjs keeps its snapshot inside its root): the sessions' hooks read it.
+  if (!apart(own, c.requestsDir)) fail('the status file must sit in the runner\'s own folder, apart from the requests folder');
+  // The runner's two folders are walled off from every worker session (render-settings runnerWallDirs), and render
+  // refuses a launch whose own folders are not apart from them: so a product's hooks, notes, node or Bob inside either
+  // is refused here, at load, rather than every launch later (L916 self-review m1).
+  for (const [name, p] of Object.entries(c.products)) {
+    for (const k of RENDER_PATHS) {
+      const v = p.render.paths[k];
+      if (v !== undefined && (!apart(v, c.requestsDir) || !apart(v, own))) fail(`product ${name}: render.paths.${k} must be apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
+    }
+  }
+  // Each product's rules snapshot is the runner's to write, one per product: the sessions' hooks read it. It sits in a
+  // folder of its own, apart from both runner folders (L916, #423 M2): a snapshot in either would refuse every launch.
+  // That also keeps it off the runner's own files there (#369 r1 m4), which check 8 would rename it over. And nowhere a
+  // worker session can write (#369 m4; L916 self-review M1): not in the copies, the outboxes, the sessions' home or a
+  // product's mirror, where a worker could rewrite the rules its own hooks enforce. This list compares spellings only: the
+  // rule that decides is who can write the folder, checked on the disk by main (snapshotFolderProblem, L926).
+  const writable = [['the copies', c.copiesRoot], ['the outboxes', c.outboxRoot], ["the sessions' home", c.home],
+    ...Object.entries(c.products).map(([n, q]) => [`product ${n}'s mirror`, q.mirror])];
   const snaps = new Set();
   for (const [name, p] of Object.entries(c.products)) {
     const s = p.render.paths.snapshot;
     if (s === undefined) continue;
-    if (!fullPath(s) || dirname(s) !== own) fail(`product ${name}: render.paths.snapshot must be a file in the runner's own folder (${own})`);
-    // Not one of the runner's own files there (#369 r1 m4): check 8 would rename the snapshot over it.
-    if ([basename(c.statusFile), 'memory.json', 'settings', 'lock', 'break.lock'].some((n) => foldKey(n) === foldKey(basename(s)))) fail(`product ${name}: render.paths.snapshot is named as one of the runner's own files`);
+    if (!fullPath(s) || dirname(s) === '/' || !apart(s, c.requestsDir) || !apart(s, own)) fail(`product ${name}: render.paths.snapshot must be a file in a folder of its own, apart from the runner's requests folder (${c.requestsDir}) and its own folder (${own}), which worker sessions are walled off from`);
+    for (const [what, dir] of writable) if (!apart(s, dir)) fail(`product ${name}: render.paths.snapshot must not sit in ${what} (${dir}), where a worker session can write it`);
     if (snaps.has(foldKey(s))) fail(`product ${name}: render.paths.snapshot is another product's`);
     snaps.add(foldKey(s));
   }
@@ -160,10 +188,100 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
     start: startPort(c, startDeps(c, { stopped, log, productHeld })),
     saveWork: saveWorkPort({ mirrorOf: (product) => c.products[product]?.mirror }),
     pauseLead: pauseLeadPort(),
-    outboxDrained: drainedPort(),
+    // The Record's read-only fact reader (L852, M4 readFactFile): an outbox is drained once every file in it is taken or told.
+    // The session reader (L899) gives the attempt whose push took the card's bundle (L898).
+    outboxDrained: drainedPort({ readFact: (fact) => readFactFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, fact }), readSession: (session) => readSessionFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, session }) }),
     size: sizePort(),
     ...over,
   };
+}
+
+/**
+ * Who can change a product's rules snapshot's folder (L926, #419 r3 M1), decided on the disk rather than by a list of
+ * places. The folder is its own real path (no link on the way, a link into a copy included), a real folder (not a link),
+ * owned by the runner's uid with no group or other write bit. The runner's sessions run as that same Mac user
+ * (runner-ports.mjs), so owning the folder keeps out other users only: the folder right above it must be root's, with no
+ * group or other write bit and no access list write entry (#419 r4 M1, option b), so a session can't rename the folder
+ * away or put another in its place. Every folder further up is root's too, with no group or other write bit unless it
+ * is sticky (/private/tmp): a session may rename a folder in one it can write, even a folder it can't (L939 self-review
+ * M-A: renaming <home>/orch with root's worker-runner/ in it would move the snapshots out from under the deny entries).
+ * So a folder in or under claude's per-user sandbox temp folder (/private/tmp/claude-<uid>), the temp folder or the home
+ * folder fails this, and so does a copy; setup's <base>/worker-runner/ passes when <base> sits in root's folders. (The
+ * home folder itself, its parent /Users being root's, passes; it is no snapshot folder anyone would name.) Writing into
+ * the folder itself only the sessions' sandbox and tool walls stop (the snapshot deny, a lane 4 card).
+ * No folder on the way carries an access list entry that lets anyone write (L926 self-review M1: a 0755 folder with
+ * "everyone allow add_file" is everyone's to write; macOS's own "deny" entries, as on a home folder, are fine).
+ * What this can't stop (L942 m4): the folder's owner, the runner's user and so its sessions, may give itself "delete" on
+ * the folder in its access list and then rename it away. That fails safe: the snapshot goes missing, and the product is
+ * held. So the whole check, the folder's own access list included, runs again at each start (keepSnapshots `recheck`,
+ * L942 c5), and a folder that fails it holds the product. A disk image mounted over the folder is the L921 settings deny's.
+ * A missing folder whose parent is there is held to the rule for the folders above it (L942 m2), so a bad place is told
+ * as that, not as a folder to make. → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
+ */
+export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid(), aclWrites = aclWriteEntries } = {}) {
+  const no = (why) => ({ missing: false, reason: `its folder ${dir} ${why}` });
+  if (typeof dir !== 'string' || !isAbsolute(dir)) return no('is not a full path');
+  const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
+  // The folder above it: root's alone (#419 r4 M1); every one above that root's, or sticky if others can write it.
+  const above = () => {
+    const parent = dirname(dir);
+    let ps; try { ps = lstat(parent); } catch (e) { return `sits in ${parent}, which can't be read (${e?.code ?? e?.message})`; }
+    if (ps.uid !== 0 || (ps.mode & 0o022)) return `sits in ${parent}, which is not root's alone (its owner is uid ${ps.uid}, mode ${(ps.mode & 0o7777).toString(8).padStart(4, '0')}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`;
+    for (let a = parent; ; a = dirname(a)) {
+      let s; try { s = lstat(a); } catch (e) { return `sits in ${a}, which can't be read (${e?.code ?? e?.message})`; }
+      if (s.uid !== 0 || ((s.mode & 0o022) && !(s.mode & 0o1000))) return `sits in ${a}, which others than root can change (its owner is uid ${s.uid}, mode ${(s.mode & 0o7777).toString(8).padStart(4, '0')})`;
+      const up = acl(a);
+      if (up.length) return `sits in ${a}, which has an access list entry that lets others write (${up[0]})`;
+      if (a === '/') return null;
+    }
+  };
+  let st; try { st = lstat(dir); } catch (e) {
+    if (e?.code !== 'ENOENT') return no(`can't be read (${e?.code ?? e?.message})`);
+    // Missing. Where its parent is there, that place is held to the rule first (L942 m2): a folder made there would fail.
+    // Its parent reached through a link (/tmp is /private/tmp) is refused as such, as the folder would be (L942 self-review M1).
+    const parent = dirname(dir);
+    let parentThere = true; try { lstat(parent); } catch (x) {
+      if (x?.code !== 'ENOENT') return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`);
+      parentThere = false;
+    }
+    if (parentThere) {
+      let rp; try { rp = realpath(parent); } catch (x) { return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`); }
+      if (rp !== parent) return no(foldKey(rp) === foldKey(parent) ? `sits in ${parent}, which is spelled otherwise on the disk (it is ${rp})` : `sits in ${parent}, which is reached through a link (it is ${rp})`);
+      const bad = above();
+      if (bad) return no(bad);
+    }
+    return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` };
+  }
+  if (st.isSymbolicLink()) return no('is a link');
+  if (!st.isDirectory()) return no('is not a folder');
+  let real; try { real = realpath(dir); } catch (e) { return no(`can't be read (${e?.code ?? e?.message})`); }
+  if (real !== dir) return no(foldKey(real) === foldKey(dir) ? `is spelled otherwise on the disk (it is ${real})` : `is reached through a link (it is ${real})`);
+  if (st.uid !== uid) return no(`is not owned by the runner's user (its owner is uid ${st.uid}, the runner is ${uid})`);
+  if (st.mode & 0o022) return no('can be written by others than the runner (a group or other write bit)');
+  const own = acl(dir);
+  if (own.length) return no(`has an access list entry that lets others write (${own[0]})`);
+  const bad = above();
+  return bad ? no(bad) : null;
+}
+
+// The access list rights that change nothing (macOS chmod(1), "ACL MANIPULATION"): reading, and the inheritance flags.
+// Any other right in an allow entry counts as a write, a name this list doesn't know included.
+const ACL_HARMLESS = new Set(['read', 'list', 'search', 'execute', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit', 'limit_inherit', 'only_inherit']);
+// An entry line as ls -le prints it: "<n>: <who> [inherited ]allow|deny <rights>". Who may hold spaces ("group:Domain
+// Users"); the rights, a comma list, are the line's last word.
+const ACL_LINE = /^\d+: .+? (?:inherited )?(allow|deny) ([a-z_]+(?:,[a-z_]+)*)$/;
+/**
+ * A folder's access list entries that may let someone write, read with /bin/ls -lde (macOS); none off a Mac. Every
+ * non-empty line after the folder's own line counts, unless it is plainly a deny, or an allow whose rights are all
+ * harmless (#419 r4 m1: a line this can't parse is a write entry, never skipped; L942 m1: a numbered one or not). The
+ * folder's own line runs on one line for each newline in its path, which ls prints as it is.
+ */
+export function aclWriteEntries(dir, { run = spawnSync, platform = process.platform } = {}) {
+  if (platform !== 'darwin') return [];
+  const r = run('/bin/ls', ['-lde', dir], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) throw new Error(`/bin/ls -lde failed (${r.error?.code ?? r.status})`);
+  return String(r.stdout).split('\n').slice(1 + (String(dir).match(/\n/g)?.length ?? 0)).map((l) => l.trim()).filter((l) => l !== '')
+    .filter((l) => { const m = ACL_LINE.exec(l); return !m || (m[1] === 'allow' && m[2].split(',').some((p) => !ACL_HARMLESS.has(p))); });
 }
 
 /**
@@ -171,9 +289,11 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  * it is 5 minutes old. A rewrite that fails stops its refresher (snapshot.mjs), failing safe. Until it is kept fresh again
  * that product starts no session (#369 r2 m2): `held(product)` starts the refresher once more at each start and, while
  * that fails too, answers why (told once with `log`), so the start is refused. Sessions already running are kept fresh
- * again by the next start that succeeds in this. → { held(product) → reason | null, stop() }.
+ * again by the next start that succeeds in this. `recheck(path)` (L942 c5) checks the snapshot's folder again at each
+ * start, even while it is kept fresh (its owner may have changed its access list since): a folder that fails holds the
+ * product. → { held(product) → reason | null, stop() }.
  */
-export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } = {}) {
+export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, recheck = () => null } = {}) {
   const kept = new Map(); const failed = new Map(); const told = new Set();
   const wanted = (name) => { const p = c.products[name]; return typeof p?.render?.paths?.snapshot === 'string' && p.rules ? p : null; };
   for (const name of Object.keys(c.products)) {
@@ -181,12 +301,20 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } =
     if (!p) continue;
     try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); } catch (e) { failed.set(name, e); told.add(name); log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
   }
+  const folderTold = new Map();
   const held = (name) => {
     const p = wanted(name);
     if (!p) return null;
     const k = kept.get(name);
     let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
-    if (!e) return null;
+    if (!e) {
+      let why; try { why = recheck(p.render.paths.snapshot); } catch (x) { why = `it can't be checked (${x?.message ?? x})`; }
+      if (!why) { folderTold.delete(name); return null; }
+      const reason = `product ${name}'s rules snapshot: ${why}, so its sessions are not started`;
+      // Told once for each reason: a new one (an entry added, then the folder renamed away) is told too.
+      if (folderTold.get(name) !== why) { folderTold.set(name, why); log(reason); }
+      return reason;
+    }
     if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }
     try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); failed.delete(name); told.delete(name); log(`product ${name}'s rules snapshot is kept fresh again`); return null; } catch (x) {
       failed.set(name, x);
@@ -201,12 +329,12 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } =
 
 /**
  * argv: [config]. opts (tests only): readConfig, lock, ports, run, log, onStop (how a SIGTERM is listened for), realpath,
- * memory (the memory reader).
+ * memory (the memory reader), folderProblem (snapshotFolderProblem).
  * → the exit code.
  */
 export async function main(argv, { readConfig = (f) => { const self = selfPath(); if (!self) throw new Error('its own script\'s path can\'t be read, so it can\'t be checked'); return readJobConfig(f, { code: [], self }); }, lock = (dir) => makeLock({ dir, timeoutMs: 2_000 }),
   ports = {}, run = runRunner, log = (s) => process.stderr.write(`${new Date().toISOString()} ${s}\n`), onStop = listenStop, fresh = keepSnapshotFresh,
-  realpath = (p) => realpathSync.native(p), memory = loadMemory } = {}) {
+  realpath = (p) => realpathSync.native(p), memory = loadMemory, folderProblem = (dir) => snapshotFolderProblem(dir) } = {}) {
   let c;
   try { c = checkRunnerConfig(readConfig(argv[0])); } catch (e) { log(`the worker runner did not start: ${e.message}`); return 1; }
   // The roots each deny is spelled from are their real paths (#378 r1 m4): the Mac's sandbox does not apply a deny reached
@@ -214,6 +342,13 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   for (const k of ['copiesRoot', 'outboxRoot']) {
     let real; try { real = realpath(c[k]); } catch (e) { log(`the worker runner did not start: ${k} can't be read (${e?.code ?? e?.message})`); return 1; }
     if (real !== c[k]) { log(`the worker runner did not start: ${k} is reached through a link (it is ${real})`); return 1; }
+  }
+  // Each product's rules snapshot's folder, only the runner's to write (L926, #419 r3 M1): one anyone else could write
+  // stops the runner here, before its lock; a missing one holds that product instead (keepSnapshots, below).
+  for (const [name, p] of Object.entries(c.products)) {
+    if (typeof p?.render?.paths?.snapshot !== 'string' || !p.rules) continue;
+    const f = folderProblem(dirname(p.render.paths.snapshot));
+    if (f && !f.missing) { log(`the worker runner did not start: product ${name}'s rules snapshot: ${f.reason}`); return 1; }
   }
   let l; let held;
   // The runner's own folder is setup's, with the access the Dispatcher's reads need: only settings/ is made here (#364 m6).
@@ -223,8 +358,12 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   if (held.broke) log('the last worker runner\'s lock was left by a runner that is gone; it was broken');
   let stopping = false;
   onStop(() => { stopping = true; });
-  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots).
-  const snaps = keepSnapshots(c, { fresh, log });
+  // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots), in a folder only
+  // the runner can write (L926): one anyone else could write refuses the start; a missing one holds the product, saying
+  // which folder to make, and is checked again, folder and all, at each later try.
+  // Checked again here at each try on purpose (also right after the check above): a missing folder may be made later.
+  const guarded = (path, rules) => { const f = folderProblem(dirname(path)); if (f) throw new Error(f.reason); return fresh(path, rules); };
+  const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
   let P;
   try {
     P = realRunnerPorts(c, ports, { stopped: () => stopping, log, productHeld: snaps.held });

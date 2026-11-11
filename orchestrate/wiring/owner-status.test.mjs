@@ -2,12 +2,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { linkSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { OWNER_PORTS, STATUS_STALE_MS } from './owner-ports.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRoleClash } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, STATUS_MAX_BYTES, USED_UP, openRead, ownerSyncPorts, readOwnerStatus, requestWriter, runnerCopy, runnerOutbox, runnerPlaces, productRole, productRoleClash } from './owner-status.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 
 const OWNER = 501; const NOW = Date.parse('2026-11-09T12:00:00Z');
 const FILE = '/runner/status.json'; const ROOT = '/out';
@@ -38,6 +39,9 @@ test('step 1: a fresh status of the runner\'s shape gives the five sync ports th
   for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(OWNER_PORTS[k].sync, true, k);
   assert.deepEqual({ ...RUNNER_ROLE_OF }, { editing: 'worker', undo: 'worker', script: 'script' }, 'pass.mjs kindOf and startRole: the only kinds the runner starts');
   assert.deepEqual([...RUNNER_KINDS], ['editing', 'undo', 'script']);
+  // L895 m2: RUNNER_ROLE_OF maps onto PRODUCT_OUTBOX_ROLES, and its guard refuses a role off that list.
+  for (const r of PRODUCT_OUTBOX_ROLES) assert.equal(productRole(r), r);
+  for (const r of ['lead', 'reviewer', 'front_door', 'Worker', '']) assert.throws(() => productRole(r), /is not one of PRODUCT_OUTBOX_ROLES/, r);
   // L767, L836: a script session has its own outbox, <root>/<product>/script/<id>, and intake tags its hand-ins 'script'.
   const scriptDoc = (more) => doc({ sessions: [session('s1', { kind: 'script', role: 'script', lead: null, outbox: `${ROOT}/p/script/s1`, ...more })] });
   assert.deepEqual(world(scriptDoc()).ports.sessions().map((x) => x.kind), ['script']);
@@ -185,6 +189,16 @@ test('step 1: a request file is written exclusively; the same ask twice is one f
   assert.throws(() => requestWriter('/req', () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); })('x.json', ''), /EACCES/, 'any other failure is told');
 });
 
+test('PR A self-review M1: a request is 0644 under the Dispatcher job\'s umask 077, so the runner (another user) can read it', () => {
+  const d = tempDir('orch-req-'); const old = process.umask(0o077);
+  try {
+    const w = requestWriter(d);
+    w('stop-s1.json', 'a\n'); w('stop-s1.json', 'b\n');
+    assert.equal(statSync(join(d, 'stop-s1.json')).mode & 0o777, 0o644);
+    assert.equal(readFileSync(join(d, 'stop-s1.json'), 'utf8'), 'a\n', 'the first ask stands');
+  } finally { process.umask(old); }
+});
+
 test('#324 r1 m1, m4, c1, c2: a status that contradicts itself is not known; a live session stays on the board whatever stop_requested says', () => {
   const ended = { alive: false, ended: true };
   const self = [
@@ -247,4 +261,19 @@ test('L836: an outbox is its product\'s, in its product\'s folder; a product nam
     assert.throws(() => world(closed).ports.sessions(), /not inside the outbox root, in its product folder/, `closed ${outbox}`);
   }
   assert.throws(() => world(doc({ sessions: [session('s1', { product: 'worker', outbox: `${ROOT}/worker/worker/s1` })] })).ports.sessions(), /product the runner's folders can't hold/);
+});
+
+test('L896: drain_held is read only as a known cause and a time, on an ended session whose outbox is open; drainHolds hands each on and throws on a status it can\'t read', () => {
+  const since = new Date(NOW - 60_000).toISOString();
+  const ended = (more = {}) => session('s2', { alive: false, ended: true, outbox_open: true, drain_held: { cause: 'not-taken', since }, ...more });
+  const d = (s2) => doc({ sessions: [session('s1'), s2], requests: { s1: { state: 'started' }, s2: { state: 'stopped' } } });
+  assert.deepEqual(world(d(ended())).ports.drainHolds(), [{ session: 's2', card: 'c-s2', product: 'p', cause: 'not-taken', since }]);
+  assert.deepEqual(world(doc()).ports.drainHolds(), [], 'nothing held');
+  for (const h of [null, 'x', [], {}, { cause: 'made-up', since }, { cause: 'not-taken' }, { cause: 'not-taken', since: 'soon' }, { cause: 'not-taken', since: 5 },
+    { cause: 'not-taken', since, more: 1 }]) {
+    assert.throws(() => world(d(ended({ drain_held: h }))).ports.drainHolds(), /has a drain_held that is not a cause and a time/, JSON.stringify(h));
+  }
+  assert.throws(() => world(d(ended({ alive: true }))).ports.drainHolds(), /has a drain_held but is running or its outbox is closed/, 'running');
+  assert.throws(() => world(d(ended({ outbox_open: false }))).ports.drainHolds(), /has a drain_held but is running or its outbox is closed/, 'closed');
+  assert.throws(() => world(d(ended()), { text: '{' }).ports.drainHolds(), 'a status that can\'t be read throws, never "nothing held"');
 });
