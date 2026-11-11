@@ -25,6 +25,9 @@ import { timeLimits, requestMerges } from '../M11-dispatcher/merges.mjs';
 import { MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, settleMerge, reconcileMerge } from './merge-outcome.mjs';
 import { markReverted } from './undo.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { undoStep, FIX_CARD, REVERSE_FACT as M11_REVERSE_FACT } from '../M11-dispatcher/undo.mjs';
+import { withAlerts } from '../M11-dispatcher/fixtures.test-helper.mjs';
+import { REVERSE_FACT, NOT_CLEAN } from '../../shared/record-names.mjs';
 
 const POLICY = 'tiers: {}\n';
 const CLEAN = { correct: 'clean', well_built: 'clean', works_for_user: 'clean', holds_up: 'clean' };
@@ -555,6 +558,105 @@ test('an undo card whose change is not the exact reverse is refused (9) and neve
   assert.equal(u.doc.state, 'refused');
   assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
   assert.equal(w.env.record.read('card', 'C-1').doc.state, 'closed');
+});
+
+// L980: the whole way for an undo that can never be the exact reverse. The gate refuses it (9, final: the check read
+// everything), records reverse-<card> = not_clean with what it found, and fails the card; M11 then writes the fix card
+// as a draft and tells the Lead once. Another pass, gate or M11, adds nothing.
+async function notCleanUndo(w) {
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  // The undo also changes a path the reversed merge never touched: no later pass can make it an exact reverse.
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' }, undo: flagged });
+  return flagged;
+}
+const m11Pass = (w, sent) => withAlerts(w.env.record, w.env.clock.t, (t) => { sent.push(typeof t === 'string' ? t : t.text); return true; },
+  (alert) => undoStep({ rec: w.env.record, rules: w.ctx.rules, now: w.env.clock.t, filesOf: () => [], alert }));
+
+test('L980: a not-clean undo is refused, recorded not_clean by the gate, failed, and M11 writes its fix card once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused');
+  assert.ok(u.doc.reasons.some((x) => x.startsWith('9:')), u.doc.reasons.join(' | '));
+  assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
+  const fid = REVERSE_FACT('U-1');
+  assert.equal(fid, M11_REVERSE_FACT('U-1'), 'M11 reads the fact the gate writes');
+  const f = w.env.record.read('fact', fid);
+  assert.equal(f.doc.state, NOT_CLEAN);
+  assert.equal(w.env.record.meta('fact', fid).createdBy, 'merge_gate');
+  assert.match(f.doc.reason, /src\/extra\.mjs/, f.doc.reason);
+  assert.equal(f.doc.merge, u.id);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+
+  const sent = [];
+  await m11Pass(w, sent);
+  const fix = w.env.record.read('card', FIX_CARD('U-1'));
+  assert.ok(fix, 'the fix card is written');
+  assert.deepEqual([fix.doc.state, fix.doc.kind, fix.doc.fix_of], ['draft', 'fix', 'U-1']);
+  assert.match(fix.doc.what, /could not be an exact reverse: .*src\/extra\.mjs/);
+  assert.equal(sent.filter((t) => /could not be an exact reverse/.test(t)).length, 1, sent.join(' | '));
+
+  // Again, both sides: the fact is written once, the card stays failed, no second fix card or alert.
+  const factRev = f.rev;
+  const cardRev = w.env.record.read('card', 'U-1').rev;
+  await gatePass(w.ctx);
+  await m11Pass(w, sent);
+  assert.equal(w.env.record.read('fact', fid).rev, factRev);
+  assert.equal(w.env.record.read('card', 'U-1').rev, cardRev);
+  assert.equal(w.env.record.list('card').filter((c) => c.id === FIX_CARD('U-1')).length, 1);
+  assert.equal(sent.filter((t) => /could not be an exact reverse/.test(t)).length, 1, sent.join(' | '));
+  assert.deepEqual(w.alerts.filter((x) => x.type === 'merge_gate_write_refused'), [], 'no write was refused on the way');
+});
+
+test('L980: a not_clean fact the gate wrote whose card move was lost is settled on the next pass', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  // The card's move into failed is refused once; the fact stands.
+  const real = w.ctx.record;
+  let lose = true;
+  w.ctx.record = Object.create(real, { write: { value: (x) => {
+    if (lose && x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed') { lose = false; return { ok: false, reason: 'the Record was in use' }; }
+    return real.write(x);
+  } } });
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.state, NOT_CLEAN);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  assert.ok(w.alerts.some((a) => a.type === 'merge_gate_write_refused'), JSON.stringify(w.alerts));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+test('L980: an undo whose reverse could not be read is held: no not_clean fact, the card is not failed', async () => {
+  const w = world();
+  const flagged = await notCleanUndo(w);
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  view.commit = async (sha) => { if (sha === flagged) throw Object.assign(new Error('HTTP 502 for the commit'), { unreadable: true }); return real.commit(sha); };
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  assert.notEqual(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+test('L980: the first-cutover refusal (not a merge the gate made) writes no not_clean fact and fails no card', async () => {
+  const w = world({ values: { 'product.cutover_stage': 'first' } });
+  // A change put on main by hand, not by the gate, and its exact reverse.
+  const before = w.g.main;
+  w.g.main = w.g.commit([before], { 'src/a.mjs': 'by hand' }, { from: before });
+  verifiedCard(w, 'U-2', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: w.g.main });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-2');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.ok(u.doc.reasons.some((x) => /^9:.*first cutover/.test(x)), u.doc.reasons.join(' | '));
+  assert.equal(u.doc.not_clean, undefined);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-2')), null);
+  assert.notEqual(w.env.record.read('card', 'U-2').doc.state, 'failed');
 });
 
 // L123 m-1: the go-free read at gather (gather.mjs, refusal 10) goes by the value as the rules file gives it, text.
