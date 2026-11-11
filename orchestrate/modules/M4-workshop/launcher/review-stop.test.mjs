@@ -7,6 +7,7 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { writeStopRequest, STOP_KEYS, STOP_PREFIX } from './review-stop.mjs';
 import { readRequest, FOLDERS } from './review-runner.mjs';
 import { stopGroupOf } from './review-runner-main.mjs';
+import { PLAN_REVIEW_ROLE } from '../../../shared/review-roles.mjs';
 import { REVIEW_USER } from './review-user.mjs';
 import { DISPATCHER_USER, dispatcherPlist } from '../../../setup/dispatcher-setup.mjs';
 import { folderTable, parseConfig, USERS, outboxRootPath, storePath, WORKER_ROLES } from '../../../setup/layout.mjs';
@@ -133,14 +134,14 @@ test('L946: a stop by card, role and head is { card, head, role, stop: true }; t
     assert.equal(got.ok, true, got.reason);
     assert.equal(got.target, true);
     assert.equal(got.owner, process.getuid());
-    for (const [t, why] of [[{ card: '.x', role: 'reviewer', head }, /card id/], [{ card: 'C-1', role: 'builder', head }, /role/], [{ card: 'C-1', role: 'reviewer', head: 'abc' }, /40 hex/], [null, /card id/]]) {
+    for (const [t, why] of [[{ card: '.x', role: 'reviewer', head }, /card id/], [{ card: 'C-1', role: 'builder', head }, /role/], [{ card: 'C-1', role: PLAN_REVIEW_ROLE, head }, /role/], [{ card: 'C-1', role: 'reviewer', head: 'abc' }, /40 hex/], [null, /card id/]]) {
       assert.match(writeStopRequest({ dir: d, target: t }).reason, why);
     }
     assert.match(writeStopRequest({ dir: d, requestId: 'r-1', target: { card: 'C-1', role: 'reviewer', head } }).reason, /not both/);
     const put = (name, body) => { writeFileSync(join(d, name), JSON.stringify(body)); return name; };
     assert.match(readRequest(d, put('stop-x1.json', { card: 'C-1', head, role: 'reviewer', stop: false })).reason, /must say "stop": true/);
     assert.match(readRequest(d, put('stop-x2.json', { card: 'C/1', head, role: 'reviewer', stop: true })).reason, /card id/);
-    assert.match(readRequest(d, put('stop-x3.json', { card: 'C-1', head, role: 'planner', stop: true })).reason, /role/);
+    assert.match(readRequest(d, put('stop-x3.json', { card: 'C-1', head, role: PLAN_REVIEW_ROLE, stop: true })).reason, /role/);
     assert.match(readRequest(d, put('stop-x4.json', { card: 'C-1', head: 'A'.repeat(40), role: 'reviewer', stop: true })).reason, /40 hex/);
     assert.match(readRequest(d, put('stop-x5.json', { card: 'C-1', head, role: 'reviewer', stop: true, request_id: 'r' })).reason, /must hold exactly/);
   } finally { rmSync(d, { recursive: true, force: true }); }

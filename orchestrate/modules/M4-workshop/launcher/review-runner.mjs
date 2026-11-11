@@ -599,7 +599,7 @@ export async function runnerPass(ctx) {
     // A corrupt state is never written over: Joe looks at it first (the status says why).
     // A save that fails is told, never thrown (re-review 3 m6): stop files read this pass are gone, so it says so.
     if (st.ok) try { writeWhole(P.state, state, 0o600); } catch (e) {
-      fail(`the runner's memory could not be saved (${e?.code ?? e?.message})${stopsRead ? `; ${stopsRead} stop file(s) read this pass were removed, so what they asked may be lost` : ''}`);
+      fail(`the runner's memory could not be saved (${e?.code ?? e?.message})${stopsRead ? `; ${stopsRead} stop file(s) read this pass were removed, so what they asked may be lost, and a session stopped this pass may end as if it was not` : ''}`);
       status.ok = false; status.error = result.error;
     }
     try { writeWhole(P.status, status, 0o644); } catch (e) { fail(`the status could not be written (${e?.code ?? e?.message})`); return { ...result, wrote: false, status }; }
@@ -1100,8 +1100,8 @@ export async function runnerPass(ctx) {
   const names = pending.sort((x, y) => (state.first_seen[x] < state.first_seen[y] ? -1 : state.first_seen[x] > state.first_seen[y] ? 1 : x < y ? -1 : 1));
   if (names.length > MAX_PENDING) alert('requests-pending', `${names.length} review requests are waiting (more than ${MAX_PENDING}); something may be asking far too often.`);
   else state.told = state.told.filter((t) => t !== 'requests-pending');
-  // The stops (L935), before any start and never capped: each matched only by the request id a running reviewer or
-  // auditor was started on. What a stop says goes in `refused` with no request id or file name: the status is anyone's.
+  // The stops (L935), before any start and never capped: each the Dispatcher's user's file, matched by the request id a
+  // running reviewer or auditor was started on, or by its card, role and head (L946). What a stop says goes in `refused` with no request id or file name: the status is anyone's.
   const stopNames = names.filter((n) => n.startsWith(STOP_PREFIX));
   const startNames = names.filter((n) => !n.startsWith(STOP_PREFIX));
   // A file the Dispatcher's Mac user wrote (L935 re-review 2 M1). With none given, no file is.
@@ -1160,12 +1160,16 @@ export async function runnerPass(ctx) {
   state.stops_waiting = (Array.isArray(state.stops_waiting) ? state.stops_waiting : [])
     .filter((x) => typeof x?.request_id === 'string' && REQUEST_ID.test(x.request_id) && pastTime(x.at, now) !== null && now - pastTime(x.at, now) < STOP_WAIT_MS)
     .slice(-KEEP_STOPS_WAITING);
+  state.targets_waiting = (Array.isArray(state.targets_waiting) ? state.targets_waiting : [])
+    .filter((x) => typeof x?.card === 'string' && REVIEW_ROLES.includes(x.role) && typeof x.head === 'string' && HEX40.test(x.head) && pastTime(x.at, now) !== null && now - pastTime(x.at, now) < STOP_WAIT_MS)
+    .slice(-KEEP_STOPS_WAITING);
   let strangers = 0;
+  const unreadStops = new Map();   // reason → files: the reasons are the runner's own few, so this stays short
   for (const name of stopNames) {
     const got = readRequest(P.requests, name, seenAt(name));
     if (got.wait) continue;
     delete state.first_seen[name];
-    if (!got.ok) { stopSaid(got.reason, name); continue; }
+    if (!got.ok) { unreadStops.set(got.reason, (unreadStops.get(got.reason) ?? 0) + 1); continue; }
     if (!got.stop) { stopSaid(`a file named ${STOP_PREFIX}… must hold a stop, so it was not read as a review request`, name); continue; }
     // Only the Dispatcher stops (L935 re-review 2 M1): its file must be the Dispatcher's Mac user's (the Record's owner,
     // `dispatcherUid`). Anyone else's does nothing, and is never kept, so others can't fill the stops kept either.
@@ -1176,7 +1180,15 @@ export async function runnerPass(ctx) {
       const { card, role, head } = got.req;
       const what = `the ${role} for card ${card} at ${head.slice(0, 7)}`;
       const hits = state.running.filter((x) => REVIEW_ROLES.includes(x.role) && x.card === card && x.role === role && x.head === head);
-      if (hits.length === 0) { stopSaid(`none running: no ${role} is running for card ${card} at ${head.slice(0, 7)}, so nothing was stopped`, name); continue; }
+      if (hits.length === 0) {
+        // Kept 30 minutes, as a stop by id is (L946 r1 M1): a request for exactly these, arriving with it, behind the
+        // start cap or later, is refused, not started.
+        const kept = state.targets_waiting.some((x) => x.card === card && x.role === role && x.head === head);
+        const room = kept || state.targets_waiting.length < KEEP_STOPS_WAITING;
+        if (!kept && room) state.targets_waiting = [...state.targets_waiting, { card, role, head, at: iso(now) }];
+        stopSaid(`none running: no ${role} is running for card ${card} at ${head.slice(0, 7)}, so nothing was stopped; ${room ? 'it is kept 30 minutes, so a request for it is refused, not started' : `${KEEP_STOPS_WAITING} are kept already, so this one was not kept`}`, name);
+        continue;
+      }
       for (const r of hits) {
         if (r.stopped_by_request) { stopSaid(`${what}, session ${r.session_id}, was stopped already`, name); continue; }
         if (r.stop_failed) { stopSaid(`${what}, session ${r.session_id}, could not be stopped before, and Joe was told; it is not tried again`, name); continue; }
@@ -1248,7 +1260,9 @@ export async function runnerPass(ctx) {
     const why = await stopIt(r);
     if (why) stopSaid(why, name);
   }
-  // Others' stop files (re-review 3 m5): one line a pass, counted, so a flood of them is one line.
+  // Others' stop files and unreadable ones (re-review 3 m5, L946 r1 m1): one line a pass each, counted, so a flood of
+  // them can't push the Dispatcher's answers out of the status.
+  for (const [why, n] of unreadStops) stopSaid(n === 1 ? why : `${n} stop files: ${why}`);
   if (strangers > 0) stopSaid(Number.isInteger(ctx.dispatcherUid) ? `${strangers} stop file(s) were not the Dispatcher's user's, so nothing was stopped` : `${strangers} stop file(s) came, but this runner is not told the Dispatcher's user, so no stop counts`);
   let starts = 0;
   // Plan reviewers started this pass that the runner could not follow (a start that ran but gave no claude): each still
@@ -1441,6 +1455,8 @@ export async function runnerPass(ctx) {
     // A stop for it came first (L935 self-review M1): refused, never started. A plan request is never stopped.
     const stopFirst = got.req.fingerprint === undefined ? state.stops_waiting.findIndex((x) => x.request_id === rid) : -1;
     if (stopFirst >= 0) { state.stops_waiting.splice(stopFirst, 1); refuse('a stop for it came before it started, so it was not started'); continue; }
+    const targetFirst = got.req.fingerprint === undefined ? state.targets_waiting.findIndex((x) => x.card === card && x.role === role && x.head === head) : -1;
+    if (targetFirst >= 0) { state.targets_waiting.splice(targetFirst, 1); refuse(`a stop for the ${role} for card ${card} at ${head.slice(0, 7)} came before it started, so it was not started`); continue; }
     if (got.req.fingerprint !== undefined) {
       await planStart({ card, fingerprint: got.req.fingerprint, rid, refuse });
       continue;

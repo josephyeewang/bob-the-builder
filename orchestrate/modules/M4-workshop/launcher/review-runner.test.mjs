@@ -2313,6 +2313,28 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   const both = await runnerPass(x.w.ctx);
   assert.deepEqual(x.groups.map((g) => g.sessionId), ['S-1'], JSON.stringify(both.refused));
   assert.deepEqual(both.started, [], 'its own request is not started over it');
+  // r1 M1: the Dispatcher's request and its target stop in one pass with none running: the stop is kept, the request
+  // refused, never started; one arriving later within 30 minutes is refused too, and past them it starts.
+  const q = await stopWorld();
+  q.w.ask({ request_id: 'q-1' });
+  writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  const qr = await runnerPass(q.w.ctx);
+  assert.deepEqual(qr.started, [], JSON.stringify(qr.refused));
+  refusedFor(qr, /none running: no reviewer is running for card C-1 at aaaaaaa, so nothing was stopped; it is kept 30 minutes/);
+  refusedFor(qr, /a stop for the reviewer for card C-1 at aaaaaaa came before it started, so it was not started/);
+  writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(q.w.ctx);
+  q.w.clock.t += 10 * 60_000;
+  q.w.ask({ request_id: 'q-2' });
+  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], 'refused within the 30 minutes');
+  q.w.clock.t += 31 * 60_000;
+  q.w.ask({ request_id: 'q-3' });
+  assert.deepEqual((await runnerPass(q.w.ctx)).started.map((s) => s.session_id), ['S-1'], 'past them it starts');
+  // r1 m1: stop files that can't be read are one counted line.
+  for (let i = 0; i < 3; i++) writeFileSync(join(q.w.requests, `stop-bad${i}.json`), 'not json');
+  const qb = await runnerPass(q.w.ctx);
+  assert.deepEqual(qb.refused.filter((x) => /^a stop request: 3 stop files: /.test(x.reason)).length, 1, JSON.stringify(qb.refused));
+  assert.equal(qb.refused.filter((x) => /stop request/.test(x.reason)).length, 1, 'one line for the three');
   // One whose first try fails is tried again on the next pass, though no request of the Dispatcher's started it.
   const z = await stopWorld({ fail: 1 });
   z.w.ctx.dispatcherUid = ME + 1;
@@ -2418,7 +2440,7 @@ test('L946 m6 planted: a memory save that fails after stop files were read says 
   try {
     const r = await runnerPass(w.ctx);
     assert.equal(r.ok, false);
-    assert.match(r.error, /the runner's memory could not be saved \(EISDIR\); 1 stop file\(s\) read this pass were removed/);
+    assert.match(r.error, /the runner's memory could not be saved \(EISDIR\); 1 stop file\(s\) read this pass were removed, so what they asked may be lost, and a session stopped this pass may end as if it was not/);
     assert.equal(w.status().ok, false);
     assert.match(w.status().error, /could not be saved/);
   } finally { rmdirSync(tmp); }
