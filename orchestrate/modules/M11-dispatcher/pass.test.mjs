@@ -2333,7 +2333,8 @@ test('L962 m5: a session still listed after REVIEW_STOP_MAX_ASKS asks is given u
   usageInto(rec);
   let asked = 0;
   const notes = [];
-  const run = (min, sessions = [rv('R-1', 'reviewer', 'C-7')]) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+  const alert = fakeAlert({ answer: true });
+  const run = (min, sessions = [rv('R-1', 'reviewer', 'C-7')]) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert,
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => { asked += 1; return { ok: true }; } });
   assert.equal(REVIEW_STOP_MAX_ASKS, 6);
   for (let k = 0; k < 10; k += 1) { const r = await run(k * 5); notes.push(...r.notes.filter((n) => /still running after/.test(n))); }
@@ -2341,9 +2342,77 @@ test('L962 m5: a session still listed after REVIEW_STOP_MAX_ASKS asks is given u
   assert.equal(notes.length, 1, 'said once');
   assert.match(notes[0], /reviewer R-1 for cancelled card C-7 is still running after 6 stop requests; it is not asked again/);
   assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'given_up');
+  // #458 r1 m-b: Joe is told once, as the runner shows no stop of its own here.
+  const tells = alert.texts.filter((t) => /still running after 6 stop requests/.test(t));
+  assert.equal(tells.length, 1, alert.texts.join(' | '));
+  assert.match(tells[0], /the reviewer R-1 for cancelled card C-7 is still running after 6 stop requests; it is not asked again; the review runner showed no answer/);
+  assert.doesNotMatch(notes[0], /the review runner tells Joe/, 'no claim the runner tells him');
   await run(60, []);
+  // Told only once the given_up fact is written (#458 self-review m2): a refused write tells nothing; the next pass does, once.
+  const rec2 = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec2);
+  let frozen = false;
+  const refusing = { ...rec2, write: (w) => (frozen && w.entity === 'fact' && w.id === REVIEW_STOP_FACT('R-1') ? { ok: false, reason: 'read-only' } : rec2.write(w)) };
+  const alert2 = fakeAlert({ answer: true });
+  const go = (min) => stopPass({ rec: refusing, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: alert2,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => ({ ok: true }) });
+  for (let k = 0; k < 6; k += 1) await go(k * 5);
+  frozen = true;
+  await go(40);
+  const toldOf = () => alert2.texts.filter((t) => /still running after 6 stop requests/.test(t)).length;
+  assert.equal(toldOf(), 0, 'the given_up write was refused: not told');
+  frozen = false;
+  await go(45); await go(50);
+  assert.equal(toldOf(), 1, 'written on the next pass: told once');
   assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'done');
 });
+
+// L968: once the review runner's row shows its own answer, the stop step asks no more; the cap is the backstop for a runner
+// that never shows one (an older install, a stop file it never reached).
+test('L968: a runner that shows its stop (stopped, wanted or failed) is not asked again; the fact says what it showed, and is done once it goes', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  let asked = 0;
+  const run = (min, sessions) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => { asked += 1; return { ok: true }; } });
+  const shown = (s) => [{ ...rv('R-1', 'reviewer', 'C-7'), ...(s ? { runner_stop: s } : {}) }];
+  await run(0, shown());
+  assert.equal(asked, 1);
+  for (const [k, s] of [[5, 'wanted'], [10, 'wanted'], [15, 'failed'], [40, 'failed']]) {
+    const r = await run(k, shown(s));
+    assert.deepEqual(r.reviewStops, [['R-1', 'cancel', `runner_${s}`]], `${k}`);
+  }
+  assert.equal(asked, 1, 'never asked again once the runner showed it');
+  const f = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.deepEqual([f.state, f.runner, f.taken_at, f.asks], ['taken', 'failed', iso(T0 + 15 * MIN), 1], 'written once per answer shown, the asks kept');
+  // The answer gone from the row while the session is still listed (L968 r1 m2): asked again at once, the cap still counting.
+  const back = await run(42, shown());
+  assert.deepEqual(back.reviewStops, [['R-1', 'cancel', 'asked']]);
+  assert.equal(asked, 2);
+  const g = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.deepEqual([g.state, g.asks, g.runner, g.taken_at], ['asked', 2, undefined, undefined], 'the dropped answer is not kept');
+  await run(45, []);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'done');
+  // Shown before any ask (a stop the runner made for another's request): nothing is asked at all.
+  const r2 = await run(50, [{ ...rv('R-2', 'reviewer', 'C-7'), runner_stop: 'stopped' }]);
+  assert.deepEqual(r2.reviewStops, [['R-2', 'cancel', 'runner_stopped']]);
+  assert.equal(asked, 2, 'R-2 is never asked');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-2')).doc.state, 'taken');
+  // #458 r1 m-a: a taken fact is swept to done once its session is no longer listed.
+  await run(55, []);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-2')).doc.state, 'done', 'taken, then gone: done');
+  // A failing ask the runner then shows ends the failure: it is no longer failing.
+  const failRec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(failRec);
+  const go = (min, sessions, stopReview) => stopPass({ rec: failRec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
+  await go(0, shown(), () => ({ ok: false, reason: 'the folder is gone' }));
+  assert.equal(failRec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'failing');
+  const r3 = await go(5, shown('stopped'), () => { throw new Error('must not be asked'); });
+  assert.deepEqual(r3.reviewStops, [['R-1', 'cancel', 'runner_stopped']]);
+  assert.equal(failRec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'taken');
+});
+// Without runner_stop the cap still ends the asking (L962 m5 above): the backstop stays.
 
 // L962 m2: a fact write the Record refuses is said, so a stop file sent on every pass is never silent.
 test('L962 m2: a refused review-stop fact write is said in the notes and the failure log', async () => {

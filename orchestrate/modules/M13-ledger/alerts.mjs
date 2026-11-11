@@ -41,6 +41,8 @@
 //   lastServerTime: GitHub's own time on its latest answer (its Date header), in ms, or null (L768)
 //     ours: the robot wrote it. closedByOwner: GitHub shows a person other than the robot closed it.
 //   findOpen(test) → the number of a robot's open issue whose last line passes test, null when there is none
+//   listOpen(test) → every robot's open issue whose last line passes test, as [{ number, body }], or false when
+//     GitHub refused a page or the list could not be read whole (only the daily sweep uses it)
 //   latestOwnComment(number, since) → the robot's latest comment since that time, as { at, body }, or null
 // edit, comment and close answer false when GitHub refused them; open answers the new issue's number, anything else is
 // a lost open (L143). findOpen and latestOwnComment answer false when GitHub refused them.
@@ -91,7 +93,41 @@ export const clockTooFast = (gh, t) => (clockAhead(gh, t) ?? 0) > CLOCK_AHEAD_MS
 /** GitHub's time now, in ms: the robot's `t` less how far it is ahead; the robot's own when it is behind or GitHub gave no Date header. */
 export const githubNow = (gh, t) => t - Math.max(0, clockAhead(gh, t) ?? 0);
 
-export function alertKey(product, kind, subject) { return `${product}|${kind}|${subject}`; }
+// The product part has no '|' (L973 4): it ends the product, and forget and sweep find a key's product by it.
+export function alertKey(product, kind, subject) {
+  if (String(product).includes('|')) throw new Error('a product name has no "|": it ends the product part of a key');
+  return `${product}|${kind}|${subject}`;
+}
+
+/**
+ * The daily sweep of alert issues left open after their cause cleared (L402, L957). An issue opened while the Record
+ * refused its number has no number in the Record, so when its cause clears, clear finds nothing and answers 'none', and
+ * the issue stays open. The sweep closes only on proof: a key some clear in this round (this makeAlerts) answered 'none'
+ * for, and no raise in the round raised again. It lists the robot's open issues whose last line is the orch:alert v1
+ * footer once, and for a proven key whose issue is on the list it runs that key's own clear, looking on GitHub. An alert
+ * nothing clears (a one-time notice, a sensor that can't look) is never closed. It fails closed: with no proof, the list
+ * not read whole, the robot's own login unknown or the product's list mark refused, it closes nothing and says why.
+ * GitHub's list is read when a proven key is not yet known clear (L959 M1, M2; L965 m2; L973 1): the product's one mark
+ * keeps the keys a list showed with no open issue, or whose issue was closed or refused, for an hour from its first
+ * write, and a raise of a key takes it off. So a key proven on any pass, by any caller, is looked at within the hour, and
+ * a key cleared again every pass doesn't read the list every pass. A key's own mark is written only when the list held
+ * an issue for it, naming that issue: a refused close of it is not tried again for a day, a kept one for an hour (L973
+ * m4), and another issue of the same key is tried as it comes.
+ * Known limits (L965 m3, m4): a raise by another caller landing between the clear's read of an issue and its close is
+ * closed with it; the raise after that finds it cleared and opens a new issue, so it is a repeated notice, not a lost one.
+ * The proof's time is this computer's and "last seen" the raiser's, so a raiser on another computer with a clock behind
+ * can look earlier than the proof; one host at a time (host.lock) keeps the callers on one clock.
+ */
+export const SWEEP_EVERY_MS = 24 * 3_600_000;
+/** How long the product's known-clear list is trusted (L973 1): caps any key's wait behind it at about an hour. */
+export const SWEEP_LIST_TRUST_MS = 3_600_000;
+/** The Record id of a key's sweep mark: from the key's own hashed id, so two keys never share one (L959 m3). */
+export const sweepFactId = (key) => `alert-sweep-${idOf(key).slice('alert-'.length)}`;
+/** The Record id of a product's list mark: from the product's hash (L959 m3). */
+export const sweepListFactId = (product) => `alert-sweep-list-${hashOf(String(product))}`;
+/** The key prefix of the home repository's own checks (outside-watch): not a product, so never swept (L959 m4). */
+export const HOME_PREFIX = 'outside-check';
+export const SWEEP_NOTE = 'Closed by the daily check of open alerts: its cause cleared while this issue\'s number was not kept, so it was not closed then. If it comes back, a new issue opens.';
 
 /** Whether raise's answer means the alert went out: not when GitHub lost it (false). */
 export const wasTold = (answer) => answer !== false;
@@ -118,7 +154,10 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
   let refused = null; // the latest cache write refused: which alert, its issue, and the status it was to have
+  const clearedNone = new Map(); // key → { id, at }, for each key a clear this round found nothing to close for (the sweep's proof)
 
+  // The robot's own tail of a body, so a line in the alert's text can't pass for its "last seen".
+  const lastSeenPart = (body) => { const b = String(body ?? ''); const at = b.lastIndexOf(TAIL); return at < 0 ? '' : b.slice(at); };
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
   // With no readable time it is GitHub's time now (L801 self-review m1): a fast robot stamp would read as ahead, so due every pass.
@@ -246,17 +285,29 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   // The condition no longer holds. The footer says so first, then an open issue closes with a note. Answers 'none' with
   // nothing to clear, and false, with the next pass trying again, when GitHub refused a step (L143). `look` also searches
   // GitHub when the Record doesn't point at an issue.
-  async function clear({ key, note = 'Cleared: the condition no longer holds.', look = false }) {
+  // `proof` is the sweep's own (kept inside: the exported clear takes one argument).
+  async function clearKey({ key, note = 'Cleared: the condition no longer holds.', look = false }, proof = null) {
     const id = idOf(key);
     const t = now().toISOString();
     const s = writer.get(id);
     const pointed = ISSUE(s?.issue) && s.status !== 'cleared';
-    if (!pointed && !look) return 'none';
+    if (!pointed && !look) { clearedNone.set(key, { id, at: t }); return 'none'; }
     let at = pointed ? await held(s.issue, id, s, t) : null;
     if (at === false) return false;
     if (!at && look) {
       at = await looked(id, s, t);
       if (at === false) return false;
+    }
+    // The sweep's own checks, on the issue as GitHub showed it just now (L959 m2, m5): with the robot's login unknown,
+    // any bot's issue reads as the robot's, so nothing is closed (false); an old-form issue is kept; and an issue told
+    // or seen at or after the proof was raised again by another caller, so its cause stands and it is kept ('kept').
+    if (proof && at) {
+      if (!('loginTrouble' in gh) || gh.loginTrouble) return false;
+      const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);
+      proof.seen = at.n; // the issue it looked at, so a kept one is named by its own number (L965 c1)
+      if (at.f.old) return 'kept'; // only an orch:alert v1 footer as the last line is swept (L957 rule 2)
+      if (!(seen < Date.parse(proof.at))) return 'kept';
+      if (at.i.open) proof.issue = at.n; // only an issue this clear closes is named (L959 review m4)
     }
     if (!at) {
       if (!pointed) return 'none';
@@ -277,6 +328,105 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     cache(id, s, key, at.n, 'cleared', settled && !at.i.open);
     return 'cleared';
   }
+
+  // The sweep (L402, L957, L959, L965; see SWEEP_EVERY_MS), called after the round's raises and clears on this object.
+  // Answers { swept, closed, failed, kept, why }: swept false with a why when it stopped (`closed` then holds what it
+  // closed before it stopped), and with why null when every proven key of this product is known clear. `closed` holds
+  // the issues the clears closed; `kept`, issues kept as raised again since the proof or old-form; `failed`, a close
+  // GitHub refused, tried again by a later proof a day on.
+  // The proof does not expire: the caller makes a new makeAlerts each round, so a 'none' is this round's (L957 review m2).
+  // The product's mark is written before the list, so a refused list is not read again on every pass.
+  async function sweep({ product } = {}) {
+    if (typeof product !== 'string' || !product) throw new Error('sweep needs the product');
+    if (product.includes('|')) throw new Error('a product name has no "|": it ends the product part of a key');
+    if (product === HOME_PREFIX) throw new Error(`sweep is for a product; ${HOME_PREFIX} keys are the home checks`);
+    const t = now().toISOString();
+    const ms = Date.parse(t);
+    const no = (why) => ({ swept: false, closed: [], failed: [], kept: [], why });
+    const within = (at, span) => { const last = pastTime(at, ms); return last !== null && ms - last < span; };
+    // A key's mark holds its issue back a day after a refused close, and an hour after it was kept (L973 m4).
+    const holds = (km) => within(km?.swept_at, km?.kept === true ? SWEEP_LIST_TRUST_MS : SWEEP_EVERY_MS);
+    // This product's proven keys, and of them those a list in the last hour has not shown clear (L965 m2, L973 1).
+    const proven = [...clearedNone].filter(([key]) => key.startsWith(`${product}|`));
+    if (!proven.length) return no(null);
+    const pid = sweepListFactId(product);
+    const mark = writer.get(pid);
+    const markFresh = within(mark?.listed_at, SWEEP_LIST_TRUST_MS);
+    const known = new Set(markFresh && Array.isArray(mark.clear_ids) ? mark.clear_ids : []);
+    const need = proven.filter(([key, p]) => !known.has(p.id) && !(writer.get(sweepFactId(key))?.kept === true && holds(writer.get(sweepFactId(key)))));
+    if (!need.length) return no(null);
+    if (typeof gh.listOpen !== 'function') return no('this GitHub client cannot list open issues, so no issue was closed');
+    // The list's time is its first write's, kept by later ones, so no id stays known past an hour from it (L973 P7).
+    const listedAt = markFresh ? mark.listed_at : t;
+    const put = writer.put(pid, { kind: 'fact.alert-sweep-list', listed_at: listedAt, clear_ids: [...known, ...need.map(([, p]) => p.id)] });
+    if (!wasSaved(put)) return no(`the Record refused the sweep's mark (${masker.maskSecrets(String(put?.reason ?? 'no reason given')).text.slice(0, 200)}), so GitHub was not asked and no issue was closed`);
+    const byId = new Map(need.map(([key, p]) => [p.id, [key, p]]));
+    // Known clear from here on (L965 review m1): an id whose issue was closed or refused (its key mark holds it), or that
+    // a whole list did not hold. One kept, or not reached (a login stop, a throw), stays needed. The list is read again
+    // when written, so a raise's forget meanwhile stands (L973 m2); a refused write is said (L973 m5).
+    const listedIds = new Set();
+    const handled = new Set();
+    let scanned = false;
+    let settled = false;
+    const finish = (res) => {
+      settled = true;
+      if (scanned) for (const [, p] of need) if (!listedIds.has(p.id)) handled.add(p.id);
+      const cur = writer.get(pid);
+      const was = cur?.listed_at === listedAt && Array.isArray(cur.clear_ids) ? cur.clear_ids : [];
+      const ids = was.filter((x) => !byId.has(x) || handled.has(x));
+      if (ids.length === was.length) return res;
+      const w2 = writer.put(pid, { kind: 'fact.alert-sweep-list', listed_at: listedAt, clear_ids: ids });
+      if (wasSaved(w2) || !res) return res;
+      const say = 'the Record refused the sweep\'s list mark, so a key it tried may wait up to an hour';
+      return { ...res, why: res.why ? `${res.why}; ${say}` : say };
+    };
+    try {
+      const list = await gh.listOpen((line) => FOOTER.test(line));
+      const whole = Array.isArray(list) && list.every((i) => ISSUE(i?.number) && typeof i.body === 'string');
+      // A list not read whole: its ids stay known for the hour, so a GitHub that won't list is not asked every pass.
+      if (!whole) { settled = true; return no(`GitHub's list of open issues could not be read whole${gh.lastAnswer ? ` (${gh.lastAnswer})` : ''}, so no issue was closed`); }
+      const out = { swept: true, closed: [], failed: [], kept: [], why: null };
+      const unmarked = [];
+      // Each call learns the login again, and with none any bot counts as the robot: stop then, checked before the list's
+      // first close and after each; the clear checks it again on the issue it found (L957 review m3, L959 m2). A client
+      // that can't say is read as not known.
+      const noLogin = () => !('loginTrouble' in gh) || gh.loginTrouble;
+      const loginStop = { swept: false, why: 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed' };
+      // Before the loop, nothing is known clear (L973 P10).
+      if (noLogin()) return finish({ ...out, ...loginStop });
+      for (const i of list) { const id = FOOTER.exec(lastLine(i.body))?.[1]; if (byId.has(id)) listedIds.add(id); }
+      scanned = true;
+      for (const i of list) {
+        const hit = byId.get(FOOTER.exec(lastLine(i.body))?.[1]);
+        if (hit === undefined) continue;
+        const [key, p] = hit;
+        // This issue tried by this key lately (its close refused: a day; kept: an hour): not again until then.
+        const km = writer.get(sweepFactId(key));
+        if (km?.issue === i.number && holds(km)) { if (km.kept !== true) handled.add(p.id); continue; }
+        // The key's own clear, looking on GitHub: it finds the robot's open issue for this key by its own checks (the
+        // robot's, open, the footer as the last line), says cleared in the footer, then closes it with the note.
+        const proof = { at: p.at, issue: null, seen: null };
+        const r = await clearKey({ key, note: SWEEP_NOTE, look: true }, proof);
+        if (r === 'cleared' && proof.issue !== null) out.closed.push(proof.issue);
+        else if (r === false) out.failed.push(proof.issue ?? proof.seen ?? i.number);
+        else if (r === 'kept') out.kept.push(proof.seen ?? i.number);
+        // The list held an issue for this key: its own mark (L965 m2). A kept one is not known clear, and its mark holds
+        // it back an hour, so a key one caller keeps raising and another clearing doesn't read the list every pass (L973 m4).
+        if (r !== 'kept') handled.add(p.id);
+        const doc = { kind: 'fact.alert-sweep', alert: p.id, issue: i.number, swept_at: t, ...(r === 'kept' ? { kept: true } : {}) };
+        if (!wasSaved(writer.put(sweepFactId(key), doc))) unmarked.push(key);
+        // Not reached: their ids stay needed.
+        if (noLogin()) return finish({ ...out, ...loginStop, ...(unmarked.length ? { why: `${loginStop.why}; ${markSay(unmarked)}` } : {}) });
+      }
+      if (unmarked.length) out.why = markSay(unmarked);
+      return finish(out);
+    } finally {
+      // A throw (GitHub's list or a clear): the ids not reached stay needed (L973 m3).
+      if (!settled) finish(null);
+    }
+  }
+  // The keys whose own mark the Record refused (L965 c4): their issue may be tried again before a day is out.
+  const markSay = (keys) => `the Record refused the mark of ${keys.map((k) => masker.maskSecrets(String(k)).text.slice(0, 120)).join(', ')}, so it may be tried again before the day is out`;
 
   /** Why the Record refused to keep where an alert is, since the last report, or null. */
   const cacheTrouble = () => trouble;
@@ -320,7 +470,22 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return answer;
   }
 
-  return Object.freeze({ raise, clear, cacheTrouble, loginTrouble, reportTrouble });
+  // A key raised again after its clear loses the sweep's proof (L957). Kept outside raise, which is ruled as it is (L135).
+  // And off the product's known-clear list (L965 m2), so the next proof of it reads GitHub's list again. A refused write
+  // leaves it on for at most the hour the list is trusted (L973 1), and is told under the Record refusing.
+  const forget = (key) => {
+    if (typeof key !== 'string') return;
+    const pid = sweepListFactId(key.slice(0, key.indexOf('|')));
+    const m = writer.get(pid);
+    const id = idOf(key);
+    if (!Array.isArray(m?.clear_ids) || !m.clear_ids.includes(id)) return;
+    const r = writer.put(pid, { kind: 'fact.alert-sweep-list', listed_at: m.listed_at, clear_ids: m.clear_ids.filter((x) => x !== id) });
+    // Refused (L973 m1a): told as the Record refusing, in this caller's reportTrouble.
+    if (!wasSaved(r)) { trouble = masker.maskSecrets(String(r?.reason ?? 'no reason given')).text.slice(0, 200); again = true; }
+  };
+  const raised = (args) => { clearedNone.delete(args?.key); forget(args?.key); return raise(args); };
+  const clear = (args) => clearKey(args);
+  return Object.freeze({ raise: raised, clear, cacheTrouble, loginTrouble, reportTrouble, sweep });
 }
 
 // A fake GitHub issue client that records every call but its reads (tests, and the owner's dry runs). With no `now` its
@@ -335,7 +500,7 @@ export function fakeIssues({ now = null, serverNow = null } = {}) {
   const said = (i, body) => { if (gNow) spoken.push({ i, at: gNow().toISOString(), body }); };
   let n = 0;
   return {
-    calls, issues,
+    calls, issues, loginTrouble: null,
     get lastServerTime() { return serverNow ? +serverNow() : null; },
     async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [], created_at: serverNow ? serverNow().toISOString() : null }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },
@@ -349,6 +514,7 @@ export function fakeIssues({ now = null, serverNow = null } = {}) {
       return x ? { open: !x.closed, body: x.body, ours: x.ours !== false, closedByOwner: x.closed && x.byOwner === true, created_at: x.created_at } : null;
     },
     async findOpen(test) { for (const [k, x] of issues) if (!x.closed && x.ours !== false && test(lastLine(x.body))) return k; return null; },
+    async listOpen(test) { calls.push(['listOpen']); return [...issues].filter(([, x]) => !x.closed && x.ours !== false && test(lastLine(x.body))).map(([number, x]) => ({ number, body: x.body })); },
     async latestOwnComment(i, since) { return spoken.filter((c) => c.i === i && c.at >= since).at(-1) ?? null; },
     ownerCloses(i) { const x = issues.get(i); x.closed = true; x.byOwner = true; },
   };

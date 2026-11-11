@@ -1,5 +1,5 @@
 // Part C's interface (R-0b-162 C, L248, L741): the ports the Dispatcher reaches only through the owner-side worker runner.
-// This file only fixes their shape. Each answers "not wired yet" until the runner is built behind it. Lane 2's phone ports
+// This file only fixes their shape; worker-ports.mjs wires them (B: the sync ports; C, L963: the asks), and the stub below refuses. Lane 2's phone ports
 // build against it, so a change of shape needs a lead ruling.
 //
 // The Dispatcher (the orchestrate user) never starts, reads or stops a worker itself, because workers run as the owner's
@@ -44,7 +44,7 @@ export const STATUS_STALE_MS = 180_000;   // L248: a status file older than 3 mi
 const sync = (inp, out, notKnown) => Object.freeze({ sync: true, in: inp, out, notKnown, deadlineMs: null });
 const ask = (inp, out, fails, deadlineMs) => Object.freeze({ sync: false, in: inp, out, fails, deadlineMs });
 const NO = 'throws (a status file is stale or unreadable)';
-const SESSION = '{ id, product, kind, card, lead, role, head, pgid, signin, config_dir, bundle_files }';   // kind: one of gate.mjs's kinds, which the start caps count by; head: a reviewer's (L946), left out of other kinds' rows
+const SESSION = '{ id, product, kind, card, lead, role, head, pgid, signin, config_dir, bundle_files, runner_stop }';   // kind: one of gate.mjs's kinds, which the start caps count by; head: a reviewer's (L946), left out of other kinds' rows; runner_stop: a reviewer's or auditor's only, 'stopped' | 'wanted' | 'failed' when the review runner shows a stop on its row (L968), left out otherwise
 
 /** Each owner-side port: what goes in, what comes out, how a failure is answered, and its default time limit. */
 export const OWNER_PORTS = Object.freeze({
@@ -88,8 +88,7 @@ export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'at
 
 /**
  * The owner-side ports, given the runner's two paths: `requestsDir` (where the Dispatcher writes a request) and `statusFile`
- * (where the runner writes its status). Until the runner is built each port refuses, so behaviour stays the same:
- * worker-ports.mjs still lists them, with the same refusal.
+ * (where the runner writes its status). This stub refuses each port; worker-ports.mjs answers them for real (B, C).
  * @returns {{ ports: object, cleanup: object }}
  */
 export function ownerPorts({ requestsDir, statusFile, clock = Date.now } = {}) {
