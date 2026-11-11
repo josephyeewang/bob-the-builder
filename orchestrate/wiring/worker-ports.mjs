@@ -216,14 +216,16 @@ export function reviewEndedPort({ root, uid, lstat = lstatSync, ended = runnerEn
 // The review runner's roles as sessions() kinds (gate.mjs: review and audit, both free of the caps). The plan reviewer
 // is counted by planReviewsRunning instead; any other role is not the review runner's, and makes the list "not known".
 export const REVIEW_KIND_OF = Object.freeze({ reviewer: 'review', auditor: 'audit' });
+const HEX40 = /^[0-9a-f]{40}$/;
 // The hold id review-runner.mjs lists while its memory file can't be read.
 export const REVIEW_STATE_CORRUPT = 'state-corrupt';
 
 /**
  * The review runner's running reviewers and auditors as sessions() rows, from its checked status (readReviewStatus), or
  * a throw. The status names no product, process group, sign-in or settings folder, so those are null: product null is no
- * product's, so the stop step never reaches one (L933: it runs until it ends on its own; its verdict for an ended card
- * is thrown away). A status whose runner could not read its own memory lists none running, so that one is a throw.
+ * product's, so the worker stop never reaches one. Each row carries the head it reviews (40 hex, as the runner's stop
+ * file needs it): the stop step asks the runner to end one only for a card of this Record at that very head (pass.mjs
+ * stopPass, L946). A status whose runner could not read its own memory lists none running, so that one is a throw.
  */
 export function reviewSessions(status) {
   // review-runner.mjs: with its memory unreadable it starts nothing and writes running: [] with this hold; the reviewers
@@ -238,7 +240,8 @@ export function reviewSessions(status) {
     if (!Object.hasOwn(REVIEW_KIND_OF, r.role)) throw new Error(`a session in the review runner's status has role ${JSON.stringify(r.role)}, which the review runner does not start`);
     if (typeof r.session_id !== 'string' || !r.session_id) throw new Error('a session in the review runner\'s status has no session id');
     if (typeof r.card !== 'string' || !r.card) throw new Error(`review session ${r.session_id} in the review runner's status has no card`);
-    out.push({ id: r.session_id, product: null, kind: REVIEW_KIND_OF[r.role], card: r.card, lead: null, role: r.role, pgid: null, signin: null, config_dir: null, bundle_files: [] });
+    if (typeof r.head !== 'string' || !HEX40.test(r.head)) throw new Error(`review session ${r.session_id} in the review runner's status names no head (40 hex)`);
+    out.push({ id: r.session_id, product: null, kind: REVIEW_KIND_OF[r.role], card: r.card, head: r.head, lead: null, role: r.role, pgid: null, signin: null, config_dir: null, bundle_files: [] });
   }
   return out;
 }

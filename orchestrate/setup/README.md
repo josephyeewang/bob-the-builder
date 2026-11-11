@@ -226,6 +226,20 @@ prepared config as a file named `robot.json`, which the install puts in the copy
 |---|---|---|
 | `sudo node setup.mjs daemons place` / `load` / `check` (also `--only robot`) | a job `<label>.robot`: runs as `orchestrate` (the Record's owner and the key folder's), from the installed copy, `wiring/robot-main.mjs <copy>/robot.json`, every 60 s and once at load, logs `robot.out.log` / `robot.err.log` in the log folder (orchestrate's, as every job with a user). Built by M11's `loginJobPlist`, the Dispatcher's builder. `place` and `load` refuse, and `check` FAILs, unless the copy's `robot.json` is root's alone and holds the values setup knows: `wiring` = the copy's `wiring/robot-wiring.mjs`, `ownerUid` = orchestrate's, `keyDir` = `<base>/keys`, `installRoot` (if given) = the copy, `lockFile` = `<base>/home/orchestrate/robot.lock` (orchestrate's home, which only it can write), `dispatcherLockFile` a full path, different, outside the install, in a folder that is orchestrate's or root's, so no worker can plant a lock there; both written plainly (no `.`, `..` or doubled `/`); each lock's folder there as a plain folder (not a link), written by no group or other, with no access list, and every folder above it root's; no key the robot job does not take. The job file also sets `HOME` (orchestrate's home) and `Umask 63`, as the watch job. The rest is the job's own start check: a refused start exits 1, and a round that cannot take its lock (a missing or unwritable folder, a lock held by another user's process, or one of its own held longer than any round may run) exits 3 with one log line naming the lock and the cause. A last exit that is not 0 is what `check` fails on; a round that finds the last one still running exits 0. `daemons unload --only robot` (and `list --only robot`) work even after the config turns the robot off, so a job left loaded can come out alone. A robot job placed or loaded while the config leaves it off fails a full `check`, as does one under an old label. With a `dispatcher` entry, `robot.json` must name the same `productsFile`, `rulesStateDir` and `tokenFile` that `dispatcher-config` prints (`uses …`), or `place` and `load` refuse both jobs | yes |
 
+The robot App (L600, L727): `robot.json` may name it with four keys, all or none (the wiring's own `appProblem`):
+`appId` (the App's id), `appInstallation` (its installation's number on the alert repository), `alertRepo` (owner/name:
+the repository where alert issues go, where the App is installed; never Bob's repository) and `alertOwner` (the GitHub
+login the issues are assigned to). Some but not all, or a bad value: `place` and `load` refuse and `check` FAILs. With all four, the
+App's key must be in the robot key folder under token.mjs's default name, `<base>/keys/robot-app.pem`: orchestrate's own
+plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). The mode must be exactly 0600:
+0400 is refused too, so a key copied in read-only needs `chmod 600`. Missing or open: `place` and `load` refuse
+(no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, the key is listed as
+NEEDS ROOT and check does not exit 0; a `--dry-run` of place or load without sudo prints it as NOT CHECKED). With none of the four, no key is asked for and the deliver pass refuses as not
+wired, so alerts stay queued.
+Setup checks the key file's owner, mode and size only; it never reads the key, so it does not prove the key is the robot
+App's or that a token can be minted from it. A wrong key (another App's, or one replaced later) passes `load` and `check`
+and fails at the job's first mint. After any key swap, confirm one test alert reaches the phone, as at first setup.
+
 Loading it on the always-on Mac is an owner-run step. It waits for the robot's config (the Dispatcher's keys, C) and
 for the passes it runs to be wired.
 

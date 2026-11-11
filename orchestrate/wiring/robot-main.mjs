@@ -14,8 +14,8 @@
 // when the round ran past its deadline; 3 when the lock could not be taken for any other reason (L740): its folder is
 // missing or not writable, the lock is unreadable, held by a process that is not this user's, or held longer than any
 // round may run. A round that can never take its lock then shows as a last exit that is not 0, which `daemons check`
-// fails on, never as a quiet 0 every minute. The log line names the lock and the cause. Exit 1 reaches only the job's log today: nothing tells the owner that this job never starts until
-// M13's heartbeatOnce is wired and the outside check sees its heartbeat go stale (a first-cutover checklist condition).
+// fails on, never as a quiet 0 every minute. The log line names the lock and the cause. Exit 1 reaches only the job's log: what tells the owner this job never starts is
+// the outside check, which sees the heartbeat go stale (a first-cutover checklist condition).
 // One exception: a store that stopped the start is told to the owner (L587), through the robot App's store-free channel
 // (robot-wiring.mjs robotChannel, L727), or a `stopChannel` ({ gh, owner }) a test injects. A config with no robot App
 // gets no channel, and the stop is only logged.
