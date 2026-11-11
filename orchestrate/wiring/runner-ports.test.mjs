@@ -232,7 +232,8 @@ test('step 5: spawnLeader starts its own process group with a start time; one wh
 
 // The start's world: real folders, fakes for the Record, the copy and the launch.
 function world(over = {}) {
-  const d = tempDir('orch-rports-');
+  // Real path: the wall check refuses a session folder reached through a link, and the temp folder is under /var (the link card).
+  const d = realpathSync(tempDir('orch-rports-'));
   const w = { d, copiesRoot: join(d, 'copies'), outboxRoot: join(d, 'outboxes'), settingsDir: join(d, 'runner', 'settings'), calls: [] };
   // As setup makes them (L836): a copies folder and an outbox folder per product, and the role folders in it.
   w.mine = { copies: join(w.copiesRoot, 'p1'), outboxes: join(w.outboxRoot, 'p1') };
