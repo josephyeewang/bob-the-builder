@@ -2313,27 +2313,60 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   const both = await runnerPass(x.w.ctx);
   assert.deepEqual(x.groups.map((g) => g.sessionId), ['S-1'], JSON.stringify(both.refused));
   assert.deepEqual(both.started, [], 'its own request is not started over it');
-  // r1 M1: the Dispatcher's request and its target stop in one pass with none running: the stop is kept, the request
-  // refused, never started; one arriving later within 30 minutes is refused too, and past them it starts.
+  // r1 M1, L951 M1: the Dispatcher's request and its target stop in one pass with none running: the stop is kept and
+  // the request refused. It is not used up: another user's request for the same, then the Dispatcher's own, with no
+  // new stop between, are refused too until its 30 minutes run out; past them one starts.
   const q = await stopWorld();
   q.w.ask({ request_id: 'q-1' });
   writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
   const qr = await runnerPass(q.w.ctx);
   assert.deepEqual(qr.started, [], JSON.stringify(qr.refused));
   refusedFor(qr, /none running: no reviewer is running for card C-1 at aaaaaaa, so nothing was stopped; it is kept 30 minutes/);
-  refusedFor(qr, /a stop for the reviewer for card C-1 at aaaaaaa came before it started, so it was not started/);
-  writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
-  await runnerPass(q.w.ctx);
-  q.w.clock.t += 10 * 60_000;
-  q.w.ask({ request_id: 'q-2' });
-  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], 'refused within the 30 minutes');
-  // A kept one not used ends after 30 minutes: past them a request starts.
-  writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
-  await runnerPass(q.w.ctx);
-  q.w.clock.t += 31 * 60_000;
-  await runnerPass(q.w.ctx);
+  refusedFor(qr, /a stop for the reviewer for card C-1 at aaaaaaa came within the last 30 minutes, so it was not started/);
+  q.w.clock.t += 60_000;
+  q.w.ctx.dispatcherUid = ME + 1;
+  q.w.ask({ request_id: 'other-1' });
+  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], "another user's request is refused");
+  q.w.ctx.dispatcherUid = ME;
+  q.w.clock.t += 60_000;
+  q.w.ask({ request_id: 'disp-2' });
+  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], "then the Dispatcher's own, with no new stop between");
+  q.w.clock.t += 26 * 60_000;
+  q.w.ask({ request_id: 'disp-3' });
+  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], 'still within the 30 minutes');
+  q.w.clock.t += 3 * 60_000;
   q.w.ask({ request_id: 'q-3' });
   assert.deepEqual((await runnerPass(q.w.ctx)).started.map((s) => s.session_id), ['S-1'], 'past them it starts');
+  // L951 m1: a stop kept for another head, role or card leaves this one's request alone.
+  const h = await stopWorld();
+  for (const t of [{ card: 'C-1', role: 'reviewer', head: HEAD2 }, { card: 'C-1', role: 'auditor', head: HEAD }, { card: 'C-2', role: 'reviewer', head: HEAD }]) writeStopRequest({ dir: h.w.requests, target: t });
+  await runnerPass(h.w.ctx);
+  assert.equal(JSON.parse(readFileSync(join(h.w.root, 'state.json'), 'utf8')).targets_waiting.length, 3);
+  h.w.ask({ request_id: 'h-1' });
+  assert.deepEqual((await runnerPass(h.w.ctx)).started.map((s) => s.session_id), ['S-1'], 'a request for head aaaaaaa starts');
+  // L951 m3: a target stop whose only match is no longer a live claude is kept, so a request for it is refused.
+  const g = await stopWorld();
+  g.w.ask({ request_id: 'g-1' }); await runnerPass(g.w.ctx);
+  const realName = g.w.ctx.processName;
+  g.w.ctx.processName = () => '/bin/zsh';
+  writeStopRequest({ dir: g.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  const gr = await runnerPass(g.w.ctx);
+  refusedFor(gr, /no live reviewer for card C-1 at aaaaaaa was reached; it is kept 30 minutes/);
+  g.w.ctx.processName = realName;
+  assert.equal(JSON.parse(readFileSync(join(g.w.root, 'state.json'), 'utf8')).targets_waiting.length, 1);
+  // A stop that did stop one is not kept.
+  const k = await stopWorld();
+  k.w.ask({ request_id: 'k-1' }); await runnerPass(k.w.ctx);
+  writeStopRequest({ dir: k.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(k.w.ctx);
+  assert.equal(JSON.parse(readFileSync(join(k.w.root, 'state.json'), 'utf8')).targets_waiting.length, 0);
+  // L951 m2: a full kept list of target stops is told, once a day.
+  const f = await stopWorld();
+  const fillT = (n0) => { for (let i = 0; i < 201; i++) writeStopRequest({ dir: f.w.requests, target: { card: `F-${n0}-${i}`, role: 'reviewer', head: HEAD } }); };
+  fillT('a');
+  assert.ok((await runnerPass(f.w.ctx)).alerts.some((a) => a.id === 'stops-waiting-full'));
+  fillT('b');
+  assert.equal((await runnerPass(f.w.ctx)).alerts.some((a) => a.id === 'stops-waiting-full'), false, 'not again within the day');
   // r1 m1: stop files that can't be read are one counted line.
   for (let i = 0; i < 3; i++) writeFileSync(join(q.w.requests, `stop-bad${i}.json`), 'not json');
   const qb = await runnerPass(q.w.ctx);

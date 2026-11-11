@@ -3,7 +3,9 @@
 // the file's owner: the runner (review-runner.mjs) counts a stop only when the file is the Dispatcher's Mac user's
 // (L935 re-review 2 M1). By request id, it reaches the session started on that id, which the runner keeps in its own
 // memory and shows no one: a second layer. By card, role and head (L946), it reaches every reviewer or auditor running
-// for exactly those, whoever's request started it. A stop that reaches none does nothing and says why in the status.
+// for exactly those, whoever's request started it. A stop that reaches no running session is kept 30 minutes, so a
+// request it names is refused, not started, in that time (by id the first such request; by card, role and head every
+// one); the status says what each did.
 //
 //   writeStopRequest({ dir, requestId } | { dir, target: { card, role, head } }) → { ok, name } | { ok: false, reason }
 //     dir: the runner's requests/ folder. Writes stop-<new id>.json holding exactly { request_id, stop: true } (or
