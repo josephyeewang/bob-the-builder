@@ -504,13 +504,17 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
  * pid), so a pid that leads none is refused, never a group it merely belongs to. Throws why it stopped nothing; `final`
  * on the error when trying again can't help (L935 self-review m3). A child that made its own group is not reached.
  */
-export function stopGroupOf(pid, { ps = run, kill = (p, sig) => process.kill(p, sig) } = {}) {
+export function stopGroupOf(pid, { sessionId, claudeBin, ps = run, kill = (p, sig) => process.kill(p, sig) } = {}) {
   const final = (m) => Object.assign(new Error(m), { final: true });
   if (!Number.isInteger(pid) || pid <= 1) throw final('not a process id');
-  const r = ps('/bin/ps', ['-o', 'pgid=', '-p', String(pid)]);
+  // Its group and its command line in one read, right before the kill (re-review 3 m3): still claude under that session.
+  const r = ps('/bin/ps', ['-o', 'pgid=,command=', '-p', String(pid)]);
   if (r.status !== 0) throw new Error(`process ${pid} is gone`);
-  const group = Number(String(r.stdout).trim());
-  if (group !== pid) throw final(`process ${pid} does not lead its own process group (its group is ${String(r.stdout).trim() || 'unknown'})`);
+  const m = /^\s*(\d+)\s+(.*?)\s*$/s.exec(String(r.stdout));
+  if (!m) throw new Error(`process ${pid}'s group and command line can't be read`);
+  const group = Number(m[1]); const cmd = m[2];
+  if (!isClaudeCommand(cmd, claudeBin) || sessionIdOf(cmd) !== sessionId) throw new Error(`process ${pid} is no longer claude under session ${sessionId}`);
+  if (group !== pid) throw final(`process ${pid} does not lead its own process group (its group is ${m[1]})`);
   kill(-pid, 'SIGTERM');
 }
 
@@ -573,7 +577,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     stop: ({ pid }) => { process.kill(pid, 'SIGTERM'); },
     // A stop request (L935): the session's whole process group. claude starts detached (review-launch.mjs), so it leads its
     // own group, whose id is its pid; one that does not lead it is refused, so no other group is reached.
-    stopGroup: ({ pid }) => stopGroupOf(pid),
+    stopGroup: ({ pid, sessionId }) => stopGroupOf(pid, { sessionId, claudeBin: c.claudeBin }),
     processName: (pid) => {
       if (!Number.isInteger(pid) || pid <= 0) return null;
       const r = run('/bin/ps', ['-o', 'command=', '-p', String(pid)]);
