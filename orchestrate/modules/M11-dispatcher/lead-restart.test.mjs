@@ -18,11 +18,13 @@ const ended = (tokens, atMin = 0) => ({ tokens, turnEnded: true, endedAt: T0 + a
 const midTurn = (tokens) => ({ tokens, turnEnded: false, endedAt: null, openTools: ['t1'], compactions: 0 });
 
 function world() {
-  const outbox = join(tempDir('m11-lead-'), 'lead');
-  mkdirSync(outbox);
+  // The Lead's real outbox, <root>/lead/<id>, under the root the stand-in Record reads (L910).
+  const root = tempDir('m11-lead-');
+  const outbox = join(root, 'lead', SID);
+  mkdirSync(outbox, { recursive: true });
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';
-  let rec = recWith();
+  let rec = recWith([], { outboxRoot: root });
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,

@@ -4,7 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_STATUS_EVERY_MS, ownerSyncPorts, readOwnerStatus } from './owner-status.mjs';
 import { ownerAsyncPorts } from './owner-asks.mjs';
-import { RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { RUNNER_DRAIN_HELD_MS, RUNNER_NOTE_EVERY_MS, RUNNER_PORT_MS, requestKey, workerRunnerPass } from './worker-runner.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
 const OWNER = 501; const ROOT = '/outboxes'; const COPIES = '/copies'; const FILE = '/runner/status.json';
 const T0 = Date.parse('2026-11-09T12:00:00Z'); const MIN = 60_000; const CLAIM = 10 * MIN;
@@ -498,4 +500,138 @@ test('#378 r1 M1, m3: a start is told the other live sessions (listed, and an ea
   await w.pass([launchReq('S-3', { product: 'Alpha' })]);
   assert.equal(seen, undefined, 'not started');
   assert.equal(w.state.requests['S-3'].state, 'refused');
+});
+
+test('L896: an ended session\'s outbox undrained past the limit is listed with its cause and since, read on by the status reader; drained, it goes', async () => {
+  let answer = { drained: false, cause: 'not-taken' };
+  const w = world({ drained: () => answer });
+  await w.pass([launchReq('S-1')]);
+  const row = () => w.status.sessions.find((x) => x.id === 'S-1');
+  await w.pass();
+  assert.equal(row().drain_held, undefined, 'running: never held');
+  w.gone.add(4001); await w.pass();
+  const first = w.now;
+  assert.equal(row().outbox_open, true);
+  assert.equal(row().drain_held, undefined, 'not yet past the limit');
+  w.now = first + RUNNER_DRAIN_HELD_MS - 1; await w.pass();
+  assert.equal(row().drain_held, undefined, 'one ms short');
+  w.now = first + RUNNER_DRAIN_HELD_MS; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() });
+  assert.deepEqual(w.sync().drainHolds(), [{ session: 'S-1', card: 'C-1', product: 'p1', cause: 'not-taken', since: new Date(w.now).toISOString() }]);
+  const since = row().drain_held.since;
+  w.now += MIN; await w.pass();
+  assert.equal(row().drain_held.since, since, 'the same cause keeps its since');
+  answer = { drained: false, cause: 'hash-mismatch' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'hash-mismatch', since: new Date(w.now).toISOString() }, 'a new cause, a new since');
+  // #425 r1 m1: a late or failed check keeps the cause already held, and its since: one slow pass tells nothing new.
+  const kept = row().drain_held;
+  for (const slow of [() => new Promise(() => {}), () => { throw new Error(''); }]) {
+    answer = undefined; const was = w.ports.outboxDrained; w.ports.outboxDrained = slow;
+    w.now += MIN; await w.pass();
+    w.ports.outboxDrained = was;
+    assert.deepEqual(row().drain_held, kept, 'a slow or failed pass keeps the held cause');
+  }
+  answer = { drained: false, cause: 'hash-mismatch' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, kept, 'back to the same cause: still the same since');
+  // #425 r1 m4: a memory that keeps drain_held but not when it was first seen (an older one) is past the limit at once.
+  delete w.state.sessions.find((x) => x.id === 'S-1').undrained_since;
+  answer = { drained: false, cause: 'in-flight' };
+  w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'in-flight', since: new Date(w.now).toISOString() }, 'a changed cause shows at once, not half an hour on');
+  answer = true;
+  w.now += MIN; await w.pass();
+  assert.equal(row().outbox_open, false);
+  assert.equal('drain_held' in row(), false, 'drained: no longer held');
+  assert.deepEqual(w.sync().drainHolds(), []);
+  assert.ok(!JSON.stringify(w.status).includes('undrained_since'), 'when it was first seen stays in the runner\'s memory');
+});
+
+test('#425 r1, r2: a first sight more than FUTURE_SKEW_MS ahead is past the limit; a failed Record read keeps the held cause; a bad drain_held is dropped', async () => {
+  let answer = { drained: false, cause: 'not-taken' };
+  const w = world({ drained: () => answer });
+  await w.pass([launchReq('S-1')]);
+  const row = () => w.status.sessions.find((x) => x.id === 'S-1');
+  const mem = () => w.state.sessions.find((x) => x.id === 'S-1');
+  w.gone.add(4001); await w.pass();
+  assert.equal(row().drain_held, undefined, 'not yet past the limit');
+  // M1: a clock set back an hour leaves the first sight ahead of now; it is told now, not an hour and a half on.
+  w.now -= 60 * MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() }, 'a clock set back');
+  delete mem().drain_held; mem().undrained_since = w.now + 365 * 24 * 60 * MIN;
+  w.now += MIN; await w.pass();
+  assert.equal(row().drain_held?.cause, 'not-taken', 'a first sight a year ahead, nothing held: past the limit');
+  // r2 m1: ahead by no more than FUTURE_SKEW_MS at the pass's own now is waited out as any first sight; one ms more is
+  // held at once.
+  w.now += MIN; delete mem().drain_held; mem().undrained_since = w.now + FUTURE_SKEW_MS;
+  await w.pass();
+  assert.equal(row().drain_held, undefined, 'FUTURE_SKEW_MS ahead: waited out');
+  w.now += 30_000; await w.pass();
+  assert.equal(row().drain_held, undefined, 'still within the limit from that first sight');
+  w.now += MIN; delete mem().drain_held; mem().undrained_since = w.now + 30_000;
+  await w.pass();
+  assert.equal(row().drain_held, undefined, '30 s ahead: waited out');
+  w.now += RUNNER_DRAIN_HELD_MS + 30_000; await w.pass();
+  assert.equal(row().drain_held?.cause, 'not-taken', 'then held at the limit');
+  w.now += MIN; delete mem().drain_held; mem().undrained_since = w.now + FUTURE_SKEW_MS + 1;
+  await w.pass();
+  assert.equal(row().drain_held?.cause, 'not-taken', 'FUTURE_SKEW_MS + 1 ahead: held at once');
+  // m2: a Record that can't be read keeps the cause held; a cause that flips with it tells nothing new.
+  const kept = row().drain_held;
+  for (const c of ['record-unreadable', 'not-taken', 'record-unreadable', 'not-taken']) {
+    answer = { drained: false, cause: c }; w.now += MIN; await w.pass();
+    assert.deepEqual(row().drain_held, kept, `flipping to ${c} keeps the held cause`);
+  }
+  // Nothing held yet: record-unreadable is held as itself.
+  const v = world({ drained: () => ({ drained: false, cause: 'record-unreadable' }) });
+  await v.pass([launchReq('S-1')]); v.gone.add(4001); await v.pass();
+  v.now += RUNNER_DRAIN_HELD_MS; await v.pass();
+  assert.equal(v.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, 'record-unreadable');
+  // m4, r2 c1: a drain_held in memory the status reader would refuse is dropped, and the real cause held in the same
+  // pass: no write of that pass shows any other cause first, and the status stays readable.
+  for (const bad of [{ cause: 'not-taken', since: 'garbled' }, { cause: 'made-up', since: kept.since }, { ...kept, extra: 1 }, 'x', []]) {
+    answer = { drained: false, cause: 'not-taken' };
+    mem().drain_held = bad; w.now += MIN; w.writes.length = 0; await w.pass();
+    assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() }, JSON.stringify(bad));
+    assert.deepEqual([...new Set(w.writes.map((d) => d.sessions.find((x) => x.id === 'S-1').drain_held?.cause ?? 'none'))], ['none', 'not-taken'], `nothing else published first (${JSON.stringify(bad)})`);
+    assert.ok(Array.isArray(w.sync().drainHolds()), `the status reads (${JSON.stringify(bad)})`);
+  }
+  // A bad one beside a failed check: held at once as the check's own cause, never 'other'.
+  answer = undefined; const was = w.ports.outboxDrained; w.ports.outboxDrained = () => { throw new Error('EIO'); };
+  mem().drain_held = { cause: 'made-up', since: 'garbled' }; w.now += MIN; await w.pass();
+  w.ports.outboxDrained = was;
+  assert.deepEqual(row().drain_held, { cause: 'check-failed', since: new Date(w.now).toISOString() }, 'dropped, then held as the failed check');
+  // r2 m2: a valid one on a session whose outbox is closed, or on a live one, is dropped: the status stays readable.
+  for (const [why, damage] of [['closed', (m) => { m.outbox_open = false; }], ['live', (m) => { m.alive = true; delete m.ended; }]]) {
+    const x = world({ drained: () => ({ drained: false, cause: 'not-taken' }) });
+    await x.pass([launchReq('S-1')]); x.gone.add(4001); await x.pass();
+    x.now += RUNNER_DRAIN_HELD_MS; await x.pass();
+    const m = x.state.sessions.find((y) => y.id === 'S-1');
+    assert.equal(m.drain_held?.cause, 'not-taken');
+    damage(m);
+    // A live session is one whose launch is still started (the reader's other rule), so the damage is the memory's alone.
+    if (why === 'live') { x.gone.delete(4001); x.state.requests['S-1'] = { ...x.state.requests['S-1'], state: 'started' }; }
+    x.now += MIN; await x.pass();
+    assert.equal('drain_held' in x.status.sessions.find((y) => y.id === 'S-1'), false, `${why}: dropped`);
+    assert.ok(Array.isArray(x.sync().drainHolds()), `${why}: the status reads`);
+  }
+  // A bad one in an older memory that kept no first sight: it was told, so the real cause is held at once.
+  answer = { drained: false, cause: 'hash-mismatch' };
+  delete mem().undrained_since; mem().drain_held = { cause: 'made-up' }; w.now += MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'hash-mismatch', since: new Date(w.now).toISOString() }, 'no first sight kept: held at once');
+  mem().outbox_open = false; mem().drain_held = 'x'; w.now += MIN; await w.pass();
+  assert.equal('drain_held' in row(), false, 'closed and malformed: dropped');
+});
+
+test('L896: a drain check that is late, fails or answers no known cause is held under its own cause', async () => {
+  for (const [why, drained, cause] of [['late', () => new Promise(() => {}), 'check-late'], ['throws', () => { throw new Error('EIO'); }, 'check-failed'], ['throws with no message', () => { throw new Error(''); }, 'check-failed'],
+    ['false', () => false, 'other'], ['an unknown cause', () => ({ drained: false, cause: 'made-up' }), 'other'], ['nothing', () => undefined, 'other'],
+    ...DRAIN_CAUSES.map((c) => [c, () => ({ drained: false, cause: c }), c])]) {
+    const w = world({ drained });
+    await w.pass([launchReq('S-1')]);
+    w.gone.add(4001); await w.pass();
+    w.now += RUNNER_DRAIN_HELD_MS; await w.pass();
+    assert.equal(w.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, cause, why);
+  }
 });
