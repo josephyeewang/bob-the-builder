@@ -1,0 +1,23 @@
+# Standalone skills — independent audit
+
+**Result: 0 remaining Material, 0 remaining Minor, 1 logged Cosmetic.** Two Material and two Minor findings were repaired and independently rechecked. This fresh auditor authored none of the implementation and changed no implementation files.
+
+The four rebuilt preview downloads match their explicit registry inputs, inner file hashes, archive hashes and required notices. They include their referenced design tests. Inspection found no remaining private project history or personal setup context in the exported files. Previews are clearly marked; the actual preview set is refused before any publisher API call.
+
+The exporter reads committed Git blobs for release mode and excludes unlisted/local files. Publisher tests cover interrupted uploads, identical retries, rejection of changed immutable bytes, stale source and advancement of the catalogue pointer only after all asset bytes are checked. Pull requests remain read-only; publication is confined to main pushes. Later main pushes can recover a skipped older run. Transport contracts were checked against the [GitHub CLI manual](https://cli.github.com/manual/gh_api), [reference API](https://docs.github.com/en/rest/git/refs) and [release-asset API](https://docs.github.com/en/rest/releases/assets).
+
+Useful standalone behavior remains available: source-grounded evaluation and recall, HTML galleries with explicit design lock/transfer, SVG logo exports, and image galleries built from fictional existing images without provider access. Companion modules and external providers remain optional. Personal discovery, handoff locations, recovery conventions and publishing integration remain private adapters.
+
+The private activation rollback originally replaced a competing edit after a later failure. The repair checks ownership of written bytes before restoring/removing files, preserves competing changes and records conflicts. The original independent reproduction now passes. Reviewed preparation matches durable private copies; live adapter targets still match their pre-activation baselines. Activation was not performed.
+
+Website downloads validate the repository, revision, hash format and exact versioned release URL. Missing/invalid catalogues leave source links available. Display sync refreshes only already reviewed IDs and refuses duplicate/missing identities without writing; a new module does not automatically become a website listing. The website does not itself download ZIP bytes to recompute their hashes; the publisher verifies those bytes before advancing the catalogue.
+
+**Independent verification:** 26 exporter/publisher tests; 106 portable evaluation tests; 3 image-module tests; 2 logo unit tests; 10 download-validator cases; 5 additional display-sync cases; 14 evaluation-adapter activation tests; 5 finish-adapter activation tests. Included design tests also passed directly from extracted ZIPs. An archived profile helper and SVG exporter were exercised with synthetic inputs.
+
+**Resolved:** private outcome/trial history generalized; competing edits preserved during rollback; referenced tests bundled; module tests added before publication.
+
+**Cosmetic:** an existing image-gallery test emits an unclosed-file ResourceWarning. Its HTML output was produced and verified. This does not block the reviewed implementation.
+
+**Limits:** first public launch, actual hosted publication and adapter activation remain pending. No real external mutation, paid provider request or confidential upload occurred. This auditor does not claim live Actions execution, provider generation, a full website build or browser rendering. Broader builder checks are separate evidence. Per-file prechecks are not a filesystem compare-and-swap or multi-file transaction. Exact reviewed file and archive hashes are in final-audit.json.
+
+Final follow-up: all eleven generic Markdown references in the prepared adapter point to the maintained module, preserving contextual path resolution and refusing missing canonical source. The sole retained JSON template is explicitly frozen legacy compatibility data; current evaluations use the maintained schema. All eighteen candidate targets match the durable packet. The prepared catalogue refresh changes only the existing entry’s source hash and description; it does not renew semantic review or activate anything. The original 109 compatibility tests also pass. Public export metadata now uses a generic workflow origin; the website maps that to its reviewed display label. All four ZIP byte hashes remain unchanged after this metadata-only adjustment. No new Material, Minor or Cosmetic findings.
