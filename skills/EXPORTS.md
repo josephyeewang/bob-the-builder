@@ -24,11 +24,15 @@ file allowlist, required license notices and optional companion modules.
    workflow validates committed files and publishes versioned ZIPs. A website
    listing is a separate reviewed editorial choice; registration does not add it.
 
+Set `BOB_ROOT` to the resolved checkout folder; these commands then work from
+any project folder. This is a local shell variable, not an assistant install path.
+
 ```sh
-python3 -m unittest discover -s scripts -p 'test_skill_*.py'
-python3 scripts/skill_export.py --working-tree --output .audit/skill-preview
+BOB_ROOT="/absolute/path/to/bob-checkout"
+python3 -m unittest discover -s "$BOB_ROOT/scripts" -p 'test_skill_*.py'
+python3 "$BOB_ROOT/scripts/skill_export.py" --root "$BOB_ROOT" --working-tree --output "$BOB_ROOT/.audit/skill-preview"
 # From a verified committed checkout:
-python3 scripts/skill_export.py --output .audit/skill-release
+python3 "$BOB_ROOT/scripts/skill_export.py" --root "$BOB_ROOT" --output "$BOB_ROOT/.audit/skill-release"
 ```
 
 Python 3.10+ and Git are required for exporting. Module runtime requirements are
