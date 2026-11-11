@@ -11,12 +11,11 @@ import { readFileSync, readdirSync, accessSync, copyFileSync, chmodSync, mkdirSy
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
-import { POLICY_HOOKS, HOOK_TIMEOUT, HOOK_FAILS_CLOSED } from './render-settings.mjs';
+import { POLICY_HOOKS, HOOK_TIMEOUT, HOOK_FAILS_CLOSED, apart } from './render-settings.mjs';
 import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E, MIN_CLAUDE_CODE, FLAGS } from './settings-names.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { readSnapshot } from '../hooks/snapshot.mjs';
 import { noteInOutbox } from '../hooks/compact-note.mjs';
-import { inside } from '../hooks/lib.mjs';
 
 export const HOOKS_SOURCE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
 const refuse = (reason) => ({ ok: false, reason });
@@ -131,11 +130,14 @@ export function checkHooks({ settings, hooksDir, source = HOOKS_SOURCE, kinds, c
       if (script !== join(hooksDir, 'compact-note.mjs')) return refuse(`a ${event} hook runs a script outside the hook folder`);
       // L101: the note goes in the outbox only when the hook's own kinds hold `<kind>-compact-`; any other role's hook
       // names a notes folder apart from the outbox, so its note can never be taken in as one of its kinds.
+      // The hook's own parser keeps the last of a repeated flag and this check reads the first, so a repeat is refused (#420 r1 m1).
+      const repeated = ['notes', 'outbox', 'kind', 'kinds'].find((k) => words.filter((w) => w === `--${k}`).length > 1);
+      if (repeated) return refuse(`a ${event} hook gives --${repeated} more than once`);
       const arg = (k) => { const i = words.indexOf(`--${k}`); return i > 1 ? words[i + 1] : undefined; };
       if (!noteInOutbox(arg('kind'), (arg('kinds') ?? '').split(','))) {
         const notes = arg('notes'); const ob = arg('outbox');
         if (!notes) return refuse(`a ${event} hook names no notes folder, so this role's compaction note would go in its outbox`);
-        if (!ob || inside(notes, ob) || inside(ob, notes)) return refuse(`a ${event} hook's notes folder is not apart from the outbox`);
+        if (!ob || !apart(notes, ob)) return refuse(`a ${event} hook's notes folder is not apart from the outbox`);
       }
       try { accessSync(script, C.R_OK | C.X_OK); } catch { return refuse(`the ${event} hook is not readable and runnable`); }
     }

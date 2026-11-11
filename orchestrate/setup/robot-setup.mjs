@@ -23,6 +23,8 @@ import { dirname, isAbsolute, join, posix } from 'node:path';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
 import { NODE, aclProblem, chainProblem, installProblem } from '../modules/M4-workshop/launcher/install-check.mjs';
 import { CONFIG_KEYS as ROBOT_KEYS, appProblem } from '../wiring/robot-wiring.mjs';
+// The robot App's key file name: token.mjs owns it (L1471) and mints from it when the wiring names no keyFile (it names none).
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import { homeOf } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
@@ -57,11 +59,6 @@ export function lockFolderProblem(io, file, owners) {
   return acl ? `its folder: ${acl}` : null;
 }
 const PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
-/**
- * The robot App's key, by the name token.mjs mints from when no keyFile is given (its default; the robot wiring passes
- * none). A test reads token.mjs and fails if its default changes. It lives in the robot key folder, <base>/keys.
- */
-export const ROBOT_KEY_FILE = 'robot-app.pem';
 /** Said wherever the config turns the robot on but its extras carry no robot.json. */
 export const ROBOT_NO_CONFIG = `config: "robot": true needs the robot's config among the extras, as a file named ${ROBOT_CONFIG} (the install carries it into the copy, and every update keeps it)`;
 

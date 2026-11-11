@@ -48,6 +48,10 @@ const refuse = (reason) => ({ ok: false, reason });
 export const PROBE_MS = 120_000;
 // The kind M11's start gate counts each review role as (gate.mjs CAP_FREE).
 export const GATE_KIND = Object.freeze({ reviewer: 'review', auditor: 'audit' });
+// The effort a send-back round runs at (R-0b-145), and a first round: the floor in M10's reviewer.json (a test holds
+// the two the same), for an auditor too, which has no role file there (L92 minor 2).
+export const SEND_BACK_EFFORT = 'xhigh';
+export const FIRST_ROUND_EFFORT = 'high';
 // The smoke command's three files: one it writes first, inside the copy, to show it ran; one outside the copy; one it
 // writes only if github.com answered.
 export const smokeFiles = ({ copy, reviewHome, sessionId }) => ({
@@ -80,10 +84,12 @@ function runProbe(spawn, bin, args, opts, timeoutMs) {
 }
 
 /** The session's own start: `--settings` the runner's file and no other source, the runner's session id, the role. */
-export function sessionArgs({ profile, settingsFile, sessionId, prompt }) {
+export function sessionArgs({ profile, settingsFile, sessionId, prompt, earlier }) {
   const args = [F.print, F.outputFormat, F.streamJson, F.verbose, F.settings, settingsFile, F.sessionId, sessionId,
     F.strictMcpConfig, F.mcpConfig, '{"mcpServers":{}}', F.tools, profile.tools.join(','), F.permissionMode, profile.mode];
   if (profile.restricted) args.push(F.restricted);
+  // A send-back (R-0b-145): a round after an earlier failing verdict on this card, by either role.
+  args.push(F.effort, typeof earlier === 'string' && earlier.trim() ? SEND_BACK_EFFORT : FIRST_ROUND_EFFORT);
   args.push(prompt);
   return args;
 }
@@ -111,18 +117,22 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  *   hooksDir, reviewHome, settings ({ file, settings } from settingsFor), rules (the config's), snapshot,
  *   writeSnapshot(path, rules), machineWide (path), busy(dir) → [holders], alert(text), spawn, ownUid(),
  *   cardDoc (the card from the Record), budget ({ rules, rec, bandsNow, runningNow } or null),
- *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs.
+ *   bobFolder, bobManifest ({ path: sha256 } or null), probeMs; managedReaders (tests only: fakes for check 10's
+ *   readers of the other managed sources, env-check.mjs MANAGED_READERS; left out, the real ones).
  * → { [n]: async () => { ok, reason } }, with no entry for a check this role has no port for.
  */
 export function reviewChecks(x) {
   const probeMs = x.probeMs ?? PROBE_MS;
+  // The worker runner's `checksFor` (wiring/runner-ports.mjs step 5; lane 4's, not built yet; L882 c4) is to reuse
+  // these ports on a card's own copy (#369 c3): its refusals name that copy, never a review copy.
+  const copyName = GATE_KIND[x.role] ? 'the review copy' : 'the card\'s copy';
   const ports = {
     1: async () => {
-      let st; try { st = lstatSync(x.copy); } catch { return refuse('the review copy is missing'); }
-      if (st.isSymbolicLink() || !st.isDirectory()) return refuse('the review copy is not a plain folder');
-      if (st.uid !== x.ownUid() || st.mode & 0o077) return refuse('the review copy is not this user\'s alone (0700)');
-      let h; try { h = (await gitOk(['rev-parse', 'HEAD'], { gitDir: join(x.copy, '.git'), workTree: x.copy, cwd: x.copy, purpose: 'review-launch-head', timeoutMs: 30_000 })).trim(); } catch (e) { return refuse(`the review copy's commit can't be read (${e?.message ?? e})`); }
-      return h === x.head ? { ok: true } : refuse(`the review copy holds ${h.slice(0, 7)}, not the head ${x.head.slice(0, 7)}`);
+      let st; try { st = lstatSync(x.copy); } catch { return refuse(`${copyName} is missing`); }
+      if (st.isSymbolicLink() || !st.isDirectory()) return refuse(`${copyName} is not a plain folder`);
+      if (st.uid !== x.ownUid() || st.mode & 0o077) return refuse(`${copyName} is not this user's alone (0700)`);
+      let h; try { h = (await gitOk(['rev-parse', 'HEAD'], { gitDir: join(x.copy, '.git'), workTree: x.copy, cwd: x.copy, purpose: 'review-launch-head', timeoutMs: 30_000 })).trim(); } catch (e) { return refuse(`${copyName}'s commit can't be read (${e?.message ?? e})`); }
+      return h === x.head ? { ok: true } : refuse(`${copyName} holds ${h.slice(0, 7)}, not the head ${x.head.slice(0, 7)}`);
     },
     3: async () => emptyOutbox(x.outbox, { busy: x.busy, alert: x.alert }),
     5: async () => {
@@ -147,7 +157,10 @@ export function reviewChecks(x) {
       return isDeepStrictEqual(s.rules, x.rules) ? { ok: true } : refuse('the rules snapshot holds other rules than the runner\'s config');
     },
     9: async () => checkRoleEnv(x.env),
-    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide }),
+    // The remote cache is read where this session's claude reads it (L913 m1): its own CLAUDE_CONFIG_DIR (the
+    // second account's), else its own HOME's .claude, from the environment it gets, whatever HOME the runner has.
+    10: async () => checkMachineWide({ readFile: readNoLink, path: x.machineWide,
+      configDirs: () => [x.env?.CLAUDE_CONFIG_DIR ?? (typeof x.env?.HOME === 'string' ? join(x.env.HOME, '.claude') : undefined)], ...x.managedReaders }),
     11: async () => {
       const f = smokeFiles(x);
       for (const p of Object.values(f)) rmSync(p, { force: true });

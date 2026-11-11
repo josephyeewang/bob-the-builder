@@ -3,11 +3,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
+import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, readFactFile, readSessionFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -17,9 +17,14 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { openJobJson } from '../../../shared/job-config.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const ME = process.getuid();
 // R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
-const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
+const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
 
 test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
   const base = tempDir('m4-install-');
@@ -280,6 +285,80 @@ test('L65: a card is read from the Record read only, as the Record owner\'s plai
   assert.match(read('C-7').reason, /not the Record's own plain file/);
 });
 
+test('L852: a fact is read from the Record read only, as a card is; reading changes nothing, whatever it finds', () => {
+  const root = tempDir('m4-factread-');
+  const read = (fact, uid = ME) => readFactFile({ recordRoot: root, recordUid: uid, fact });
+  const tree = () => {
+    const out = [];
+    const walk = (d) => { for (const n of readdirSync(d).sort()) { const p = join(d, n); const st = lstatSync(p); out.push([p, st.mode, st.mtimeMs, st.isFile() ? readFileSync(p, 'utf8') : null]); if (st.isDirectory()) walk(p); } };
+    walk(root);
+    return JSON.stringify(out);
+  };
+  // No folders yet: an answer, and nothing is made.
+  chmodSync(root, 0o755);
+  let before = tree();
+  assert.match(read('F-1').reason, /docs is missing/);
+  assert.equal(tree(), before, 'a missing folder is not made');
+  mkdirSync(join(root, 'docs', 'fact'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'fact')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'fact', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('intake-applied-S-1-plan-a.md', { entity: 'fact', id: 'intake-applied-S-1-plan-a.md', rev: 2, doc: { state: 'applied', sha256: 'b'.repeat(64) } });
+  put('F-2', { entity: 'card', id: 'F-2', doc: {} });
+  put('F-3', '{');
+  put('F-4', { entity: 'fact', id: 'F-4', doc: {} }, 0o666);
+  before = tree();
+  assert.deepEqual(read('intake-applied-S-1-plan-a.md'), { ok: true, doc: { state: 'applied', sha256: 'b'.repeat(64) }, rev: 2 });
+  assert.equal(read('F-9').missing, true);
+  assert.match(read('F-9').reason, /no such fact/);
+  for (const id of ['../x', '.F-1', '', 'a/b', 7, null]) assert.equal(read(id).missing, true, String(id));
+  assert.match(read('F-2').reason, /not a fact document/);
+  assert.match(read('F-3').reason, /not JSON/);
+  assert.match(read('F-4').reason, /not the Record's own plain file/);
+  assert.match(read('intake-applied-S-1-plan-a.md', ME + 1).reason, /not the Record owner's alone/);
+  assert.equal(read('INTAKE-applied-S-1-plan-a.md').missing, true, 'only the exact name');
+  assert.equal(read('f-3').missing, true, 'only the exact name is that fact, even when its file is ruined');
+  assert.equal(tree(), before, 'no read writes, moves or makes anything');
+});
+
+test('L899: a session is read from the Record read only, as a fact is: its id checked, its folders checked, only the exact name', () => {
+  const root = tempDir('m4-lane4-sessionread-');
+  const read = (session, uid = ME) => readSessionFile({ recordRoot: root, recordUid: uid, session });
+  chmodSync(root, 0o755);
+  assert.match(read('S-1').reason, /docs is missing/);
+  mkdirSync(join(root, 'docs', 'session'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'session')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'session', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('S-1', { entity: 'session', id: 'S-1', rev: 3, doc: { card: 'C-1', attempt: 'a1' } });
+  put('S-2', { entity: 'fact', id: 'S-2', doc: {} });
+  put('S-3', { entity: 'session', id: 'S-3', doc: {} }, 0o666);
+  put('Ab-1', { entity: 'session', id: 'Ab-1', doc: { attempt: 'a1' } });
+  assert.deepEqual(read('S-1'), { ok: true, doc: { card: 'C-1', attempt: 'a1' }, rev: 3 });
+  assert.match(read('S-9').reason, /no such session/);
+  for (const id of ['../S-1', 'S-1.json', 'S_1', '', 7, null, 'x'.repeat(129)]) assert.equal(read(id).missing, true, String(id));
+  assert.match(read('../S-1').reason, /not a session id/);
+  assert.match(read('S-2').reason, /not a session document/);
+  assert.match(read('S-3').reason, /not the Record's own plain file/);
+  assert.match(read('S-1', ME + 1).reason, /not the Record owner's alone/);
+  // Only the exact name: a name that differs by case or is a prefix of one listed is no such session.
+  for (const id of ['s-1', 'AB-1', 'S', 'Ab']) assert.match(read(id).reason, /no such session/, id);
+  chmodSync(join(root, 'docs', 'session'), 0o777);
+  assert.match(read('S-1').reason, /not the Record owner's alone/, 'a session folder others can write');
+  chmodSync(join(root, 'docs', 'session'), 0o755);
+});
+
+test('L852: one list of the intake states that mean an outbox file is used, and the Lead restart reads it', async () => {
+  const { USED_STATES } = await import('../../M11-dispatcher/intake-facts.mjs');
+  assert.deepEqual([...USED_STATES].sort(), ['applied', 'interrupted', 'refused', 'waiting']);
+  assert.ok(Object.isFrozen(USED_STATES));
+  assert.throws(() => USED_STATES.add('x'), /read only/);
+  assert.throws(() => USED_STATES.delete('applied'), /read only/);
+  assert.equal(USED_STATES.size, 4);
+  const src = readFileSync(new URL('../../M11-dispatcher/lead-restart.mjs', import.meta.url), 'utf8');
+  assert.match(src, /import \{ USED_STATES \} from '\.\/intake-facts\.mjs';/);
+  assert.match(src, /USED_STATES\.has\(used\)/);
+  assert.doesNotMatch(src, /\[[^\]]*'(applied|refused|interrupted|waiting)'[^\]]*'(applied|refused|interrupted|waiting)'/, 'lead-restart keeps no list of its own');
+});
+
 test('L65 m-3: the admin answer is yes, no, or an error (which the runner counts as an admin)', () => {
   assert.equal(adminAnswer({ status: 0, stdout: 'yes review is a member of admin\n' }), true);
   assert.equal(adminAnswer({ status: 1, stdout: 'no review is NOT a member of admin\n' }), false);
@@ -327,6 +406,13 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   assert.equal(ruled([{ id: 'p1' }, { id: 'p2' }]).requestGapMs(undefined), 2880 * 60_000, 'a request with no card takes the longest');
   assert.equal(ruled([]).requestGapMs(undefined), Infinity, 'no product listed is no answer, and ends nothing');
   assert.throws(() => realPorts(c, {}).requestGapMs('p1'), 'with no budget module it throws, and the runner ends nothing on silence');
+  // The plan reviewers' cap (L735 M1): the Dispatcher's own read-only cap for the card's product; none without a budget.
+  asked.length = 0;
+  const capRules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 4, p2: 2 })[o.product] };
+  const capped = realPorts(c, {}, { budget: { rules: capRules, rec: { list: () => [] } } });
+  assert.deepEqual([capped.planReviewCap('p1'), capped.planReviewCap('p2')], [4, 2]);
+  assert.deepEqual(asked[0], ['caps.readonly_per_session', 'p1']);
+  assert.throws(() => realPorts(c, {}).planReviewCap('p1'), 'with no budget module it throws, and no plan reviewer starts');
   assert.equal(realPorts({ ...c, ownerUid: ME + 1 }, {}).accountInUse(), null);
   assert.equal(realPorts({ ...c, ownerHome: join(home, 'nobody') }, {}).accountInUse(), 'a');
 });
@@ -450,6 +536,13 @@ test('L65: the config names every path as a full path', () => {
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
+  // L913 (a): machineWide is claude's fixed file only, refused at load rather than review by review at check 10.
+  for (const machineWide of NEAR_MISSES) {
+    writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide }));
+    assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  }
+  writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide: '/etc/claude/managed-settings.json' }));
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file$/);
 });
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {
@@ -595,7 +688,7 @@ test('L71 planted: root and outboxRoot, and every folder above them, are root\'s
   mkdirSync(join(mid, 'review'), { recursive: true });
   mkdirSync(join(mid, 'outbox'));
   for (const p of [mid, join(mid, 'review'), join(mid, 'outbox')]) chmodSync(p, 0o755);
-  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer });
+  const uidsOf = (reviewer) => ({ ...Object.fromEntries(['lead', 'worker', 'front_door', 'learning', 'writer', 'incident', 'scout', 'thinking'].map((r) => [r, ME + 1])), reviewer, auditor: reviewer, plan_reviewer: reviewer });
   const good = withR163({ installRoot: '/i', root: join(mid, 'review'), outboxRoot: join(mid, 'outbox'), reviewHome: '/h', uids: uidsOf(ME), recordRoot: '/x', recordUid: 5, mirror: '/m', claudeBin: '/c', hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: 5, wiring: '/i/w.mjs' });
   const cfg = (over = {}, opts = { top: d }) => { writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, ...over })); return () => readConfig(join(d, 'c.json'), opts); };
   assert.equal(cfg()().outboxRoot, join(mid, 'outbox'), 'the control: review\'s folders, under review\'s and root\'s');
@@ -809,4 +902,34 @@ test('R-0b-163: the review copy holds the card\'s head with main beside it; a fo
   assert.equal(existsSync(lost), false, 'a failed copy leaves nothing behind');
   assert.match((await prepareReviewCopy({ mirror: gd, card: 'C-1', head: 'HEAD', dest: lost })).reason, /not 40 hex/);
   assert.match((await prepareReviewCopy({ mirror: gd, card: '../x', head, dest: lost })).reason, /not a card id/);
+});
+
+test('L738 re-merge: the real ports hand the runner its finalize and handedIn (a missing one would skip the finding check unseen)', () => {
+  const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: process.getuid() }, recordRoot: '/x', recordUid: process.getuid(), mirror: '/m', claudeBin: '/c', ownerHome: '/h', ownerUid: process.getuid() };
+  const p = realPorts(c, {});
+  for (const k of ['finalize', 'handedIn']) assert.equal(typeof p[k], 'function', `${k} is wired`);
+});
+
+// L736 #306 m4: the Front Door's taps folder must be the runner's, compared on real paths.
+test('L736 m4 planted: the Front Door\'s taps folder is checked against the one the runner reads', () => {
+  const base = realpathSync.native(tempDir('m4-taps-match-'));
+  const taps = join(base, 'owner-taps');
+  mkdirSync(taps);
+  symlinkSync(taps, join(base, 'link'));
+  const read = (doc) => () => doc;
+  assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null);
+  assert.equal(tapsFolderProblem({ ownerTaps: `${taps}/`, runnerConfig: '/x', read: read({ ownerTaps: taps }) }), null, 'a trailing slash is the same folder');
+  // Another spelling of the same folder is refused: the rules name it as given (#306 self-review m1).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'link'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it/, 'a link to it');
+  assert.match(tapsFolderProblem({ ownerTaps: taps.toUpperCase(), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not written as the disk holds it|is not the one the review runner reads/, 'another case');
+  // Two spellings that differ only in case are never taken as one (a case-sensitive disk holds two folders).
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'later-taps'), runnerConfig: '/x', read: read({ ownerTaps: join(base, 'Later-Taps') }) }), /is not the one the review runner reads/);
+  // The runner's own may be a link: it is compared on its real path.
+  assert.equal(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({ ownerTaps: join(base, 'link') }) }), null);
+  assert.match(tapsFolderProblem({ ownerTaps: join(base, 'other'), runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /is not the one the review runner reads .*so its wall guards the wrong folder/);
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: read({}) }), /names no taps folder \(ownerTaps\)/);
+  assert.match(tapsFolderProblem({ ownerTaps: 'owner-taps', runnerConfig: '/x', read: read({ ownerTaps: taps }) }), /the Front Door names no taps folder/);
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: () => { throw new Error('config: not root\'s'); } }), /the review runner's config can't be read \(config: not root's\)/);
+  // The real reader by default: a config that is not there can't be read, and is refused.
+  assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: join(base, 'nothing.json') }), /the review runner's config can't be read/);
 });

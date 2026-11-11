@@ -40,7 +40,7 @@ function folders(h, A, B) {
     const s = st[ctx.signin];
     const did = (what, extra = {}) => { log.push([what, ctx.signin, ...Object.values(extra)]); };
     return {
-      launch: async (x) => { did('launch', { card: x.card.id }); n += 1; const id = x.sessionId ?? `S-${n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, outbox: `/outbox-root/worker/${id}`, pid: 2000 + n, pidStart: `s${n}`, pgid: 100 + n, head: 'h'.repeat(40) }; },
+      launch: async (x) => { did('launch', { card: x.card.id }); n += 1; const id = x.sessionId ?? `S-${n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, outbox: `/outbox-root/${x.product}/worker/${id}`, pid: 2000 + n, pidStart: `s${n}`, pgid: 100 + n, head: 'h'.repeat(40) }; },
       startReadonly: async (x) => { did('startReadonly', { lead: x.lead }); return { ok: true }; },
       startMinibase: async () => { did('startMinibase'); return { ok: true }; },
       sessions: () => s.sessions.map((x) => ({ ...x })),
@@ -359,7 +359,7 @@ function world() {
   rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: T0 }) });
   const rules = rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) });
   const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
-  const pass = (min, only) => dispatcherPass({ rec, rules, now: T0 + min * MIN, account: ACCT, sessions: f.ports.sessions(), probe: () => idle,
+  const pass = (min, only) => dispatcherPass({ product: 'p1', rec, rules, now: T0 + min * MIN, account: ACCT, sessions: f.ports.sessions(), probe: () => idle,
     launch: async (x) => (only && x.card.id !== only ? { ok: false, reason: 'not this pass' } : f.ports.launch(x)),
     stopGroup: f.ports.stopGroup, saveWork: async () => ({ ok: true }), alert: () => {} });
   const setCard = (id, patch) => change(rec, 'card', id, patch);
@@ -389,3 +389,7 @@ test('R-1-89: every launch record names its folder; a switch leaves the running 
   assert.deepEqual(w.f.st.a.sessions, []);
   assert.deepEqual(w.f.st.b.sessions.map((s) => s.id), [l2.session_id]);
 });
+
+// L778: the caller hazards of the account layer, written into the contract; each is a test owed once the ports are wired.
+test.todo('L778: acrossLeads over a folder whose Lead list is async gives a Promise, which the tick\'s for...of over leads() can\'t read');
+test.todo('L778: frontDoorAlive answers a silent null when the account in use can\'t be read, where L63 m1 asks for an error naming why');

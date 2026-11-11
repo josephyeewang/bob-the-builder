@@ -8,10 +8,13 @@
 //             review runner refuses a wall whose folders sit under a folder anyone else can write (review-runner-main.mjs).
 //   owner     the person's own Mac user (their outboxes and worker copies are theirs).
 //   products  optional; one folder set per product.
+//   hostLockPath  optional until the Dispatcher is set up; the full path of the owner's host.lock, in the owner's home (L739).
 
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
-import { REVIEW_ROLES } from '../shared/review-roles.mjs';
+// A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
+import { PRODUCT, productRoleClash, runnerPlaces, PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
+import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
 export const USERS = Object.freeze(['orchestrate', 'pages', 'review']);
@@ -30,7 +33,6 @@ export const BASE_MARKER = '.made-by-setup';
 export const baseMarkerPath = (cfg) => join(cfg.base, BASE_MARKER);
 
 const NAME = /^[a-z_][a-z0-9_.-]{0,31}$/;
-const PRODUCT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE = /^\/[A-Za-z0-9._/-]+$/;
 // Folders other users can write; compared without regard to case (the Mac's disk treats /users and /Users as one).
 // The chain check (guard.mjs) is the real wall: it runs before root changes anything. This only gives a clear early error.
@@ -43,7 +45,7 @@ export const isRepoName = (r) => typeof r === 'string' && /^[A-Za-z0-9_.-]{1,100
 /** The checked config, or a thrown Error naming the first problem. */
 export function parseConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config: expected an object with base, owner and products');
-  const { base, owner, products = [], proposalsParent, watch } = raw;
+  const { base, owner, products = [], proposalsParent, watch, hostLockPath } = raw;
   if (typeof base !== 'string' || !BASE.test(base) || base.split('/').some((s) => s === '..' || s === '.') || base.includes('//') || base.length > 200) {
     throw new Error('config: base must be a full path of letters, digits and . _ - / only, with no .. and no spaces');
   }
@@ -56,8 +58,18 @@ export function parseConfig(raw) {
   if (!Array.isArray(products) || products.length > 50 || products.some((p) => typeof p !== 'string' || !PRODUCT.test(p)) || new Set(products).size !== products.length) {
     throw new Error('config: products must be a list of distinct names (lowercase letters, digits, dashes)');
   }
+  // A product's outbox folder sits beside the role folders (L836), so no product may be named as a role.
+  if (products.some(productRoleClash)) {
+    throw new Error('config: a product may not be named as a role (its outbox folder would be that role\'s)');
+  }
   if (proposalsParent !== undefined && (typeof proposalsParent !== 'string' || !BASE.test(proposalsParent) || proposalsParent.split('/').some((x) => x === '..' || x === '.') || proposalsParent.includes('//') || proposalsParent.endsWith('/') || proposalsParent.split('/').length < 3 || proposalsParent.length > 200)) {
     throw new Error('config: proposalsParent must be a full path of letters, digits and . _ - / only, in a folder of its own, with no .. and no spaces');
+  }
+  // The owner's host.lock (L739): a file in the owner's own home, which may hold spaces (a synced folder's name).
+  // posix.normalize refuses . and .. segments and doubled slashes: the normal form must be the path as written.
+  if (hostLockPath !== undefined && (typeof hostLockPath !== 'string' || !hostLockPath.startsWith(`/Users/${owner}/`) || posix.normalize(hostLockPath) !== hostLockPath
+    || hostLockPath.endsWith('/') || /[\u0000-\u001f\u007f]/.test(hostLockPath) || hostLockPath.length > 300)) {
+    throw new Error(`config: hostLockPath must be the full path of a file in /Users/${owner}/, with no .. and no control characters`);
   }
   // The watch-only week: `repo` is the repository the token is proven against (prove-token reads it from here, never from the command
   // line) and the one watch-rules prints; `rulesSha256` is the hash of the rules file root put in place (watch-rules), absent until then.
@@ -75,7 +87,7 @@ export function parseConfig(raw) {
     }
     if (watch.rulesSha256 !== undefined && (typeof watch.rulesSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(watch.rulesSha256))) throw new Error('config: watch.rulesSha256 must be 64 hex characters');
   }
-  return { base: b, owner, products: [...products], ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}), ...(watch.app !== undefined ? { app: { ...watch.app } } : {}) } } : {}) };
+  return { base: b, owner, products: [...products], ...(hostLockPath !== undefined ? { hostLockPath } : {}), ...(proposalsParent !== undefined ? { proposalsParent } : {}), ...(watch !== undefined ? { watch: { repo: watch.repo, ...(watch.rulesSha256 !== undefined ? { rulesSha256: watch.rulesSha256 } : {}), ...(watch.app !== undefined ? { app: { ...watch.app } } : {}) } } : {}) };
 }
 
 /** Where the proposals folders live (R-0b-128, runbook A7; "a proposal for the owner's OK" until they OK it): one folder per product under this parent. */
@@ -83,8 +95,32 @@ export const DEFAULT_PROPOSALS_PARENT = '/Users/Shared/orchestrate-proposals';
 export const proposalsParentOf = (cfg) => cfg.proposalsParent ?? DEFAULT_PROPOSALS_PARENT;
 /** The folder the owner writes review-again taps into (runner setting `ownerTaps`, runbook A6). */
 export const ownerTapsPath = (cfg) => join(cfg.base, 'owner-taps');
+/**
+ * The owner's answer for the Sensors (L609, L614, L727): the owner's job (wiring/owner-answer.mjs, as the owner) writes
+ * its ANSWER_FILE (owner-answer.json) in it, 0644; orchestrate's Sensors read it (sensors-ports.mjs). The owner's, 0755: no
+ * group or other write, and orchestrate may list and read it. No access list. The file name is the wiring's, not setup's.
+ */
+export const ownerAnswerPath = (cfg) => join(cfg.base, 'owner-answer');
 /** The Do-plane git mirror; the owner's git is told to trust exactly this path (R-0b-05 done_when, safe.directory). */
 export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
+/** Where cleanup seals a copy's bundle it could not prove saved (the Dispatcher config's sealRoot, L739). */
+export const sealRootPath = (cfg) => join(cfg.base, 'seals');
+
+/**
+ * The ten Dispatcher config keys the worker and cleanup ports read (wiring/dispatcher-wiring.mjs WORKER_CONFIG_KEYS, L739),
+ * from this config: the one place their values come from. hostLockPath is the owner's own file, so it is the config's;
+ * hostLockUid is the owner's Mac user id (the reader takes host.lock only when the opened file is that user's, L763), which
+ * the caller reads from this Mac (dispatcher-check.mjs dispatcherKeysOn). The worker runner's requests folder and status file
+ * (L921, made by this setup) and its user, workerUid: the runner runs as the owner's own user (wiring/runner-job.mjs), so it
+ * is hostLockUid's same user, read the same way (L896).
+ */
+export function dispatcherKeys(cfg, { hostLockUid } = {}) {
+  if (cfg.hostLockPath === undefined) throw new Error('config: hostLockPath is not set (the full path of the owner\'s host.lock); the Dispatcher can\'t start without it');
+  if (!Number.isSafeInteger(hostLockUid) || hostLockUid < 0) throw new Error(`the owner ${cfg.owner} is not a user on this Mac, so host.lock's owner (hostLockUid) can't be named`);
+  // outboxRoot and copiesRoot: the TOP folders, never a product's (L887).
+  return { reviewRoot: join(cfg.base, 'review'), mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: outboxRootPath(cfg), copiesRoot: workerCopiesPath(cfg), hostLockPath: cfg.hostLockPath, hostLockUid,
+    workerRequestsDir: workerRunnerPaths(cfg).requests, workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: hostLockUid };
+}
 
 /**
  * The proposals folders (R-0b-128, L76 (3)). The parent is root's, 0711 (traverse only): nobody else can rename, remove or
@@ -101,11 +137,59 @@ export function proposalRows(cfg) {
   ];
 }
 
+/** Folders the table below makes that the review runner's config also names (review-config.mjs): one definition each. */
+export const keysPath = (cfg) => join(cfg.base, 'keys');
+export const privatePath = (cfg) => join(cfg.base, 'private');
+export const bobPath = (cfg) => join(cfg.base, 'bob');
+export const reviewCopiesPath = (cfg) => join(cfg.base, 'review-copies');
+export const workerCopiesPath = (cfg) => join(cfg.base, 'worker-copies');
+export const outboxRootPath = (cfg) => join(cfg.base, 'outboxes');
+/** A product's Record (the folder table's `products/<prod>/store`, and the runner's recordRoot). */
+export const storePath = (cfg, prod) => join(cfg.base, 'products', prod, 'store');
+// The rules snapshot the review runner writes for its sessions' hooks (M4 hooks/snapshot.mjs writeSnapshot: written_at,
+// hash, rules), in the runner's own folder. Its own name (L731 M2): M10's signed snapshot (snapshot.mjs SNAPSHOT_FILE) is
+// another format, not placed yet, and must never share a file name with this one.
+export const REVIEW_SNAPSHOT_FILE = 'review-rules-snapshot.json';
+// The two items add-to-install puts into the installed copy (L573): the pinned Claude Code (CLAUDE_CODE/<pin>/claude,
+// hooks-check.mjs pinnedBinary) and the hook scripts. One spelling each, for review-config and add-to-install alike.
+// M4's pinnedBinary spells claude-code once more, as a launcher may not depend on setup; review-config.test.mjs pins the two
+// as equal.
+export const COPY_CLAUDE_CODE = 'claude-code';
+export const COPY_HOOKS = 'hooks';
+
 /** Where a user's home folder is (also what its Mac record names). */
 export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
 
-/** The roles whose outbox folders the workers' Mac user owns: every AI role except the review roles (read from the shared lists). */
-export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.includes(r)));
+/**
+ * The roles whose outbox folders the workers' Mac user owns: every AI role except the roles the review runner starts
+ * (RUNNER_ROLES: the review roles and the plan reviewer, L722). A role the runner starts writes as `review`, so its
+ * outbox is review's; were it the workers' user's, a worker could write that role's answer.
+ */
+export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
+/** The roles the worker runner starts (L836): one list, in shared/product-paths.mjs. */
+export { PRODUCT_OUTBOX_ROLES };
+/**
+ * The worker roles whose outboxes still sit flat under the outbox root (`<root>/<role>`): every worker role but the ones
+ * the worker runner starts, whose outboxes are each product's own (`<root>/<product>/<role>`, L836). A flat folder for a
+ * runner role is made no more (L914); users-folders.mjs check names any left from before.
+ */
+export const FLAT_OUTBOX_ROLES = Object.freeze(WORKER_ROLES.filter((r) => !PRODUCT_OUTBOX_ROLES.includes(r)));
+/** The flat outbox folders of the runner roles that setup made before L914 and makes no more. */
+export const oldFlatOutboxPaths = (cfg) => PRODUCT_OUTBOX_ROLES.map((r) => join(outboxRootPath(cfg), r));
+
+/**
+ * The worker runner's folders (L921, wiring/runner-main.mjs checkRunnerConfig): each apart from the others and from every
+ * copies, outbox and mirror folder, under one root-owned parent so the runner's user can't rename one away.
+ *   requests   the Dispatcher's asks (owner-status.mjs requestWriter, exclusive files of orchestrate's); the runner reads
+ *              and removes them. The runner's user owns it; orchestrate may only add files (WORKER_REQUESTS_ACL).
+ *   runner     the runner's own folder: status.json (which the Dispatcher reads), its memory (0600), settings and lock.
+ *   snapshots  one rules snapshot per product, written by the runner and read by its sessions' hooks.
+ */
+export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
+export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
+/** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
+export const WORKER_STATUS_FILE = 'status.json';
+export const workerRunnerPaths = (cfg) => Object.freeze(Object.fromEntries(Object.entries(WORKER_RUNNER_FOLDERS).map(([k, n]) => [k, join(workerRunnerPath(cfg), n)])));
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it
@@ -114,6 +198,20 @@ export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !REVIEW_ROLES.i
  */
 // `delete_child` (L100 m8): the record's intake may clear a hand-in once it is taken in; the worker seals its own file 0440.
 export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
+// The workers' copies (L747, L751): cleanup runs as orchestrate and lists, reads and deletes a card's copy once its checks
+// pass, through this one entry, inherited by every file and folder made under it. No add or write. `list` on a folder is
+// `read` on the files it holds (an inherited entry shows "read"), and `delete_child` on every folder deletes anything below
+// it, so neither `read` (the Mac shows it as `list` on a folder, and the exact check would never pass) nor `delete` (which
+// would let orchestrate remove the empty copies folder itself) is in it. A product's own copies folder sits under it
+// (L836), so orchestrate can remove that one once it is empty (#378 m7); the start then refuses that product ("setup has
+// made no folder") until setup is run again: it fails safe.
+// Equal to ORCHESTRATE_READ_ACL's rights today on purpose; kept apart because the two may need to differ.
+export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
+// The worker runner's requests folder (L921): orchestrate goes in and adds a request file, and does nothing else there (it
+// writes each new, exclusively: owner-status.mjs requestWriter; no listing, no removing). No inherit: each file is
+// orchestrate's own, 0644 whatever its job's umask (owner-status.mjs writeNewReadable), which the runner checks before it
+// reads one (runner-files.mjs readRequest).
+export const WORKER_REQUESTS_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['search', 'add_file']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
 export const PROPOSALS_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
 
@@ -133,8 +231,8 @@ export function folderTable(cfg) {
     [cfg.base, 'root', 0o755, 'the base: root\'s, so the folders under it cannot be renamed away'],
     [p('home'), 'root', 0o755, 'the three users\' home folders'],
     ...USERS.map((u) => [homeOf(cfg, u), u, 0o700, `${u}'s home`]),
-    [p('keys'), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
-    [p('private'), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
+    [keysPath(cfg), 'orchestrate', 0o700, 'robot keys: nothing else reads them'],
+    [privatePath(cfg), 'orchestrate', 0o700, 'private data: attempt logs, raw facts before masking'],
     [p('watch'), 'orchestrate', 0o700, 'the watch-only week: the log of what the Merge Gate would have done, and the rules draft'],
     [watchNotesPath(cfg), 'owner', 0o755, 'the watch-only week\'s written explanations: the owner writes, orchestrate and the summary only read'],
     [p('hooks'), 'orchestrate', 0o755, 'hook copies and the rules snapshot: read and run by others, written by orchestrate'],
@@ -144,30 +242,47 @@ export function folderTable(cfg) {
     [p('lead-main'), 'orchestrate', 0o755, 'the Lead\'s read-only copy of main'],
     [mirrorPath(cfg), 'orchestrate', 0o755, 'the Do-plane git mirror'],
     [ownerTapsPath(cfg), 'owner', 0o755, 'the owner\'s review-again taps (runner setting ownerTaps): the owner writes, others only read, no access list'],
-    [p('bob'), 'orchestrate', 0o755, 'Bob method copies'],
+    [ownerAnswerPath(cfg), 'owner', 0o755, 'the owner\'s answer for the Sensors (owner-answer.json, 0644, L727): the owner\'s job writes, orchestrate only reads, no access list'],
+    [bobPath(cfg), 'orchestrate', 0o755, 'Bob method copies'],
     [p('global-rules'), 'orchestrate', 0o755, 'plain-text copy of the global rules'],
     [p('claude-code'), 'orchestrate', 0o755, 'the roles\' pinned Claude Code copies'],
     [p('review'), 'review', 0o755, 'the review runner\'s folder (its subfolders are made by the runner)'],
-    [p('review-copies'), 'review', 0o755, 'the review sessions\' copies of the code under review'],
-    [p('worker-copies'), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies)'],
+    [reviewCopiesPath(cfg), 'review', 0o755, 'the review sessions\' copies of the code under review'],
+    [workerCopiesPath(cfg), 'owner', 0o755, 'the workers\' clones (kept apart from the review copies); orchestrate lists, reads and deletes through one access-list entry (cleanup), never writes', [COPIES_CLEANUP_ACL]],
+    [sealRootPath(cfg), 'orchestrate', 0o700, 'cleanup\'s sealed bundles (the Dispatcher\'s sealRoot): orchestrate\'s alone'],
     // The one outbox root (L71): root's, so no role's Mac user can rename another role's folder away. Under it one folder
     // per role, so the record's intake and the Merge Gate read every role through the same root (L90 M1).
-    [p('outboxes'), 'root', 0o755, 'the outbox root (L71): one folder per role under it'],
-    ...REVIEW_ROLES.map((r) => [p('outboxes', r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44); others read`]),
-    ...WORKER_ROLES.map((r) => [p('outboxes', r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
+    [outboxRootPath(cfg), 'root', 0o755, 'the outbox root (L71): a folder per role and one per product (L836) under it'],
+    ...RUNNER_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'review', 0o755, `the ${r}'s outboxes: only review writes them (L44, L722); others read`]),
+    // Not the worker runner's roles: theirs are in each product's folder below (L914).
+    ...FLAT_OUTBOX_ROLES.map((r) => [join(outboxRootPath(cfg), r), 'owner', 0o750, `the ${r}'s outboxes (the workers' user writes; orchestrate reads through one access-list entry)`, [ORCHESTRATE_READ_ACL]]),
+    [workerRunnerPath(cfg), 'root', 0o755, 'the worker runner\'s folders (L921): root\'s, so none can be renamed away'],
+    [workerRunnerPaths(cfg).requests, 'owner', 0o700, 'the worker runner\'s requests: orchestrate only adds (one access-list entry), the runner reads and removes, no one else sees in', [WORKER_REQUESTS_ACL]],
+    [workerRunnerPaths(cfg).state, 'owner', 0o755, 'the worker runner\'s own folder: its status (orchestrate reads it; owner-status.mjs refuses a folder others can write), memory (0600), settings and lock'],
+    [workerRunnerPaths(cfg).snapshots, 'owner', 0o755, 'the worker runner\'s rules snapshots, one per product: its sessions\' hooks read them'],
     ...(cfg.products.length ? [[p('products'), 'root', 0o755, 'one folder set per product']] : []),
+    // A copies folder and an outbox folder per product (L836): the worker runner denies each session every other
+    // product's whole folder. Same owner, mode and access list as the folder above; the product's role folders as the
+    // role folders above (the runner starts worker and script sessions).
+    // Named by the one rule the runner uses (shared/product-paths.mjs runnerPlaces, #378 r1 m1).
+    ...cfg.products.map((prod) => [prod, runnerPlaces({ copiesRoot: workerCopiesPath(cfg), outboxRoot: outboxRootPath(cfg), product: prod })]).flatMap(([prod, at]) => [
+      [at.copies, 'owner', 0o755, `${prod}: the workers' clones (cleanup as above)`, [COPIES_CLEANUP_ACL]],
+      [at.outboxes, 'root', 0o755, `${prod}: its worker runner outboxes, a folder per worker runner role`],
+      ...PRODUCT_OUTBOX_ROLES.map((r) => [join(at.outboxes, r), 'owner', 0o750, `${prod}: the ${r}'s outboxes (as the ${r} folder above)`, [ORCHESTRATE_READ_ACL]]),
+    ]),
     ...cfg.products.flatMap((prod) => [
       // Root's (L100 m2): its children belong to different users, and a folder one of them owns could rename another's away.
       [p('products', prod), 'root', 0o755, `${prod}: its folders`],
-      [p('products', prod, 'store'), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
+      [storePath(cfg, prod), 'orchestrate', 0o755, `${prod}: the record (the owner reads it)`],
       [p('products', prod, 'pages'), 'pages', 0o755, `${prod}: built pages (only pages writes them)`],
       [p('products', prod, 'handoffs'), 'orchestrate', 0o755, `${prod}: handoff copies`],
       [p('products', prod, 'pages-in'), 'orchestrate', 0o755, `${prod}: the page builder's input`],
     ]),
   ];
-  // `group`: 'root' pins the folder's group to wheel (0) where the mode gives its group any access and the owner is the
-  // person's own user, whose Mac group would otherwise be taken as it comes (L100 m1). Set on apply, compared in check.
-  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' && (mode & 0o070) ? { group: 'root' } : {}) }));
+  // `group`: 'root' pins the folder's group to wheel (0) where the owner is the person's own user, whose Mac group would
+  // otherwise be taken as it comes (L100 m1): every such folder, so one whose mode gives its group nothing today (the
+  // worker runner's requests, L921) gets no group to open to later. Set on apply, compared in check.
+  return rows.map(([path, owner, mode, why, acl = []]) => ({ path, owner, mode, why, acl, ...(owner === 'owner' ? { group: 'root' } : {}) }));
 }
 
 /** The rules draft the watch-only week judges by (R-0b-122): root's copy, in orchestrate's watch folder; the config holds its hash. */

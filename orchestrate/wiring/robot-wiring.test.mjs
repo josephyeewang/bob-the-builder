@@ -7,26 +7,32 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { installedLayout } from '../shared/job-config.test-helper.mjs';
 import { fakeRules } from '../shared/rules.mjs';
+import { makeRecord, memoryRecord } from '../shared/record.mjs';
 import { openRecord } from '../modules/M9-record/writer.mjs';
 import { FIRST, ENTRY } from '../modules/M10-rules/first-cutover.test-helper.mjs';
 import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
-import { pidDead } from '../modules/M11-dispatcher/pass-lock.mjs';
+import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
 import { rulesWith } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { fakeAlert } from '../test/fake-alert.test-helper.mjs';
 import { DISPATCHER_LATE_MIN } from '../modules/M13-ledger/heartbeat.mjs';
-import { runPasses, CAUSE, main, NOT_QUEUED } from './robot-main.mjs';
+import { runPasses, CAUSE, main, NOT_QUEUED, LOCK_REFUSED, pidState, takeRoundLock } from './robot-main.mjs';
+import { fakeIssues } from '../modules/M13-ledger/alerts.mjs';
 import { notWiredText } from './dispatcher-wiring.mjs';
+import { UNSENT, readUnsent } from '../modules/M9-record/unsent.mjs';
+import { holdAlert } from '../modules/M11-dispatcher/pass.mjs';
 import { fakeGitHubFetch, blobOf } from './fake-github.test-helper.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -89,6 +95,64 @@ test('R-0b-162 B: `node robot-main.mjs <config>` runs every pass; the ones not w
   const second = boot(w);
   assert.equal(second.code, 0, second.err);
   assert.deepEqual(queued(readRecord(w)), q);
+});
+
+test('L587: a store that won\'t open is told once per reason through the channel, and the job still exits 1', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const diary = join(w.config.recordRoot, 'diary.jsonl');
+  rmSync(diary);
+  mkdirSync(diary);
+  const gh = fakeIssues();
+  const run = async (stopChannel) => {
+    const logs = [];
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: stopChannel ? { stopChannel } : {} });
+    return { code, logs: logs.join('\n') };
+  };
+  const first = await run({ gh, owner: 'owner-login' });
+  assert.equal(first.code, 1);
+  assert.match(first.logs, /robot: not started: .*diary\.jsonl/);
+  assert.equal(gh.issues.size, 1);
+  assert.match(gh.issues.get(1).body, /store_layout/);
+  assert.equal((await run({ gh, owner: 'owner-login' })).code, 1);
+  assert.equal(gh.issues.size, 1, 'the next start finds the open issue');
+  const bare = await run(null);
+  assert.equal(bare.code, 1);
+  assert.match(bare.logs, /could not be told: .*R-0b-02/);
+});
+
+// L724, L732 m2: a recovery that stops writes does not stop the start (a store write never throws), so the round runs and
+// the store keeps its line for the deliver pass. The start's stop path, and its issue, is only for a store that won't open.
+// Opening the store sets tmp/ back to 755 and recovers once, so this happens after the open, just before the round's first
+// write (the heartbeat's held alert): a torn diary line, as a writer killed mid-append leaves, makes that write recover
+// again, and the recovery stops at tmp/, which it may not list.
+test('L724: a Record whose recovery stopped still starts the round, keeps one line, and the stop path opens no issue', async () => {
+  const w = world();
+  assert.equal(boot(w).code, 0);
+  const tmp = join(w.config.recordRoot, 'tmp');
+  const gh = fakeIssues();
+  const logs = [];
+  let shut = 0;
+  const hold = (args) => { appendFileSync(join(w.config.recordRoot, 'diary.jsonl'), '{"torn'); chmodSync(tmp, 0o000); shut++; return holdAlert(args); };
+  try {
+    const code = await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { hold, stopChannel: { gh, owner: 'owner-login' } } });
+    assert.equal(shut, 1, 'the round reached its first write');
+    assert.notEqual(code, 1, logs.join('\n'));
+    assert.doesNotMatch(logs.join('\n'), /robot: not started/);
+    assert.match(logs.join('\n'), /the Dispatcher-late alert could not be queued/, 'the write was refused: recovery really stopped');
+    const kept = readUnsent(w.config.recordRoot).filter((x) => x.event.type === 'recovery_stopped');
+    assert.equal(kept.length, 1, 'one line kept for the deliver pass');
+    assert.match(readFileSync(join(w.config.recordRoot, UNSENT), 'utf8'), /"cap_key":"recovery_stopped:EACCES:tmp"/, 'kept under the fault\'s stable key');
+    assert.equal(gh.issues.size, 0, 'the start\'s stop path is not used for it');
+  } finally { chmodSync(tmp, 0o755); }
+});
+
+test('L587: a start that fails for any other reason is not told as a stopped Record', async () => {
+  const w = world({ keyMode: 0o755 });
+  const gh = fakeIssues();
+  const logs = [];
+  assert.equal(await main([w.configFile], { self: w.main, log: (s) => logs.push(s), wireOpts: { stopChannel: { gh, owner: 'owner-login' } } }), 1);
+  assert.equal(gh.issues.size, 0);
 });
 
 test('R-0b-162 B (L238): the job refuses to start, loudly, unless it runs as the Record\'s and the key folder\'s owner', async () => {
@@ -237,12 +301,14 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
     const code = await main([cfg], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver, fetchFn: fakeGitHubFetch(w.fake) }, ...opts.main });
     return { code, logs, delivered }; };
   // P7: a live holder (this test's own pid): exit 0, a log line, no pass runs, the lock is left as it was.
-  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
+  // (L740: the holder's time must be readable and inside the longest a round may run, or it is refused, exit 3.)
+  const liveAt = new Date().toISOString();
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: liveAt }));
   let r = await run();
   assert.equal(r.code, 0);
   assert.ok(r.logs.some((l) => /robot: another pass runs \(pid \d+\)/.test(l)), r.logs.join('\n'));
   assert.equal(r.delivered, 0, 'no pass ran under another round\'s lock');
-  assert.match(readFileSync(lockOf(w), 'utf8'), /T-live/);
+  assert.equal(JSON.parse(readFileSync(lockOf(w), 'utf8')).taken_at, liveAt);
   // P5: a dead holder: its lock is broken, the stopped round is told, and this round runs.
   writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }));
   r = await run();
@@ -258,6 +324,57 @@ test('L265 M2 (P7, P5, P6a/b): a live holder runs nothing; a dead holder\'s lock
   assert.ok(logs.some((l) => /the round did not finish within 300 ms/.test(l)));
   assert.ok(queued(readRecord(slow)).includes('a robot job round did not finish within 300 ms and was stopped; the next round starts in a minute'));
   assert.equal(existsSync(slow.config.lockFile), true, 'the late round keeps its lock');
+});
+
+test('L740: every lock the round cannot take exits 3 and names the lock and the cause; only a current round of ours exits 0', async () => {
+  const w = world();
+  const run = async (cfg) => { const logs = []; let delivered = 0;
+    const code = await main([cfg], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => { delivered += 1; return { sent: 0 }; }, fetchFn: fakeGitHubFetch(w.fake) } });
+    return { code, logs, delivered }; };
+  const refused = (r, cause, file = lockOf(w)) => {
+    assert.equal(r.code, LOCK_REFUSED, r.logs.join('\n'));
+    assert.equal(r.delivered, 0, 'no pass ran');
+    const line = r.logs.find((l) => l.startsWith('robot: cannot take its lock '));
+    assert.ok(line, r.logs.join('\n'));
+    assert.ok(line.includes(file), `names the lock: ${line}`);
+    assert.match(line, cause);
+  };
+  // Audit A1: the lock's folder does not exist (ENOENT). Never a quiet exit 0.
+  const gone = join(dirname(w.configFile), 'no-such-folder', 'robot.lock');
+  const cfgGone = join(dirname(w.configFile), 'robot-gone.json');
+  writeFileSync(cfgGone, JSON.stringify({ ...JSON.parse(readFileSync(w.configFile, 'utf8')), lockFile: gone }), { mode: 0o600 });
+  refused(await run(cfgGone), /could not take the pass lock: ENOENT/, gone);
+  // A lock that can't be read.
+  writeFileSync(lockOf(w), 'not json');
+  refused(await run(w.configFile), /unreadable/);
+  // Audit A2: a planted lock naming a live process that is not this user's (pid 1, launchd/init).
+  if (pidState(1) === 'foreign') {
+    writeFileSync(lockOf(w), JSON.stringify({ pid: 1, taken_at: new Date().toISOString() }));
+    refused(await run(w.configFile), /another pass runs \(pid 1\), a process that is not this job's user's/);
+  }
+  // A lock with no pid at all.
+  writeFileSync(lockOf(w), JSON.stringify({ taken_at: new Date().toISOString() }));
+  refused(await run(w.configFile), /not this job's user's/);
+  // Ours and alive, but held longer than any round may run (a reused pid, or a round that outlived its watchdog).
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() - 3 * 60 * 60e3).toISOString() }));
+  refused(await run(w.configFile), /held 180 minutes, longer than any round may run/);
+  // L754 (#312 Minor): the lock is never broken on its own, so the line says how to clear it, with its path.
+  refused(await run(w.configFile), new RegExp(`if no robot round is running \\(check pid ${process.pid} is not one\\), delete ${lockOf(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+  // Ours and alive, with no readable time, or one in the future.
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: 'T-live' }));
+  refused(await run(w.configFile), /no readable time/);
+  writeFileSync(lockOf(w), JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() + 10 * 60e3).toISOString() }));
+  refused(await run(w.configFile), /in the future/);
+  // Every refusal left the lock as it was found.
+  assert.match(readFileSync(lockOf(w), 'utf8'), new RegExp(String(process.pid)));
+  rmSync(lockOf(w));
+});
+
+test("L740: pidState: this user's live pid is ours, a pid that is gone is dead, any other answer is foreign", () => {
+  assert.equal(pidState(process.pid), 'ours');
+  assert.equal(pidState(deadPid()), 'dead');
+  assert.equal(pidState(5, { kill: () => { throw Object.assign(new Error('x'), { code: 'EPERM' }); } }), 'foreign');
+  for (const p of [undefined, null, 0, -1, 1.5, '7']) assert.equal(pidState(p), 'foreign', String(p));
 });
 
 test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logged and kept with the failure; the later passes still run', async () => {
@@ -364,6 +481,7 @@ test('L265 M5, M6: a running Dispatcher pass is not late (a 20-minute live pass)
 
 const noPorts = () => { const noop = () => [];
   return { alert: fakeAlert(), board: noop, healthy: () => true, outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
+    proposals: () => ({ products: [], ownerUid: 501 }),
     launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hasSession: () => true, gateAlive: () => true,
     hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop, sendFrontDoor: async () => ({}), restartFrontDoor: async () => ({ ok: true }),
     startMinibase: async () => ({ ok: true }), cleanup: { copiesRoot: '/none', sealRoot: '/none', mirrorFor: () => null }, approvals: () => [] }; };
@@ -443,11 +561,202 @@ test('audit #150 P21: the wired heartbeat reads the lock file its config names: 
   assert.equal(lateQ().length, 1, 'no holder');
 });
 
+// L754 (#312 Minors): the holder read once. A round of ours that releases its lock while this one looks is still exit 0
+// (before, a second read found it gone: exit 3 "no readable time"); and a lock is never seen half-written.
+test('L754: a holder that releases while the round looks is still a running round of ours (exit 0); a lock appears whole', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date(at).toISOString() }));
+  const r = takeRoundLock(f, { now: at + 1000, maxHeldMs: 60e3, state: () => { rmSync(f, { force: true }); return 'ours'; } });
+  assert.deepEqual([r.ok, r.code], [false, 0], r.line);
+  assert.match(r.line, /another pass runs/);
+  const held = takePassLock(f, { pid: 4242, now: at });
+  assert.equal(held.ok, true);
+  const b = takePassLock(f, { pid: 4343, now: at, dead: () => false });
+  assert.deepEqual([b.ok, b.held?.pid, b.held?.taken_at], [false, 4242, new Date(at).toISOString()], 'the holder as read is handed back');
+  const st = lstatSync(f);
+  assert.deepEqual([st.nlink, st.mode & 0o777], [1, 0o600], 'one name, 0600');
+  assert.deepEqual(readdirSync(dirname(f)).filter((n) => n.endsWith('.new')), [], 'no file of its own is left');
+  held.release();
+  assert.equal(existsSync(f), false);
+  // The lock path itself is never created empty and written after (a reader in between saw "unreadable"): only linked.
+  const opened = []; const real = fs.openSync;
+  fs.openSync = (path, ...rest) => { opened.push(String(path)); return real(path, ...rest); };
+  syncBuiltinESMExports();
+  try { const t = takePassLock(f, { pid: 4444, now: at }); assert.equal(t.ok, true); t.release(); }
+  finally { fs.openSync = real; syncBuiltinESMExports(); }
+  assert.ok(opened.length >= 1, 'the take was seen');
+  assert.ok(!opened.includes(f), `the lock is linked into place, never opened to be written: ${opened.join(', ')}`);
+  // A holder that releases between the refused link and the read (self-review Minor): the take tries the link again and gets
+  // the lock, never "unreadable" (which was exit 3 for a round of ours).
+  writeFileSync(f, JSON.stringify({ pid: 4545, taken_at: new Date(at).toISOString() }));
+  const realRead = fs.readFileSync; let gone = 0;
+  fs.readFileSync = (path, ...rest) => { if (String(path) === f && gone === 0) { gone += 1; rmSync(f, { force: true }); } return realRead(path, ...rest); };
+  syncBuiltinESMExports();
+  let again;
+  try { again = takePassLock(f, { pid: 4646, now: at, dead: () => false }); } finally { fs.readFileSync = realRead; syncBuiltinESMExports(); }
+  assert.equal(gone, 1, 'the release happened between the link and the read');
+  assert.equal(again.ok, true, again.reason);
+  again.release();
+});
+
+test('L771 Minor 1: two takers over one dead lock: only one breaks it and holds; the other never deletes a live lock', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  const DEAD = { pid: 999, taken_at: new Date(at - 60e3).toISOString() };
+  const isDead = (p) => p === DEAD.pid;
+  const leftover = () => readdirSync(dirname(f)).filter((n) => n.endsWith('.dead') || n.endsWith('.new'));
+  // B has read the dead lock and judged it dead; before B acts, A takes the whole lock (breaks the dead one, links its own).
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let a = null;
+  const b = takePassLock(f, { pid: 5002, now: at, dead: (p) => { a ??= takePassLock(f, { pid: 5001, now: at, dead: isDead }); return isDead(p); } });
+  assert.deepEqual([a?.ok, a?.broke?.pid], [true, DEAD.pid], 'A broke the dead lock and holds');
+  assert.deepEqual([b.ok, b.held?.pid], [false, 5001], `B refuses, naming A: ${b.reason}`);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).pid, 5001, 'A\'s lock is in place, never deleted by B');
+  assert.deepEqual(leftover(), [], 'no moved or own file is left');
+  a.release();
+  assert.equal(existsSync(f), false);
+  // A judged it dead; B moved it first and has not linked yet: A finds the move missing, tries the link again and holds;
+  // B's link then finds A's live lock and refuses.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const bMoved = `${f}.5002.dead`;
+  const a2 = takePassLock(f, { pid: 5001, now: at, dead: (p) => { if (existsSync(f)) renameSync(f, bMoved); return isDead(p); } });
+  assert.equal(a2.ok, true, a2.reason);
+  rmSync(bMoved, { force: true });
+  const b2 = takePassLock(f, { pid: 5002, now: at, dead: isDead });
+  assert.deepEqual([b2.ok, b2.held?.pid], [false, 5001], b2.reason);
+  assert.deepEqual(leftover(), []);
+  a2.release();
+  // The round's own take: it loses the same race and puts the other's lock back; that holder is a live round of ours, so the
+  // round exits 0 (another round runs), never 3 (self-review Minor 1).
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let a3 = null;
+  const r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => { a3 ??= takePassLock(f, { pid: 5001, now: at, dead: isDead }); return isDead(p) ? 'dead' : 'ours'; } });
+  assert.equal(a3?.ok, true);
+  assert.deepEqual([r.ok, r.code], [false, 0], r.line);
+  assert.equal(JSON.parse(readFileSync(f, 'utf8')).pid, 5001);
+  a3.release();
+  // L785 M1: in order (b) the taker that holds tells the broken dead lock (above: a2). Re-run it and check `broke`.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const a4 = takePassLock(f, { pid: 5001, now: at, dead: (p) => { if (existsSync(f)) renameSync(f, bMoved); return isDead(p); } });
+  rmSync(bMoved, { force: true });
+  assert.deepEqual([a4.ok, a4.broke?.pid, a4.broke?.taken_at], [true, DEAD.pid, DEAD.taken_at], 'the holder tells the dead lock another taker broke');
+  a4.release();
+  // L785 m2: the re-check compares taken_at too. The dead pid is in a lock taken again (a reused pid, a new time) between the
+  // judgment and the move: that lock is put back, never deleted.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  const again = { pid: DEAD.pid, taken_at: new Date(at).toISOString() };
+  const r2 = takePassLock(f, { pid: 5002, now: at, dead: (p) => { writeFileSync(f, JSON.stringify(again), { mode: 0o600 }); return isDead(p); } });
+  assert.equal(r2.ok, false, 'refused');
+  assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), again, 'the lock taken again is put back');
+  assert.deepEqual(leftover(), []);
+  rmSync(f, { force: true });
+});
+
+// L800 M-A (audit #336 r2 probe Q2): B breaks the dead lock D; before B links again, A (which never saw D) finds the place
+// empty and links; B's link then finds A and refuses. A has nothing to tell, so B's refusal must carry the break.
+test('L800 M-A: a taker that broke a dead lock and then lost the place to a late taker still carries `broke`', () => {
+  const w = world();
+  const f = lockOf(w);
+  const at = Date.now();
+  const DEAD = { pid: 999, taken_at: new Date(at - 60e3).toISOString() };
+  const isDead = (p) => p === DEAD.pid;
+  const lateTaker = (pid) => {
+    // At B's re-read of its moved file the place is empty: A arrives then and links.
+    let a = null; const orig = fs.readFileSync;
+    fs.readFileSync = function (p, ...r) { if (String(p).endsWith(`.${pid}.dead`) && !a) a = takePassLock(f, { pid: 5001, now: at, dead: isDead }); return orig.call(this, p, ...r); };
+    syncBuiltinESMExports();
+    return { get a() { return a; }, undo() { fs.readFileSync = orig; syncBuiltinESMExports(); } };
+  };
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  let late = lateTaker(5002); let b;
+  try { b = takePassLock(f, { pid: 5002, now: at, dead: isDead }); } finally { late.undo(); }
+  assert.deepEqual([late.a?.ok, late.a?.broke], [true, null], 'A holds and never saw D');
+  assert.equal(b.ok, false, b.reason);
+  assert.deepEqual([b.broke?.pid, b.broke?.taken_at], [DEAD.pid, DEAD.taken_at], 'the refusal carries the break');
+  late.a.release();
+  // The round's own take passes it through, as LOCK_REFUSED or code 0.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  late = lateTaker(process.pid); let r;
+  try { r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => (isDead(p) ? 'dead' : 'ours') }); } finally { late.undo(); }
+  assert.equal(late.a?.ok, true);
+  assert.deepEqual([r.ok, r.broke?.pid], [false, DEAD.pid], r.line);
+  late.a.release();
+  // L816 m-1: the generic LOCK_REFUSED refusal carries it too: here the late holder is a process that is not this user's.
+  writeFileSync(f, JSON.stringify(DEAD), { mode: 0o600 });
+  late = lateTaker(process.pid);
+  try { r = takeRoundLock(f, { now: at, maxHeldMs: 60e3, state: (p) => (isDead(p) ? 'dead' : 'foreign') }); } finally { late.undo(); }
+  assert.equal(late.a?.ok, true);
+  assert.deepEqual([r.ok, r.code, r.broke?.pid], [false, LOCK_REFUSED, DEAD.pid], r.line);
+  late.a.release();
+  // A refusal with no break carries none.
+  writeFileSync(f, JSON.stringify({ pid: 5001, taken_at: new Date(at).toISOString() }), { mode: 0o600 });
+  const plain = takePassLock(f, { pid: 5002, now: at, dead: isDead });
+  assert.deepEqual([plain.ok, 'broke' in plain], [false, false]);
+  rmSync(f, { force: true });
+});
+
+// L785 m1: a round whose take moved a live lock and could not put it back (two rounds may run) tells Joe, once a day.
+test('L785 m1: robot-main tells a moved, not-put-back live lock through the held alert', async () => {
+  const w = world();
+  const f = lockOf(w);
+  writeFileSync(f, JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }), { mode: 0o600 });
+  // At the take's move: another taker has just broken the dead lock and linked its own (A), and a third (C) links into the
+  // place as soon as A's lock is moved out, so the put-back finds C there.
+  const realRename = fs.renameSync; let moves = 0;
+  fs.renameSync = (src, dst, ...rest) => {
+    if (String(src) === f && String(dst).endsWith('.dead') && moves === 0) {
+      moves += 1;
+      writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date().toISOString() }));
+      realRename(src, dst, ...rest);
+      writeFileSync(f, JSON.stringify({ pid: process.pid, taken_at: new Date(Date.now() + 1).toISOString() }));
+      return;
+    }
+    return realRename(src, dst, ...rest);
+  };
+  syncBuiltinESMExports();
+  const logs = []; let code;
+  try { code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => ({ sent: 0 }), fetchFn: fakeGitHubFetch(w.fake) } }); }
+  finally { fs.renameSync = realRename; syncBuiltinESMExports(); }
+  assert.equal(moves, 1, 'the take moved a lock');
+  assert.equal(code, 3, logs.join('\n'));
+  assert.ok(queued(readRecord(w)).some((t) => /two robot job rounds may be running at once/.test(t)), JSON.stringify(queued(readRecord(w))));
+  // L800 m-1: under its own cause, never the late-round one, so a late tell already held that day can't silence it.
+  const entries = readRecord(w).read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+  assert.equal(entries.find((e) => /two robot job rounds may be running at once/.test(e.text))?.mark?.fact, HOLD_FACT('robot-lock-moved'), JSON.stringify(entries));
+});
+
+// L800 M-A: the round broke the dead lock, then a late round of ours linked into the place: this round exits 0 (another round
+// runs) and still tells the stopped round, as the holder never saw it.
+test('L800 M-A: robot-main tells a dead lock it broke even when a late round took the place', async () => {
+  const w = world();
+  const f = lockOf(w);
+  writeFileSync(f, JSON.stringify({ pid: deadPid(), taken_at: 'T-dead' }), { mode: 0o600 });
+  let late = null; const orig = fs.readFileSync;
+  fs.readFileSync = function (p, ...r) {
+    if (String(p).startsWith(`${f}.`) && String(p).endsWith('.dead') && !late) late = takePassLock(f, { pid: process.pid, dead: () => false });
+    return orig.call(this, p, ...r);
+  };
+  syncBuiltinESMExports();
+  const logs = []; let code;
+  try { code = await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { deliver: () => ({ sent: 0 }), fetchFn: fakeGitHubFetch(w.fake) } }); }
+  finally { fs.readFileSync = orig; syncBuiltinESMExports(); }
+  assert.equal(late?.ok, true, 'the late round holds');
+  assert.equal(code, 0, logs.join('\n'));
+  assert.ok(queued(readRecord(w)).some((t) => /the last robot job round \(taken T-dead\) was stopped before it finished; another round holds the lock now/.test(t)), JSON.stringify(queued(readRecord(w))));
+  // L816 m-2: under the holder's own cause, so a holder and a refuser that both carry the break tell it once that day.
+  const entries = readRecord(w).read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
+  assert.equal(entries.find((e) => /another round holds the lock now/.test(e.text))?.mark?.fact, HOLD_FACT('robot-run-late'), JSON.stringify(entries));
+  late.release();
+});
+
 // ── L600 PR 1: the deliver pass and the store-free channel, through the robot App ──────────────────────────────────────
 
 const ALERT_REPO = 'alerts-owner/alerts-repo';
 const APP = Object.freeze({ appId: 12345, appInstallation: 678, alertRepo: ALERT_REPO, alertOwner: 'owner-login' });
-const KEY_NAME = 'robot-app.pem';   // token.mjs's default key file name
+const KEY_NAME = ROBOT_KEY_FILE;   // token.mjs's default key file name (L734: imported, not copied)
 
 // The robot App's key, in the key folder under token.mjs's default name, the scripts' user's own, mode 600.
 let KEY_TEXT = null;
@@ -508,6 +817,24 @@ test('L600 PR 1: with the robot App named, the real deliver pass sends the round
   for (const p of ['gate', 'heartbeat', 'watch']) assert.match(sent, new RegExp(`the robot job's ${p} pass failed`), p);
   assert.ok([...gh.issues.values()].every((i) => i.assignees?.[0] === APP.alertOwner), 'assigned to alertOwner');
   assert.equal(gh.mints(), 1, 'one mint for the whole round');
+  assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
+});
+
+// L727: a store that won't open is told through the robot App's own channel, with nothing injected.
+test('L727: with the robot App named, a stopped store is told through robotChannel, once, in the alert repository', async () => {
+  const w = withKey(world({ extra: APP }));
+  assert.equal(boot(w).code, 0);
+  const diary = join(w.config.recordRoot, 'diary.jsonl');
+  rmSync(diary);
+  mkdirSync(diary);
+  const gh = appGitHub(w);
+  for (let i = 0; i < 2; i++) {
+    const logs = [];
+    assert.equal(await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn: gh.fetchFn } }), 1, logs.join('\n'));
+  }
+  const stops = [...gh.issues.values()].filter((i) => /Record has stopped: store_layout/.test(i.title));
+  assert.equal(stops.length, 1, 'the second start finds the open issue');
+  assert.equal(stops[0].assignees?.[0], APP.alertOwner);
   assert.deepEqual(gh.writesOutside(), [], 'nothing is written anywhere but the alert repository');
 });
 
@@ -619,4 +946,25 @@ test('L587/L600 PR 1: robotChannel never throws, takes any config, and mints onl
   assert.equal(gh.issues.size, 1);
   assert.match(gh.issues.get(1).body, /store_layout/);
   assert.deepEqual(gh.issues.get(1).assignees, [APP.alertOwner]);
+});
+
+// L797: the Record's read never throws, so a queue it can't read came back as a corrupt row, which read as an empty
+// queue: nothing was dropped and the pass answered true ("every drop written"). It must answer false and drop nothing.
+test('L797: dropLateAlerts answers false and drops nothing when the alert queue cannot be read; an absent queue is true', () => {
+  const real = memoryRecord();
+  let failQueue = false; let writes = 0;
+  const rec = makeRecord({
+    read: (e, id) => { if (failQueue && e === 'fact' && id === ALERT_QUEUE_FACT) throw new Error('SQLITE_BUSY'); return real.read(e, id); },
+    list: (e) => real.list(e),
+    write: (w) => { writes++; return real.write(w); },
+    diary: (o) => real.diary(o),
+  });
+  assert.equal(dropLateAlerts(rec), true, 'no queue at all: nothing to drop');
+  failQueue = true;
+  assert.equal(rec.read('fact', ALERT_QUEUE_FACT)?.corrupt, true, 'the real wrapper answers a corrupt row, not a throw');
+  const logs = [];
+  assert.equal(dropLateAlerts(rec, { log: (l) => logs.push(l) }), false);
+  assert.equal(writes, 0, 'nothing written or dropped');
+  // Its own line, with the Record's reason, never the drop-failed one (audit #346 m2).
+  assert.deepEqual(logs, ['robot: the Dispatcher is on time, but the alert queue could not be read (record error: SQLITE_BUSY), so its old late alerts were not cleared']);
 });

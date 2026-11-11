@@ -17,11 +17,10 @@ import { SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-na
 import { readOutboxFile } from './outbox.mjs';
 import { decide, kindIn } from '../hooks/plain-files.mjs';
 import { parseArgs } from '../hooks/lib.mjs';
-import { setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
+import { outboxDir, outboxTag, setup, UID } from '../../M9-record/fixtures.test-helper.mjs';
 
-// The roles M4 launches. `script` is an outbox role too (a plain script's reports), but M4 starts no session for it, so
-// it has no profile and no hook; M9 alone judges its files.
-const LAUNCHED = AI_ROLES.filter((r) => r !== 'script');
+// The roles M4 launches: every AI role. A script card's session is one since L760, with its own profile and hook.
+const LAUNCHED = AI_ROLES;
 // A kind the table lists for a role that its design leaves out until something does what the kind's text promises
 // (L151 M-1, L167 c-4: the Front Door's state- and request-).
 const notYet = (role, kind) => (NOT_YET[role] ?? []).includes(kind);
@@ -31,7 +30,7 @@ const REVIEW_WALLS = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' };
 // The plain-files hook's arguments exactly as the launcher renders them for this role and outbox.
 function hookArgv(role, outbox) {
   const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const entry = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files']);
   // The command ends with the shell's fail-closed tail (HOOK_FAILS_CLOSED), which is not one of the hook's arguments.
@@ -48,14 +47,14 @@ const m9Listed = (r) => !(r.ok === false && /is not listed for|no outbox kind/.t
 
 // One probe: a file in the role's session outbox, judged by all three in the order a write meets them.
 function judge(env, role, sid, name) {
-  const outbox = join(env.outRoot, role, sid);
+  const outbox = outboxDir(env, role, sid);
   mkdirSync(outbox, { recursive: true });
   const file = join(outbox, name);
   const args = parseArgs(hookArgv(role, outbox));
   const hook = !decide(write(file), args).block;
   writeFileSync(file, 'some text\n');
   const m4 = readOutboxFile(outbox, name, { kinds: DESIGN_PROFILES[role].outbox, uid: UID }).ok;
-  const m9 = m9Listed(env.record.applyOutbox({ role, sessionId: sid, card: 'C-x' }, file));
+  const m9 = m9Listed(env.record.applyOutbox(outboxTag(role, sid, { card: 'C-x' }), file));
   return { hook, m4, m9 };
 }
 
@@ -97,7 +96,7 @@ test('L82 M-1: every role × every listed kind and look-alike: the hook, M4\'s i
     }
   }
   // Every (role, kind) pair in the table was reached as an allowed hand-in.
-  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => r !== 'script' && !notYet(r, k)).map((r) => `${r}:${k}`));
+  const pairs = Object.entries(OUTBOX_KINDS).flatMap(([k, v]) => v.roles.filter((r) => !notYet(r, k)).map((r) => `${r}:${k}`));
   for (const p of pairs) assert.ok(swept.includes(p), `${p} was swept`);
 });
 
@@ -176,7 +175,7 @@ test('L101: the rendered compaction hooks name a notes folder apart from the out
   for (const role of LAUNCHED) {
     const outbox = `/w/outbox/${role}`;
     const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-      paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `/w/notes/${role}`, deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+      paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: `/w/notes/${role}`, deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
     assert.equal(r.ok, true, r.reason);
     const inOutbox = DESIGN_PROFILES[role].outbox.includes(`${DESIGN_PROFILES[role].compactKind}-compact-`);
     assert.equal(inOutbox, ['worker', 'front_door'].includes(role), `${role}: only the worker and the Front Door keep the note in the outbox`);
@@ -192,10 +191,10 @@ test('L101: the rendered compaction hooks name a notes folder apart from the out
     }
     if (!inOutbox) {
       const bare = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
       assert.equal(bare.ok, false, `${role}: no notes folder is refused`);
       const inside = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], product: { commands: { test: 'npm test' } },
-        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: `${outbox}/notes`, deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+        paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: `${outbox}/notes`, deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
       assert.equal(inside.ok, false, `${role}: a notes folder inside the outbox is refused`);
     }
   }
@@ -203,11 +202,11 @@ test('L101: the rendered compaction hooks name a notes folder apart from the out
 
 test('L82 M-1: a published profile that lists fewer kinds is refused at the hook for the ones it leaves out, as at M4\'s read', () => {
   const env = setup({ prefix: 'm4-kinds-' });
-  const outbox = join(env.outRoot, 'worker', 'N-1');
+  const outbox = outboxDir(env, 'worker', 'N-1');
   mkdirSync(outbox, { recursive: true });
   const profile = { ...DESIGN_PROFILES.worker, outbox: ['report-'] };
   const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile, product: { commands: { test: 'npm test' } },
-    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
+    paths: { copy: '/w/copy', outbox, hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes', deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'] }, reviewWalls: REVIEW_WALLS } });
   assert.equal(r.ok, true, r.reason);
   const cmd = r.settings[S.hooks][E.preToolUse].find((e) => e[H.matcher] === POLICY_HOOKS['plain-files'])[H.hooks][0][H.command];
   const args = parseArgs(cmd.slice(0, -HOOK_FAILS_CLOSED.length).split(' ').slice(2));

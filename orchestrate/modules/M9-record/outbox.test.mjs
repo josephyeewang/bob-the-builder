@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { AI_ROLES, OUTBOX_KINDS, notARecord } from '../../shared/record.mjs';
 import { MAX_OUTBOX_BYTES, kindOf, readOutboxFile, sessionVerdict } from './outbox.mjs';
 import { openRecord } from './writer.mjs';
-import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
+import { HEAD, HEAD2, PRODUCT, UID, leadCard, must, outboxFile, outboxTag, product, put, readyCard, roadmap, runCard, setup } from './fixtures.test-helper.mjs';
 
 const handin = (id, extra = {}) => `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review', fields: { summary: 'done' }, ...extra })}\n`;
 const refusals = (env) => { try { return readFileSync(join(env.root, 'refusals.jsonl'), 'utf8').trim().split('\n').filter(Boolean).length; } catch { return 0; } };
@@ -28,10 +28,10 @@ function refusedCleanly(env, r, pattern) {
 
 test('unsafe files are refused with no diary line: link, hard link, outside path, other role, oversize, bad header, bad UTF-8', () => {
   const env = setup({ prefix: 'm9-out-' });
-  const tag = { role: 'worker', sessionId: 'S-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1' };
   const lines = () => env.record.diary().length;
   const before = lines();
-  const dir = join(env.outRoot, 'worker', 'S-1');
+  const dir = join(env.outRoot, PRODUCT, 'worker', 'S-1');
   mkdirSync(dir, { recursive: true });
   const secret = join(env.base, 'secret.txt');
   writeFileSync(secret, 'not for the record');
@@ -66,12 +66,12 @@ test('unsafe files are refused with no diary line: link, hard link, outside path
 test('a session folder that is a link, a file of the wrong owner, and a role with no owner are refused (0b-2 audit MIN-5, MIN-9)', () => {
   const env = setup({ prefix: 'm9-out-' });
   const other = outboxFile(env, 'worker', 'S-3', 'report-s3.md', 'from S-3');
-  symlinkSync(join(env.outRoot, 'worker', 'S-3'), join(env.outRoot, 'worker', 'S-2'));
-  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-2' }, join(env.outRoot, 'worker', 'S-2', 'report-s3.md'));
+  symlinkSync(join(env.outRoot, PRODUCT, 'worker', 'S-3'), join(env.outRoot, PRODUCT, 'worker', 'S-2'));
+  const r = env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-2' }, join(env.outRoot, PRODUCT, 'worker', 'S-2', 'report-s3.md'));
   assert.equal(r.ok, false);
   assert.match(r.reason, /outbox folder S-2 is a link/);
   assert.equal(env.record.list('report').length, 0);
-  const tag = { role: 'worker', sessionId: 'S-3' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-3' };
   assert.match(readOutboxFile({ outboxRoot: env.outRoot, uids: { worker: UID + 1 }, tag, file: other }).reason, /owned by uid \d+, not the worker outbox owner/);
   assert.match(readOutboxFile({ outboxRoot: env.outRoot, uids: {}, tag, file: other }).reason, /no owner uid configured for worker/);
   assert.equal(readOutboxFile({ outboxRoot: env.outRoot, uids: { worker: UID }, tag, file: other }).ok, true, 'the same file with the right owner');
@@ -84,7 +84,7 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
     for (const role of AI_ROLES) {
       const sid = `K-${++n}`;
       const text = spec.mode === 'create' ? 'some text' : `${JSON.stringify({ entity: spec.entity, id: 'C-x', card: 'C-x', expectRev: 0 })}\n`;
-      const r = env.record.applyOutbox({ role, sessionId: sid, card: 'C-x' }, outboxFile(env, role, sid, `${kind}${n}.md`, text));
+      const r = env.record.applyOutbox(outboxTag(role, sid, { card: 'C-x' }), outboxFile(env, role, sid, `${kind}${n}.md`, text));
       const where = `${kind} from ${role}: ${r.reason}`;
       if (!spec.roles.includes(role)) { assert.equal(r.ok, false, where); assert.match(r.reason, /is not listed for/, where); continue; }
       if (spec.record === 'none') { assert.deepEqual(r, notARecord(kind), where); assert.ok(!env.record.diary().some((e) => e.actor === `${role}:${sid}`), where); continue; }
@@ -103,7 +103,7 @@ test('every outbox kind × every AI role: applied only for the roles listed (R2-
 
 test('a file that meets a store error is alerted once and tried again after the repair, not lost (round 3 m-D, round 4 MAT-1)', () => {
   const env = setup({ prefix: 'm9-out-', faultAt: 'readback_wrong' });
-  const tag = { role: 'worker', sessionId: 'S-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1' };
   const f = outboxFile(env, 'worker', 'S-1', 'report-throws.md', 'body');
   env.alerts.length = 0;
   const first = env.record.applyOutbox(tag, f);
@@ -142,18 +142,18 @@ test('a name too long for the disk never reaches the diary, so the store keeps t
   const env = setup({ prefix: 'm9-out-' });
   product(env);
   const long = 'S'.repeat(248);
-  assert.match(env.record.applyOutbox({ role: 'worker', sessionId: long }, outboxFile(env, 'worker', long, 'report-long.md', 'body')).reason, /session id/, 'a session id over 128 is refused');
+  assert.match(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: long }, outboxFile(env, 'worker', long, 'report-long.md', 'body')).reason, /session id/, 'a session id over 128 is refused');
   const before = env.record.diary().length;
   assert.throws(() => env.store.transaction((tx) => tx.commit([{ entity: 'report', id: 'r'.repeat(240), doc: { text: 'x' } }], { actor: 'test', kind: 'seed' })), /bad entity or id/);
   assert.throws(() => env.store.transaction((tx) => tx.commit([{ entity: '../../x', id: 'r-1', doc: { text: 'x' } }], { actor: 'test', kind: 'seed' })), /bad entity or id/);
   assert.equal(env.record.diary().length, before, 'no diary line');
   const fresh = openRecord({ root: env.root, product: PRODUCT, ownerUid: UID, rules: env.rules, alert: () => {}, now: () => env.clock.t, outbox: { root: env.outRoot, uids: { worker: UID } } });
-  must(fresh.record.applyOutbox({ role: 'worker', sessionId: 'S-1' }, outboxFile(env, 'worker', 'S-1', 'report-ok.md', 'body')), 'a fresh writer still writes');
+  must(fresh.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1' }, outboxFile(env, 'worker', 'S-1', 'report-ok.md', 'body')), 'a fresh writer still writes');
 });
 
 test('the same file twice: one document and one diary line; a refused file twice: one alert (R2-M10, R3-m7)', () => {
   const env = setup({ prefix: 'm9-out-' });
-  const tag = { role: 'worker', sessionId: 'S-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1' };
   const f = outboxFile(env, 'worker', 'S-1', 'report-twice.md', 'once');
   must(env.record.applyOutbox(tag, f));
   const again = env.record.applyOutbox(tag, f);
@@ -180,7 +180,7 @@ test('a worker may hand in only its own running card, only to in_review (R-0b-22
   const env = setup({ prefix: 'm9-out-' });
   running(env);
   readyCard(env, 'C-2');
-  const tag = { role: 'worker', sessionId: 'S-1', card: 'C-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' };
   const lines = env.record.diary().length;
   refusedCleanly(env, env.record.applyOutbox(tag, outboxFile(env, 'worker', 'S-1', 'handin-m.md', handin('C-1', { to_state: 'merged' }))), /running → in_review/);
   refusedCleanly(env, env.record.applyOutbox(tag, outboxFile(env, 'worker', 'S-1', 'handin-o.md', handin('C-2'))), /own card/);
@@ -199,12 +199,12 @@ test('a hand-in after 3 head pushes is accepted; one from another session is ref
   const env = setup({ prefix: 'm9-out-' });
   running(env);
   for (const h of [HEAD, HEAD2, 'c'.repeat(40)]) must(put(env.record, 'workshop', 'card', 'C-1', { head: h }), 'push');
-  const other = env.record.applyOutbox({ role: 'worker', sessionId: 'S-2', card: 'C-1' }, outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1')));
+  const other = env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-2', card: 'C-1' }, outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1')));
   refusedCleanly(env, other, /S-2 does not hold card C-1/);
   const fact = env.record.list('fact').find((x) => x.doc.type === 'outbox_refused');
   assert.equal(fact.doc.session, 'S-2');
   assert.match(fact.doc.reason, /does not hold/);
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-1.md', handin('C-1'))), 'hand-in');
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-1.md', handin('C-1'))), 'hand-in');
   const c = env.record.read('card', 'C-1').doc;
   assert.equal(c.state, 'in_review');
   assert.equal(c.claim, undefined, 'the claim ends with the hand-in');
@@ -212,12 +212,29 @@ test('a hand-in after 3 head pushes is accepted; one from another session is ref
   assert.equal(env.record.diary().at(-1).actor, 'worker:S-1');
 });
 
+test('L838: a script hands in as a worker does: its own claimed card only, as script:<id>, and no other worker kind', () => {
+  const env = setup({ prefix: 'm9-out-' });
+  running(env);
+  must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'push');
+  // A script session that does not hold the card is refused, as a worker would be.
+  const other = env.record.applyOutbox({ role: 'script', product: PRODUCT, sessionId: 'S-2', card: 'C-1' }, outboxFile(env, 'script', 'S-2', 'handin-1.md', handin('C-1')));
+  refusedCleanly(env, other, /S-2 does not hold card C-1/);
+  // A worker's compaction note is not a script's kind.
+  const compact = env.record.applyOutbox({ role: 'script', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'script', 'S-1', 'report-compact-1.md', 'a note\n'));
+  assert.equal(compact.ok, false, JSON.stringify(compact));
+  must(env.record.applyOutbox({ role: 'script', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'script', 'S-1', 'handin-1.md', handin('C-1'))), 'hand-in');
+  const c = env.record.read('card', 'C-1').doc;
+  assert.equal(c.state, 'in_review');
+  assert.equal(c.claim, undefined, 'the claim ends with the hand-in');
+  assert.equal(env.record.diary().at(-1).actor, 'script:S-1', 'its actor is its own role, never worker:');
+});
+
 test('a hand-in may not clear needs_joe (R2-M12)', () => {
   const env = setup({ prefix: 'm9-out-' });
   product(env);
   readyCard(env, 'C-1', { needs_joe: true });
   runCard(env, 'C-1');
-  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-nj.md', handin('C-1', { fields: { needs_joe: false } })));
+  const r = env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-nj.md', handin('C-1', { fields: { needs_joe: false } })));
   refusedCleanly(env, r, /needs_joe/);
   assert.equal(env.record.read('card', 'C-1').doc.needs_joe, true);
 });
@@ -252,7 +269,7 @@ test('the role tag decides the actor; a bad tag is refused before any file is re
   const env = setup({ prefix: 'm9-out-' });
   const f = outboxFile(env, 'worker', 'S-1', 'report-tag.md', 'x');
   assert.match(env.record.applyOutbox({ role: 'dispatcher', sessionId: 'S-1' }, f).reason, /unknown role/);
-  assert.match(env.record.applyOutbox({ role: 'worker', sessionId: '../S-1' }, f).reason, /session id/);
+  assert.match(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: '../S-1' }, f).reason, /session id/);
   assert.equal(env.record.diary().length, 0);
 });
 
@@ -261,7 +278,7 @@ test('a FIFO in an outbox is refused at once, never waited on (0b-2 audit round 
   const p = outboxFile(env, 'worker', 'S-1', 'report-x.md', 'x');
   unlinkSync(p);
   execFileSync('mkfifo', [p]);
-  const r = env.record.applyOutbox({ role: 'worker', sessionId: 'S-1' }, p);
+  const r = env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1' }, p);
   assert.equal(r.ok, false);
   assert.match(r.reason, /not a plain file|regular|file/);
 });
@@ -272,7 +289,7 @@ test('a kill while a refused hand-in\'s fact is being written loses nothing: the
   const CHILD = fileURLToPath(new URL('./child.test-helper.mjs', import.meta.url));
   const env = setup({ prefix: 'm9-out-' });
   running(env);
-  const tag = { role: 'worker', sessionId: 'S-2', card: 'C-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-2', card: 'C-1' };
   const outbox = { root: env.outRoot, uids: Object.fromEntries(AI_ROLES.concat('script').map((r) => [r, UID])) };
   const file = outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1'));
   const r = spawnSync(process.execPath, [CHILD, JSON.stringify({ op: 'outbox', root: env.root, now: env.clock.t, faultAt: 'temp_written', outbox, tag, file })], { encoding: 'utf8', timeout: 60000 });
@@ -295,7 +312,7 @@ test('a hand-in whose refusal fact is down stays refused, even if the seen mark 
   const raw = (doc) => env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'C-1', doc }], { actor: 'test', kind: 'seed' }));
   const runningDoc = env.record.read('card', 'C-1').doc;
   raw({ ...runningDoc, state: 'waiting' });
-  const tag = { role: 'worker', sessionId: 'S-1', card: 'C-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' };
   const file = outboxFile(env, 'worker', 'S-1', 'handin-1.md', handin('C-1'));
   assert.equal(env.record.applyOutbox(tag, file).ok, false, 'refused while waiting');
   writeFileSync(join(env.root, 'outbox-seen.jsonl'), '');   // a kill between the fact and the seen mark
@@ -312,7 +329,7 @@ test('a store error writing a refused hand-in\'s fact leaves the file unseen, tr
   const CHILD = fileURLToPath(new URL('./child.test-helper.mjs', import.meta.url));
   const env = setup({ prefix: 'm9-out-' });
   running(env);
-  const tag = { role: 'worker', sessionId: 'S-2', card: 'C-1' };
+  const tag = { role: 'worker', product: PRODUCT, sessionId: 'S-2', card: 'C-1' };
   const outbox = { root: env.outRoot, uids: Object.fromEntries(AI_ROLES.concat('script').map((r) => [r, UID])) };
   const file = outboxFile(env, 'worker', 'S-2', 'handin-1.md', handin('C-1'));
   const r = JSON.parse(spawnSync(process.execPath, [CHILD, JSON.stringify({ op: 'outbox', root: env.root, now: env.clock.t, faultAt: 'append_fails', outbox, tag, file })], { encoding: 'utf8', timeout: 60000 }).stdout);

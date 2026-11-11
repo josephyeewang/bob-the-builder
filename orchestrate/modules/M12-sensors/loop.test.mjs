@@ -208,6 +208,25 @@ test('a usage read that fails is written as a reading with no figures (M11: unkn
   assert.equal(readFact(rec.read('fact', USAGE_FACT(ACCT)), { account: ACCT, now: T0, staleMs: STALE }).ok, false);
 });
 
+test('L771 Minor 2: a usage window handed on from the stored reading shows as kept in the pass summary, never as known', async () => {
+  const { rec } = world();
+  const id = `usage-${ACCT}`;
+  const good = await sensorsPass({ rec, ports: ports(T0), now: () => new Date(T0) });
+  assert.deepEqual([good.wrote[id].ok, good.wrote[id].unknown, good.wrote[id].kept], [true, false, undefined], 'a new reading is known');
+  // The read fails 5 minutes on: both windows are still open, so both are handed on, and the summary says so.
+  const p = ports(T0 + 5 * MIN); p.readUsage = async () => { throw new Error('screen unreadable'); };
+  const gap = await sensorsPass({ rec, ports: p, now: () => new Date(T0 + 5 * MIN) });
+  assert.deepEqual([gap.wrote[id].ok, gap.wrote[id].kept], [true, ['h5', 'week']], JSON.stringify(gap.wrote[id]));
+  assert.equal(fact(rec, USAGE_FACT(ACCT)).h5.used_pct, 20, 'the stored figure was handed on');
+  // A reading with a new week and no 5-hour row: only the 5-hour window is kept.
+  const q = ports(T0 + 10 * MIN); q.readUsage = async () => ({ source: 'test', week: { used_pct: 31, resets_at: iso(T0 + 3 * 24 * 60 * MIN) } });
+  const half = await sensorsPass({ rec, ports: q, now: () => new Date(T0 + 10 * MIN) });
+  assert.deepEqual(half.wrote[id].kept, ['h5']);
+  // A full new reading again: nothing kept.
+  const back = await sensorsPass({ rec, ports: ports(T0 + 15 * MIN), now: () => new Date(T0 + 15 * MIN) });
+  assert.equal(back.wrote[id].kept, undefined);
+});
+
 test('no usage source yet (R-0b-66): written as unknown and said so; nobody signed in: no usage fact; a label is no account', async () => {
   const { rec } = world();
   const p = ports(T0); delete p.readUsage;

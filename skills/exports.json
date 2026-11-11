@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "repository": "josephyeewang/bob-the-builder",
+  "modules": [
+    {
+      "id": "verdict",
+      "title": "Verdict",
+      "summary": "Evaluate tools against your projects and workflow.",
+      "origin": "Workflow",
+      "files": [
+        "LICENSE",
+        "LICENSES/Apache-2.0.txt",
+        "NOTICE",
+        "SKILL.md",
+        "reference/batch-rechecks.md",
+        "reference/blind-judge.md",
+        "reference/breadth.md",
+        "reference/code-vs-ours.md",
+        "reference/depth.md",
+        "reference/evaluation-record.json",
+        "reference/memory.md",
+        "reference/qualitative.md",
+        "reference/record-fields.md",
+        "reference/relevance.md",
+        "reference/source-capture.md",
+        "reference/ui-ux.md",
+        "scripts/capture-source.py",
+        "scripts/check-evaluation.py",
+        "scripts/component-index.py",
+        "scripts/fit-profile.py"
+      ],
+      "optionalModules": [],
+      "notices": {}
+    },
+    {
+      "id": "design-gallery",
+      "title": "Design Gallery",
+      "summary": "Explore visual directions before committing to a design.",
+      "origin": "Bob",
+      "files": [
+        "DEPENDENCIES.md",
+        "SKILL.md",
+        "logo-kit/LICENSE",
+        "logo-kit/LOGO-LANE.md",
+        "logo-kit/assets/library/stats.json",
+        "logo-kit/references/critique.md",
+        "logo-kit/references/discovery-brief.md",
+        "logo-kit/references/svg-construction.md",
+        "logo-kit/references/testing-checklist.md",
+        "logo-kit/scripts/concept_sheet.py",
+        "logo-kit/scripts/export_variants.py",
+        "logo-kit/scripts/preview_sheet.py",
+        "logo-kit/scripts/render_png.py",
+        "logo-kit/scripts/svg_audit.py",
+        "logo-kit/scripts/svglib.py",
+        "references/agent-ui-primitives.md",
+        "references/inspo-round-zero.md",
+        "references/inspo-trial-log.md",
+        "references/scroll-story-lane.md",
+        "templates/LOCKED-DESIGN.template.md",
+        "templates/fidelity-protocol.md",
+        "templates/gallery-index.html",
+        "templates/playground-controls.html",
+        "logo-kit/tests/smoke_test.py",
+        "logo-kit/tests/test_export_titles.py"
+      ],
+      "optionalModules": [
+        "design-mockups"
+      ],
+      "notices": {
+        "LICENSE": "LICENSE",
+        "LICENSES/beautiful-ui.txt": "third_party/beautiful-ui/LICENSE"
+      }
+    },
+    {
+      "id": "design-mockups",
+      "title": "Design Mockups",
+      "summary": "Generate image concepts for websites and landing pages.",
+      "origin": "Bob",
+      "files": [
+        "DEPENDENCIES.md",
+        "SKILL.md",
+        "config.example.json",
+        "lib/archetypes.py",
+        "lib/gallery.py",
+        "lib/gen.py",
+        "lib/vid.py",
+        "mockup.py",
+        "references/build-bridge.md",
+        "tests/test_portability.py"
+      ],
+      "optionalModules": [
+        "design-gallery"
+      ],
+      "notices": {
+        "LICENSE": "LICENSE"
+      }
+    },
+    {
+      "id": "pushall",
+      "title": "PushAll",
+      "summary": "Save verified work with a clear handoff.",
+      "origin": "Workflow",
+      "files": [
+        "SKILL.md"
+      ],
+      "optionalModules": [],
+      "notices": {
+        "LICENSE": "LICENSE"
+      }
+    }
+  ]
+}

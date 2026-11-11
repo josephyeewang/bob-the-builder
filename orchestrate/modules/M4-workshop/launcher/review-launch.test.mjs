@@ -14,14 +14,16 @@ import { namesIn, FLAGS as F, SETTINGS as S, HOOK_FIELDS as H, HOOK_EVENTS as E 
 import { HOOKS_SOURCE, installHooks } from './hooks-check.mjs';
 import { makeSnapshot, writeSnapshot } from '../hooks/snapshot.mjs';
 import { templateText } from './review-settings.mjs';
+import { roleEnv } from './env-check.mjs';
+import { ACCOUNT_NAMES, accountEnv } from './accounts.mjs';
 import { startGate } from '../../M11-dispatcher/gate.mjs';
 import { rulesWith, recWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
-import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND } from './review-launch.mjs';
+import { reviewChecks, launchReview, sessionArgs, spawnClaude, smokeFiles, smokeCommand, GATE_KIND, FIRST_ROUND_EFFORT, SEND_BACK_EFFORT } from './review-launch.mjs';
 
 const PIN = '2.1.300';
 const ME = process.getuid();
 // The review roles run as this test's own user; every other role as someone else (the review user is separate).
-const UIDS = Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000]));
+const UIDS = { ...Object.fromEntries(Object.keys(DESIGN_PROFILES).map((r) => [r, ['reviewer', 'auditor'].includes(r) ? ME : ME + 1000])), plan_reviewer: ME };
 
 const initFor = (role, over = {}) => {
   const p = DESIGN_PROFILES[role];
@@ -98,6 +100,9 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
     hooksDir, hooksSource: source, reviewHome, settings: { file: settingsFile, settings: r.settings }, rules, snapshot, writeSnapshot,
     machineWide, busy: () => [], alert: (t) => alerts.push(t), spawn: fakeSpawn, ownUid: () => ME, uids: UIDS,
     cardDoc: null, budget: null, bobFolder, bobManifest: null, probeMs: 10_000,
+    // Check 10 never reads this Mac's /Library here (L900). No home reader: reviewChecks reads the caches
+    // under reviewHome itself (L906 m2), so every check-10 run here goes through that.
+    managedReaders: { plist: () => null, user: () => 'role', claudeFile: machineWide },
   };
   const flags = sessionArgs({ profile, settingsFile, sessionId: 'S-1', prompt: 'p' }).filter((a) => a.startsWith('--'));
   const names = { flags, version: PIN, confirmed: Object.fromEntries([...namesIn(r.settings), ...flags].map((n) => [n, { by: 'readback:stand-in', version: PIN }])) };
@@ -146,6 +151,18 @@ test('M-3 check 1: the copy must be a plain folder of this user\'s alone, holdin
   const link = join(w.root, 'link'); symlinkSync(w.x.copy, link);
   assert.match((await port({ ...w.x, copy: link }, 1)).reason, /not a plain folder/);
   assert.match((await port({ ...w.x, copy: join(w.root, 'gone') }, 1)).reason, /missing/);
+  // L852 (#369 c3): a review role's refusals name the review copy; the worker runner's reuse names the card's copy.
+  for (const role of ['reviewer', 'auditor']) {
+    assert.equal((await port({ ...w.x, role, copy: join(w.root, 'gone') }, 1)).reason, 'the review copy is missing', role);
+    assert.match((await port({ ...w.x, role, head: 'b'.repeat(40) }, 1)).reason, /^the review copy holds /, role);
+  }
+  for (const role of ['worker', 'undo', 'script']) {
+    const gone = (await port({ ...w.x, role, copy: join(w.root, 'gone') }, 1)).reason;
+    assert.equal(gone, 'the card\'s copy is missing', role);
+    assert.match((await port({ ...w.x, role, head: 'b'.repeat(40) }, 1)).reason, /^the card's copy holds /, role);
+    assert.match((await port({ ...w.x, role, copy: link }, 1)).reason, /^the card's copy is not a plain folder/, role);
+    assert.match((await port({ ...w.x, role, ownUid: () => ME + 1 }, 1)).reason, /^the card's copy is not this user's alone/, role);
+  }
 });
 
 test('M-3 check 3: the outbox is emptied, and refused while something holds it', async () => {
@@ -203,9 +220,83 @@ test('M-3 checks 9 and 10: no key in the session\'s environment; the machine-wid
   assert.deepEqual(await port(w.x, 9), { ok: true });
   assert.match((await port({ ...w.x, env: { ...w.x.env, ANTHROPIC_API_KEY: 'x' } }, 9)).reason, /ANTHROPIC_API_KEY/);
   assert.deepEqual(await port(w.x, 10), { ok: true });
-  assert.match((await port({ ...w.x, machineWide: join(w.root, 'gone.json') }, 10)).reason, /missing or not JSON/);
+  // The fixed file missing refuses (L909: the test names it through the injected reader, not this Mac's).
+  const gone = join(w.root, 'gone.json');
+  assert.match((await port({ ...w.x, machineWide: gone, managedReaders: { ...w.x.managedReaders, claudeFile: gone } }, 10)).reason, /missing or not JSON/);
+  // Any machineWide but the fixed file refuses (L909).
+  assert.match((await port({ ...w.x, machineWide: gone }, 10)).reason, /^machine-wide settings must be .*managed\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
+  // With no readers handed in, port 10 checks against claude's own fixed file: refused before anything is read, on any Mac.
+  const { managedReaders: _r, ...bare } = w.x;
+  assert.match((await port({ ...bare, machineWide: gone }, 10)).reason, /^machine-wide settings must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json, not .*gone\.json: claude 2\.1\.322 reads only that file$/);
   writeFileSync(w.x.machineWide, JSON.stringify({ [S.hooks]: {} }));
   assert.match((await port(w.x, 10)).reason, /not in force/);
+});
+
+// The live readers read this Mac's /Library managed folders: on a Mac that has either, this test can't say what it expects.
+const MAC_MANAGED = ['/Library/Application Support/ClaudeCode', '/Library/Managed Preferences'].filter((p) => existsSync(p));
+test('L900: check 10 reads the other managed sources through the real readers unless a test hands it fakes (reads this Mac\'s /Library managed folders; skipped where either exists)',
+  { skip: MAC_MANAGED.length ? `this Mac has ${MAC_MANAGED.join(' and ')}` : false }, async () => {
+  const w = world();
+  const cache = join(w.x.reviewHome, '.claude', 'remote-settings.json');
+  mkdirSync(join(w.x.reviewHome, '.claude'), { recursive: true });
+  writeFileSync(cache, JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } }));
+  const why = `the machine-wide production block is not in force (in ${cache})`;
+  assert.equal((await port(w.x, 10)).reason, why, 'the fakes read the session\'s home');
+  // Left out, the live readers; the cache is still the session's own HOME's (here reviewHome), not the runner's (L913 m1).
+  // Only the fixed file is still named for the test (L909: machineWide must be it), so /Library's fixed managed-settings.json is not read.
+  const live = { ...w.x, managedReaders: { claudeFile: w.x.machineWide } };
+  assert.notEqual(process.env.HOME, w.x.reviewHome, 'here the two differ');
+  assert.equal((await port(live, 10)).reason, why);
+  writeFileSync(cache, '{}');   // what claude writes when the server has none (L906 M1)
+  assert.deepEqual(await port(live, 10), { ok: true });
+});
+
+// L913 m1 (the #419 r2 probe): check 10 reads the remote cache where the session's claude reads it, from the
+// session's own environment: account a's HOME (the runner's, not reviewHome), account b's CLAUDE_CONFIG_DIR.
+test('L913 m1: check 10 reads the session\'s own remote cache: its CLAUDE_CONFIG_DIR, else its HOME\'s .claude', async () => {
+  const w = world();
+  const runnerHome = join(w.root, 'runnerHOME');
+  const noGuard = JSON.stringify({ [S.permissions]: { [S.deny]: ['Read(//w/held/**)'] } });
+  const put = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'remote-settings.json'), noGuard); return join(dir, 'remote-settings.json'); };
+  const a = { ...w.x, env: { ...w.x.env, HOME: runnerHome } };
+  assert.notEqual(runnerHome, w.x.reviewHome);
+  const atReview = put(join(w.x.reviewHome, '.claude'));
+  assert.deepEqual(await port(a, 10), { ok: true }, 'reviewHome\'s cache is not account a\'s session\'s');
+  rmSync(atReview);
+  const atRunner = put(join(runnerHome, '.claude'));
+  assert.equal((await port(a, 10)).reason, `the machine-wide production block is not in force (in ${atRunner})`);
+  // Account b: its CLAUDE_CONFIG_DIR, whatever HOME says.
+  const b = { ...w.x, env: { ...a.env, ...accountEnv(w.x.reviewHome, 'b') } };
+  assert.deepEqual(await port(b, 10), { ok: true }, 'the HOME cache is not account b\'s');
+  const atB = put(accountEnv(w.x.reviewHome, 'b').CLAUDE_CONFIG_DIR);
+  assert.equal((await port(b, 10)).reason, `the machine-wide production block is not in force (in ${atB})`);
+  // No HOME and no CLAUDE_CONFIG_DIR: nowhere to look, refused.
+  const { HOME, ...noHome } = w.x.env;
+  assert.equal((await port({ ...w.x, env: noHome }, 10)).reason, 'the remote settings cache can\'t be found (no home folder)');
+});
+
+// L900: the "parent" managed source (env-check.mjs MANAGED SOURCES). Check 10 doesn't read it: it holds only
+// because the launcher never passes it. A pin, no code: a session's own start, the probe (6) and the smoke (11).
+test('L900 pin: no claude the launcher starts gets --managed-settings or CLAUDE_CODE_MANAGED_SETTINGS_PATH', async () => {
+  const PARENT_FLAG = '--managed-settings';
+  const PARENT_VAR = 'CLAUDE_CODE_MANAGED_SETTINGS_PATH';
+  const noFlag = (args, what) => assert.equal(args.some((a) => a === PARENT_FLAG || a.startsWith(`${PARENT_FLAG}=`)), false, `${what}: ${JSON.stringify(args)}`);
+  for (const role of ['reviewer', 'auditor']) {
+    const w = world({ role });
+    for (const earlier of [undefined, 'an earlier failing verdict']) {
+      noFlag(sessionArgs({ profile: w.x.profile, settingsFile: w.x.settings.file, sessionId: 'S-1', prompt: 'p', earlier }), `${role} session`);
+    }
+    const seen = [];
+    const spy = (bin, args, opts) => { seen.push({ args, env: opts?.env ?? {} }); return w.x.spawn(bin, args, opts); };
+    await port({ ...w.x, spawn: spy }, 6);
+    await port({ ...w.x, spawn: spy }, 11);
+    assert.ok(seen.length >= 2, `${role}: the probe and the smoke both started a claude`);
+    for (const s of seen) { noFlag(s.args, `${role} probe or smoke`); assert.equal(Object.hasOwn(s.env, PARENT_VAR), false, `${role}: ${PARENT_VAR} reached a claude`); }
+  }
+  // A worker role's environment is built from a short list, so the variable can't come in from the launcher's own;
+  // a review session's is PATH, HOME and its account's (review-wiring sessionEnv), which never sets it.
+  assert.equal(Object.hasOwn(roleEnv({ HOME: '/h', [PARENT_VAR]: '/x.json' }), PARENT_VAR), false);
+  for (const n of ACCOUNT_NAMES) assert.equal(Object.hasOwn(accountEnv('/h', n), PARENT_VAR), false, `account ${n}`);
 });
 
 test('M-3 planted check 11: the smoke runs through the role\'s own start; a write outside the copy, the network, or a run that never ran refuses', async () => {
@@ -250,10 +341,9 @@ test('M-3 check 13: the Bob folder against the pinned list the config names', as
   assert.match((await port({ ...w.x, bobManifest: manifest }, 13)).reason, /holds a skill/);
 });
 
-// Found while wiring L83 M-3: render-settings writes the Bob folder's read-only rules in Claude's "//path" form
-// (`Edit(//Users/.../**)`), and launch.mjs checkBobFolder looks for the one-slash form, so check 13 refuses every real
-// rendered role file. launch.mjs is lane 2's; the exact change is in the L83 report. Take off `todo` once it lands.
-test('M-3 check 13: a real rendered role file with the right Bob folder passes', { todo: 'lane 2: checkBobFolder must read the "//path" rules render-settings writes' }, async () => {
+// Found while wiring L83 M-3: check 13 once looked for a one-slash form of the Bob folder's rules that render-settings
+// never writes. Both sides now use render-settings' bobFolderDeny (L750), so a real rendered role file passes.
+test('M-3 check 13: a real rendered role file with the right Bob folder passes', async () => {
   const w = world();
   const manifest = { 'rules.md': sha256(readFileSync(join(w.x.bobFolder, 'rules.md'))) };
   assert.deepEqual(await port({ ...w.x, bobManifest: manifest }, 13), { ok: true });
@@ -271,6 +361,14 @@ test('R-0b-163 planted: the session starts with --settings naming the runner\'s 
   assert.equal(args.includes(F.restricted), true);
   assert.equal(args[args.indexOf(F.mcpConfig) + 1], '{"mcpServers":{}}');
   assert.equal(args.at(-1), 'the prompt');
+  // R-0b-145: a send-back (an earlier failing verdict) runs at xhigh; L92 minor 2: a first round at M10's floor.
+  assert.equal(args[args.indexOf(F.effort) + 1], FIRST_ROUND_EFFORT);
+  assert.equal(FIRST_ROUND_EFFORT, JSON.parse(readFileSync(new URL('../../M10-rules/roles/reviewer.json', import.meta.url), 'utf8')).effort_floor);
+  for (const earlier of ['', '  ', undefined]) { const a = sessionArgs({ profile: DESIGN_PROFILES.reviewer, settingsFile: '/f', sessionId: 'S-1', prompt: 'p', earlier }); assert.equal(a[a.indexOf(F.effort) + 1], FIRST_ROUND_EFFORT); }
+  const back = sessionArgs({ profile: DESIGN_PROFILES.reviewer, settingsFile: '/f', sessionId: 'S-1', prompt: 'p', earlier: 'An earlier round failed.' });
+  assert.equal(back[back.indexOf(F.effort) + 1], SEND_BACK_EFFORT);
+  assert.equal(SEND_BACK_EFFORT, 'xhigh');
+  assert.equal(back.at(-1), 'p');
 });
 
 test('R-0b-163: spawnClaude hands back claude\'s own pid, detached, or says it never spawned', async () => {

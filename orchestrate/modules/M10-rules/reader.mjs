@@ -27,6 +27,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from '
 import { join } from 'node:path';
 import { parsePolicy } from './policy.mjs';
 import { makeGitView } from './git-view.mjs';
+import { PRODUCT, productRoleClash } from '../../shared/product-paths.mjs';
 
 export const RULES_PATH = 'orchestrate/policy.yaml';
 export const BRANCH = 'main';
@@ -34,9 +35,10 @@ export const FETCH_GRACE_MS = 300_000;
 export const MAX_BYTES = 1_000_000;
 const SHA = /^[0-9a-f]{40}$/;
 const NAME = /^[A-Za-z0-9_.-]+$/;
-// A product name names folders (the approvals state folder, L295 MAT-2): it starts with a letter or digit, so . and ..
-// can't climb out of it (L309 Minor 1). The one definition: the Dispatcher's config check uses it too.
-export const PRODUCT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+// A product name names folders (the approvals state folder, L295 MAT-2; the runner's copies and outboxes, L836). It is
+// the runner's one form (shared/product-paths.mjs PRODUCT: lower case, digits and -), so a product listed here can
+// always run (L867): `App` or `my_app` was taken here and then refused by every runner place, with nothing said.
+// (PRODUCT_NAME, its own looser form, is gone: nothing imports it.)
 
 // Git's own id for a file's contents, so we can prove the text we decoded is the blob GitHub named.
 export function blobSha(buf) {
@@ -53,10 +55,13 @@ export function checkProducts(list) {
   if (!Array.isArray(list)) throw new Error('products.json must be a list');
   const seen = new Set();
   for (const p of list) {
-    if (!p || !PRODUCT_NAME.test(p.product ?? '') || !NAME.test(p.owner ?? '') || !NAME.test(p.repo ?? '')) throw new Error('products.json entry needs product, owner, repo');
+    if (!p || typeof p.product !== 'string' || !NAME.test(p.owner ?? '') || !NAME.test(p.repo ?? '')) throw new Error('products.json entry needs product, owner, repo');
+    if (!PRODUCT.test(p.product)) throw new Error(`products.json ${JSON.stringify(p.product)}: a product name is lower-case letters, digits and -, at most 64, starting with a letter or digit (shared/product-paths.mjs), so the runner can make its folders`);
+    if (productRoleClash(p.product)) throw new Error(`products.json ${p.product}: a product may not be named as a role (its folders would be taken for the role's)`);
     if (!Number.isSafeInteger(p.joe_github_id) || p.joe_github_id <= 0) throw new Error(`products.json ${p.product}: joe_github_id must be a number`);
-    // macOS folders ignore case, so App and app would share one state folder (L309 Minor 1).
-    if (seen.has(p.product.toLowerCase())) throw new Error(`products.json lists ${p.product} twice (names that differ only in case count as one)`);
+    // macOS folders ignore case (L309 Minor 1). Names are lower case now (PRODUCT), so this is an exact duplicate; the
+    // lower-casing stays as a guard should the form ever allow capitals.
+    if (seen.has(p.product.toLowerCase())) throw new Error(`products.json lists ${p.product} twice`);
     seen.add(p.product.toLowerCase());
   }
   return list.map((p) => Object.freeze({ product: p.product, owner: p.owner, repo: p.repo, joe_github_id: p.joe_github_id }));

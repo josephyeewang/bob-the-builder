@@ -101,7 +101,7 @@ the download list.
 - `sidebar-nav` depends on `@central-icons-react`, a **paid** icon set whose license check runs
   at `npm install`. Swap icons before adding it. Three others pull small free packages:
   `insight-cards` (liveline), `prompt-bar` (glimm), `selection-actions` (iconoir-react).
-- Vercel's `ai-elements` (inside the AI SDK you already use) covers the same ground with looser
+- Vercel's `ai-elements` (when the project uses the AI SDK) covers the same ground with looser
   styling; prefer it when the product is on Next.js + AI SDK and the lock is far from beautiful-
   ui's look. Use beautiful-ui when you want the *behavior* of a specific piece (the
   clarifying-questions card, diff-table, thinking-state) that ai-elements lacks.
@@ -109,5 +109,3 @@ the download list.
   beautiful-ui will not hand you these: only `task-rows` has a failed state and only `search` has
   an empty one. For a tool trace, give every call one of three honest statuses — worked, worked but
   found nothing, failed — which `tool-chips` does not model.
-
-Status 2026-10-22 (piece descriptions re-verified from source 2026-10-27): 328★ (github.com/slev12397/beautiful-ui, MIT, created July 2026), one author, active. The checklist is the durable part.
