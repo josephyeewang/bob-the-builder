@@ -42,7 +42,7 @@ import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSetti
 import { workerChecks } from './runner-checks.mjs';
 import { holdersOf } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
-import { spawn as childSpawn } from 'node:child_process';
+import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
@@ -199,26 +199,44 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  * by a list of places. The folder is its own real path (no link on the way, a link into a copy included), a real folder
  * (not a link), owned by the runner's uid with no group or other write bit; and every folder above it is root's or the
  * runner's, with no group or other write bit unless it is sticky (/private/tmp), so no one else can swap it out (claude's
- * per-user sandbox temp folder is the worker's, and so is a folder under it). → null | { missing, reason }.
- * opts (tests): lstat, realpath, uid.
+ * per-user sandbox temp folder is the worker's, and so is a folder under it). No folder on the way carries an access
+ * list entry that lets anyone write (L926 self-review M1: a 0755 folder with "everyone allow add_file" is everyone's to
+ * write; macOS's own "deny" entries, as on a home folder, are fine). → null | { missing, reason }.
+ * opts (tests): lstat, realpath, uid, aclWrites.
  */
-export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid() } = {}) {
+export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid(), aclWrites = aclWriteEntries } = {}) {
   const no = (why) => ({ missing: false, reason: `its folder ${dir} ${why}` });
   let st; try { st = lstat(dir); } catch (e) {
-    if (e?.code === 'ENOENT') return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner and writable by it alone (setup does not make it yet)` };
+    if (e?.code === 'ENOENT') return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner, mode 0755 (readable by its sessions, writable by the runner alone; setup does not make it yet)` };
     return no(`can't be read (${e?.code ?? e?.message})`);
   }
   if (st.isSymbolicLink()) return no('is a link');
   if (!st.isDirectory()) return no('is not a folder');
   let real; try { real = realpath(dir); } catch (e) { return no(`can't be read (${e?.code ?? e?.message})`); }
-  if (real !== dir) return no(`is reached through a link (it is ${real})`);
+  if (real !== dir) return no(foldKey(real) === foldKey(dir) ? `is spelled otherwise on the disk (it is ${real})` : `is reached through a link (it is ${real})`);
   if (st.uid !== uid) return no(`is not the runner's own (its owner is uid ${st.uid}, the runner is ${uid})`);
   if (st.mode & 0o022) return no('can be written by others than the runner (a group or other write bit)');
+  const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
+  const own = acl(dir);
+  if (own.length) return no(`has an access list entry that lets others write (${own[0]})`);
   for (let a = dirname(dir); ; a = dirname(a)) {
     let s; try { s = lstat(a); } catch (e) { return no(`sits in ${a}, which can't be read (${e?.code ?? e?.message})`); }
     if ((s.uid !== 0 && s.uid !== uid) || ((s.mode & 0o022) && !(s.mode & 0o1000))) return no(`sits in ${a}, which others than the runner can change`);
+    const up = acl(a);
+    if (up.length) return no(`sits in ${a}, which has an access list entry that lets others write (${up[0]})`);
     if (a === '/') return null;
   }
+}
+
+// The access list rights that change a folder's entries or the folder itself (macOS chmod(1), "ACL MANIPULATION").
+const ACL_WRITES = new Set(['add_file', 'add_subdirectory', 'delete_child', 'delete', 'write', 'append', 'writeattr', 'writeextattr', 'writesecurity', 'chown']);
+/** A folder's access list "allow" entries that grant a write right, read with /bin/ls -lde (macOS); none off a Mac. */
+export function aclWriteEntries(dir, { run = spawnSync, platform = process.platform } = {}) {
+  if (platform !== 'darwin') return [];
+  const r = run('/bin/ls', ['-lde', dir], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) throw new Error(`/bin/ls -lde failed (${r.error?.code ?? r.status})`);
+  return String(r.stdout).split('\n').slice(1).map((l) => l.trim()).filter((l) => /^\d+: /.test(l))
+    .filter((l) => { const m = /^\d+: \S+ (?:inherited )?allow (\S+)/.exec(l); return m && m[1].split(',').some((p) => ACL_WRITES.has(p)); });
 }
 
 /**
@@ -288,6 +306,7 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   // Each product's rules snapshot is kept fresh for the runner's life (#369 r1 m2, r2 m2: keepSnapshots), in a folder only
   // the runner can write (L926): one anyone else could write refuses the start; a missing one holds the product, saying
   // which folder to make, and is checked again, folder and all, at each later try.
+  // Checked again here at each try on purpose (also right after the check above): a missing folder may be made later.
   const guarded = (path, rules) => { const f = folderProblem(dirname(path)); if (f) throw new Error(f.reason); return fresh(path, rules); };
   const snaps = keepSnapshots(c, { fresh: guarded, log });
   let P;
