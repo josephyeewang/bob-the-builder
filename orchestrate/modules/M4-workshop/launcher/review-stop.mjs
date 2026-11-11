@@ -19,10 +19,10 @@
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { CARD_ID, REQUEST_ID, REQUEST_NAME, STOP_KEYS, STOP_PREFIX, STOP_REASON, STOP_TARGET_KEYS } from './review-runner.mjs';
+import { CARD_ID, REQUEST_ID, REQUEST_NAME, STOP_KEYS, STOP_PREFIX, STOP_REASON, STOP_TARGET_KEYS, STOP_TARGET_REASON_KEYS } from './review-runner.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
-export { STOP_KEYS, STOP_PREFIX, STOP_TARGET_KEYS };
+export { STOP_KEYS, STOP_PREFIX, STOP_TARGET_KEYS, STOP_TARGET_REASON_KEYS };
 
 export function writeStopRequest({ dir, requestId, target, newName = randomUUID, tmpId = randomUUID }) {
   let doc;
