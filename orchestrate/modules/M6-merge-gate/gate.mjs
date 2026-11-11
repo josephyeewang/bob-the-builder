@@ -35,6 +35,7 @@ import { gatherFacts, botId } from './gather.mjs';
 import { judge, WAITING_HOLD } from './refusals.mjs';
 import { MARK_CONTEXT, markDescription, markable, NEEDS_JOE_CONTEXT, needsJoeDescription } from './mark.mjs';
 import { isOpen } from '../../shared/record.mjs';
+import { NOT_CLEAN, REVERSE_FACT } from '../../shared/record-names.mjs';
 import { markReverted } from './undo.mjs';
 import { factFrom } from '../M9-record/permissions.mjs';
 import { settleMerge, openTooLong, prReading, prReadingAfter, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, alertTaken } from './merge-outcome.mjs';
@@ -138,6 +139,9 @@ export async function gatePass(ctx) {
   // not telling. These two only send an alert and write their own told mark: no GitHub call, no other state change.
   for (const m of merges().filter((x) => x.doc.state === 'refused' && x.doc.tell_owner === true && !x.doc.told_at)) tellRefused(m);
   for (const m of merges().filter((x) => x.doc.state === 'refused' && typeof x.doc.interrupted_note === 'string' && !x.doc.interrupted_told_at)) tellInterrupted(m);
+  // An undo refused as never an exact reverse whose fact or card move was not written is finished (L980), gate open or
+  // shut: the Record only, no GitHub call.
+  for (const m of merges().filter((x) => x.doc.state === 'refused' && Array.isArray(x.doc.not_clean))) settleNotClean(m);
   // A parent check whose read failed or whose alert was lost is done again (L168 M-4), gate open or shut (L358, L601): it
   // is one GitHub read and its own marks, and complete() stays below the start check, since that posts to GitHub.
   for (const m of merges().filter((x) => ['merged', 'audited_ok', 'audit_flagged'].includes(x.doc.state) && SHA.test(x.doc.merge_commit ?? '') && !x.doc.parent_checked_at)) await parentCheck(m, m.doc.merge_commit);
@@ -324,10 +328,41 @@ export async function gatePass(ctx) {
 
   function refuse(m, facts, v) {
     const reasons = v.refusals.map((x) => `${x.n}: ${x.reason}`);
+    const nc = notCleanOf(v);
     // The owner's Approve is missing: say so on the card, so M2 asks for it (refusal 8).
     const card = fresh('card', m.doc.card);
     if (v.refusals.some((x) => x.n === 8) && facts.approve?.needed && card && card.doc.needs_joe !== true) write('card', card, { needs_joe: true });
-    if (move(m, 'refused', { reasons, tell_owner: true, tell_note: FINAL_NOTE })) tellRefused(fresh('merge', m.id));
+    if (move(m, 'refused', { reasons, tell_owner: true, tell_note: FINAL_NOTE, ...nc })) { tellRefused(fresh('merge', m.id)); if (nc.not_clean) settleNotClean(fresh('merge', m.id)); }
+  }
+
+  // L980: refusal 9 on an undo whose change the check read in full and found can never be the exact reverse (a path
+  // changed since, or one not back as it was): what it found, kept on the refused merge. A read that failed is a hold
+  // (refusals.mjs), never this; and the first cutover's "not a merge the gate made" is an undo not allowed, not an
+  // unclean one, so it has none.
+  function notCleanOf(v) {
+    const r = v.refusals.find((x) => x.n === 9 && Array.isArray(x.not_clean) && x.not_clean.length);
+    return r ? { not_clean: r.not_clean } : {};
+  }
+
+  // Records it (M11 undo.mjs fixCards reads it): the fact reverse-<undo card> = not_clean, written once (a fact already
+  // there is never rewritten), then the undo card verified/approved → failed, the one move M9 lets the gate make into
+  // failed, on that fact. Each pass finishes what a refused write left (1b), so it is safe to repeat.
+  function settleNotClean(m) {
+    const card = m?.doc?.card ? fresh('card', m.doc.card) : null;
+    if (!card?.doc || card.corrupt || card.doc.kind !== 'exact_reverse') return;
+    const fid = REVERSE_FACT(card.id);
+    const f = record.read('fact', fid);
+    if (!f) {
+      const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
+      const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, at: iso() } });
+      if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
+      step(m, 'undo_not_clean', { fact: fid });
+    } else if (f.corrupt || f.doc?.state !== NOT_CLEAN || !factFrom(ACTOR, { id: fid, createdBy: record.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) return;
+    const c = fresh('card', card.id);
+    if (!['verified', 'approved'].includes(c?.doc?.state)) return;
+    const r = write('card', c, { state: 'failed' });
+    if (!r.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'failed', reason: r.reason });
+    else step(m, 'undo_failed', { card: card.id });
   }
 
   // Told once delivered: told_at is the mark, and 3b sends again until it is down.
@@ -445,9 +480,12 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons });
+      const nc = v.decision === 'refuse' ? notCleanOf(v) : {};
+      const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons, ...nc });
       if (!left) cutShort(m, reasons);
-      return putBack(m, 'verified');
+      putBack(m, 'verified');
+      if (left && nc.not_clean) settleNotClean(fresh('merge', m.id));
+      return;
     }
     if (!move(m, 'merging', { judged_main: facts.main.sha, ...WAIT_CLEARED })) return;
     return land(fresh('merge', m.id));

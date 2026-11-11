@@ -277,13 +277,19 @@ export async function gatherFacts(ctx, merge) {
   // An undo: recomputed from the files, never taken from the card (M10 exact-reverse.mjs); and whose merge it reverses.
   const reverses = undoneBy(record, card)?.commit ?? null;
   f.exactReverse = false;
+  f.exactReverseReasons = null;
   f.reversesGateMerge = false;
   let reversedAudit = 'none';
   if (kind === 'exact_reverse' && reverses && SHA.test(f.pr?.merge_commit_sha ?? '')) {
     // Each on watched reads: a read that failed leaves the answer unknown (exactReverseUnread, reversesGateMergeUnread),
     // so the judge waits instead of refusing the undo for good (L205).
     const unread = (key, which) => markFailed(which, () => { f[key] = true; });
-    f.exactReverse = (await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'))).ok === true;
+    const er = await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'));
+    f.exactReverse = er.ok === true;
+    // L980: what the check found, only when it read everything and answered no: the gate's not_clean fact says it. A
+    // check that threw ("could not check") says nothing about the change, so it is not kept.
+    const said = Array.isArray(er.reasons) ? er.reasons.map(String) : [];
+    if (er.ok === false && f.exactReverseUnread !== true && said.length && !said.some((x) => x.startsWith('could not check'))) f.exactReverseReasons = said;
     const robotBotId = botId(get('product_profile.robot'));
     f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
     const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);
