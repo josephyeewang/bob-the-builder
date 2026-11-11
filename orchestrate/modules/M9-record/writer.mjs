@@ -319,12 +319,14 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
       if (!tx.list('merge').some((m) => m.doc.card === id && MERGE_DONE.includes(m.doc.state) && m.doc.merge_commit === doc.merge_commit)) return no(`no merged merge document for ${id} at ${doc.merge_commit.slice(0, 7)}`);
     }
     // L980: the one way the Merge Gate fails a card. Only an undo (exact_reverse) card, and only on the gate's own fact
-    // that its change can never be the exact reverse (`reverse-<card>`, state not_clean), so M11 writes its fix card.
+    // that its change can never be the exact reverse (`reverse-<card>`, state not_clean), so M11 writes its fix card;
+    // and only a fact found at the card's own head (#466 r1 self-review m-1), so the rule holds where writes are let in.
     if (moving && to === 'failed' && name === 'merge_gate') {
       if (old.kind !== 'exact_reverse') return no('the Merge Gate fails only an undo (exact_reverse) card');
       const fid = REVERSE_FACT(id);
       const f = tx.lookup('fact', fid);
       if (!f || !factFrom('merge_gate', { id: fid, createdBy: f.createdBy ?? null }, 'reverse-') || f.doc?.state !== NOT_CLEAN) return no(`the Merge Gate fails undo card ${id} only on its own ${NOT_CLEAN} fact ${fid}`);
+      if (typeof old.head !== 'string' || f.doc.head !== old.head) return no(`the Merge Gate fails undo card ${id} only on a ${NOT_CLEAN} fact found at its head`);
     }
     // The dispatcher's report fields go with their move (0b-2 audit MIN-3).
     if (name === 'dispatcher') {

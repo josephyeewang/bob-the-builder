@@ -135,7 +135,7 @@ test('every legal move succeeds for each listed actor when its condition holds',
             // L980: the gate fails only an undo card, on its own not_clean reverse- fact.
             if (actor === 'merge_gate' && to === 'failed') {
               doc.kind = 'exact_reverse';
-              ok(env.record.write({ actor: 'merge_gate', entity: 'fact', id: `reverse-${id}`, expectRev: 0, doc: { type: 'undo_reverse', state: 'not_clean', reason: 'x' } }), 'reverse fact');
+              ok(env.record.write({ actor: 'merge_gate', entity: 'fact', id: `reverse-${id}`, expectRev: 0, doc: { type: 'undo_reverse', state: 'not_clean', reason: 'x', head: HEAD } }), 'reverse fact');
             }
             goFreeCard(id, doc);
             const next = { ...doc, state: to };
@@ -217,17 +217,20 @@ test('L980: the gate fails an undo card only on its own not_clean reverse- fact'
   seed(env, 'product', PRODUCT, { state: 'active' });
   const card = (id, from, kind = 'exact_reverse') => { seed(env, 'card', id, { ...baseDoc('card', from, env), kind }); return id; };
   const fail = (id) => env.record.write({ actor: 'merge_gate', entity: 'card', id, expectRev: env.record.read('card', id).rev, doc: { ...env.record.read('card', id).doc, state: 'failed' } });
-  const fact = (actor, id, state) => assert.ok(env.record.write({ actor, entity: 'fact', id, expectRev: 0, doc: { type: 'undo_reverse', state, reason: 'x' } }).ok, `${actor} ${id}`);
+  const fact = (actor, id, state, head = HEAD) => assert.ok(env.record.write({ actor, entity: 'fact', id, expectRev: 0, doc: { type: 'undo_reverse', state, reason: 'x', head } }).ok, `${actor} ${id}`);
   const refused = (id, re, what) => { const r = fail(id); assert.equal(r.ok, false, what); assert.match(r.reason, re, what); assert.notEqual(env.record.read('card', id).doc.state, 'failed', what); };
 
   refused(card('U-none', 'verified'), /only on its own not_clean fact reverse-U-none/, 'no fact');
   fact('merge_gate', 'reverse-U-clean', 'clean');
   refused(card('U-clean', 'verified'), /not_clean fact/, 'a clean fact');
-  seed(env, 'fact', 'reverse-U-seed', { type: 'undo_reverse', state: 'not_clean', reason: 'x' });
+  seed(env, 'fact', 'reverse-U-seed', { type: 'undo_reverse', state: 'not_clean', reason: 'x', head: HEAD });
   refused(card('U-seed', 'verified'), /not_clean fact reverse-U-seed/, 'a not_clean fact the gate did not write');
   fact('merge_gate', 'reverse-C-ord', 'not_clean');
   refused(card('C-ord', 'verified', 'ordinary'), /fails only an undo \(exact_reverse\) card/, 'an ordinary card');
 
+  // #466 r1 self-review m-1: the gate's own not_clean fact found at another head of the card fails nothing.
+  fact('merge_gate', 'reverse-U-old', 'not_clean', 'f'.repeat(40));
+  refused(card('U-old', 'verified'), /not_clean fact found at its head/, 'a fact for another head');
   fact('merge_gate', 'reverse-U-v', 'not_clean');
   fact('merge_gate', 'reverse-U-a', 'not_clean');
   fact('merge_gate', 'reverse-U-r', 'not_clean');

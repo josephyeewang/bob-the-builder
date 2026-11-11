@@ -675,7 +675,7 @@ async function reReview(w, id, pr, files, n, { verify = true } = {}) {
   return head;
 }
 
-test('L980 (#466 r1 M2): an undo pushed again while queued (in review), then verified at a head still not clean, is failed there', async () => {
+test('L980 (#466 r1 M2): an undo pushed again while queued (in review), then verified at a head still not clean, is failed there (the write guard, M2a)', async () => {
   const w = world();
   await notCleanUndo(w);
   await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra2.mjs': 'y' }, 2, { verify: false });
@@ -732,21 +732,37 @@ test('L980 (#466 r1 M1): a finding on a pull request head that is not the card h
   assert.equal(w.env.record.read('card', 'U-1').doc.head, h1);
 });
 
-// #466 r1 m1: while GitHub has not worked out the test merge (3 waits), or the test merge is of a main that is not the
-// one read now, the finding is not one yet: the merge may be refused, but nothing is recorded and no card is failed.
-test('L980 (#466 r1 m1): no not_clean while refusal 3 still waits on the test merge', async () => {
-  const w = world();
-  await notCleanUndo(w);
-  w.g.pulls.get(9).mergeable_state = 'unknown';
+// #466 r1 m1 (and r1 fix self-review M-a, M-b): while GitHub has not worked out the test merge, or the test merge is
+// stale (of a main that is not the one read now), the undo is judged on nothing: it waits (held, never refused for
+// good), nothing is recorded and no card is failed; once GitHub's test merge is current, it is refused, recorded and
+// failed.
+async function waitsThenSettles(w, settle) {
   await gatePass(w.ctx);
   const u = mergeOf(w, 'U-1');
-  assert.ok((u.doc.reasons ?? []).some((x) => x.startsWith('3:')), JSON.stringify(u.doc));
+  assert.notEqual(u.doc.state, 'refused', JSON.stringify(u.doc));
   assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
   assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
   assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  settle();
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'refused', JSON.stringify(mergeOf(w, 'U-1').doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1'))?.doc?.state, NOT_CLEAN);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+}
+
+test('L980 (#466 r1 m1): an undo waits while GitHub has not worked out the test merge, then is failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.gh;
+  const pending = { mergeable: null, mergeable_state: 'unknown' };
+  w.ctx.gh = Object.create(real, { get: { value: async (path, ...rest) => {
+    const r = await real.get(path, ...rest);
+    return /\/pulls\/9$/.test(path) && r?.json ? { ...r, json: { ...r.json, ...pending } } : r;
+  } } });
+  await waitsThenSettles(w, () => { w.ctx.gh = real; });
 });
 
-test('L980 (#466 r1 m1): no not_clean on a test merge of a main that is not the one read now', async () => {
+test('L980 (#466 r1 m1): an undo waits on a stale test merge (of an old main), then is failed', async () => {
   const w = world();
   await notCleanUndo(w);
   const real = w.ctx.view;
@@ -759,11 +775,7 @@ test('L980 (#466 r1 m1): no not_clean on a test merge of a main that is not the 
     return c && Array.isArray(c.parents) && c.parents.length === 2 && c.parents[1] === p.head ? { ...c, parents: [stale, p.head] } : c;
   };
   w.ctx.view = view;
-  await gatePass(w.ctx);
-  const u = mergeOf(w, 'U-1');
-  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
-  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
-  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  await waitsThenSettles(w, () => { w.ctx.view = real; });
 });
 
 // #466 r1 m4: refused under the lock (check), the card put back to verified is failed in that same pass. Main moves

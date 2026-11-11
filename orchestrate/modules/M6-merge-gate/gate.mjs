@@ -342,7 +342,8 @@ export async function gatePass(ctx) {
   // The card's head it was found on goes with it, so a card pushed again since is never failed on the old finding.
   function notCleanOf(v, facts) {
     const r = v.refusals.find((x) => x.n === 9 && Array.isArray(x.not_clean) && x.not_clean.length);
-    // #466 r1 m1: while 3 still waits (GitHub has not worked out the test merge), the finding is not one yet.
+    // #466 r1 m1, belt and braces: gather already makes such an undo wait (its answer unread) until GitHub has worked
+    // out the test merge; should 3 still be waiting here, nothing is recorded from this judgement.
     if (!r || v.refusals.some((x) => x.n === 3 && x.temporary)) return {};
     return { not_clean: r.not_clean, not_clean_head: facts?.card?.doc?.head ?? null };
   }
@@ -357,11 +358,11 @@ export async function gatePass(ctx) {
     if (!card?.doc || card.corrupt || card.doc.kind !== 'exact_reverse') return;
     const at = m.doc.not_clean_head;
     if (typeof at !== 'string' || !at) return;
-    const fid = REVERSE_FACT(card.id);
-    const f = record.read('fact', fid);
     // #466 r1 M2: the finding is for the card only while the card is verified or approved at the head it was found on;
     // pushed again or moved on since, the next review judges it anew. The guard compares the finding with the card.
     if (card.doc.head !== at || !['verified', 'approved'].includes(card.doc.state)) return;
+    const fid = REVERSE_FACT(card.id);
+    const f = record.read('fact', fid);
     const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
     const fact = { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() };
     if (!f) {
