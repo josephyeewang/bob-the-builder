@@ -17,7 +17,11 @@ import { basename, dirname, join, sep } from 'node:path';
 import { FOLDERS as RUNNER_FOLDERS } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { dispatcherKeys } from './layout.mjs';
 import { readUser } from './users-folders.mjs';
+import { installPaths } from './install.mjs';                                  // cycles (they read this file's dispatcherKeysOn):
+import { DISPATCHER_CONFIG, dispatcherSourcePath } from './dispatcher-setup.mjs';   // all used only when called
 import { HOST_LOCK_MAX } from '../wiring/worker-ports.mjs';
+import { currentCopy } from '../modules/M4-workshop/launcher/install-check.mjs';
+import { PRODUCT } from '../shared/product-paths.mjs';
 
 const SUDO = '/usr/bin/sudo';
 const DISPATCHER_USER = 'orchestrate';
@@ -67,12 +71,42 @@ export function unreadableWhy(io, file, real, stderr = '', mode) {
   return `the read failed: ${String(stderr).split('\n')[0].trim().slice(0, 160) || 'no reason given'}`;
 }
 
+// The two roots the Dispatcher finds each product's folder under (L871, L885 m1): its pass and undo-starts check a
+// session's outbox as <outboxRoot>/<product>/<role>/<id>, and cleanup looks for copies at <copiesRoot>/<product>/<card>.
+// A root set to a product's own folder would put every outbox and copy one level too deep, so each is named here.
+const ROOTS = Object.freeze([['outboxRoot', 'the top outbox root'], ['copiesRoot', 'the workers\' top copies root']]);
+
+/**
+ * check-dispatcher's rows for outboxRoot and copiesRoot: the dispatcher.json the job reads (the copy's once there is a copy,
+ * else the base's) names each as exactly the root users-folders makes (dispatcherKeys). Read only.
+ */
+export function rootRows(io, cfg, k) {
+  const inCopy = join(installPaths(cfg).installRoot, DISPATCHER_CONFIG); const src = dispatcherSourcePath(cfg);
+  // The job reads the copy's file once there is a copy (L871 review m1): a copy without it FAILs, never passes on the base's.
+  const cur = currentCopy(io.at(installPaths(cfg).installRoot), { owner: io.rootUid });
+  const file = cur.missing ? src : inCopy; let text = null;   // a broken copy is the copy's file too: the job's plist names it
+  try { text = io.readText(file); } catch { /* told below */ }
+  let c = null; try { c = text === null ? null : JSON.parse(text); } catch { c = null; }
+  return ROOTS.map(([key, name]) => {
+    const want = io.at(k[key]); const what = `${file} names ${name} ${want} as ${key} (the Dispatcher's ${key})`;
+    if (text === null) return { ok: false, what, why: `${file} can't be read${file === inCopy ? ' (the job reads the copy\'s)' : ''}; run dispatcher-config${file === inCopy ? ', then install again if the copy does not keep it' : ''}` };
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return { ok: false, what, why: `${file} is not a JSON object; run dispatcher-config` };
+    if (!Object.hasOwn(c, key)) return { ok: false, what, why: `it has no ${key}, so an existing dispatcher.json without it won't start the Dispatcher until dispatcher-config is run again (an older setup wrote it)` };
+    const got = c[key];
+    if (got === want) return { ok: true, what };
+    // A folder right under the root with a product's name: this config's products, or one it dropped.
+    const prod = typeof got === 'string' && dirname(got) === want && PRODUCT.test(basename(got)) ? basename(got) : undefined;
+    if (prod) return { ok: false, what, why: `it names ${got}, product ${prod}'s own folder, not the root above it: the Dispatcher finds each product's folder under the root, so every outbox or copy would be looked for one level too deep; run dispatcher-config` };
+    return { ok: false, what, why: `it names ${JSON.stringify(got)?.slice(0, 160)}, not ${want}; run dispatcher-config` };
+  });
+}
+
 /**
  * Read only → [{ ok, what, why? } | { ok: true, skip: true, what, why } | { ok: false, notTried: true, what, why }].
  * Not part of checkInstall (install.mjs): `daemons load` and the watch cutover wait on that, and a host.lock the
  * Dispatcher can't read must not stop the review or watch jobs. Its own command is `check-dispatcher`.
  */
-export function checkDispatcherKeys(io, cfg) {
+export function checkDispatcherKeys(io, cfg, { dispatcher = cfg.dispatcher !== undefined, refused } = {}) {
   const out = [];
   const item = (ok, what, why) => out.push({ ok, what, ...(ok ? {} : { why }) });
   const skip = (what, why) => out.push({ ok: true, skip: true, what, why });
@@ -84,6 +118,11 @@ export function checkDispatcherKeys(io, cfg) {
   let ls = null; try { ls = io.lstat(launches); } catch { /* reported below */ }
   item(!!ls && ls.isDirectory() && !ls.isSymbolicLink(), `the review runner's folder ${k.reviewRoot} holds its ${RUNNER_FOLDERS.launches} folder (the Dispatcher's reviewRoot)`,
     !ls ? `${launches} is not there yet: the review runner makes it on its first run, so load the review jobs first` : `${launches} is not a plain folder`);
+
+  // With a dispatcher entry (check-dispatcher reads the plain config, so setup.mjs says whether its parser takes one).
+  if (dispatcher) for (const row of rootRows(io, cfg, k)) out.push(row);
+  // An entry setup refuses (`refused`, its parser's reason): the roots can't be named, which is never a PASS (L905 m1).
+  else if (refused !== undefined) item(false, 'the config\'s dispatcher entry is one setup takes, so its outboxRoot and copiesRoot can be checked', `the dispatcher entry is refused (${refused}); its roots can't be checked`);
 
   const what = `the owner's host.lock (${k.hostLockPath}) is ${cfg.owner}'s and ${DISPATCHER_USER} can read it (the Dispatcher's hostLockPath)`;
   const owner = readUser(io, cfg.owner); const me = readUser(io, DISPATCHER_USER);
