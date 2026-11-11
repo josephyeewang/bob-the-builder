@@ -269,7 +269,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
     // L943 m2: the product port must name this Dispatcher's product. Missing or not a non-empty string, the step is
     // refused (told as a step failure), never run as every product's.
     if (typeof p.product !== 'string' || p.product === '') throw new Error(`no product named (the product port is ${p.product === '' ? 'empty' : JSON.stringify(p.product) ?? typeof p.product}), so no session is stopped`);
-    stops = await stopPass({ rec, rules, now, clock, account: acct.account, product: p.product, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, failureLog: failed('stops'), ...portDeadlines });
+    stops = await stopPass({ rec, rules, now, clock, account: acct.account, product: p.product, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, stopReview: p.stopReview, saveWork: p.saveWork, alert, failureLog: failed('stops'), ...portDeadlines });
     missing.push(...stops.missing);
     return stops;
   });

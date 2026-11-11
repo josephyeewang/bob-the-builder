@@ -39,16 +39,17 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
 const PORTS_NOT_WIRED = Object.freeze(['frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
-  'launch', 'leads', 'pauseLead', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
-  'saveWork', 'sendFrontDoor', 'startMinibase', 'startReadonly', 'stopGroup', 'strayFrontDoor']);
+  'leads', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
+  'sendFrontDoor', 'startMinibase', 'startReadonly', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['saveWork']);
 // The cleanup ports wired for real (L739; worker-ports.test.mjs plants each).
 const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'sealRoot']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below). filesOf, hostLock
 // and reviewEnded (L739): worker-ports.test.mjs plants each. The worker runner's sync ports (L925: sessions, board,
-// outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too.
-const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'outboxRoot', 'outboxSessions', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
-  'requestReview', 'reviewAlerts', 'reviewEnded', 'sessions', 'startPlanReview', 'stopSession', 'wait']);
+// outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too. stopReview (L946): the review runner's stop file. The worker
+// runner's four asks (L963: launch, stopGroup, saveWork, pauseLead): worker-ports.test.mjs runs each end to end.
+const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'launch', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
+  'requestReview', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sessions', 'startPlanReview', 'stopGroup', 'stopReview', 'stopSession', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -266,9 +267,9 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
   const config = reviewConfig(tempDir('orch-review-keys-'));
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
-    ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'wait']);
+    ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'stopReview', 'wait']);
   const w = world();
-  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession']);
+  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'stopGroup', 'saveWork', 'pauseLead']);
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };

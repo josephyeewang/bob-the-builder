@@ -1922,3 +1922,16 @@ test('L800 M-A: runTick tells a broken dead lock carried on a refusal, once a da
   const said = [...told().map((e) => e.text), ...w.calls.alerts.filter((t) => /the last Dispatcher pass \(taken T-dead\) was stopped/.test(t))];
   assert.equal(said.length, 1, `one cause: the holder's tell the same day is not a second one: ${said.join(' | ')}`);
 });
+
+// L946: the tick hands its stopReview port to the stops step, which asks the review runner to end a reviewer of this
+// Record's cancelled card at the head it reviews.
+test('L946: the stops step gets p.stopReview and asks by card, role and head', async () => {
+  const hd = 'f'.repeat(40);
+  const asked = [];
+  const w = world([account(), usage(), card('C-7', { state: 'cancelled', head: hd })], { over: {
+    sessions: () => [{ id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', head: hd, lead: null, pgid: null, bundle_files: [] }],
+    stopReview: (x) => { asked.push(x); return { ok: true }; } } });
+  const r = await w.pass();
+  assert.equal(r.steps.stops.ok, true, r.steps.stops.error);
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: hd }]);
+});

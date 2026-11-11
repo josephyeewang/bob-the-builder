@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, rmdirSync, fstatSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runnerPass, readReviewStatus, tapOffers, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, TAPS_TOLD_EACH, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
+import { STOP_SHOWN, runnerPass, readReviewStatus, tapOffers, needsRole, rolesFor, RETRY_MS, INTAKE_WAIT_MS, SWEEP_AFTER_MS, MAX_FAILED_STARTS, STATUS_STALE_MS, MAX_REQUEST_BYTES, MAX_STARTS_PER_PASS, MAX_PENDING, TAPS_TOLD_EACH, CARD_ID, readRequest, earlierBlock, newestFirst, outboxLeft } from './review-runner.mjs';
 import { PASSES, headReviews, runnerEnded, runnerLaunchFor, runnerLaunches, sessionVerdict, worstVerdict } from '../../M9-record/outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { reviewPorts } from '../../M11-dispatcher/review-requests.mjs';
@@ -1991,6 +1991,57 @@ test('L935: a pid that is no longer claude, or not live under its own session id
   assert.equal(t.ok, true, t.error);
   assert.deepEqual(groups.map((g) => [g.pid, g.sessionId]), [[pid, 'S-1']]);
   assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running[0].stop_wanted, undefined);
+});
+
+// L968: each running row shows the stop asked for it, as the time it was so, and nothing else of the runner's memory.
+test('L968: a running row shows stop_wanted while a failed stop is tried again, stop_failed once given up, stopped_by_request once made', async () => {
+  const at = new Date(T0).toISOString();
+  const row = (w) => w.status().running.find((x) => x.session_id === 'S-1');
+  const failing = await stopWorld({ fail: 99 });
+  failing.w.ask({ request_id: 'r-1' });
+  await runnerPass(failing.w.ctx);
+  assert.deepEqual(Object.keys(row(failing.w)).sort(), ['card', 'head', 'role', 'session_id', 'started_at'], 'no stop asked: none shown');
+  writeStopRequest({ dir: failing.w.requests, requestId: 'r-1' });
+  await runnerPass(failing.w.ctx);
+  assert.deepEqual([row(failing.w).stop_wanted, row(failing.w).stop_failed, row(failing.w).stopped_by_request], [at, undefined, undefined]);
+  assert.equal(row(failing.w).stop_tries, undefined, 'the tries stay in the runner\'s memory');
+  for (let n = 0; n < 6 && !row(failing.w).stop_failed; n += 1) await runnerPass(failing.w.ctx);
+  assert.deepEqual([row(failing.w).stop_wanted, row(failing.w).stop_failed], [undefined, at], 'given up on and told to Joe: shown as failed');
+  const made = await stopWorld();
+  made.w.ask({ request_id: 'r-2' });
+  await runnerPass(made.w.ctx);
+  writeStopRequest({ dir: made.w.requests, requestId: 'r-2' });
+  await runnerPass(made.w.ctx);
+  assert.deepEqual([row(made.w).stopped_by_request, row(made.w).stop_wanted], [at, undefined], 'made, the session not gone yet');
+  assert.deepEqual(STOP_SHOWN, ['stop_wanted', 'stop_failed', 'stopped_by_request']);
+  // A stamp the memory holds that is not a time is shown raw (#458 r1 m-d): the runner acts on it, so the Dispatcher refuses
+  // the whole list on it, loudly, rather than read the row as one with no stop.
+  const odd = await stopWorld();
+  odd.w.ask({ request_id: 'r-3' });
+  await runnerPass(odd.w.ctx);
+  const file = join(odd.w.root, 'state.json');
+  const st = JSON.parse(readFileSync(file, 'utf8'));
+  // stopped_by_request, which a pass leaves as it is (an odd stop_wanted would be acted on and cleared).
+  st.running[0].stopped_by_request = 'soon';
+  writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
+  await runnerPass(odd.w.ctx);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).running[0].stopped_by_request, 'soon', 'the memory still holds it');
+  assert.equal(row(odd.w).stopped_by_request, 'soon', 'shown as held');
+  // One the runner reads as no stop (null, '', false: it tests them as set or not) is not shown, so the list is not refused for it.
+  const blank = JSON.parse(readFileSync(file, 'utf8'));
+  blank.running[0].stopped_by_request = ''; blank.running[0].stop_failed = null;
+  writeFileSync(file, JSON.stringify(blank), { mode: 0o600 });
+  await runnerPass(odd.w.ctx);
+  assert.equal(Object.hasOwn(row(odd.w), 'stopped_by_request') || Object.hasOwn(row(odd.w), 'stop_failed'), false, 'unset: not shown');
+  // #458 r1 m-f: a stop by card, role and head (the Dispatcher's stop step, L946) shows the same: tried again, then made.
+  const byTarget = await stopWorld({ fail: 1 });
+  byTarget.w.ask({ request_id: 'r-4' });
+  await runnerPass(byTarget.w.ctx);
+  writeStopRequest({ dir: byTarget.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(byTarget.w.ctx);
+  assert.deepEqual([row(byTarget.w).stop_wanted, row(byTarget.w).stopped_by_request], [at, undefined], 'by target, failed once: wanted');
+  await runnerPass(byTarget.w.ctx);
+  assert.deepEqual([row(byTarget.w).stopped_by_request, row(byTarget.w).stop_wanted], [at, undefined], 'by target, made on the next pass');
 });
 
 test('L935: what is not a stop is never one, and a runner with no stop port stops nothing', async () => {

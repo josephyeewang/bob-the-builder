@@ -14,7 +14,7 @@
 //     under a hidden name and then given its own, never over another file, readable by the runner (0644 whatever the
 //     writer's umask: the Dispatcher's job runs with 077).
 //
-// Nothing calls it yet: lane 2's worker-ports wires it to the Dispatcher's stop step. Writing a file is all it does.
+// Called by the Dispatcher's stop step through M11 review-requests.mjs reviewPorts.stopReview (L946). Writing a file is all it does.
 
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';

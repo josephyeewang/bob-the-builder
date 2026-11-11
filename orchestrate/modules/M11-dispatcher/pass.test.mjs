@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -2153,4 +2153,289 @@ test('L767: a script card\'s outbox is <root>/<product>/script/<id>; the worker 
   const editing = world([card('C-2')]);
   editing.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/${x.product}/script/${x.sessionId}` }));
   assert.match((await editing.pass()).refused.map(([, x]) => x).join('\n'), /is not a worker outbox/);
+});
+
+// L946, L947: the stop step asks the review runner to end a reviewer or auditor (product null) only for a card of this
+// Record at the very head it reviews, cancelled or ended; by card, role and head, never a request id.
+const HD = 'c'.repeat(40);
+const OLD_HD = 'd'.repeat(40);
+const rv = (id, role, cardId, head = HD) => ({ id, product: null, kind: role === 'auditor' ? 'audit' : 'review', role, card: cardId, head, lead: null, pgid: null, bundle_files: [] });
+
+test('L946: a reviewer or auditor of this Record\'s cancelled or ended card at its head is asked to stop by card, role and head; nothing else is', async () => {
+  const rec = recWith([['product', 'p1', { state: 'paused' }], card('C-7', { state: 'cancelled', head: HD }), card('C-8', { state: 'failed', head: HD }),
+    card('C-9', { state: 'in_review', head: HD }), card('C-6', { state: 'cancelled', head: HD, product: 'q9' }), card('C-5', { state: 'waiting', head: HD, wait: { who: 'joe', what: 'x', since: iso(T0) } })]);
+  usageInto(rec);
+  const sessions = [rv('R-1', 'reviewer', 'C-7'), rv('A-1', 'auditor', 'C-7'), rv('R-2', 'reviewer', 'C-8'), rv('R-old', 'reviewer', 'C-7', OLD_HD),
+    rv('R-live', 'reviewer', 'C-9'), rv('R-q9', 'reviewer', 'C-6'), rv('R-none', 'reviewer', 'C-404'), rv('R-joe', 'reviewer', 'C-5'),
+    { ...rv('R-nohead', 'reviewer', 'C-7'), head: undefined }, { id: 'E-1', product: null, kind: 'editing', card: 'C-7', head: HD }];
+  const asked = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => { throw new Error('no worker here'); }, saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x); return { ok: true, name: 'stop-1.json' }; } });
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }, { card: 'C-7', role: 'auditor', head: HD }, { card: 'C-8', role: 'reviewer', head: HD }],
+    'exactly the three, each by card, role and head: not an older head, a live card (its product paused: no matter), another product\'s card, a card not here, one waiting on Joe, a row with no head, nor a non-review row');
+  assert.deepEqual(r.reviewStops, [['R-1', 'cancel', 'asked'], ['A-1', 'cancel', 'asked'], ['R-2', 'card_ended', 'asked']]);
+  assert.deepEqual(r.stopped, [], 'the review runner\'s sessions are not stopGroup\'s');
+  const f = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.equal(f.state, 'asked');
+  assert.deepEqual([f.card, f.role, f.head, f.reason, f.asked_at, f.tries], ['C-7', 'reviewer', HD, 'cancel', iso(T0), 1]);
+  assert.equal(Object.keys(f).some((k) => /request/.test(k)), false, 'no request id kept (L947)');
+});
+
+test('L946: a stop is asked again only after REVIEW_STOP_AGAIN_MS while listed, and marked done once the session is gone', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  let asked = 0;
+  const run = (at, sessions) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => { asked += 1; return { ok: true }; } });
+  assert.equal(REVIEW_STOP_AGAIN_MS, 5 * MIN);
+  await run(T0, [rv('R-1', 'reviewer', 'C-7')]);
+  const r1 = await run(T0 + 4 * MIN, [rv('R-1', 'reviewer', 'C-7')]);
+  assert.equal(asked, 1, 'not again within 5 minutes');
+  assert.deepEqual(r1.reviewStops, [['R-1', 'cancel', 'waiting']]);
+  await run(T0 + 5 * MIN, [rv('R-1', 'reviewer', 'C-7')]);
+  assert.equal(asked, 2, 'again at 5 minutes');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.tries, 2);
+  await run(T0 + 6 * MIN, []);
+  assert.equal(asked, 2);
+  const f = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.deepEqual([f.state, f.done_at], ['done', iso(T0 + 6 * MIN)]);
+  await run(T0 + 20 * MIN, []);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.done_at, iso(T0 + 6 * MIN), 'done stays done');
+});
+
+test('L946: a stop that can\'t be asked is said each pass, told to Joe once a day, tried again next pass, and holds no worker stop', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD }), card('C-1', { state: 'cancelled' })]);
+  usageInto(rec);
+  const alert = fakeAlert({ answer: true });
+  const log = [];
+  let asked = 0;
+  const stopped = [];
+  const run = (at, answer) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, product: 'p1', sessions: [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-1', pgid: 50 }, rv('R-1', 'reviewer', 'C-7')],
+    probe: () => idle, alert, failureLog: (l) => log.push(l), stopGroup: async (s) => { stopped.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }),
+    stopReview: () => { asked += 1; return answer; } });
+  const r = await run(T0, { ok: false, reason: 'the folder is full' });
+  assert.deepEqual(stopped, ['S-1'], 'the worker stop still runs');
+  assert.deepEqual(r.reviewStops, [['R-1', 'cancel', 'failed']]);
+  assert.ok(r.notes.some((n) => /reviewer R-1 for cancelled card C-7 could not be asked to stop: the folder is full/.test(n)), r.notes.join(' | '));
+  assert.equal(log.filter((l) => /R-1/.test(l)).length, 1);
+  assert.equal(alert.texts.filter((t) => /^a review session could not be asked to stop: the reviewer R-1 for cancelled card C-7 \(the folder is full\)$/.test(t)).length, 1, alert.texts.join(' | '));
+  await run(T0 + MIN, { ok: false, reason: 'the folder is full' });
+  assert.equal(asked, 2, 'tried again on the next pass, not 5 minutes on');
+  assert.equal(log.filter((l) => /R-1/.test(l)).length, 2, 'said each pass');
+  assert.equal(alert.texts.filter((t) => /R-1/.test(t)).length, 1, 'told once a day');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'failing');
+  assert.ok(rec.read('fact', REVIEW_STOP_TELL_FACT).doc.told_at);
+  await run(T0 + 2 * MIN, { ok: true });
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'asked');
+  assert.ok(rec.read('fact', REVIEW_STOP_TELL_FACT).doc.told_at, 'told_at stays once none fails (L962 m1)');
+  // A throw or no port at all is a failure too, never an ask.
+  const rec2 = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec2);
+  for (const stopReview of [() => { throw new Error('boom'); }, undefined]) {
+    const r2 = await stopPass({ rec: rec2, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-9', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
+    assert.deepEqual(r2.reviewStops, [['R-9', 'cancel', 'failed']], String(stopReview));
+    assert.ok(r2.notes.some((n) => (stopReview ? /boom/ : /no stopReview port is wired/).test(n)), r2.notes.join(' | '));
+  }
+});
+
+// The card names no product, so only the "no product named" gate keeps its reviewer running.
+test('L946: with no product named, no reviewer is asked to stop either (L943 m2); dispatcherPass hands its stopReview on', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD, product: null })]);
+  usageInto(rec);
+  const asked = [];
+  const stopReview = (x) => { asked.push(x); return { ok: true }; };
+  for (const product of [undefined, '']) {
+    const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, ...(product === undefined ? {} : { product }), sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle,
+      alert: fakeAlert(), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
+    assert.deepEqual(r.reviewStops, []);
+  }
+  assert.deepEqual(asked, []);
+  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
+    launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [], stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }]);
+});
+
+test('L946: asks are made at once (a hung one is a failure, never an ask, and holds no other); one tell names every failure', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD }), card('C-8', { state: 'failed', head: HD })]);
+  usageInto(rec);
+  const alert = fakeAlert({ answer: true });
+  const started = [];
+  const at = [];
+  const t = Date.now();
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7'), rv('A-1', 'auditor', 'C-7'), rv('R-2', 'reviewer', 'C-8')],
+    probe: () => idle, alert, portDeadlineMs: 150, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
+    stopReview: (x) => { started.push(x.role); at.push(Date.now()); return x.role === 'auditor' ? { ok: true } : new Promise(() => {}); } });
+  assert.ok(Math.max(...at) - Math.min(...at) < 75, `every ask starts before any times out (spread ${Math.max(...at) - Math.min(...at)} ms)`);
+  assert.ok(Date.now() - t < 1000, 'two hung asks take one deadline');
+  assert.deepEqual(started.sort(), ['auditor', 'reviewer', 'reviewer']);
+  assert.deepEqual(r.reviewStops, [['R-1', 'cancel', 'failed'], ['A-1', 'cancel', 'asked'], ['R-2', 'card_ended', 'failed']]);
+  const tells = alert.texts.filter((x) => /could not be asked to stop/.test(x));
+  assert.equal(tells.length, 1, 'one tell for both');
+  assert.match(tells[0], /^2 review sessions could not be asked to stop: the reviewer R-1 for cancelled card C-7 \(.+\); the reviewer R-2 for ended card C-8 \(.+\)$/);
+});
+
+test('L946: a failing stop is done once its session is gone, one no longer due stays as it is, and the worker stops\' facts and these never touch', async () => {
+  const UUID = '0b0e7c1e-0000-4000-8000-000000000001';
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD }), card('C-9', { state: 'in_review', head: HD }),
+    ['fact', REVIEW_STOP_FACT('R-9'), { state: 'asked', card: 'C-9', role: 'reviewer', head: HD, reason: 'cancel', asked_at: iso(T0 - H), tries: 1 }],
+    ['fact', STOP_FACT(UUID), { state: 'done', card: 'C-1', moved: true, saved: true, stopped_at: iso(T0 - H) }]]);
+  usageInto(rec);
+  const run = (at, sessions, answer) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert({ answer: true }),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => answer });
+  await run(T0, [rv('R-1', 'reviewer', 'C-7'), rv('R-9', 'reviewer', 'C-9')], { ok: false, reason: 'no' });
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'failing');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-9')).doc.asked_at, iso(T0 - H), 'listed, no longer due: left as it is');
+  const workerBefore = JSON.stringify(rec.read('fact', STOP_FACT(UUID)).doc);
+  await run(T0 + MIN, [], { ok: true });
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'done');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-9')).doc.state, 'done');
+  assert.equal(JSON.stringify(rec.read('fact', STOP_FACT(UUID)).doc), workerBefore, 'a worker stop is not the review sweep\'s');
+  for (const id of [REVIEW_STOP_FACT('R-1'), REVIEW_STOP_TELL_FACT]) {
+    const d = rec.read('fact', id)?.doc ?? {};
+    assert.equal('moved' in d || 'saved' in d, false, `${id} carries nothing reparkStopped or tellUnsaved reads`);
+  }
+});
+
+// L960: ended is M9's REVIEW_OVER, not FINAL_STATES. A closed card's auditor does work M9 keeps (closed can still be
+// reverted), so it is not stopped; a reverted or closed_no_answer card's is.
+test('L960: an auditor on a closed card is not asked to stop; one on a reverted or closed_no_answer card is', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'closed', head: HD }), card('C-8', { state: 'reverted', head: HD }), card('C-9', { state: 'closed_no_answer', head: HD })]);
+  usageInto(rec);
+  const asked = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('A-7', 'auditor', 'C-7'), rv('A-8', 'auditor', 'C-8'), rv('A-9', 'auditor', 'C-9')],
+    probe: () => idle, alert: fakeAlert(), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x.card); return { ok: true }; } });
+  assert.deepEqual(asked, ['C-8', 'C-9'], 'the closed card\'s auditor runs on');
+  assert.deepEqual(r.reviewStops, [['A-8', 'card_ended', 'asked'], ['A-9', 'card_ended', 'asked']]);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('A-7')), null);
+});
+
+// L962 m1: a stop that fails, works, waits and fails again is told once a day, not on each failure.
+test('L962 m1: fail, ask, wait, fail again over a day is told to Joe once', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  const alert = fakeAlert({ answer: true });
+  // A new reviewer each round (one the runner did stop is gone), so no session reaches REVIEW_STOP_MAX_ASKS.
+  const run = (min, answer, sid) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions: [rv(sid, 'reviewer', 'C-7')], probe: () => idle, alert,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => answer });
+  for (let k = 0; k < 20; k += 1) {
+    await run(k * 6, { ok: false, reason: 'busy' }, `R-${k}`);
+    await run(k * 6 + 1, { ok: true }, `R-${k}`);
+  }
+  assert.equal(alert.texts.filter((t) => /could not be asked to stop/.test(t)).length, 1, alert.texts.join(' | '));
+  await run(25 * H / MIN, { ok: false, reason: 'busy' }, 'R-99');
+  assert.equal(alert.texts.filter((t) => /could not be asked to stop/.test(t)).length, 2, 'again a day on');
+});
+
+// L962 m5: still listed after REVIEW_STOP_MAX_ASKS stop files, the runner could not stop it: said once, then left alone.
+test('L962 m5: a session still listed after REVIEW_STOP_MAX_ASKS asks is given up on, said once, and done once it goes', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  let asked = 0;
+  const notes = [];
+  const alert = fakeAlert({ answer: true });
+  const run = (min, sessions = [rv('R-1', 'reviewer', 'C-7')]) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => { asked += 1; return { ok: true }; } });
+  assert.equal(REVIEW_STOP_MAX_ASKS, 6);
+  for (let k = 0; k < 10; k += 1) { const r = await run(k * 5); notes.push(...r.notes.filter((n) => /still running after/.test(n))); }
+  assert.equal(asked, 6, 'six stop files, then no more');
+  assert.equal(notes.length, 1, 'said once');
+  assert.match(notes[0], /reviewer R-1 for cancelled card C-7 is still running after 6 stop requests; it is not asked again/);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'given_up');
+  // #458 r1 m-b: Joe is told once, as the runner shows no stop of its own here.
+  const tells = alert.texts.filter((t) => /still running after 6 stop requests/.test(t));
+  assert.equal(tells.length, 1, alert.texts.join(' | '));
+  assert.match(tells[0], /the reviewer R-1 for cancelled card C-7 is still running after 6 stop requests; it is not asked again; the review runner showed no answer/);
+  assert.doesNotMatch(notes[0], /the review runner tells Joe/, 'no claim the runner tells him');
+  await run(60, []);
+  // Told only once the given_up fact is written (#458 self-review m2): a refused write tells nothing; the next pass does, once.
+  const rec2 = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec2);
+  let frozen = false;
+  const refusing = { ...rec2, write: (w) => (frozen && w.entity === 'fact' && w.id === REVIEW_STOP_FACT('R-1') ? { ok: false, reason: 'read-only' } : rec2.write(w)) };
+  const alert2 = fakeAlert({ answer: true });
+  const go = (min) => stopPass({ rec: refusing, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: alert2,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => ({ ok: true }) });
+  for (let k = 0; k < 6; k += 1) await go(k * 5);
+  frozen = true;
+  await go(40);
+  const toldOf = () => alert2.texts.filter((t) => /still running after 6 stop requests/.test(t)).length;
+  assert.equal(toldOf(), 0, 'the given_up write was refused: not told');
+  frozen = false;
+  await go(45); await go(50);
+  assert.equal(toldOf(), 1, 'written on the next pass: told once');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'done');
+});
+
+// L968: once the review runner's row shows its own answer, the stop step asks no more; the cap is the backstop for a runner
+// that never shows one (an older install, a stop file it never reached).
+test('L968: a runner that shows its stop (stopped, wanted or failed) is not asked again; the fact says what it showed, and is done once it goes', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  let asked = 0;
+  const run = (min, sessions) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => { asked += 1; return { ok: true }; } });
+  const shown = (s) => [{ ...rv('R-1', 'reviewer', 'C-7'), ...(s ? { runner_stop: s } : {}) }];
+  await run(0, shown());
+  assert.equal(asked, 1);
+  for (const [k, s] of [[5, 'wanted'], [10, 'wanted'], [15, 'failed'], [40, 'failed']]) {
+    const r = await run(k, shown(s));
+    assert.deepEqual(r.reviewStops, [['R-1', 'cancel', `runner_${s}`]], `${k}`);
+  }
+  assert.equal(asked, 1, 'never asked again once the runner showed it');
+  const f = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.deepEqual([f.state, f.runner, f.taken_at, f.asks], ['taken', 'failed', iso(T0 + 15 * MIN), 1], 'written once per answer shown, the asks kept');
+  // The answer gone from the row while the session is still listed (L968 r1 m2): asked again at once, the cap still counting.
+  const back = await run(42, shown());
+  assert.deepEqual(back.reviewStops, [['R-1', 'cancel', 'asked']]);
+  assert.equal(asked, 2);
+  const g = rec.read('fact', REVIEW_STOP_FACT('R-1')).doc;
+  assert.deepEqual([g.state, g.asks, g.runner, g.taken_at], ['asked', 2, undefined, undefined], 'the dropped answer is not kept');
+  await run(45, []);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'done');
+  // Shown before any ask (a stop the runner made for another's request): nothing is asked at all.
+  const r2 = await run(50, [{ ...rv('R-2', 'reviewer', 'C-7'), runner_stop: 'stopped' }]);
+  assert.deepEqual(r2.reviewStops, [['R-2', 'cancel', 'runner_stopped']]);
+  assert.equal(asked, 2, 'R-2 is never asked');
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-2')).doc.state, 'taken');
+  // #458 r1 m-a: a taken fact is swept to done once its session is no longer listed.
+  await run(55, []);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('R-2')).doc.state, 'done', 'taken, then gone: done');
+  // A failing ask the runner then shows ends the failure: it is no longer failing.
+  const failRec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(failRec);
+  const go = (min, sessions, stopReview) => stopPass({ rec: failRec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
+  await go(0, shown(), () => ({ ok: false, reason: 'the folder is gone' }));
+  assert.equal(failRec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'failing');
+  const r3 = await go(5, shown('stopped'), () => { throw new Error('must not be asked'); });
+  assert.deepEqual(r3.reviewStops, [['R-1', 'cancel', 'runner_stopped']]);
+  assert.equal(failRec.read('fact', REVIEW_STOP_FACT('R-1')).doc.state, 'taken');
+});
+// Without runner_stop the cap still ends the asking (L962 m5 above): the backstop stays.
+
+// L962 m2: a fact write the Record refuses is said, so a stop file sent on every pass is never silent.
+test('L962 m2: a refused review-stop fact write is said in the notes and the failure log', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  // The Record is frozen: a stand-in in front of it refuses this one fact's writes.
+  const refusing = { ...rec, write: (w) => (w.entity === 'fact' && w.id === REVIEW_STOP_FACT('R-1') ? { ok: false, reason: 'the store is read-only' } : rec.write(w)) };
+  const log = [];
+  const r = await stopPass({ rec: refusing, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(), failureLog: (l) => log.push(l),
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => ({ ok: true }) });
+  const line = /review stop fact stop-review-R-1 could not be written \(the store is read-only\); its stop file is written again on each pass until it is/;
+  assert.ok(r.notes.some((n) => line.test(n)), r.notes.join(' | '));
+  assert.ok(log.some((n) => line.test(n)));
+});
+
+// L962 m1: a tell not yet sent (the port down) is dropped from the queue once no stop fails, so it never goes out late.
+test('L962 m1: a queued tell is dropped on the first pass with no failing stop', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD })]);
+  usageInto(rec);
+  const run = (min, answer, alert) => stopPass({ rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert,
+    stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: () => answer });
+  await run(0, { ok: false, reason: 'busy' }, fakeAlert({ answer: false }));
+  assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), true, 'the port lost it, so it waits in the queue');
+  await run(1, { ok: true }, fakeAlert({ answer: false }));
+  assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), false, 'dropped once none fails');
 });
