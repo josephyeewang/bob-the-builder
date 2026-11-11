@@ -244,9 +244,9 @@ export const ALERT_FIELDS = [['merge', 'merge'], ['ask', 'ask'], ['card', 'card'
 export const ALERT_LIST_MAX = 50;
 // Every control character, line and paragraph separator, invisible format character (zero-width, direction and the
 // like) and Hangul filler becomes a space, so text from outside (a folder's name) can't start a line of its own, turn
-// the words around it or hide any (#403 r3 m2, r4 c1). Emoji joined by a
+// the words around it or hide any (#403 r3 m2, r4 c1). A cut that splits an emoji drops its first half (r5 review). Emoji joined by a
 // zero-width joiner show as their parts: alert text is plain operational words.
-export const plain = (v, n = 200) => String(v).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u1160\u2065\u3164\uFFA0]+/gu, ' ').slice(0, n);
+export const plain = (v, n = 200) => String(v).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u1160\u2065\u3164\uFFA0]+/gu, ' ').slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
 // What is left off is counted, a capped name or an item that isn't text alike (L408 m1): no list reads shorter than it is.
 export const listed = (list) => {
   const names = list.filter((x) => typeof x === 'string').slice(0, ALERT_LIST_MAX).map((x) => plain(x));

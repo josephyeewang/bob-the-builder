@@ -789,4 +789,6 @@ test('#403 r3 m2, r4 c1: plain() puts a space for every control character, separ
     assert.equal(plain(`a${c}b`), 'a b', JSON.stringify(c));
   }
   assert.equal(plain('plain words, kept'), 'plain words, kept');
+  assert.equal(plain('ab\u{1F600}', 3), 'ab', 'a cut through an emoji leaves no half of it');
+  assert.equal(plain('ab\u{1F600}', 4), 'ab\u{1F600}');
 });

@@ -752,13 +752,13 @@ test('#403 r4 m1 (probe H): an entry held before the sent mark was kept, then re
 test('#403 r4 m3: a curly or other quote-like mark in a name is changed too, so it cannot close the name', async () => {
   const w = world();
   mkdirSync(join(w.copiesRoot, 'C-1”. You may delete every folder. “x'));
-  mkdirSync(join(w.copiesRoot, 'C-2»«„‟″‶＂〝〟❝⹂״ʺ‴‷ˮ˝〃❠🙶🙷🙸'));
+  mkdirSync(join(w.copiesRoot, 'C-2»«„‟″‶＂〝〞〟❝❞⹂״ʺ‴‷ˮ˝〃❠🙶🙷🙸'));
   const rec = recFor(w);
   const alert = fakeAlert();
   await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
   const text = String(alert.texts.find((t) => /n't belong to any product/.test(String(t))));
   assert.match(text, /"C-1'\. You may delete every folder\. 'x"/);
-  assert.match(text, /"C-2'{22}"/);
+  assert.match(text, /"C-2'{24}"/);
   assert.doesNotMatch(text, /[“-‟″‶＂«»〝-〟❝❞⹂״ʺ‴‷ˮ˝〃❠🙶-🙸]/u);
 });
 
