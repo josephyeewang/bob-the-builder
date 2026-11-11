@@ -39,6 +39,17 @@ test('MAT-9: no facts at all → every Mini item and the Air read "unknown", nev
   assert.match(a.text, /type \/configaudit/);
 });
 
+test('L604: a fresh heartbeat that says not known is unknown, never a NO and never green', () => {
+  const { facts } = world();
+  green(facts);
+  facts.put(STATUS_FACT(HB), { kind: 'fact.heartbeat-status', at: ago(5), front_door_reachable: null, signed_in: null, login: null, red: [] });
+  const m = miniCheck({ facts, heartbeatProduct: HB, now });
+  assert.equal(m.green, false);
+  assert.deepEqual(m.items.map((i) => i.state), ['unknown', 'unknown', 'green']);
+  assert.match(m.items[0].text, /^unknown: heartbeat 5 min ago/);
+  assert.doesNotMatch(`${m.items[0].text} ${m.items[1].text}`, /NO/);
+});
+
 test('MAT-9: facts older than an hour are unknown; fresh ones are green; a fresh "no" is red', () => {
   const { facts } = world();
   green(facts);
