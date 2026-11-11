@@ -252,18 +252,24 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, product, clock = D
  * which would leave a request 0600, orchestrate's alone, and the runner (the owner's user, which reads it through no
  * access list: setup/layout.mjs WORKER_REQUESTS_ACL) could not open it (PR A self-review M1). Set by handle, as
  * runner-files.mjs writeStatus does. A write that fails once the file is made takes the file away again (PR C self-review
- * m5), so a failed ask leaves no request the runner could act on; if it can't be taken away, the error says so (mayExist),
- * and the ask reads it as written (owner-asks.mjs).
+ * m5), so a failed ask leaves no half request the runner could act on. If it can't be taken away, or the whole text was
+ * already in (the runner may have read it, #456 r1 m2), the error says so (mayExist), and the ask reads it as written
+ * (owner-asks.mjs).
  */
 export function writeNewReadable(path, text, { flag = 'wx', mode = 0o644, fs = { openSync, fchmodSync, writeFileSync, closeSync, unlinkSync } } = {}) {
   const fd = fs.openSync(path, flag, mode);
   let failure = null;
-  try { fs.fchmodSync(fd, mode); fs.writeFileSync(fd, text); } catch (e) { failure = e; }
+  let whole = false;
+  try { fs.fchmodSync(fd, mode); fs.writeFileSync(fd, text); whole = true; } catch (e) { failure = e; }
   try { fs.closeSync(fd); } catch (e) { failure ??= e; }
   if (!failure) return;
-  try { fs.unlinkSync(path); } catch (e) {
-    if (e?.code !== 'ENOENT') throw Object.assign(new Error(`${failure.message ?? failure}; the request file could not be taken away (${e?.code ?? e?.message}), so it may still be read`), { mayExist: true });
-  }
+  let gone = null;
+  try { fs.unlinkSync(path); } catch (e) { gone = e; }
+  // Once the whole text is in, the runner may have read it before it was taken away (#456 r1 m2): only the runner removes
+  // a request file, so a file already missing (ENOENT) is one it may have taken, and even a removal that worked may come
+  // after its read. Either way the ask is waited on as asked (mayExist).
+  if (whole) throw Object.assign(new Error(`${failure.message ?? failure}; the whole request was written, so the runner may have read it${gone ? ` (and it could not be taken away: ${gone.code ?? gone.message})` : ''}`), { mayExist: true });
+  if (gone && gone.code !== 'ENOENT') throw Object.assign(new Error(`${failure.message ?? failure}; the request file could not be taken away (${gone.code ?? gone.message}), so it may still be read`), { mayExist: true });
   throw failure;
 }
 

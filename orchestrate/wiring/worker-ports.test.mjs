@@ -541,7 +541,7 @@ function asksWorld({ runner = {}, session = true } = {}) {
   // A session the runner started earlier, still running: what a save or a stop is asked about.
   const listed = { id: LIVE, product: P, kind: 'editing', card: 'C-9', lead: null, role: 'worker', pgid: 4321, signin: 's', config_dir: '/cfg', bundle_files: [], outbox, uid: OWNER,
     outbox_open: true, stop_requested: false, alive: true, ended: false, pid: 4321, pid_start: '2026-11-11T11:00:00Z', head: HEAD, copy: join(c.copiesRoot, P, 'C-9'), started_at: AT - 60_000 };
-  const x = { now: AT, notes: [], stops: [], state: session ? { sessions: [listed], requests: { [LIVE]: { state: 'started', at: AT - 60_000 } }, answers: {}, seen: {} } : {}, pending: new Map() };
+  const x = { now: AT, nonces: 0, notes: [], stops: [], state: session ? { sessions: [listed], requests: { [LIVE]: { state: 'started', at: AT - 60_000 } }, answers: {}, seen: {} } : {}, pending: new Map() };
   const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
   x.ports = {
     // Real: the start port as runner-main.mjs makes it, less what it reads first (the card, claimed for the asked session).
@@ -562,7 +562,8 @@ function asksWorld({ runner = {}, session = true } = {}) {
     open: (f) => ({ st: fakeSt(), text: readFileSync(f, 'utf8') }),
     realpath: (p) => p,
     sleep: async (ms) => { await x.tick(); x.now += ms; },
-    nonce: () => '0123456789abcdef', pollMs: 2000, giveUpMs: 30_000,
+    // A counter (#456 r1 c2): each ask names a request of its own, as randomBytes does.
+    nonce: () => (x.nonces += 1).toString(16).padStart(16, '0'), pollMs: 2000, giveUpMs: 30_000,
   };
   x.ports4 = workerPorts({ ...w.ctx, now: () => x.now }, io);
   x.requests = () => readdirSync(c.workerRequestsDir).sort();
@@ -584,7 +585,7 @@ test('C (L963): launch, stopGroup, saveWork and pauseLead are wired: each writes
   assert.deepEqual(x.stops, [4321]);
   // The runner took each request it answered; each one the Dispatcher wrote was a 0644 file of its own name.
   assert.deepEqual(x.requests(), [], 'every request was read and taken by the runner');
-  for (const n of ['launch-S-new', 'saveWork-S-live-0123456789abcdef', `pauseLead-${P}-0123456789abcdef`, 'stopGroup-S-live-0123456789abcdef']) assert.ok(Object.hasOwn(x.state.answers, n), n);
+  for (const n of ['launch-S-new', 'saveWork-S-live-0000000000000001', `pauseLead-${P}-0000000000000002`, 'stopGroup-S-live-0000000000000003']) assert.ok(Object.hasOwn(x.state.answers, n), n);
 });
 
 test('C (L963): the three refusals the runner gives today reach the Dispatcher with their plain reason: no prompt, no lock-down, no activity feed', async () => {
@@ -628,8 +629,8 @@ test('C (L963): the asks write only through the checked requests folder: a folde
   // No answer within the ask's own limit: timedOut, never ok: false as if known (the runner never ticks here).
   const quiet = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, sleep: async (ms) => { x.now += ms; }, giveUpMs: 6000 });
   const t = await quiet.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' });
-  assert.equal(t.ok, false); assert.equal(t.timedOut, true); assert.match(t.reason, /did not answer saveWork-S-live-0123456789abcdef within 6000 ms/);
-  assert.deepEqual(x.requests(), ['saveWork-S-live-0123456789abcdef.json'], 'written, and left for the runner');
+  assert.equal(t.ok, false); assert.equal(t.timedOut, true); assert.match(t.reason, /did not answer saveWork-S-live-0000000000000004 within 6000 ms/);
+  assert.deepEqual(x.requests(), ['saveWork-S-live-0000000000000004.json'], 'written, and left for the runner');
   assert.equal(statSync(join(c.workerRequestsDir, x.requests()[0])).mode & 0o777, 0o644);
 });
 
@@ -637,11 +638,16 @@ test('C (L963, self-review m5): a request whose write fails once its file is mad
   const dir = tempDir('orch-prc-w-');
   const fail = (code) => () => { throw Object.assign(new Error(`write ${code}`), { code }); };
   const fsWith = (over) => ({ openSync, fchmodSync, writeFileSync, closeSync, unlinkSync, ...over });
-  for (const [what, over] of [['write', { writeFileSync: fail('ENOSPC') }], ['close', { closeSync: (fd) => { closeSync(fd); fail('EIO')(); } }]]) {
-    const f = join(dir, `${what}.json`);
-    assert.throws(() => writeNewReadable(f, '{}\n', { fs: fsWith(over) }), (e) => /write (ENOSPC|EIO)/.test(e.message) && !e.mayExist, what);
-    assert.equal(existsSync(f), false, `${what}: the file is taken away`);
-  }
+  const f = join(dir, 'write.json');
+  assert.throws(() => writeNewReadable(f, '{}\n', { fs: fsWith({ writeFileSync: fail('ENOSPC') }) }), (e) => /write ENOSPC/.test(e.message) && !e.mayExist, 'a half write');
+  assert.equal(existsSync(f), false, 'a half write is taken away');
+  // #456 r1 m2: once the whole text is in, the runner may have read it, so the ask waits as asked (mayExist), whether the
+  // file was then taken away or was already gone (the runner took it: only it removes request files).
+  const closed = join(dir, 'close.json');
+  assert.throws(() => writeNewReadable(closed, '{}\n', { fs: fsWith({ closeSync: (fd) => { closeSync(fd); fail('EIO')(); } }) }), (e) => e.mayExist === true && /write EIO; the whole request was written, so the runner may have read it$/.test(e.message));
+  assert.equal(existsSync(closed), false, 'still taken away');
+  const taken = join(dir, 'taken.json');
+  assert.throws(() => writeNewReadable(taken, '{}\n', { fs: fsWith({ closeSync: (fd) => { closeSync(fd); rmSync(taken); fail('EIO')(); } }) }), (e) => e.mayExist === true && /the runner may have read it \(and it could not be taken away: ENOENT\)/.test(e.message), 'the runner took it before the unlink');
   const kept = join(dir, 'kept.json');
   assert.throws(() => writeNewReadable(kept, '{}\n', { fs: fsWith({ writeFileSync: fail('ENOSPC'), unlinkSync: fail('EPERM') }) }), (e) => e.mayExist === true && /could not be taken away \(EPERM\), so it may still be read/.test(e.message));
   writeNewReadable(join(dir, 'ok.json'), '{"a":1}\n');
@@ -654,4 +660,38 @@ test('C (L963, self-review m5): a request whose write fails once its file is mad
   assert.equal(l.ok, false); assert.equal(l.timedOut, true, 'not known, so the claim stays');
   const plain = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, writeFile: fail('ENOSPC') });
   await assert.rejects(plain.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' }), /write ENOSPC/, 'nothing left: refused');
+});
+
+test('C (#456 r1 m1): a launch a stop reached first (cancelled) is the runner\'s told refusal at once, not a late answer', async () => {
+  const { c, x } = asksWorld({ session: false });
+  writeFileSync(join(c.workerRequestsDir, 'stop-S-new.json'), `${JSON.stringify({ stop: 'S-new' })}\n`, { mode: 0o644 });
+  await x.tick();
+  x.sid = 'S-new';
+  const l = await x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
+  assert.equal(x.state.requests['S-new'].state, 'cancelled');
+  assert.equal(l.ok, false); assert.equal(l.timedOut, undefined, 'known: used up, so the claim can be let go');
+  assert.equal(l.reason, x.state.answers['launch-S-new'].reason, 'the runner\'s own reason');
+  assert.ok(x.now - AT < 30_000, 'answered before the ask\'s own limit');
+});
+
+test('C (#456 r1 m4): the tick\'s signal ends a wait for the runner as timedOut, so no poller outlives the tick', async () => {
+  const { c, x, io } = asksWorld();
+  // A runner that never answers and a sleep that never ends on its own: only the signal ends the wait.
+  const stuck = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, sleep: () => new Promise(() => {}) });
+  for (const call of [(o) => stuck.stopGroup({ id: LIVE, pgid: 4321, kind: 'editing' }, o), (o) => stuck.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' }, o),
+    (o) => stuck.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' }, o)]) {
+    const ac = new AbortController();
+    const r = call({ signal: ac.signal });
+    ac.abort();
+    const a = await r;
+    assert.equal(a.ok, false); assert.equal(a.timedOut, true); assert.match(a.reason, /^the tick stopped waiting for the worker runner's answer to /);
+  }
+  const ac = new AbortController(); ac.abort();
+  await assert.rejects(stuck.pauseLead({ product: P }, { signal: ac.signal }), (e) => e.timedOut === true && /the tick stopped waiting/.test(e.message), 'pauseLead fails by throwing, timedOut kept (c1)');
+  // Through pass.mjs guarded, as the tick calls stopGroup: its limit fires the signal and the port's own wait ends too.
+  const { guarded } = await import('../modules/M11-dispatcher/pass.mjs');
+  let inner;
+  const g = await guarded((signal) => (inner = stuck.stopGroup({ id: LIVE, pgid: 4321, kind: 'editing' }, { signal })), 20);
+  assert.equal(g.timedOut, true);
+  assert.equal((await inner).timedOut, true, 'the port\'s wait ended with the tick\'s');
 });

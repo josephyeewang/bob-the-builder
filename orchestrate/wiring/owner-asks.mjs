@@ -89,7 +89,9 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
   // A request that can't be written: nothing was asked, so launch and pauseLead throw (refused, and a failed pause) and
   // stopGroup and saveWork answer ok: false (`unwritten`), as owner-ports.mjs says an async port answers (PR C
   // self-review m1). A write that may have left the file (mayExist, owner-status.mjs writeNewReadable) is waited on as asked.
-  async function ask(key, body, accept, unwritten) {
+  // `signal` is the tick's own limit (pass.mjs guarded, #456 r1 m4): once it fires the wait ends as timedOut, so a poller
+  // never outlives the tick that gave up on it.
+  async function ask(key, body, accept, unwritten, signal) {
     const start = clock();
     try { writeRequest(`${key}.json`, `${JSON.stringify({ ...body, asked_at: new Date(start).toISOString() })}\n`); } catch (e) {
       if (!e?.mayExist) { if (unwritten) return unwritten(e); throw e; }
@@ -104,14 +106,24 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       } catch (e) { last = e?.message ?? String(e); }
       try { const t = clock() - start; if (t > waited) waited = t; } catch { /* the reads alone count */ }
       if (waited >= giveUpMs) return { ok: false, timedOut: true, reason: `the worker runner did not answer ${key} within ${giveUpMs} ms (${last})` };
-      await sleep(pollMs);
+      if (signal?.aborted) return gaveUp(key, last);
+      await waitOrAbort(pollMs, signal);
+      if (signal?.aborted) return gaveUp(key, last);
     }
   }
+  const gaveUp = (key, last) => ({ ok: false, timedOut: true, reason: `the tick stopped waiting for the worker runner's answer to ${key} (${last})` });
+  // The poll's sleep, cut short when the tick gives up. A sleep that ends on its own is the test's or the clock's.
+  const waitOrAbort = (ms, signal) => (signal ? new Promise((done) => {
+    if (signal.aborted) { done(); return; }
+    const off = () => { signal.removeEventListener('abort', off); done(); };
+    signal.addEventListener('abort', off);
+    Promise.resolve(sleep(ms)).then(off, off);
+  }) : sleep(ms));
   const told = (a) => ({ ok: false, reason: a.reason });
   const notAsked = (e) => ({ ok: false, reason: `the request could not be written (${e?.message ?? e})` });
 
   return {
-    launch: async ({ card, kind, product, sessionId } = {}) => {
+    launch: async ({ card, kind, product, sessionId } = {}, { signal } = {}) => {
       // Before the request is written a throw reads as refused (owner-ports.mjs).
       if (!REQUEST_ID.test(sessionId ?? '')) throw new Error('the launch names no session id the runner takes');
       if (!RUNNER_KINDS.includes(kind)) throw new Error(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
@@ -119,16 +131,18 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       if (!CARD_ID.test(card ?? '') || card.startsWith('.') || !productName(product)) throw new Error('the launch names no card or product');
       return ask(`launch-${sessionId}`, { launch: { card, kind, product, sessionId } }, (a, s) => {
         const state = Object.hasOwn(s.requests, sessionId) ? s.requests[sessionId].state : undefined;
-        if (a.ok === false) return state === 'refused' ? told(a) : undefined;
+        // A refusal is the runner's once the request is used up by it: refused, or cancelled (a stop reached it before the
+        // launch did, #456 r1 m1). Both are USED_UP (owner-status.mjs), so neither can still start a session.
+        if (a.ok === false) return state === 'refused' || state === 'cancelled' ? told(a) : undefined;
         const right = (state === 'started' || state === 'stopped') && a.sessionId === sessionId && !launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot });
         // The session the answer names is the one the status lists (review M2): listed while started, and agreeing.
         const x = s.sessions.find((y) => y.id === sessionId);
         const agrees = x ? x.card === card && x.product === product && x.kind === kind && x.pgid === a.pgid && x.signin === a.signin
           && x.config_dir === a.configDir && x.outbox === a.outbox : state === 'stopped';
         return right && agrees ? { ok: true, ...Object.fromEntries(LAUNCH_FIELDS.filter((f) => f !== 'base' || a.base !== undefined).map((f) => [f, a[f]])) } : undefined;
-      });
+      }, undefined, signal);
     },
-    stopGroup: async (session) => {
+    stopGroup: async (session, { signal } = {}) => {
       const { id, pgid, kind } = session ?? {};
       if (!REQUEST_ID.test(id ?? '')) return { ok: false, reason: 'the stop names no session id' };
       if (!RUNNER_KINDS.includes(kind)) return { ok: false, reason: `the worker runner did not start ${JSON.stringify(kind)} sessions` };
@@ -137,20 +151,23 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const x = s.sessions.find((y) => y.id === id);
         // Gone by the status's own rule (review M1: no alive field is not gone), and the group that was asked to stop.
         return x && x.stop_requested === true && !live(x) && (pgid === undefined || pgid === null || x.pgid === pgid) && name(a.how) ? { ok: true, how: a.how } : undefined;
-      }, notAsked);
+      }, notAsked, signal);
     },
-    saveWork: async (session) => {
+    saveWork: async (session, { signal } = {}) => {
       const { id, kind, card } = session ?? {};
       if (NO_COPY_KINDS.includes(kind)) return { ok: true };
       if (kind === 'overnight') return { ok: false, reason: 'no runner starts overnight sessions yet, so none saves one' };
       if (!RUNNER_KINDS.includes(kind)) return { ok: false, reason: `no runner saves ${JSON.stringify(kind)} sessions` };
       if (!REQUEST_ID.test(id ?? '')) return { ok: false, reason: 'the save names no session id' };
-      return ask(`saveWork-${id}-${nonce()}`, { saveWork: { id, kind, card: card ?? null } }, (a) => (a.ok ? { ok: true } : told(a)), notAsked);
+      return ask(`saveWork-${id}-${nonce()}`, { saveWork: { id, kind, card: card ?? null } }, (a) => (a.ok ? { ok: true } : told(a)), notAsked, signal);
     },
-    pauseLead: async ({ product } = {}) => {
+    pauseLead: async ({ product } = {}, { signal } = {}) => {
       if (!productName(product)) throw new Error('the pause names no product');
-      const r = await ask(`pauseLead-${product}-${nonce()}`, { pauseLead: { product } }, (a) => (a.ok ? { ok: true } : told(a)));
-      if (!r.ok) throw new Error(r.reason);
+      const r = await ask(`pauseLead-${product}-${nonce()}`, { pauseLead: { product } }, (a) => (a.ok ? { ok: true } : told(a)), undefined, signal);
+      // Still a throw on a time-out (#456 r1 c1): owner-ports.mjs says pauseLead fails by throwing, and its one caller
+      // (pass.mjs pausing, through guarded) reads only that it failed and why. The error keeps timedOut for any reader
+      // that looks, and its reason names the time-out.
+      if (!r.ok) throw Object.assign(new Error(r.reason), r.timedOut ? { timedOut: true } : {});
       return r;
     },
   };
