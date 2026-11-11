@@ -192,10 +192,11 @@ export function parkOnLimit(rec, id, { ranAt = T0, parkedAt = ranAt, account, ca
 const clocks = new WeakMap();
 /** Moves the Record's clock of a recWith record (ms): its later writes are stamped then. */
 export const setClock = (rec, ms) => { clocks.get(rec).t = ms; };
-// outboxRoot: as M9's; with none the stand-in refuses every outbox file (L910).
-export function recWith(entries = [], { now = T0, dead = null, outboxRoot } = {}) {
+// outboxRoot: as M9's; with none the stand-in refuses every outbox file (L910). product: the Record's own (p1, as the
+// tests seed it), so a hand-in tagged with another product is refused as M9 refuses it (L938 m2).
+export function recWith(entries = [], { now = T0, dead = null, outboxRoot, product = 'p1' } = {}) {
   const clock = { t: now };
-  const rec = memoryRecord({ now: () => clock.t, dead, outboxRoot });
+  const rec = memoryRecord({ now: () => clock.t, dead, outboxRoot, product });
   clocks.set(rec, clock);
   for (const [entity, id, doc] of entries) seed(rec, entity, id, doc);
   return rec;

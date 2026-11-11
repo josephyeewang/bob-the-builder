@@ -280,7 +280,11 @@ export function makeRecord(impl) {
 // The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
 export const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
 
-export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) {
+// The Record's refusal of another product's outbox: one wording for M9's Store Writer and the stand-in (L850-2, L938 m2).
+export const otherProductReason = (product, other) => `this record is product ${product}'s, and the outbox is product ${other}'s`;
+
+// product: the product this stand-in is the Record of (as M9's); a tag naming another product is refused, as M9 refuses it.
+export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null, product = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
@@ -336,8 +340,8 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
     applyOutbox(tag, file) {
       // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. With no
       // outbox root it refuses every file, as M9 does, so no test hands in a file the real Record would not find (L910).
-      // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
-      // (L850-2); a tag's product still picks the folder through outboxPlace.
+      // Given its product, it refuses another product's tag first, as the Store Writer does (L850-2, L938 m2).
+      if (product != null && tag?.product != null && tag.product !== product) return refused(otherProductReason(product, tag.product));
       const place = outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).
