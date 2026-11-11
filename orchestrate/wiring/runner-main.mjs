@@ -211,13 +211,36 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  * the folder itself only the sessions' sandbox and tool walls stop (the snapshot deny, a lane 4 card).
  * No folder on the way carries an access list entry that lets anyone write (L926 self-review M1: a 0755 folder with
  * "everyone allow add_file" is everyone's to write; macOS's own "deny" entries, as on a home folder, are fine).
- * → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
+ * What this can't stop (L942 m4): the folder's owner, the runner's user and so its sessions, may give itself "delete" on
+ * the folder in its access list and then rename it away. That fails safe: the snapshot goes missing, and the product is
+ * held. So the whole check, the folder's own access list included, runs again at each start (keepSnapshots `recheck`,
+ * L942 c5), and a folder that fails it holds the product. A disk image mounted over the folder is the L921 settings deny's.
+ * A missing folder whose parent is there is held to the rule for the folders above it (L942 m2), so a bad place is told
+ * as that, not as a folder to make. → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
  */
 export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid(), aclWrites = aclWriteEntries } = {}) {
   const no = (why) => ({ missing: false, reason: `its folder ${dir} ${why}` });
+  const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
+  // The folder above it: root's alone (#419 r4 M1); every one above that root's, or sticky if others can write it.
+  const above = () => {
+    const parent = dirname(dir);
+    let ps; try { ps = lstat(parent); } catch (e) { return `sits in ${parent}, which can't be read (${e?.code ?? e?.message})`; }
+    if (ps.uid !== 0 || (ps.mode & 0o022)) return `sits in ${parent}, which is not root's alone (its owner is uid ${ps.uid}, mode ${(ps.mode & 0o7777).toString(8).padStart(4, '0')}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`;
+    for (let a = parent; ; a = dirname(a)) {
+      let s; try { s = lstat(a); } catch (e) { return `sits in ${a}, which can't be read (${e?.code ?? e?.message})`; }
+      if (s.uid !== 0 || ((s.mode & 0o022) && !(s.mode & 0o1000))) return `sits in ${a}, which others than root can change (its owner is uid ${s.uid}, mode ${(s.mode & 0o7777).toString(8).padStart(4, '0')})`;
+      const up = acl(a);
+      if (up.length) return `sits in ${a}, which has an access list entry that lets others write (${up[0]})`;
+      if (a === '/') return null;
+    }
+  };
   let st; try { st = lstat(dir); } catch (e) {
-    if (e?.code === 'ENOENT') return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` };
-    return no(`can't be read (${e?.code ?? e?.message})`);
+    if (e?.code !== 'ENOENT') return no(`can't be read (${e?.code ?? e?.message})`);
+    // Missing. Where its parent is there, that place is held to the rule first (L942 m2): a folder made there would fail.
+    let parentThere = true; try { lstat(dirname(dir)); } catch { parentThere = false; }
+    const bad = parentThere ? above() : null;
+    if (bad) return no(bad);
+    return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` };
   }
   if (st.isSymbolicLink()) return no('is a link');
   if (!st.isDirectory()) return no('is not a folder');
@@ -225,20 +248,10 @@ export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) =
   if (real !== dir) return no(foldKey(real) === foldKey(dir) ? `is spelled otherwise on the disk (it is ${real})` : `is reached through a link (it is ${real})`);
   if (st.uid !== uid) return no(`is not owned by the runner's user (its owner is uid ${st.uid}, the runner is ${uid})`);
   if (st.mode & 0o022) return no('can be written by others than the runner (a group or other write bit)');
-  const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
   const own = acl(dir);
   if (own.length) return no(`has an access list entry that lets others write (${own[0]})`);
-  // The folder above it: root's alone (#419 r4 M1). Its access list is read by the walk below, which starts here.
-  const parent = dirname(dir);
-  let ps; try { ps = lstat(parent); } catch (e) { return no(`sits in ${parent}, which can't be read (${e?.code ?? e?.message})`); }
-  if (ps.uid !== 0 || (ps.mode & 0o022)) return no(`sits in ${parent}, which is not root's alone (its owner is uid ${ps.uid}, mode ${(ps.mode & 0o7777).toString(8).padStart(4, '0')}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`);
-  for (let a = dirname(dir); ; a = dirname(a)) {
-    let s; try { s = lstat(a); } catch (e) { return no(`sits in ${a}, which can't be read (${e?.code ?? e?.message})`); }
-    if (s.uid !== 0 || ((s.mode & 0o022) && !(s.mode & 0o1000))) return no(`sits in ${a}, which others than root can change (its owner is uid ${s.uid}, mode ${(s.mode & 0o7777).toString(8).padStart(4, '0')})`);
-    const up = acl(a);
-    if (up.length) return no(`sits in ${a}, which has an access list entry that lets others write (${up[0]})`);
-    if (a === '/') return null;
-  }
+  const bad = above();
+  return bad ? no(bad) : null;
 }
 
 // The access list rights that change nothing (macOS chmod(1), "ACL MANIPULATION"): reading, and the inheritance flags.
@@ -249,14 +262,15 @@ const ACL_HARMLESS = new Set(['read', 'list', 'search', 'execute', 'readattr', '
 const ACL_LINE = /^\d+: .+? (?:inherited )?(allow|deny) ([a-z_]+(?:,[a-z_]+)*)$/;
 /**
  * A folder's access list entries that may let someone write, read with /bin/ls -lde (macOS); none off a Mac. Every
- * numbered entry line counts, unless it is plainly a deny, or an allow whose rights are all harmless (#419 r4 m1: a line
- * this can't parse is a write entry, never skipped).
+ * non-empty line after the folder's own line counts, unless it is plainly a deny, or an allow whose rights are all
+ * harmless (#419 r4 m1: a line this can't parse is a write entry, never skipped; L942 m1: a numbered one or not). The
+ * folder's own line runs on one line for each newline in its path, which ls prints as it is.
  */
 export function aclWriteEntries(dir, { run = spawnSync, platform = process.platform } = {}) {
   if (platform !== 'darwin') return [];
   const r = run('/bin/ls', ['-lde', dir], { encoding: 'utf8' });
   if (r.error || r.status !== 0) throw new Error(`/bin/ls -lde failed (${r.error?.code ?? r.status})`);
-  return String(r.stdout).split('\n').slice(1).map((l) => l.trim()).filter((l) => /^\d+: /.test(l))
+  return String(r.stdout).split('\n').slice(1 + (String(dir).match(/\n/g)?.length ?? 0)).map((l) => l.trim()).filter((l) => l !== '')
     .filter((l) => { const m = ACL_LINE.exec(l); return !m || (m[1] === 'allow' && m[2].split(',').some((p) => !ACL_HARMLESS.has(p))); });
 }
 
@@ -265,9 +279,11 @@ export function aclWriteEntries(dir, { run = spawnSync, platform = process.platf
  * it is 5 minutes old. A rewrite that fails stops its refresher (snapshot.mjs), failing safe. Until it is kept fresh again
  * that product starts no session (#369 r2 m2): `held(product)` starts the refresher once more at each start and, while
  * that fails too, answers why (told once with `log`), so the start is refused. Sessions already running are kept fresh
- * again by the next start that succeeds in this. → { held(product) → reason | null, stop() }.
+ * again by the next start that succeeds in this. `recheck(path)` (L942 c5) checks the snapshot's folder again at each
+ * start, even while it is kept fresh (its owner may have changed its access list since): a folder that fails holds the
+ * product. → { held(product) → reason | null, stop() }.
  */
-export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } = {}) {
+export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, recheck = () => null } = {}) {
   const kept = new Map(); const failed = new Map(); const told = new Set();
   const wanted = (name) => { const p = c.products[name]; return typeof p?.render?.paths?.snapshot === 'string' && p.rules ? p : null; };
   for (const name of Object.keys(c.products)) {
@@ -280,7 +296,13 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {} } =
     if (!p) return null;
     const k = kept.get(name);
     let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
-    if (!e) return null;
+    if (!e) {
+      let why; try { why = recheck(p.render.paths.snapshot); } catch (x) { why = `it can't be checked (${x?.message ?? x})`; }
+      if (!why) { told.delete(`${name} folder`); return null; }
+      const reason = `product ${name}'s rules snapshot: ${why}, so its sessions are not started`;
+      if (!told.has(`${name} folder`)) { told.add(`${name} folder`); log(reason); }
+      return reason;
+    }
     if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }
     try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); failed.delete(name); told.delete(name); log(`product ${name}'s rules snapshot is kept fresh again`); return null; } catch (x) {
       failed.set(name, x);
@@ -329,7 +351,7 @@ export async function main(argv, { readConfig = (f) => { const self = selfPath()
   // which folder to make, and is checked again, folder and all, at each later try.
   // Checked again here at each try on purpose (also right after the check above): a missing folder may be made later.
   const guarded = (path, rules) => { const f = folderProblem(dirname(path)); if (f) throw new Error(f.reason); return fresh(path, rules); };
-  const snaps = keepSnapshots(c, { fresh: guarded, log });
+  const snaps = keepSnapshots(c, { fresh: guarded, log, recheck: (path) => folderProblem(dirname(path))?.reason ?? null });
   let P;
   try {
     P = realRunnerPorts(c, ports, { stopped: () => stopping, log, productHeld: snaps.held });
