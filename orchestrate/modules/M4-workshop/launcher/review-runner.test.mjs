@@ -2326,14 +2326,20 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   q.w.clock.t += 60_000;
   q.w.ctx.dispatcherUid = ME + 1;
   q.w.ask({ request_id: 'other-1' });
-  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], "another user's request is refused");
+  const q1 = await runnerPass(q.w.ctx);
+  assert.deepEqual(q1.started, [], "another user's request is refused");
+  refusedFor(q1, /came within the last 30 minutes, so it was not started/);
   q.w.ctx.dispatcherUid = ME;
   q.w.clock.t += 60_000;
   q.w.ask({ request_id: 'disp-2' });
-  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], "then the Dispatcher's own, with no new stop between");
+  const q2 = await runnerPass(q.w.ctx);
+  assert.deepEqual(q2.started, [], "then the Dispatcher's own, with no new stop between");
+  refusedFor(q2, /came within the last 30 minutes, so it was not started/);
   q.w.clock.t += 26 * 60_000;
   q.w.ask({ request_id: 'disp-3' });
-  assert.deepEqual((await runnerPass(q.w.ctx)).started, [], 'still within the 30 minutes');
+  const q3 = await runnerPass(q.w.ctx);
+  assert.deepEqual(q3.started, [], 'still within the 30 minutes');
+  refusedFor(q3, /came within the last 30 minutes, so it was not started/);
   q.w.clock.t += 3 * 60_000;
   q.w.ask({ request_id: 'q-3' });
   assert.deepEqual((await runnerPass(q.w.ctx)).started.map((s) => s.session_id), ['S-1'], 'past them it starts');
@@ -2354,6 +2360,31 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   refusedFor(gr, /no live reviewer for card C-1 at aaaaaaa was reached; it is kept 30 minutes/);
   g.w.ctx.processName = realName;
   assert.equal(JSON.parse(readFileSync(join(g.w.root, 'state.json'), 'utf8')).targets_waiting.length, 1);
+  // Once that session ends, a new request for it is refused by the kept stop, not as already running.
+  g.w.end('S-1'); await runnerPass(g.w.ctx);
+  g.w.ask({ request_id: 'g-2' });
+  const g2 = await runnerPass(g.w.ctx);
+  assert.deepEqual(g2.started, []);
+  refusedFor(g2, /came within the last 30 minutes, so it was not started/);
+  // L951 r M1: a second stop for it starts its 30 minutes again.
+  g.w.clock.t += 20 * 60_000;
+  writeStopRequest({ dir: g.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  refusedFor(await runnerPass(g.w.ctx), /it is kept already, and kept 30 minutes from now/);
+  g.w.clock.t += 20 * 60_000;
+  g.w.ask({ request_id: 'g-3' });
+  const g3 = await runnerPass(g.w.ctx);
+  assert.deepEqual(g3.started, [], '40 minutes after the first stop, 20 after the second');
+  refusedFor(g3, /came within the last 30 minutes, so it was not started/);
+  // L951 r m2: a target stop still being tried again whose session goes first is kept.
+  const e = await stopWorld({ fail: 1 });
+  e.w.ctx.dispatcherUid = ME + 1;
+  e.w.ask({ request_id: 'e-1' }); await runnerPass(e.w.ctx);
+  e.w.ctx.dispatcherUid = ME;
+  writeStopRequest({ dir: e.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  refusedFor(await runnerPass(e.w.ctx), /it is tried again on the next pass/);
+  e.w.ctx.processName = () => '/bin/zsh';
+  refusedFor(await runnerPass(e.w.ctx), /the reviewer for card C-1 at aaaaaaa went before its stop was done; it is kept 30 minutes/);
+  assert.equal(JSON.parse(readFileSync(join(e.w.root, 'state.json'), 'utf8')).targets_waiting.length, 1);
   // A stop that did stop one is not kept.
   const k = await stopWorld();
   k.w.ask({ request_id: 'k-1' }); await runnerPass(k.w.ctx);

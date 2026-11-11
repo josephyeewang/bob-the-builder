@@ -1146,9 +1146,11 @@ export async function runnerPass(ctx) {
     result.stopped.push({ pid: r.pid, sessionId: r.session_id, stopped: true, by_request: true });
     return null;
   };
+  const goneTargets = [];   // a stop by card, role and head whose session went before a retry stopped it (L951 r m2)
   for (const r of state.running.filter((x) => (x.stoppable === true || x.stop_by_target === true) && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
     const why = await stopIt(r);
     if (why) stopSaid(why);
+    if (r.stop_by_target === true && !r.stop_wanted && !r.stopped_by_request && !r.stop_failed) goneTargets.push(r);
   }
   // A session stopped by request but still live 5 minutes on (it ignored the stop) is told to Joe once (m3).
   for (const r of state.running.filter((x) => x.stopped_by_request)) {
@@ -1169,16 +1171,19 @@ export async function runnerPass(ctx) {
     if (toldAt !== null && now - toldAt < STOPS_FULL_TOLD_MS) return;
     state.stops_full_told_at = iso(now);
     state.told = state.told.filter((t) => t !== 'stops-waiting-full');
-    alert('stops-waiting-full', `${KEEP_STOPS_WAITING} stops are waiting for review requests that have not come, so a new one was not kept, and the review it names may still start. Something may be writing stops far too often.`);
+    alert('stops-waiting-full', `${KEEP_STOPS_WAITING} stops (by request id, or by card, role and head) are waiting for review requests that have not come, so a new one was not kept, and the review it names may still start. Something may be writing stops far too often.`);
   };
   // A stop by card, role and head that reached no live session (L946 r1 M1, L951 m3): kept 30 minutes, and every
   // request for exactly those in that time is refused, whoever wrote it (L951 M1); it is not used up by the first.
   const keepTarget = (card, role, head) => {
-    if (state.targets_waiting.some((x) => x.card === card && x.role === role && x.head === head)) return 'it is kept already, so a request for it within 30 minutes is refused, not started';
+    // Kept already: its 30 minutes start again from this stop (L951 r M1), so each stop holds for its own 30 minutes.
+    const was = state.targets_waiting.find((x) => x.card === card && x.role === role && x.head === head);
+    if (was) { was.at = iso(now); return 'it is kept already, and kept 30 minutes from now, so a request for it is refused, not started'; }
     if (state.targets_waiting.length >= KEEP_STOPS_WAITING) { stopsFull(); return `${KEEP_STOPS_WAITING} are kept already, so this one was not kept; a request for it may start`; }
     state.targets_waiting = [...state.targets_waiting, { card, role, head, at: iso(now) }];
     return 'it is kept 30 minutes, so a request for it is refused, not started';
   };
+  for (const r of goneTargets) stopSaid(`the ${r.role} for card ${r.card} at ${String(r.head).slice(0, 7)} went before its stop was done; ${keepTarget(r.card, r.role, r.head)}`);
   let strangers = 0;
   const unreadStops = new Map();   // reason → files: the reasons are the runner's own few, so this stays short
   for (const name of stopNames) {
