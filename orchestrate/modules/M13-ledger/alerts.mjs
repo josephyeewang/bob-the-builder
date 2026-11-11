@@ -359,14 +359,25 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     // that can't say is read as not known.
     const noLogin = () => !('loginTrouble' in gh) || gh.loginTrouble;
     const loginStop = { swept: false, why: 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed' };
-    if (noLogin()) return { ...out, ...loginStop };
+    // Known clear from here on (L965 review m1): an id whose issue was closed, refused (its key mark holds it for the
+    // day), or not listed at all. A kept issue, or one not reached, stays needed, so the next proof reads the list again.
+    const listedIds = new Set();
+    const handled = new Set();
+    const finish = (res) => {
+      for (const [, p] of need) if (!listedIds.has(p.id)) handled.add(p.id);
+      const ids = [...new Set([...known, ...handled])];
+      if (ids.length !== known.size + need.length) writer.put(pid, { kind: 'fact.alert-sweep-list', listed_at: markFresh ? mark.listed_at : t, clear_ids: ids });
+      return res;
+    };
+    for (const i of list) { const id = FOOTER.exec(lastLine(i.body))?.[1]; if (byId.has(id)) listedIds.add(id); }
+    if (noLogin()) { listedIds.clear(); for (const [, p] of need) listedIds.add(p.id); return finish({ ...out, ...loginStop }); }
     for (const i of list) {
       const hit = byId.get(FOOTER.exec(lastLine(i.body))?.[1]);
       if (hit === undefined) continue;
       const [key, p] = hit;
       // This issue tried by this key in the last day (its close refused, or kept): not again until a day on.
       const km = writer.get(sweepFactId(key));
-      if (km?.issue === i.number && fresh(km.swept_at)) continue;
+      if (km?.issue === i.number && fresh(km.swept_at)) { handled.add(p.id); continue; }
       // The key's own clear, looking on GitHub: it finds the robot's open issue for this key by its own checks (the
       // robot's, open, the footer as the last line), says cleared in the footer, then closes it with the note.
       const proof = { at: p.at, issue: null, seen: null };
@@ -374,12 +385,19 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       if (r === 'cleared' && proof.issue !== null) out.closed.push(proof.issue);
       else if (r === false) out.failed.push(proof.issue ?? proof.seen ?? i.number);
       else if (r === 'kept') out.kept.push(proof.seen ?? i.number);
-      // The list held an issue for this key: its own mark (L965 m2).
-      if (!wasSaved(writer.put(sweepFactId(key), { kind: 'fact.alert-sweep', alert: p.id, issue: i.number, swept_at: t }))) unmarked.push(key);
-      if (noLogin()) return { ...out, ...loginStop, ...(unmarked.length ? { why: `${loginStop.why}; ${markSay(unmarked)}` } : {}) };
+      // The list held an issue for this key and it was tried: its own mark (L965 m2). A kept issue is not a try, so it
+      // gets no mark and its id stays needed (L965 review m4).
+      if (r !== 'kept') {
+        handled.add(p.id);
+        if (!wasSaved(writer.put(sweepFactId(key), { kind: 'fact.alert-sweep', alert: p.id, issue: i.number, swept_at: t }))) unmarked.push(key);
+      }
+      if (noLogin()) {
+        // Not reached: their ids stay needed.
+        return finish({ ...out, ...loginStop, ...(unmarked.length ? { why: `${loginStop.why}; ${markSay(unmarked)}` } : {}) });
+      }
     }
     if (unmarked.length) out.why = markSay(unmarked);
-    return out;
+    return finish(out);
   }
   // The keys whose own mark the Record refused (L965 c4): their issue may be tried again before a day is out.
   const markSay = (keys) => `the Record refused the mark of ${keys.map((k) => masker.maskSecrets(String(k)).text.slice(0, 120)).join(', ')}, so it may be tried again before the day is out`;

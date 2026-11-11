@@ -1567,3 +1567,23 @@ test('L965 m2: a key orphaned again within the day closes on its next proof; a k
   const r3 = w.round(); await r3.clear({ key: B }); await r3.sweep({ product: 'product 1' });
   assert.equal(listed(w.gh), before + 1);
 });
+
+test('L965 review m1, m4: a kept issue leaves its key needed and unmarked, so it closes on the next proof the same day', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const r = w.round();
+  await r.clear({ key: A });
+  w.clock.tick(1);
+  w.world.refuse = true;
+  assert.equal(await w.round().raise({ key: A, title: A, body: 'It holds again.', status: 'again' }), 'changed');
+  w.world.refuse = false;
+  w.clock.tick(1);
+  assert.deepEqual((await r.sweep({ product: 'product 1' })).kept, [1]);
+  assert.equal(w.writer.get(sweepFactId(A)), null, 'kept is not a try: no mark');
+  // An hour on it truly clears: the list is read again and the issue closes, not a day later.
+  w.clock.tick(60);
+  const r2 = w.round();
+  await r2.clear({ key: A });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [1]);
+  assert.equal(w.gh.issues.get(1).closed, true);
+});
