@@ -452,7 +452,7 @@ function lossSetup(raise, rulesEntry = { stage: 'first' }) {
   const v = fakeVercel();
   const world = { refuse: false };
   const w = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
-  const writer = { get: w.get, put: (id, doc) => (world.refuse ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
+  const writer = { ...w, put: (id, doc) => (world.refuse ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
   const reported = [];
   const alerts = { raise, clear: async () => false, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
@@ -818,20 +818,21 @@ test('L402: an alert about the Record that GitHub lost is in the pass\'s answer,
   }
 });
 
-// Row 202 (#195 / L435, L957): the five raises ruled "condition stands" save nothing on a loss, so a lost one must show
+// Row 202 (#195 / L435, L957): the five raise sites (four kinds) ruled "condition stands" save nothing on a loss, so a lost one must show
 // in the pass's answer as false, be raised again on every pass while its condition stands, and go out once GitHub takes it.
-test('row 202: each "condition stands" raise that answered false is in the pass\'s answer and is raised again next pass', async () => {
+test('row 202: each "condition stands" raise that answered false is in the pass\'s answer, is raised again next pass, and goes out once GitHub takes it', async () => {
   const broken = (t) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, get() { throw Object.assign(new Error('x'), { status: 502 }); } });
   const cases = [
-    ['watcher-cannot-read (a read that throws)', 'watcher-cannot-read', 'vercel', { stage: 'first' }, broken, /could not read Vercel \(HTTP 502\)/],
+    ['watcher-cannot-read (a read that throws)', 'watcher-cannot-read', 'vercel', { stage: 'first' }, broken, /could not read Vercel \(HTTP 502\)/, 'cannot-read'],
     ['watcher-cannot-read (an answer in a shape it does not know)', 'watcher-cannot-read', 'vercel', { stage: 'first' },
-      (t) => { for (const d of t.v.s.deployments) { d.status = d.readyState; delete d.readyState; } }, /shape the production watcher does not know/],
+      (t) => { for (const d of t.v.s.deployments) { d.status = d.readyState; delete d.readyState; } }, /shape the production watcher does not know/, 'cannot-read'],
     ['no-stage', 'no-stage', 'rules', {}, () => {}, /has no stage/],
     ['old-version-live', 'old-version-live', 'production', { stage: 'first' }, (t) => { t.v.s.live = t.v.s.deployments[1].uid; }, /An older deployment was promoted/],
     ['watcher-cannot-save', 'watcher-cannot-save', 'baseline', { stage: 'first' },
-      (t) => { t.world.refuse = true; }, /The Record refused what the production watcher saw \(the store is full\)/],
+      (t) => { t.world.refuse = true; }, /The Record refused what the production watcher saw \(the store is full\)/, 'cannot-save'],
   ];
-  for (const [name, kind, subject, rulesEntry, start, body] of cases) {
+  // The status keeps a body that changes (an HTTP code, the store's reason) from reading as a new cause (L376).
+  for (const [name, kind, subject, rulesEntry, start, body, status] of cases) {
     let lose = true;
     const raise = sink((a) => (lose && a.key === `product 1|${kind}|${subject}` ? false : 'opened'));
     // GitHub answers a little later, as it does: a raise the pass forgot to wait for would land after the answer.
@@ -843,12 +844,15 @@ test('row 202: each "condition stands" raise that answered false is in the pass\
     for (let i = 0; i < 3; i++) {
       raise.reset();
       const out = await t.pass();
-      assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject && o.result !== 'none').map((o) => o.result), [false], `${name}: pass ${i + 1}`);
+      assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject), [{ kind, subject, result: false }], `${name}: pass ${i + 1}`);
       assert.deepEqual(subjects(raise, kind), [subject], `${name}: raised again on pass ${i + 1}`);
-      assert.match(raise.texts.find((a) => a.key.includes(`|${kind}|`)).body, body, name);
+      const sent = raise.texts.find((a) => a.key.includes(`|${kind}|`));
+      assert.match(sent.body, body, name);
+      assert.equal(sent.status, status, `${name}: status`);
     }
     lose = false; raise.reset();
     const out = await t.pass();
     assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject).map((o) => o.result), ['opened'], `${name}: sent once GitHub takes it`);
+    assert.deepEqual(subjects(raise, kind), [subject], name);
   }
 });
