@@ -645,6 +645,150 @@ test('L980: a card pushed again after its not_clean finding is not failed on the
   w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, head: 'f'.repeat(40) } }], { actor: 'test', kind: 'seed' }));
   await gatePass(w.ctx);
   assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  // #466 r1 M2: and on to the right end. Reviewed again at a real head that is still not clean, the gate brings its own
+  // finding up to that head and fails the card there; M11 writes the fix card.
+  const h3 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra3.mjs': 'z' }, 3);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, h3);
+  assert.match(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.reason, /src\/extra3\.mjs/);
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+// #466 r1 M2: the card pushed again and reviewed again at a head that is still not clean. reReview is the Workshop's
+// push (in_review at the new head) then a clean review and a merge request, as the real flow makes them.
+async function reReview(w, id, pr, files, n, { verify = true } = {}) {
+  const E = w.env; const g = w.g;
+  const head = g.commit([g.main], files, { from: g.main });
+  g.openPull({ number: pr, head, files });
+  must(put(E.record, 'workshop', 'card', id, { head, state: 'in_review' }), 'pushed again');
+  if (!verify) return head;
+  const sid = `R-${id}-${n}`;
+  runnerLaunch(E, id, sid, 'reviewer', head);
+  const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: E.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
+  must(E.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: id }, outboxFile(E, 'reviewer', sid, `verdict-${id}-${n}.md`, hdr)), 'verdict');
+  runnerEndedRecord(E, id, sid, 'reviewer', head);
+  must(put(E.review, 'dispatcher', 'card', id, { state: 'verified' }), 'verified');
+  must(E.record.write({ actor: 'dispatcher', entity: 'merge_request', id: `mr-${id}-${n}`, expectRev: 0, doc: { card: id, pr, session_id: 'S-1', head, rev: E.record.read('card', id).rev, requested_at: new Date(E.clock.t).toISOString() } }), 'request');
+  return head;
+}
+
+test('L980 (#466 r1 M2): an undo pushed again while queued (in review), then verified at a head still not clean, is failed there', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra2.mjs': 'y' }, 2, { verify: false });
+  await gatePass(w.ctx);
+  // In review: no finding is for the card, so nothing is written and nothing is failed.
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'in_review');
+  const h3 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra3.mjs': 'z' }, 3);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, h3);
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+test('L980 (#466 r1 M2): the card move lost, then pushed again and verified at a head still not clean: failed there, on the finding brought up to it', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed' ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  const h1 = w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head;
+  const h2 = await reReview(w, 'U-1', 9, { 'src/a.mjs': 'one', 'src/extra2.mjs': 'y' }, 2);
+  assert.notEqual(h1, h2);
+  for (let i = 0; i < 3; i++) { w.env.clock.t += 60_000; await gatePass(w.ctx); }
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  const f = w.env.record.read('fact', REVERSE_FACT('U-1'));
+  assert.equal(f.doc.head, h2);
+  assert.match(f.doc.reason, /src\/extra2\.mjs/);
+  assert.equal(w.env.record.meta('fact', REVERSE_FACT('U-1')).createdBy, 'merge_gate');
+  const sent = [];
+  await m11Pass(w, sent);
+  assert.ok(w.env.record.read('card', FIX_CARD('U-1')), 'the fix card is written');
+});
+
+// #466 r1 M1: the card was verified at a clean head; the pull request was pushed to a head that is not clean, which the
+// Record has not seen. The finding is of GitHub's test merge of that other head: nothing is recorded, nothing is failed.
+test('L980 (#466 r1 M1): a finding on a pull request head that is not the card head records nothing and fails no card', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  const h1 = verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  const h2 = w.g.commit([w.g.main], { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' }, { from: w.g.main });
+  w.g.openPull({ number: 9, head: h2, files: { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' } });
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
+  assert.equal(w.env.record.read('card', 'U-1').doc.head, h1);
+});
+
+// #466 r1 m1: while GitHub has not worked out the test merge (3 waits), or the test merge is of a main that is not the
+// one read now, the finding is not one yet: the merge may be refused, but nothing is recorded and no card is failed.
+test('L980 (#466 r1 m1): no not_clean while refusal 3 still waits on the test merge', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  w.g.pulls.get(9).mergeable_state = 'unknown';
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.ok((u.doc.reasons ?? []).some((x) => x.startsWith('3:')), JSON.stringify(u.doc));
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+test('L980 (#466 r1 m1): no not_clean on a test merge of a main that is not the one read now', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  const stale = 'd'.repeat(40);
+  view.commit = async (sha) => {
+    const c = await real.commit(sha);
+    const p = w.g.pulls.get(9);
+    return c && Array.isArray(c.parents) && c.parents.length === 2 && c.parents[1] === p.head ? { ...c, parents: [stale, p.head] } : c;
+  };
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+// #466 r1 m4: refused under the lock (check), the card put back to verified is failed in that same pass. Main moves
+// between the first judgement (a clean undo) and the one under the lock (now a path changed since).
+test('L980 (#466 r1 m4): an undo found not clean under the lock is failed in the same pass', async () => {
+  const w = world();
+  verifiedCard(w);
+  await gatePass(w.ctx);
+  const flagged = mergeOf(w).doc.merge_commit;
+  must(put(w.env.record, 'dispatcher', 'card', 'C-1', { state: 'closed' }), 'closed');
+  verifiedCard(w, 'U-1', { pr: 9, files: { 'src/a.mjs': 'one' }, undo: flagged });
+  const real = w.ctx.record;
+  let moved = false;
+  w.ctx.record = Object.create(real, { write: { value: (x) => {
+    const r = real.write(x);
+    if (!moved && r.ok && x.entity === 'merge' && x.doc?.state === 'checking') { moved = true; w.g.main = w.g.commit([w.g.main], { 'src/a.mjs': 'by hand' }, { from: w.g.main }); }
+    return r;
+  } } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  assert.ok(moved, 'the merge reached checking');
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
+  assert.ok(Array.isArray(u.doc.not_clean) && u.doc.not_clean.length, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
 });
 
 test('L980: an undo whose reverse could not be read is held: no not_clean fact, the card is not failed', async () => {

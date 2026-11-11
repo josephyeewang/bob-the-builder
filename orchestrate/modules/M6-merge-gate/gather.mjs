@@ -287,9 +287,17 @@ export async function gatherFacts(ctx, merge) {
     const er = await attempt(async () => { const w = watchReads({ view }); return throwIfUnread(await checkExactReverse({ view: w.view, reverses, merged: f.pr.merge_commit_sha }), w.seen); }, { ok: false }, unread('exactReverseUnread', 'exact reverse'));
     f.exactReverse = er.ok === true;
     // L980: what the check found, only when it read everything and answered no: the gate's not_clean fact says it. A
-    // check that threw ("could not check") says nothing about the change, so it is not kept.
+    // check that threw ("could not check") says nothing about the change, so it is not kept. Nor is a finding on a commit
+    // that is not the card's (#466 r1 M1): GitHub's test merge must be of the pull request's head, and that head the
+    // card's, or the card would be failed on a change it was never verified at; and of main as read now (#466 r1 m1),
+    // not a stale one GitHub has not redone yet. Otherwise nothing is kept, and 3, 5 and 6 refuse as before.
     const said = Array.isArray(er.reasons) ? er.reasons.map(String) : [];
-    if (er.ok === false && f.exactReverseUnread !== true && said.length && !said.some((x) => x.startsWith('could not check'))) f.exactReverseReasons = said;
+    if (er.ok === false && f.exactReverseUnread !== true && said.length && !said.some((x) => x.startsWith('could not check'))) {
+      const head = card.doc.head;
+      const ps = SHA.test(head ?? '') && f.pr?.head?.sha === head
+        ? await attempt(async () => (await view.commit(f.pr.merge_commit_sha))?.parents ?? null, null) : null;
+      if (Array.isArray(ps) && ps.length === 2 && ps[1] === head && SHA.test(f.main?.sha ?? '') && ps[0] === f.main.sha) f.exactReverseReasons = said;
+    }
     const robotBotId = botId(get('product_profile.robot'));
     f.reversesGateMerge = (await attempt(async () => { const w = watchReads({ gh }); return throwIfUnread(await readMark({ gh: w.gh, owner, repo, sha: reverses, robotBotId }), w.seen); }, { ok: false }, unread('reversesGateMergeUnread', 'robot mark'))).ok === true;
     const m = record.list('merge').find((x) => x.doc?.merge_commit === reverses);

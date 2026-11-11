@@ -342,12 +342,16 @@ export async function gatePass(ctx) {
   // The card's head it was found on goes with it, so a card pushed again since is never failed on the old finding.
   function notCleanOf(v, facts) {
     const r = v.refusals.find((x) => x.n === 9 && Array.isArray(x.not_clean) && x.not_clean.length);
-    return r ? { not_clean: r.not_clean, not_clean_head: facts?.card?.doc?.head ?? null } : {};
+    // #466 r1 m1: while 3 still waits (GitHub has not worked out the test merge), the finding is not one yet.
+    if (!r || v.refusals.some((x) => x.n === 3 && x.temporary)) return {};
+    return { not_clean: r.not_clean, not_clean_head: facts?.card?.doc?.head ?? null };
   }
 
-  // Records it (M11 undo.mjs fixCards reads it): the fact reverse-<undo card> = not_clean, written once (a fact already
-  // there is never rewritten), then the undo card verified/approved → failed, the one move M9 lets the gate make into
-  // failed, on that fact. Each pass finishes what a refused write left (1b), so it is safe to repeat.
+  // Records it (M11 undo.mjs fixCards reads it): the fact reverse-<undo card> = not_clean, written once for each head it
+  // is found at (the gate's own fact is brought up to a later head's finding, never another writer's), then the undo
+  // card verified/approved → failed, the one move M9 lets the gate make into failed, on that fact. Only while the card
+  // is verified or approved at the finding's head. Each pass finishes what a refused write left (1b), so it is safe to
+  // repeat.
   function settleNotClean(m) {
     const card = m?.doc?.card ? fresh('card', m.doc.card) : null;
     if (!card?.doc || card.corrupt || card.doc.kind !== 'exact_reverse') return;
@@ -355,10 +359,13 @@ export async function gatePass(ctx) {
     if (typeof at !== 'string' || !at) return;
     const fid = REVERSE_FACT(card.id);
     const f = record.read('fact', fid);
+    // #466 r1 M2: the finding is for the card only while the card is verified or approved at the head it was found on;
+    // pushed again or moved on since, the next review judges it anew. The guard compares the finding with the card.
+    if (card.doc.head !== at || !['verified', 'approved'].includes(card.doc.state)) return;
+    const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
+    const fact = { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() };
     if (!f) {
-      if (card.doc.head !== at) return;   // pushed again since: the next review judges it anew
-      const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
-      const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() } });
+      const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: fact });
       if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
       step(m, 'undo_not_clean', { fact: fid });
     } else if (f.corrupt || f.doc?.state !== NOT_CLEAN || !factFrom(ACTOR, { id: fid, createdBy: record.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) {
@@ -369,6 +376,12 @@ export async function gatePass(ctx) {
       const r = write('merge', m, { not_clean_stuck_told_at: iso() });
       if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'not_clean_stuck_told', reason: r.reason });
       return;
+    } else if (f.doc.head !== at) {
+      // #466 r1 M2 (b): the gate's own finding was for another head of this card (pushed again since, and still not
+      // clean at this one): it is brought up to this finding (head and reason), and the card is failed on it.
+      const w = write('fact', f, fact, { kind: 'undo_not_clean' });
+      if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
+      step(m, 'undo_not_clean', { fact: fid, again: true });
     }
     const c = fresh('card', card.id);
     if (!['verified', 'approved'].includes(c?.doc?.state) || c.doc.head !== at || fresh('fact', fid)?.doc?.head !== at) return;
