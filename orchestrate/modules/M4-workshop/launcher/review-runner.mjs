@@ -34,7 +34,9 @@
 // says what it stopped, or that none was running. A plan reviewer's id is its plan's hash, which anyone can work out,
 // so a stop never reaches one. The runner stops the
 // session's whole process group (claude starts as its leader) once its pid is still claude under that session's id, and
-// lists it in the status (`stopped_by_request`); its end then tells Joe it was stopped, not that it went silent. A stop
+// lists it in the status (`stopped_by_request`); its end then tells Joe it was stopped, not that it went silent (a stop
+// by card, role and head whose every reason is a cancel or a card ended for good tells nothing, L962 m6, #455 r1 M1;
+// any other reason, or none, tells). A stop
 // for an id no session it runs was started on, and not seen before, is kept 30 minutes in its memory, so a request with
 // that id arriving with it or held behind the start cap is refused, not started (L935 self-review M1). A stop for one
 // already ended does nothing and says why; it never fails the pass. A stop that can never work (the process leads no
@@ -144,6 +146,11 @@ const STOPS_FULL_TOLD_MS = 24 * 60 * 60_000;
 export const STOP_KEYS = Object.freeze(['request_id', 'stop']);
 // A stop by what it is for (L946): every reviewer or auditor running for exactly this card, role and head.
 export const STOP_TARGET_KEYS = Object.freeze(['card', 'head', 'role', 'stop']);
+// The same with why the Dispatcher stops it (#455 r1 M1): the stop step's own reason, a short plain word. Only a card
+// cancelled, or ended for good, is a stop Joe is not told of; any other reason, or none, is told (noisy beats silent).
+export const STOP_TARGET_REASON_KEYS = Object.freeze(['card', 'head', 'reason', 'role', 'stop']);
+export const STOP_REASON = /^[a-z_]{1,32}$/;
+export const STOP_QUIET_REASONS = Object.freeze(['cancel', 'card_final']);
 export { CARD_ID };
 const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -299,15 +306,16 @@ export function readRequest(dir, name, { firstSeen = null, now = null } = {}) {
         if (typeof req.request_id !== 'string' || !REQUEST_ID.test(req.request_id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
         return { ok: true, req, stop: true, owner: st.uid };
       }
-      if (keys.join() === STOP_TARGET_KEYS.join()) {
+      if (keys.join() === STOP_TARGET_KEYS.join() || keys.join() === STOP_TARGET_REASON_KEYS.join()) {
         if (req.stop !== true) return { ok: false, reason: 'it must say "stop": true' };
+        if (req.reason !== undefined && (typeof req.reason !== 'string' || !STOP_REASON.test(req.reason))) return { ok: false, reason: 'the stop\'s reason is not a short plain word' };
         if (typeof req.card !== 'string' || !CARD_ID.test(req.card) || req.card.startsWith('.')) return { ok: false, reason: 'the card id is not a plain id' };
         if (!REVIEW_ROLES.includes(req.role)) return { ok: false, reason: `a stop names a role of ${REVIEW_ROLES.join(' or ')}` };
         if (typeof req.head !== 'string' || !HEX40.test(req.head)) return { ok: false, reason: 'the head is not 40 hex' };
         return { ok: true, req, stop: true, target: true, owner: st.uid };
       }
       const plan = keys.join() === PLAN_REQUEST_KEYS.join();
-      if (!plan && keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')} (or, for a plan reviewer, ${PLAN_REQUEST_KEYS.join(', ')}; for a stop, ${STOP_KEYS.join(', ')} or ${STOP_TARGET_KEYS.join(', ')})` };
+      if (!plan && keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')} (or, for a plan reviewer, ${PLAN_REQUEST_KEYS.join(', ')}; for a stop, ${STOP_KEYS.join(', ')}, ${STOP_TARGET_KEYS.join(', ')} or ${STOP_TARGET_REASON_KEYS.join(', ')})` };
       // No card file's name starts with a dot, so no such card can be read (R-0b-171).
       if (typeof req.card !== 'string' || !CARD_ID.test(req.card) || req.card.startsWith('.')) return { ok: false, reason: 'the card id is not a plain id' };
       if (plan && req.role !== PLAN_REVIEW_ROLE) return { ok: false, reason: 'only a plan reviewer\'s request names a fingerprint' };
@@ -590,7 +598,7 @@ export async function runnerPass(ctx) {
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
-      running: state.running.map((r) => ({ card: r.card, head: r.head, role: r.role, session_id: r.session_id, started_at: r.started_at, ...(r.fingerprint ? { fingerprint: r.fingerprint, request_id: r.request_id } : {}), ...stopShown(r) })),
+      running: state.running.filter((r) => r.end_pending !== true).map((r) => ({ card: r.card, head: r.head, role: r.role, session_id: r.session_id, started_at: r.started_at, ...(r.fingerprint ? { fingerprint: r.fingerprint, request_id: r.request_id } : {}), ...stopShown(r) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [], offers,
@@ -702,7 +710,7 @@ export async function runnerPass(ctx) {
     if (c?.missing === true || (c?.ok && !needsRole(c.doc, n.role))) { delete state.no_verdict[key]; continue; }
     if (c?.ok && !isHead(c.doc.head)) { headUnread(n.card); continue; }
     if (c?.ok && c.doc.head !== n.head) { delete state.no_verdict[key]; continue; }
-    if (notTakenCovers(state, n) || state.running.some((r) => r.card === n.card && r.role === n.role)) { delete state.no_verdict[key]; continue; }
+    if (notTakenCovers(state, n) || state.running.some((r) => r.end_pending !== true && r.card === n.card && r.role === n.role)) { delete state.no_verdict[key]; continue; }
     let t; try { t = await ctx.verdictTaken({ role: n.role, sessionId: n.session, card: n.card, head: n.head }); } catch { t = null; }
     if (t?.ok === true) delete state.no_verdict[key];
   }
@@ -729,7 +737,8 @@ export async function runnerPass(ctx) {
   // The sessions alive now. One the runner did not start is stopped, and Joe is told (m-7); one that ended leaves `running`.
   let live;
   try { live = await ctx.sessions(); } catch (e) { fail(`the review sessions could not be listed (${e?.message ?? e}), so none starts`); return finish(); }
-  const mine = new Set(state.running.map((r) => r.pid));
+  // One whose end is pending (#455 r1 M2) is ended, not live: its pid, if reused, is a stray like any other.
+  const mine = new Set(state.running.filter((r) => r.end_pending !== true).map((r) => r.pid));
   let strayClaude = false;
   for (const s of live) {
     if (mine.has(s.pid)) continue;
@@ -796,20 +805,33 @@ export async function runnerPass(ctx) {
     else h = await handed();
     if (pre?.ok === true && (h?.ok !== true || h.verdict?.content_sha256 !== pre.verdict?.content_sha256)) h = { ok: false, reason: 'finalize changed the review beyond its labels, so it is refused' };
     const sha = h?.ok === true && HEX64.test(h.verdict?.sha256 ?? '') ? h.verdict.sha256 : null;
-    // Stopped at the Dispatcher's request (re-review 3 m4): its verdict, if it wrote one, never counts.
-    const said = doc.stopped_by_request ? (sha || h?.none !== true ? 'refused' : 'none') : sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
+    // Stopped at the Dispatcher's request (re-review 3 m4): its verdict, if it wrote one, never counts. Nor does one
+    // written by a session a stop reached but did not stop (still being tried, gone first, or failed), unless it was a
+    // stop by card, role and head whose every reason was a cancel (#455 r1 m4): a stop for a red band, a pause or a card
+    // that now waits says the head should not pass as it stands, and a stop by id carries no reason. Keyed on the marks
+    // that stay (the stop's own and its reasons), not on `stop_wanted`, which a gone or failed stop clears (L738 M1).
+    // One that wrote no verdict ends as any silent session does (L953 m1).
+    const stopping = !doc.stopped_by_request && sha !== null && (doc.stop_by_id === true || (doc.stop_by_target === true && !(doc.stop_reasons?.length ? doc.stop_reasons : ['none']).every((x) => x === 'cancel')));
+    const stopped = doc.stopped_by_request || stopping;
+    const said = stopped ? (sha || h?.none !== true ? 'refused' : 'none') : sha ?? (h?.ok !== true && h?.none === true ? 'none' : 'refused');
     const left = outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: doc.role, sessionId: doc.session_id }));
     if (!markEnded(doc, said, how, said === 'none' && left.empty)) return false;
     if (state.packages) delete state.packages[doc.session_id];
     const done = { ...a, started: true, ended_at: iso(now), session_id: doc.session_id };
     const where = `card ${doc.card} at ${doc.head.slice(0, 7)}`;
     const offer = { action: 'review-again', session_id: doc.session_id };
-    if (sha && !doc.stopped_by_request) state.attempts[k] = { ...done, held: false };
-    else if (doc.stopped_by_request) {
+    if (sha && !stopped) state.attempts[k] = { ...done, held: false };
+    else if (stopped) {
       // Stopped at the Dispatcher's request (L935): told as that, in place of the silent-end alert, and with no "review
       // again": the Dispatcher stopped it on purpose. It still counts as a failure, so the head can't pass.
-      state.attempts[k] = { ...done, held: true, last_reason: 'stopped at the Dispatcher\'s request' };
-      alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} was stopped at the Dispatcher's request ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
+      // A stop by card, role and head (L946) for a card cancelled or ended for good (L962 m6, #455 r1 M1) is Joe's own
+      // doing: he is not told of it, unless a stop by its request id named it too (L971 a), or another stop reached it
+      // for any other reason, or none. Its failure stays (the attempt held, its ended record, the status's
+      // stopped_by_request), so the head still can't pass; only the tell is dropped. A stop by request id still tells,
+      // as do a stop that failed and one ignored.
+      state.attempts[k] = { ...done, held: true, last_reason: doc.stopped_by_request ? 'stopped at the Dispatcher\'s request' : 'ended while the Dispatcher was stopping it' };
+      const quiet = doc.stop_by_target === true && doc.stop_by_id !== true && (doc.stop_reasons ?? []).length > 0 && doc.stop_reasons.every((x) => STOP_QUIET_REASONS.includes(x));
+      if (!quiet) alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} ${doc.stopped_by_request ? 'was stopped' : 'ended while it was being stopped'} at the Dispatcher's request${(doc.stop_reasons ?? []).length ? ` (${doc.stop_reasons.join(', ')})` : ''} ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
     } else if (said === 'none' && left.empty) {
       // The attempt names what it is for (L733); the offer itself takes card, role and head from the launch record (#307).
       state.attempts[k] = { ...done, held: true, tap: true, card: doc.card, role: doc.role, head: doc.head, last_reason: 'ended with no verdict' };
@@ -876,12 +898,17 @@ export async function runnerPass(ctx) {
   const alive = new Set(live.map((s) => s.pid));
   // A stop by card, role and head still being tried again whose process has exited (L953 m1): kept below, as one
   // whose session went mid-retry, before its entry leaves the running list here.
-  const goneTargets = state.running.filter((x) => !alive.has(x.pid) && x.stop_by_target === true && x.stop_wanted && !x.stopped_by_request && !x.stop_failed);
-  for (const r of state.running.filter((x) => !alive.has(x.pid))) {
-    if (r.role === PLAN_REVIEW_ROLE) endPlan(r, 'ended');
-    else await endSession(r, 'ended');
+  // A session whose end could not be recorded last pass (`end_pending`, #455 r1 M2) is ended again now whatever its pid
+  // shows, since that pid may be another process's since; it was a gone target once already, so it is not again.
+  const ending = (x) => !alive.has(x.pid) || x.end_pending === true;
+  const goneTargets = state.running.filter((x) => !alive.has(x.pid) && x.end_pending !== true && x.stop_by_target === true && x.stop_wanted && !x.stopped_by_request && !x.stop_failed);
+  // One whose end could not be recorded (markEnded refused) stays in the running list (#455 r1 M2), so the next pass
+  // ends it with its stop marks, and the sweep, which skips running sessions, never ends it without them.
+  const unended = new Set();
+  for (const r of state.running.filter(ending)) {
+    if (!(r.role === PLAN_REVIEW_ROLE ? endPlan(r, 'ended') : await endSession(r, 'ended'))) { r.end_pending = true; unended.add(r); }
   }
-  state.running = state.running.filter((x) => alive.has(x.pid));
+  state.running = state.running.filter((x) => unended.has(x) || !ending(x));
 
   // The launch records, read once for the sweep, Joe's taps and the requests. One that fails its checks is told to Joe
   // once, with what it says: the Merge Gate refuses the card it belongs to, or skips it when it names no card (L69
@@ -989,7 +1016,10 @@ export async function runnerPass(ctx) {
     const bad = (reason) => ({ ok: false, reason });
     if (typeof sid !== 'string' || !SESSION_ID.test(sid)) return bad('that is not a session id');
     if (!rl.ok) return bad('the launch records could not be read');
-    if (state.running.some((r) => r.session_id === sid)) return bad('that session is still running');
+    // One whose end could not be recorded (`end_pending`, #455 r2 m3) has ended: its tap waits for the record, not used up.
+    const inList = state.running.find((r) => r.session_id === sid);
+    if (inList?.end_pending === true) return { ok: false, reason: 'that session has ended, but its end is not yet recorded', retry: true };
+    if (inList) return bad('that session is still running');
     const doc = rl.launches.find((l) => l.doc.session_id === sid)?.doc;
     if (!doc) return bad(rl.refused.some((b) => b.sid === sid) ? 'its launch record fails its checks; that needs the builder, not a new review' : 'the runner launched no such session');
     // M9 refuses such a launch record already; this keeps the tap's own test whole if that ever changes.
@@ -1081,7 +1111,7 @@ export async function runnerPass(ctx) {
   }
   state.tap_retry = tapRetry;
   const longWait = Object.values(tapRetry).filter((v) => now - (pastTime(v.since, now) ?? -Infinity) >= STILL_WAITING_MS);
-  if (longWait.length) hold('tap-unreadable', `${longWait.length} of Joe's "review again" taps (session${longWait.length === 1 ? '' : 's'} ${longWait.slice(0, 5).map((v) => v.sid).join(', ')}${longWait.length > 5 ? ', …' : ''}) have waited a day or more, because the card or the tree of its head can't be read; each is read again on every pass that can read the taps`);
+  if (longWait.length) hold('tap-unreadable', `${longWait.length} of Joe's "review again" taps (session${longWait.length === 1 ? '' : 's'} ${longWait.slice(0, 5).map((v) => v.sid).join(', ')}${longWait.length > 5 ? ', …' : ''}) have waited a day or more, because the card or the tree of its head can't be read, or the session's end is not yet recorded; each is read again on every pass that can read the taps`);
   // Every refused tap is told (L736 m2): the first ones each with its cause, the rest in one line, all marked told.
   const untold = tapsRefused.filter((x) => !state.told.includes(x.id));
   for (const x of untold.slice(0, TAPS_TOLD_EACH)) alert(x.id, x.text);
@@ -1154,7 +1184,7 @@ export async function runnerPass(ctx) {
     return null;
   };
   // Also one whose session went before a retry stopped it (L951 r m2): kept with those whose process exited above.
-  for (const r of state.running.filter((x) => (x.stoppable === true || x.stop_by_target === true) && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
+  for (const r of state.running.filter((x) => x.end_pending !== true && (x.stoppable === true || x.stop_by_target === true) && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
     const why = await stopIt(r);
     if (why) stopSaid(why);
     if (r.stop_by_target === true && !r.stop_wanted && !r.stopped_by_request && !r.stop_failed) goneTargets.push(r);
@@ -1206,10 +1236,16 @@ export async function runnerPass(ctx) {
     // By card, role and head (L946): every reviewer or auditor running for exactly those, whoever's request started it.
     if (got.target) {
       const { card, role, head } = got.req;
+      const reason = got.req.reason ?? 'none';
       const what = `the ${role} for card ${card} at ${head.slice(0, 7)}`;
-      const hits = state.running.filter((x) => REVIEW_ROLES.includes(x.role) && x.card === card && x.role === role && x.head === head);
+      // One whose end could not be recorded (`end_pending`) has ended already: a stop never lands on it (#455 r2 m2), so
+      // its verdict is not turned into a refusal and Joe is not told a stop that never happened.
+      const hits = state.running.filter((x) => x.end_pending !== true && REVIEW_ROLES.includes(x.role) && x.card === card && x.role === role && x.head === head);
       if (hits.length === 0) { stopSaid(`none running: no ${role} is running for card ${card} at ${head.slice(0, 7)}, so nothing was stopped; ${keepTarget(card, role, head)}`, name); continue; }
       for (const r of hits) {
+        // Every reason that reached it is kept, before any skip below (#455 r1 M1): one that is not a quiet reason makes
+        // its end told, whichever stop did the stopping.
+        if (!(r.stop_reasons ?? []).includes(reason)) r.stop_reasons = [...(r.stop_reasons ?? []), reason];
         if (r.stopped_by_request) { stopSaid(`${what}, session ${r.session_id}, was stopped already`, name); continue; }
         if (r.stop_failed) { stopSaid(`${what}, session ${r.session_id}, could not be stopped before, and Joe was told; it is not tried again`, name); continue; }
         if (tried.has(r.session_id)) { stopSaid(`${what}, session ${r.session_id}, was tried already this pass`, name); continue; }
@@ -1222,10 +1258,13 @@ export async function runnerPass(ctx) {
       continue;
     }
     const rid = got.req.request_id;
-    const r = state.running.find((x) => REVIEW_ROLES.includes(x.role) && typeof x.request_id === 'string' && x.request_id === rid);
+    const r = state.running.find((x) => x.end_pending !== true && REVIEW_ROLES.includes(x.role) && typeof x.request_id === 'string' && x.request_id === rid);
     // One started before stops were (no `stoppable`, re-review m3), or on a request file someone other than the
     // Dispatcher's user wrote (whose id that someone knows; re-review 2 M1), is never reached.
     if (r && r.stoppable !== true) { stopSaid('that session was not started on a request the Dispatcher\'s user wrote to this runner, which a stop does not reach; nothing was stopped', name); continue; }
+    // Named by its request id (L971 a): its end tells Joe, whatever stop did the stopping and in whatever order the stop
+    // files were read, so a stop by id is never silenced by a stop by card, role and head beside it.
+    if (r) r.stop_by_id = true;
     if (!r) {
       if (state.seen.includes(rid)) { stopSaid('no reviewer or auditor the runner is running was started on that request id (it has ended, never started, or is a plan reviewer\'s, which a stop never reaches); nothing was stopped', name); continue; }
       // Not seen yet. The Dispatcher names a request's file by its id, so one waiting in requests/ (this pass, or behind
@@ -1325,7 +1364,8 @@ export async function runnerPass(ctx) {
     // Its own reviewer running or already started is no refusal of the Dispatcher's request (L735 m2-r2): the answer it
     // waits on comes from that one. So a replay of the plan's id is refused quietly, never told as a stop.
     const already = (reason) => { delete tries[k]; refuse(reason); };
-    if (state.running.some((r) => r.role === PLAN_REVIEW_ROLE && r.card === card && r.fingerprint === fingerprint)) return already(`a plan reviewer is already running for card ${card}'s plan ${fingerprint.slice(0, 12)}`);
+    const planRun = state.running.find((r) => r.role === PLAN_REVIEW_ROLE && r.card === card && r.fingerprint === fingerprint);
+    if (planRun) return already(planRun.end_pending === true ? `a plan reviewer for card ${card}'s plan ${fingerprint.slice(0, 12)} has ended, but its end is not yet recorded` : `a plan reviewer is already running for card ${card}'s plan ${fingerprint.slice(0, 12)}`);
     const pl = readPlanLaunches(P.planLaunches, uid);
     if (!pl.ok) return again(`the plan reviewers' launch records could not be read (${pl.reason})`);
     // One start per plan: a launch on it counts, unless claude never ran and its outbox is still review's own and empty.
@@ -1337,7 +1377,7 @@ export async function runnerPass(ctx) {
     // At the cap the request waits as the runner's own, tried each pass and never counted as a failed start.
     let cap; try { cap = await ctx.planReviewCap(d.product); } catch (e) { cap = { bad: e?.message ?? String(e) }; }
     if (!Number.isInteger(cap) || cap < 0) return again(`the plan reviewers' cap could not be read (${String(cap?.bad ?? cap).slice(0, 200)})`);
-    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE).length + untrackedPlans;
+    const runningPlans = state.running.filter((r) => r.role === PLAN_REVIEW_ROLE && r.end_pending !== true).length + untrackedPlans;
     if (runningPlans >= cap) {
       tries[k] = { ...(was ?? {}), card, fingerprint, request_id: rid, failures: was?.failures ?? 0, waiting_since: was?.waiting_since ?? iso(now) };
       refuse(`${runningPlans} plan reviewers already run (cap ${cap}); card ${card}'s waits, and the runner starts it itself once one ends`);
@@ -1491,7 +1531,8 @@ export async function runnerPass(ctx) {
     if (typeof tree !== 'string' || !HEX40.test(tree)) { stuck(`the tree of ${head.slice(0, 7)} could not be read`); continue; }
     if (!rl.ok) { stuck(`the launch records could not be read, so no ${role} starts`); continue; }
     const k = keyOf(card, tree, role);
-    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) { accepted(); refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
+    const same = state.running.find((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k);
+    if (same) { accepted(); refuse(same.end_pending === true ? `a ${role} for card ${card} at ${head.slice(0, 7)} (or a head with the same tree) has ended, but its end is not yet recorded` : `a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
     let a = state.attempts[k] ?? { failures: 0 };
     // The launch records say it too, whatever the runner's memory says: a session on this card's tree (or head) for this
     // role, not set aside by Joe, is a start already made. So is one marked never ran (L71 point 2) once anything is in
@@ -1516,7 +1557,8 @@ export async function runnerPass(ctx) {
         }
       }
       // Started, ended, and nothing counted: no later request starts it again, so it is a hold under its own cause, told
-      // from a day on (the session's end was told at the time). A not-taken hold on this card and head says it already.
+      // from a day on (the session's end was told at the time, unless a stop by card, role and head for a cancel or a
+      // card ended for good ended it, L962 m6, #455 r1 M1). A not-taken hold on this card and head says it already.
       const key = `${card} ${role}`;
       const madeDoc = newestFirst(rl.launches, now).map((l) => l.doc).find((d) => d.card === card && d.role === role && (d.head === head || d.tree === tree) && !asideIds.has(d.session_id) && !stillNeverRan(d));
       const session = madeDoc?.session_id ?? sid;

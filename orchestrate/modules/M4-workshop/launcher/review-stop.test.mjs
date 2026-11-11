@@ -4,7 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync 
 import { spawn, spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tempDir } from '../../../shared/test-tmp.mjs';
-import { writeStopRequest, STOP_KEYS, STOP_PREFIX } from './review-stop.mjs';
+import { writeStopRequest, STOP_KEYS, STOP_PREFIX, STOP_TARGET_KEYS, STOP_TARGET_REASON_KEYS } from './review-stop.mjs';
 import { readRequest, FOLDERS } from './review-runner.mjs';
 import { stopGroupOf } from './review-runner-main.mjs';
 import { PLAN_REVIEW_ROLE } from '../../../shared/review-roles.mjs';
@@ -39,6 +39,16 @@ test('L935: a stop request is stop-<new id>.json holding exactly { request_id, s
     assert.equal(named.ok, true);
     assert.ok(!readdirSync(d).some((x) => x.includes('secret-id')));
   } finally { process.umask(was); rmSync(d, { recursive: true, force: true }); }
+});
+
+// #455 r2 c3: the writer's module gives both target shapes, with and without a reason, as the files it writes hold.
+test('#455 r2 c3: a stop by card, role and head holds exactly the target keys, or the reason keys with a reason', () => {
+  const d = tempDir('m4-stop-keys-');
+  const head = 'a'.repeat(40);
+  const plain = writeStopRequest({ dir: d, target: { card: 'C-1', role: 'reviewer', head }, newName: () => 'k1' });
+  const why = writeStopRequest({ dir: d, target: { card: 'C-1', role: 'reviewer', head, reason: 'cancel' }, newName: () => 'k2' });
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(d, plain.name), 'utf8'))).sort(), [...STOP_TARGET_KEYS]);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(d, why.name), 'utf8'))).sort(), [...STOP_TARGET_REASON_KEYS]);
 });
 
 test('L935: what the runner refuses as a stop: stop not true, a key more or less, a link', () => {
