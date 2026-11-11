@@ -34,7 +34,8 @@
 // says what it stopped, or that none was running. A plan reviewer's id is its plan's hash, which anyone can work out,
 // so a stop never reaches one. The runner stops the
 // session's whole process group (claude starts as its leader) once its pid is still claude under that session's id, and
-// lists it in the status (`stopped_by_request`); its end then tells Joe it was stopped, not that it went silent. A stop
+// lists it in the status (`stopped_by_request`); its end then tells Joe it was stopped, not that it went silent (a stop
+// by card, role and head is the Dispatcher's user's own cancel, so its end tells nothing, L962 m6). A stop
 // for an id no session it runs was started on, and not seen before, is kept 30 minutes in its memory, so a request with
 // that id arriving with it or held behind the start cap is refused, not started (L935 self-review M1). A stop for one
 // already ended does nothing and says why; it never fails the pass. A stop that can never work (the process leads no
@@ -804,8 +805,11 @@ export async function runnerPass(ctx) {
     else if (doc.stopped_by_request) {
       // Stopped at the Dispatcher's request (L935): told as that, in place of the silent-end alert, and with no "review
       // again": the Dispatcher stopped it on purpose. It still counts as a failure, so the head can't pass.
+      // A stop by card, role and head (L946) is the Dispatcher's user's own cancel (L962 m6): Joe is not told of it. Its
+      // failure stays (the attempt held, its ended record, the status's stopped_by_request), so the head still can't
+      // pass; only the tell is dropped. A stop by request id still tells, as do a stop that failed and one ignored.
       state.attempts[k] = { ...done, held: true, last_reason: 'stopped at the Dispatcher\'s request' };
-      alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} was stopped at the Dispatcher's request ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
+      if (doc.stop_by_target !== true) alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} was stopped at the Dispatcher's request ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
     } else if (said === 'none' && left.empty) {
       // The attempt names what it is for (L733); the offer itself takes card, role and head from the launch record (#307).
       state.attempts[k] = { ...done, held: true, tap: true, card: doc.card, role: doc.role, head: doc.head, last_reason: 'ended with no verdict' };

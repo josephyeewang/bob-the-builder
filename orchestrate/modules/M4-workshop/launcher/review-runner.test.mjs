@@ -2528,3 +2528,37 @@ test('L946 m6 planted: a memory save that fails after stop files were read says 
     assert.match(w.status().error, /could not be saved/);
   } finally { rmdirSync(tmp); }
 });
+
+test('L962 m6: a stop by card, role and head ends as a failure with no alert to Joe; a stop by id still tells', async () => {
+  const { w, groups } = await stopWorld();
+  w.ask({ request_id: 't-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  const hit = await runnerPass(w.ctx);
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], JSON.stringify(hit.refused));
+  assert.equal(w.status().stopped_by_request.length, 1, 'the status line stays');
+  const e = await runnerPass(w.ctx);
+  assert.equal(e.ok, true, e.error);
+  assert.deepEqual(e.alerts, [], 'no tell: the Dispatcher\'s user stopped it');
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none', 'its end is a failure');
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  const at = Object.values(st.attempts).find((a) => a.session_id === 'S-1');
+  assert.equal(at.held, true, 'the head still can\'t pass');
+  assert.equal(at.last_reason, 'stopped at the Dispatcher\'s request');
+  assert.deepEqual(st.alerts.filter((x) => /^stopped-/.test(x.id)), [], 'nor kept to tell later');
+  assert.deepEqual(w.status().offers, []);
+  // A stop by id, in a world of its own, still tells.
+  const v = await stopWorld();
+  v.w.ask({ request_id: 'id-1' });
+  await runnerPass(v.w.ctx);
+  writeStopRequest({ dir: v.w.requests, requestId: 'id-1' });
+  await runnerPass(v.w.ctx);
+  assert.deepEqual((await runnerPass(v.w.ctx)).alerts.map((a) => a.id), ['stopped-S-1']);
+  // A stop by card, role and head that can't work is still told: the reviewer goes on running.
+  const f = await ready();
+  f.ctx.stopGroup = async () => { throw Object.assign(new Error('process 1001 does not lead its own process group (its group is 1)'), { final: true }); };
+  f.ask({ request_id: 'tf-1' });
+  await runnerPass(f.ctx);
+  writeStopRequest({ dir: f.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  assert.deepEqual((await runnerPass(f.ctx)).alerts.map((a) => a.id), ['stop-failed-S-1']);
+});
