@@ -870,6 +870,9 @@ export async function runnerPass(ctx) {
     return outboxLeft(reviewOutbox({ outboxRoot: ctx.outboxRoot, role: PLAN_REVIEW_ROLE, sessionId: d.session_id })).empty;
   };
   const alive = new Set(live.map((s) => s.pid));
+  // A stop by card, role and head still being tried again whose process has exited (L953 m1): kept below, as one
+  // whose session went mid-retry, before its entry leaves the running list here.
+  const goneTargets = state.running.filter((x) => !alive.has(x.pid) && x.stop_by_target === true && x.stop_wanted && !x.stopped_by_request && !x.stop_failed);
   for (const r of state.running.filter((x) => !alive.has(x.pid))) {
     if (r.role === PLAN_REVIEW_ROLE) endPlan(r, 'ended');
     else await endSession(r, 'ended');
@@ -1146,7 +1149,7 @@ export async function runnerPass(ctx) {
     result.stopped.push({ pid: r.pid, sessionId: r.session_id, stopped: true, by_request: true });
     return null;
   };
-  const goneTargets = [];   // a stop by card, role and head whose session went before a retry stopped it (L951 r m2)
+  // Also one whose session went before a retry stopped it (L951 r m2): kept with those whose process exited above.
   for (const r of state.running.filter((x) => (x.stoppable === true || x.stop_by_target === true) && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
     const why = await stopIt(r);
     if (why) stopSaid(why);

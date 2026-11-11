@@ -2229,6 +2229,8 @@ test('L935 re-review m2, m3 planted: a stop to retry ends when its session is go
   w.ctx.processName = () => '/bin/zsh';
   refusedFor(await runnerPass(w.ctx), /session S-1's process is no longer claude under its own id/);
   assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running[0].stop_wanted, undefined);
+  // A stop by id gone mid-retry keeps no stop by card, role and head (L953 m2).
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).targets_waiting.length, 0);
   w.ctx.processName = realName;
   const quiet = await runnerPass(w.ctx);
   assert.equal(quiet.refused.some((x) => /a stop request/.test(x.reason)), false);
@@ -2385,6 +2387,19 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   e.w.ctx.processName = () => '/bin/zsh';
   refusedFor(await runnerPass(e.w.ctx), /the reviewer for card C-1 at aaaaaaa went before its stop was done; it is kept 30 minutes/);
   assert.equal(JSON.parse(readFileSync(join(e.w.root, 'state.json'), 'utf8')).targets_waiting.length, 1);
+  // L953 m1: one whose process exits mid-retry is kept too, and the Dispatcher gets its line.
+  const x2 = await stopWorld({ fail: 1 });
+  x2.w.ctx.dispatcherUid = ME + 1;
+  x2.w.ask({ request_id: 'x2-1' }); await runnerPass(x2.w.ctx);
+  x2.w.ctx.dispatcherUid = ME;
+  writeStopRequest({ dir: x2.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  refusedFor(await runnerPass(x2.w.ctx), /it is tried again on the next pass/);
+  x2.w.end('S-1');
+  refusedFor(await runnerPass(x2.w.ctx), /the reviewer for card C-1 at aaaaaaa went before its stop was done; it is kept 30 minutes/);
+  x2.w.ask({ request_id: 'x2-2' });
+  const x2r = await runnerPass(x2.w.ctx);
+  assert.deepEqual(x2r.started, []);
+  refusedFor(x2r, /came within the last 30 minutes, so it was not started/);
   // A stop that did stop one is not kept.
   const k = await stopWorld();
   k.w.ask({ request_id: 'k-1' }); await runnerPass(k.w.ctx);
