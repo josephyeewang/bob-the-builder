@@ -512,7 +512,6 @@ export function stopGroupOf(pid, { ps = run, kill = (p, sig) => process.kill(p, 
 }
 
 /** The real ports (the wiring gives `start`). */
-
 export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
   // What the launch checks read for one session (review-launch.mjs reviewChecks, L83 M-3).
