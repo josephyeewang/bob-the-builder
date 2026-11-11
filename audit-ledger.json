@@ -77,6 +77,20 @@
       "rounds": 2,
       "evidence": "evolutions/009-standalone-skills/pushall-scope-audit.md",
       "zero_finding_rerun": "Checked actual archives and unchanged caller step references, then explicit HTTPS transport ordering."
+    },
+    {
+      "audit": "Release upload byte count and real CLI transport regression",
+      "ran": "2026-11-10",
+      "tier": 1,
+      "class_of_work": "data-pipeline",
+      "material_found": 0,
+      "material_remaining": 0,
+      "minor": 0,
+      "cosmetic": 0,
+      "auditor_context": "fresh subagent; authored no implementation",
+      "rounds": 1,
+      "evidence": "evolutions/009-standalone-skills/release-transport-audit.md",
+      "zero_finding_rerun": "Independently exercised the complete publisher with the installed CLI and loopback server, including interrupted upload/retry, exact byte readback and pointer ordering."
     }
   ]
 }

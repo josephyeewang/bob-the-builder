@@ -21,3 +21,5 @@ actual hosted checks; local/fake-API results are not represented as live deliver
 Builder staging check additionally logged extra blank EOF lines in eight new Markdown files as Cosmetic. These do not affect source behavior, closure, privacy or archive validity; reviewed bytes are preserved.
 
 Scope refinement: the public fourth module is PushAll only. Whole-project closeout remains separate, and the existing closeout caller is preserved byte for byte. The narrowed export and private compatibility adapter passed independent review with zero Material/Minor findings; see pushall-scope-audit.md.
+
+First hosted release attempt exposed a missing binary-upload Content-Length header. The installed CLI reproduced the request defect against a loopback HTTP endpoint; the exporter and fake API tests had not exercised request construction. The transport now sends the exact byte count and preserves sanitized HTTP status. Thirty tests plus an independent full CLI/HTTP publisher review pass. Hosted publication remains subject to actual release verification; local loopback tests are not represented as a live upload.
