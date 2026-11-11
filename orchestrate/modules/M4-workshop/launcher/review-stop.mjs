@@ -7,9 +7,10 @@
 // request it names is refused, not started, in that time (by id the first such request; by card, role and head every
 // one); the status says what each did.
 //
-//   writeStopRequest({ dir, requestId } | { dir, target: { card, role, head } }) → { ok, name } | { ok: false, reason }
+//   writeStopRequest({ dir, requestId } | { dir, target: { card, role, head, reason? } }) → { ok, name } | { ok: false, reason }
 //     dir: the runner's requests/ folder. Writes stop-<new id>.json holding exactly { request_id, stop: true } (or
-//     { card, head, role, stop: true }), whole
+//     { card, head, reason?, role, stop: true }; `reason` is the stop step's own word, and only 'cancel' or
+//     'card_final' leaves Joe untold of the end, #455 r1 M1), whole
 //     under a hidden name and then given its own, never over another file, readable by the runner (0644 whatever the
 //     writer's umask: the Dispatcher's job runs with 077).
 //
@@ -18,7 +19,7 @@
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { CARD_ID, REQUEST_ID, REQUEST_NAME, STOP_KEYS, STOP_PREFIX, STOP_TARGET_KEYS } from './review-runner.mjs';
+import { CARD_ID, REQUEST_ID, REQUEST_NAME, STOP_KEYS, STOP_PREFIX, STOP_REASON, STOP_TARGET_KEYS } from './review-runner.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 
 export { STOP_KEYS, STOP_PREFIX, STOP_TARGET_KEYS };
@@ -27,11 +28,12 @@ export function writeStopRequest({ dir, requestId, target, newName = randomUUID,
   let doc;
   if (target !== undefined) {
     if (requestId !== undefined) return { ok: false, reason: 'a stop names a request id or a card, role and head, not both' };
-    const { card, role, head } = target ?? {};
+    const { card, role, head, reason } = target ?? {};
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return { ok: false, reason: 'the card id is not a plain id' };
     if (!REVIEW_ROLES.includes(role)) return { ok: false, reason: `a stop names a role of ${REVIEW_ROLES.join(' or ')}` };
     if (typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) return { ok: false, reason: 'the head is not 40 hex' };
-    doc = { card, head, role, stop: true };
+    if (reason !== undefined && (typeof reason !== 'string' || !STOP_REASON.test(reason))) return { ok: false, reason: 'the stop\'s reason is not a short plain word' };
+    doc = { card, head, ...(reason !== undefined ? { reason } : {}), role, stop: true };
   } else {
     if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
     doc = Object.fromEntries(STOP_KEYS.map((k) => [k, k === 'stop' ? true : requestId]));
