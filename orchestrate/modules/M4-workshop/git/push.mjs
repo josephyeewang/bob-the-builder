@@ -49,7 +49,7 @@ import { scanSecrets } from './gitleaks.mjs';
 import { allowList, maskPath } from './binary-files.mjs';
 import { startGate } from './start-gate.mjs';
 import { BRANCH, cardBranch } from './branch.mjs';
-import { WORKER_OUTBOX_ROLES, workerOutboxProblem } from './session-outbox.mjs';
+import { WORKER_OUTBOX_ROLES, outboxProblemFor } from './session-outbox.mjs';
 import { proposalFolder } from '../launcher/proposal-wall.mjs';
 import { plainFd } from '../../M9-record/unsent.mjs';
 import { researchPath, researchFileName, RESEARCH_ID } from '../../M2-approvals/research-ask.mjs';
@@ -322,6 +322,8 @@ export function createPushScript(deps) {
   if (!isUid(uids?.worker)) throw new Error('createPushScript: uids.worker must be a Mac user id');
   if (!isUid(ownerUid)) throw new Error('createPushScript: ownerUid must be a Mac user id');
   if (uids.worker === ownerUid) throw new Error('createPushScript: the worker user and the owner must be different users');
+  // #403 r1 M1: a push must find the outbox in its own product's folder under the real root, never by shape alone.
+  if (typeof outboxRoot !== 'string' || !isAbsolute(outboxRoot)) throw new Error('createPushScript: outboxRoot must be the outboxes\' full path');
 
   /** A worker's inputs, from the session record only (step 1). */
   function workerInputs(sessionId) {
@@ -333,9 +335,10 @@ export function createPushScript(deps) {
     if (typeof att !== 'string' || !ATTEMPT.test(att) || DOOR_ATTEMPT.test(att)) no('the launch record has a bad attempt id');
     // The record says role worker for a script card too (L759), so either runner role's folder is this session's own (L767).
     // Taking either here is safe because of an earlier check, not this one (#358 c3): the Dispatcher wrote this outbox
-    // into the record only after checking it under the session's own role (M11 pass.mjs, workerOutboxProblem with
-    // startRole(kind)), so a worker's record never names the script folder, nor a script's the worker one.
-    const badOutbox = workerOutboxProblem(outbox, sessionId, { root: outboxRoot, role: WORKER_OUTBOX_ROLES });
+    // into the record only after checking it under the session's own role (M11 pass.mjs, startRole(kind)), so a
+    // worker's record never names the script folder, nor a script's the worker one. In the session's own product's
+    // folder (L836: <root>/<product>/<role>/<id>).
+    const badOutbox = outboxProblemFor(outbox, sessionId, { outboxRoot, product, role: WORKER_OUTBOX_ROLES });
     if (badOutbox) no(`the launch record's outbox ${badOutbox}`);
     return { product, card, branch, folder: outbox, uid: uids.worker, att };
   }

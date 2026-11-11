@@ -15,7 +15,7 @@
 //                                       place: no update, no job touched; safe to run again                    (root)
 //   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
-//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, hostLockPath and hostLockUid as JSON (read only)
+//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //                                       (place and load refuse on the same checks: a placed job starts at boot without load)
 //   daemons list                        loaded or not, per job                                                 (read only)

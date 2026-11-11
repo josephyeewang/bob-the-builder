@@ -20,8 +20,9 @@ async function startOne(rec, outboxRoot) {
   let asked;
   const r = await withAlerts(rec, T0, (t) => alerts.push(t), (alert) => dispatcherPass({
     rec, rules: rulesWith({}, allowStart), now: T0, account: ACCT, sessions: [], probe: () => null,
-    // M4's launcher makes the session's own outbox, <root>/<role>/<sessionId>, and answers where it is.
-    launch: async (x) => { asked = x; const outbox = join(outboxRoot, 'worker', x.sessionId); mkdirSync(outbox, { recursive: true, mode: 0o700 }); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 'start-1', pgid: 4242, head: 'h'.repeat(40), outbox }; },
+    // M4's launcher makes the session's own outbox, <root>/<product>/<role>/<sessionId> (L836), and answers where it is.
+    outboxRoot,
+    launch: async (x) => { asked = x; const outbox = join(outboxRoot, PRODUCT, 'worker', x.sessionId); mkdirSync(outbox, { recursive: true, mode: 0o700 }); return { ok: true, sessionId: x.sessionId, pid: 4242, pidStart: 'start-1', pgid: 4242, head: 'h'.repeat(40), outbox }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: () => {}, startsOff: null, filesOf: () => [],
     alert,
   }));
@@ -41,7 +42,7 @@ test('L204-a: a card the real pass starts is pushed by the real push script from
   assert.deepEqual(alerts, []);
   const s = rec.read('session', sessionId)?.doc;
   assert.deepEqual([s?.state, s?.role, s?.product, s?.card, s?.branch, s?.outbox, s?.attempt, s?.pid, s?.pid_start],
-    ['preparing', 'worker', PRODUCT, 'C-1', 'card/c-1', join(outboxRoot, 'worker', sessionId), 'a1', 4242, 'start-1']);
+    ['preparing', 'worker', PRODUCT, 'C-1', 'card/c-1', join(outboxRoot, PRODUCT, 'worker', sessionId), 'a1', 4242, 'start-1']);
 
   // The worker's work: one commit on the card's branch, handed in as a bundle in its own outbox.
   await w.commit('card one', (dir) => writeFileSync(join(dir, 'app.txt'), 'app, changed\n'));
@@ -50,7 +51,8 @@ test('L204-a: a card the real pass starts is pushed by the real push script from
 
   // The world's rules hand every value back as the rules file's reader does (true as "true"), so this push reads its
   // rules as it will on the Mac.
-  const p = await w.push({}, sessionId);
+  // The pass and the push script both check the outbox against the same root (L836 self-review m3).
+  const p = await w.push({ outboxRoot }, sessionId);
   assert.equal(p.ok, true, p.reason);
   assert.ok((await w.ghRefs()).split('\n').includes(`refs/heads/card/c-1 ${tip}`), 'GitHub has the card branch at the worker\'s tip');
   const f = rec.read('fact', 'push.C-1.a1')?.doc;
