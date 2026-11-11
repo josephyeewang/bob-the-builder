@@ -25,7 +25,7 @@ test('L935: a stop request is stop-<new id>.json holding exactly { request_id, s
     assert.deepEqual(readdirSync(d), [w.name], 'no hidden file left behind');
     // The runner reads it as a stop.
     const got = readRequest(d, w.name);
-    assert.deepEqual(got, { ok: true, req: { request_id: 'req-1', stop: true }, stop: true });
+    assert.deepEqual(got, { ok: true, req: { request_id: 'req-1', stop: true }, stop: true, owner: process.getuid() }, 'with its file\'s owner, which a stop must be the Dispatcher\'s');
     // Never over another file: the same name again is refused, and the file there is left as it was.
     writeFileSync(join(d, `${STOP_PREFIX}same.json`), 'theirs');
     const again = writeStopRequest({ dir: d, requestId: 'req-2', newName: () => 'same' });

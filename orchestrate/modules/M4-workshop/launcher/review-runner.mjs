@@ -128,6 +128,11 @@ export const REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
 export const STOP_PREFIX = 'stop-';
 // The one unread-request cause whose hold names its file: a plan request's id is its plan's hash, no secret.
 const PLAN_OTHER_ID = 'plan request with another id';
+// What an unread-request hold says of its last file: a short hash of its name, never the name (L935 re-review 2).
+const fileMark = (name) => `request #${createHash('sha256').update(String(name)).digest('hex').slice(0, 12)}`;
+const FILE_MARK = /^request #[0-9a-f]{12}$/;
+// The stops kept full is told at most once a day (L935 re-review 2 m2), however often the list drains and fills.
+const STOPS_FULL_TOLD_MS = 24 * 60 * 60_000;
 export const STOP_KEYS = Object.freeze(['request_id', 'stop']);
 export { CARD_ID };
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -262,7 +267,7 @@ function ensureFolder(path, mode) {
  * One request file, read without following a link or waiting on a pipe; it is removed after, except one with two names
  * first seen (`firstSeen`, the runner's clock) under LINKING_MS before `now`, as in the instant its writer links it: that
  * one is left for the next pass (L935 self-review m4; re-review m1: a file's change time is its writer's to set).
- * → { ok, req } | { ok: false, reason } | { ok: false, wait: true }
+ * → { ok, req, owner (the file's uid) } | { ok: false, reason } | { ok: false, wait: true }
  */
 export function readRequest(dir, name, { firstSeen = null, now = null } = {}) {
   const p = join(dir, name);
@@ -282,7 +287,7 @@ export function readRequest(dir, name, { firstSeen = null, now = null } = {}) {
       if (keys.join() === STOP_KEYS.join()) {
         if (req.stop !== true) return { ok: false, reason: 'it must say "stop": true' };
         if (typeof req.request_id !== 'string' || !REQUEST_ID.test(req.request_id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
-        return { ok: true, req, stop: true };
+        return { ok: true, req, stop: true, owner: st.uid };
       }
       const plan = keys.join() === PLAN_REQUEST_KEYS.join();
       if (!plan && keys.join() !== REQUEST_KEYS.join()) return { ok: false, reason: `it must hold exactly ${REQUEST_KEYS.join(', ')} (or, for a plan reviewer, ${PLAN_REQUEST_KEYS.join(', ')}; for a stop, ${STOP_KEYS.join(', ')})` };
@@ -293,7 +298,7 @@ export function readRequest(dir, name, { firstSeen = null, now = null } = {}) {
       if (!plan && (typeof req.head !== 'string' || !HEX40.test(req.head))) return { ok: false, reason: 'the head is not 40 hex' };
       if (typeof req.role !== 'string' || req.role.length > 40) return { ok: false, reason: 'the role is not a short word' };
       if (typeof req.request_id !== 'string' || !REQUEST_ID.test(req.request_id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
-      return { ok: true, req };
+      return { ok: true, req, owner: st.uid };
     } finally { closeSync(fd); }
   })();
   if (!out.wait) try { unlinkSync(p); } catch { /* gone already */ }
@@ -598,8 +603,9 @@ export async function runnerPass(ctx) {
   keepGood('refused_streaks', goodStreak, 'entry_unread_at');
   keepGood('refused_more', goodStreak, 'entry_unread_at');
   keepGood('unread_requests', goodUnread, 'entry_unread_at');
-  // One kept from before L935 may name its file, which is a request id (re-review m4): only the plan cause keeps it.
-  for (const u of Object.values(state.unread_requests ?? {})) if (u.cause !== PLAN_OTHER_ID) u.file = null;
+  // One kept from before L935 may name its file, which is a request id (re-review m4): only the plan cause keeps it;
+  // the others keep only a hash of it.
+  for (const u of Object.values(state.unread_requests ?? {})) if (u.cause !== PLAN_OTHER_ID && !FILE_MARK.test(String(u.file))) u.file = null;
   keepGood('no_verdict', goodNoVerdict, 'hold_unread_at');
   // A verdict dropped here comes back from its launch and ended records, if it is still not taken.
   keepGood('not_taken', goodNotTaken, 'hold_unread_at');
@@ -1079,6 +1085,8 @@ export async function runnerPass(ctx) {
   // auditor was started on. What a stop says goes in `refused` with no request id or file name: the status is anyone's.
   const stopNames = names.filter((n) => n.startsWith(STOP_PREFIX));
   const startNames = names.filter((n) => !n.startsWith(STOP_PREFIX));
+  // A file the Dispatcher's Mac user wrote (L935 re-review 2 M1). With none given, no file is.
+  const fromDispatcher = (g) => Number.isInteger(ctx.dispatcherUid) && g?.owner === ctx.dispatcherUid;
   // When this runner first saw a file, on its own clock (the two-name wait, re-review m1).
   const seenAt = (n) => ({ firstSeen: pastTime(state.first_seen[n], now) ?? now, now });
   // `request` is the stop file's own name (stop-<random>, never the request id), which the Dispatcher's writer returned,
@@ -1092,9 +1100,11 @@ export async function runnerPass(ctx) {
     // A session no longer there to stop ends what was wished, so a retry is never left to run on (re-review m2).
     const gone = (why) => { delete r.stop_wanted; delete r.stop_tries; return why; };
     if (!live.some((s) => s.pid === r.pid && s.sessionId === r.session_id)) return gone(`session ${r.session_id} is not live under its own id, so nothing was stopped`);
-    let cmd = null; try { cmd = await ctx.processName(r.pid); } catch { cmd = null; }
-    if (!isClaudeCommand(cmd, ctx.claudeBin) || sessionIdOf(cmd) !== r.session_id) return gone(`session ${r.session_id}'s process is no longer claude under its own id, so nothing was stopped`);
+    let cmd = null; let unread = null; try { cmd = await ctx.processName(r.pid); } catch (e) { unread = e; }
+    if (unread === null && (!isClaudeCommand(cmd, ctx.claudeBin) || sessionIdOf(cmd) !== r.session_id)) return gone(`session ${r.session_id}'s process is no longer claude under its own id, so nothing was stopped`);
     try {
+      // Its command line not read this time (re-review 2 m1): a failed try, so a passing trouble ends no stop.
+      if (unread !== null) throw new Error(`its command line can't be read (${String(unread?.code ?? unread?.message ?? unread).slice(0, 100)})`);
       if (typeof ctx.stopGroup !== 'function') throw Object.assign(new Error('this runner has no way to stop a session'), { final: true });
       await ctx.stopGroup({ pid: r.pid, sessionId: r.session_id });
     } catch (e) {
@@ -1131,18 +1141,21 @@ export async function runnerPass(ctx) {
   state.stops_waiting = (Array.isArray(state.stops_waiting) ? state.stops_waiting : [])
     .filter((x) => typeof x?.request_id === 'string' && REQUEST_ID.test(x.request_id) && pastTime(x.at, now) !== null && now - pastTime(x.at, now) < STOP_WAIT_MS)
     .slice(-KEEP_STOPS_WAITING);
-  if (state.stops_waiting.length < KEEP_STOPS_WAITING) state.told = state.told.filter((t) => t !== 'stops-waiting-full');
+  if (state.stops_waiting.length < KEEP_STOPS_WAITING && !(pastTime(state.stops_full_told_at, now) !== null && now - pastTime(state.stops_full_told_at, now) < STOPS_FULL_TOLD_MS)) state.told = state.told.filter((t) => t !== 'stops-waiting-full');
   for (const name of stopNames) {
     const got = readRequest(P.requests, name, seenAt(name));
     if (got.wait) continue;
     delete state.first_seen[name];
     if (!got.ok) { stopSaid(got.reason, name); continue; }
     if (!got.stop) { stopSaid(`a file named ${STOP_PREFIX}… must hold a stop, so it was not read as a review request`, name); continue; }
+    // Only the Dispatcher stops (L935 re-review 2 M1): its file must be the Dispatcher's Mac user's (the Record's owner,
+    // `dispatcherUid`). Anyone else's does nothing, and is never kept, so others can't fill the stops kept either.
+    if (!fromDispatcher(got)) { stopSaid(Number.isInteger(ctx.dispatcherUid) ? `its file is not the Dispatcher's user's (it is uid ${got.owner}'s), so nothing was stopped` : 'this runner is not told the Dispatcher\'s user, so no stop counts', name); continue; }
     const rid = got.req.request_id;
     const r = state.running.find((x) => REVIEW_ROLES.includes(x.role) && typeof x.request_id === 'string' && x.request_id === rid);
-    // One started before stops were (no `stoppable`), whose request id was not then kept as a secret, is never reached
-    // (re-review m3).
-    if (r && r.stoppable !== true) { stopSaid('that session was started by an earlier runner, which a stop does not reach; nothing was stopped', name); continue; }
+    // One started before stops were (no `stoppable`, re-review m3), or on a request file someone other than the
+    // Dispatcher's user wrote (whose id that someone knows; re-review 2 M1), is never reached.
+    if (r && r.stoppable !== true) { stopSaid('that session was not started on a request the Dispatcher\'s user wrote to this runner, which a stop does not reach; nothing was stopped', name); continue; }
     if (!r) {
       if (state.seen.includes(rid)) { stopSaid('no reviewer or auditor the runner is running was started on that request id (it has ended, never started, or is a plan reviewer\'s, which a stop never reaches); nothing was stopped', name); continue; }
       // Not seen yet. The Dispatcher names a request's file by its id, so one waiting in requests/ (this pass, or behind
@@ -1158,7 +1171,7 @@ export async function runnerPass(ctx) {
         delete state.first_seen[own];
         const req = early.ok && !early.stop ? early.req : null;
         const said = (reason) => result.refused.push({ at: iso(now), request: null, card: req?.card ?? null, role: req?.role ?? null, request_id: null, reason });
-        if (req && req.fingerprint === undefined && req.request_id === rid && !state.seen.includes(rid)) {
+        if (req && req.fingerprint === undefined && req.request_id === rid) {
           state.seen = [...state.seen, rid].slice(-KEEP_SEEN);
           said('a stop for it came before it started, so it was not started');
           stopSaid('no session was started on that request id yet; its request was waiting, and it is not started', name);
@@ -1168,16 +1181,18 @@ export async function runnerPass(ctx) {
             // The same one hold for its cause as an unreadable request read in the start loop (R-0b-171).
             const cause = String(early.code ?? early.reason).slice(0, 100);
             const was = state.unread_requests?.[cause];
-            state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: null, first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
+            state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: fileMark(own), first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
           }
           stopSaid('the file named for that request id was not its review request; nothing was started', name);
         }
         continue;
       }
-      // Its request has not come: the stop is kept 30 minutes. One already kept keeps its first time; past
+      // Its request has not come (or is still being linked: the Dispatcher's writer gives a request its one name before it
+      // writes the stop, so that is never the case with it): the stop is kept 30 minutes. One already kept keeps its first time; past
       // KEEP_STOPS_WAITING the new one is not kept, and Joe is told once, so a promised stop is never pushed out.
       if (state.stops_waiting.some((x) => x.request_id === rid)) { stopSaid('no session was started on that request id yet; a stop for it is kept already', name); continue; }
       if (state.stops_waiting.length >= KEEP_STOPS_WAITING) {
+        if (!state.told.includes('stops-waiting-full')) state.stops_full_told_at = iso(now);
         alert('stops-waiting-full', `${KEEP_STOPS_WAITING} stops are waiting for review requests that have not come, so a new one was not kept, and the review it names may still start. Something may be writing stops far too often.`);
         stopSaid(`no session was started on that request id yet, and ${KEEP_STOPS_WAITING} stops are kept already, so this one was not kept; a request with it may start`, name);
         continue;
@@ -1345,7 +1360,7 @@ export async function runnerPass(ctx) {
       // from its own cause ends it: anyone can write a clean request, and that shows nothing is fixed (R-0b-171).
       const cause = String(got.code ?? got.reason).slice(0, 100);
       const was = state.unread_requests?.[cause];
-      state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: null, first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
+      state.unread_requests = { ...state.unread_requests, [cause]: { cause, file: fileMark(name), first_at: was?.first_at ?? iso(now), last_at: iso(now) } };
       continue;
     }
     if (got.stop) { refuse(`a stop request's file name starts with ${STOP_PREFIX}, so this one was not read as a stop`); continue; }
@@ -1527,7 +1542,7 @@ export async function runnerPass(ctx) {
       refuse(`the ${role} start said it failed (${String(r?.reason ?? 'no process id').slice(0, 200)}), but the session ran (${ranAs !== null ? `claude ${ranAs} carries its id` : liveNow === null ? 'the session list could not be read' : left.said}); it counts as a start`);
       if (ranAs !== null) {
         state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };
-        state.running.push({ ...doc, request_id: rid, pid: ranAs, started_at: iso(now), stoppable: true });
+        state.running.push({ ...doc, request_id: rid, pid: ranAs, started_at: iso(now), ...(fromDispatcher(got) ? { stoppable: true } : {}) });
       } else if (liveNow === null) {
         state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid, last_reason: 'the start said it failed, and the session list could not be read' };
       } else {
@@ -1549,7 +1564,7 @@ export async function runnerPass(ctx) {
     }
     state.attempts[k] = { ...a, started: true, started_at: iso(now), session_id: sid };
     accepted();
-    state.running.push({ card, head, tree, role, session_id: sid, request_id: rid, pid: r.pid, started_at: iso(now), stoppable: true });
+    state.running.push({ card, head, tree, role, session_id: sid, request_id: rid, pid: r.pid, started_at: iso(now), ...(fromDispatcher(got) ? { stoppable: true } : {}) });
     result.started.push({ card, head, role, session_id: sid, signin: acct });
   }
   // The memory is trimmed (#307 r1 M1), so it doesn't grow for good: an attempt whose card is gone, merged or closed, or

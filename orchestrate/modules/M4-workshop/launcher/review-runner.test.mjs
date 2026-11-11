@@ -50,7 +50,7 @@ function world(over = {}) {
   let n = 0;
   let pid = 1000;
   const ctx = {
-    root, outboxRoot, uids: UIDS, reviewHome: join(base, 'review-home'), claudeBin: CLAUDE,
+    root, outboxRoot, uids: UIDS, reviewHome: join(base, 'review-home'), claudeBin: CLAUDE, dispatcherUid: ME,
     // The command of a live process: a fake claude for each live session (with its session id), nothing for any other.
     processName: (p) => { const s = live.find((x) => x.pid === p); return s ? `${CLAUDE} --session-id ${s.sessionId ?? 'x'}` : null; },
     now: () => clock.t, ownUid: () => ME, newId: () => `S-${++n}`,
@@ -2161,10 +2161,9 @@ test('L935 re-review M1 planted: a stop with its request waiting, then 200 forge
   // Its request waits behind the start cap: the stop reads it at once, refuses it, and no flood after can undo that.
   const { w, groups } = await stopWorld();
   for (let i = 0; i < MAX_STARTS_PER_PASS; i++) { w.cards.set(`C-${100 + i}`, { state: 'in_review', head: HEAD, tier: 2 }); w.heads.set(`C-${100 + i}`, HEAD); }
+  // Every file is first seen in this one pass, so their names order them: a-* before real-1.
   for (let i = 0; i < MAX_STARTS_PER_PASS; i++) w.ask({ card: `C-${100 + i}`, request_id: `a-${i}` });
-  w.clock.t += 1_000;
   w.ask({ request_id: 'real-1' });
-  w.clock.t += 1_000;
   writeStopRequest({ dir: w.requests, requestId: 'real-1' });
   for (let i = 0; i < 200; i++) writeStopRequest({ dir: w.requests, requestId: `forged-${i}` });
   const r = await runnerPass(w.ctx);
@@ -2200,6 +2199,9 @@ test('L935 re-review M1: a stop by a plan reviewer\'s kind of id never takes its
   refusedFor(r, /a stop request: that is a plan reviewer's kind of request id, which a stop never reaches; nothing was stopped/);
   assert.equal(r.refused.some((x) => /a stop for it came before it started/.test(x.reason)), false);
   assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).stops_waiting.length, 0);
+  // The plan request is read by the start loop (it goes the plan reviewer's way), not taken by the stop.
+  assert.ok(r.refused.some((x) => x.role === 'plan_reviewer' && x.card === 'C-1') || r.started.some((x) => x.role === 'plan_reviewer'), JSON.stringify(r.refused));
+  assert.ok(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).seen.includes(pid), 'seen by the start loop');
   // A request file named for the stop's id but holding another id: refused, never started under either.
   const v = await stopWorld();
   v.w.ask({ request_id: 'other-9' }, 'named-1.json');
@@ -2213,7 +2215,7 @@ test('L935 re-review M1: a stop by a plan reviewer\'s kind of id never takes its
   writeStopRequest({ dir: v.w.requests, requestId: 'named-2' });
   refusedFor(await runnerPass(v.w.ctx), /^the request it is not JSON$/);
   assert.deepEqual(readdirSync(v.w.requests), []);
-  assert.equal(JSON.parse(readFileSync(join(v.w.root, 'state.json'), 'utf8')).unread_requests?.['it is not JSON']?.file, null, 'one hold for its cause, as in the start loop');
+  assert.match(JSON.parse(readFileSync(join(v.w.root, 'state.json'), 'utf8')).unread_requests?.['it is not JSON']?.file, /^request #[0-9a-f]{12}$/, 'one hold for its cause, as in the start loop');
 });
 
 test('L935 re-review m2, m3 planted: a stop to retry ends when its session is gone; a session from an earlier runner is never stopped', async () => {
@@ -2240,7 +2242,7 @@ test('L935 re-review m2, m3 planted: a stop to retry ends when its session is go
   delete st.running[0].stoppable;
   writeFileSync(sp, JSON.stringify(st), { mode: 0o600 });
   writeStopRequest({ dir: v.w.requests, requestId: 'old-1' });
-  refusedFor(await runnerPass(v.w.ctx), /a stop request: that session was started by an earlier runner, which a stop does not reach; nothing was stopped/);
+  refusedFor(await runnerPass(v.w.ctx), /a stop request: that session was not started on a request the Dispatcher's user wrote to this runner, which a stop does not reach; nothing was stopped/);
   const st2 = JSON.parse(readFileSync(sp, 'utf8'));
   st2.running[0].stop_wanted = new Date(v.w.clock.t).toISOString();
   writeFileSync(sp, JSON.stringify(st2), { mode: 0o600 });
@@ -2262,7 +2264,67 @@ test('L935 re-review m4: an unread-request hold kept from before names no file, 
   assert.match(everything(w), /plan-shown\.json/);
   const kept = JSON.parse(readFileSync(sp, 'utf8')).unread_requests;
   assert.equal(kept['it is not JSON'].file, null);
+  // One this version kept (a hash of the name) stays.
+  const st2 = JSON.parse(readFileSync(sp, 'utf8'));
+  st2.unread_requests['it is not JSON'].file = 'request #0123456789ab';
+  writeFileSync(sp, JSON.stringify(st2), { mode: 0o600 });
+  await runnerPass(w.ctx);
+  assert.equal(JSON.parse(readFileSync(sp, 'utf8')).unread_requests['it is not JSON'].file, 'request #0123456789ab');
   assert.equal(kept['plan request with another id'].file, 'plan-shown.json');
+});
+
+test('L935 re-review 2 M1 planted: a request or a stop someone other than the Dispatcher\'s user wrote stops nothing', async () => {
+  // A request written first by another user (here: the Dispatcher is told to be another uid) starts, but is not stoppable.
+  const { w, groups } = await stopWorld();
+  w.ctx.dispatcherUid = ME + 1;
+  w.ask({ request_id: 'forged-1' });
+  await runnerPass(w.ctx);
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running[0].stoppable, undefined);
+  // Its stop, also not the Dispatcher's: does nothing, and is not kept.
+  writeStopRequest({ dir: w.requests, requestId: 'forged-1' });
+  writeStopRequest({ dir: w.requests, requestId: 'not-yet' });
+  const r = await runnerPass(w.ctx);
+  assert.equal(r.refused.filter((x) => x.reason === `a stop request: its file is not the Dispatcher's user's (it is uid ${ME}'s), so nothing was stopped`).length, 2, JSON.stringify(r.refused));
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).stops_waiting.length, 0, 'never kept');
+  // A stop the Dispatcher's user wrote does not reach the session someone else's request started either.
+  w.ctx.dispatcherUid = ME;
+  writeStopRequest({ dir: w.requests, requestId: 'forged-1' });
+  refusedFor(await runnerPass(w.ctx), /a stop request: that session was not started on a request the Dispatcher's user wrote to this runner/);
+  assert.deepEqual(groups, []);
+  assert.equal(w.live.length, 1, 'the review goes on, as before stops');
+  // A runner not told the Dispatcher's user counts no stop.
+  const v = await stopWorld();
+  delete v.w.ctx.dispatcherUid;
+  v.w.ask({ request_id: 'd-1' });
+  await runnerPass(v.w.ctx);
+  writeStopRequest({ dir: v.w.requests, requestId: 'd-1' });
+  refusedFor(await runnerPass(v.w.ctx), /^a stop request: this runner is not told the Dispatcher's user, so no stop counts$/);
+  assert.deepEqual(v.groups, []);
+});
+
+test('L935 re-review 2 m1, m2 planted: a command line that can\'t be read is a failed try; the full kept stops are told once a day', async () => {
+  const { w, groups } = await stopWorld();
+  w.ask({ request_id: 'p-1' });
+  await runnerPass(w.ctx);
+  const realName = w.ctx.processName;
+  w.ctx.processName = () => { throw Object.assign(new Error('ps'), { code: 'EAGAIN' }); };
+  writeStopRequest({ dir: w.requests, requestId: 'p-1' });
+  refusedFor(await runnerPass(w.ctx), /session S-1 could not be stopped \(its command line can't be read \(EAGAIN\)\); it is tried again on the next pass/);
+  assert.ok(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running[0].stop_wanted, 'still wanted');
+  w.ctx.processName = realName;
+  await runnerPass(w.ctx);
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], 'stopped on the next pass');
+  // Full, drained past 30 minutes, full again: told once until a day has gone.
+  const v = await stopWorld();
+  const fill = (tag) => { for (let i = 0; i < 201; i++) writeStopRequest({ dir: v.w.requests, requestId: `${tag}-${i}` }); };
+  fill('a');
+  assert.ok((await runnerPass(v.w.ctx)).alerts.some((a) => a.id === 'stops-waiting-full'));
+  v.w.clock.t += 31 * 60_000; await runnerPass(v.w.ctx);
+  fill('b');
+  assert.equal((await runnerPass(v.w.ctx)).alerts.some((a) => a.id === 'stops-waiting-full'), false, 'not again within the day');
+  v.w.clock.t += 24 * 3600_000; await runnerPass(v.w.ctx);
+  fill('c');
+  assert.ok((await runnerPass(v.w.ctx)).alerts.some((a) => a.id === 'stops-waiting-full'), 'told again a day on');
 });
 
 test('L935 self-review m1: an unread review request\'s file name (its request id) is in no hold', async () => {
@@ -2273,6 +2335,8 @@ test('L935 self-review m1: an unread review request\'s file name (its request id
   w.ask('not json', 'secret-u2.json');
   const r = await runnerPass(w.ctx);
   assert.equal(r.ok, true, r.error);
-  assert.ok(w.status().holds.some((h) => /^Review requests can't be read \(it is not JSON\) for a day\. No review starts from them\.$/.test(h.text)), JSON.stringify(w.status().holds));
+  // Its last file is named by a short hash of its name only (L935 re-review 2), which the Dispatcher can match to its ids.
+  const mark = createHash('sha256').update('secret-u2.json').digest('hex').slice(0, 12);
+  assert.ok(w.status().holds.some((h) => h.text === `Review requests can't be read (it is not JSON) for a day; the last: request #${mark}. No review starts from them.`), JSON.stringify(w.status().holds));
   assert.doesNotMatch(everything(w), /secret-u/);
 });

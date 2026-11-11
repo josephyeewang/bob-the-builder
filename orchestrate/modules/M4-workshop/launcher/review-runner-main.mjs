@@ -529,6 +529,8 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
     now: () => Date.now(), ownUid: () => process.getuid(),
+    // The Dispatcher's Mac user, whose stops alone count (L935 re-review 2 M1): it owns the Record (setup's recordUid).
+    dispatcherUid: c.recordUid,
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     planFile: ({ plan_sha256 }) => recordPlanFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, plan_sha256 }),
