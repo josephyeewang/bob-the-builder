@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { spawnSync } from 'node:child_process';
 import { writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
@@ -19,6 +19,11 @@ const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir
 const roots = (d0) => { const d = realpathSync.native(d0); mkdirSync(join(d, 'copies')); mkdirSync(join(d, 'outboxes')); return d; };
 const DENY = (d) => ({ record: join(d, 'record'), ssh: join(d, 'home', '.ssh'), gh: join(d, 'home', '.config', 'gh'), claudeHome: join(d, 'home', '.claude'),
   robotKeys: join(d, 'keys'), secrets: [join(d, 'secrets'), join(d, 'approvals')] });
+// #419 r4 M1: the snapshot folder's parent must be root's, which a test's own temp folder never is. `over` reads one
+// folder as another owner and mode; `rootParent` reads a folder's parent as root's 0755 (as setup's <base>/worker-runner/).
+const over = (base, dir, uid, mode) => (p) => { const st = base(p); return p === dir ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid, mode }) : st; };
+const rootParent = (dir, base = lstatSync) => over(base, dirname(dir), 0, 0o40755);
+const rootParentCheck = (dir, o = {}) => snapshotFolderProblem(dir, { ...o, lstat: rootParent(dir, o.lstat) });
 
 test('step 5: the config is refused unless every path is full, the uids are uids, and each product has its repo, mirror and paths', () => {
   const c = checkRunnerConfig(config('/x'));
@@ -175,7 +180,7 @@ test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, 
     const kept = []; const logs = [];
     const fresh = (path, r) => { const k = { path, r, stopped: false }; kept.push(k); return { stop: () => { k.stopped = true; }, error: () => (path.endsWith('p1.json') ? Object.assign(new Error('x'), { code: 'ENOSPC' }) : null) }; };
     let during;
-    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { during = kept.map((k) => k.stopped); } });
+    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async () => { during = kept.map((k) => k.stopped); } });
     assert.equal(code, 0, logs.join('\n'));
     assert.deepEqual(kept.map((k) => [k.path, k.r]), [[join(d, 'snapshots', 'rules-p1.json'), rules]], 'only a product with rules and a snapshot');
     assert.deepEqual(during, [false], 'kept fresh while the loop runs'); assert.equal(kept[0].stopped, true, 'stopped at the end');
@@ -224,7 +229,7 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
     const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
     const logs = []; let r;
     const fresh = () => { throw Object.assign(new Error('x'), { code: 'EROFS' }); };
-    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh,
+    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck,
       run: async (ctx) => { r = await ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' }); } });
     assert.equal(code, 0, logs.join('\n'));
     assert.equal(r.ok, false); assert.match(r.reason, /p1's rules snapshot is not kept fresh \(EROFS\)/);
@@ -323,13 +328,39 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('L926 (#419 r3 M1): the snapshot\'s folder is decided on the disk: the runner\'s own real folder, writable by it alone, under folders no one else can change', () => {
+test('L926 (#419 r3 M1, r4 M1): the snapshot\'s folder is decided on the disk: the runner\'s user\'s own real folder, in a folder of root\'s alone, under folders no one else can change', () => {
   const d = realpathSync(tempDir('orch-rmain-'));
   try {
     const ok = join(d, 'snaps'); mkdirSync(ok); chmodSync(ok, 0o755);
-    assert.equal(snapshotFolderProblem(ok), null);
+    assert.equal(rootParentCheck(ok), null);
+    // #419 r4 M1, the real uid and the real disk: the runner's sessions are the runner's own user, so a folder whose parent
+    // is that user's is refused: here the test's temp folder (the user's own temp folder, a folder under it), and a folder
+    // made right in it, owned by the runner's user.
+    const me = process.getuid();
+    const notRoots = (dir, uid, mode) => `its folder ${dir} sits in ${dirname(dir)}, which is not root's alone (its owner is uid ${uid}, mode ${mode}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`;
+    assert.equal(lstatSync(d).uid, me);
+    assert.equal(snapshotFolderProblem(ok).reason, notRoots(ok, me, '0700'));
+    const inTemp = join(realpathSync.native(dirname(d)), d.split('/').at(-1));
+    assert.equal(snapshotFolderProblem(inTemp).reason, notRoots(inTemp, me, (lstatSync(dirname(inTemp)).mode & 0o7777).toString(8).padStart(4, '0')), 'the temp folder\'s own child');
+    if (process.platform === 'darwin' && existsSync(`/private/tmp/claude-${me}`)) {
+      // claude's per-user sandbox temp folder sits in /private/tmp, root's but anyone's to write (sticky is not enough here).
+      const sand = `/private/tmp/claude-${me}`;
+      assert.equal(snapshotFolderProblem(sand).reason, notRoots(sand, 0, '1777'));
+    }
+    // The parent's mode and access list: root's with a group write bit, or sticky and anyone's, is refused; so is an
+    // access list write entry on it (read by the walk up).
+    assert.equal(snapshotFolderProblem(ok, { lstat: over(lstatSync, d, 0, 0o40775) }).reason, notRoots(ok, 0, '0775'));
+    assert.equal(snapshotFolderProblem(ok, { lstat: over(lstatSync, d, 0, 0o41777) }).reason, notRoots(ok, 0, '1777'));
+    assert.equal(snapshotFolderProblem(ok, { lstat: (p) => { if (p === d) throw Object.assign(new Error('no'), { code: 'EACCES' }); return lstatSync(p); } }).reason, `its folder ${ok} sits in ${d}, which can't be read (EACCES)`);
+    const entry0 = '0: group:everyone allow add_file';
+    assert.equal(rootParentCheck(ok, { aclWrites: (p) => (p === d ? [entry0] : []) }).reason, `its folder ${ok} sits in ${d}, which has an access list entry that lets others write (${entry0})`);
+    // #433's layout passes: <base> and <base>/worker-runner root's 0755, snapshots/ the runner's user's 0755.
+    const base = join(d, 'base'); const wr = join(base, 'worker-runner'); const snaps = join(wr, 'snapshots');
+    mkdirSync(snaps, { recursive: true }); chmodSync(base, 0o755); chmodSync(wr, 0o755); chmodSync(snaps, 0o755);
+    assert.equal(snapshotFolderProblem(snaps, { lstat: over(over(lstatSync, base, 0, 0o40755), wr, 0, 0o40755) }), null, '<base>/worker-runner/snapshots');
+    assert.equal(snapshotFolderProblem(snaps, { lstat: over(lstatSync, base, 0, 0o40755) }).reason, notRoots(snaps, me, '0755'), 'worker-runner/ the user\'s: refused');
     // Missing: held, saying which folder to make.
-    assert.deepEqual(snapshotFolderProblem(join(d, 'none')), { missing: true, reason: `its folder ${join(d, 'none')} is missing: make it, owned by the runner, mode 0755 (readable by its sessions, writable by the runner alone; setup does not make it yet)` });
+    assert.deepEqual(snapshotFolderProblem(join(d, 'none')), { missing: true, reason: `its folder ${join(d, 'none')} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` });
     // A link into a worker's copy, and a folder reached through one.
     const card = join(d, 'copies', 'p1', 'card'); mkdirSync(card, { recursive: true });
     symlinkSync(card, join(d, 'link'));
@@ -339,52 +370,55 @@ test('L926 (#419 r3 M1): the snapshot\'s folder is decided on the disk: the runn
     // Group or other writable.
     for (const mode of [0o775, 0o757, 0o777]) { chmodSync(ok, mode); assert.match(snapshotFolderProblem(ok).reason, /can be written by others than the runner/, mode.toString(8)); }
     chmodSync(ok, 0o755);
-    // A folder the worker's uid owns (the runner here is another uid), and one under a folder the worker owns (claude's
-    // per-user sandbox temp folder, /private/tmp/claude-<uid>, is the worker's).
-    const me = process.getuid();
-    assert.equal(snapshotFolderProblem(ok, { uid: me + 1 }).reason, `its folder ${ok} is not the runner's own (its owner is uid ${me}, the runner is ${me + 1})`);
-    const workerOwns = (dir) => (p) => { const st = lstatSync(p); return p === dir ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: me + 7 }) : st; };
-    assert.equal(snapshotFolderProblem(ok, { lstat: workerOwns(d) }).reason, `its folder ${ok} sits in ${d}, which others than the runner can change`);
-    // A folder above it that others can write, not sticky.
+    // A folder another Mac user owns (the runner told it is another uid), and one in a folder another user owns.
+    assert.equal(snapshotFolderProblem(ok, { uid: me + 1 }).reason, `its folder ${ok} is not owned by the runner's user (its owner is uid ${me}, the runner is ${me + 1})`);
+    const otherOwns = (dir) => (p) => { const st = lstatSync(p); return p === dir ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: me + 7 }) : st; };
+    assert.equal(snapshotFolderProblem(ok, { lstat: otherOwns(d) }).reason, notRoots(ok, me + 7, '0700'));
+    // Its parent anyone's to write.
     chmodSync(d, 0o777);
-    assert.equal(snapshotFolderProblem(ok).reason, `its folder ${ok} sits in ${d}, which others than the runner can change`);
+    assert.equal(snapshotFolderProblem(ok).reason, notRoots(ok, me, '0777'));
     chmodSync(d, 0o700);
     // Every folder up, not only the parent (self-review m2): two levels up, others can write.
     const deep = join(d, 'a', 'snaps'); mkdirSync(deep, { recursive: true }); chmodSync(join(d, 'a'), 0o755); chmodSync(deep, 0o755);
-    assert.equal(snapshotFolderProblem(deep), null);
+    assert.equal(rootParentCheck(deep), null);
     chmodSync(d, 0o777);
-    assert.equal(snapshotFolderProblem(deep).reason, `its folder ${deep} sits in ${d}, which others than the runner can change`);
+    assert.equal(rootParentCheck(deep).reason, `its folder ${deep} sits in ${d}, which others than the runner can change`);
     chmodSync(d, 0o700);
-    assert.equal(snapshotFolderProblem(deep, { lstat: workerOwns(d) }).reason, `its folder ${deep} sits in ${d}, which others than the runner can change`);
+    assert.equal(rootParentCheck(deep, { lstat: otherOwns(d) }).reason, `its folder ${deep} sits in ${d}, which others than the runner can change`);
     // Sticky (self-review m3): a folder anyone may write but only its owners rename in passes when root's; not sticky, or
     // not root's or the runner's, it does not.
     const asIf = (dir, uid, mode) => (p) => { const st = lstatSync(p); return p === dir ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid, mode }) : st; };
-    assert.equal(snapshotFolderProblem(deep, { lstat: asIf(d, 0, 0o41777) }), null, 'root\'s, sticky');
-    assert.match(snapshotFolderProblem(deep, { lstat: asIf(d, 0, 0o40777) }).reason, /which others than the runner can change/, 'root\'s, not sticky');
-    assert.match(snapshotFolderProblem(deep, { lstat: asIf(d, me + 7, 0o41777) }).reason, /which others than the runner can change/, 'another\'s, sticky');
+    assert.equal(rootParentCheck(deep, { lstat: asIf(d, 0, 0o41777) }), null, 'root\'s, sticky');
+    assert.match(rootParentCheck(deep, { lstat: asIf(d, 0, 0o40777) }).reason, /which others than the runner can change/, 'root\'s, not sticky');
+    assert.match(rootParentCheck(deep, { lstat: asIf(d, me + 7, 0o41777) }).reason, /which others than the runner can change/, 'another\'s, sticky');
     // An access list entry that lets others write, on the folder or one above it (self-review M1); a deny entry is fine.
     const entry = '0: group:everyone allow add_file,delete_child';
-    assert.equal(snapshotFolderProblem(deep, { aclWrites: (p) => (p === deep ? [entry] : []) }).reason, `its folder ${deep} has an access list entry that lets others write (${entry})`);
-    assert.equal(snapshotFolderProblem(deep, { aclWrites: (p) => (p === d ? [entry] : []) }).reason, `its folder ${deep} sits in ${d}, which has an access list entry that lets others write (${entry})`);
-    assert.match(snapshotFolderProblem(deep, { aclWrites: () => { throw new Error('ls failed'); } }).reason, /access list can't be read \(ls failed\)/);
+    assert.equal(rootParentCheck(deep, { aclWrites: (p) => (p === deep ? [entry] : []) }).reason, `its folder ${deep} has an access list entry that lets others write (${entry})`);
+    assert.equal(rootParentCheck(deep, { aclWrites: (p) => (p === d ? [entry] : []) }).reason, `its folder ${deep} sits in ${d}, which has an access list entry that lets others write (${entry})`);
+    assert.match(rootParentCheck(deep, { aclWrites: () => { throw new Error('ls failed'); } }).reason, /access list can't be read \(ls failed\)/);
     const ls = (out) => () => ({ status: 0, stdout: out });
     assert.deepEqual(aclWriteEntries('/x', { platform: 'darwin', run: ls('drwxr-xr-x+ 51 u staff 1 Nov 10 /x\n 0: group:everyone deny delete\n') }), []);
     assert.deepEqual(aclWriteEntries('/x', { platform: 'darwin', run: ls('drwxr-xr-x+ 2 u staff 1 Nov 10 /x\n 0: user:w inherited allow list,add_subdirectory\n 1: group:everyone allow list,search\n') }), ['0: user:w inherited allow list,add_subdirectory']);
+    // #419 r4 m1: a name with a space, a line it can't parse and a right it doesn't know are write entries; a deny, and an
+    // allow of reading only, are not, whatever the name.
+    const spaced = ['0: group:Domain Users allow add_file', '1: group:Domain Users allow list,search,readattr', '2: group:Domain Users deny add_file,delete',
+      '3: user:Some One inherited allow list,delete_child', '4: something this does not know', '5: group:everyone allow frobnicate', '6: user:a allow b inherited allow list'];
+    assert.deepEqual(aclWriteEntries('/x', { platform: 'darwin', run: ls(`drwxr-xr-x+ 2 u staff 1 Nov 10 /x\n${spaced.map((l) => ` ${l}`).join('\n')}\n`) }), [spaced[0], spaced[3], spaced[4], spaced[5]]);
     assert.throws(() => aclWriteEntries('/x', { platform: 'darwin', run: () => ({ status: 1, stdout: '' }) }), /ls -lde failed/);
     assert.deepEqual(aclWriteEntries('/x', { platform: 'linux', run: () => { throw new Error('not run'); } }), []);
     if (process.platform === 'darwin') {
       // The real reader, with a real entry.
       assert.equal(spawnSync('/bin/chmod', ['+a', 'everyone allow add_file,delete_child', deep]).status, 0);
-      assert.match(snapshotFolderProblem(deep).reason, /has an access list entry that lets others write \(0: group:everyone allow add_file,delete_child\)/);
+      assert.match(rootParentCheck(deep).reason, /has an access list entry that lets others write \(0: group:everyone allow add_file,delete_child\)/);
       assert.equal(spawnSync('/bin/chmod', ['-N', deep]).status, 0);
-      assert.equal(snapshotFolderProblem(deep), null);
+      assert.equal(rootParentCheck(deep), null);
       // A case that differs from the disk's is told so, not called a link (self-review m7).
-      assert.equal(snapshotFolderProblem(deep.replace('/snaps', '/SNAPS')).reason, `its folder ${deep.replace('/snaps', '/SNAPS')} is spelled otherwise on the disk (it is ${deep})`);
+      assert.equal(rootParentCheck(deep.replace('/snaps', '/SNAPS')).reason, `its folder ${deep.replace('/snaps', '/SNAPS')} is spelled otherwise on the disk (it is ${deep})`);
     }
     // The temp folder: /tmp is a link, and /private/tmp is root's and anyone's to write.
     if (process.platform === 'darwin') {
       assert.match(snapshotFolderProblem('/tmp').reason, /^its folder \/tmp is (a link|reached through a link)/);
-      assert.match(snapshotFolderProblem('/private/tmp').reason, /^its folder \/private\/tmp is not the runner's own/);
+      assert.match(snapshotFolderProblem('/private/tmp').reason, /^its folder \/private\/tmp is not owned by the runner's user/);
     }
   } finally { chmodSync(d, 0o700); rmSync(d, { recursive: true, force: true }); }
 });
@@ -407,12 +441,18 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
     assert.equal(locked, 0, 'refused before the lock (self-review m4)'); assert.equal(existsSync(join(d, 'runner', 'settings')), false, 'and before settings/ is made');
     assert.ok(logs.some((l) => l === `the worker runner did not start: product p1's rules snapshot: its folder ${join(d, 'snapshots')} is a link`), logs.join('\n'));
     assert.deepEqual(readdirSync(card), [], 'nothing written in the copy');
+    // #419 r4 M1, with main's own check and the real uid: a right folder whose parent is the runner's user's (here the
+    // test's temp folder) is refused before the lock, nothing written.
+    rmSync(join(d, 'snapshots')); mkdirSync(join(d, 'snapshots')); chmodSync(join(d, 'snapshots'), 0o755); logs.length = 0;
+    assert.equal(await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { ran = true; } }), 1);
+    assert.equal(ran, false); assert.deepEqual(wrote, []); assert.deepEqual(readdirSync(join(d, 'snapshots')), []);
+    assert.ok(logs.some((l) => l.startsWith(`the worker runner did not start: product p1's rules snapshot: its folder ${join(d, 'snapshots')} sits in ${d}, which is not root's alone (its owner is uid ${process.getuid()}, mode `)), logs.join('\n'));
     // Missing: the runner starts, the product is held, saying which folder to make; made as a link later, still held;
     // made right, kept fresh.
-    rmSync(join(d, 'snapshots'));
+    rmSync(join(d, 'snapshots'), { recursive: true });
     logs.length = 0; const reasons = [];
     const start = (ctx) => ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' });
-    const code2 = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async (ctx) => {
+    const code2 = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, folderProblem: rootParentCheck, run: async (ctx) => {
       reasons.push((await start(ctx)).reason);
       symlinkSync(card, join(d, 'snapshots'));
       reasons.push((await start(ctx)).reason);
@@ -420,7 +460,7 @@ test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked 
       await start(ctx);
     } });
     assert.equal(code2, 0, logs.join('\n'));
-    const missing = `its folder ${join(d, 'snapshots')} is missing: make it, owned by the runner, mode 0755 (readable by its sessions, writable by the runner alone; setup does not make it yet)`;
+    const missing = `its folder ${join(d, 'snapshots')} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)`;
     assert.ok(logs.some((l) => l === `product p1's rules snapshot can't be written (${missing}); its sessions are refused`), logs.join('\n'));
     assert.equal(reasons[0], `product p1's rules snapshot is not kept fresh (${missing}), so its sessions are not started`);
     assert.equal(reasons[1], `product p1's rules snapshot is not kept fresh (its folder ${join(d, 'snapshots')} is a link), so its sessions are not started`);
