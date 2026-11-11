@@ -8,8 +8,13 @@
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
 //   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main, runnerLog })
-//                                                             → { requestReview, hasReviewer, planReviewsRunning,
+//                                                             → { requestReview, stopReview, hasReviewer, planReviewsRunning,
 //                                                                 reviewAlerts, startPlanReview, planReviewAnswer }
+//   stopReview({ card, role, head })                         → { ok, name } | { ok: false, reason }: the stop step's ask to
+//     end every reviewer or auditor running for exactly that card, role and head (L946, L947), a stop file written by
+//     M4 review-stop.mjs writeStopRequest in its target form into the same requests/ folder. No request id is kept or
+//     sent: the runner counts the stop only because the file is the Dispatcher's Mac user's. A requests/ that is a link,
+//     or not a folder, is refused before the write (anyone may write it, so its owner is not the proof; the file's is).
 //   writePlanReviewRequest({ dir, card, fingerprint, key })   → asks for a plan reviewer (L703); its session is the request id
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
@@ -34,12 +39,13 @@
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
-import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
+import { writeStopRequest } from '../M4-workshop/launcher/review-stop.mjs';
 import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
 import { tellThen, clearCause, writeFrom, queuedMarks } from './alerts.mjs';
 import { causeOf } from './pass.mjs';
@@ -93,6 +99,13 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid(),
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
   } finally { if (made) try { unlinkSync(tmp); } catch { /* gone */ } }
   return { ok: true };
+}
+
+// Why the runner's requests/ can't take a stop, or null: a plain folder, not a link (L946).
+function plainFolder(dir) {
+  let st;
+  try { st = lstatSync(dir); } catch (e) { return `the review runner's requests folder ${dir} can't be read (${e?.code ?? e?.message ?? e})`; }
+  return st.isSymbolicLink() || !st.isDirectory() ? `the review runner's requests folder ${dir} is not a plain folder` : null;
 }
 
 // Why the file under a request's name is not this very request, or null when it is: read by descriptor, never a link.
@@ -199,6 +212,8 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
   const read = () => readReviewStatus({ file: status, now: now(), uid: reviewUid });
   return {
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
+    // L946: by card, role and head only, never a request id (L947: M11 keeps none).
+    stopReview: ({ card, role, head }) => { const bad = plainFolder(requests); return bad ? { ok: false, reason: bad } : writeStopRequest({ dir: requests, target: { card, role, head } }); },
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
     // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list

@@ -7,7 +7,7 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { writeReviewRequest, reviewPorts, statusAlerts, MAIN_UNREAD, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
-import { STATUS_STALE_MS } from '../M4-workshop/launcher/review-runner.mjs';
+import { STATUS_STALE_MS, readRequest } from '../M4-workshop/launcher/review-runner.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
 
 const ME = process.getuid();
@@ -280,5 +280,45 @@ test('L945 a: a review request is 0644 under the Dispatcher job\'s umask 077, so
     assert.equal(st.mode & 0o777, 0o644);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, 'req-1.json'), 'utf8')), { card: 'C-1', head: 'a'.repeat(40), role: 'reviewer', request_id: 'req-1' });
     assert.deepEqual(readdirSync(dir), ['req-1.json'], 'no hidden file left');
+  } finally { process.umask(old); }
+});
+
+// L946, L947: the stop step's stopReview port writes the review runner's stop file by target (card, role and head), never
+// a request id, 0644 under the Dispatcher job's umask 077, and the runner's own reader takes it as a target stop of this
+// user's (its owner is the proof). A requests folder that is a link, or not a folder, is refused and nothing is written.
+test('L946: stopReview writes { card, head, role, stop: true } by target, 0644 under umask 077, which the runner reads as a stop of this user\'s', () => {
+  const dir = tempDir('m11-rr-stop-');
+  const old = process.umask(0o077);
+  try {
+    const head = 'b'.repeat(40);
+    const p = reviewPorts({ requests: dir, status: join(dir, 'status.json'), reviewUid: process.getuid() });
+    const w = p.stopReview({ card: 'C-7', role: 'auditor', head });
+    assert.equal(w.ok, true, w.reason);
+    const names = readdirSync(dir);
+    assert.deepEqual(names, [w.name], 'one file, and no hidden file left');
+    assert.match(w.name, /^stop-[0-9a-f-]+\.json$/);
+    assert.equal(lstatSync(join(dir, w.name)).mode & 0o777, 0o644);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, w.name), 'utf8')), { card: 'C-7', head, role: 'auditor', stop: true }, 'no request id');
+    const got = readRequest(dir, w.name);
+    assert.equal(got.ok, true, got.reason);
+    assert.equal(got.target, true);
+    assert.equal(got.owner, process.getuid());
+    // What the writer refuses is refused here too, and writes nothing (the runner's reader may have taken the file away).
+    const before = readdirSync(dir).sort();
+    for (const t of [{ card: 'C-7', role: 'auditor', head: 'B'.repeat(40) }, { card: 'C-7', role: 'plan_reviewer', head }, { card: '.x', role: 'reviewer', head }]) {
+      assert.equal(p.stopReview(t).ok, false, JSON.stringify(t));
+    }
+    assert.deepEqual(readdirSync(dir).sort(), before);
+    // The folder a link or a file: refused before any write.
+    const link = join(dir, 'link');
+    const real = join(dir, 'real');
+    mkdirSync(real);
+    symlinkSync(real, link);
+    const viaLink = reviewPorts({ requests: link, status: join(dir, 'status.json'), reviewUid: process.getuid() }).stopReview({ card: 'C-7', role: 'auditor', head });
+    assert.equal(viaLink.ok, false);
+    assert.match(viaLink.reason, /requests folder .* is not a plain folder/);
+    assert.deepEqual(readdirSync(real), [], 'nothing written through the link');
+    const gone = reviewPorts({ requests: join(dir, 'none'), status: join(dir, 'status.json'), reviewUid: process.getuid() }).stopReview({ card: 'C-7', role: 'auditor', head });
+    assert.match(gone.reason, /requests folder .* can't be read \(ENOENT\)/);
   } finally { process.umask(old); }
 });
