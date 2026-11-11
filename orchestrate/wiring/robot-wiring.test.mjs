@@ -1205,3 +1205,24 @@ test('L955: markToldByBeat writes nothing over a hold fact whose read failed, an
   assert.equal(markToldByBeat(broken, { cause, text: 'late', now: T730 }), false);
   assert.deepEqual(writes.filter(([o]) => o?.id === fact), [], 'nothing written to the unreadable hold');
 });
+
+// L955 plants P7 and P9 (the fold of #289): the rules line and a heartbeat that fails.
+test('L955: rules that could not be read and adopted are "M10 Rules readable: no" on the heartbeat, never yes', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // Every read of the product's repository fails, so no rules are adopted; the alert repository and the mint still work.
+  const fetchFn = (url, init = {}) => { const path = new URL(url).pathname;
+    return path.startsWith('/repos/') && !path.startsWith(`/repos/${ALERT_REPO}`) ? Promise.resolve({ status: 500, json: async () => ({}) }) : gh.fetchFn(url, init); };
+  const { passes } = await wire(w.config, { fetchFn, log: () => {} });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /M10 Rules readable: no/);
+});
+
+test('L955: a heartbeat that fails makes the pass fail with its reason, and the late Dispatcher stays queued', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const fetchFn = (url, init = {}) => (new URL(url).pathname.startsWith(`/repos/${ALERT_REPO}`) ? Promise.reject(new Error('alert repository unreachable')) : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, log: () => {} });
+  await assert.rejects(passes.heartbeat(), (e) => { assert.match(e.message, /alert repository unreachable/); return true; });
+  assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'the late alert is still queued for deliver');
+});
