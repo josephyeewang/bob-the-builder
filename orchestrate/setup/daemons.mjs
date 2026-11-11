@@ -25,7 +25,7 @@ import { checkInstall, installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { watchPlist, WATCH_NO_HASH } from './watch-setup.mjs';
 import { watchRulesPath } from './layout.mjs';
-import { ROBOT_JOB, robotConfigProblem, robotPlist } from './robot-setup.mjs';
+import { ROBOT_JOB, robotAppKeyItems, robotConfigProblem, robotPlist } from './robot-setup.mjs';
 import { DISPATCHER_JOB, DISPATCHER_OFF, DISPATCHER_RUN_LIMIT_S, dispatcherConfigProblem, dispatcherKeysProblem, dispatcherLoadProblem, dispatcherPlist, robotMatchProblem, writeAside } from './dispatcher-setup.mjs';
 
 export const DAEMON_DIR = '/Library/LaunchDaemons';
@@ -176,7 +176,7 @@ export function jobLive(io, cfg, job) {
 /** `daemons place`: launchd starts every job file in its folder at boot, with no load to refuse it, so a job file is placed only when load would start the job (L807 M1). */
 export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const gate = startProblems(io, cfg, jobs);
-  if (!gate.length) return placeSteps(io, cfg, jobs);
+  if (!gate.length) return { ...placeSteps(io, cfg, jobs), unchecked: startUnchecked(io, cfg, jobs) };
   // A job file placed before still starts at boot; say so (the gate's own lines stay first, as load's).
   const live = (j) => { try { return jobLive(io, cfg, j); } catch { return null; } };   // the gate already refuses; this line only helps
   // Only a job whose own checks fail: a healthy job starting at boot is fine, and taking the review runner out would stop
@@ -237,10 +237,21 @@ export function startProblems(io, cfg, jobs) {
     const why = robotConfigProblem(io, cfg); if (why) problems.push(`${why}, so the robot job would not start`);
     // With the Dispatcher on, the robot must name its Record and lock, also when only the robot is loaded (self-review M2).
     const apart = why ? null : robotMatchProblem(io, cfg); if (apart) problems.push(`${apart}, so the robot job would not start`);
+    // L727: robot.json names the robot App, so its key must be there, or no alert (not even the store-free one) reaches Joe.
+    for (const k of robotAppKeyItems(io, cfg)) if (!k.ok) problems.push(`${k.what}: ${k.why}, so the robot job could not send an alert`);
   }
   // The Dispatcher: its config in the copy, then check-dispatcher (L757), before it may start.
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherLoadProblem(io, cfg); if (why) problems.push(why); }
   return problems;
+}
+
+/**
+ * What startProblems could not look at without root, so a dry run says so instead of reading as a pass (#305 r1 m4): the
+ * robot App's key in the orchestrate-only key folder. A real run is root's (setup refuses it otherwise), so this is empty.
+ */
+export function startUnchecked(io, cfg, jobs) {
+  if (!jobs.includes(ROBOT_JOB)) return [];
+  return robotAppKeyItems(io, cfg).filter((k) => k.skip).map((k) => `the robot App's key: ${k.what} — ${k.why}`);
 }
 
 export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
@@ -260,7 +271,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
       op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; })),
       readBackOp(io, cfg, job));
   }
-  return { ops, problems };
+  return { ops, problems, unchecked: startUnchecked(io, cfg, jobs) };
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */
@@ -360,7 +371,11 @@ export function checkDaemons(io, cfg, jobs = jobsFor(cfg)) {
     const s = jobState(io, cfg, off); let placed = false; try { io.lstat(plistPath(cfg, off)); placed = true; } catch { /* none */ }
     item(!s.loaded && !placed, `no ${labelOf(cfg, off)} job is placed or loaded (${offWhy[off]})`, `${s.loaded ? `it is loaded: take it out with sudo node setup.mjs daemons unload --only ${off}, then` : 'its file is there:'} delete ${plistPath(cfg, off)}`, !s.loaded && !placed);
   }
-  if (jobs.includes(ROBOT_JOB)) { const why = robotConfigProblem(io, cfg) ?? robotMatchProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why); }
+  if (jobs.includes(ROBOT_JOB)) {
+    const why = robotConfigProblem(io, cfg) ?? robotMatchProblem(io, cfg); item(why === null, `the robot job's config in the copy (robot.json) matches this setup`, why);
+    // A key that needs root to look at is listed as NEEDS ROOT, never dropped (audit #305 n3): a check without sudo is not a pass.
+    for (const k of robotAppKeyItems(io, cfg)) if (k.skip) out.push({ ok: true, skip: true, what: `the robot App's key: ${k.what}`, why: k.why }); else item(k.ok, `the robot App's key: ${k.what}`, k.why);
+  }
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherConfigProblem(io, cfg); item(why === null, `the Dispatcher's config in the copy (dispatcher.json) is the one this setup writes`, why); }
   // check-dispatcher's FAILs only: a NOT TRIED line (no root to look) is not one, so check without sudo stays quiet on it (L807 m3).
   if (jobs.includes(DISPATCHER_JOB)) { const why = dispatcherKeysProblem(io, cfg); item(why === null, 'check-dispatcher has no FAIL', why); }

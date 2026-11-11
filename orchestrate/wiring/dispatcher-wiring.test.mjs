@@ -48,7 +48,7 @@ const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'sealRoot
 // and reviewEnded (L739): worker-ports.test.mjs plants each. The worker runner's sync ports (L925: sessions, board,
 // outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too.
 const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'outboxRoot', 'outboxSessions', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
-  'requestReview', 'reviewAlerts', 'reviewEnded', 'sessions', 'startPlanReview', 'stopSession', 'wait']);
+  'requestReview', 'reviewAlerts', 'reviewEnded', 'sessions', 'startPlanReview', 'stopReview', 'stopSession', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -266,7 +266,7 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(phonePorts({}), {}, 'nothing answered yet');
   const config = reviewConfig(tempDir('orch-review-keys-'));
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
-    ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'wait']);
+    ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'stopReview', 'wait']);
   const w = world();
   assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession']);
 
