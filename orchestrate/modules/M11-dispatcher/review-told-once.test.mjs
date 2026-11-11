@@ -1040,7 +1040,7 @@ test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, d
   const m = mac();
   const old = process.umask(0o777);
   let told;
-  try { told = await m.run(0, 80, /Review requests can't be read \(EACCES\) for a day; the last: [A-Za-z0-9-]+\.json/); } finally { process.umask(old); }
+  try { told = await m.run(0, 80, /Review requests can't be read \(EACCES\) for a day; the last: request #[0-9a-f]{12}/); } finally { process.umask(old); }
   assert.deepEqual(told, [25, 49, 73]);
   assert.equal(m.starts.length, 0);
   assert.equal(statusHolds(m).length, 1);
@@ -1092,7 +1092,7 @@ test('R-0b-171: one hold per cause however many files, and none arriving ends it
   const holds = statusHolds(m);
   assert.equal(holds.length, 2);
   assert.equal(new Set(holds.map((h) => h.id)).size, 2);
-  assert.match(holds.map((h) => h.text).join(' '), /Review requests can't be read \(it is not JSON\) for a day; the last: junk-41\.json/);
+  assert.match(holds.map((h) => h.text).join(' '), /Review requests can't be read \(it is not JSON\) for a day; the last: request #[0-9a-f]{12}/);
   m.clock.t += REFUSED_QUIET_MS;
   await runnerPass(m.ctx);
   assert.deepEqual(statusHolds(m), []);

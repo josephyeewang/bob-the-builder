@@ -133,6 +133,8 @@ const fileMark = (name) => `request #${createHash('sha256').update(String(name))
 const FILE_MARK = /^request #[0-9a-f]{12}$/;
 // The stops kept full is told at most once a day (L935 re-review 2 m2), however often the list drains and fills.
 const STOPS_FULL_TOLD_MS = 24 * 60 * 60_000;
+// The Dispatcher's ids kept on a session someone else's request started (L945): its latest few.
+const KEEP_STOP_IDS = 8;
 export const STOP_KEYS = Object.freeze(['request_id', 'stop']);
 export { CARD_ID };
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -1127,7 +1129,7 @@ export async function runnerPass(ctx) {
     result.stopped.push({ pid: r.pid, sessionId: r.session_id, stopped: true, by_request: true });
     return null;
   };
-  for (const r of state.running.filter((x) => x.stoppable === true && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
+  for (const r of state.running.filter((x) => (x.stoppable === true || (Array.isArray(x.stop_ids) && x.stop_ids.length > 0)) && x.stop_wanted && !x.stopped_by_request && !x.stop_failed)) {
     const why = await stopIt(r);
     if (why) stopSaid(why);
   }
@@ -1152,10 +1154,12 @@ export async function runnerPass(ctx) {
     // `dispatcherUid`). Anyone else's does nothing, and is never kept, so others can't fill the stops kept either.
     if (!fromDispatcher(got)) { stopSaid(Number.isInteger(ctx.dispatcherUid) ? "its file is not the Dispatcher's user's, so nothing was stopped" : 'this runner is not told the Dispatcher\'s user, so no stop counts', name); continue; }
     const rid = got.req.request_id;
-    const r = state.running.find((x) => REVIEW_ROLES.includes(x.role) && typeof x.request_id === 'string' && x.request_id === rid);
+    // Its own id, or one the Dispatcher asked for while it ran (L945: its request refused as already running).
+    const r = state.running.find((x) => REVIEW_ROLES.includes(x.role) && ((typeof x.request_id === 'string' && x.request_id === rid) || (Array.isArray(x.stop_ids) && x.stop_ids.includes(rid))));
+    const byOwnAsk = r && Array.isArray(r.stop_ids) && r.stop_ids.includes(rid);
     // One started before stops were (no `stoppable`, re-review m3), or on a request file someone other than the
     // Dispatcher's user wrote (whose id that someone knows; re-review 2 M1), is never reached.
-    if (r && r.stoppable !== true) { stopSaid('that session was not started on a request the Dispatcher\'s user wrote to this runner, which a stop does not reach; nothing was stopped', name); continue; }
+    if (r && r.stoppable !== true && !byOwnAsk) { stopSaid('that session was not started on a request the Dispatcher\'s user wrote to this runner, which a stop does not reach; nothing was stopped', name); continue; }
     if (!r) {
       if (state.seen.includes(rid)) { stopSaid('no reviewer or auditor the runner is running was started on that request id (it has ended, never started, or is a plan reviewer\'s, which a stop never reaches); nothing was stopped', name); continue; }
       // Not seen yet. The Dispatcher names a request's file by its id, so one waiting in requests/ (this pass, or behind
@@ -1416,7 +1420,12 @@ export async function runnerPass(ctx) {
     if (typeof tree !== 'string' || !HEX40.test(tree)) { stuck(`the tree of ${head.slice(0, 7)} could not be read`); continue; }
     if (!rl.ok) { stuck(`the launch records could not be read, so no ${role} starts`); continue; }
     const k = keyOf(card, tree, role);
-    if (state.running.some((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k)) { accepted(); refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
+    const there = state.running.find((r) => keyOf(r.card, r.tree ?? r.head, r.role) === k);
+    // The Dispatcher's own request for a session already running (one someone else's request started first, L945, the
+    // reviewer's re-review 3 m1): its id is kept on that session, so the Dispatcher can still stop it. Only its id: one
+    // who wrote the first request knows that one, and a stop is the Dispatcher's user's alone either way.
+    if (there && fromDispatcher(got) && REVIEW_ROLES.includes(there.role)) there.stop_ids = [...(Array.isArray(there.stop_ids) ? there.stop_ids : []), rid].slice(-KEEP_STOP_IDS);
+    if (there) { accepted(); refuse(`a ${role} is already running for card ${card} at ${head.slice(0, 7)} (or a head with the same tree)`); continue; }
     let a = state.attempts[k] ?? { failures: 0 };
     // The launch records say it too, whatever the runner's memory says: a session on this card's tree (or head) for this
     // role, not set aside by Joe, is a start already made. So is one marked never ran (L71 point 2) once anything is in

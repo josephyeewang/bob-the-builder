@@ -2292,6 +2292,30 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   refusedFor(await runnerPass(w.ctx), /a stop request: that session was not started on a request the Dispatcher's user wrote to this runner/);
   assert.deepEqual(groups, []);
   assert.equal(w.live.length, 1, 'the review goes on, as before stops');
+  // L945: the Dispatcher's own request for it, refused as already running, keeps its id on that session (never in the
+  // status), so the Dispatcher's stop for that id stops it; a stop for the first request's id still does nothing.
+  w.ask({ request_id: 'disp-1' });
+  refusedFor(await runnerPass(w.ctx), /a reviewer is already running for card C-1/);
+  assert.deepEqual(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running[0].stop_ids, ['disp-1']);
+  assert.equal(JSON.stringify(w.status()).includes('disp-1'), false, 'the id is in no status');
+  writeStopRequest({ dir: w.requests, requestId: 'forged-1' });
+  refusedFor(await runnerPass(w.ctx), /a stop request: that session was not started on a request the Dispatcher's user wrote/);
+  assert.deepEqual(groups, []);
+  // Its first try fails (the command line can't be read): it is tried again on the next pass.
+  const realName = w.ctx.processName;
+  w.ctx.processName = () => { throw Object.assign(new Error('ps'), { code: 'EAGAIN' }); };
+  writeStopRequest({ dir: w.requests, requestId: 'disp-1' });
+  await runnerPass(w.ctx);
+  assert.deepEqual(groups, []);
+  w.ctx.processName = realName;
+  await runnerPass(w.ctx);
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], 'stopped by the Dispatcher\'s own id, on the try again');
+  // Someone else's request refused as already running keeps nothing.
+  const x = await stopWorld();
+  x.w.ctx.dispatcherUid = ME + 1;
+  x.w.ask({ request_id: 'first-1' }); await runnerPass(x.w.ctx);
+  x.w.ask({ request_id: 'second-1' }); await runnerPass(x.w.ctx);
+  assert.equal(JSON.parse(readFileSync(join(x.w.root, 'state.json'), 'utf8')).running[0].stop_ids, undefined);
   // One not the Dispatcher's never reads a waiting request early (re-review 3 m2): that request still starts.
   const u = await stopWorld();
   u.w.ctx.dispatcherUid = ME + 1;
