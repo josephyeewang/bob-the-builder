@@ -19,7 +19,7 @@ const LS = '/bin/ls';
 const TRUE = '/usr/bin/true';
 
 // The folders the owner's user must not write: the record, and the code and rules the robots run from.
-const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies', 'outboxes', ...RUNNER_ROLES.map((r) => `outboxes/${r}`)];
+const NO_WRITE = ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'bob', 'global-rules', 'frontdoor', 'mirror', 'private', 'keys', 'review', 'review-copies', 'worker-runner', 'outboxes', ...RUNNER_ROLES.map((r) => `outboxes/${r}`)];
 
 /** The proofs: [{ what, args, expect: 'ok' | 'fail', control? }]. `args` are what follows `sudo -n -u <owner>`.
  *  A "cannot write" proof shows the state now; that the owner cannot gain write (own it and chmod it) is check's job:

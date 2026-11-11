@@ -9,7 +9,7 @@ the SVG is always written.
 Usage:
   python3 scripts/concept_sheet.py a.svg b.svg c.svg --names "Next Block" "Ranked F" "Forward f" \\
       --notes "One block steps forward: the next move." "An F of ranked priority bars." "The i-dot steps ahead." \\
-      --title "Fabbit — logo concepts" --recommend 1 -o concepts.png
+      --title "Example Brand — fictional logo concepts" --recommend 1 -o concepts.png
   python3 scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-h.svg b-h.svg c-h.svg --greyscale -o round1.png
 
 Show the resulting PNG to the user (view it yourself first), then stop and ask how to proceed.

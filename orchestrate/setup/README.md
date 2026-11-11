@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 53 FAILs of 59 items for one product (about 9 more for each extra product: its copies and outbox folders, L836), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 53 FAILs of 57 items for one product (about 9 more for each extra product: its copies and outbox folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -60,18 +60,19 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   entry. Those two roles have no flat folder (L914): `outboxes/worker/` and `outboxes/script/` left by an earlier setup
   FAIL in `check` by name, with what they hold (a hand-in there may not be taken in yet); check each holds nothing unsaved,
   then remove it by hand. Setup removes nothing.
-- **The worker runner's folders (L921).** `worker-runner/` is root's 0755, so none under it can be renamed away; under it,
-  each apart from the others and from every copies, outbox and mirror folder: `requests/` (the owner's, group wheel, 0700,
-  with one access-list entry letting `orchestrate` only go in and add a file, `search,add_file`: the Dispatcher writes
-  each request new; the runner reads and removes it), `runner/` (the owner's 0755: the runner's status, which the
-  Dispatcher reads and refuses when others can write the folder, its memory, settings and lock) and `snapshots/` (the
-  owner's 0755: one rules snapshot per product, which its sessions' hooks read). The worker runner writes a session's outbox at `outboxes/<product>/<role>/<session>`, so a session can be
+  The worker runner writes a session's outbox at `outboxes/<product>/<role>/<session>`, so a session can be
   denied every other product's whole folder (which names a product may take: `shared/product-paths.mjs`). The review roles take no product: their
   folders, and `review-copies/`, stay as they are. `proofs` checks, per product, that the owner CAN write
   `worker-copies/<product>` and both role folders (controls) and can NOT write `outboxes/<product>` itself.
   Every "cannot write" proof shows the state now; that the owner cannot gain write (own the folder and `chmod` it) is
   `check`'s job: it wants each of these folders owned by root, orchestrate or review (never the owner), with the exact
   mode and access list.
+- **The worker runner's folders (L921).** `worker-runner/` is root's 0755, so none under it can be renamed away; under it,
+  each apart from the others and from every copies, outbox and mirror folder: `requests/` (the owner's, group wheel, 0700,
+  with one access-list entry letting `orchestrate` only go in and add a file, `search,add_file`: the Dispatcher writes
+  each request new; the runner reads and removes it), `runner/` (the owner's 0755: the runner's status, which the
+  Dispatcher reads and refuses when others can write the folder, its memory, settings and lock) and `snapshots/` (the
+  owner's 0755: one rules snapshot per product, which its sessions' hooks read). `proofs` checks the owner can NOT write `worker-runner/` itself.
 - Root runs only a node program that is root's alone with every folder above it (the nodejs.org install in
   `/usr/local/bin`; a Homebrew node is refused). The real guard is the absolute path of that program and its owner: the
   program checks itself, and refuses under `sudo` for every command (`check` included). `--root-prefix` is for tests and

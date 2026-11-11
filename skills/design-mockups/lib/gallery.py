@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reusable gallery builders + the numbering SSOT.
 
-canonical_files()/num2file() define THE stable gallery numbering (ported from the
-original project's gallery runner scripts). Every board (consolidated / grouped / curated) numbers
+canonical_files()/num2file() define the shared gallery numbering. Every board
+(consolidated / grouped / curated) numbers
 figures from this same map, so "the user said #117" always resolves to the same
 file — gallery numbers and ref-resolver numbers can never drift.
 """
@@ -17,8 +17,8 @@ def _font(sz):
     return ImageFont.load_default()
 
 # ---------------------------------------------------------------- numbering SSOT
-# Ordered glob patterns -> natural sort within each -> dedupe (ported from the
-# original runner scripts). A final "*.png" catch-all is ADDED so
+# Ordered glob patterns -> natural sort within each -> dedupe. A final "*.png"
+# catch-all ensures
 # project-agnostic names (win*-, soph-, custom names) still get stable numbers.
 CANON_PATTERNS = ["A[0-9]*.png", "B[0-9]*.png", "arch-[0-9]*.png", "arch-C*.png", "arch-M*.png",
                   "AD*.png", "theme-*.png", "s2-*.png", "S[0-9]*.png", "final-*.png",
@@ -38,7 +38,7 @@ GROUPS = [("phys", ["phys", "hands"]),
           ("bold", ["bold", "type", "kinetic", "grotesk", "colorfield", "color-field"]),
           ("paint", ["painterly", "fineart", "fine-art"])]
 
-# Human section titles per bucket, from the source gallery-grouped.html nav.
+# Human section titles per bucket, for the grouped gallery navigation.
 BUCKET_TITLES = {"phys": "Physical report & hands", "prod": "Product-hero & glass panels",
                  "sci": "Scientific & data-viz", "fash": "Fashion & studio photography",
                  "pers": "Person / human-in-use", "artful": "Artful / abstract",
@@ -48,7 +48,7 @@ BUCKET_TITLES = {"phys": "Physical report & hands", "prod": "Product-hero & glas
                  "z": "Other"}
 
 def classify(filename):
-    """Keyword -> style bucket; 'z' = other. Ported verbatim from the original runner scripts."""
+    """Keyword -> style bucket; 'z' = other. Shared by all gallery builders."""
     n = os.path.basename(str(filename)).lower()
     for t, ks in GROUPS:
         if any(k in n for k in ks):
@@ -62,7 +62,7 @@ def _is_render(f):
     return not (b.startswith("_") or b.endswith("-sheet.png"))
 
 def canonical_files(out_dir):
-    """The stable numbering pool, in canonical order. Ported from the original runner scripts:
+    """The stable numbering pool, in canonical order:
     pattern order -> natural sort -> dedupe -> classifier buckets in GROUPS order,
     'z' (other) last. out_dir/_deleted is excluded (glob doesn't descend)."""
     seen = set(); allf = []
@@ -103,7 +103,7 @@ def contact_sheet(pattern, out_path, cols=4, tw=400, label_strip=""):
 def _render(html_path, title, built, numof):
     """Shared searchable dark board. built: [(section_title, files, star)]; numof:
     str(path)->stable number. Star sections get the green #7CFC7C h2 accent, others
-    the #ffdc78 yellow — both from the source gallery-curated.html/gallery-grouped.html."""
+    the #ffdc78 yellow for the highlighted section."""
     total = sum(len(fs) for _, fs, _ in built)
     base = os.path.dirname(os.path.abspath(html_path))
     sid = lambda t: re.sub(r'[^a-z0-9]+', '-', t.lower()).strip('-')
@@ -163,8 +163,7 @@ def consolidated(out_dir, html_path, sections=None, title="All renders"):
 
 def grouped(out_dir, html_path=None, title="Grouped by style"):
     """gallery-grouped.html — auto-sections from classify() in GROUPS order, 'Other'
-    last (structure ported from the source gallery-grouped.html; classifier from
-    the original runner scripts). Section order == canonical order, so numbers run 1..N."""
+    last, using the shared classifier and numbering. Section order == canonical order, so numbers run 1..N."""
     canon = canonical_files(out_dir)
     built = []
     for t in [g for g, _ in GROUPS] + ["z"]:
@@ -174,8 +173,7 @@ def grouped(out_dir, html_path=None, title="Grouped by style"):
     return _render(html_path, title, built, _numof(out_dir))
 
 def curated(out_dir, sections, html_path=None, title="Curated — your themes on top"):
-    """gallery-curated.html — hand-authored themed board (structure ported from the
-    source gallery-curated.html; number resolution from the original runner scripts).
+    """gallery-curated.html — a themed board using the shared number resolution.
     sections: [{title, nums?: [int], names?: [str], star?: bool}]. Starred h2s get
     the green #7CFC7C accent. A '— Remainder (everything else)' section is ALWAYS
     appended so no render is ever dropped from the board."""
@@ -207,9 +205,7 @@ def curated(out_dir, sections, html_path=None, title="Curated — your themes on
 
 # ---------------------------------------------------------------- per-round board
 def round_board(out_dir, round_name, files=None, title=None):
-    """Per-round pair: {round}-sheet.png + {round}-gallery.html. Ported from the
-    source's per-round pairs (winners-sheet.png + winners-gallery.html, soph-sheet.png
-    + soph-gallery.html); the light mini-gallery form is winners-gallery.html verbatim."""
+    """Build a contact sheet and light mini-gallery for one named round."""
     out_dir = str(out_dir)
     if files is None:
         files = sorted(glob.glob(os.path.join(out_dir, f"{round_name}*.png")), key=_nat)

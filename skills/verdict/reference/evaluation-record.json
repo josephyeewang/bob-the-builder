@@ -1,0 +1,63 @@
+{
+  "schema_version": 2,
+  "opportunity_schema_version": 1,
+  "context_schema_version": 1,
+  "checked_on": "",
+  "request_mode": "learn",
+  "tool": "",
+  "complete": false,
+  "source_revision": "",
+  "source_access_limits": "",
+  "context_evidence": [],
+  "project_context": {
+    "pains": [],
+    "limitations": ""
+  },
+  "product_angle": {
+    "claimed_angle": "",
+    "delivered_behavior": "",
+    "conclusion": "",
+    "evidence": [],
+    "opportunities": [],
+    "limitations": ""
+  },
+  "coverage": {
+    "inspected": [],
+    "omitted": []
+  },
+  "alternative_search": {
+    "scope_reason": "",
+    "queries": [],
+    "results": []
+  },
+  "whole_tool_decision": "investigate",
+  "runtime": {
+    "status": "not-tested",
+    "receipt": ""
+  },
+  "usefulness": {
+    "conclusion": "",
+    "components": []
+  },
+  "security": {
+    "conclusion": "",
+    "checks": [],
+    "findings": [],
+    "unknowns": []
+  },
+  "qualitative": {
+    "conclusion": "",
+    "sources": [],
+    "limitations": ""
+  },
+  "independent_review_receipt": "",
+  "visual_review": {
+    "applicability": "unknown",
+    "reason": "",
+    "conclusion": "",
+    "evidence": [],
+    "opportunities": [],
+    "limitations": ""
+  },
+  "application_schema_version": 1
+}
