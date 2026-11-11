@@ -21,6 +21,7 @@ import { DO_PLANE_TOML, RULES_VERSION, scanSecrets } from './gitleaks.mjs';
 import { crc32 } from './binary-files.mjs';
 import { chunk, makePng, ihdr } from './png-fixture.mjs';
 import { startGate, factId, vercelFact } from './start-gate.mjs';
+import { drainedPort } from '../../../wiring/runner-ports.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
 import { timeLimits } from '../../M11-dispatcher/merges.mjs';
 import { rulesWith } from '../../M11-dispatcher/fixtures.test-helper.mjs';
@@ -372,6 +373,34 @@ test('a bundle swapped right after the private copy is taken, before any check: 
   assert.equal(f.result, 'pushed');
   assert.equal(f.bundle_sha256, staged);
   assert.notEqual(f.bundle_sha256, createHash('sha256').update(readFileSync(join(w.outbox, 'bundle-C-1.bundle'))).digest('hex'));
+});
+
+test('L898 (#425): from settle to drain: the pushed fact, as the Record holds it, takes the worker\'s bundle; a later refusal keeps its hash', async () => {
+  const w = await world();
+  await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
+  await w.bundle();
+  const bytes = readFileSync(join(w.outbox, 'bundle-C-1.bundle'));
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  assert.equal((await w.push()).ok, true);
+  const pushed = w.record.read('fact', 'push.C-1.a1').doc;
+  assert.equal(pushed.result, 'pushed');
+  assert.equal(pushed.bundle_sha256, sha);
+  // The runner's own drain, reading this Record as the runner's readers answer.
+  const asRead = (entity) => (id) => { const r = w.record.read(entity, id); return r ? { ok: true, doc: r.doc } : { ok: false, missing: true }; };
+  const s = { id: 'S-1', role: 'worker', card: 'C-1', outbox: w.outbox };
+  const drained = drainedPort({ readFact: asRead('fact'), readSession: asRead('session') });
+  assert.deepEqual(readdirSync(w.outbox), ['bundle-C-1.bundle'], 'the bundle is the outbox\'s only file');
+  assert.equal(drained(s), true, 'the bundle its push took drains');
+  // A refusal of the same attempt after the push keeps the recorded push and its hash (#170 r1).
+  const r = await w.push({ readRun: async () => { throw new Error('the run could not be read'); } });
+  assert.equal(r.ok, false);
+  const after = w.record.read('fact', 'push.C-1.a1').doc;
+  assert.equal(after.result, 'pushed');
+  assert.equal(after.bundle_sha256, sha, 'the refusal keeps the pushed bytes\' hash');
+  assert.ok(after.last_refusal, 'the refusal is added as the last one');
+  assert.equal(drained(s), true, 'the same bytes still drain');
+  writeFileSync(join(w.outbox, 'bundle-C-1.bundle'), Buffer.concat([bytes, Buffer.from('x')]));
+  assert.deepEqual(drained(s), { drained: false, cause: 'bundle-changed' }, 'other bytes in its place do not');
 });
 
 test('scanner problems refuse: a finding, a crash (exit 2), the wrong version, a missing binary, a changed config', async () => {
@@ -1093,6 +1122,7 @@ test('R-0b-127: a proposal bundle is verified, fetched for its card\'s branch on
   const f = w.record.read('fact', `push.C-1.p-${sha256.slice(0, 12)}`).doc;
   assert.equal(f.result, 'pushed');
   assert.equal(f.from, 'proposal');
+  assert.equal('bundle_sha256' in f, false, 'L898: a proposal\'s pushed fact carries no bundle hash (only a worker\'s outbox drains by it)');
   assert.equal(w.record.read('fact', 'push.C-1.a1'), null, 'a proposal must not write a worker\'s fact');
   // Only the card's branch is fetched from the bundle, into the attempt's holding ref, which is gone afterwards.
   const fetches = callLog.filter((c) => c.purpose === 'push-fetch-bundle' && c.args[0] === 'fetch');
