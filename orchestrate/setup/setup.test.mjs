@@ -706,7 +706,7 @@ test('proofs: the owner\'s user cannot write the record, hooks, settings, launch
   const mac = applied(); const res = runProofs(mac, cfg);
   assert.deepEqual(res.filter((r) => !r.ok), [], JSON.stringify(res.filter((r) => !r.ok)));
   const w = res.map((r) => r.what);
-  for (const d of ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code']) assert.ok(w.some((x) => x.includes(`cannot write ${P(d)}`)), d);
+  for (const d of ['hooks', 'settings', 'launcher', 'lead-main', 'claude-code', 'worker-runner']) assert.ok(w.some((x) => x.includes(`cannot write ${P(d)}`)), d);  // worker-runner: #433 r1 m2
   assert.ok(w.some((x) => x.includes(`cannot write the record ${P('products/alpha/store')}`)));
   assert.ok(w.some((x) => x.includes('cannot read the robot keys')));
   assert.match(run(mac, ['proofs']).text, /all \d+ proofs PASS/);
@@ -786,7 +786,8 @@ test('L836 check: the workers\' copies folder holds only the config\'s product f
 test('L914 check: a flat outbox folder of a worker runner role, left from before, FAILs naming what it holds and is not removed', () => {
   const mac = applied();
   const row = (r) => check(mac, cfg).find((i) => i.what.startsWith(`${P(`outboxes/${r}`)} is gone`));
-  for (const r of PRODUCT_OUTBOX_ROLES) assert.deepEqual(row(r), { ok: true, what: `${P(`outboxes/${r}`)} is gone (L914: the ${r} outboxes are in each product's folder now)` }, r);
+  // Gone (a fresh install never had them): no row at all, PASS or FAIL (#433 r1 c2).
+  for (const r of PRODUCT_OUTBOX_ROLES) assert.equal(row(r), undefined, r);
   assert.deepEqual(check(mac, cfg).filter((i) => !i.ok), []);
   // Left from before with a hand-in in it: named, and the outbox root's own row does not FAIL on it too.
   const W = (s = '') => mac.at(P(`outboxes/worker${s}`));
@@ -810,7 +811,7 @@ test('L914 check: a flat outbox folder of a worker runner role, left from before
   rmSync(mac.at(P('outboxes/script'))); symlinkSync(mac.at(P('outboxes/alpha/script')), mac.at(P('outboxes/script')));
   assert.match(row('script').why, /^it is still there \(a link\)\./);
   assert.deepEqual(check(mac, cfg).filter((x) => !x.ok).map((x) => x.what), [row('script').what], 'a link there FAILs only on its own row');
-  rmSync(mac.at(P('outboxes/script'))); assert.equal(row('script').ok, true);
+  rmSync(mac.at(P('outboxes/script'))); assert.equal(row('script'), undefined, 'gone again: no row');
   // A folder that cannot be listed or looked at FAILs rather than passes.
   mkdirSync(W());
   const list = mac.list; mac.list = (d) => { if (d === P('outboxes/worker')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return list(d); };

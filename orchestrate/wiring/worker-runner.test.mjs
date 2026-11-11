@@ -101,6 +101,20 @@ test('L764 c1: a stop that times out answers ok: false with the flag set; the se
   assert.deepEqual(v.sync(() => true).board().map((x) => [x.id, x.alive]), [['S-2', false]]);
 });
 
+test('#433 r1 m1: a request still being written is left in place, unnoted, and acted on once it is whole', async () => {
+  const w = world();
+  await w.pass([{ name: 'launch-S-1.json', body: { notYet: 'the request is empty yet' } }]);
+  assert.deepEqual(w.removed, [], 'not removed, so not lost');
+  assert.deepEqual(w.started, []);
+  assert.equal(w.notes.join('\n'), '', 'nothing to tell');
+  w.now += 2_000;
+  await w.pass([launchReq('S-1')]);
+  assert.deepEqual(w.started, ['S-1'], 'read next pass, whole');
+  // Control: a refused one is still removed.
+  const v = world(); await v.pass([{ name: 'launch-S-2.json', body: { refused: 'the request can\'t be read' } }]);
+  assert.equal(v.removed.length, 1);
+});
+
 test('#328 r1 m2: a replayed request, one whose body is not its name\'s, and one older than the runner keeps answers are not read', async () => {
   const w = world();
   await w.pass([launchReq('S-1')]);

@@ -330,7 +330,7 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   for (const old of oldFlatOutboxPaths(cfg)) {
     const what = `${old} is gone (L914: the ${old.split('/').pop()} outboxes are in each product's folder now)`;
     let st = null; try { st = io.lstat(old); } catch (e) { if (e?.code !== 'ENOENT') { item(false, what, `it could not be looked at (${e?.code ?? e?.message})`); continue; } }
-    if (!st) { item(true, what); continue; }
+    if (!st) continue; // gone, as it should be: no row, so a fresh install is not told of folders it never had (#433 r1 c2)
     if (!st.isDirectory() || st.isSymbolicLink()) { item(false, what, `it is still there (${st.isSymbolicLink() ? 'a link' : 'not a folder'}). Check that it holds nothing unsaved, then remove it; setup removes nothing itself`); continue; }
     let names = null; try { names = io.list(old); } catch { item(false, what, 'it is still there, and its contents could not be listed'); continue; }
     const left = names.filter((n) => n !== '.DS_Store').sort();
