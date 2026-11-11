@@ -2327,7 +2327,11 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   q.w.clock.t += 10 * 60_000;
   q.w.ask({ request_id: 'q-2' });
   assert.deepEqual((await runnerPass(q.w.ctx)).started, [], 'refused within the 30 minutes');
+  // A kept one not used ends after 30 minutes: past them a request starts.
+  writeStopRequest({ dir: q.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(q.w.ctx);
   q.w.clock.t += 31 * 60_000;
+  await runnerPass(q.w.ctx);
   q.w.ask({ request_id: 'q-3' });
   assert.deepEqual((await runnerPass(q.w.ctx)).started.map((s) => s.session_id), ['S-1'], 'past them it starts');
   // r1 m1: stop files that can't be read are one counted line.
