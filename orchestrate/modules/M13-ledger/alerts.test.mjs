@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
-import { makeAlerts, alertKey, fakeIssues, HOME_PREFIX, lastLine, wasTold, clockAhead, clockTooFast, CLOCK_AHEAD_MS, sweepFactId, SWEEP_NOTE, SWEEP_EVERY_MS } from './alerts.mjs';
+import { makeAlerts, alertKey, fakeIssues, HOME_PREFIX, lastLine, wasTold, clockAhead, clockTooFast, CLOCK_AHEAD_MS, sweepFactId, sweepListFactId, SWEEP_NOTE, SWEEP_EVERY_MS, SWEEP_LIST_TRUST_MS } from './alerts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
@@ -1189,9 +1189,9 @@ test('L801 r2 m2: a comment GitHub gives no time for is stamped by GitHub\'s tim
 // clear in the same round that answered 'none' for that key.
 function sweepWorld() {
   const { gh, rec, clock } = setup();
-  const world = { refuse: false };
+  const world = { refuse: false, kinds: [] };
   const w = makeFactWriter(rec, { actor: 'ledger', now: clock.now });
-  const writer = { ...w, put: (id, doc) => (world.refuse && doc.kind === 'fact.alert' ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
+  const writer = { ...w, put: (id, doc) => ((world.refuse && doc.kind === 'fact.alert') || world.kinds.includes(doc.kind) ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
   const round = (over = {}) => makeAlerts({ rec, gh: over.gh ?? gh, owner: 'owner-login', now: clock.now, writer: over.writer ?? writer });
   return { gh, rec, clock, world, writer, round, alerts: round() };
 }
@@ -1224,10 +1224,10 @@ test('L402 sweep: an issue whose number the Record refused is closed once a clea
   const { ts, ...mark } = w.writer.get(sweepFactId(A));
   assert.deepEqual(mark, { kind: 'fact.alert-sweep', alert: idFor(A), issue: 1, swept_at: sweptAt }, 'A\'s own mark, for the issue the list held');
   assert.equal(w.writer.get(sweepFactId(C)), null, 'no mark for a key with no proof');
-  w.clock.tick(60);
+  w.clock.tick(30);
   const r2 = w.round();
   await r2.clear({ key: A });
-  assert.deepEqual(await r2.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null }, 'a key at most once a day');
+  assert.deepEqual(await r2.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null }, 'known clear: the list not read again within the hour (L973 1)');
   assert.equal(listed(w.gh), 1);
   assert.equal(await r2.raise({ key: A, title: A, body: 'It holds.' }), 'opened', 'back: a new issue');
   w.clock.tick(SWEEP_EVERY_MS / 60000);
@@ -1295,7 +1295,7 @@ test('L957 plant: with no proof, the list not read whole, the robot\'s login unk
     await orphan(w, A);
     const r = w.round({ writer: { ...w.writer, put: () => ({ ok: false, reason: 'the store is full' }) } });
     await r.clear({ key: A });
-    assert.match((await r.sweep({ product: 'product 1' })).why, /refused the sweep's mark for the day \(the store is full\), so GitHub was not asked/);
+    assert.match((await r.sweep({ product: 'product 1' })).why, /refused the sweep's mark \(the store is full\), so GitHub was not asked/);
     assert.equal(listed(w.gh), 0);
     assert.equal(w.gh.issues.get(1).closed, false);
   }
@@ -1568,7 +1568,7 @@ test('L965 m2: a key orphaned again within the day closes on its next proof; a k
   assert.equal(listed(w.gh), before + 1);
 });
 
-test('L965 review m1, m4: a kept issue leaves its key needed and unmarked, so it closes on the next proof the same day', async () => {
+test('L965 review m1, L973 m4: a kept issue is not known clear and is held back an hour, so it closes on its proof an hour on', async () => {
   const w = sweepWorld();
   await orphan(w, A);
   const r = w.round();
@@ -1579,11 +1579,161 @@ test('L965 review m1, m4: a kept issue leaves its key needed and unmarked, so it
   w.world.refuse = false;
   w.clock.tick(1);
   assert.deepEqual((await r.sweep({ product: 'product 1' })).kept, [1]);
-  assert.equal(w.writer.get(sweepFactId(A)), null, 'kept is not a try: no mark');
+  assert.equal(w.writer.get(sweepFactId(A)).kept, true, 'kept: its mark holds it back an hour (L973 m4)');
   // An hour on it truly clears: the list is read again and the issue closes, not a day later.
   w.clock.tick(60);
   const r2 = w.round();
   await r2.clear({ key: A });
   assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [1]);
   assert.equal(w.gh.issues.get(1).closed, true);
+});
+
+// L973: the known-clear list is trusted an hour, so every wait behind it is about an hour at most (r3 demos D1-D4).
+const SWEEP_LIST = 'fact.alert-sweep-list';
+const whileListed = (w, gh, fn) => ({ ...gh, listOpen: async (f) => { const l = await gh.listOpen(f); await fn(); return l; } });
+
+test('L973 D1: a second orphan whose raise could not take its key off the list closes within the hour, and the refusal is told', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const r = w.round();
+  await r.clear({ key: A });
+  assert.deepEqual((await r.sweep({ product: 'product 1' })).closed, [1]);
+  // 20 minutes on, A is back while the whole Record refuses: issue 2, and the forget refused too.
+  w.clock.tick(20);
+  w.world.kinds = ['fact.alert', SWEEP_LIST];
+  const raiser = w.round();
+  assert.equal(await raiser.raise({ key: A, title: A, body: 'It holds again.' }), 'opened');
+  w.world.kinds = [];
+  assert.equal(raiser.cacheTrouble(), 'the store is full');
+  w.clock.tick(1);
+  const r2 = w.round();
+  await r2.clear({ key: A });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [], 'still on the list');
+  assert.equal(w.gh.issues.get(2).closed, false);
+  // An hour from the list's first write, its next proof reads the list and closes it.
+  w.clock.tick(40);
+  const r3 = w.round();
+  await r3.clear({ key: A });
+  assert.deepEqual((await r3.sweep({ product: 'product 1' })).closed, [2]);
+});
+
+test('L973 m1a: a forget the Record refuses is told under the Record refusing', async () => {
+  const w = sweepWorld();
+  const r = w.round();
+  assert.equal(await r.clear({ key: B }), 'none');
+  await r.sweep({ product: 'product 1' });
+  assert.ok(w.writer.get(sweepListFactId('product 1')).clear_ids.includes(idFor(B)), 'B known clear');
+  w.clock.tick(1);
+  w.world.kinds = [SWEEP_LIST];
+  const raiser = w.round();
+  assert.equal(await raiser.raise({ key: B, title: B, body: 'No stage.' }), 'opened');
+  w.world.kinds = [];
+  assert.equal(raiser.cacheTrouble(), 'the store is full');
+  assert.equal(await raiser.reportTrouble('product 1', 'sensors'), 'opened', 'told: the Record is refusing');
+});
+
+test('L973 D2: a raise while the sweep waits on its list stays off the list, so its orphan closes on its next proof', async () => {
+  const w = sweepWorld();
+  const r0 = w.round();
+  await r0.clear({ key: B });
+  await r0.sweep({ product: 'product 1' });
+  w.clock.tick(1);
+  await orphan(w, A);
+  let fired = false;
+  const gh = whileListed(w, w.gh, async () => {
+    if (fired) return;
+    fired = true;
+    // Another caller: B back while its number is refused (an orphan), and A raised again (so A is kept).
+    w.world.refuse = true; await w.round().raise({ key: B, title: B, body: 'No stage.' }); w.world.refuse = false;
+    w.clock.tick(1);
+    await w.round().raise({ key: A, title: A, body: 'It holds again.' });
+  });
+  const r = w.round({ gh });
+  await r.clear({ key: A });
+  await r.clear({ key: B });
+  assert.deepEqual((await r.sweep({ product: 'product 1' })).kept, [1]);
+  assert.equal(w.writer.get(sweepListFactId('product 1')).clear_ids.includes(idFor(B)), false, 'the forget stands');
+  w.clock.tick(1);
+  const r2 = w.round();
+  await r2.clear({ key: B });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [2], 'B\'s orphan, at once');
+});
+
+test('L973 D3, m4: a key one caller keeps raising and another clearing reads the list at most once an hour', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const before = listed(w.gh);
+  for (let n = 0; n < 5; n++) {
+    w.clock.tick(10);
+    const r = w.round();
+    await r.clear({ key: A });
+    w.world.refuse = true; await w.round().raise({ key: A, title: A, body: 'It holds.' }); w.world.refuse = false;
+    w.clock.tick(1);
+    await r.sweep({ product: 'product 1' });
+  }
+  assert.equal(listed(w.gh) - before, 1);
+  assert.equal(w.gh.issues.get(1).closed, false);
+});
+
+test('L973 D4, m3: a list read that throws leaves no id known clear, so the next pass closes', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const r = w.round({ gh: { ...w.gh, listOpen: async () => { throw new Error('the network is down'); } } });
+  await r.clear({ key: A });
+  await assert.rejects(r.sweep({ product: 'product 1' }), /network is down/);
+  assert.equal(w.writer.get(sweepListFactId('product 1')).clear_ids.includes(idFor(A)), false);
+  w.clock.tick(10);
+  const r2 = w.round();
+  await r2.clear({ key: A });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [1]);
+});
+
+test('L973 P7: the list keeps its first write\'s time, so an old id is needed again an hour on though a new one came later', async () => {
+  const w = sweepWorld();
+  const r = w.round();
+  await r.clear({ key: A });
+  await r.sweep({ product: 'product 1' });
+  const at = w.writer.get(sweepListFactId('product 1')).listed_at;
+  w.clock.tick(23);
+  const r2 = w.round();
+  await r2.clear({ key: B });
+  await r2.sweep({ product: 'product 1' });
+  assert.equal(w.writer.get(sweepListFactId('product 1')).listed_at, at, 'not moved by a later write');
+  const before = listed(w.gh);
+  w.clock.tick(SWEEP_LIST_TRUST_MS / 60000 - 23);
+  const r3 = w.round();
+  await r3.clear({ key: A });
+  await r3.sweep({ product: 'product 1' });
+  assert.equal(listed(w.gh), before + 1, 'A read again an hour from the first write');
+});
+
+test('L973 P10: a login unknown before the loop leaves nothing known clear, and the issue closes on the next pass', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const r = w.round({ gh: { ...w.gh, listOpen: w.gh.listOpen, loginTrouble: 'the robot\'s own login could not be read' } });
+  await r.clear({ key: A });
+  assert.match((await r.sweep({ product: 'product 1' })).why, /login is not known/);
+  assert.equal(w.writer.get(sweepListFactId('product 1')).clear_ids.includes(idFor(A)), false);
+  w.clock.tick(1);
+  const r2 = w.round();
+  await r2.clear({ key: A });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [1]);
+});
+
+test('L973 m5, 4: a refused final list write is said; a product with "|" is refused', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  // The list's first write lands, its rewrite (A kept, so off the list) is refused.
+  let n = 0;
+  const writer = { ...w.writer, put: (id, doc) => (doc.kind === SWEEP_LIST && n++ > 0 ? { ok: false, reason: 'full' } : w.writer.put(id, doc)) };
+  const r = w.round({ writer });
+  await r.clear({ key: A });
+  w.clock.tick(1);
+  w.world.refuse = true; await w.round().raise({ key: A, title: A, body: 'It holds.' }); w.world.refuse = false;
+  w.clock.tick(1);
+  const out = await r.sweep({ product: 'product 1' });
+  assert.deepEqual(out.kept, [1]);
+  assert.match(out.why, /refused the sweep's list mark, so a key it tried may wait up to an hour/);
+  assert.throws(() => alertKey('a|b', 'k', 's'), /has no "\|"/);
+  await assert.rejects(w.round().sweep({ product: 'a|b' }), /has no "\|"/);
 });
