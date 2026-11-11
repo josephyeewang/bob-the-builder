@@ -78,6 +78,7 @@ import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -341,7 +342,7 @@ export function liveWallProblem(live, product, places, read) {
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
-    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
+    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = (x) => { const p = workerPrompt(x); return p.ok ? p.text : null; },
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir),

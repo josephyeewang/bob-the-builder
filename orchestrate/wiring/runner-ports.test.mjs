@@ -6,6 +6,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
@@ -293,6 +294,24 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     assert.equal(b.ok, false); assert.match(b.reason, /already exists/);
     assert.deepEqual(w.left(), { copy: true, outbox: true, settings: true });
     assert.equal(existsSync(join(w.mine.outboxes, 'worker', SID2)), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+// L970: the default promptFor is the worker prompt builder. It is asked before the copy (and its head and outbox) is
+// made, so until lane 2 moves the call it gives no prompt and the start is refused for that, a full card or not.
+test('L970: the default promptFor is the worker prompt builder, which refuses with no head or outbox given', async () => {
+  const w = world();
+  try {
+    delete w.deps.promptFor;
+    const b = { goal: 'Add search.', done_when: 'The test passes.', files: ['src/s.js'], not_in_scope: 'The store.' };
+    let read = 0;   // only the prompt builder reads the brief, so this counts that the default asked it
+    w.card = { ...w.card, tier: 2, get brief() { read += 1; return b; } };
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /^not wired: no worker prompt/);
+    assert.ok(read >= 1, 'the default promptFor is the worker prompt builder');
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+    assert.match(workerPrompt({ role: 'worker', kind: 'editing', card: 'C-1', cardDoc: w.card, product: 'p1' }).reason, /no head given/);
+    assert.equal(workerPrompt({ role: 'worker', kind: 'editing', card: 'C-1', cardDoc: w.card, product: 'p1', head: HEAD, outbox: '/o/p1/worker/S-1' }).ok, true);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 
