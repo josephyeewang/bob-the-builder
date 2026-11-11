@@ -73,7 +73,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
+import { runnerPass, CARD_ID, isClaudeCommand, sessionIdOf } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
@@ -454,7 +454,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
     const pid = Number(m[1]);
     const cmd = m[2];
     if (pid === self || !isClaudeCommand(cmd, bin)) continue;
-    const sid = /(?:^|\s)--session-id[ =]([A-Za-z0-9-]{1,128})(?:\s|$)/.exec(cmd)?.[1];
+    const sid = sessionIdOf(cmd);
     out.push(sid ? { pid, sessionId: sid } : { pid });
   }
   return out;
@@ -496,19 +496,22 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
   }
 }
 
-/** The real ports (the wiring gives `start`). */
 /**
  * Stops a review session's whole process group (L935): only when `pid` leads its own group (ps says its group id is its
- * pid), so a pid that leads none is refused, never a group it merely belongs to. Throws why it stopped nothing.
+ * pid), so a pid that leads none is refused, never a group it merely belongs to. Throws why it stopped nothing; `final`
+ * on the error when trying again can't help (L935 self-review m3). A child that made its own group is not reached.
  */
 export function stopGroupOf(pid, { ps = run, kill = (p, sig) => process.kill(p, sig) } = {}) {
-  if (!Number.isInteger(pid) || pid <= 1) throw new Error('not a process id');
+  const final = (m) => Object.assign(new Error(m), { final: true });
+  if (!Number.isInteger(pid) || pid <= 1) throw final('not a process id');
   const r = ps('/bin/ps', ['-o', 'pgid=', '-p', String(pid)]);
   if (r.status !== 0) throw new Error(`process ${pid} is gone`);
   const group = Number(String(r.stdout).trim());
-  if (group !== pid) throw new Error(`process ${pid} does not lead its own process group (its group is ${String(r.stdout).trim() || 'unknown'})`);
+  if (group !== pid) throw final(`process ${pid} does not lead its own process group (its group is ${String(r.stdout).trim() || 'unknown'})`);
   kill(-pid, 'SIGTERM');
 }
+
+/** The real ports (the wiring gives `start`). */
 
 export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
