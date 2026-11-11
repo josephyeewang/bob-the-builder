@@ -40,7 +40,7 @@ function folders(h, A, B) {
     const s = st[ctx.signin];
     const did = (what, extra = {}) => { log.push([what, ctx.signin, ...Object.values(extra)]); };
     return {
-      launch: async (x) => { did('launch', { card: x.card.id }); n += 1; const id = x.sessionId ?? `S-${n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, outbox: `/outbox-root/worker/${id}`, pid: 2000 + n, pidStart: `s${n}`, pgid: 100 + n, head: 'h'.repeat(40) }; },
+      launch: async (x) => { did('launch', { card: x.card.id }); n += 1; const id = x.sessionId ?? `S-${n}`; s.sessions.push({ id, card: x.card.id, product: x.product, kind: x.kind }); return { ok: true, sessionId: id, outbox: `/outbox-root/${x.product}/worker/${id}`, pid: 2000 + n, pidStart: `s${n}`, pgid: 100 + n, head: 'h'.repeat(40) }; },
       startReadonly: async (x) => { did('startReadonly', { lead: x.lead }); return { ok: true }; },
       startMinibase: async () => { did('startMinibase'); return { ok: true }; },
       sessions: () => s.sessions.map((x) => ({ ...x })),

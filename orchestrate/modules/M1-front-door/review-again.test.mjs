@@ -107,7 +107,7 @@ function runnerConfig(w, over = {}, at = installOf(w)) {
   mkdirSync(at, { recursive: true, mode: 0o755 }); chmodSync(at, 0o755);
   const c = { installRoot: installOf(w), root: w.root, outboxRoot: w.outboxRoot, reviewHome: '/h', uids: UIDS, recordRoot: '/x', recordUid: OTHER, mirror: '/m',
     claudeBin: CLAUDE, hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: ME, ownerTaps: w.taps, wiring: '/i/w.mjs',
-    snapshot: join(w.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json',
+    snapshot: join(w.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     rules: { production: { env_files: [], programs: [], hosts: [] } }, ...over };
   for (const k of Object.keys(over)) if (over[k] === undefined) delete c[k];
   const file = join(at, 'runner-config.json');

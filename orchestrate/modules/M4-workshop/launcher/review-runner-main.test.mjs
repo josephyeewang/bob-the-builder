@@ -7,7 +7,7 @@ import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readdirSync, rea
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, readFactFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, readFactFile, readSessionFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -17,9 +17,14 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { openJobJson } from '../../../shared/job-config.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const ME = process.getuid();
 // R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
-const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
+const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
 
 test('L65: the installed copy must be root\'s alone, with the runner, config and wiring inside it', () => {
   const base = tempDir('m4-install-');
@@ -315,6 +320,32 @@ test('L852: a fact is read from the Record read only, as a card is; reading chan
   assert.equal(tree(), before, 'no read writes, moves or makes anything');
 });
 
+test('L899: a session is read from the Record read only, as a fact is: its id checked, its folders checked, only the exact name', () => {
+  const root = tempDir('m4-lane4-sessionread-');
+  const read = (session, uid = ME) => readSessionFile({ recordRoot: root, recordUid: uid, session });
+  chmodSync(root, 0o755);
+  assert.match(read('S-1').reason, /docs is missing/);
+  mkdirSync(join(root, 'docs', 'session'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'session')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'session', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('S-1', { entity: 'session', id: 'S-1', rev: 3, doc: { card: 'C-1', attempt: 'a1' } });
+  put('S-2', { entity: 'fact', id: 'S-2', doc: {} });
+  put('S-3', { entity: 'session', id: 'S-3', doc: {} }, 0o666);
+  put('Ab-1', { entity: 'session', id: 'Ab-1', doc: { attempt: 'a1' } });
+  assert.deepEqual(read('S-1'), { ok: true, doc: { card: 'C-1', attempt: 'a1' }, rev: 3 });
+  assert.match(read('S-9').reason, /no such session/);
+  for (const id of ['../S-1', 'S-1.json', 'S_1', '', 7, null, 'x'.repeat(129)]) assert.equal(read(id).missing, true, String(id));
+  assert.match(read('../S-1').reason, /not a session id/);
+  assert.match(read('S-2').reason, /not a session document/);
+  assert.match(read('S-3').reason, /not the Record's own plain file/);
+  assert.match(read('S-1', ME + 1).reason, /not the Record owner's alone/);
+  // Only the exact name: a name that differs by case or is a prefix of one listed is no such session.
+  for (const id of ['s-1', 'AB-1', 'S', 'Ab']) assert.match(read(id).reason, /no such session/, id);
+  chmodSync(join(root, 'docs', 'session'), 0o777);
+  assert.match(read('S-1').reason, /not the Record owner's alone/, 'a session folder others can write');
+  chmodSync(join(root, 'docs', 'session'), 0o755);
+});
+
 test('L852: one list of the intake states that mean an outbox file is used, and the Lead restart reads it', async () => {
   const { USED_STATES } = await import('../../M11-dispatcher/intake-facts.mjs');
   assert.deepEqual([...USED_STATES].sort(), ['applied', 'interrupted', 'refused', 'waiting']);
@@ -505,6 +536,13 @@ test('L65: the config names every path as a full path', () => {
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /hooksDir must be an absolute path/);
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
+  // L913 (a): machineWide is claude's fixed file only, refused at load rather than review by review at check 10.
+  for (const machineWide of NEAR_MISSES) {
+    writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide }));
+    assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  }
+  writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide: '/etc/claude/managed-settings.json' }));
+  assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file$/);
 });
 
 test('L68 planted: the runner\'s folder and review\'s outbox are two walls: one inside the other, or the same, is refused', () => {

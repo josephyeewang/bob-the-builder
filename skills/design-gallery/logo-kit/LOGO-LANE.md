@@ -1,18 +1,15 @@
 # Logo lane — process, checks and scripts
 
-The full procedure for the **SVG logo board** lane. Harvested 2026-10-03 from
-[kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill) @ `7340903` (v1.4.5, MIT —
-see `LICENSE` in this folder). Taken: the phase discipline, the concept checkpoint, red flags, craft pass, testing
-checklist, discovery brief, SVG construction notes, and five dependency-free scripts. **Added 2026-10-27:** the HTML
-preview sheet (`scripts/preview_sheet.py`, minus its library option), the logo critique (`references/critique.md`),
-and two self-tests (`tests/`). Why the preview sheet came in after all: in a side-by-side test on real shipped marks it
-caught one-colour, reversed and app-icon failures that the concept sheet and the gallery board both missed. **Not taken:** its 1,432-logo reference library (other companies' trademarks; MIT
-does not cover them), the library search/catalog scripts, and the heavy presentation-board generator.
-`assets/library/stats.json` is kept — aggregate complexity numbers only, no logos — so `svg_audit.py` can flag an
-over-complex mark.
+Procedure and tools adapted from [kaankiziltug/logo-design-skill](https://github.com/kaankiziltug/logo-design-skill)
+@ `7340903` (v1.4.5, MIT; see LICENSE). Includes concept checkpoints, craft/critique guidance,
+SVG construction references, audit/render/export helpers and local verification tests.
+
+No third-party company-logo library is bundled: a software license does not grant trademark rights.
+assets/library/stats.json contains aggregate source-library complexity data, not logo artwork.
+The preview sheet checks one-colour, reversed, app-icon and small-size variants before selection.
 
 All scripts are plain Python 3, no installs. Rendering uses whatever is present (cairosvg, rsvg-convert, Inkscape,
-headless Chrome, or macOS Quick Look). Commands below use the installed path, so they work from any folder.
+headless Chrome, or macOS Quick Look). Resolve this module from its SKILL.md and set DESIGN_GALLERY_DIR to that absolute folder. Commands below then work from the target project without assuming an assistant-specific install path.
 
 ## Where it sits in the gallery
 
@@ -34,9 +31,9 @@ component with hard-coded colours and no font dependency.
    negative space. **No live `<text>` in a finished mark.** Save every iteration (`-v1`, `-v2`), never overwrite.
 5. **Test and refine — at least two loops.**
    ```bash
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/svg_audit.py a.svg b.svg c.svg
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/render_png.py a.svg b.svg c.svg --out-dir renders --size 512   # then LOOK at the PNGs
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/preview_sheet.py a.svg b.svg c.svg --brand-color "#HEX" --refs rival1.svg rival2.svg -o /tmp/preview.html
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/svg_audit.py" a.svg b.svg c.svg
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/render_png.py" a.svg b.svg c.svg --out-dir renders --size 512   # then LOOK at the PNGs
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/preview_sheet.py" a.svg b.svg c.svg --brand-color "#HEX" --refs rival1.svg rival2.svg -o /tmp/preview.html
    ```
    **The preview sheet is required — a mark is not "done" (or shown as a concept) until it has been run and looked
    at.** Open the HTML in a browser and check, for every concept: **one-colour** black and white (does the idea
@@ -53,7 +50,7 @@ component with hard-coded colours and no font dependency.
    (the user's or anyone's): `references/critique.md`.
 6. **Show the concepts, then STOP.**
    ```bash
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/concept_sheet.py a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/concept_sheet.py" a.svg b.svg c.svg --lockups a-lockup.svg b-lockup.svg c-lockup.svg \
      --names "A" "B" "C" --notes "one-line idea A" "…" "…" --recommend 1 --greyscale -o concepts.png
    ```
    Greyscale first (colour starts taste debates). Show the image, one line per concept, a recommendation with one
@@ -61,9 +58,9 @@ component with hard-coded colours and no font dependency.
 7. **Kit (only after a yes).** Final geometry + optical corrections + a simplified small-size cut; 1–2 colours that
    still work in one colour and reversed; lockups (horizontal, stacked, symbol-only); then export:
    ```bash
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/export_variants.py final-symbol.svg --title "Brand logo" --mono "#HEX" --icon-bg "#HEX" \
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/export_variants.py" final-symbol.svg --title "Brand logo" --mono "#HEX" --icon-bg "#HEX" \
      --web-icons --favicon-source final-symbol-small.svg      # favicon.ico, PNG icon set, webmanifest, <head> snippet
-   python3 ~/.claude/skills/design-gallery/logo-kit/scripts/export_variants.py final-horizontal.svg --title "Brand logo" --only black white mono --mono "#HEX" --png 1200
+   python3 "$DESIGN_GALLERY_DIR/logo-kit/scripts/export_variants.py" final-horizontal.svg --title "Brand logo" --only black white mono --mono "#HEX" --png 1200
    ```
    Record the locked mark in the gallery's `LOCKED-DESIGN` doc like any other lock.
 

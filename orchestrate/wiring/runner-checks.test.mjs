@@ -14,6 +14,11 @@ import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
 import { RECHECK, checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const REPO = 'example-owner/example-repo';
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
@@ -223,11 +228,11 @@ test('step 6, check 2 (#369 m7): names compared after folding letter case, a non
 const RULES = { production: { env_files: ['.env'], programs: ['psql'], hosts: ['db.example.com'] } };
 test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the product\'s rules, paths and test command)', async () => {
   const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
-    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/mw.json',
-    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/o/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
+    path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, pin: '2.1.300', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
+    products: { p1: { repo: 'o/p', mirror: '/m', rules: RULES, render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json', bobFolder: '/b' }, product: { commands: { test: 'npm test' } } } } } });
   const i = workerCheckInputs(c, { product: 'p1', sessionId: SID });
   assert.deepEqual([i.mirror, i.pin, i.hooksDir, i.rules, i.snapshot, i.machineWide, i.home, i.testCommand, i.bobFolder, i.budget],
-    ['/m', '2.1.300', '/h', RULES, '/o/s.json', '/mw.json', '/home', 'npm test', '/b', null]);
+    ['/m', '2.1.300', '/h', RULES, '/snap/s.json', '/Library/Application Support/ClaudeCode/managed-settings.json', '/home', 'npm test', '/b', null]);
   for (const k of ['busy', 'writeSnapshot', 'spawn', 'alert']) assert.equal(typeof i[k], 'function', k);
   // The start port gets these checks and check 0's version.
   const sd = startDeps(c);
@@ -241,27 +246,52 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
-  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w']) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), /machineWide must be a full path in its simplest form/, machineWide);   // the #364 r2 n4 class
+  // #419 r3 c1, m1: any value but the fixed file, a near miss or an unsimple path, is told the fixed file.
+  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  // L915 (#420 m2): render.paths node, hooksDir, notes and bobFolder, when given, in their simplest form, at load.
+  for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) {
+    const at = (v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });
+    for (const bad of [`/x/${k}/`, `x/${k}`, `/x/../${k}`, '/', 7]) {
+      assert.throws(() => checkRunnerConfig(at(bad)), new RegExp(`product p1: render\\.paths\\.${k} must be a full path in its simplest form`), `${k} ${bad}`);
+    }
+    assert.doesNotThrow(() => checkRunnerConfig(at(`/x/${k}`)), k);
+  }
+  // L913 (a): any file but claude's fixed one is refused at load, not session by session at check 10.
+  assert.throws(() => checkRunnerConfig({ ...base, machineWide: '/mw.json' }), /machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/);
+  assert.equal(checkRunnerConfig({ ...base, machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json' }).machineWide, '/Library/Application Support/ClaudeCode/managed-settings.json');
   assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules: [] } } }), /rules must be/);
-  // #369 m4: the rules' production lists, as the review runner requires; the snapshot in the runner's own folder, one per product.
+  // #369 m4: the rules' production lists, as the review runner requires; one snapshot per product, apart from the runner's folders (L916).
   for (const rules of [{}, { production: { env_files: [], programs: [] } }, { production: { env_files: [1], programs: [], hosts: [] } }]) {
     assert.throws(() => checkRunnerConfig({ ...base, products: { p1: { ...base.products.p1, rules } } }), /rules\.production must list env_files, programs and hosts/, JSON.stringify(rules));
   }
   const withSnap = (p1, p2) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p1 } } }, p2: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, snapshot: p2 } } } } });
-  assert.doesNotThrow(() => checkRunnerConfig(withSnap('/o/s1.json', '/o/s2.json')));
-  for (const s of ['/x/s.json', '/o/sub/s.json', '/o/../o/s.json', 's.json', '/o']) assert.throws(() => checkRunnerConfig(withSnap(s, '/o/s2.json')), /p1: render\.paths\.snapshot must be a file in the runner's own folder \(\/o\)/, s);
-  assert.throws(() => checkRunnerConfig(withSnap('/o/s.json', '/o/S.json')), /p2: render\.paths\.snapshot is another product's/);
-  // #369 r1 m4: never one of the runner's own files there.
-  for (const s of ['/o/status.json', '/o/Memory.json', '/o/settings', '/o/lock', '/o/break.lock']) assert.throws(() => checkRunnerConfig(withSnap(s, '/o/s2.json')), /named as one of the runner's own files/, s);
+  assert.doesNotThrow(() => checkRunnerConfig(withSnap('/snap/s1.json', '/snap/s2.json')));
+  // L916: the old placement (the runner's own folder, /o), the requests folder (/r), inside either, above either, or not simple.
+  const notApart = /p1: render\.paths\.snapshot must be a file in a folder of its own, apart from the runner's requests folder \(\/r\) and its own folder \(\/o\)/;
+  for (const s of ['/o/s.json', '/O/s.json', '/o/sub/s.json', '/r/s.json', '/r/sub/s.json', '/o', '/r', '/s.json', '/o/../o/s.json', 's.json']) assert.throws(() => checkRunnerConfig(withSnap(s, '/snap/s2.json')), notApart, s);
+  // #369 r1 m4: never one of the runner's own files there (now: never in its folder at all).
+  for (const s of ['/o/status.json', '/o/Memory.json', '/o/settings', '/o/lock', '/o/break.lock']) assert.throws(() => checkRunnerConfig(withSnap(s, '/snap/s2.json')), notApart, s);
+  assert.throws(() => checkRunnerConfig(withSnap('/snap/s.json', '/snap/S.json')), /p2: render\.paths\.snapshot is another product's/);
+  // L916 self-review M1: never where a worker session can write it (base: copies /c, outboxes /ob, home /home, mirror /m).
+  for (const [s, what] of [['/c/s.json', 'the copies \\(\\/c\\)'], ['/C/p1/s.json', 'the copies'], ['/ob/p1/s.json', 'the outboxes'], ['/home/s.json', "the sessions' home"], ['/m/s.json', "product p1's mirror"]]) {
+    assert.throws(() => checkRunnerConfig(withSnap(s, '/snap/s2.json')), new RegExp(`p1: render\\.paths\\.snapshot must not sit in ${what}`), s);
+  }
+  // L916 self-review m1, m2: the session's own folders, and the status folder, apart from the runner's folders at load.
+  const withPath = (k, v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });
+  for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) for (const v of [`/o/${k}`, `/R/${k}`, '/o', '/r']) {
+    assert.throws(() => checkRunnerConfig(withPath(k, v)), new RegExp(`p1: render\\.paths\\.${k} must be apart from the runner's requests folder`), `${k} ${v}`);
+  }
+  for (const statusFile of ['/r/status.json', '/r/sub/status.json', '/R/status.json']) assert.throws(() => checkRunnerConfig({ ...base, statusFile }), /status file must sit in the runner's own folder, apart from the requests folder/, statusFile);
 });
 
 test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the outbox and the rules snapshot are checked again', async () => {
   const f = await copyOfMain();
   try {
     const own = join(f.root, 'runner'); mkdirSync(own);
+    const snapDir = join(f.root, 'snapshots'); mkdirSync(snapDir);   // L916: apart from the runner's folders
     const c = checkRunnerConfig({ installRoot: '/i', requestsDir: '/r', statusFile: join(own, 'status.json'), orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
       path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: REPO, mirror: f.mirror, rules: RULES,
-        render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, snapshot: join(own, 'rules.json') } } } } });
+        render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, snapshot: join(snapDir, 'rules.json') } } } } });
     chmodSync(f.copy, 0o700);
     const outbox = join(f.root, 'outbox'); mkdirSync(outbox, { mode: 0o700 });
     const x = { product: 'p1', sessionId: SID, copy: f.copy, head: f.head, outbox, ownUid: () => process.getuid() };
@@ -278,8 +308,8 @@ test('#369 r1 m1, m2: just before claude starts, the copy, its setup files, the 
     const noSnap = { ...c, products: { p1: { ...c.products.p1, render: { paths: { ...c.products.p1.render.paths, snapshot: undefined } } } } };
     assert.equal(await startDeps(noSnap, { checksOf: (y) => workerChecks({ ...workerCheckInputs(noSnap, y), ...(busy ? { busy } : {}) }) }).beforeStart(x), 'check 8 has no port');
     // Check 8: the snapshot is written afresh.
-    rmSync(join(own, 'rules.json'));
-    assert.equal(await again(x), null); assert.equal(existsSync(join(own, 'rules.json')), true, 'the snapshot is written again');
+    rmSync(join(snapDir, 'rules.json'));
+    assert.equal(await again(x), null); assert.equal(existsSync(join(snapDir, 'rules.json')), true, 'the snapshot is written again');
     // Check 3: a hand-in left in the outbox.
     writeFileSync(join(outbox, 'bundle-C-1.json'), '{}');
     const o3 = await again(x);

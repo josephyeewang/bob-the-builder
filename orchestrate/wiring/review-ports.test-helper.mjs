@@ -32,7 +32,9 @@ export function workerConfig(dir) {
   // The shape safe-git's checkMirror wants (worker-ports.mjs mirrorProblem, L763): its config is the template.
   writeFileSync(join(mirror, 'config'), MIRROR_CONFIG_TEMPLATE);
   // host.lock's owner is not the Dispatcher's own user (worker-ports.mjs, L763); the test's Dispatcher is this user.
-  return { reviewRoot: runner, mirror, sealRoot: join(dir, 'seals'), hostLockPath: join(dir, 'host.lock'), hostLockUid: process.getuid() + 3 };
+  // The TOP outboxes and worker-copies folders (L887), real folders as setup makes them.
+  for (const f of ['outboxes', 'worker-copies']) mkdirSync(join(dir, f), { recursive: true, mode: 0o755 });
+  return { reviewRoot: runner, mirror, sealRoot: join(dir, 'seals'), outboxRoot: join(dir, 'outboxes'), copiesRoot: join(dir, 'worker-copies'), hostLockPath: join(dir, 'host.lock'), hostLockUid: process.getuid() + 3 };
 }
 
 const C = 'c'.repeat(40);

@@ -53,7 +53,7 @@ test('waits: a re-check moves next_check but keeps resume and return_to; a conti
   readyCard(env, 'C-1');
   runCard(env, 'C-1');
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }));
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-w.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-w.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
   must(put(env.record, 'dispatcher', 'card', 'C-1', { state: 'waiting', wait: wait(env, { resume: 'continue', return_to: 'in_review' }) }), 'continue wait');
   env.clock.t += 10 * MIN;
   must(put(env.record, 'dispatcher', 'card', 'C-1', { wait: wait(env, { resume: 'continue', return_to: 'in_review' }) }), 're-check');
@@ -275,7 +275,7 @@ test('verified needs a passing verdict for the current head from a reviewer laun
   readyCard(env, 'C-1');
   runCard(env, 'C-1');
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }));
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-v.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, outboxFile(env, 'worker', 'S-1', 'handin-v.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)));
   const vfile = (sid, name, header) => outboxFile(env, 'reviewer', sid, name, `${JSON.stringify(header)}\n`);
   const apply = (sid, name, header) => env.review.applyOutbox({ role: 'reviewer', sessionId: sid, card: 'C-1' }, vfile(sid, name, header));
   // A reviewer's pass carries a clean checklist (M9 PASSES, L69).

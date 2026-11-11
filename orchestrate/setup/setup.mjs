@@ -13,9 +13,10 @@
 //                                       the runner's own check; --for-install for a first install (review-config.mjs) (NOT root)
 //   add-to-install --pin <x.y.z> --sha256 <hex> [--dry-run]   the pinned Claude Code and the hooks into the installed copy, in
 //                                       place: no update, no job touched; safe to run again                    (root)
-//   check-dispatcher     the review runner's launches folder, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
+//   check-dispatcher     the review runner's launches folder, the job's dispatcher.json's outboxRoot and copiesRoot, and whether orchestrate can read the owner's host.lock, and if not why  (read only; sudo to read as orchestrate)
 //   dispatcher-config    [--dry-run]    write the Dispatcher's config, <base>/dispatcher.json (and the copy's, when the copy keeps it)  (root)
-//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, hostLockPath and hostLockUid as JSON (read only)
+//                                       an existing dispatcher.json without outboxRoot and copiesRoot won't start the Dispatcher until this is run again
+//   dispatcher-keys      prints the Dispatcher config's reviewRoot, mirror, sealRoot, outboxRoot, copiesRoot, hostLockPath and hostLockUid as JSON (read only)
 //   daemons place|load|unload  [--dry-run]   the three background jobs' files; load; unload                    (root)
 //                                       (place and load refuse on the same checks: a placed job starts at boot without load)
 //   daemons list                        loaded or not, per job                                                 (read only)
@@ -173,7 +174,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     cfg = PLAIN_CONFIG.includes(o.cmd) ? parseConfig(raw) : parseInstallConfig(raw);
     if (o.cmd === 'watch-app') { o.raw = raw; o.text = text; }
     // check reads the plain config, which drops the entry: on only when the entry's own parser takes it (L807 c2, r1 c1).
-    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch { return false; } })();
+    // An entry there that its parser refuses: check-dispatcher says so rather than leave its root rows out (L905 m1).
+    o.dispatcherOn = (() => { try { return parseDispatcher(raw?.dispatcher, cfg) !== undefined; } catch (e) { if (raw?.dispatcher !== undefined) o.dispatcherWhy = e?.message ?? 'it can\'t be read'; return false; } })();
     if (o.only !== null) o.jobs = onlyJobs(cfg, o.only, { anyKnown: o.cmd === 'daemons' && (o.sub === 'unload' || o.sub === 'list') });   // a name that is no job of this config is refused before anything runs (unload and list take any job setup makes)
   } catch (e) { err(`${e.message}\n${USAGE}`); return 2; }
 
@@ -186,7 +188,7 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
     if (cfg.hostLockPath !== undefined) out('the Dispatcher\'s folders and host.lock: run check-dispatcher (sudo to read host.lock as orchestrate)');
     return code;
   }
-  if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg), out);
+  if (o.cmd === 'check-dispatcher') return report(checkDispatcherKeys(io, cfg, { dispatcher: o.dispatcherOn, refused: o.dispatcherWhy }), out);
   if (o.cmd === 'dispatcher-keys') { let k; try { k = dispatcherKeysOn(io, cfg); } catch (e) { err(`PROBLEM  ${e.message}`); return 1; } out(JSON.stringify(k, null, 2)); return 0; }
   if (o.cmd === 'check-proposals') return report(checkProposals(io, cfg), out);
   if (o.cmd === 'check-safe-directory') return report(checkSafeDirectory(io, cfg), out);

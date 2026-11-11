@@ -147,7 +147,7 @@ export function queueAlert(rec, text, { now, mark = null } = {}) {
     const i = all.findIndex((e) => (key ? e.key === key : !e.key && e.text === entry.text));
     // A copy already delivered whose mark could not be saved stays held (see holdsDelivered): a site that sees no mark
     // tells again each pass, and that must not start the day over.
-    if (i >= 0) { const { delivered_at: at, delivered_text: said } = all[i]; all[i] = at ? { ...entry, delivered_at: at, delivered_text: said } : entry; } else all.push(entry);
+    if (i >= 0) { const { delivered_at: at, delivered_text: said, delivered_mark: told } = all[i]; all[i] = at ? { ...entry, delivered_at: at, delivered_text: said, ...(told !== undefined && { delivered_mark: told }) } : entry; } else all.push(entry);
     const capped = capQueue(rec, all);
     dropped = capped.dropped;
     return { ...withDrops(rec, d, capped.entries, dropped), next };
@@ -242,7 +242,11 @@ export const ALERT_FIELDS = [['merge', 'merge'], ['ask', 'ask'], ['card', 'card'
   ['report', 'report'], ['to', (v, e) => (STATES[shows(e.card) ? 'card' : 'merge'].includes(v) ? 'moving to' : 'writing')], ['context', 'check'], ['status', 'status'], ['judged_main', 'judged main'], ['parent', 'parent'],
   ['waiting_since', 'waiting since']];
 export const ALERT_LIST_MAX = 50;
-export const plain = (v, n = 200) => String(v).replace(/[\r\n\t]+/g, ' ').slice(0, n);
+// Every control character, line and paragraph separator, invisible format character (zero-width, direction and the
+// like) and Hangul filler becomes a space, so text from outside (a folder's name) can't start a line of its own, turn
+// the words around it or hide any (#403 r3 m2, r4 c1). A cut that splits an emoji drops its first half (r5 review). Emoji joined by a
+// zero-width joiner show as their parts: alert text is plain operational words.
+export const plain = (v, n = 200) => String(v).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u115F\u1160\u2065\u3164\uFFA0]+/gu, ' ').slice(0, n).replace(/[\uD800-\uDBFF]$/, '');
 // What is left off is counted, a capped name or an item that isn't text alike (L408 m1): no list reads shorter than it is.
 export const listed = (list) => {
   const names = list.filter((x) => typeof x === 'string').slice(0, ALERT_LIST_MAX).map((x) => plain(x));
@@ -294,8 +298,13 @@ const sameAs = (sent) => (x) => x.id === sent.id || (sent.key ? x.key === sent.k
 // A day on it goes out again, so the cause is told daily at most and never lost. The cap lives on the queue, not on the
 // mark that can't be saved. A time that can't be read is no hold: it is sent. `delivered_text` is what went out: a site
 // may replace a held entry with a new fact (a different refusal), so when the mark saves, an entry whose text changed
-// loses its hold and goes out once instead of leaving unsent (L533). A pass is one process, so nothing in memory can cap
+// loses its hold and goes out once instead of leaving unsent (L533). `delivered_mark` is the mark that went out with it:
+// the retry writes that one, never the replacing entry's, so a mark never says more was told than was sent (#403 r3 M1). A pass is one process, so nothing in memory can cap
 // a queue write refused as well: the entry is then sent each round, which the alert channel turns into an edit of one issue.
+/** The mark a held entry's retry writes: always the one that went out, even when the text is the same, since one text
+ * can stand for different marks (names behind "and N more"). An entry held before it was kept writes its own only when
+ * its text is what went out, else none, and is told again (#403 r3 M1, r4 M1). */
+export const heldMark = (e) => (e.delivered_mark !== undefined ? e.delivered_mark : e.text === e.delivered_text ? e.mark : null);
 export const holdsDelivered = (e, now) => {
   if (!e.delivered_at) return false;
   const at = pastTime(e.delivered_at, now);
@@ -356,9 +365,9 @@ export function settleAlert(rec, sent, ok, now, why = 'it was not delivered') {
     const cur = doc ?? {};
     const dropped = Math.max(0, (cur.dropped ?? 0) - (sent.carried?.n ?? 0));
     const causes = causesOf(cur).filter((c) => !told.has(c.id));
-    const unsaid = ({ delivered_at: _at, delivered_text: _said, ...x }) => x;
+    const unsaid = ({ delivered_at: _at, delivered_text: _said, delivered_mark: _told, ...x }) => x;
     const entries = markRefused
-      ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now), delivered_text: sent.text } : x))
+      ? entriesOf(cur).map((x) => (x.id === e.id ? { ...x, delivered_at: iso(now), delivered_text: sent.text, delivered_mark: sent.mark ?? null } : x))
       : entriesOf(cur).flatMap((x) => (x.id !== e?.id ? [x] : sent.retry && x.text !== x.delivered_text ? [unsaid(x)] : []));
     return { ...cur, entries, dropped, dropped_causes: causes, ...(e && { error: null, at: iso(now) }) };
   }, 'alert_sent'); } catch (err) { queueStuck(err?.message ?? err); throw err; }
@@ -414,8 +423,10 @@ export async function sendAlerts(rec, port, now, { sendMs = ALERT_SEND_MS, budge
       if (clock() - start + sendMs > budgetMs && out.sent + out.failed > 0) break;
       const d = rec.read('fact', ALERT_QUEUE_FACT)?.doc ?? {};
       if (!entriesOf(d).some((x) => x.id === e.id)) continue;
-      // Held, delivered within the day: nothing is sent, and its mark is tried again when the round settles.
-      if (holdsDelivered(e, now)) { done.push([{ ...e, retry: true }, true, null]); if (!later) settle(); continue; }
+      // Held, delivered within the day: nothing is sent, and the mark that went out with it is tried again when the round
+      // settles. Not the entry's own mark: a site may have replaced the text since, and that mark is written only once
+      // its own text is delivered (#403 r3 M1, r4 M1).
+      if (holdsDelivered(e, now)) { done.push([{ ...e, mark: heldMark(e), retry: true }, true, null]); if (!later) settle(); continue; }
       // The count of dropped alerts rides on the next copy sent; the copy keeps what it carried, so a second
       // copy, in this round or one alongside it, carries only what none still out carries.
       const sent = { ...e, carried: carryFor(rec, d, e) };

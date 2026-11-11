@@ -8,9 +8,52 @@
 // one takes) fails too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { setup, outboxFile, product, readyCard, runCard, seed, plan, put, must, iso, PRODUCT } from './fixtures.test-helper.mjs';
+import { setup, outboxFile, outboxTag, product, readyCard, runCard, seed, plan, put, must, iso, PRODUCT } from './fixtures.test-helper.mjs';
 import { recWith, parkOnLimit, setClock } from '../M11-dispatcher/fixtures.test-helper.mjs';
 import { memoryRecord, OUTBOX_KINDS, AI_ROLES } from '../../shared/record.mjs';
+import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+
+// L938 m1, m2: where a file is, case for case. The same files, on the same root, go to the real Record and the stand-in,
+// and each must be refused with the same reason. A stand-in that let one of these through (the old flat layout under a
+// product tag, a product named on a Lead's tag, another product's tag) would hand M11's tests a file M9 never reads.
+test('L938 m1: the stand-in and the real applyOutbox refuse each misplaced file with the same reason', () => {
+  const env = setup({ prefix: 'm9-place-' });
+  const fake = memoryRecord({ outboxRoot: env.outRoot, product: PRODUCT });
+  const put = (dir, name, text = 'plain text body\n') => { mkdirSync(dir, { recursive: true }); const p = join(dir, name); writeFileSync(p, text); return p; };
+  const w = (sid, more = {}) => ({ role: 'worker', sessionId: sid, product: PRODUCT, card: 'C-1', ...more });
+  const elsewhere = put(join(env.base, 'elsewhere'), 'report-C-1.md');
+  const linkDir = join(env.outRoot, PRODUCT, 'worker', 'S-1');
+  mkdirSync(linkDir, { recursive: true });
+  symlinkSync(elsewhere, join(linkDir, 'report-C-1.md'));
+  outboxFile(env, 'worker', 'S-2', 'report-C-2.md', 'x\n');
+  mkdirSync(join(env.outRoot, PRODUCT, 'worker', 'S-3'), { recursive: true });   // S-3's own folder is there; its file is not in it
+  const cases = [
+    ['a link', w('S-1'), join(linkDir, 'report-C-1.md'), /./],
+    ['the wrong folder', w('S-3'), put(join(env.outRoot, PRODUCT, 'worker', 'S-2'), 'report-C-3.md'), /not directly inside the worker outbox of session S-3/],
+    ['a missing session folder', w('S-4'), put(join(env.outRoot, PRODUCT, 'worker'), 'report-C-4.md'), /^no outbox folder for worker S-4 of product /],
+    ['the flat layout under a product tag', w('S-5'), put(join(env.outRoot, 'worker', 'S-5'), 'report-C-5.md'), /^no outbox folder for worker S-5 of product /],
+    ['a worker tag with no product', w('S-6', { product: undefined }), put(join(env.outRoot, PRODUCT, 'worker', 'S-6'), 'report-C-6.md'), /the tag names no product/],
+    ['a Lead tag with a product', { role: 'lead', sessionId: 'L-7', product: PRODUCT }, put(join(env.outRoot, 'lead', 'L-7'), 'wish-7.md'), /a lead outbox has no product folder/],
+    ['another product\'s tag', w('S-8', { product: 'other-app' }), put(join(env.outRoot, 'other-app', 'worker', 'S-8'), 'report-C-8.md'), /and the outbox is product other-app's$/],
+  ];
+  for (const [what, tag, file, want] of cases) {
+    const real = env.record.applyOutbox(tag, file);
+    const f = fake.applyOutbox(tag, file);
+    assert.equal(real.ok, false, `${what}: the real Record refuses it`);
+    assert.match(real.reason, want, `${what}: the real Record's own reason`);
+    assert.equal(f.ok, false, `${what}: the stand-in refuses it too`);
+    assert.equal(f.reason, real.reason, `${what}: the same reason`);
+  }
+  // With no root, both refuse even a file in its right folder.
+  const noRoot = setup({ prefix: 'm9-place-', extra: { outbox: { root: '', uids: {}, launches: env.launchRoot } } });
+  const good = outboxFile(env, 'worker', 'S-9', 'report-C-9.md', 'x\n');
+  const real = noRoot.record.applyOutbox(w('S-9'), good);
+  assert.equal(real.reason, 'no outbox root configured');
+  assert.equal(memoryRecord({ product: PRODUCT }).applyOutbox(w('S-9'), good).reason, real.reason);
+  // Control: the same file is placed rightly, so the stand-in with the root goes past the place check.
+  assert.ok(!/outbox|link|folder|inside/.test(fake.applyOutbox(w('S-9'), good).reason ?? ''), 'a rightly placed file passes the place check');
+});
 
 const NAME_REASONS = /^(no outbox kind for file name|outbox kind \S+ is not listed for|outbox kind \S+ has no record rule yet|not_a_record$)/;
 const EXTRA = ['notakind-X1.md', 'report-.md', 'REPORT-X1.md', 'report-X.1.md', 'report-X1.MD', 'report-X1.md.txt',
@@ -28,7 +71,7 @@ test('L129 M-1: the stand-in and the real applyOutbox agree on every name and ro
     const names = [...Object.keys(OUTBOX_KINDS).flatMap((k) => [`${k}X${++n}.md`, `${k}X${++n}.json`, `${k}compact-X${++n}.md`]), ...EXTRA];
     for (const name of names) {
       const p = outboxFile(env, role, sid, name, 'plain text body\n');
-      const tag = { role, sessionId: sid, card: 'C-1' };
+      const tag = outboxTag(role, sid, { card: 'C-1' });
       const real = env.record.applyOutbox(tag, p);
       const f = fake.applyOutbox(tag, p);
       cases += 1;

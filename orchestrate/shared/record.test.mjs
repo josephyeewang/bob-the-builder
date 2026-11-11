@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeRecord, memoryRecord, outboxKind, isActor, isNotARecord, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
+import { makeRecord, memoryRecord, outboxKind, isActor, missingFields, STATES, FINAL_STATES, WAIT_FIELDS, REQUIRED_FIELDS, ENTITIES } from './record.mjs';
 import { tempDir } from './test-tmp.mjs';
+import { PRODUCT_OUTBOX_ROLES } from './product-paths.mjs';
 
 test('create, read, update only if unchanged, one diary line per accepted write', () => {
   const rec = memoryRecord();
@@ -84,10 +85,12 @@ test('AI roles cannot call write; bad arguments are refused, not thrown', () => 
   assert.equal(rec.diary().length, 0);
 });
 
-// A real outbox folder for the stand-in, which checks where a file is the way M9 does (L151 m7).
+// A real outbox folder for the stand-in, which checks where a file is the way M9 does (L151 m7). The worker runner's
+// roles have their outbox in a product's folder (L836, L895 m1).
+const PROD = 'alpha';
 function outbox() {
   const root = tempDir('orch-outbox-');
-  const file = (role, sid, name, text = 'words\n') => { const d = join(root, role, sid); mkdirSync(d, { recursive: true }); const p = join(d, name); writeFileSync(p, text); return p; };
+  const file = (role, sid, name, text = 'words\n') => { const d = PRODUCT_OUTBOX_ROLES.includes(role) ? join(root, PROD, role, sid) : join(root, role, sid); mkdirSync(d, { recursive: true }); const p = join(d, name); writeFileSync(p, text); return p; };
   return { root, file, rec: memoryRecord({ outboxRoot: root }) };
 }
 
@@ -95,7 +98,8 @@ test('applyOutbox needs a known role and its session id', () => {
   const { rec, file } = outbox();
   assert.equal(rec.applyOutbox({ role: 'merge_gate', sessionId: 'S' }, 'f').ok, false);
   assert.equal(rec.applyOutbox({ role: 'worker' }, 'f').ok, false);
-  assert.equal(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-1.md')).ok, true);
+  assert.match(rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-2.md')).reason, /tag names no product/, 'a worker tag with no product (L895 m1)');
+  assert.equal(rec.applyOutbox({ role: 'worker', product: PROD, sessionId: 'S-4', card: 'C-1' }, file('worker', 'S-4', 'report-C-1.md')).ok, true);
   assert.equal(rec.diary()[0].actor, 'worker:S-4');
 });
 
@@ -142,7 +146,7 @@ test('a launch names a card and head only for a worker, reviewer or auditor', ()
 test('L121: the stand-in refuses a file name with no outbox kind, as the real M9 does', () => {
   const { rec, file } = outbox();
   for (const name of ['notakind-C-1.md', 'verdict-compact\u2011S1.md', 'report-.md']) {
-    const r = rec.applyOutbox({ role: 'worker', sessionId: 'S-4' }, file('worker', 'S-4', name));
+    const r = rec.applyOutbox({ role: 'worker', product: PROD, sessionId: 'S-4' }, file('worker', 'S-4', name));
     assert.equal(r.ok, false, name);
     assert.match(r.reason, /no outbox kind/, name);
   }
@@ -176,11 +180,12 @@ test('L151 m7: the stand-in refuses a missing file, a link and the wrong folder 
   assert.equal(rec.applyOutbox(lead, join(root, 'lead', 'L-1', 'think-3.md')).reason, 'file is a link');
   assert.match(rec.applyOutbox(lead, file('lead', 'L-2', 'think-4.md')).reason, /not directly inside the lead outbox of session L-1/);
   assert.equal(memoryRecord({ outboxRoot: '' }).applyOutbox(lead, think).reason, 'no outbox root configured', 'an empty root: refused, as M9');
-  // With no root at all (M11's fixture), the folder cannot be checked, but a missing file or a link is still refused.
+  // With no root, every file is refused, as M9 refuses it: even a file that would be accepted with a root, and a missing
+  // file, a link, and a worker's file in its product's folder (L910: no test hands in a file the real Record would not find).
   const bare = memoryRecord();
-  assert.equal(bare.applyOutbox(lead, `${think}.missing`).reason, 'file not found');
-  assert.equal(bare.applyOutbox(lead, join(root, 'lead', 'L-1', 'think-3.md')).reason, 'file is a link');
-  assert.ok(isNotARecord(bare.applyOutbox(lead, think)));
+  for (const f of [think, `${think}.missing`, join(root, 'lead', 'L-1', 'think-3.md')]) assert.equal(bare.applyOutbox(lead, f).reason, 'no outbox root configured', f);
+  assert.equal(bare.applyOutbox({ role: 'worker', product: PROD, sessionId: 'S-4' }, file('worker', 'S-4', 'report-C-1.md')).reason, 'no outbox root configured');
+  assert.equal(bare.diary().length, 0);
   assert.equal(rec.diary().length, 0);
 });
 

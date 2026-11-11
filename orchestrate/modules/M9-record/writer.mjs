@@ -19,7 +19,7 @@
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, otherProductReason, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
 import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, draftFields, factFrom, mayCreateKind } from './permissions.mjs';
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
@@ -537,7 +537,7 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   function applyOutbox(tag, file) {
     // A worker runner session's tag names its product (L836): this Record takes only its own product's hand-ins, so
     // another product's outbox (client work) is never read from here (L850-2).
-    if (tag?.product != null && tag.product !== product) return no(`this record is product ${product}'s, and the outbox is product ${tag.product}'s`);
+    if (tag?.product != null && tag.product !== product) return no(otherProductReason(product, tag.product));
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
     // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
     if (isNotARecord(f)) return notARecord(f.kind);

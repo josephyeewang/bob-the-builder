@@ -38,6 +38,7 @@ import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.m
 import { CONFIG_FIELDS, readConfig } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, bobPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 
@@ -108,6 +109,8 @@ export function ownerFields(cfg, input) {
     problems.push(`the input file's product must be one of the setup config's products (${cfg.products.join(', ') || 'none listed'})`);
   }
   if (Object.hasOwn(input, 'machineWide') && !absPath(input.machineWide)) problems.push('the input file\'s machineWide must be the full path of the machine-wide Claude Code settings file');
+  // L909: claude reads only its fixed managed file, so a guard in any other would never apply (launch check 10 refuses it too).
+  else if (Object.hasOwn(input, 'machineWide') && input.machineWide !== CLAUDE_FILE) problems.push(`the input file's machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   if (Object.hasOwn(input, 'rules')) {
     const r = input.rules;
     if (!plainObject(r)) problems.push('the input file\'s rules must be an object with production and secrets');
