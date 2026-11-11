@@ -39,7 +39,19 @@
 //   stopSession(id)      → the worker runner's: true once the launch request is used up, else a stop request in its
 //                          requests folder (config workerRequestsDir, the owner's, which orchestrate may add files to; its owner, mode and
 //                          access list are checked on each write, L943 m4).
-// launch, stopGroup, saveWork and pauseLead stay unwired (they write and wait: PR C).
+//
+// WIRED (C, L963), the four asks (owner-asks.mjs ownerAsyncPorts): each writes one request through the same checked writer
+// as stopSession (runnerRequestWriter) and waits until the same status file bears its answer out, or its own limit
+// (ASK_GIVE_UP_MS) answers { ok: false, timedOut: true }; the tick's limit (pass.mjs guarded) answers first.
+//   launch(x)            → launch-<sessionId>.json; ok once the runner lists the session it started.
+//   stopGroup(session)   → stopGroup-<id>-<nonce>.json; ok once the session is listed stopped (ok: false: it may still run).
+//   saveWork(session)    → saveWork-<id>-<nonce>.json; review, audit and the other kinds with no copy are ok unasked.
+//   pauseLead({product}) → pauseLead-<product>-<nonce>.json; any failure is a throw.
+// On the runner's side three still refuse, each with its reason in the answer (cutover blockers, not this file's): a
+// launch ("not wired: no worker prompt is given to the runner", runner-ports.mjs promptFor), a save (M4 save-work with no
+// lock-down runner, runLocked) and a pause ("not wired: the Lead's wrap-up needs the activity tracker's feed"). Until
+// they are given, no worker starts, no stop is cleared as saved, and every pause throws and is told.
+// cleanup.saveWork stays unwired (NOT_WIRED_CLEANUP).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
 import { lstatSync, statSync } from 'node:fs';
@@ -51,12 +63,13 @@ import { checkMirror, git as safeGit } from '../modules/M4-workshop/git/safe-git
 import { ENDED_FOLDER, runnerEnded } from '../modules/M9-record/outbox.mjs';
 import { FOLDERS as RUNNER_FOLDERS, readReviewStatus } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { RUNNER_KINDS, ownerSyncPorts, requestWriter } from './owner-status.mjs';
+import { ownerAsyncPorts } from './owner-asks.mjs';
 import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
 
 const RUNNER_LAUNCHES = RUNNER_FOLDERS.launches;
 
-export const NOT_WIRED_WORKER = Object.freeze(['launch', 'stopGroup', 'saveWork', 'pauseLead']);
+export const NOT_WIRED_WORKER = Object.freeze([]);
 // What the cleanup step reads (cleanupPass's own parameters, less what the tick gives every step: a test pins the two
 // together), and which of those aren't wired yet. To wire one: answer it in `cleanup` below and take it off NOT_WIRED_CLEANUP.
 export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot']);
@@ -300,14 +313,32 @@ export function requestsAclProblem(dir, { run = spawnSync, platform = process.pl
 }
 
 /**
+ * The one writer of the worker runner's requests (stopSession and the four asks): the folder's owner, mode and access list
+ * are checked before each write (L943 m4), and a folder that fails is a throw, with nothing written.
+ */
+export function runnerRequestWriter(c, io = {}) {
+  const toRequests = requestWriter(c.workerRequestsDir, io.writeFile);
+  return (name, text) => { const bad = requestsFolderProblem(c.workerRequestsDir, c.workerUid, { lstat: io.lstat, acl: io.requestsAcl }); if (bad) throw new Error(bad); toRequests(name, text); };
+}
+
+/**
+ * The worker runner's four asks for this Dispatcher (PR C, L963): owner-asks.mjs ownerAsyncPorts, writing through
+ * runnerRequestWriter and reading the same status file the sync ports read. `io` lets a test stand in for the files
+ * (stat, open, realpath, lstat, requestsAcl, writeFile), the wait (sleep, pollMs, giveUpMs) and the nonce.
+ */
+export function runnerAsyncPorts({ config: c, now = Date.now }, io = {}) {
+  return ownerAsyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, clock: now,
+    writeRequest: runnerRequestWriter(c, io), stat: io.stat, open: io.open, realpath: io.realpath,
+    ...Object.fromEntries(['sleep', 'nonce', 'pollMs', 'giveUpMs'].filter((k) => io[k] !== undefined).map((k) => [k, io[k]])) });
+}
+
+/**
  * The worker runner's sync ports for this Dispatcher (L925): `c` its config, `rec` its Record. `io` lets a test stand in
  * for the files (stat, open, realpath, lstat, requestsAcl, writeFile, reviewStatus).
  */
 export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
-  const toRequests = requestWriter(c.workerRequestsDir, io.writeFile);
   const sync = ownerSyncPorts({ statusFile: c.workerStatusFile, uid: c.workerUid, outboxRoot: c.outboxRoot, product: c.product, clock: now,
-    stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec),
-    writeRequest: (name, text) => { const bad = requestsFolderProblem(c.workerRequestsDir, c.workerUid, { lstat: io.lstat, acl: io.requestsAcl }); if (bad) throw new Error(bad); toRequests(name, text); } });
+    stat: io.stat, open: io.open, realpath: io.realpath, holds: recordHolds(rec), writeRequest: runnerRequestWriter(c, io) });
   const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
   return {
     // Both read before either is used: one that throws makes the whole list "not known" (L925 rule 1).
@@ -359,5 +390,6 @@ export function workerPorts(ctx, io = {}) {
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
     product: c.product,
     ...runnerSyncPorts({ config: c, rec: ctx.rec, ...(ctx.now ? { now: ctx.now } : {}) }, io),
+    ...runnerAsyncPorts({ config: c, ...(ctx.now ? { now: ctx.now } : {}) }, io),
   };
 }

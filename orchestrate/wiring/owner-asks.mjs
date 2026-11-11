@@ -1,5 +1,5 @@
 // Part C, runner step 2 (L759): the Dispatcher's side of the four async owner ports (owner-ports.mjs: launch, stopGroup,
-// saveWork, pauseLead). Nothing here is wired yet: owner-ports.mjs still hands out refusing ports.
+// saveWork, pauseLead). worker-ports.mjs runnerAsyncPorts wires them (PR C, L963); owner-ports.mjs's stub still refuses.
 //
 // Each ask writes one request file into the runner's requests folder (requestWriter: exclusive) and then reads the
 // runner's status (readOwnerStatus, every check of step 1) until the answer to that request is there:
@@ -86,9 +86,14 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
   // while the status does not yet agree.
   // Nothing after the request is written throws: a clock that fails is waited through, and the reads alone count the time
   // (so a stuck or failing clock still stops at the limit).
-  async function ask(key, body, accept) {
+  // A request that can't be written: nothing was asked, so launch and pauseLead throw (refused, and a failed pause) and
+  // stopGroup and saveWork answer ok: false (`unwritten`), as owner-ports.mjs says an async port answers (PR C
+  // self-review m1). A write that may have left the file (mayExist, owner-status.mjs writeNewReadable) is waited on as asked.
+  async function ask(key, body, accept, unwritten) {
     const start = clock();
-    writeRequest(`${key}.json`, `${JSON.stringify({ ...body, asked_at: new Date(start).toISOString() })}\n`);
+    try { writeRequest(`${key}.json`, `${JSON.stringify({ ...body, asked_at: new Date(start).toISOString() })}\n`); } catch (e) {
+      if (!e?.mayExist) { if (unwritten) return unwritten(e); throw e; }
+    }
     let last = 'no answer yet';
     for (let n = 0; ; n += 1) {
       let waited = n * pollMs;
@@ -103,6 +108,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
     }
   }
   const told = (a) => ({ ok: false, reason: a.reason });
+  const notAsked = (e) => ({ ok: false, reason: `the request could not be written (${e?.message ?? e})` });
 
   return {
     launch: async ({ card, kind, product, sessionId } = {}) => {
@@ -131,7 +137,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
         const x = s.sessions.find((y) => y.id === id);
         // Gone by the status's own rule (review M1: no alive field is not gone), and the group that was asked to stop.
         return x && x.stop_requested === true && !live(x) && (pgid === undefined || pgid === null || x.pgid === pgid) && name(a.how) ? { ok: true, how: a.how } : undefined;
-      });
+      }, notAsked);
     },
     saveWork: async (session) => {
       const { id, kind, card } = session ?? {};
@@ -139,7 +145,7 @@ export function ownerAsyncPorts({ statusFile, uid, outboxRoot, copiesRoot, write
       if (kind === 'overnight') return { ok: false, reason: 'no runner starts overnight sessions yet, so none saves one' };
       if (!RUNNER_KINDS.includes(kind)) return { ok: false, reason: `no runner saves ${JSON.stringify(kind)} sessions` };
       if (!REQUEST_ID.test(id ?? '')) return { ok: false, reason: 'the save names no session id' };
-      return ask(`saveWork-${id}-${nonce()}`, { saveWork: { id, kind, card: card ?? null } }, (a) => (a.ok ? { ok: true } : told(a)));
+      return ask(`saveWork-${id}-${nonce()}`, { saveWork: { id, kind, card: card ?? null } }, (a) => (a.ok ? { ok: true } : told(a)), notAsked);
     },
     pauseLead: async ({ product } = {}) => {
       if (!productName(product)) throw new Error('the pause names no product');

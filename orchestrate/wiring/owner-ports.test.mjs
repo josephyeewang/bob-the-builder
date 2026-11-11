@@ -10,11 +10,11 @@ import { LAUNCH_DOC_FIELDS, OWNER_CLEANUP_PORTS, SESSION_RECORD_PUSH_FIELDS, OWN
 
 const code = (f) => readFileSync(new URL(`../modules/M11-dispatcher/${f}`, import.meta.url), 'utf8');
 
-test('L741, L925: the owner-side ports are the worker ports the runner answers; the sync ones are wired (B), the asks not yet', () => {
+test('L741, L925: the owner-side ports are the worker ports the runner answers; the sync ones are wired (B), the asks too (C, L963)', () => {
   assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
   const wired = Object.keys(OWNER_PORTS).filter((k) => OWNER_PORTS[k].sync).sort();
   assert.deepEqual(wired, ['board', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
-  for (const k of Object.keys(OWNER_PORTS)) assert.equal(NOT_WIRED_WORKER.includes(k), !wired.includes(k), k);
+  assert.deepEqual(NOT_WIRED_WORKER, [], 'every owner port is wired, the asks through owner-asks.mjs (worker-ports.mjs runnerAsyncPorts)');
   // What stays orchestrate-side (L737's chunk for lane 3) is not here.
   for (const k of ['hostLock', 'reviewEnded']) assert.equal(OWNER_PORTS[k], undefined, k);
   // copiesRoot is the Dispatcher config's (L887), so only saveWork is the runner's.

@@ -8,14 +8,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerAsyncPorts, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { runnerTick } from './runner-loop.mjs';
+import { pauseLeadPort, saveWorkPort, startPort } from './runner-ports.mjs';
+import { NO_COPY_KINDS } from './owner-asks.mjs';
+import { writeNewReadable } from './owner-status.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 
 const ME = process.getuid();
@@ -516,7 +520,138 @@ test('L925, L896: the worker runner is the owner\'s user and its requests folder
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerRequestsDir: join(w.base, 'nope') } }), /requests folder \(workerRequestsDir\) .*nope can't be read \(ENOENT\)/);
   const ports = workerPorts(w.ctx);
   assert.equal(ports.product, P, 'the stop step\'s product is the config\'s (L927)');
-  for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(typeof ports[k], 'function', k);
+  for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession', 'launch', 'stopGroup', 'saveWork', 'pauseLead']) assert.equal(typeof ports[k], 'function', k);
   // The real reads: this test's runner folder is this user's, not the owner's, so the status is never trusted.
   assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the owner's user/);
+});
+
+// ---- C (L963): the four asks, wired, end to end ----
+// The Dispatcher's wired ports (workerPorts) write real request files into the real requests folder; between its polls one
+// real runner tick (runner-loop.mjs runnerTick: readRequest, workerRunnerPass, writeStatus) reads them and writes the real
+// status file, which the ports read back. Only the owner's uid is stood in for (this test runs as one Mac user): the
+// requests folder's and the status file's owner are reported as the owner's. The runner's ports are the real ones where
+// they refuse today (start with no prompt, save-work with no lock-down, the Lead's wrap-up), so each refusal and its plain
+// reason is pinned as the Dispatcher receives it.
+const AT = Date.parse('2026-11-11T12:00:00Z');
+const LIVE = 'S-live';
+function asksWorld({ runner = {}, session = true } = {}) {
+  const w = mirrorWorld(); const c = w.config;
+  const memoryFile = join(c.workerStatusFile, '..', 'memory.json');
+  const outbox = join(c.outboxRoot, P, 'worker', LIVE);
+  // A session the runner started earlier, still running: what a save or a stop is asked about.
+  const listed = { id: LIVE, product: P, kind: 'editing', card: 'C-9', lead: null, role: 'worker', pgid: 4321, signin: 's', config_dir: '/cfg', bundle_files: [], outbox, uid: OWNER,
+    outbox_open: true, stop_requested: false, alive: true, ended: false, pid: 4321, pid_start: '2026-11-11T11:00:00Z', head: HEAD, copy: join(c.copiesRoot, P, 'C-9'), started_at: AT - 60_000 };
+  const x = { now: AT, notes: [], stops: [], state: session ? { sessions: [listed], requests: { [LIVE]: { state: 'started', at: AT - 60_000 } }, answers: {}, seen: {} } : {}, pending: new Map() };
+  const rc = { copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, products: { [P]: { repo: 'o/r', mirror: w.mirror, render: { paths: {} } } } };
+  x.ports = {
+    // Real: the start port as runner-main.mjs makes it, less what it reads first (the card, claimed for the asked session).
+    start: startPort(rc, { readCard: () => ({ ok: true, doc: { state: 'claimed', product: P, claim: { session_id: x.sid } } }) }),
+    saveWork: saveWorkPort({ mirrorOf: () => w.mirror }),
+    pauseLead: pauseLeadPort(),
+    groupGone: async (g) => x.stops.includes(g.pgid),
+    stopGroup: async (g) => { x.stops.push(g.pgid); return { ok: true, how: 'SIGTERM' }; },
+    outboxDrained: async () => false,
+    ...runner,
+  };
+  x.tick = async () => { x.state = await runnerTick({ state: x.state, pending: x.pending, requestsDir: c.workerRequestsDir, statusFile: c.workerStatusFile, memoryFile, orchestrateUid: ME,
+    uid: OWNER, outboxRoot: c.outboxRoot, copiesRoot: c.copiesRoot, claimMs: 10 * 60_000, ports: x.ports, clock: () => x.now, note: (t) => x.notes.push(t) }); };
+  const io = {
+    lstat: (p) => { const r = statSync(p); return { ...fakeSt({ dir: true }), mode: r.mode & 0o7777 }; },
+    requestsAcl: () => null,
+    stat: () => fakeSt({ dir: true }),
+    open: (f) => ({ st: fakeSt(), text: readFileSync(f, 'utf8') }),
+    realpath: (p) => p,
+    sleep: async (ms) => { await x.tick(); x.now += ms; },
+    nonce: () => '0123456789abcdef', pollMs: 2000, giveUpMs: 30_000,
+  };
+  x.ports4 = workerPorts({ ...w.ctx, now: () => x.now }, io);
+  x.requests = () => readdirSync(c.workerRequestsDir).sort();
+  return { w, c, x, io, listed };
+}
+
+test('C (L963): launch, stopGroup, saveWork and pauseLead are wired: each writes its request into the runner\'s folder and takes the answer the runner wrote', async () => {
+  const ok = { start: async (q) => (mkdirSync(join(c0().outboxRoot, P, 'worker', q.sessionId), { recursive: true }), { ok: true, pid: 5001, pidStart: '2026-11-11T12:00:01Z', pgid: 5001, head: HEAD, outbox: join(c0().outboxRoot, P, 'worker', q.sessionId), signin: 's', configDir: '/cfg', copy: join(c0().copiesRoot, P, q.card) }),
+    saveWork: async () => ({ ok: true }), pauseLead: async () => ({ ok: true }) };
+  let cfg; const c0 = () => cfg;
+  const { c, x } = asksWorld({ runner: ok }); cfg = c;
+  await x.tick();
+  x.sid = 'S-new';
+  const l = await x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
+  assert.equal(l.ok, true, l.reason); assert.equal(l.pgid, 5001); assert.equal(l.copy, join(c.copiesRoot, P, 'C-1'));
+  assert.deepEqual(await x.ports4.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' }), { ok: true });
+  assert.deepEqual(await x.ports4.pauseLead({ product: P }), { ok: true });
+  assert.deepEqual(await x.ports4.stopGroup({ id: LIVE, pgid: 4321, kind: 'editing' }), { ok: true, how: 'SIGTERM' });
+  assert.deepEqual(x.stops, [4321]);
+  // The runner took each request it answered; each one the Dispatcher wrote was a 0644 file of its own name.
+  assert.deepEqual(x.requests(), [], 'every request was read and taken by the runner');
+  for (const n of ['launch-S-new', 'saveWork-S-live-0123456789abcdef', `pauseLead-${P}-0123456789abcdef`, 'stopGroup-S-live-0123456789abcdef']) assert.ok(Object.hasOwn(x.state.answers, n), n);
+});
+
+test('C (L963): the three refusals the runner gives today reach the Dispatcher with their plain reason: no prompt, no lock-down, no activity feed', async () => {
+  const { c, x } = asksWorld();
+  await x.tick();
+  // 1. launch: the runner's start port has no worker prompt (runner-ports.mjs promptFor), so nothing starts.
+  x.sid = 'S-new';
+  const l = await x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
+  assert.deepEqual(l, { ok: false, reason: 'not wired: no worker prompt is given to the runner' });
+  assert.equal(x.state.requests['S-new'].state, 'refused', 'used up, so the claim can be let go');
+  assert.equal(existsSync(join(c.copiesRoot, P, 'C-1')), false, 'no copy made'); assert.equal(existsSync(join(c.outboxRoot, P, 'worker', 'S-new')), false, 'no outbox made');
+  // 2. saveWork: M4 save-work runs only inside the worker's lock-down (runLocked), which the runner does not have.
+  assert.deepEqual(await x.ports4.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' }), { ok: false, reason: 'save-work runs only inside the worker\'s lock-down' });
+  // 3. pauseLead: the Lead's wrap-up needs the activity tracker's feed; a failed pause is a throw (owner-ports.mjs).
+  await assert.rejects(x.ports4.pauseLead({ product: P }), { message: 'not wired: the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet' });
+  // Each was answered, not timed out: one tick each, well inside the tick's limit.
+  assert.ok(x.now - AT <= 3 * 2000, `answered within a poll each (${x.now - AT} ms)`);
+  // A save of a session with no copy is ok without asking; a stop of a kind this runner does not start is ok: false unasked.
+  const before = x.requests().length + Object.keys(x.state.answers).length;
+  for (const kind of NO_COPY_KINDS) assert.deepEqual(await x.ports4.saveWork({ id: 'R-1', kind, card: 'C-9' }), { ok: true }, kind);
+  assert.match((await x.ports4.stopGroup({ id: 'R-1', pgid: null, kind: 'review' })).reason, /did not start "review" sessions/);
+  assert.equal(x.requests().length + Object.keys(x.state.answers).length, before, 'nothing written for those');
+});
+
+test('C (L963): the asks write only through the checked requests folder: a folder others can write is refused before anything is written', async () => {
+  const { c, x, io } = asksWorld();
+  await x.tick();
+  chmodSync(c.workerRequestsDir, 0o777);
+  const r = await import('../modules/M11-dispatcher/pass.mjs').then((m) => m.guarded(() => x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' })));
+  assert.equal(r.ok, false); assert.match(r.reason, /requests folder \(workerRequestsDir\) .* can be written by group or others \(mode 777\)/, 'a throw before the request is written reads as refused');
+  // stopGroup and saveWork answer ok: false, never a throw (owner-ports.mjs); nothing was asked, so nothing may still run from it.
+  for (const r of [await x.ports4.stopGroup({ id: LIVE, pgid: 4321, kind: 'editing' }), await x.ports4.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' })]) {
+    assert.equal(r.ok, false); assert.equal(r.timedOut, undefined); assert.match(r.reason, /^the request could not be written \(.*can be written by group or others/);
+  }
+  await assert.rejects(x.ports4.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' }), /can be written by group or others/);
+  await assert.rejects(x.ports4.pauseLead({ product: P }), /can be written by group or others/);
+  assert.deepEqual(x.requests(), [], 'nothing written');
+  // The same writer as stopSession: one definition (runnerRequestWriter).
+  assert.throws(() => x.ports4.stopSession(LIVE), /can be written by group or others/);
+  chmodSync(c.workerRequestsDir, 0o755);
+  // No answer within the ask's own limit: timedOut, never ok: false as if known (the runner never ticks here).
+  const quiet = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, sleep: async (ms) => { x.now += ms; }, giveUpMs: 6000 });
+  const t = await quiet.saveWork({ id: LIVE, kind: 'editing', card: 'C-9' });
+  assert.equal(t.ok, false); assert.equal(t.timedOut, true); assert.match(t.reason, /did not answer saveWork-S-live-0123456789abcdef within 6000 ms/);
+  assert.deepEqual(x.requests(), ['saveWork-S-live-0123456789abcdef.json'], 'written, and left for the runner');
+  assert.equal(statSync(join(c.workerRequestsDir, x.requests()[0])).mode & 0o777, 0o644);
+});
+
+test('C (L963, self-review m5): a request whose write fails once its file is made is taken away; one that can\'t be is waited on as asked, never read as refused', async () => {
+  const dir = tempDir('orch-prc-w-');
+  const fail = (code) => () => { throw Object.assign(new Error(`write ${code}`), { code }); };
+  const fsWith = (over) => ({ openSync, fchmodSync, writeFileSync, closeSync, unlinkSync, ...over });
+  for (const [what, over] of [['write', { writeFileSync: fail('ENOSPC') }], ['close', { closeSync: (fd) => { closeSync(fd); fail('EIO')(); } }]]) {
+    const f = join(dir, `${what}.json`);
+    assert.throws(() => writeNewReadable(f, '{}\n', { fs: fsWith(over) }), (e) => /write (ENOSPC|EIO)/.test(e.message) && !e.mayExist, what);
+    assert.equal(existsSync(f), false, `${what}: the file is taken away`);
+  }
+  const kept = join(dir, 'kept.json');
+  assert.throws(() => writeNewReadable(kept, '{}\n', { fs: fsWith({ writeFileSync: fail('ENOSPC'), unlinkSync: fail('EPERM') }) }), (e) => e.mayExist === true && /could not be taken away \(EPERM\), so it may still be read/.test(e.message));
+  writeNewReadable(join(dir, 'ok.json'), '{"a":1}\n');
+  assert.equal(readFileSync(join(dir, 'ok.json'), 'utf8'), '{"a":1}\n'); assert.equal(statSync(join(dir, 'ok.json')).mode & 0o777, 0o644);
+  // The ask: a write that may have left the file is waited on (its limit answers timedOut, "may still start"), never a throw.
+  const { c, x, io } = asksWorld({ session: false });
+  const mayExist = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, sleep: async (ms) => { x.now += ms; }, giveUpMs: 4000,
+    writeFile: () => { throw Object.assign(new Error('write ENOSPC; the request file could not be taken away (EPERM), so it may still be read'), { mayExist: true }); } });
+  const l = await mayExist.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' });
+  assert.equal(l.ok, false); assert.equal(l.timedOut, true, 'not known, so the claim stays');
+  const plain = runnerAsyncPorts({ config: c, now: () => x.now }, { ...io, writeFile: fail('ENOSPC') });
+  await assert.rejects(plain.launch({ card: 'C-1', kind: 'editing', product: P, sessionId: 'S-new' }), /write ENOSPC/, 'nothing left: refused');
 });
