@@ -220,6 +220,8 @@ export function main(argv, { io: given, runUpdater = spawnUpdater, out = (s) => 
   if (!planned.ops.length) out(planned.installed ? 'nothing to do: already installed.' : 'nothing to do: already as needed.');
   if (o.dry) {
     for (const x of planned.ops) out(`would run: ${x.text}`);
+    // What the plan could not look at without root (#305 r1 m4): never read as checked.
+    for (const u of planned.unchecked ?? []) out(`NOT CHECKED  ${u}`);
     // A dry run is not root, but it can read the runner config with root's rules: warn only when root would refuse it, and say why (L169 m4).
     if ((o.cmd === 'install' || o.cmd === 'add-to-install') && cfg.runnerConfig && planned.ops.length) {
       try { io.readSourceStrict(cfg.runnerConfig); } catch (e) { out(`WARNING  root will refuse ${cfg.runnerConfig}: ${e.message}. To put it right: keep your copy of review.json in a folder only you can open, then sudo install -o root -g wheel -m 0644 /dev/stdin <a path in a folder only root can write, e.g. under /Library> < <that copy>, and set runnerConfig in your settings to that path`); }

@@ -176,6 +176,14 @@ export function checkRulesCopy(io, cfg) {
 export function checkWatchAppKey(io, cfg) {
   const f = watchAppKeyPath(cfg);
   if (!f) return [{ ok: false, what: 'the watch job names a watcher App', why: 'the config\'s watch entry has no "app" (id, installation, keyFile): without it the job cannot read check runs' }];
+  return keyFileItems(io, f);
+}
+
+/**
+ * An App key file in the robot key folder (the watcher App's, L627; the robot App's, L727): orchestrate's own plain 0600
+ * file, of a key's size, one name, with no access list. Never reads it. Without root it is skipped, never a pass.
+ */
+export function keyFileItems(io, f) {
   const what = `${f} is orchestrate's own 0600 file of a key's size, with no access list`;
   if (io.euid() !== 0) return [{ ok: true, skip: true, what, why: 'the folder is orchestrate-only; needs root to look; run with sudo' }];
   const orch = readUser(io, 'orchestrate');
@@ -185,6 +193,8 @@ export function checkWatchAppKey(io, cfg) {
   if (st.isSymbolicLink() || !st.isFile()) why.push('is not a plain file');
   else {
     if (st.uid !== orch.uid) why.push(`owner is uid ${st.uid}, not orchestrate`);
+    // Exactly 0600 on purpose: token.mjs (mintInstallationToken), the reader, refuses only group or other bits, so it takes
+    // 0400 too. Setup is stricter because the mode is one it sets and fixes; a key copied in read-only needs chmod 600.
     if ((st.mode & 0o7777) !== 0o600) why.push(`mode is ${(st.mode & 0o7777).toString(8)}, want 600`);
     if (st.nlink !== undefined && st.nlink !== 1) why.push('has a second name');
     if (!(st.size >= 200 && st.size <= 10_000)) why.push('its size is not a key\'s');
