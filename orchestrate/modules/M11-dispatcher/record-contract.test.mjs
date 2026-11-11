@@ -47,7 +47,7 @@ function world() {
   const pass = () => withAlerts(rec, env.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: env.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
+    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   return { env, rec, rules, dead, launched, pass, refuseLaunch: (f) => { answer = f; } };

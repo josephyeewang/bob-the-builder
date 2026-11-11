@@ -55,7 +55,7 @@ Every outside effect (launching, stopping, typing into a session, git, alerts) i
 | `hasReviewer`, `requestReview`, `reviewAlerts` | limits | From `reviewPorts({ requests, status, reviewUid, mainHead })` (`review-requests.mjs`, L65, L66): the review runner's `requests/` folder, its `status.json`, the review user's uid, and `mainHead(installed)` → `{ commit, since }` for the stamp check (main's commit, 40 hex, and since when the copy has been behind it, from root's own record that the updater writes: M4 `install-check.mjs` `behindSince`, never a commit's date, L73); without `mainHead` there is no stamp check |
 | `filesOf` | undo | The files a merged PR changed |
 | `sendFrontDoor`, `restartFrontDoor`, `startMinibase`, `frontDoorAlive`, `strayFrontDoor`, `frontDoorHandoff` | phone | As in `phone-link.mjs` |
-| `cleanup: { copiesRoot, sealRoot, mirrorFor, git, saveWork }` | cleanup | As in `cleanup.mjs` |
+| `cleanup: { copiesRoot, sealRoot, mirrorFor, git, saveWork }` | cleanup | As in `cleanup.mjs`. Copies are `<copiesRoot>/<product>/<card>` (L836); a copy in another product's folder is never touched |
 
 With two Claude accounts (R-1-89), every port that starts, lists, checks or stops a session goes through `accountPorts` in `account-ports.mjs`; see "Two Claude accounts" below for the contract.
 

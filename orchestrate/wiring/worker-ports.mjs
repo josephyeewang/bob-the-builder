@@ -14,6 +14,14 @@
 //   cleanup.mirrorFor    → the product's mirror (config mirror) for a card of this Dispatcher's product, else null.
 //   cleanup.git          → safe-git, on the mirror only, and only the two reads cleanup makes (ls-tree, merge-base).
 //   cleanup.sealRoot     → config sealRoot, a private folder of this user's, checked at start and on each read.
+//   cleanup.copiesRoot   → config copiesRoot, the TOP worker-copies folder (<base>/worker-copies; cleanupPass enters
+//                          each product's folder under it, L836): a real folder, not a link, checked on each read (L887).
+//                          cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives
+//                          orchestrate an access list of its own there (L747): list, search, read (file contents and
+//                          attributes, so a copy can be hashed) and delete, inherited by every file and folder made under
+//                          it; no add, no write; it deletes only after cleanupPass's checks (or on Joe's counted Yes).
+//   outboxRoot           → config outboxRoot, the TOP outboxes folder (<base>/outboxes): the pass checks a launch's
+//                          outbox in <outboxRoot>/<product>/<role>/<id> under it (#403 r1 M1, L887).
 // The mirror and the seal folder are checked when the wiring starts, so a wrong path stops the start.
 
 import { lstatSync, statSync } from 'node:fs';
@@ -31,7 +39,7 @@ export const NOT_WIRED_WORKER = Object.freeze(['sessions', 'probe', 'launch', 's
 // What the cleanup step reads (cleanupPass's own parameters, less what the tick gives every step: a test pins the two
 // together), and which of those aren't wired yet. To wire one: answer it in `cleanup` below and take it off NOT_WIRED_CLEANUP.
 export const CLEANUP_PORTS = Object.freeze(['mirrorFor', 'git', 'saveWork', 'copiesRoot', 'sealRoot']);
-export const NOT_WIRED_CLEANUP = Object.freeze(['saveWork', 'copiesRoot']);
+export const NOT_WIRED_CLEANUP = Object.freeze(['saveWork']);
 
 /** Why the cleanup group can't start, or null. The same rules as the tick's ports, inside the one port the tick reads as a group. */
 export function cleanupProblem(cleanup) {
@@ -73,6 +81,14 @@ export function checkedMirror(mirror, uid, opts) {
 export const CLEANUP_GIT = Object.freeze(['ls-tree', 'merge-base']);
 export const CLEANUP_GIT_MS = 60_000;
 
+/** `path` when it is a real folder (not a link), else a throw naming `what` (L887). */
+function realFolder(path, what) {
+  let s;
+  try { s = lstatSync(path); } catch (e) { throw new Error(`${what} ${path} can't be read (${e?.code ?? e})`); }
+  if (s.isSymbolicLink() || !s.isDirectory()) throw new Error(`${what} ${path} is not a plain folder`);
+  return path;
+}
+
 /** The cleanup group's wired ports for one product. `run` is safe-git's runner (a port for a test). */
 export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
   checkedMirror(c.mirror, selfUid);
@@ -93,6 +109,9 @@ export function cleanupPorts({ config: c, selfUid }, { run = safeGit } = {}) {
   };
   // A folder, read on each pass: one that can't be used throws inside the step, so the sweep is never skipped in silence.
   Object.defineProperty(ports, 'sealRoot', { enumerable: true, get: () => privateFolder({ path: c.sealRoot, uid: selfUid, what: sealWhat, writable: true }) });
+  // The top copies folder (L887), the owner's (setup layout.mjs, read and deleted in through its access-list entry): a
+  // missing one, a link or a file throws inside the step, never reads as "no copies".
+  Object.defineProperty(ports, 'copiesRoot', { enumerable: true, get: () => realFolder(c.copiesRoot, 'the worker copies folder (copiesRoot)') });
   return ports;
 }
 
@@ -188,6 +207,8 @@ export function workerPorts(ctx) {
   for (const k of NOT_WIRED_CLEANUP) Object.defineProperty(cleanup, k, { enumerable: true, get: refusing(`cleanup.${k}`) });
   return {
     cleanup,
+    // A value the tick hands the pass (L887): the TOP outboxes folder, checked a real folder at start.
+    outboxRoot: realFolder(c.outboxRoot, 'the outboxes folder (outboxRoot)'),
     hostLock: hostLockPort({ path: c.hostLockPath, run: ctx.limitedSync, ownerUid: c.hostLockUid, selfUid: ctx.selfUid }),
     reviewEnded: reviewEndedPort({ root: c.reviewRoot, uid: c.reviewUid }),
   };

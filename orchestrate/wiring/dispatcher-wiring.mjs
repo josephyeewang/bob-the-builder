@@ -82,7 +82,9 @@ import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 // The review runner's (L615, L639; review-ports.mjs reviewRunner). The Dispatcher's alone: the robot config refuses them.
 export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewStatusFile', 'reviewUid', 'reviewRunnerLog', 'reviewInstallRoot']);
 // The worker and cleanup ports' (worker-ports.mjs, and filesOf in review-ports.mjs, L739). The Dispatcher's alone too.
-export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'hostLockPath', 'hostLockUid']);
+// outboxRoot and copiesRoot are the TOP folders (setup layout.mjs outboxRootPath, workerCopiesPath: <base>/outboxes and
+// <base>/worker-copies), never a product's: each product's own folder is under them (L836, L887).
+export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'outboxRoot', 'copiesRoot', 'hostLockPath', 'hostLockUid']);
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
   ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
 const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid'), ...WORKER_CONFIG_KEYS.filter((k) => k !== 'hostLockUid')]);
@@ -97,9 +99,11 @@ export const PORT_GROUPS = Object.freeze([
 export { notWiredText, refusing };
 // Every port the tick needs from the wiring. A port's wiring moves between the port files; this list changes only when the
 // tick starts reading a new port. Options with defaults are not ports. `alert` and `approvals` are answered here.
+// `outboxRoot` is a port, not an option (#403 r1 M1): without it the pass checks a launch's outbox by its name only, so
+// it is answered from the config's own outboxRoot (worker-ports.mjs, L887), never left to a default.
 const WIRED_HERE = Object.freeze(['alert', 'approvals']);
 export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'mainSha', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'proposals', 'replyToLead', 'requestReview',
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'proposals', 'replyToLead', 'requestReview',
   'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
   'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 

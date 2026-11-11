@@ -79,7 +79,7 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   await w.commit('work', (c) => writeFileSync(join(c, 'app.txt'), 'changed\n'));
   await w.bundle();
   const outboxes = join(w.root, 'outboxes');
-  const older = join(outboxes, 'worker', 'S-old');
+  const older = join(outboxes, w.product, 'worker', 'S-old');
   mkdirSync(older, { mode: 0o700 });
   await w.bundle(undefined, older);
   const setOutbox = (outbox) => { const cur = w.record.read('session', 'S-1'); assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: cur.rev, doc: { ...cur.doc, outbox } }).ok, true); };
@@ -102,6 +102,29 @@ test('#219 M-1: a worker push reads only the session\'s own outbox', async () =>
   assert.equal(await w.ghRefs(), before);
   rmSync(w.outbox);
   renameSync(link, w.outbox);
+  // L836: the right role and session in another product's folder, or the old flat place, is not this session's own.
+  for (const where of [['p2', 'worker'], ['worker']]) {
+    const other = join(outboxes, ...where, 'S-1');
+    mkdirSync(other, { recursive: true, mode: 0o700 });
+    await w.bundle(undefined, other);
+    setOutbox(other);
+    const r = await w.push({ outboxRoot: outboxes });
+    assert.equal(r.ok, false, where.join('/'));
+    assert.match(r.reason, /not inside the outbox root/, where.join('/'));
+    assert.equal(await w.ghRefs(), before);
+  }
+  // #403 r1 m2 (A9): the product is the session's, never the card's: a session naming p2's card C-2, with p2's outbox,
+  // is refused at the outbox (its own product p1's folder only), before any card check is reached.
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'card', id: 'C-2', expectRev: 0, doc: { state: 'draft', module: 'M-test', product: 'p2', lane: 'product', what: 'Card two' } }).ok, true);
+  const sNow = w.record.read('session', 'S-1');
+  mkdirSync(join(outboxes, 'p2', 'worker', 'S-1'), { recursive: true, mode: 0o700 });
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: sNow.rev, doc: { ...sNow.doc, card: 'C-2', outbox: join(outboxes, 'p2', 'worker', 'S-1') } }).ok, true);
+  const byCard = await w.push({ outboxRoot: outboxes });
+  assert.equal(byCard.ok, false);
+  assert.match(byCard.reason, /not inside the outbox root/);
+  const sBack = w.record.read('session', 'S-1');
+  assert.equal(w.record.write({ actor: 'dispatcher', entity: 'session', id: 'S-1', expectRev: sBack.rev, doc: { ...sBack.doc, card: sNow.doc.card } }).ok, true);
+  setOutbox(w.outbox);
   const good = await w.push({ outboxRoot: outboxes });
   assert.equal(good.ok, true, good.reason);
 });
@@ -1698,6 +1721,8 @@ test('L325 cosmetics: no root as the worker or owner; the test fstat port outsid
   const w = await world();
   assert.throws(() => createPushScript({ ...w.ports, ownerUid: 0 }), /ownerUid must be a Mac user id/);
   assert.throws(() => createPushScript({ ...w.ports, uids: { worker: 0 } }), /uids\.worker must be a Mac user id/);
+  // #403 r1 M1: no outbox root, or one that is no full path, makes no push script.
+  for (const outboxRoot of [undefined, null, '', 'outboxes', 7]) assert.throws(() => createPushScript({ ...w.ports, outboxRoot }), /outboxRoot must be the outboxes' full path/, String(outboxRoot));
   const ctx = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
   try {
