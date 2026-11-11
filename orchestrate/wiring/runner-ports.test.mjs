@@ -315,7 +315,9 @@ test('L970: the default promptFor is the worker prompt builder, which refuses wi
     assert.equal(workerPromptText(asked), null);
     assert.match(workerPrompt(asked).reason, /no head given/, 'null because the start does not pass the head yet (lane 2 moves the call)');
     const full = { ...asked, head: HEAD, outbox: '/o/p1/worker/S-1' };
-    assert.equal(workerPromptText(full), workerPrompt(full).text);
+    // The same prompt but for its random heading tag (L1006 m-A), which is new each time.
+    const untag = (t) => t.replace(/\[[0-9a-f]{24}\]/g, '[tag]');
+    assert.equal(untag(workerPromptText(full)), untag(workerPrompt(full).text));
     assert.match(workerPromptText(full), /^You are a worker\./);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });

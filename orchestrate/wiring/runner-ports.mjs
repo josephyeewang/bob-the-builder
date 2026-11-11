@@ -78,6 +78,7 @@ import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { workerPrompt } from '../modules/M5-review-audit/worker-prompt.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
@@ -124,8 +125,8 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
 // The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
 export const INTAKE_DONE = USED_STATES;
 // The roles whose sessions are a card's own work: 'waiting' is done for them (#388 r1 m2), and only theirs carry the
-// card's bundle (#388 r2 m1).
-const WAITING_DONE_FOR = new Set(['worker', 'script']);
+// card's bundle (#388 r2 m1). The one list (L1006 M1): PRODUCT_OUTBOX_ROLES, which M4 push and M11 intake read too.
+const WAITING_DONE_FOR = new Set(PRODUCT_OUTBOX_ROLES);
 const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });

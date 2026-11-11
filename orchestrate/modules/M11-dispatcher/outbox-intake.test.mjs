@@ -1763,3 +1763,16 @@ test('L982: a worker outbox with its own card\'s bundle gives no alert; any othe
   assert.equal(o3.length, 1); assert.ok(o3[0].refused, JSON.stringify(o3));
   assert.equal(w.calls.alerts.length, 2, w.calls.alerts.join(' | '));
 });
+
+// L1006 M1: a stopped script session's saved bundle (stopPass saves for every stopped card session) is its own card's
+// bundle too: left for the push, no alert. The roles come from the one list the push and runner-ports read.
+test('L1006: a script outbox with its own card\'s saved bundle gives no alert', async () => {
+  const w = world();
+  const ob = box(w, 'script', 'S-3');
+  writeFileSync(join(ob, 'bundle-C-3.bundle'), 'a saved bundle');
+  const rec = w.rec([['card', 'C-3', { state: 'running', product: 'p1' }]]);
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-3', role: 'script', product: 'p1', outbox: ob, uid: UID, card: 'C-3' }], ...w.ports });
+  assert.deepEqual(out, [], JSON.stringify(out));
+  assert.deepEqual(w.calls.alerts, []);
+  assert.deepEqual([...PRODUCT_OUTBOX_ROLES].sort(), ['script', 'worker']);
+});
