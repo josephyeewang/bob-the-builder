@@ -94,7 +94,7 @@ export function parseDispatcher(raw, cfg) {
  * The Dispatcher's config as the job will see it (every path through io.at), in CONFIG_KEYS order. → { config, problems }.
  * The uids come from the Mac's user records: orchestrate's owns the Record (the job runs as it), review's is the runner's.
  */
-export function dispatcherConfigFor(io, cfg) {
+export function dispatcherConfigFor(io, cfg, { keys = CONFIG_KEYS } = {}) {
   const d = cfg.dispatcher;
   if (!d) return { config: null, problems: [DISPATCHER_OFF] };
   const problems = [];
@@ -113,11 +113,15 @@ export function dispatcherConfigFor(io, cfg) {
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
     reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), outboxRoot: at(k.outboxRoot), copiesRoot: at(k.copiesRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
   };
+  // The other way too (L871): a key setup writes that the wiring doesn't take would stop the Dispatcher's start (an
+  // unknown key), so it is told here, never written or dropped.
+  const untaken = Object.keys(value).filter((key) => !keys.includes(key));
+  if (untaken.length) return { config: null, problems: [`the Dispatcher's wiring doesn't take the config keys ${untaken.join(', ')} that setup writes (this setup's own wiring, wiring/dispatcher-wiring.mjs beside it, is from another version: use setup and its wiring from one checkout)`] };
   // Every key the Dispatcher reads is written; only runDeadlineMs may be left to main.mjs's default. A key the wiring adds
   // and this doesn't fill is told here, never dropped (the Dispatcher would refuse to start on it).
-  const unfilled = CONFIG_KEYS.filter((key) => value[key] === undefined && key !== 'runDeadlineMs');
+  const unfilled = keys.filter((key) => value[key] === undefined && key !== 'runDeadlineMs');
   if (unfilled.length) return { config: null, problems: [`setup doesn't fill the Dispatcher's config keys ${unfilled.join(', ')}`] };
-  const config = Object.fromEntries(CONFIG_KEYS.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
+  const config = Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
   // Checked as the Dispatcher checks it, as orchestrate: so host.lock's owner (the owner's Mac user, read from the user records)
   // may be neither root, orchestrate nor review (#323 c1).
   try { checkConfig(config, { selfUid: orch.uid }); } catch (e) { return { config: null, problems: [`the config this would write is one the Dispatcher refuses (${e.message})`] }; }
@@ -159,7 +163,20 @@ function fileProblem(io, file, want, { inCopy = false } = {}) {
   if ((st.mode & 0o7777) !== 0o644) return `${file} has mode ${(st.mode & 0o7777).toString(8)}, want 644`;
   if (st.nlink !== 1) return `${file} has ${st.nlink} names`;
   let t; try { t = io.readText(file); } catch { return `${file} can't be read`; }
-  return t === want ? null : `${file} is not the config this setup writes now (run dispatcher-config)`;
+  return t === want ? null : `${file} is not the config this setup writes now${keysDiffer(t, want)} (run dispatcher-config)`;
+}
+
+/** `: <the keys that differ, by name>`, or '' when either text is no JSON object (L871: a missing or wrong root is named). */
+export function keysDiffer(text, want) {
+  let a; let b; try { a = JSON.parse(text); b = JSON.parse(want); } catch { return ''; }
+  if (!a || typeof a !== 'object' || Array.isArray(a) || !b || typeof b !== 'object' || Array.isArray(b)) return '';
+  const show = (v) => JSON.stringify(v)?.slice(0, 120);
+  const out = [
+    ...Object.keys(b).filter((k) => !Object.hasOwn(a, k)).map((k) => `${k} is missing (setup writes ${show(b[k])})`),
+    ...Object.keys(b).filter((k) => Object.hasOwn(a, k) && JSON.stringify(a[k]) !== JSON.stringify(b[k])).map((k) => `${k} is ${show(a[k])}, not ${show(b[k])}`),
+    ...Object.keys(a).filter((k) => !Object.hasOwn(b, k)).map((k) => `${JSON.stringify(k.slice(0, 40))} is not a key setup writes`),
+  ];
+  return out.length ? `: ${out.slice(0, 5).join('; ')}${out.length > 5 ? `; and ${out.length - 5} more` : ''}` : ': its keys are in another order or spacing';
 }
 
 /**
@@ -198,7 +215,9 @@ export function planDispatcherConfig(io, cfg, { jobLive } = {}) {
   // the checks load makes come first. The base file is held back too, since the next update carries it into the copy (L807 m1).
   if (toBase || toCopy) {
     let live; try { live = jobLive(); } catch (e) { return { ops: [], problems: [`could not tell whether the Dispatcher job is loaded (${e.message}), so its config is not changed`] }; }
-    const why = live ? robotMatchProblem(io, cfg, config) ?? dispatcherKeysProblem(io, cfg) : null;
+    // Without the root rows: they judge the file on disk, which this write replaces; the new config's roots are dispatcherKeys'
+    // own, so an older file that lacks them must not stop the very run that puts them right (L871 review M1).
+    const why = live ? robotMatchProblem(io, cfg, config) ?? dispatcherKeysProblem(io, cfg, { roots: false }) : null;
     if (why) return { ops: [], problems: [`the Dispatcher job is ${live} and reads ${inCopy}, and the new config would not start it: ${why}. Put that right first, or take the job out (sudo node setup.mjs daemons unload --only ${DISPATCHER_JOB}, then delete its job file), run dispatcher-config again, then daemons place and load`] };
   }
   // What the paths are, and which setup chose (L802): printed by every run, so the owner can copy them into the robot's robot.json.
@@ -270,9 +289,10 @@ export function checkDispatcherConfig(io, cfg) {
   ];
 }
 
-/** Null, or check-dispatcher's FAILs in one line (NOT TRIED is not a FAIL). Load and place refuse on it, and daemons check FAILs on it (L807 m3). */
-export function dispatcherKeysProblem(io, cfg) {
-  const bad = checkDispatcherKeys(io, cfg).filter((r) => !r.ok && !r.notTried);
+/** Null, or check-dispatcher's FAILs in one line (NOT TRIED is not a FAIL). Load and place refuse on it, and daemons check FAILs on it (L807 m3).
+ *  `roots: false` leaves out the outboxRoot and copiesRoot rows, which judge the dispatcher.json on disk (L871 review M1). */
+export function dispatcherKeysProblem(io, cfg, { roots = true } = {}) {
+  const bad = checkDispatcherKeys(io, cfg, roots ? {} : { dispatcher: false }).filter((r) => !r.ok && !r.notTried);
   return bad.length ? `check-dispatcher FAILs (${bad[0].what}: ${bad[0].why})${bad.length > 1 ? `, and ${bad.length - 1} more` : ''}; fix that first (node setup.mjs check-dispatcher shows all of it)` : null;
 }
 
