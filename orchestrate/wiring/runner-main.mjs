@@ -31,7 +31,7 @@
 // carriedOverProblem), or when it has no memory but earlier sessions' settings files are there (#378 self-review M3).
 
 import { lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readJobConfig } from '../shared/job-config.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
@@ -220,6 +220,7 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  */
 export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) => realpathSync.native(p), uid = process.getuid(), aclWrites = aclWriteEntries } = {}) {
   const no = (why) => ({ missing: false, reason: `its folder ${dir} ${why}` });
+  if (typeof dir !== 'string' || !isAbsolute(dir)) return no('is not a full path');
   const acl = (a) => { try { return aclWrites(a); } catch (e) { return [`its access list can't be read (${e?.message ?? e})`]; } };
   // The folder above it: root's alone (#419 r4 M1); every one above that root's, or sticky if others can write it.
   const above = () => {
@@ -237,9 +238,18 @@ export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) =
   let st; try { st = lstat(dir); } catch (e) {
     if (e?.code !== 'ENOENT') return no(`can't be read (${e?.code ?? e?.message})`);
     // Missing. Where its parent is there, that place is held to the rule first (L942 m2): a folder made there would fail.
-    let parentThere = true; try { lstat(dirname(dir)); } catch { parentThere = false; }
-    const bad = parentThere ? above() : null;
-    if (bad) return no(bad);
+    // Its parent reached through a link (/tmp is /private/tmp) is refused as such, as the folder would be (L942 self-review M1).
+    const parent = dirname(dir);
+    let parentThere = true; try { lstat(parent); } catch (x) {
+      if (x?.code !== 'ENOENT') return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`);
+      parentThere = false;
+    }
+    if (parentThere) {
+      let rp; try { rp = realpath(parent); } catch (x) { return no(`sits in ${parent}, which can't be read (${x?.code ?? x?.message})`); }
+      if (rp !== parent) return no(foldKey(rp) === foldKey(parent) ? `sits in ${parent}, which is spelled otherwise on the disk (it is ${rp})` : `sits in ${parent}, which is reached through a link (it is ${rp})`);
+      const bad = above();
+      if (bad) return no(bad);
+    }
     return { missing: true, reason: `its folder ${dir} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` };
   }
   if (st.isSymbolicLink()) return no('is a link');
@@ -291,6 +301,7 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
     if (!p) continue;
     try { kept.set(name, fresh(p.render.paths.snapshot, p.rules)); } catch (e) { failed.set(name, e); told.add(name); log(`product ${name}'s rules snapshot can't be written (${e?.code ?? e?.message}); its sessions are refused`); }
   }
+  const folderTold = new Map();
   const held = (name) => {
     const p = wanted(name);
     if (!p) return null;
@@ -298,9 +309,10 @@ export function keepSnapshots(c, { fresh = keepSnapshotFresh, log = () => {}, re
     let e; try { e = k ? k.error() : failed.get(name); } catch (x) { e = x; }
     if (!e) {
       let why; try { why = recheck(p.render.paths.snapshot); } catch (x) { why = `it can't be checked (${x?.message ?? x})`; }
-      if (!why) { told.delete(`${name} folder`); return null; }
+      if (!why) { folderTold.delete(name); return null; }
       const reason = `product ${name}'s rules snapshot: ${why}, so its sessions are not started`;
-      if (!told.has(`${name} folder`)) { told.add(`${name} folder`); log(reason); }
+      // Told once for each reason: a new one (an entry added, then the folder renamed away) is told too.
+      if (folderTold.get(name) !== why) { folderTold.set(name, why); log(reason); }
       return reason;
     }
     if (k) { try { k.stop(); } catch { /* stopped */ } kept.delete(name); }

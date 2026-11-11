@@ -222,6 +222,10 @@ test('#369 r2 m2: a product whose rules snapshot is not kept fresh is held back,
   assert.equal(s3.held('p1'), `product p1's rules snapshot: ${bad}, so its sessions are not started`);
   s3.held('p1');
   assert.equal(logs.filter((l) => /p1's rules snapshot: its folder \/s has an access list entry/.test(l)).length, 1, 'told once');
+  // A new reason while held is told too (L942 self-review m4).
+  bad = 'its folder /s is missing: make it'; s3.held('p1'); s3.held('p1');
+  assert.equal(logs.filter((l) => /p1's rules snapshot: its folder \/s is missing/.test(l)).length, 1, 'the new reason told once');
+  bad = 'its folder /s has an access list entry that lets others write (0: user:me allow delete)';
   assert.equal(s3.held('p2'), `product p2's rules snapshot: ${bad}, so its sessions are not started`);
   bad = null;
   assert.equal(s3.held('p1'), null);
@@ -390,6 +394,15 @@ test('L926 (#419 r3 M1, r4 M1): the snapshot\'s folder is decided on the disk: t
     assert.deepEqual(snapshotFolderProblem(join(up, 'none'), { lstat: over(rootAbove(join(up, 'none')), d, me, 0o40755) }), { missing: false, reason: others(join(up, 'none'), d, me, '0755') });
     rmSync(up, { recursive: true });
     assert.match(rootParentCheck(join(d, 'none'), { aclWrites: (p) => (p === d ? ['0: group:everyone allow add_file'] : []) }).reason, /sits in .*, which has an access list entry that lets others write \(0: group:everyone allow add_file\)$/);
+    // L942 self-review: its parent reached through a link is refused (as /tmp is /private/tmp); one that can't be read
+    // is refused for that, not "missing"; a path that is not full is refused.
+    const ln = join(d, 'ln'); symlinkSync(d, ln);
+    assert.deepEqual(rootParentCheck(join(ln, 'none')), { missing: false, reason: `its folder ${join(ln, 'none')} sits in ${ln}, which is reached through a link (it is ${d})` });
+    rmSync(ln);
+    if (process.platform === 'darwin') assert.match(snapshotFolderProblem('/tmp/orch-none-here').reason, /sits in \/tmp, which is reached through a link \(it is \/private\/tmp\)/);
+    const eacces = (p) => { if (p === d) throw Object.assign(new Error('no'), { code: 'EACCES' }); return lstatSync(p); };
+    assert.deepEqual(snapshotFolderProblem(join(d, 'none'), { lstat: (p) => (p === join(d, 'none') ? lstatSync(p) : eacces(p)) }), { missing: false, reason: `its folder ${join(d, 'none')} sits in ${d}, which can't be read (EACCES)` });
+    assert.deepEqual(snapshotFolderProblem('rel/none'), { missing: false, reason: 'its folder rel/none is not a full path' });
     // Its parent missing too: held, saying which folder to make (setup makes the parents).
     assert.deepEqual(snapshotFolderProblem(join(d, 'gone', 'none')), { missing: true, reason: `its folder ${join(d, 'gone', 'none')} is missing: make it, owned by the runner's user, mode 0755, in a folder of root's that no one else can write (setup does not make it yet)` });
     // A link into a worker's copy, and a folder reached through one.
