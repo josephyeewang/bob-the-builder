@@ -1258,3 +1258,29 @@ test('L768 githubIssues: GitHub\'s own time comes from its Date header, and read
   assert.equal((await gh.read(7)).created_at, null);
   assert.equal(gh.lastServerTime, null, 'an answer without a good Date header is not known');
 });
+
+test('L957 githubIssues.listOpen: every robot issue whose last line passes, on every page, read whole or false', async () => {
+  const { answers, asked, gh } = realClient();
+  const MARK = '<!-- orch:alert v1 key=alert-1 -->';
+  const test = lineIs(MARK);
+  const other = (number) => ({ number, body: 'something else', user: ROBOT });
+  const full = Array.from({ length: 100 }, (_, i) => other(i + 100));
+  full[3] = { number: 3, body: `text\n${MARK}`, user: ROBOT, updated_at: '2026-11-03T08:00:00Z' };
+  full[4] = { number: 4, body: MARK, user: { type: 'User', login: 'someone' } };
+  full[5] = { number: 5, body: MARK, user: { type: 'Bot', login: 'other-app[bot]' } };
+  full[6] = { number: 6, body: `${MARK}\nafter`, user: ROBOT };
+  full[7] = { number: 7, body: MARK, user: ROBOT, pull_request: {} };
+  answers.push([200, full], [200, [{ number: 8, body: MARK, user: ROBOT }]]);
+  assert.deepEqual(await gh.listOpen(test), [{ number: 3, body: `text\n${MARK}`, updated_at: '2026-11-03T08:00:00Z' }, { number: 8, body: MARK, updated_at: null }]);
+  assert.match(asked.at(-2), /state=open&creator=robot%5Bbot%5D&per_page=100&page=1$/);
+  assert.match(asked.at(-1), /&page=2$/);
+  answers.push([200, full], [502, null]);
+  assert.equal(await gh.listOpen(test), false, 'a refused second page: not a part list');
+  answers.push([200, { message: 'not a list' }]);
+  assert.equal(await gh.listOpen(test), false);
+  answers.push([200, [{ number: 'x', body: MARK, user: ROBOT }]]);
+  assert.equal(await gh.listOpen(test), false, 'a matching issue with no number');
+  for (let i = 0; i < 10; i++) answers.push([200, full]);
+  assert.equal(await gh.listOpen(test), false);
+  assert.match(gh.lastAnswer, /more than 1000 open issues/);
+});

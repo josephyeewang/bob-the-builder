@@ -121,6 +121,8 @@ const once = (token) => {
  * closed it. Anyone can open an issue on a public repo and quote a marker, so the robot's own login decides (L399).
  * findOpen(test) → the number of an open issue of the robot's whose last line passes test, on any page, null when there
  * is none, false when GitHub refused the list or there are too many to read.
+ * listOpen(test) → every open issue of the robot's whose last line passes test, as [{ number, body, updated_at }], read
+ * whole or not at all: false when GitHub refused a page, a page was not a list, or there are too many to read (L957).
  * latestOwnComment(n, since) → the robot's latest comment since that ISO time, as { at, body }; null when there is none;
  * false when GitHub refused a read or there are too many comments to read them all.
  * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell the owner what GitHub said.
@@ -203,6 +205,23 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
         if (r.json.length < COMMENT_PAGE) return null;
       }
       last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues to look through for this alert, too many to read`;
+      return false;
+    },
+    async listOpen(test) {
+      await bearer();
+      const creator = robot ? `&creator=${encodeURIComponent(robot)}` : '';
+      const found = [];
+      for (let page = 1; page <= ISSUE_PAGES; page++) {
+        const r = await call('GET', `/issues?state=open${creator}&per_page=${COMMENT_PAGE}&page=${page}`);
+        if (r.status !== 200 || !Array.isArray(r.json)) return false;
+        for (const i of r.json) {
+          if (!i || i.pull_request || !mine(i.user) || typeof i.body !== 'string' || !test(lastLine(i.body))) continue;
+          if (!ISSUE(i.number)) return false;
+          found.push({ number: i.number, body: i.body, updated_at: typeof i.updated_at === 'string' ? i.updated_at : null });
+        }
+        if (r.json.length < COMMENT_PAGE) return found;
+      }
+      last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues to look through, too many to read`;
       return false;
     },
     async latestOwnComment(n, since) {

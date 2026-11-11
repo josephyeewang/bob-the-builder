@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryRecord } from '../../shared/record.mjs';
 import { createHash } from 'node:crypto';
-import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold, clockAhead, clockTooFast, CLOCK_AHEAD_MS } from './alerts.mjs';
+import { makeAlerts, alertKey, fakeIssues, lastLine, wasTold, clockAhead, clockTooFast, CLOCK_AHEAD_MS, openKeys, sweepFactId, SWEEP_NOTE, SWEEP_QUIET_MS, SWEEP_EVERY_MS } from './alerts.mjs';
 import { makeMasker } from '../M12-sensors/mask.mjs';
 import { makeFactWriter, TROUBLE_SOURCES } from '../M12-sensors/facts.mjs';
 import { dueToTell, STILL_WAITING_MS, FUTURE_SKEW_MS } from '../../shared/still-waiting.mjs';
@@ -1182,4 +1182,181 @@ test('L801 r2 m2: a comment GitHub gives no time for is stamped by GitHub\'s tim
   const told = answers.map((a, i) => (a === 'reminded' ? i : null)).filter((i) => i !== null);
   assert.ok(told.length >= 5 && told.length <= 6, `${told.length} reminders in 6 days`);
   for (let i = 1; i < told.length; i++) assert.ok(told[i] - told[i - 1] >= 24, `never sooner than a day (hours ${told[i - 1]}, ${told[i]})`);
+});
+
+// L402, L957: the daily sweep of alert issues left open after their cause cleared. An issue opened while the Record
+// refused its number is one: when its cause clears, clear finds nothing to close.
+function sweepWorld() {
+  const { gh, rec, clock } = setup(); // GitHub's updated_at runs on the same clock
+  const world = { refuse: false };
+  const w = makeFactWriter(rec, { actor: 'ledger', now: clock.now });
+  const writer = { get: w.get, put: (id, doc) => (world.refuse && doc.kind === 'fact.alert' ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
+  const alerts = makeAlerts({ rec, gh, owner: 'owner-login', now: clock.now, writer });
+  return { gh, rec, clock, world, alerts, writer };
+}
+const A = alertKey('product 1', 'old-version-live', 'production');
+const B = alertKey('product 1', 'no-stage', 'rules');
+const C = alertKey('product 1', 'watcher-cannot-read', 'vercel');
+const listed = (gh) => gh.calls.filter(([c]) => c === 'listOpen').length;
+
+test('L402 sweep: an issue whose number the Record refused, left open after its cause cleared, is closed by the daily sweep; a raised one and a recent one stay', async () => {
+  const w = sweepWorld();
+  w.world.refuse = true;
+  await w.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' });
+  w.world.refuse = false;
+  assert.equal(await w.alerts.clear({ key: A }), 'none', 'the cause cleared, but clear has no number to close');
+  await w.alerts.raise({ key: B, title: 'no stage', body: 'The rules entry has no stage.' });
+  w.clock.tick(7 * 60);
+  w.world.refuse = true;
+  await w.alerts.raise({ key: C, title: 'cannot read', body: 'The watcher cannot read Vercel.' });
+  w.world.refuse = false;
+  assert.equal(w.gh.issues.get(1).closed, false);
+  const out = await w.alerts.sweep({ product: 'product 1', raised: openKeys(w.rec) });
+  assert.deepEqual(out, { swept: true, closed: [1], failed: [], kept: 2, why: null }, 'B is raised; C has no number but was touched within the quiet time');
+  assert.equal(w.gh.issues.get(1).closed, true);
+  assert.equal(w.gh.issues.get(1).comments.at(-1), SWEEP_NOTE);
+  assert.notEqual(foot(w.gh, 1).cleared, '-', 'the footer says it cleared, so the cause coming back opens a new issue');
+  assert.equal(w.gh.issues.get(2).closed, false);
+  assert.equal(w.gh.issues.get(3).closed, false);
+  assert.equal(w.writer.get(sweepFactId('product 1')).swept_at, '2026-11-03T15:00:00.000Z');
+  w.clock.tick(60);
+  assert.deepEqual(await w.alerts.sweep({ product: 'product 1', raised: openKeys(w.rec) }), { swept: false, closed: [], failed: [], kept: 0, why: null }, 'once a day');
+  assert.equal(listed(w.gh), 1);
+  assert.equal(await w.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' }), 'opened', 'back: a new issue');
+  assert.equal(w.gh.issues.size, 4);
+  w.clock.tick(SWEEP_EVERY_MS / 60000);
+  await w.alerts.sweep({ product: 'product 1', raised: openKeys(w.rec) });
+  assert.equal(listed(w.gh), 2, 'the next day it sweeps again');
+});
+
+test('L957 plant: with the raised set unknown, the list not read whole or the robot\'s login unknown, the sweep closes nothing and says why', async () => {
+  const orphan = async () => {
+    const w = sweepWorld();
+    w.world.refuse = true;
+    await w.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' });
+    w.world.refuse = false;
+    w.clock.tick(7 * 60);
+    return w;
+  };
+  for (const raised of [undefined, null, 'x', [1], { [A]: true }, openKeys({ list: () => { throw new Error('the Record cannot be read'); } }),
+    openKeys({ list: () => [{ id: 'f', entity: 'fact', corrupt: true, reason: 'bad line' }] })]) {
+    const w = await orphan();
+    const out = await w.alerts.sweep({ product: 'product 1', raised });
+    assert.equal(out.swept, false, String(raised));
+    assert.match(out.why, /not known, so no issue was closed/);
+    assert.equal(listed(w.gh), 0);
+    assert.equal(w.gh.issues.get(1).closed, false);
+    assert.equal(w.writer.get(sweepFactId('product 1')), null, 'not marked swept');
+  }
+  const lists = [
+    ['a refused list', async () => false, /could not be read whole/],
+    ['a list that is not one', async () => ({ number: 1 }), /could not be read whole/],
+    ['an entry with no number', async function () { return [...(await this.real(() => true))].map((x) => ({ ...x, number: 'one' })); }, /could not be read whole/],
+    ['an entry with no body', async function () { return [...(await this.real(() => true))].map((x) => ({ number: x.number })); }, /could not be read whole/],
+  ];
+  for (const [name, listOpen, why] of lists) {
+    const w = await orphan();
+    const gh = { ...w.gh, real: w.gh.listOpen, listOpen, lastAnswer: 'GitHub answered 502 to GET /issues' };
+    const alerts = makeAlerts({ rec: w.rec, gh, owner: 'owner-login', now: w.clock.now, writer: w.writer });
+    const out = await alerts.sweep({ product: 'product 1', raised: [] });
+    assert.equal(out.swept, false, name);
+    assert.match(out.why, why, name);
+    assert.match(out.why, /502/, name);
+    assert.equal(w.gh.issues.get(1).closed, false, name);
+  }
+  {
+    const w = await orphan();
+    const gh = { ...w.gh, listOpen: w.gh.listOpen, loginTrouble: 'the robot\'s own login could not be read' };
+    const out = await makeAlerts({ rec: w.rec, gh, owner: 'owner-login', now: w.clock.now, writer: w.writer }).sweep({ product: 'product 1', raised: [] });
+    assert.match(out.why, /login is not known/);
+    assert.equal(w.gh.issues.get(1).closed, false);
+  }
+  {
+    const w = await orphan();
+    const { listOpen, ...rest } = w.gh;
+    const out = await makeAlerts({ rec: w.rec, gh: rest, owner: 'owner-login', now: w.clock.now, writer: w.writer }).sweep({ product: 'product 1', raised: [] });
+    assert.match(out.why, /cannot list open issues/);
+    assert.equal(w.gh.issues.get(1).closed, false);
+  }
+});
+
+test('L957: the sweep closes only the robot\'s own issues whose last line is the orch:alert v1 footer, and none a raise moved on since the list', async () => {
+  const w = sweepWorld();
+  w.world.refuse = true;
+  await w.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' });
+  w.world.refuse = false;
+  const robotOpen = (body) => w.gh.open({ title: 't', body });
+  await robotOpen('The heartbeat.\n<!-- orch:heartbeat product 1 -->');
+  await robotOpen(`An old-form alert.\n<!-- alert-key ${idFor(B)} -->`);
+  await robotOpen(`${w.gh.issues.get(1).body}\nand a line after the footer`);
+  await robotOpen(w.gh.issues.get(1).body.replace(idFor(A), idFor(C)));
+  w.gh.issues.get(5).ours = false;
+  w.clock.tick(7 * 60);
+  // Every open issue listed, the robot's or not, so the sweep's own checks decide.
+  const gh = { ...w.gh, listOpen: async () => [...w.gh.issues].filter(([, x]) => !x.closed).map(([number, x]) => ({ number, body: x.body, updated_at: x.updated_at })) };
+  const out = await makeAlerts({ rec: w.rec, gh, owner: 'owner-login', now: w.clock.now, writer: w.writer }).sweep({ product: 'product 1', raised: [] });
+  assert.deepEqual(out.closed, [1]);
+  assert.equal(out.kept, 4);
+  for (const n of [2, 3, 4, 5]) assert.equal(w.gh.issues.get(n).closed, false, `issue ${n}`);
+
+  const v = sweepWorld();
+  v.world.refuse = true;
+  await v.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' });
+  v.clock.tick(7 * 60);
+  const stale = await v.gh.listOpen(() => true);
+  await v.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy again.' });
+  v.world.refuse = false;
+  const gh2 = { ...v.gh, listOpen: async () => stale };
+  const out2 = await makeAlerts({ rec: v.rec, gh: gh2, owner: 'owner-login', now: v.clock.now, writer: v.writer }).sweep({ product: 'product 1', raised: [] });
+  assert.deepEqual([out2.closed, out2.kept], [[], 1], 'raised again after the list: it stays');
+  assert.equal(v.gh.issues.get(1).closed, false);
+});
+
+test('L957: a close GitHub refused is in the answer and tried again the next day; a refused mark says the next pass sweeps again', async () => {
+  const w = sweepWorld();
+  w.world.refuse = true;
+  await w.alerts.raise({ key: A, title: 'old version live', body: 'Production serves an older deploy.' });
+  w.world.refuse = false;
+  w.clock.tick(7 * 60);
+  const noEdit = { ...w.gh, edit: async () => false };
+  const out0 = await makeAlerts({ rec: w.rec, gh: noEdit, owner: 'owner-login', now: w.clock.now, writer: w.writer }).sweep({ product: 'product 1', raised: [] });
+  assert.deepEqual([out0.closed, out0.failed], [[], [1]], 'a refused footer edit: not closed with the footer still saying open');
+  assert.equal(w.gh.issues.get(1).closed, false);
+  w.writer.put(sweepFactId('product 1'), { kind: 'fact.alert-sweep', product: 'product 1', swept_at: '2026-01-01T00:00:00.000Z' });
+  const gh = { ...w.gh, close: async () => false };
+  const out = await makeAlerts({ rec: w.rec, gh, owner: 'owner-login', now: w.clock.now, writer: w.writer }).sweep({ product: 'product 1', raised: [] });
+  assert.deepEqual([out.swept, out.closed, out.failed], [true, [], [1]]);
+  assert.equal(w.gh.issues.get(1).closed, false);
+  w.clock.tick(SWEEP_EVERY_MS / 60000);
+  assert.deepEqual((await w.alerts.sweep({ product: 'product 1', raised: [] })).closed, [1], 'the footer already says cleared: only the close is left');
+  assert.equal(w.gh.issues.get(1).closed, true);
+
+  const v = sweepWorld();
+  const refusing = { get: v.writer.get, put: () => ({ ok: false, reason: 'the store is full' }) };
+  const out2 = await makeAlerts({ rec: v.rec, gh: v.gh, owner: 'owner-login', now: v.clock.now, writer: refusing }).sweep({ product: 'product 1', raised: [] });
+  assert.match(out2.mark, /refused the sweep's own mark \(the store is full\), so the next pass sweeps again/);
+});
+
+test('L957: openKeys holds the Record\'s open alerts only, and the quiet time is SWEEP_QUIET_MS by GitHub\'s clock', async () => {
+  const w = sweepWorld();
+  await w.alerts.raise({ key: A, title: 'a', body: 'a' });
+  await w.alerts.raise({ key: B, title: 'b', body: 'b' });
+  await w.alerts.clear({ key: B });
+  assert.deepEqual(openKeys(w.rec), [A]);
+  w.clock.tick(SWEEP_QUIET_MS / 60000);
+  assert.deepEqual((await w.alerts.sweep({ product: 'product 1', raised: [] })).closed, [1], 'a caller that holds A raised no more');
+  assert.equal(cached(w.rec, A).status, 'cleared', 'the Record no longer points at it as open');
+  assert.deepEqual(openKeys(w.rec), []);
+  const v = sweepWorld();
+  v.world.refuse = true;
+  await v.alerts.raise({ key: C, title: 'c', body: 'c' });
+  v.world.refuse = false;
+  v.clock.tick(SWEEP_QUIET_MS / 60000 - 1);
+  assert.deepEqual((await v.alerts.sweep({ product: 'product 1', raised: [] })).closed, [], 'a minute short');
+  v.clock.tick(SWEEP_EVERY_MS / 60000);
+  v.gh.touch(1, null);
+  assert.deepEqual((await v.alerts.sweep({ product: 'product 1', raised: [] })).closed, [], 'no readable updated_at: it stays');
+  v.clock.tick(SWEEP_EVERY_MS / 60000);
+  v.gh.touch(1, new Date(Date.parse(v.clock.now().toISOString()) - SWEEP_QUIET_MS).toISOString());
+  assert.deepEqual((await v.alerts.sweep({ product: 'product 1', raised: [] })).closed, [1]);
 });

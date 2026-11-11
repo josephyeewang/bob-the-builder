@@ -30,6 +30,7 @@ const usageWindow = { used_pct: 'num', resets_at: 'time' };
 export const SHAPES = Object.freeze({
   'fact.air-health': { red_count: 'count', checked_at: 'time' },
   'fact.alert': alert,
+  'fact.alert-sweep': { product: 'id', swept_at: 'time' },
   'fact.heartbeat-account': { product: 'id', login: 'text', switches: 'count' },
   'fact.heartbeat-issue': { product: 'id', issue: 'count' },
   'fact.heartbeat-status': { product: 'id', at: 'time', front_door_reachable: 'bool', signed_in: 'bool', login: 'text', login_told: 'text', red: ['id'] },
