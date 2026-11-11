@@ -10,7 +10,9 @@ file allowlist, required license notices and optional companion modules.
 1. Put the generic capability in `skills/<id>/SKILL.md` and its relative resources.
    Move personal paths, project discovery, memory destinations and publishing
    integrations into private adapters outside this repository. Keep existing
-   callers compatible when changing a maintained capability.
+   callers compatible when changing a maintained capability. Preserve established
+   command names, distinct scopes and discovery descriptions when moving a capability;
+   handle an intentional change as a separate explicit decision.
 2. Test a standalone copy with synthetic context. A module must work without Bob,
    another module, private settings, a specific assistant's native tools, or the
    author's project history. Mark optional lanes, providers and costs explicitly;

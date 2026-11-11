@@ -12,13 +12,28 @@ import json
 import re
 import subprocess
 import zipfile
+from http import HTTPStatus
 from pathlib import Path
 
 
 class ApiError(RuntimeError):
-    def __init__(self, status, message='GitHub request failed'):
-        super().__init__(f'{message} (HTTP {status})')
+    def __init__(self, status, message='GitHub request failed', cli_exit=None):
+        details = f'HTTP {status}' if status is not None else 'no HTTP status'
+        if status is not None:
+            try:
+                details += f': {HTTPStatus(status).phrase}'
+            except ValueError:
+                pass
+        if cli_exit is not None:
+            details += f'; CLI exit {cli_exit}'
+        super().__init__(f'{message} ({details})')
         self.status = status
+
+
+def gh_error(result, operation):
+    """Retain status without reflecting raw CLI/server messages or auth data."""
+    match = re.search(rb'\bHTTP[ /](\d{3})\b', result.stderr)
+    return ApiError(int(match[1]) if match else None, operation, result.returncode)
 
 
 class Gh:
@@ -31,18 +46,19 @@ class Gh:
         result = subprocess.run(command, input=json.dumps(payload).encode() if payload is not None else None,
                                 capture_output=True)
         if result.returncode:
-            match = re.search(rb'\(HTTP (\d{3})\)', result.stderr)
-            raise ApiError(int(match[1]) if match else 0)
+            raise gh_error(result, 'GitHub API request failed')
         return result.stdout if binary else json.loads(result.stdout or b'null')
 
     def upload(self, repository, release_id, name, data):
-        # gh api's raw-file body is stdin; --input - also supports binary bytes.
+        # gh cannot infer a pipe's byte count. Release uploads require an exact
+        # Content-Length; otherwise gh 2.97.0 sends chunked stdin without it.
         path = f'https://uploads.github.com/repos/{repository}/releases/{release_id}/assets?name={name}'
         result = subprocess.run(['gh', 'api', '--method', 'POST', path,
-                                 '-H', 'Content-Type: application/octet-stream', '--input', '-'],
+                                 '-H', 'Content-Type: application/octet-stream',
+                                 '-H', f'Content-Length: {len(data)}', '--input', '-'],
                                 input=data, capture_output=True)
         if result.returncode:
-            raise ApiError(0, 'Release asset upload failed; retry is safe')
+            raise gh_error(result, 'Release asset upload failed; retry is safe')
         return json.loads(result.stdout)
 
 
