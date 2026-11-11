@@ -42,6 +42,17 @@ import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/rec
 export const STOP_FACT = (sid) => `stop-${sid}`;
 /** The mark that a stop's unsaved work was told (L130 M9). */
 export const UNSAVED_FACT = (sid) => `stop-unsaved-${sid}`;
+// A review runner's reviewer or auditor the stop step asked the runner to end (L946): asked, failing, then done once it is
+// no longer listed. In the Dispatcher's `stop-` family (M9 permissions FACT_FAMILIES), under `stop-review-`: the worker
+// stops' passes over STOP_FACT (reparkStopped, tellUnsaved) read only a done stop with moved or saved false, which this
+// never carries, and a worker's session id is a UUID, never `review-…`.
+export const REVIEW_STOP_FACT = (sid) => `stop-review-${sid}`;
+// While the session is still listed, the stop is asked again after this long (the runner stops at once, or tells Joe
+// itself when a stop it made does not take, review-runner.mjs STOP_IGNORED_MS).
+export const REVIEW_STOP_AGAIN_MS = 5 * 60_000;
+// The one daily tell for every review stop that can't be asked (one broken folder fails them all): `stop-reviews-`, not
+// `stop-review-`, so the done sweep over REVIEW_STOP_FACT never reads it.
+export const REVIEW_STOP_TELL_FACT = 'stop-reviews-failing';
 export const COMPACTION_FACT = (card) => `compactions-${card}`;
 export const HOST_FACT = 'host-lock-seen';
 export const PAUSE_FACT = (product) => `pause-${product}`;
@@ -230,13 +241,15 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
 // Left out, it is `now`.
 // `product` is this Dispatcher's (the tick's value port, config.product, L927): `sessions` is Mac-wide, and the stop step
 // acts only on a session whose OWN product (the runner's status names it) is this one, never on one whose card id merely
-// reads from this Record (two products may each have a C-7). A session naming no product is no product's: not stopped
-// here (a review or audit session: it runs until it ends on its own, and its verdict for an ended card is thrown away,
-// L933). `running` stays Mac-wide, so the caps count every
-// product. Left out, or anything but a non-empty string, it matches NO session, never every one (L943 m2): the pass
-// stops nothing and says so in its notes and failure log (the tick refuses such a product before it gets here).
-export async function stopPass({ rec, rules, now, clock = () => now, account, product: ownProduct, sessions, probe, stopGroup, saveWork, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
-  const out = { stopping: [], stopped: [], notes: [] };
+// reads from this Record (two products may each have a C-7). A session naming no product is no product's, never
+// stopGroup's here: a review or audit session is asked to end through the review runner (`stopReview`, L946) only when
+// its card is in this Record at the very head it reviews and that card is cancelled or ended (reviewStops below); any
+// other runs until it ends on its own, and its verdict for an ended card is thrown away (L933). `running` stays
+// Mac-wide, so the caps count every product. Left out, or anything but a non-empty string, `product` matches NO
+// session, never every one (L943 m2): the pass stops nothing and says so in its notes and failure log (the tick
+// refuses such a product before it gets here).
+export async function stopPass({ rec, rules, now, clock = () => now, account, product: ownProduct, sessions, probe, stopGroup, stopReview, saveWork, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
+  const out = { stopping: [], stopped: [], notes: [], reviewStops: [] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
   // Any other failure reading the rules (an unreadable file) is treated the same, never thrown before
@@ -272,7 +285,8 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
 
   // 3 + 4. Compactions and stops. Which sessions stop is decided first; then every stop is called at
   // once, then every save, each with its own time limit (audit 0b-6 r4 MAT-1): the step takes at most
-  // two port deadlines however many sessions stop, and one stuck stop holds no other.
+  // two port deadlines however many sessions stop, and one stuck stop holds no other. The review stops after
+// them (reviewStops, L946) ask all at once too: one port deadline more.
   let running = [...sessions];
   const due = [];
   for (const s of mine) {
@@ -345,9 +359,76 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
     out.stopped.push([s.id, pending.reason]);
   }
 
+  if (named) await reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, failureLog, report, out, portDeadlineMs });
   tellUnsaved({ rec, alert, now });
   reparkStopped({ rec, now: Math.max(after, clock()) });
   return { ...out, running, bands: b, unknownSince, missing };
+}
+
+const REVIEW_KINDS = ['review', 'audit'];
+// Only a cancel or an ended card ends a reviewer (L947): red, paused and a split don't (reviewers are free of the caps and
+// report no size), and a card waiting on Joe may be waiting on this very review.
+const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : FINAL_STATES.card.includes(card.state) ? 'card_ended' : null);
+
+/**
+ * L946: ask the review runner to end each reviewer or auditor (product null, kind review or audit) whose card is in this
+ * Record AT THE HEAD IT REVIEWS, and is cancelled or ended. The head is what makes it this product's: two products may
+ * each have a C-7, never one commit. A reviewer of an older head of the card is left alone (L947: its verdict is thrown
+ * away). The ask is `stopReview({ card, role, head })`, a stop file by target (no request id, L947), again every
+ * REVIEW_STOP_AGAIN_MS while the session is listed. Every ask of a pass is made at once, each with its own time limit,
+ * so the asks add one port deadline to the step however many there are. A failed ask is said in the notes and the
+ * failure log on each pass; Joe is told once for all of them (REVIEW_STOP_TELL_FACT), again each day it lasts, and the
+ * tell is taken back (a queued one dropped) on the first pass with none failing. A stop asked for a session no longer
+ * listed is marked done. Results go in out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed'].
+ */
+async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, failureLog, report, out, portDeadlineMs }) {
+  const listed = new Set();
+  const due = [];
+  for (const s of sessions) {
+    if (s?.product != null || !REVIEW_KINDS.includes(s?.kind)) continue;
+    listed.add(s.id);
+    if (typeof s.card !== 'string' || typeof s.head !== 'string' || !s.head) continue;
+    const card = rec.read('card', s.card)?.doc;
+    if (!card || card.head !== s.head || (card.product != null && card.product !== ownProduct)) continue;
+    const why = reviewStopReason(card);
+    if (!why) continue;
+    const key = REVIEW_STOP_FACT(s.id);
+    const was = factDoc(rec, key)?.doc;
+    const askedAt = was?.state === 'asked' ? pastTime(was.asked_at, now) : null;
+    if (askedAt !== null && now - askedAt < REVIEW_STOP_AGAIN_MS) { out.reviewStops.push([s.id, why, 'waiting']); continue; }
+    due.push({ s, why, key, was });
+  }
+  const answers = await Promise.all(due.map(({ s }) => (typeof stopReview === 'function'
+    ? guarded(() => stopReview({ card: s.card, role: s.role, head: s.head }), portDeadlineMs)
+    : { ok: false, reason: 'no stopReview port is wired' })));
+  const failing = [];
+  due.forEach(({ s, why, key, was }, n) => {
+    const r = answers[n];
+    const base = { ...(was ?? {}), reason: why, card: s.card, role: s.role, head: s.head, since: was?.since ?? iso(now), tries: (was?.tries ?? 0) + 1 };
+    if (r?.ok) {
+      putFact(rec, key, { ...base, state: 'asked', asked_at: iso(now), last_reason: null }, 'review_stop_asked', was);
+      out.reviewStops.push([s.id, why, 'asked']);
+      return;
+    }
+    const reason = String(r?.reason ?? 'no answer').slice(0, 300);
+    const line = `stops: the ${s.role} ${s.id} for card ${s.card} (${why}) could not be asked to stop: ${reason}`;
+    out.notes.push(line);
+    failureLog(line);
+    putFact(rec, key, { ...base, state: 'failing', last_reason: reason }, 'review_stop_failed', was);
+    out.reviewStops.push([s.id, why, 'failed']);
+    failing.push(`the ${s.role} ${s.id} for card ${s.card} (${reason})`);
+  });
+  const told = factDoc(rec, REVIEW_STOP_TELL_FACT)?.doc;
+  if (failing.length) {
+    if (dueToTell(told, now, HOLD_REPEAT_MS)) tellThen(alert, `${failing.length === 1 ? 'a review session' : `${failing.length} review sessions`} of an ended card could not be asked to stop: ${failing.join('; ')}`, { fact: REVIEW_STOP_TELL_FACT, fields: { told_at: iso(now) }, kind: 'review_stop_told' });
+  } else if (told?.told_at || isQueued(rec, REVIEW_STOP_TELL_FACT)) {
+    clearCause(rec, REVIEW_STOP_TELL_FACT, () => { if (!told) return; const rest = Object.fromEntries(Object.entries(told).filter(([k]) => !TOLD.includes(k))); putFact(rec, REVIEW_STOP_TELL_FACT, { ...rest, cleared_at: iso(now) }, 'review_stop_cleared', told, TOLD); }, report, { hold: false });
+  }
+  for (const f of rec.list('fact')) {
+    if (!f.id.startsWith(REVIEW_STOP_FACT('')) || !['asked', 'failing'].includes(f.doc?.state)) continue;
+    if (listed.has(f.id.slice(REVIEW_STOP_FACT('').length))) continue;
+    putFact(rec, f.id, { ...f.doc, state: 'done', done_at: iso(now) }, 'review_stop_done', f.doc);
+  }
 }
 
 // A stop's record of its card's move: moved true, or false with the Record's reason; nothing when no move was due.
@@ -389,12 +470,13 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
 
 /**
  * One pass. Ports:
- *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, pgid, bundle_files }]
+ *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files }] (head: a review session's, L946)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
  *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
+ *   stopReview({ card, role, head }) -> { ok, reason }  (the review runner's stop file by target, L946; stopPass reviewStops)
  *   saveWork(s) -> { ok, reason }    (M4 save-work, inside the worker's lock-down)
  *   hostLock() -> string | null      (the host.lock text; its path is config)
  *   pauseLead({ product }) -> any    (lead-restart's WRAP flow for a paused product)
@@ -403,8 +485,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
-  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, product, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, stopReview, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, product, sessions, probe, stopGroup, stopReview, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
   const failing = (line) => { out.notes.push(line); failureLog(line); };
