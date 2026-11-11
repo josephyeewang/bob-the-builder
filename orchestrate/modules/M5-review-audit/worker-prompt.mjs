@@ -37,11 +37,21 @@ const PLAIN_PRODUCT = /^[A-Za-z0-9._-]{1,64}$/;
 // draws as nothing (default-ignorable); the emoji selectors (U+FE0E/FE0F) but straight after an emoji; the ideographic
 // selectors (U+E0100-E01EF) but straight after a Han character (the other selectors are default-ignorable). One selector after any letter is
 // a hidden byte per letter ("emoji smuggling"). Each is text a model reads but a person can't see; ordinary Persian,
-// Hindi, CJK and emoji text needs none of them (#460 r1 self-review). A flag of a region (a black flag, two to six tag
-// letters or digits, the cancel tag) is ordinary emoji: it is set aside before the check.
+// Hindi, CJK and emoji text needs none of them (#460 r1 self-review). The three flags of a region Unicode recommends
+// (England, Scotland, Wales: a black flag, tag letters, the cancel tag) are ordinary emoji: set aside before the check.
+// Any other tag letters would spell plain ASCII a model reads. After a digit, "#" or "*" an emoji selector is allowed
+// only in a keycap. "Unassigned" follows the Unicode version of the Node running this (a tool limit that moves with
+// Node; a new emoji is refused until then, which fails safe).
 // Accepted limit: one soft hyphen or joiner between two letters still passes (a few bits a gap; ordinary text uses them).
-const CONTROL = /[^\n\t\P{Cc}]|[\u2028\u2029\u034f\p{Co}\p{Cn}\u{e0000}-\u{e007f}]|(?![\u00ad\u200c\u200d])\p{Cf}|(?![\u00ad\u200c\u200d\ufe0e\ufe0f\u{e0100}-\u{e01ef}])\p{Default_Ignorable_Code_Point}|(?<!\p{Emoji})[\ufe0e\ufe0f]|(?<!\p{Ideographic})[\u{e0100}-\u{e01ef}]|(?![\ufe00-\ufe0f\u{e0100}-\u{e01ef}]\u200d)[\u00ad\u200c\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]{2}/u;
-const REGION_FLAG = /\u{1f3f4}[\u{e0030}-\u{e0039}\u{e0061}-\u{e007a}]{2,6}\u{e007f}/gu;
+const CONTROL = /[^\n\t\P{Cc}]|[\u2028\u2029\u034f\p{Co}\p{Cn}\u{e0000}-\u{e007f}]|(?![\u00ad\u200c\u200d])\p{Cf}|(?![\u00ad\u200c\u200d\ufe0e\ufe0f\u{e0100}-\u{e01ef}])\p{Default_Ignorable_Code_Point}|(?<!\p{Emoji})[\ufe0e\ufe0f]|(?<=[#*0-9])[\ufe0e\ufe0f](?!\u20e3)|(?<!\p{Ideographic})[\u{e0100}-\u{e01ef}]|(?![\ufe00-\ufe0f\u{e0100}-\u{e01ef}]\u200d)[\u00ad\u200c\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]{2}/u;
+const REGION_FLAG = /\u{1f3f4}\u{e0067}\u{e0062}(?:\u{e0065}\u{e006e}\u{e0067}|\u{e0073}\u{e0063}\u{e0074}|\u{e0077}\u{e006c}\u{e0073})\u{e007f}/gu;
+// One ideographic selector after a Han character is ordinary (a name's variant form); one after every character is a
+// hidden byte each. A few in a brief are let through; more are refused (failing safe on rare text).
+const IDEO_SELECTOR = /[\u{e0100}-\u{e01ef}]/gu;
+export const IDEO_SELECTORS_MAX = 4;
+// Space a person can't count: a line ending in spaces or tabs (spaces against tabs carry bits), and any space
+// character but the plain, no-break and ideographic ones.
+const HIDDEN_SPACE = /[ \t\p{Zs}\u2800]$|(?![ \u00a0\u3000])\p{Zs}/mu;
 // What draws as blank: spaces, marks, the allowed format characters, Hangul fillers, the braille blank.
 const BLANK = String.raw`(?:[^\p{L}\p{N}\p{P}\p{S}]|[\u115f\u1160\u3164\uffa0\u2800])`;
 // A line that reads as a heading once normalised (NFKC folds the full-width and small marks into "#"): "#" or the
@@ -136,6 +146,8 @@ export function workerPrompt(x = {}, { kinds = DESIGN_PROFILES.worker?.outbox ??
     try { brief = briefText(card, d.brief); } catch (e) { return no(String(e?.message ?? e)); }
     // Checked on the finished text, so whatever the brief's fields are, what the worker reads is plain.
     if (CONTROL.test(brief.replace(REGION_FLAG, ''))) return no(`card ${card}'s brief holds a control character`);
+    if ((brief.match(IDEO_SELECTOR) ?? []).length > IDEO_SELECTORS_MAX) return no(`card ${card}'s brief holds more than ${IDEO_SELECTORS_MAX} ideographic variation selectors`);
+    if (HIDDEN_SPACE.test(brief)) return no(`card ${card}'s brief holds a line ending in space or an unusual space character`);
     if (Buffer.byteLength(brief, 'utf8') > BRIEF_MAX_BYTES) return no(`card ${card}'s brief is over ${BRIEF_MAX_BYTES} bytes`);
     // Inside the owner's words a full-width or small "<" or ">" could pass for the block's own tags to a model.
     if ((brief.match(OWNER_WORDS) ?? []).some((b) => /[<>]/.test(b.replace(OWNER_TAGS, '').normalize('NFKC')))) return no(`card ${card}'s brief holds a look-alike tag mark in the owner's words`);
