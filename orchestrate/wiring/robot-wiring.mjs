@@ -96,8 +96,12 @@ export function markToldByBeat(rec, { cause, text, now }) {
 }
 
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
-/** The queue cause of the alert sweep's trouble (L977), told as robot-main tells a failed pass's. */
+/** The queue cause of the alert sweep's trouble (L977), told as robot-main tells a failed pass's. It is in robot-main's
+ * `robot-<pass>` form, so no pass may be named 'sweep' (a test checks it). */
 export const SWEEP_CAUSE = 'robot-sweep';
+/** How long the sweep may take inside the heartbeat pass (L977 review M1): well inside the pass's own limit, so a slow
+ * sweep is the sweep's trouble, not a failed heartbeat. */
+export const SWEEP_DEADLINE_MS = 30_000;
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: `robot.heartbeat: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, watch: 'robot.vercel',
@@ -275,7 +279,7 @@ export async function ideaIssues(gh, { owner, repo }) {
 }
 
 export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`), fetchFn = globalThis.fetch, now = () => Date.now(),
-  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken } = {}) {
+  uid = process.getuid?.(), deliver = null, hold = holdAlert, mint = mintInstallationToken, sweepDeadlineMs = SWEEP_DEADLINE_MS } = {}) {
   const c = checkConfig(config, { keys: CONFIG_KEYS, paths: PATHS });
   const appBad = appProblem(c);
   if (appBad) throw new Error(`config: ${appBad}`);
@@ -315,20 +319,27 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts,
       owner: c.alertOwner, probes: { ...probes, dispatcherLate: async () => late }, now: when });
     // The sweep, after the round's last raise and clear on that object (the heartbeat is the only pass that uses it). What
-    // it did is logged; a why is round trouble, told through the queue as a failed pass is, once a day, by deliver in this
-    // same round. A sweep that throws is the same trouble.
+    // it did is logged; a why is round trouble, told through the queue as a failed pass is, once a day per cause, by
+    // deliver in this same round. A sweep that throws, or runs past its own limit, is the same trouble, and so is a
+    // Record that refused to keep where an alert is during the sweep (the beat's own report has already run by then).
+    // Never throws, and never changes the heartbeat's own answer.
+    const stopped = (e) => ({ swept: false, closed: [], failed: [], kept: [], why: `it stopped: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` });
     sweepRound = async () => {
-      let a;
-      try { a = await alerts.sweep({ product: c.product }); } catch (e) {
-        a = { swept: false, closed: [], failed: [], kept: [], why: `it stopped: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` };
+      let a; let timer;
+      const limit = new Promise((resolve) => { timer = setTimeout(() => resolve({ swept: false, closed: [], failed: [], kept: [], why: `it did not finish within ${sweepDeadlineMs} ms` }), sweepDeadlineMs); timer.unref?.(); });
+      try { a = await Promise.race([alerts.sweep({ product: c.product }), limit]); } catch (e) { a = stopped(e); } finally { clearTimeout(timer); }
+      let refused = null;
+      try { refused = alerts.cacheTrouble(); } catch { refused = null; }
+      const why = [a.why, refused !== null ? `the Record refused to keep where an alert is (${String(refused).slice(0, 200)})` : null].filter((x) => x !== null).join('; ') || null;
+      if (a.closed.length || a.failed.length || a.kept.length || why !== null) {
+        log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${why !== null ? `; ${why}` : ''}`);
       }
-      if (a.closed.length || a.failed.length || a.kept.length || a.why !== null) {
-        log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${a.why !== null ? `; ${a.why}` : ''}`);
+      if (why !== null) {
+        try {
+          if (hold({ rec, cause: SWEEP_CAUSE, text: `the robot job's alert sweep: ${why}`, alert: outbox(rec, now()), now: now() }) === false) log('robot: the alert sweep\'s trouble could not be queued');
+        } catch (e) { log(`robot: the alert sweep's trouble could not be queued: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}`); }
       }
-      if (a.why !== null && hold({ rec, cause: SWEEP_CAUSE, text: `the robot job's alert sweep: ${a.why}`, alert: outbox(rec, now()), now: now() }) === false) {
-        log('robot: the alert sweep\'s trouble could not be queued');
-      }
-      return { closed: a.closed, failed: a.failed, kept: a.kept, why: a.why };
+      return { swept: a.swept, closed: a.closed, failed: a.failed, kept: a.kept, why };
     };
   }
   passes.heartbeat = async () => {
@@ -351,8 +362,6 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     } else dropLateAlerts(rec, { log });   // logs why, when it answers false
     let beaten = null; let failed = null;
     if (beat) { try { beaten = await beat(late); } catch (e) { failed = e; } }
-    // After the beat, so its clears are in (L977). Never throws.
-    const sweep = sweepRound ? await sweepRound() : null;
     // Told per alert (L730 m4): only what the Dispatcher alert itself answered counts, not whether every alert went out.
     const answer = beaten?.told?.dispatcher;
     // Any string but 'suppressed' is told: 'opened', 'changed' and 'reminded' reached Joe now, and 'updated' is the same
@@ -366,6 +375,9 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
       if (!markToldByBeat(rec, { cause: LATE_CAUSE(late.since), text: late.text, now: now() })) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: the next round queues it again, unless the heartbeat of that round tells it');
       if (!dropCause(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
     }
+    // After the beat, so its clears are in, and after the late alert's mark and drop, so a slow sweep can't undo them
+    // (L977). Never throws.
+    const sweep = sweepRound ? await sweepRound() : null;
     if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
     if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
     // Neither queued nor told by the heartbeat (GitHub lost it, or Joe closed it while it lasts): the pass fails with the

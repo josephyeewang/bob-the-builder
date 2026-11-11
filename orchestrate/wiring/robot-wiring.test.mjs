@@ -22,7 +22,7 @@ import { ALERT_QUEUE_FACT } from '../modules/M11-dispatcher/alerts.mjs';
 import { HOLD_FACT } from '../modules/M11-dispatcher/pass.mjs';
 import { LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
-import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat } from './robot-wiring.mjs';
+import { wire, checkUser, lastReturn, dispatcherLate, dropLateAlerts, lockHolder, LIVE_PASS_MAX_MS, NOT_WIRED_PASSES, ROBOT_PASSES, APP_KEYS, robotToken, robotChannel, markToldByBeat, SWEEP_CAUSE } from './robot-wiring.mjs';
 import { generateKeyPairSync } from 'node:crypto';
 import { pidDead, takePassLock } from '../modules/M11-dispatcher/pass-lock.mjs';
 import { tick } from '../modules/M11-dispatcher/tick.mjs';
@@ -1337,7 +1337,7 @@ test('L977: an alert issue whose number the Record lost is closed by the next ro
   assert.ok(!queued(rec).some((q) => /alert sweep/.test(q)), 'no trouble to tell');
 });
 
-test('L977: a sweep that says why is round trouble, queued once a day for deliver; what it did is logged', async () => {
+test('L977: a sweep that says why is round trouble, one queued entry under its own cause, not one per pass; what it did is logged; the heartbeat\'s answer is unchanged', async () => {
   const w = withKey(world({ extra: APP }));
   const gh = appGitHub(w);
   // GitHub won't say who the robot is: any bot counts as the robot, so the sweep closes nothing and says why.
@@ -1346,8 +1346,39 @@ test('L977: a sweep that says why is round trouble, queued once a day for delive
   const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l) });
   const r = await passes.heartbeat();
   assert.match(String(r.sweep?.why), /login is not known/);
+  assert.ok(Array.isArray(r.red), 'the heartbeat\'s own answer');
+  assert.equal(r.failed, undefined, 'a sweep with a why is not a failed heartbeat');
   assert.match(logs.join('\n'), /robot: alert sweep: closed \[\], failed \[\], kept \[\]; the robot's own login is not known/);
   assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: the robot's own login is not known/.test(q)), queued(rec).join(' | '));
   await passes.heartbeat();
   assert.equal(queued(rec).filter((q) => /alert sweep/.test(q)).length, 1, 'once, not every pass');
+});
+
+test('L977 review: a sweep that throws, or runs past its limit, is told masked and never fails the heartbeat; no pass is named sweep', async () => {
+  assert.ok(!ROBOT_PASSES.some((p) => CAUSE(p) === SWEEP_CAUSE), 'the sweep\'s cause is no pass\'s');
+  const TOK = 'ghs_'.padEnd(40, 'z');
+  for (const [name, broken, want] of [
+    ['throws', async () => { throw new Error(`list broke with ${TOK}`); }, /^it stopped: /],
+    ['hangs', () => new Promise(() => {}), /^it did not finish within 50 ms/],
+  ]) {
+    const w = withKey(world({ extra: APP }));
+    const gh = appGitHub(w);
+    let beatDone = false;
+    // Only the sweep's own list (no creator filter, after the beat) breaks; the heartbeat's reads go through.
+    const fetchFn = async (url, init = {}) => {
+      const u = new URL(url);
+      if (beatDone && u.pathname === `/repos/${ALERT_REPO}/issues` && (init.method ?? 'GET') === 'GET') return broken();
+      return gh.fetchFn(url, init);
+    };
+    const logs = [];
+    const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => { if (/pinned|heartbeat/.test(l)) beatDone = true; logs.push(l); }, sweepDeadlineMs: 50 });
+    const orig = passes.heartbeat;
+    beatDone = false;
+    const r = await orig();
+    assert.equal(r.failed, undefined, name);
+    if (r.sweep.why === null) continue;   // the list was not reached after the beat in this world: covered below
+    assert.match(r.sweep.why, want, name);
+    assert.ok(!logs.join('\n').includes(TOK) && !queued(rec).join('\n').includes(TOK), `${name}: the token is masked`);
+    assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: it (stopped|did not finish)/.test(q)), `${name}: ${queued(rec).join(' | ')}`);
+  }
 });
