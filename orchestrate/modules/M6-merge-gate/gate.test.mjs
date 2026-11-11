@@ -1225,7 +1225,7 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
 test('L66 M1 planted: a verdict row that says pass while its outbox file says fail is refused (5)', async () => {
   const w = world();
   verifiedCard(w);
-  // As if the reviewer had said fail and the Record row (which the workers' Mac user can write) were edited to pass: the
+  // As if the reviewer had said fail and the Record row (which the Dispatcher's `orchestrate` user writes, L936) were edited to pass: the
   // file now says fail, and the row names that file, so only the file's own word differs.
   const v = w.env.record.list('verdict')[0];
   const file = v.doc.source_key.slice(0, v.doc.source_key.lastIndexOf('\0'));

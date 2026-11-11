@@ -34,6 +34,9 @@ const MIN = 60000;
 // How long a session claim may wait for its process (claims.unlaunched_min, L72) when the rules don't say.
 const UNLAUNCHED_MIN_DEFAULT = 5;
 const HEX40 = /^[0-9a-f]{40}$/;
+// The card states with no move out (moves.mjs): a verdict for one is thrown away (L933), since it can verify nothing.
+// l44.test.mjs derives this list from MOVES, so a state that gains or loses its last move out changes it there first.
+export const REVIEW_OVER = Object.freeze(['cancelled', 'failed', 'closed_no_answer', 'reverted']);
 const KIND = /^[a-z_]{1,40}$/;
 const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
@@ -507,6 +510,11 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
       // verdict. The runner's own record is the proof; a launch the Dispatcher wrote into the Record is not.
       const rl = runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: tag.role, card: tag.card, head: fields.head, sessionId: tag.sessionId });
       if (!rl.ok) return no(`no launch of ${tag.role} session ${tag.sessionId} on ${tag.card} at head ${fields.head.slice(0, 7)} from the review runner (${rl.reason}): a verdict counts only from a session the runner launched, for the head it was launched on`);
+      // A card no move leads out of (cancelled, failed, closed with no answer, reverted: REVIEW_OVER) has no review left
+      // to give: a real answer from a session the runner launched is thrown away, never kept as a pass (L933). Seen, so
+      // it is not read again; no row, so nothing shows a passed review for it. Checked after the file's own fields and its
+      // runner launch, so a malformed or forged verdict is still refused and told, whatever the card's state.
+      if (REVIEW_OVER.includes(c.doc.state)) return { ok: true, skipped: true, dropped: `card ${tag.card} is ${c.doc.state}, so its review is over and this verdict is not kept` };
       // One verdict per session (D12, 0b-9 M6): a reviewer that changes its mind is a new launch, never a second file.
       if (tx.list('verdict').some((v) => v.doc.session_id === tag.sessionId)) return no(`session ${tag.sessionId} has already given its verdict; a second is refused`);
       const id = `verdict-${tag.sessionId}-${tx.nextSeq()}`;
@@ -572,7 +580,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
           if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
           return no(reason);
         }
-        if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
+        // A verdict thrown away for an ended card (REVIEW_OVER, L933) is marked seen as 'dropped', not 'applied' (L943 c2).
+        if (r.ok) { tx.markSeen(f.key, r.dropped ? 'dropped' : 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
         return refuse({ ...ev, outbox: true }, r.reason);
       });

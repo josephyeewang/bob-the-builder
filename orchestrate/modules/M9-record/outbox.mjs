@@ -26,7 +26,8 @@
 // THE RUNNER'S LAUNCH RECORDS (lead call L65). The review runner (M4 review-runner.mjs) runs as `review`, makes each
 // review session's id itself, and writes `<launches folder>/<session id>.json` into a folder only `review` can write.
 // A verdict counts only when such a record names the same session, role, card and head. The Record's own `launch`
-// entries are written by the Dispatcher, which runs as the workers' Mac user, so for a review they never count. These
+// entries are written by the Dispatcher (the orchestrate user, not `review`; L936 corrects an older note that said the
+// workers' Mac user), so for a review they never count. These
 // checks live here and nowhere else: the record's intake and verdict rule (writer.mjs) and the Merge Gate (M6
 // gather.mjs) call them.
 //
@@ -35,7 +36,7 @@
 //     `uid` in place of `uids`: the review user the intake already proved (a verdict's outbox_uid), for the verdict rule.
 //   runnerLaunches({ root, uids }) → { ok, launches: [{ doc, key }], refused: [{ name, reason }] } | { ok: false, reason }
 //
-// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the workers' Mac user, so what a
+// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the `orchestrate` user (L936), so what a
 // verdict row says (pass, checklist, head, who wrote it) is never what counts. `verdictFromFile` re-reads the file the
 // row came from, with every check readOutboxFile makes, and needs it to be the very file the row names (its
 // `source_key`: real path and sha256). What counts is what the file says, and the session and role come from the folder

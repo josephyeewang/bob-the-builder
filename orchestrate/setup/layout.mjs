@@ -107,16 +107,19 @@ export const mirrorPath = (cfg) => join(cfg.base, 'mirror');
 export const sealRootPath = (cfg) => join(cfg.base, 'seals');
 
 /**
- * The seven Dispatcher config keys the worker and cleanup ports read (wiring/dispatcher-wiring.mjs WORKER_CONFIG_KEYS, L739),
+ * The ten Dispatcher config keys the worker and cleanup ports read (wiring/dispatcher-wiring.mjs WORKER_CONFIG_KEYS, L739),
  * from this config: the one place their values come from. hostLockPath is the owner's own file, so it is the config's;
  * hostLockUid is the owner's Mac user id (the reader takes host.lock only when the opened file is that user's, L763), which
- * the caller reads from this Mac (dispatcher-check.mjs dispatcherKeysOn).
+ * the caller reads from this Mac (dispatcher-check.mjs dispatcherKeysOn). The worker runner's requests folder and status file
+ * (L921, made by this setup) and its user, workerUid: the runner runs as the owner's own user (wiring/runner-job.mjs), so it
+ * is hostLockUid's same user, read the same way (L896).
  */
 export function dispatcherKeys(cfg, { hostLockUid } = {}) {
   if (cfg.hostLockPath === undefined) throw new Error('config: hostLockPath is not set (the full path of the owner\'s host.lock); the Dispatcher can\'t start without it');
   if (!Number.isSafeInteger(hostLockUid) || hostLockUid < 0) throw new Error(`the owner ${cfg.owner} is not a user on this Mac, so host.lock's owner (hostLockUid) can't be named`);
   // outboxRoot and copiesRoot: the TOP folders, never a product's (L887).
-  return { reviewRoot: join(cfg.base, 'review'), mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: outboxRootPath(cfg), copiesRoot: workerCopiesPath(cfg), hostLockPath: cfg.hostLockPath, hostLockUid };
+  return { reviewRoot: join(cfg.base, 'review'), mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: outboxRootPath(cfg), copiesRoot: workerCopiesPath(cfg), hostLockPath: cfg.hostLockPath, hostLockUid,
+    workerRequestsDir: workerRunnerPaths(cfg).requests, workerStatusFile: join(workerRunnerPaths(cfg).state, WORKER_STATUS_FILE), workerUid: hostLockUid };
 }
 
 /**
@@ -184,6 +187,8 @@ export const oldFlatOutboxPaths = (cfg) => PRODUCT_OUTBOX_ROLES.map((r) => join(
  */
 export const workerRunnerPath = (cfg) => join(cfg.base, 'worker-runner');
 export const WORKER_RUNNER_FOLDERS = Object.freeze({ requests: 'requests', state: 'runner', snapshots: 'snapshots' });
+/** The worker runner's status file, in its own folder (wiring/runner-main.mjs statusFile; the Dispatcher's workerStatusFile). */
+export const WORKER_STATUS_FILE = 'status.json';
 export const workerRunnerPaths = (cfg) => Object.freeze(Object.fromEntries(Object.entries(WORKER_RUNNER_FOLDERS).map(([k, n]) => [k, join(workerRunnerPath(cfg), n)])));
 
 /**

@@ -3,7 +3,7 @@
 //
 //   the config      <base>/dispatcher.json, root's 0644, written by `dispatcher-config` from the setup config: every key
 //                   main.mjs and wiring/dispatcher-wiring.mjs take (CONFIG_KEYS). Setup knows most of them (the copy, the
-//                   lock, the Record's folder and owner, the review runner's files, the seven worker keys of dispatcherKeys);
+//                   lock, the Record's folder and owner, the review runner's files, the ten worker keys of dispatcherKeys);
 //                   the owner names the rest in the setup config's `dispatcher` entry (the product, M10's products file and
 //                   state folder, the read token's file, M2's state folder). The install carries the file into the copy, and
 //                   every update keeps it (it is one of the updater's `keep`), as review.json. main.mjs reads the config
@@ -112,6 +112,7 @@ export function dispatcherConfigFor(io, cfg, { keys = CONFIG_KEYS } = {}) {
     reviewRequestsDir: at(join(k.reviewRoot, FOLDERS.requests)), reviewStatusFile: at(join(k.reviewRoot, FOLDERS.status)), reviewUid: rev.uid,
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
     reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), outboxRoot: at(k.outboxRoot), copiesRoot: at(k.copiesRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
+    workerRequestsDir: at(k.workerRequestsDir), workerStatusFile: at(k.workerStatusFile), workerUid: k.workerUid,
   };
   // The other way too (L871): a key setup writes that the wiring doesn't take would stop the Dispatcher's start (an
   // unknown key), so it is told here, never written or dropped.
