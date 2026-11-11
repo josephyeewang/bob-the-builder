@@ -2446,7 +2446,9 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   writeStopRequest({ dir: x2.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
   refusedFor(await runnerPass(x2.w.ctx), /it is tried again on the next pass/);
   x2.w.end('S-1');
-  refusedFor(await runnerPass(x2.w.ctx), /the reviewer for card C-1 at aaaaaaa went before its stop was done; it is kept 30 minutes/);
+  const x2g = await runnerPass(x2.w.ctx);
+  refusedFor(x2g, /the reviewer for card C-1 at aaaaaaa went before its stop was done; it is kept 30 minutes/);
+  assert.deepEqual(x2g.alerts.map((a) => a.id), ['silent-S-1'], 'an end mid-retry with no verdict is told as any silent end (#455 r1 m2)');
   x2.w.ask({ request_id: 'x2-2' });
   const x2r = await runnerPass(x2.w.ctx);
   assert.deepEqual(x2r.started, []);
@@ -2578,4 +2580,314 @@ test('L946 m6 planted: a memory save that fails after stop files were read says 
     assert.equal(w.status().ok, false);
     assert.match(w.status().error, /could not be saved/);
   } finally { rmdirSync(tmp); }
+});
+
+test('L962 m6: a stop by card, role and head ends as a failure with no alert to Joe; a stop by id still tells', async () => {
+  const { w, groups } = await stopWorld();
+  w.ask({ request_id: 't-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+  const hit = await runnerPass(w.ctx);
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], JSON.stringify(hit.refused));
+  assert.equal(w.status().stopped_by_request.length, 1, 'the status line stays');
+  const e = await runnerPass(w.ctx);
+  assert.equal(e.ok, true, e.error);
+  assert.deepEqual(e.alerts, [], 'no tell: the Dispatcher\'s user stopped it');
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none', 'its end is a failure');
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  const at = Object.values(st.attempts).find((a) => a.session_id === 'S-1');
+  assert.equal(at.held, true, 'the head still can\'t pass');
+  assert.equal(at.last_reason, 'stopped at the Dispatcher\'s request');
+  assert.deepEqual(st.alerts.filter((x) => /^stopped-/.test(x.id)), [], 'nor kept to tell later');
+  assert.deepEqual(w.status().offers, []);
+  assert.equal(w.status().stopped_by_request.length, 1, 'the status line stays after the end');
+  // A stop by id, in a world of its own, still tells.
+  const v = await stopWorld();
+  v.w.ask({ request_id: 'id-1' });
+  await runnerPass(v.w.ctx);
+  writeStopRequest({ dir: v.w.requests, requestId: 'id-1' });
+  await runnerPass(v.w.ctx);
+  assert.deepEqual((await runnerPass(v.w.ctx)).alerts.map((a) => a.id), ['stopped-S-1']);
+  // A stop by card, role and head that can't work is still told: the reviewer goes on running.
+  const f = await ready();
+  f.ctx.stopGroup = async () => { throw Object.assign(new Error('process 1001 does not lead its own process group (its group is 1)'), { final: true }); };
+  f.ask({ request_id: 'tf-1' });
+  await runnerPass(f.ctx);
+  writeStopRequest({ dir: f.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  assert.deepEqual((await runnerPass(f.ctx)).alerts.map((a) => a.id), ['stop-failed-S-1']);
+});
+
+test('L971 a: a stop by id beside a stop by card, role and head in one pass tells Joe, in either order of the files', async () => {
+  for (const [idName, targetName] of [['aaaa-id', 'bbbb-target'], ['bbbb-id', 'aaaa-target']]) {
+    const { w, groups } = await stopWorld();
+    w.ask({ request_id: 'b-1' });
+    await runnerPass(w.ctx);
+    writeStopRequest({ dir: w.requests, requestId: 'b-1', newName: () => idName });
+    // Its reason a cancel (#455 r2 m1, P1): silent alone, so only the stop by id beside it can make the end told.
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' }, newName: () => targetName });
+    await runnerPass(w.ctx);
+    assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], `stopped once (${idName} first: ${idName < targetName})`);
+    assert.deepEqual((await runnerPass(w.ctx)).alerts.map((a) => a.id), ['stopped-S-1'], `told (${idName} ${targetName})`);
+  }
+});
+
+test('L971 gaps: a stop by card, role and head that works only on its retry is still not told; one ignored 5 minutes is', async () => {
+  const { w, groups } = await stopWorld({ fail: 1 });
+  w.ask({ request_id: 'rt-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+  const first = await runnerPass(w.ctx);
+  assert.deepEqual(groups, [], 'the first try failed');
+  assert.deepEqual(first.alerts, []);
+  // Its retry, a later pass read back from state.json, keeps the mark.
+  let n = 0;
+  while (!groups.length && n++ < 6) { w.clock.t += 60_000; assert.deepEqual((await runnerPass(w.ctx)).alerts, []); }
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], 'stopped on a retry');
+  assert.deepEqual((await runnerPass(w.ctx)).alerts, [], 'its end tells nothing');
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.equal(Object.values(st.attempts).find((a) => a.session_id === 'S-1').held, true, 'still held');
+  // Stopped by card, role and head, but still running 5 minutes on: told once, as any stop is.
+  const u = await ready();
+  u.ctx.stopGroup = async () => {};
+  u.ask({ request_id: 'ig-1' });
+  await runnerPass(u.ctx);
+  writeStopRequest({ dir: u.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(u.ctx);
+  u.clock.t += 4 * 60_000;
+  assert.deepEqual((await runnerPass(u.ctx)).alerts, []);
+  u.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(u.ctx)).alerts.map((a) => a.id), ['stop-ignored-S-1']);
+});
+
+// #455 r1 M1: only a card cancelled, or ended for good, leaves Joe untold of a stop by card, role and head; any other
+// reason, a missing one, or a mix with one of those, tells.
+test('#455 r1 M1: a stop by card, role and head is silent only for cancel or card_final; another reason, none, or a mix tells', async () => {
+  for (const [reasons, told] of [[['cancel'], false], [['card_final'], false], [['cancel', 'card_final'], false], [[undefined], true], [['red'], true], [['paused'], true], [['card_ended'], true], [['cancel', 'red'], true], [['red', 'cancel'], true], [[undefined, 'cancel'], true]]) {
+    const { w, groups } = await stopWorld();
+    w.ask({ request_id: 'rs-1' });
+    await runnerPass(w.ctx);
+    reasons.forEach((reason, i) => assert.equal(writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, ...(reason === undefined ? {} : { reason }) }, newName: () => `r${i}` }).ok, true));
+    await runnerPass(w.ctx);
+    assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], String(reasons));
+    assert.deepEqual((await runnerPass(w.ctx)).alerts.map((a) => a.id), told ? ['stopped-S-1'] : [], String(reasons));
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'none', `${reasons}: a failure either way`);
+  }
+  // The writer refuses a reason that is not a short plain word, and the runner refuses such a file.
+  const { w } = await stopWorld();
+  assert.equal(writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'Red Band' } }).ok, false);
+  writeFileSync(join(w.requests, 'stop-bad.json'), JSON.stringify({ card: 'C-1', head: HEAD, reason: 'x'.repeat(33), role: 'reviewer', stop: true }), { mode: 0o644 });
+  const r = await runnerPass(w.ctx);
+  refusedFor(r, /the stop's reason is not a short plain word/);
+});
+
+// #455 r1 M2: an end the runner could not record keeps its entry, so the next pass ends it with its stop marks and the
+// sweep never ends it without them.
+test('#455 r1 M2: when the ended record cannot be written, the session stays in the running list and ends next pass as stopped, not swept', async () => {
+  const { w } = await stopWorld();
+  w.ask({ request_id: 'm2-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(w.ctx);
+  const endedDir = join(w.root, 'ended');
+  chmodSync(endedDir, 0o555);
+  let r;
+  try { r = await runnerPass(w.ctx); } finally { chmodSync(endedDir, 0o755); }
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.ok(st.running.some((x) => x.session_id === 'S-1' && x.stopped_by_request && x.end_pending === true), `kept with its marks: ${JSON.stringify(st.running)} ${r?.error ?? ''}`);
+  assert.ok(!w.status().running.some((x) => x.session_id === 'S-1'), 'not shown as running');
+  w.clock.t += 10 * 60_000;
+  const e = await runnerPass(w.ctx);
+  assert.equal(e.ok, true, e.error);
+  assert.deepEqual(e.alerts.map((a) => a.id), ['stopped-S-1'], 'ended as stopped, and not swept');
+  const at = Object.values(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).find((a) => a.session_id === 'S-1');
+  assert.equal(at.last_reason, 'stopped at the Dispatcher\'s request');
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none');
+});
+
+// #455 r2 m1 (P8, P9): a session whose end could not be recorded is ended, not live: when its pid comes back as claude
+// under another session id, that one is a stray and is stopped, and the entry is still ended again with its marks.
+test('#455 r2 m1: a pending end\'s pid reused by another claude is stopped as a stray, and the entry still re-ends', async () => {
+  const { w } = await stopWorld();
+  w.ask({ request_id: 'pe-1' });
+  await runnerPass(w.ctx);
+  const pid = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running.find((x) => x.session_id === 'S-1').pid;
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(w.ctx);
+  const endedDir = join(w.root, 'ended');
+  chmodSync(endedDir, 0o555);
+  try { await runnerPass(w.ctx); } finally { chmodSync(endedDir, 0o755); }
+  assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running.find((x) => x.session_id === 'S-1')?.end_pending, true);
+  w.live.push({ pid, sessionId: 'X-9' });
+  const r = await runnerPass(w.ctx);
+  assert.deepEqual(w.stops.map((s) => [s.pid, s.sessionId]), [[pid, 'X-9']], 'the reused pid is a stray, stopped');
+  assert.ok(r.alerts.some((a) => a.id === `stray-${pid}-X-9`), JSON.stringify(r.alerts.map((a) => a.id)));
+  assert.ok(r.alerts.some((a) => a.id === 'stopped-S-1'), 'the pending entry ended again, as stopped');
+  assert.ok(!JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running.some((x) => x.session_id === 'S-1'));
+  assert.equal(w.ended('S-1').ended.verdict_sha256, 'none');
+});
+
+// #455 r2 m3: an entry whose end is pending has ended. A tap on it waits for the record (kept, not used up), a request
+// for its card, role and head is told its end is not yet recorded, and it covers no no-verdict hold.
+test('#455 r2 m3: a pending end is said as ended, not running; a tap on it is kept; it covers no no-verdict hold', async () => {
+  const w = await ready({ verdictTaken: () => ({ ok: false, reason: 'no verdict in the Record' }) });
+  w.ask({ request_id: 'pt-1' });
+  await runnerPass(w.ctx);
+  w.end('S-1');
+  const endedDir = join(w.root, 'ended');
+  chmodSync(endedDir, 0o555);
+  try {
+    await runnerPass(w.ctx);
+    const sp = join(w.root, 'state.json');
+    const st = JSON.parse(readFileSync(sp, 'utf8'));
+    assert.equal(st.running.find((x) => x.session_id === 'S-1')?.end_pending, true);
+    // A hold already there for this card and role (one an earlier session left) is not taken as covered by it.
+    st.no_verdict = { 'C-1 reviewer': { card: 'C-1', head: HEAD, role: 'reviewer', session: 'S-0', first_at: new Date(w.clock.t).toISOString() } };
+    writeFileSync(sp, JSON.stringify(st), { mode: 0o600 });
+    w.taps.push({ session_id: 'S-1', key: 'tap-pt-1' });
+    w.ask({ request_id: 'pt-2' });
+    const r = await runnerPass(w.ctx);
+    refusedFor(r, /review again" for session S-1: that session has ended, but its end is not yet recorded; it is read again each pass/);
+    refusedFor(r, /a reviewer for card C-1 at aaaaaaa \(or a head with the same tree\) has ended, but its end is not yet recorded/);
+    assert.ok(!r.refused.some((x) => /still running|is already running/.test(x.reason)), r.refused.map((x) => x.reason).join(' | '));
+    const after = JSON.parse(readFileSync(sp, 'utf8'));
+    assert.ok(after.tap_retry?.['tap-pt-1'], 'the tap is kept for the next pass');
+    assert.ok(after.no_verdict?.['C-1 reviewer'], 'the hold stays');
+  } finally { chmodSync(endedDir, 0o755); }
+});
+
+// #455 r2 m2: a stop that lands on an entry whose end is pending, by card, role and head or by id, does nothing to it:
+// a verdict it handed in before any stop still counts and Joe is told no stop.
+test('#455 r2 m2: a stop meeting a pending end leaves it alone; its verdict counts and nothing is told', async () => {
+  for (const by of ['target', 'id']) {
+    const { w, groups } = await stopWorld();
+    w.ctx.handedIn = () => ({ ok: true, verdict: { sha256: 'e'.repeat(64), content_sha256: 'f'.repeat(64) } });
+    w.ask({ request_id: 'pv-1' });
+    await runnerPass(w.ctx);
+    w.end('S-1');
+    const endedDir = join(w.root, 'ended');
+    chmodSync(endedDir, 0o555);
+    // The stop arrives while the end is still pending (its record still can't be written), so it meets the entry itself.
+    try {
+      await runnerPass(w.ctx);
+      writeStopRequest(by === 'id' ? { dir: w.requests, requestId: 'pv-1' } : { dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'red' } });
+      const sp = await runnerPass(w.ctx);
+      // The stop was read in this pass, while the end was pending: it says nothing was stopped.
+      assert.ok((sp.refused ?? []).some((x) => /^a stop request: /.test(x.reason) && (by === 'id' ? /it has ended, never started/ : /none running: no reviewer is running for card C-1/).test(x.reason)), `${by}: ${JSON.stringify(sp.refused)}`);
+      const e = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).running.find((x) => x.session_id === 'S-1');
+      assert.equal(e?.end_pending, true, `${by}: still pending`);
+      assert.deepEqual([e.stop_by_target, e.stop_by_id, e.stop_reasons, e.stop_wanted], [undefined, undefined, undefined, undefined], `${by}: no stop marked on it`);
+    } finally { chmodSync(endedDir, 0o755); }
+    const r = await runnerPass(w.ctx);
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(groups, [], by);
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'e'.repeat(64), `${by}: its verdict counts`);
+    assert.deepEqual(r.alerts.filter((a) => /^stop/.test(a.id)).map((a) => a.id), [], `${by}: no stop told`);
+    const at = Object.values(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).find((a) => a.session_id === 'S-1');
+    assert.equal(at.held, false, by);
+  }
+});
+
+// #455 r2 m1 (P11): an entry a stop by card, role and head reached with no reason kept (one an older runner wrote, or an
+// empty list) is told: silence needs a quiet reason, never the lack of one.
+test('#455 r2 m1: a stop by card, role and head with no reason kept, or an empty list, tells', async () => {
+  for (const kept of [undefined, []]) {
+    const { w, groups } = await stopWorld({ fail: 1 });
+    w.ask({ request_id: 'nr-1' });
+    await runnerPass(w.ctx);
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+    await runnerPass(w.ctx);
+    const sp = join(w.root, 'state.json');
+    const st = JSON.parse(readFileSync(sp, 'utf8'));
+    const e = st.running.find((x) => x.session_id === 'S-1');
+    assert.deepEqual(e.stop_reasons, ['cancel']);
+    if (kept === undefined) delete e.stop_reasons; else e.stop_reasons = kept;
+    writeFileSync(sp, JSON.stringify(st), { mode: 0o600 });
+    w.clock.t += 60_000;
+    await runnerPass(w.ctx);
+    assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], String(kept));
+    assert.deepEqual((await runnerPass(w.ctx)).alerts.map((a) => a.id), ['stopped-S-1'], `${JSON.stringify(kept)}: told`);
+  }
+});
+
+// #455 r1 m1 (P10) and m4: a verdict written by a session a stop by card, role and head reached never counts once it is
+// stopped; one written while the stop is still being tried counts only when every reason was a cancel.
+test('#455 r1 m1, m4: a target-stopped session\'s verdict is refused and held; one written mid-retry is held unless the stop was a cancel', async () => {
+  const verdict = () => ({ ok: true, verdict: { sha256: 'e'.repeat(64), content_sha256: 'f'.repeat(64) } });
+  {
+    const { w } = await stopWorld();
+    w.ctx.handedIn = verdict;
+    w.ask({ request_id: 'v-1' });
+    await runnerPass(w.ctx);
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+    await runnerPass(w.ctx);
+    await runnerPass(w.ctx);
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused', 'stopped: its verdict does not count');
+    assert.equal(Object.values(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).find((a) => a.session_id === 'S-1').held, true);
+  }
+  for (const [reason, counts, told] of [['red', false, true], [undefined, false, true], ['card_final', false, false], ['cancel', true, false]]) {
+    const { w } = await stopWorld({ fail: 1 });
+    w.ctx.handedIn = verdict;
+    w.ctx.dispatcherUid = ME + 1;
+    w.ask({ request_id: 'v-2' }); await runnerPass(w.ctx);
+    w.ctx.dispatcherUid = ME;
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, ...(reason === undefined ? {} : { reason }) } });
+    refusedFor(await runnerPass(w.ctx), /it is tried again on the next pass/);
+    w.end('S-1');
+    const g = await runnerPass(w.ctx);
+    const at = Object.values(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).find((a) => a.session_id === 'S-1');
+    assert.equal(at.held, !counts, `${reason}: ${JSON.stringify(at)}`);
+    assert.equal(w.ended('S-1').ended.verdict_sha256 === 'refused', !counts, String(reason));
+    if (told) assert.deepEqual(g.alerts.map((a) => a.id), ['stopped-S-1'], `${reason}: told`);
+    else assert.deepEqual(g.alerts.filter((a) => /^stopped-/.test(a.id)).map((a) => a.id), [], `${reason}: not told`);
+  }
+  // #455 r2 self-review m1: an empty reasons list (an older runner's, or a hand-edited state) is no cancel: held and told.
+  {
+    const { w } = await stopWorld({ fail: 1 });
+    w.ctx.handedIn = verdict;
+    w.ask({ request_id: 'v-4' }); await runnerPass(w.ctx);
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+    refusedFor(await runnerPass(w.ctx), /it is tried again on the next pass/);
+    const sp = join(w.root, 'state.json'); const st = JSON.parse(readFileSync(sp, 'utf8'));
+    st.running.find((x) => x.session_id === 'S-1').stop_reasons = [];
+    writeFileSync(sp, JSON.stringify(st), { mode: 0o600 });
+    w.end('S-1');
+    const g = await runnerPass(w.ctx);
+    const at = Object.values(JSON.parse(readFileSync(sp, 'utf8')).attempts).find((x) => x.session_id === 'S-1');
+    assert.equal(at.held, true, JSON.stringify(at));
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused');
+    assert.deepEqual(g.alerts.map((x) => x.id), ['stopped-S-1']);
+  }
+  // L738 M1: a stop whose retry finds the pid no longer claude clears its wish; the verdict still does not count. Nor
+  // does one after a stop by id that is still being tried.
+  for (const [how, by] of [['not claude on its retry', 'target'], ['by id, still being tried', 'id']]) {
+    const { w } = await stopWorld({ fail: 1 });
+    w.ctx.handedIn = verdict;
+    w.ask({ request_id: 'v-3' }); await runnerPass(w.ctx);
+    writeStopRequest(by === 'id' ? { dir: w.requests, requestId: 'v-3' } : { dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'red' } });
+    refusedFor(await runnerPass(w.ctx), /it is tried again on the next pass/);
+    if (by === 'target') { w.ctx.processName = () => '/bin/zsh'; await runnerPass(w.ctx); w.ctx.processName = () => null; }
+    w.end('S-1');
+    await runnerPass(w.ctx);
+    const at = Object.values(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).attempts).find((a) => a.session_id === 'S-1');
+    assert.equal(at.held, true, `${how}: ${JSON.stringify(at)}`);
+    assert.equal(w.ended('S-1').ended.verdict_sha256, 'refused', how);
+  }
+});
+
+// #455 r1 m3 (P11): a head a stop by card, role and head ended silently is still a hold a day on, as any no-verdict end.
+test('#455 r1 m3: a head whose reviewer a cancel stopped, asked again, is a no-verdict hold from a day on', async () => {
+  const { w } = await stopWorld();
+  w.ctx.verdictTaken = () => ({ ok: false, reason: 'no verdict in the Record' });
+  w.ask({ request_id: 'h-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD, reason: 'cancel' } });
+  await runnerPass(w.ctx);
+  assert.deepEqual((await runnerPass(w.ctx)).alerts, [], 'the cancel itself is not told');
+  w.clock.t += 31 * 60_000;
+  w.ask({ request_id: 'h-2' });
+  refusedFor(await runnerPass(w.ctx), /a reviewer was already started for card C-1 at aaaaaaa/);
+  assert.ok(!w.status().holds.some((h) => h.id === 'no-verdict-C-1-reviewer'), 'not before a day');
+  w.clock.t += 24 * 60 * 60_000;
+  await runnerPass(w.ctx);
+  assert.ok(w.status().holds.some((h) => h.id === 'no-verdict-C-1-reviewer'), JSON.stringify(w.status().holds));
 });
