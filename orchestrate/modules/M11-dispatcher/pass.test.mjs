@@ -785,11 +785,12 @@ test('M7: a stop that fails alerts and leaves the card as it was; a failed save 
   const sid = w.sessions[0].id;
   w.setCard('C-1', { state: 'cancelled' });
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }) };
-  const alerts = [];
-  await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) });
+  const alert = fakeAlert({ answer: true });
+  const alerts = alert.texts;
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert });
   assert.match(alerts[0], /could not be stopped: permission/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'pending');
-  await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
 });
@@ -805,11 +806,12 @@ test('L130: an unsaved stop whose alert was not queued is told on the next pass,
   await dispatcherPass0({ product: 'p1', ...base, now: T0 + MIN, alert: () => false });
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done', 'the stop stands');
   assert.equal(w.rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at, undefined, 'not marked told');
-  const alerts = [];
-  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
+  const alert = fakeAlert({ answer: true });
+  const alerts = alert.texts;
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 2 * MIN, alert });
   assert.equal(alerts.filter((a) => /not saved: disk full/.test(a)).length, 1, alerts.join(' | '));
   assert.ok(w.rec.read('fact', UNSAVED_FACT(sid)).doc.told_at);
-  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 3 * MIN, alert });
   assert.equal(alerts.filter((a) => /not saved/.test(a)).length, 1, 'told once');
 });
 
@@ -1130,9 +1132,10 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
   usageInto(rec);
   const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }, { id: 'S-B', product: 'p1', kind: 'editing', card: 'C-B', pgid: 51 }];
-  const alerts = [];
+  const alert = fakeAlert();
+  const alerts = alert.texts;
   const stopped = [];
-  const run = (at) => stopPass({ product: 'p1', rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert: (t) => alerts.push(t), portDeadlineMs: 50, saveDeadlineMs: 50,
+  const run = (at) => stopPass({ product: 'p1', rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert, portDeadlineMs: 50, saveDeadlineMs: 50,
     stopGroup: (s) => (s.id === 'S-A' ? new Promise(() => {}) : (stopped.push(s.id), { ok: true, how: 'SIGTERM' })),
     saveWork: async () => ({ ok: true }) });
   const r = await run(T0);
@@ -1154,7 +1157,7 @@ test('L927: stopPass stops only its own product\'s sessions, never another\'s C-
   const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 },
     { id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', pgid: null }];
   const called = [];
-  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; }, alert: () => {},
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; }, alert: fakeAlert(),
     stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async (s) => { called.push(`save ${s.id}`); return { ok: true }; } });
   assert.deepEqual(r.stopped, [['S-1', 'cancel']]);
   assert.deepEqual(called, ['probe S-1', 'stop S-1', 'save S-1'], 'nothing of another product\'s, nor the review runner\'s, is probed, stopped or saved');
@@ -1167,7 +1170,7 @@ test('L927: dispatcherPass, running its own stop step, passes the product on: an
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
   usageInto(rec);
   const stops = [];
-  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', probe: () => idle, alert: () => {}, launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [],
+  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', probe: () => idle, alert: fakeAlert(), launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [],
     sessions: [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 }],
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
   assert.deepEqual(stops, ['S-1']);
@@ -1181,7 +1184,7 @@ test('L943 m2: stopPass with no product, an empty one or a non-string one stops 
     const called = []; const log = [];
     const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-0', kind: 'editing', card: 'C-7', pgid: 52 }];
     const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, ...(product === undefined ? {} : { product }), sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; },
-      alert: () => {}, failureLog: (l) => log.push(l), stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+      alert: fakeAlert(), failureLog: (l) => log.push(l), stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
     const what = String(product);
     assert.deepEqual(r.stopped, [], what);
     assert.deepEqual(called, [], `${what}: nothing probed or stopped`);
@@ -1199,7 +1202,7 @@ test('r4 MAT-1: the stops are called side by side, not one after another', async
   const called = new Set();
   // A answers only once B's stop has been called too: one after another, A would time out.
   const waitFor = (id) => new Promise((ok) => { const t = setInterval(() => { if (called.has(id)) { clearInterval(t); ok(); } }, 2); });
-  const r = await stopPass({ product: 'p1', rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: () => {}, portDeadlineMs: 300,
+  const r = await stopPass({ product: 'p1', rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: fakeAlert(), portDeadlineMs: 300,
     stopGroup: async (s) => { called.add(s.id); if (s.id === 'S-A') await waitFor('S-B'); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { called.add(`save-${s.id}`); if (s.id === 'S-A') await waitFor('save-S-B'); return { ok: true }; } });
   assert.deepEqual(r.stopped.map(([id]) => id).sort(), ['S-A', 'S-B']);
