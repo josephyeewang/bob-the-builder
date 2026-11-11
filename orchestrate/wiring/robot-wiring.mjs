@@ -79,8 +79,8 @@ export const LIVE_PASS_MAX_MS = DISPATCHER_RUN_MS + WATCHDOG_MARGIN_MS + 60_000;
  * The heartbeat told the hold for `cause`: its told mark is written onto the hold fact as delivery would write it (L746 m-B).
  * The mark is the one holdAlert itself gives, the same the queued copy carries, so it is written whether or not the queue
  * took that copy (L738 self-review), and only when the hold was due: one already told today keeps its time and its daily
- * count. A hold fact that cannot be read is not written over (L781: a failed read is not "absent"). → whether the hold now
- * carries the mark; never throws.
+ * count. A hold fact that cannot be read is not written over (L781: a failed read is not "absent"). → true when the hold
+ * is marked, or needed no mark; false when the mark could not be written; never throws.
  */
 export function markToldByBeat(rec, { cause, text, now }) {
   try {
@@ -297,11 +297,14 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
   if (token) {
     const issues = githubIssues({ repo: c.alertRepo, token, fetchFn });
     const when = () => new Date(now());
-    // "Rules readable": the product's rules were read and adopted (M10's `rules.adopted`, the engine's usable rules).
+    // "Rules readable": the product has usable rules (M10's `rules.adopted`: adopted now, or the last good kept after a
+    // newer file was refused; nothing refuses in either state).
     const probes = { ...heartbeatProbes({ rec, rules, now }), rulesReadable: async () => rules.get('rules.adopted', { product: c.product }) !== undefined };
     // The pass's own dispatcherLate answer decides the heartbeat's Dispatcher line too: one rule for "late", so a live
     // pass inside its run limit is never red there either (L730 m2; audit #137 M6).
-    beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when }),
+    // TODO(#449, lead follow-up): once M13's alerts.sweep({ product }) is on main, the round makes one makeAlerts per round
+    // and calls sweep on that same object at the round's end (a proof never expires). Today each beat makes its own.
+    beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when, log }),
       owner: c.alertOwner, probes: { ...probes, dispatcherLate: async () => late }, now: when });
   }
   passes.heartbeat = async () => {
@@ -311,7 +314,9 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     // lose it (L730 m1). With the App, the heartbeat's own Dispatcher alert then tells it, and the queued copy leaves
     // unsent, so it is not told twice (L239). When the heartbeat failed, lost that alert on GitHub, or found it closed by
     // Joe while the stop lasts ('suppressed', L730 m3), the queued copy stays: a broken App never leaves a stopped
-    // Dispatcher untold, and holdAlert tells a lasting one again each day.
+    // Dispatcher untold, and holdAlert tells a lasting one again each day. That errs toward telling twice, on purpose: a
+    // heartbeat that throws after its Dispatcher alert went out (say the pinned-issue edit fails), or that ends after the
+    // pass's time limit, leaves the copy for deliver too (L738 review m2).
     let tell = null;
     if (late) {
       // A refused alert is logged and kept with the pass's failure (audit #137 M1; L130 m12).
@@ -329,11 +334,14 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
       const fact = HOLD_FACT(LATE_CAUSE(late.since));
       // L746 m-B: the heartbeat's tell is the tell, so the hold is marked told now, as delivery would have marked it; the
       // daily count then starts from it, and Joe closing that issue is answered the next day, not in a minute.
-      if (!markToldByBeat(rec, { cause: LATE_CAUSE(late.since), text: late.text, now: now() })) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: it may be told again within a day');
+      if (!markToldByBeat(rec, { cause: LATE_CAUSE(late.since), text: late.text, now: now() })) log('robot: the heartbeat told the Dispatcher-late alert, but the hold could not be marked told: the next round queues it again, unless the heartbeat of that round tells it');
       if (!dropCause(rec, fact)) log('robot: the heartbeat told the Dispatcher-late alert, but its queued copy could not be dropped: it may be told twice');
     }
     if (failed) throw Object.assign(failed instanceof Error ? failed : new Error(String(failed)), tell ? { tell } : {});
     if (!beat) throw Object.assign(new Error(notWiredText(NOT_WIRED_PASSES.heartbeat)), tell ? { tell } : {});
+    // Neither queued nor told by the heartbeat (GitHub lost it, or Joe closed it while it lasts): the pass fails with the
+    // tell, as above, so robot-main logs it as not told and the round's result says so (L738 review m1).
+    if (late && tell && !toldByBeat) throw Object.assign(new Error('the Dispatcher-late alert was neither queued nor told by the heartbeat'), { tell });
     return { red: beaten.red };
   };
   passes['caught-up'] = async () => {

@@ -1226,3 +1226,17 @@ test('L955: a heartbeat that fails makes the pass fail with its reason, and the 
   await assert.rejects(passes.heartbeat(), (e) => { assert.match(e.message, /alert repository unreachable/); return true; });
   assert.ok(queued(rec).some((q) => /the Dispatcher has no full pass on record/.test(q)), 'the late alert is still queued for deliver');
 });
+
+test('L738 review m1: a late alert the queue refused and the heartbeat did not tell fails the pass with the tell', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { rec, passes } = await wire(w.config, { fetchFn, hold: () => false, log: () => {} });
+  await assert.rejects(passes.heartbeat(), (e) => { assert.match(e.message, /neither queued nor told/); assert.equal(e.tell, 'the Dispatcher-late alert could not be queued'); return true; });
+  assert.ok(!queued(rec).some((q) => /Dispatcher/.test(q)), 'the queue really refused it');
+  // Told by the heartbeat: the refused queue alone does not fail the pass.
+  const w2 = withKey(world({ extra: APP }));
+  const told = await wire(w2.config, { fetchFn: appGitHub(w2).fetchFn, hold: () => false, log: () => {} });
+  await told.passes.heartbeat();
+});
