@@ -1303,3 +1303,51 @@ test('#451 L967: an alert lost outside the per-kind list (usage) still makes the
   await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn } });
   assert.match(logs.join('\n'), /robot: heartbeat ran, and 1 of its items failed/);
 });
+
+// L977: one alerts object a round, and the sweep on it after the heartbeat, so an alert issue whose number the Record
+// lost is closed once its cause clears (#449).
+test('L977: an alert issue whose number the Record lost is closed by the next round\'s sweep once its cause clears', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  let t = Date.parse('2026-11-03T10:00:00Z');
+  const round = () => wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  const first = await round();
+  const { rec } = first;
+  const sense = (id, doc) => { const r = rec.write({ actor: 'sensors', entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }); assert.ok(r.ok, `${id}: ${r.reason}`); };
+  const dispatcherPass = () => assert.ok(rec.write({ actor: 'dispatcher', entity: 'fact', id: LAST_PASS_FACT, expectRev: rec.read('fact', LAST_PASS_FACT)?.rev ?? 0,
+    doc: { at: isoAt(t), started_at: isoAt(t), steps: {} }, kind: 'full_pass' }).ok);
+  dispatcherPass();
+  sense('signed-in-account', { account: null, signed_in: false, reason: 'nobody is signed in', observed_at: isoAt(t) });
+  await first.passes.heartbeat();
+  const out = [...gh.issues.values()].find((i) => /heartbeat red: signed-out/.test(i.title));
+  assert.ok(out, 'the signed-out alert is raised');
+  // The Record loses where that issue is (as when its write was refused): its clear will find nothing to close.
+  const f = rec.list('fact').find((x) => x.doc?.kind === 'fact.alert' && x.doc?.issue === out.number);
+  assert.ok(f, 'the alert\'s own fact');
+  assert.ok(rec.write({ actor: 'ledger', entity: 'fact', id: f.id, expectRev: f.rev, doc: { ...f.doc, issue: null } }).ok);
+  // The next round (its own process, its own alerts object): signed in again, so the clear answers 'none' and the sweep
+  // after the beat closes the issue.
+  t += 5 * MIN; dispatcherPass();
+  sense('signed-in-account', { account: 'b', observed_at: isoAt(t) });
+  const second = await round();
+  const r = await second.passes.heartbeat();
+  assert.deepEqual(r.sweep.closed, [out.number], JSON.stringify(r.sweep));
+  assert.equal(r.sweep.why, null);
+  assert.equal(gh.issues.get(out.number).state, 'closed');
+  assert.ok(!queued(rec).some((q) => /alert sweep/.test(q)), 'no trouble to tell');
+});
+
+test('L977: a sweep that says why is round trouble, queued once a day for deliver; what it did is logged', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // GitHub won't say who the robot is: any bot counts as the robot, so the sweep closes nothing and says why.
+  const fetchFn = async (url, init = {}) => (new URL(url).pathname === '/app' ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const logs = [];
+  const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l) });
+  const r = await passes.heartbeat();
+  assert.match(String(r.sweep?.why), /login is not known/);
+  assert.match(logs.join('\n'), /robot: alert sweep: closed \[\], failed \[\], kept \[\]; the robot's own login is not known/);
+  assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: the robot's own login is not known/.test(q)), queued(rec).join(' | '));
+  await passes.heartbeat();
+  assert.equal(queued(rec).filter((q) => /alert sweep/.test(q)).length, 1, 'once, not every pass');
+});

@@ -96,6 +96,8 @@ export function markToldByBeat(rec, { cause, text, now }) {
 }
 
 export const LATE_CAUSE = (since) => `robot-dispatcher-late-${since ?? 'never'}`;
+/** The queue cause of the alert sweep's trouble (L977), told as robot-main tells a failed pass's. */
+export const SWEEP_CAUSE = 'robot-sweep';
 export const ROBOT_PASSES = Object.freeze(['gate', 'heartbeat', 'caught-up', 'watch', 'deliver']);
 // What each pass that is not wired yet is waiting for: the port named in its refusal.
 export const NOT_WIRED_PASSES = Object.freeze({ gate: 'robot.github (R-0b-02)', heartbeat: `robot.heartbeat: the config names no robot App (${APP_KEYS.join(', ')}; L600)`, watch: 'robot.vercel',
@@ -297,6 +299,7 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     passes.deliver = () => send({ rec, now });
   }
   let beat = null;
+  let sweepRound = null;
   if (token) {
     const issues = githubIssues({ repo: c.alertRepo, token, fetchFn });
     const when = () => new Date(now());
@@ -305,10 +308,28 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     const probes = { ...heartbeatProbes({ rec, rules, now }), rulesReadable: async () => rules.get('rules.adopted', { product: c.product }) !== undefined };
     // The pass's own dispatcherLate answer decides the heartbeat's Dispatcher line too: one rule for "late", so a live
     // pass inside its run limit is never red there either (L730 m2; audit #137 M6).
-    // TODO(#449, lead follow-up): once M13's alerts.sweep({ product }) is on main, the round makes one makeAlerts per round
-    // and calls sweep on that same object at the round's end (a proof never expires). Today each beat makes its own.
-    beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts: makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when, log }),
+    // One alerts object for the round (L977): the heartbeat's clears leave their proof on it, and the sweep after them
+    // reads that same proof, so an alert issue whose number the Record refused is closed once its cause clears (#449).
+    // The robot job is one process per round, so this is one per round.
+    const alerts = makeAlerts({ rec, gh: issues, owner: c.alertOwner, now: when, log });
+    beat = (late) => heartbeatOnce({ product: c.product, writer: ledger, gh: issues, alerts,
       owner: c.alertOwner, probes: { ...probes, dispatcherLate: async () => late }, now: when });
+    // The sweep, after the round's last raise and clear on that object (the heartbeat is the only pass that uses it). What
+    // it did is logged; a why is round trouble, told through the queue as a failed pass is, once a day, by deliver in this
+    // same round. A sweep that throws is the same trouble.
+    sweepRound = async () => {
+      let a;
+      try { a = await alerts.sweep({ product: c.product }); } catch (e) {
+        a = { swept: false, closed: [], failed: [], kept: [], why: `it stopped: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` };
+      }
+      if (a.closed.length || a.failed.length || a.kept.length || a.why !== null) {
+        log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${a.why !== null ? `; ${a.why}` : ''}`);
+      }
+      if (a.why !== null && hold({ rec, cause: SWEEP_CAUSE, text: `the robot job's alert sweep: ${a.why}`, alert: outbox(rec, now()), now: now() }) === false) {
+        log('robot: the alert sweep\'s trouble could not be queued');
+      }
+      return { closed: a.closed, failed: a.failed, kept: a.kept, why: a.why };
+    };
   }
   passes.heartbeat = async () => {
     const late = dispatcherLate(rec, { nowMs: now(), holder: lockHolder(c.dispatcherLockFile) });
@@ -330,6 +351,8 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     } else dropLateAlerts(rec, { log });   // logs why, when it answers false
     let beaten = null; let failed = null;
     if (beat) { try { beaten = await beat(late); } catch (e) { failed = e; } }
+    // After the beat, so its clears are in (L977). Never throws.
+    const sweep = sweepRound ? await sweepRound() : null;
     // Told per alert (L730 m4): only what the Dispatcher alert itself answered counts, not whether every alert went out.
     const answer = beaten?.told?.dispatcher;
     // Any string but 'suppressed' is told: 'opened', 'changed' and 'reminded' reached Joe now, and 'updated' is the same
@@ -352,8 +375,8 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     if (beaten.posted === false) throw Object.assign(new Error(`the pinned heartbeat issue was not posted: ${beaten.postedWhy}`), tell && !toldByBeat ? { tell } : {});
     // An alert GitHub lost is a failed item, which robot-main logs as deliver's are (#451 r1 m2).
     const failedItems = Object.values(beaten.told ?? {}).filter((v) => v === false).length;
-    if (beaten.red.includes(NOT_TOLD)) return { red: beaten.red, failed: Math.max(1, failedItems) };
-    return { red: beaten.red };
+    if (beaten.red.includes(NOT_TOLD)) return { red: beaten.red, failed: Math.max(1, failedItems), sweep };
+    return { red: beaten.red, sweep };
   };
   passes['caught-up'] = async () => {
     const ret = lastReturn(rec, { nowMs: now() });
