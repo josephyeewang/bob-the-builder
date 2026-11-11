@@ -6,26 +6,40 @@ user-invocable: true
 
 # design-mockups — explore the design space as images, then build the winner
 
-A reusable capability for producing Awwwards / One-Page-Love-caliber homepage directions for ANY product. Proven on a consumer AI app (Aug 2026): ~250 comps across the full design space for ~$15, funneled to a locked direction.
+A reusable workflow for exploring homepage directions as images, comparing them in a numbered
+gallery, and carrying a selected direction into implementation.
 
 ## The one principle
-**Generic is a workflow problem, not a model problem. Explore as IMAGES (cheap, fast, artful), build as CODE (correct, data-wired, motion).** Never ask one tool to do both — that's what produces "AI slop." Image models originate art (texture, palette, type, mood, concept) that CSS can't; code originates correctness that images can't.
+**Generic is a workflow problem, not a model problem. Explore as IMAGES (art direction), build as CODE (correct, data-wired, motion).** Never ask one tool to do both — that's what produces "AI slop." Image models originate art (texture, palette, type, mood, concept) that CSS can't; code originates correctness that images can't.
+
+## Standalone execution
+
+When invoked to explore designs, create the requested jobs, run approved generation or gallery
+commands and inspect their outputs; do not only describe the funnel. Keep project configuration
+and output in the target project, never in this installed module. Confirm scope and budget before
+paid generation, and do not upload confidential references without permission. If generation is
+unavailable, organize supplied images and state the limitation.
+
+This module works without Bob or a particular assistant. Resolve this SKILL.md folder and set
+DESIGN_MOCKUPS_DIR to that absolute path for the examples. See DEPENDENCIES.md for local tools,
+provider boundaries and optional companions. Design Gallery is useful for reference discovery and
+code transfer but is not required to generate or organize images.
 
 ## Setup (one time)
-0. **Python 3 with Pillow** (the gallery and contact sheets draw with it): `python3 -m pip install --user Pillow`. Use `python3`; many Macs have no `python` command.
-1. **Google AI Studio API key** with **billing/prepay enabled** (image gen is a paid feature; Nano Banana Pro ≈ $0.13/image, so a 40-comp sweep ≈ $5). Get it at aistudio.google.com/apikey → add credits.
-2. Put the key in an env-style file (e.g. a project `.env.local`) as `GOOGLE_AI_API_KEY=...` (the toolkit reads it without printing it).
-3. Copy `config.example.json` → your project as `mockup.config.json`; fill in product_name, product_desc, headline, data_points, content_recipe, and point `api_key_file` at your key file. Set `out_dir`.
+0. **Python 3 with Pillow.** Use the project's Python environment, or create a virtual environment and install Pillow there. Local gallery commands need no provider account or generation credits.
+1. **Only for generated images/video:** a Google AI Studio account and approved credential/billing setup for the configured model. Check current availability and pricing before proposing a budget; existing-image gallery commands remain local.
+2. Use the user's approved secret-setup process. The runtime accepts the variable named by `api_key_env`, or an optional user-managed `api_key_file`. Never read, echo, commit or include secret values in a download.
+3. The supplied configuration and feedback examples are fictional illustrations. Copy `config.example.json` into the target project as `mockup.config.json`; fill in product_name, product_desc, headline, data_points and content_recipe. Set out_dir inside that project. Prefer the configured environment variable; use api_key_file only if the user chose that runtime method. Keep local configuration out of public exports.
 
 ## Usage (from the project dir, or set DESIGN_MOCKUP_CONFIG)
 ```
-python3 ~/.claude/skills/design-mockups/mockup.py archetypes [core|cinematic|modern|all]  # 1 comp per style
-python3 ~/.claude/skills/design-mockups/mockup.py recipe        # your content_recipe across the 12 art-direction STYLES
-python3 ~/.claude/skills/design-mockups/mockup.py custom jobs.json [round]  # [{name,prompt,refs?}] — refs = paths OR gallery NUMBERS (117)
-python3 ~/.claude/skills/design-mockups/mockup.py gallery       # rebuild the consolidated searchable gallery of out_dir
-python3 ~/.claude/skills/design-mockups/mockup.py grouped [out_dir]           # auto-sectioned board (13 style buckets)
-python3 ~/.claude/skills/design-mockups/mockup.py curated curation.json [out_dir]  # user's themes on top (★ green), remainder always appended
-python3 ~/.claude/skills/design-mockups/mockup.py reject 23 45 old-name       # prune: MOVE to out/_deleted — never delete, numbering pool shrinks
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" archetypes [core|cinematic|modern|all]  # 1 comp per style
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" recipe        # your content_recipe across the 12 art-direction STYLES
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" custom jobs.json [round]  # [{name,prompt,refs?}] — refs = paths OR gallery NUMBERS (117)
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" gallery       # rebuild the consolidated searchable gallery of out_dir
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" grouped [out_dir]           # auto-sectioned board (13 style buckets)
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" curated curation.json [out_dir]  # user's themes on top (★ green), remainder always appended
+python3 "$DESIGN_MOCKUPS_DIR/mockup.py" reject 23 45 old-name       # prune: MOVE to out/_deleted — never delete, numbering pool shrinks
 ```
 Every run also writes `_contact.png` + `gallery-ALL.html` (one searchable, NUMBERED board), and — when the batch has a round name — a per-round `{round}-sheet.png` + `{round}-gallery.html` pair. **Gallery numbers are the shared vocabulary**: they're stable (one canonical numbering in `lib/gallery.py`), the user gives feedback by number ("#117 but lighter"), curation section titles cite them ("like #117"), and `refs` resolve from them. curation.json: `[{"title":"THEME 1 — report hero (like #117)","nums":[117,94],"star":true}, ...]`.
 
@@ -38,19 +52,19 @@ Every run also writes `_contact.png` + `gallery-ALL.html` (one searchable, NUMBE
 5. **Motion previews** — `lib/vid.py` turns a chosen comp into a short Veo clip (image→video) to preview the motion feel before building.
 6. **Build the winner** — hand the winning comp (the canonical input) + its `LOCKED-DESIGN.md` map (`references/build-bridge.md` §1) to a coding agent; reuse the 4K backdrop as a real asset; implement motion with GSAP + Lenis + Motion.dev. Full bridge (spec layer, motion-stack table, honest limits): `references/build-bridge.md`.
 
-## Hard-won heuristics (the real IP — apply every time)
-- **Reference-class anchoring decides the cluster.** Naming Linear/Stripe/SaaS → generic boilerplate. Naming "luxury" → spa/interior stock. Naming A24 / Obys / fashion-campaign / gallery / fine-art → cinematic art direction. Name the *right* reference class in the prompt. For a homepage/hero, first run design-gallery's **Round 0** (`../design-gallery/references/inspo-round-zero.md` — real reference sites from Inspo, default-on) and pass the LIKEd screenshots as `refs`.
+## Working heuristics
+- **Reference-class anchoring decides the cluster.** Naming Linear/Stripe/SaaS → generic boilerplate. Naming "luxury" → spa/interior stock. Naming A24 / Obys / fashion-campaign / gallery / fine-art → cinematic art direction. Name the *right* reference class in the prompt. For a homepage/hero, use supplied references first. If Design Gallery and approved reference tools are available, use its Round 0 (`references/inspo-round-zero.md` in that module) and pass LIKEd screenshots as refs. Otherwise collect approved public references with available tools or state the omission; do not assume a sibling directory or connected service.
 - **Two independent axes — never collapse them:** CONTENT (what's in the hero) × ART-DIRECTION (how it looks). Cross them in a matrix; hold one constant and vary the other.
 - **Theme-first, not image-first.** Decisions are easier as "which of 12 themes" than "which of 100 images." Group variations under their theme.
-- **The hero must EMBODY the value prop, not just brand it.** (consumer AI app: a lone "NN/100" score argued *against* the product — the fix was showing R/Y/G status, flags, trend graphs, range bars, insight lines. The hero should demonstrate what's unique.)
+- **The hero must embody the value proposition.** Show the product doing its job, with enough context to explain why its output matters; a decorative score alone may not communicate that.
 - **Materiality beats flat color** (texture/grain/gradient/imagery, never flat divs). **Ban AI-default fonts** (Inter, Roboto, Arial, Space Grotesk) and clichés (purple gradient on white, centered-hero + 3 cards).
 - **People, if any, should be genuinely USING the product** (candid interaction), not fashion-posing.
 - **One consolidated, NAMED gallery** so feedback is precise ("the panels of X + the palette of Y + the type of Z").
 - **Expect iteration.** Don't chase "this is it" early; the user finds combinations by sorting. Never silently drop a direction they liked — keep everything in the board.
-- **Negative-constraint vocabulary works** (consumer AI app redesign, Sep 2026): state what it must be AND what it must never be — "LIGHT and TRUSTWORTHY — never a dark cave", "NOT a generic gray gradient, NOT homey/architectural-digest stock". The NOTs steer as hard as the wants.
-- **The hero panel must EXPLAIN, not just display** — "colorful glass metric panels POP OUT (status ring, spectrum bar, trend chart, flagged chips)... NOT just a lone number." A number alone argues against the product.
-- **Overshoot-recover is one round, expect it** — "colorful popping panels" overshoots into candy within a round; the documented correction: "COLOR IS A RESTRAINED, TASTEFUL ACCENT... NOT bright primary red/yellow/green, NOT rainbow, NOT candy." Ask loud, then rein in.
-- **Prune loud/kitsch archetypes per-project via `reject`** (moved to `_deleted`, never erased — one consumer app's blocklist: neo-brutalism, y2k-chrome, vaporwave, synthwave, cyberpunk-neon, memphis-80s, corporate-memphis, claymorphism).
+- **State positive and negative constraints.** Describe what the direction must express and the clichés it must avoid; use the current project brief rather than a previous product's taste decisions.
+- **The hero panel must explain, not just display.** Show relationships, context and next actions where relevant; use clearly fictional example figures until real data is intentionally wired.
+- **Refine intensity through comparisons.** If an expressive direction is too loud, compare restrained variants while keeping the chosen structure visible.
+- **Prune per project with `reject`.** Move rejected renders to `_deleted` rather than erasing them, and rebuild the board before citing its updated numbering.
 - **Only headline text is legible** in image comps; body copy renders as gibberish — judge layout/mood, not paragraphs. Comps are direction, not a spec.
 - **Ops:** batch with backoff/retry (429/5xx); "prepayment credits depleted" = top up billing, not a bug.
 

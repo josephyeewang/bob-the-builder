@@ -1,0 +1,5 @@
+Verdict portable module
+
+Except for the attributed blind-judge reference, this module is distributed under the accompanying MIT LICENSE.
+
+reference/blind-judge.md adapts anthropics/skills skills/skill-creator/agents/comparator.md at revision dbd4588, Apache-2.0. Its attribution and modification notice are preserved in that file. The full Apache-2.0 license is supplied in LICENSES/Apache-2.0.txt.

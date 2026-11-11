@@ -1,0 +1,14 @@
+# Full-list rechecks and learning
+
+Use only for an explicitly requested batch/full-list re-run. Snapshot the requested tool slugs and prior record hashes once; later additions are explicit. Keep a private campaign queue alongside verdict memory, linking per-tool records and batch evidence. Queue status describes campaign work, never substitutes for component/integration state. Preserve prior decisions and dates; bulk formatting is not re-evaluation.
+
+Work in manageable batches with independent evidence per tool. Reopen current source and relevant project paths, inspect changed implementation and old blockers, consider UI/visual and product-angle value plus current/reusable/future applications, and collect independent qualitative evidence where available. Keep source-access/runtime/license limitations explicit. A partial-access assessment can be saved and reviewed but is not a fully examined tool. Never inflate progress by counting partial or blocked work as complete.
+
+For every batch:
+1. Save current reports/sidecars and selected permitted originals with exact revision/notices. Preserve old Markdown and History. Run the evaluation checker; a passing checker is not a soundness review. Use audit-hashes.json as a flat map from batch-relative file paths to lowercase SHA-256 strings; keep reviewer/scope metadata in a separate receipt. Bind reports, records and load-bearing evidence, excluding the hash file itself.
+2. Use a fresh reviewer to check claims against current sources/destinations, meaningful omitted areas, false superiority, future-use speculation, capture/integration states and campaign counts. Fix material findings and re-audit the affected work. Record receipts and unresolved limitations.
+3. Derive lessons from actual evaluated behavior: what opportunity was missed, what recommendation changed, what evidence overturned it, or what procedure wasted effort. Link the tool/source and test the lesson against a different example or explicit counterexample before generalizing. Do not elevate one preference/example into a universal mandate.
+4. Fix recurring mechanical failures in their helper/tests; put judgment changes in the existing owning reference, not another checklist. Reconcile contradictions and remove duplicated wording. Validate revised scripts and replay affected examples; review changes before shared installation.
+5. Refresh generated recall. Demonstrate retrieval by behavior across projects/categories, including future/unassigned opportunities when established. Report pending, partial, blocked and reviewed work separately using actual artifacts. Do not claim the full list is done while unexamined or materially unresolved entries remain.
+
+Evaluation approval covers private evidence and skill learning, not unrelated project edits, installations, paid use or publishing. Reports can recommend next actions without carrying them out. Keep public rows unchanged until separately approved.
