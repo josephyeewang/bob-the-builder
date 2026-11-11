@@ -5,7 +5,7 @@
 //   { "installRoot": "/abs/install", "wiring": "/abs/install/<code file>.mjs", "lockFile": "/abs/path/dispatcher.lock" }
 // It is read through shared/job-config.mjs (L253): the config and the wiring must be the installed copy's own, root's
 // or this job's user's alone, never links, or nothing starts.
-// and, optionally, "runDeadlineMs" (a positive number; RUN_DEADLINE_MS when absent).
+// and, optionally, "runDeadlineMs" (a positive number, at most RUN_DEADLINE_MS; RUN_DEADLINE_MS when absent).
 // The wiring module (built with the module that joins the real ports, not in this folder) exports
 // `async function wire(config, { limitedSync })` returning exactly { rec, rules, ports } — see README, "The tick's ports".
 // Any other key is refused (audit #127 r2 m-B): a wiring answering `lock` or `now` must not replace the lock or the clock.
@@ -26,7 +26,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { runTick, STEPS, STEP_DEADLINE_MS } from './tick.mjs';
 import { outbox, sendAlerts, ALERT_SEND_MS, ALERT_BUDGET_MS } from './alerts.mjs';
-import { holdAlert } from './pass.mjs';
+import { holdAlert, clearHold, HOLD_FACT } from './pass.mjs';
 import { limitedSync } from './sync-limit.mjs';
 
 // Every step at its own deadline and the pass's two sends (alerts.mjs), plus a margin: past this the pass is stuck.
@@ -61,10 +61,15 @@ export function flushHeld(rec, log) {
 const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
 const SELF = realOf(fileURLToPath(import.meta.url));
 
-export function readConfig(file, opts = {}) {
+// `maxRunDeadlineMs` (L802): the longest runDeadlineMs taken, by default the Dispatcher pass's own sum. The robot judges
+// the Dispatcher by that sum (robot-wiring.mjs LIVE_PASS_MAX_MS), so a longer limit would make a healthy pass read as
+// stuck; setup refuses one too (dispatcher-setup.mjs), and this reader holds the line for a config written by hand.
+// Another job that reads its config here (robot-main.mjs) passes its own limit.
+export function readConfig(file, { maxRunDeadlineMs = RUN_DEADLINE_MS, ...opts } = {}) {
   const c = readJobConfig(file, { code: ['wiring'], ...opts });
   for (const k of ['wiring', 'lockFile']) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   if (c.runDeadlineMs !== undefined && !(Number.isFinite(c.runDeadlineMs) && c.runDeadlineMs > 0)) throw new Error('config: runDeadlineMs must be a positive number');
+  if (c.runDeadlineMs > maxRunDeadlineMs) throw new Error(`config: runDeadlineMs may be at most ${maxRunDeadlineMs} (this job's own limit)`);
   return c;
 }
 
@@ -102,6 +107,21 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     return 1;
   }
   const limit = runDeadlineMs ?? config.runDeadlineMs ?? RUN_DEADLINE_MS;
+  // A config deadline under the pass's own sum (L736 m5): the run can be cut in its last steps whenever one is slow. Not
+  // refused, since the watchdog's own tests run whole passes on a short deadline through a real config; said in the log
+  // every run and told to Joe once a day. Queued after the pass, never before it: the tick's early send carries the
+  // oldest alert first, and this one must never stand ahead of a safety step's (the r7 M1 broken-lock alert).
+  const low = config.runDeadlineMs !== undefined && config.runDeadlineMs < RUN_DEADLINE_MS
+    ? `the Dispatcher config's runDeadlineMs (${config.runDeadlineMs}) is below the pass's own sum (${RUN_DEADLINE_MS} ms: every step's deadline and the two sends), so a slow step can get the pass stopped; raise it, or take it out`
+    : null;
+  if (low) log(`dispatcher: ${low}`);
+  const alert = outbox(wired.rec, now); // the queue's alert (L47: the outbox), made once; it only queues
+  const tellLow = () => {
+    // Fixed (self-review m6): a copy still queued goes, and a deadline lowered again is told afresh.
+    if (!low) { try { clearHold(wired.rec, HOLD_FACT('run-deadline-low'), now, (line) => log(`dispatcher: ${line}`)); } catch (e) { log(`dispatcher: the low-deadline hold could not be cleared: ${e?.message ?? e}`); return false; } return; }
+    try { return holdAlert({ rec: wired.rec, cause: 'run-deadline-low', text: low, alert: alert, now }); }
+    catch (e) { log(`dispatcher: the low deadline could not be told: ${e?.message ?? e}`); return false; }
+  };
   let timer;
   const late = new Promise((ok) => { timer = setTimeout(() => ok({ late: true }), limit); });
   let r;
@@ -113,7 +133,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
     // Joe is told too (L38), once a day: a stuck pass holds everything after the step it is stuck in.
     // Queued, then sent with one send's time: a pass that is late every time never reaches its own sender.
     // A refused alert is logged (L130 m12): the late pass is otherwise silent.
-    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
+    try { if (holdAlert({ rec: wired.rec, cause: 'run-late', text: `a Dispatcher pass did not finish within ${limit} ms and was stopped; the next pass starts in a minute`, alert: outbox(wired.rec, now), now }) === false) log('dispatcher: the late-pass alert could not be queued'); if (tellLow() === false) log('dispatcher: the low-deadline alert could not be queued, or its hold cleared'); await sendAlerts(wired.rec, wired.ports.alert, now, { budgetMs: ALERT_SEND_MS }); }
     catch (e) { log(`dispatcher: the late pass could not be told: ${e?.message ?? e}`); }
     flushHeld(wired.rec, log);
     return 2;
@@ -121,6 +141,7 @@ export async function main(argv, { now, clock, log = (s) => process.stderr.write
   if (!r.ran) log(`dispatcher: ${r.reason}`);
   // A step's refused drop, save, note or clear: its only trace if its alert is refused too (L449).
   for (const line of r.reports ?? []) log(`dispatcher: ${line}`);
+  if (tellLow() === false) log('dispatcher: the low-deadline alert could not be queued, or its hold cleared');
   flushHeld(wired.rec, log);
   return 0;
 }

@@ -7,3 +7,15 @@ import { createHash } from 'node:crypto';
 export const idHash = (...parts) => createHash('sha256').update(parts.map((p) => `${String(p).length}:${p}`).join('|')).digest('hex').slice(0, 32);
 /** The fact a file's intake is kept in. */
 export const intakeFactId = (product, name) => `intake-applied-proposals-file-${idHash(product, name)}`;
+
+/**
+ * The states of an outbox file's intake fact (intake-applied-<session>-<name>) that mean the intake is done with the
+ * file for now (L852): applied, refused, interrupted (it may have run; the next pass told it), and waiting (a held
+ * plan file with no launch record, or a read-only request queued on a refusal: it waits on something outside the
+ * session). The one list: the Lead's restart (lead-restart.mjs leadInFlight) reads it, and so will the runner's drain
+ * when it lands (#388; L863 c2).
+ */
+// Read only to its importers: its own add, delete and clear throw, so no importer changes the list by mistake (a
+// deliberate Set.prototype.add.call still could: a frozen Set's contents are not frozen).
+const readOnly = (set) => { for (const m of ['add', 'delete', 'clear']) Object.defineProperty(set, m, { value: () => { throw new Error('USED_STATES is read only'); } }); return Object.freeze(set); };
+export const USED_STATES = readOnly(new Set(['applied', 'refused', 'interrupted', 'waiting']));

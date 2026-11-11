@@ -7,9 +7,11 @@
 // Said plainly: every plain script runs as the same `orchestrate` user, so the rows between scripts catch bugs, not
 // attackers. The real boundary is between the AI roles (whose tag comes from their outbox folder) and the scripts.
 //
-//   WRITERS[entity][actorName] = { create?: fields | '*', update?: fields | '*', kinds?: [...] }
+//   WRITERS[entity][actorName] = { create?: fields | '*', update?: fields | '*', updateInDraft?: fields,
+//                                  draftKinds?: [...], kinds?: [...] }
 //   actorName is a script actor, or an AI role (the part before ':' in `role:session`).
-//   fieldsAllowed(entity, actor, { create, state }) → Set of fields, or '*' (any), or null (may not write at all)
+//   fieldsAllowed(entity, actor, { create, state, kind }) → Set of fields, or '*' (any), or null (may not write at all)
+//   draftFields(actor, kind) → the card fields this actor may change while a card of this kind is a draft (L731)
 
 import { OUTBOX_KINDS, CARD_KINDS } from '../../shared/record-names.mjs';
 
@@ -130,9 +132,18 @@ export const WRITERS = Object.freeze({
       // tab's hand-in: the writer checks each against the move.
       // attempts: only its own keys (ATTEMPTS), checked by the guard.
       update: f('claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'),
+      // done_when only while the card is a draft: the Dispatcher sets it to its rows' pass tests before the Tier-1
+      // review and the ask (L698 design b, L699, L722); the Lead's own words stay in brief.done_when.
+      updateInDraft: f('done_when'),
+      // L731 M1: and only on a kind that always needs a go, so the go is asked on the bar as it then stands. Not its own
+      // kinds: a fix card's plan never changes, and exact_reverse and research_copy reach ready with no go (ready.mjs
+      // GO_FREE), so a bar changed there would be one nobody approved. Missing draftKinds means every kind (the Lead).
+      draftKinds: f('ordinary'),
       kinds: CARD_CREATORS.dispatcher,
     }),
     worker: Object.freeze({ update: f('summary', 'report_ref') }),
+    // L838: a script hands in as a worker does, its own claimed card only (writer.mjs's hand-in checks), and nothing else.
+    script: Object.freeze({ update: f('summary', 'report_ref') }),
     workshop: Object.freeze({ update: f('head') }),
     approvals: Object.freeze({ update: f('needs_joe', 'approval_required', 'cancel_reason') }),
     merge_gate: Object.freeze({ update: f('needs_joe', 'merge_commit', 'attempts') }),
@@ -163,15 +174,27 @@ export const WRITERS = Object.freeze({
 export const actorName = (actor) => String(actor).split(':')[0];
 
 // The fields this actor may set on this write, or null when it may not write this entity this way at all.
-export function fieldsAllowed(entity, actor, { create, state } = {}) {
+export function fieldsAllowed(entity, actor, { create, state, kind } = {}) {
   const row = WRITERS[entity]?.[actorName(actor)];
   if (!row || !Object.hasOwn(WRITERS[entity], actorName(actor))) return null;
   const base = create ? row.create : row.update;
   if (base === undefined) return null;
   if (base === '*') return '*';
   const out = new Set(base);
-  if (!create && state === 'draft' && row.updateInDraft) for (const x of row.updateInDraft) out.add(x);
+  if (!create && state === 'draft' && entity === 'card') for (const x of draftFields(actor, kind)) out.add(x);
+  else if (!create && state === 'draft' && row.updateInDraft) for (const x of row.updateInDraft) out.add(x);
   return out;
+}
+
+// The one place a card's draft-only grant is read (L731): the field gate and the writer's plan gate both ask here, so
+// they cannot disagree on which kinds it covers. A row with draftKinds grants nothing on any other kind, nor on a card
+// whose kind is not given.
+export function draftFields(actor, kind) {
+  const name = actorName(actor);
+  const row = Object.hasOwn(WRITERS.card, name) ? WRITERS.card[name] : null;
+  if (!row?.updateInDraft) return [];
+  if (row.draftKinds && !row.draftKinds.includes(kind)) return [];
+  return row.updateInDraft;
 }
 
 export function mayCreateKind(actor, kind) {

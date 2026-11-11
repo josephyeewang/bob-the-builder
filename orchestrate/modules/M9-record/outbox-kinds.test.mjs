@@ -20,7 +20,7 @@ import { ENTITIES, NOT_A_RECORD, OUTBOX_KINDS, isNotARecord, memoryRecord, notAR
 import { NEVER_STARTED, ROLE_FILES } from '../M10-rules/roles.mjs';
 import { DESIGN_PROFILES } from '../M4-workshop/launcher/role-profiles.mjs';
 import { WRITERS, fieldsAllowed } from './permissions.mjs';
-import { outboxFile, setup } from './fixtures.test-helper.mjs';
+import { PRODUCT, outboxFile, outboxTag, setup } from './fixtures.test-helper.mjs';
 import { namesKind } from '../../shared/kinds.test-helper.mjs';
 
 const MODULES = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -275,7 +275,7 @@ test('L140: applyOutbox answers not_a_record for a none kind, in the real M9 and
   assert.equal(env.alerts.length, badAlerts, 'no alert for a none kind');
   assert.equal(env.record.list('report').length, 0);
   // The role check still comes first: a worker's think- is refused, not handed back.
-  const w = env.record.applyOutbox({ role: 'worker', sessionId: 'S-9' }, outboxFile(env, 'worker', 'S-9', 'think-1.md', 'x\n'));
+  const w = env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-9' }, outboxFile(env, 'worker', 'S-9', 'think-1.md', 'x\n'));
   assert.equal(isNotARecord(w), false);
   assert.match(w.reason, /think- is not listed for worker/);
   // A refusal is never read as not_a_record, whatever its reason text says.
@@ -288,7 +288,7 @@ test('L140: every inert kind is stored as a report through the real Record, by e
   for (const [k, s] of Object.entries(OUTBOX_KINDS).filter(([, x]) => x.entity === 'report')) {
     for (const role of s.roles) {
       const sid = `I-${++n}`;
-      const r = env.record.applyOutbox({ role, sessionId: sid }, outboxFile(env, role, sid, `${k}x${n}.md`, 'words\n'));
+      const r = env.record.applyOutbox(outboxTag(role, sid), outboxFile(env, role, sid, `${k}x${n}.md`, 'words\n'));
       assert.equal(r.ok, true, `${role} ${k}: ${r.reason}`);
     }
   }
@@ -344,7 +344,7 @@ test('L162 m3: makeHistory counts as a caller in any source form, and yaml/yml/t
 test('L162: each kind\'s roles are pinned', () => {
   assert.deepEqual(Object.fromEntries(Object.entries(OUTBOX_KINDS).map(([k, s]) => [k, s.roles])), {
     'report-': ['worker', 'reviewer', 'scout', 'writer', 'thinking', 'script'], 'report-compact-': ['worker'], 'state-compact-': ['front_door'],
-    'handoff-': ['lead', 'learning'], 'handin-': ['worker'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
+    'handoff-': ['lead', 'learning'], 'handin-': ['worker', 'script'], 'lesson-': ['learning'], 'verdict-': ['reviewer', 'auditor'],
     'ask-request-': ['front_door', 'incident'], 'wish-': ['lead'], 'think-': ['lead'], 'scout-': ['lead'], 'write-': ['lead'],
     'plan-': ['lead'], 'roadmap-': ['lead'], 'history-': ['lead'], 'request-': ['front_door'], 'state-': ['front_door'], 'idea-': ['front_door', 'thinking'],
     'check-': ['learning'], 'prune-': ['learning'],

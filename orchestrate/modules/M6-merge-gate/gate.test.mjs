@@ -75,7 +75,7 @@ function verifiedCard(w, id = 'C-1', { pr = 7, files = { 'src/a.mjs': 'two' }, u
   const head = g.commit([g.main], files, { from: g.main });
   g.openPull({ number: pr, head, files });
   must(put(env.record, 'workshop', 'card', id, { head }), 'head');
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: id }, outboxFile(env, 'worker', 'S-1', `handin-${id}.md`, `${JSON.stringify({ entity: 'card', id, from_state: 'running', to_state: 'in_review' })}\n`)), 'in review');
   const sid = `R-${id}`;
   runnerLaunch(env, id, sid, 'reviewer', head);
   const hdr = `${JSON.stringify({ entity: 'verdict', card: id, expectRev: env.record.read('card', id).rev, fields: { head, pass: true, checklist: CLEAN, material: 0 } })}\n`;
@@ -1225,7 +1225,7 @@ test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy 
 test('L66 M1 planted: a verdict row that says pass while its outbox file says fail is refused (5)', async () => {
   const w = world();
   verifiedCard(w);
-  // As if the reviewer had said fail and the Record row (which the workers' Mac user can write) were edited to pass: the
+  // As if the reviewer had said fail and the Record row (which the Dispatcher's `orchestrate` user writes, L936) were edited to pass: the
   // file now says fail, and the row names that file, so only the file's own word differs.
   const v = w.env.record.list('verdict')[0];
   const file = v.doc.source_key.slice(0, v.doc.source_key.lastIndexOf('\0'));

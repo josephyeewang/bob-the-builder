@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf } from './layout.mjs';
+import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, workerCopiesPath } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -212,7 +212,7 @@ export function planFolders(io, cfg, ids, rows = folderTable(cfg), { afterBase =
     if (st.isSymbolicLink() || !st.isDirectory()) { problems.push(`${row.path} exists but is ${st.isSymbolicLink() ? 'a link' : 'not a folder'}; nothing was changed`); continue; }
     // A folder under the base is root's or the one user it is for (NEW-1): one owned by anyone else was put there by someone
     // else, and is not adopted (that would hand root's later work, and the next owner, to whoever made it).
-    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}; it was not made by this setup and is not taken over. Nothing was changed`); continue; }
+    if (st.uid !== io.rootUid && st.uid !== want.uid) { problems.push(`${row.path} is owned by uid ${st.uid}, who is neither root nor ${row.owner}, so it is not taken over: someone else could have put files in it. Look inside it, remove it by hand, then run users-folders again. Nothing was changed`); continue; }
     const wantGid = wantGidOf(row, want);
     const group = [];
     if (st.uid !== want.uid || (wantGid !== undefined && st.gid !== wantGid) || (st.mode & 0o7777) !== row.mode) group.push(modeDo(wantGid, { ino: st.ino, dev: st.dev }));
@@ -321,7 +321,39 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
   { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
   const tableRows = folderTable(cfg);
-  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]) });
+  // The runner roles' flat outbox folders (outboxes/worker, outboxes/script) that setup made before L914 are no entry the
+  // setup did not make: the check below names them and what they hold, so the outbox root's row does not FAIL on them too.
+  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...oldFlatOutboxPaths(cfg), ...alsoKnown]) });
+  // L914: the worker runner's roles have their outboxes in each product's folder (L836), so setup makes their flat folders no
+  // more. One left from before is named with what it holds, for the owner to clear by hand: a session's hand-in there may
+  // not be taken in yet. Setup deletes nothing. Finder's own .DS_Store is let be.
+  for (const old of oldFlatOutboxPaths(cfg)) {
+    const what = `${old} is gone (L914: the ${old.split('/').pop()} outboxes are in each product's folder now)`;
+    let st = null; try { st = io.lstat(old); } catch (e) { if (e?.code !== 'ENOENT') { item(false, what, `it could not be looked at (${e?.code ?? e?.message})`); continue; } }
+    if (!st) continue; // gone, as it should be: no row, so a fresh install is not told of folders it never had (#433 r1 c2)
+    if (!st.isDirectory() || st.isSymbolicLink()) { item(false, what, `it is still there (${st.isSymbolicLink() ? 'a link' : 'not a folder'}). Check that it holds nothing unsaved, then remove it; setup removes nothing itself`); continue; }
+    let names = null; try { names = io.list(old); } catch { item(false, what, 'it is still there, and its contents could not be listed'); continue; }
+    const left = names.filter((n) => n !== '.DS_Store').sort();
+    const one = left.length === 1;
+    item(false, what, `${left.length ? `it is still there and holds ${one ? 'an entry' : `${left.length} entries`}: ${left.slice(0, 5).map((n) => `${old}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}` : 'it is still there, empty'}. Check that ${left.length > 1 ? 'each holds' : 'it holds'} nothing unsaved (a hand-in not yet taken in), then remove it; setup removes nothing itself`);
+  }
+  // The workers' copies folder is the owner's, so the root-only rule above does not list it. Since L836 it holds one folder
+  // per product and nothing else: a copy made before (flat, `<copies>/<card>`, also one whose card is named as a product:
+  // it has its own .git) or a dropped product's folder is named, for the owner to clear by hand. Setup deletes nothing:
+  // the copy may hold work not yet saved. Finder's own .DS_Store is let be. Missing, a link or a file: its own row FAILs.
+  {
+    const wc = workerCopiesPath(cfg); const what = `${wc} holds only the config's product folders (L836)`;
+    let isDir = false; try { isDir = io.lstat(wc).isDirectory(); } catch { /* missing: its own row says so */ }
+    let names = null;
+    if (isDir) { try { names = io.list(wc); } catch { item(false, what, 'its contents could not be listed'); } }
+    if (names) {
+      const known = new Set(tableRows.map((r) => r.path));
+      const isCopy = (n) => { try { io.lstat(`${wc}/${n}/.git`); return true; } catch { return false; } };
+      const left = names.filter((n) => n !== '.DS_Store' && (!known.has(`${wc}/${n}`) || isCopy(n))).sort();
+      const one = left.length === 1;
+      item(left.length === 0, what, `holds ${one ? 'an entry' : `${left.length} entries`} that ${one ? 'is' : 'are'} no product folder of this config (a copy made before the folders per product, or a dropped product's folder): ${left.slice(0, 5).map((n) => `${wc}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}. Check that each holds nothing unsaved (git status, and commits not yet pushed), then remove it; setup removes nothing itself`);
+    }
+  }
   return out;
 }
 

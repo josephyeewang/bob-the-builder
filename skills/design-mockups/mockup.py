@@ -23,15 +23,20 @@ Each generation run with a batch name also writes {round}-sheet.png + {round}-ga
 
 The archetype/style library lives in lib/archetypes.py. Prompt-craft heuristics are in SKILL.md.
 """
-import sys, os, json, pathlib
+import sys, os, json, pathlib, webbrowser
 sys.dont_write_bytecode = True  # never leave __pycache__/ in the shared skill folder
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import gen, archetypes, gallery  # noqa  (gen is config-LAZY: importing needs no config)
 
 def _open(p):
-    try: os.system(f'open "{p}"')
-    except Exception: pass
+    """Open a board without a shell or an OS-specific command."""
+    try:
+        opened = webbrowser.open(pathlib.Path(p).resolve().as_uri())
+    except Exception:
+        opened = False
+    if not opened:
+        print(f"Open the gallery in a browser: {pathlib.Path(p).resolve()}")
 
 def _resolve_out(explicit=None):
     """out_dir for the pure-gallery verbs: arg > $MOCKUP_OUT_DIR > config."""

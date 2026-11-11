@@ -13,26 +13,30 @@
 //   head name stand in.
 //   record is shared/record.mjs's interface (makeRecord), so callers never see this file.
 //
-// Options only tests pass: `now` (a fake clock), `host`, `probe` (fake process checks), `faultAt` (crash at a step),
+// Options only tests pass: `now` (a fake clock), `host`, `machine` (this Mac's id, L845), `probe` (fake process checks), `faultAt` (crash at a step),
 // `testNoLock` + `testNoRevCheck` (the mutation race, M-6: the race must be able to fail), `lockTimeoutMs`.
 
 import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { basename } from 'node:path';
-import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, releaseData, timeoutFor } from '../../shared/record.mjs';
+import { CARD_KINDS, ENTITIES, FINAL_STATES, SESSION_ID, STATES, WAIT_FIELDS, WAIT_WHO, isNotARecord, isOpen, leadLaunchHead, makeRecord, missingFields, notARecord, otherProductReason, releaseData, timeoutFor } from '../../shared/record.mjs';
 import { claimCheck, fixPlanCheck, guardWrite, same, waitSince } from './guard.mjs';
-import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, factFrom, mayCreateKind } from './permissions.mjs';
+import { PLAN_INPUTS, TAB_HEARTBEAT_FAMILY, TAB_HEARTBEAT_WRITER, actorName, draftFields, factFrom, mayCreateKind } from './permissions.mjs';
 import { PLAN_FROZEN, hasItsGo, planCards } from './plan-cards.mjs';
-import { readyCheck } from './ready.mjs';
+import { GO_FREE, readyCheck } from './ready.mjs';
 import { PASSES, headReviews, readOutboxFile, runnerLaunchFor, verdictFields, worstVerdict } from './outbox.mjs';
-import { processDead, realProbe } from './lock.mjs';
+import { machineId, onThisMachine, processDead, realProbe } from './lock.mjs';
 import { openStore } from './store.mjs';
+import { PRODUCT, productRoleClash } from '../../shared/product-paths.mjs';
 import { pastTime } from '../../shared/still-waiting.mjs';
 
 const MIN = 60000;
 // How long a session claim may wait for its process (claims.unlaunched_min, L72) when the rules don't say.
 const UNLAUNCHED_MIN_DEFAULT = 5;
 const HEX40 = /^[0-9a-f]{40}$/;
+// The card states with no move out (moves.mjs): a verdict for one is thrown away (L933), since it can verify nothing.
+// l44.test.mjs derives this list from MOVES, so a state that gains or loses its last move out changes it there first.
+export const REVIEW_OVER = Object.freeze(['cancelled', 'failed', 'closed_no_answer', 'reverted']);
 const KIND = /^[a-z_]{1,40}$/;
 const no = (reason) => ({ ok: false, reason });
 const iso = (ms) => new Date(ms).toISOString();
@@ -45,9 +49,29 @@ export function heartbeatLimit(rules, product) {
   return n !== undefined && n >= 1 ? n : undefined;
 }
 
+// L722, L729, L731: the draft-only plan grant, on its own so a test can reach it past the field gate, which refuses the
+// same writes first. True only when the card is a draft of a kind that always needs a go, the writer's grant covers that
+// kind (permissions draftFields, the one reading), and EVERY changed plan input is in it; one plan input off the list,
+// or none at all, refuses the whole write. GO_FREE is checked here too, so a grant table widened by mistake still can't
+// change the bar of a card that reaches ready with no go.
+export function draftPlanGrant(name, old, plan) {
+  const granted = draftFields(name, old?.kind);
+  return old?.state === 'draft' && !Object.hasOwn(GO_FREE, old.kind) && plan.length > 0 && plan.every((f) => granted.includes(f));
+}
+
+// L731 m1: a done_when set through the grant is what M2 derives from the rows (go.mjs doneBar): text, not empty. It is
+// never removed, since the go and the Tier-1 review would then carry no bar at all.
+export function grantedDoneWhenProblem(doc) {
+  if (!Object.hasOwn(doc, 'done_when')) return 'done_when may not be removed';
+  if (typeof doc.done_when !== 'string' || !doc.done_when.trim()) return 'done_when must be the rows\' pass tests as text (go.mjs doneBar)';
+  return null;
+}
+
 export function openRecordWithStore({ root, product, ownerUid, rules, alert = () => false, now = () => Date.now(), host = hostname(),
-  probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
-  if (typeof product !== 'string' || !/^[A-Za-z0-9._-]+$/.test(product)) throw new Error('the record needs its product name');
+  machine = machineId(), probe = realProbe, outbox = {}, profileVersion = null, faultAt, testNoLock = false, testNoRevCheck = false, lockTimeoutMs } = {}) {
+  // The product name is the one rule setup makes folders by (shared/product-paths.mjs PRODUCT, L890): a Record opened for a
+  // name setup can't make (`My.App`) or a role's (`lead`) would have no front door, and every file handed in would be refused.
+  if (typeof product !== 'string' || !PRODUCT.test(product) || productRoleClash(product)) throw new Error('the record needs its product name: lower case letters, digits and -, and not an AI role');
   if (!rules || typeof rules.get !== 'function') throw new Error('the record needs the rules (shared/rules.mjs)');
   const store = openStore({ root, ownerUid, alert, now, host, probe, faultAt, testNoLock, lockTimeoutMs });
   const get = (key) => rules.get(key, { product });
@@ -230,7 +254,13 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
     if (old.kind === 'fix' && PLAN_INPUTS.some((f) => changed.includes(f))) return no('a fix card\'s plan is its root card\'s; it never changes');
     // The Lead edits the plan only of a card kind it may make (0b-2 audit MAT-1): a go-free card (exact_reverse,
     // research_copy) gets to ready with no go, so a changed plan on one would run with no go at all.
-    if (PLAN_INPUTS.some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change the plan of a ${old.kind} card`);
+    // One exception (L722): a draft-only grant (permissions updateInDraft, the Dispatcher's done_when) on a draft of a kind
+    // that always needs a go. Its go is still asked on the plan as it then stands, so the hole MAT-1 closes stays closed.
+    const plan = PLAN_INPUTS.filter((f) => changed.includes(f));
+    if (plan.length && !mayCreateKind(name, old.kind)) {
+      if (!draftPlanGrant(name, old, plan)) return no(`${name} may not change the plan of a ${old.kind} card`);
+      if (plan.includes('done_when')) { const p = grantedDoneWhenProblem(doc); if (p) return no(p); }
+    }
     // Nor its brief, desired outcome or merge request (round 2 m5); needs_joe is a flag any setter may raise on any card.
     if (['brief', 'desired', 'merge_requested'].some((f) => changed.includes(f)) && !mayCreateKind(name, old.kind)) return no(`${name} may not change a ${old.kind} card's brief, desired or merge request`);
     if (changed.includes('needs_joe')) {
@@ -480,6 +510,11 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
       // verdict. The runner's own record is the proof; a launch the Dispatcher wrote into the Record is not.
       const rl = runnerLaunchFor({ root: outbox.launches, uids: outbox.uids, role: tag.role, card: tag.card, head: fields.head, sessionId: tag.sessionId });
       if (!rl.ok) return no(`no launch of ${tag.role} session ${tag.sessionId} on ${tag.card} at head ${fields.head.slice(0, 7)} from the review runner (${rl.reason}): a verdict counts only from a session the runner launched, for the head it was launched on`);
+      // A card no move leads out of (cancelled, failed, closed with no answer, reverted: REVIEW_OVER) has no review left
+      // to give: a real answer from a session the runner launched is thrown away, never kept as a pass (L933). Seen, so
+      // it is not read again; no row, so nothing shows a passed review for it. Checked after the file's own fields and its
+      // runner launch, so a malformed or forged verdict is still refused and told, whatever the card's state.
+      if (REVIEW_OVER.includes(c.doc.state)) return { ok: true, skipped: true, dropped: `card ${tag.card} is ${c.doc.state}, so its review is over and this verdict is not kept` };
       // One verdict per session (D12, 0b-9 M6): a reviewer that changes its mind is a new launch, never a second file.
       if (tx.list('verdict').some((v) => v.doc.session_id === tag.sessionId)) return no(`session ${tag.sessionId} has already given its verdict; a second is refused`);
       const id = `verdict-${tag.sessionId}-${tx.nextSeq()}`;
@@ -508,6 +543,9 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
   }
 
   function applyOutbox(tag, file) {
+    // A worker runner session's tag names its product (L836): this Record takes only its own product's hand-ins, so
+    // another product's outbox (client work) is never read from here (L850-2).
+    if (tag?.product != null && tag.product !== product) return no(otherProductReason(product, tag.product));
     const f = readOutboxFile({ outboxRoot: outbox.root, uids: outbox.uids, tag, file });
     // A kind that is not a record (L140) is handed back untouched: no seen mark, no diary line, no refusal, no alert.
     if (isNotARecord(f)) return notARecord(f.kind);
@@ -542,7 +580,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
           if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
           return no(reason);
         }
-        if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
+        // A verdict thrown away for an ended card (REVIEW_OVER, L933) is marked seen as 'dropped', not 'applied' (L943 c2).
+        if (r.ok) { tx.markSeen(f.key, r.dropped ? 'dropped' : 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
         return refuse({ ...ev, outbox: true }, r.reason);
       });
@@ -591,7 +630,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
         if (c.doc.state !== 'claimed' && c.doc.state !== 'running') return no(`card ${card} is ${c.doc.state}; only a claimed or running card's claim is broken`);
         const claim = c.doc.claim;
         if (claim?.kind !== 'session') return no('a tab claim is never broken; it lapses');
-        if (claim.host !== host) return no(`claim is from host ${claim.host}; never broken from here`);
+        // This Mac's claim when its host name or its machine id matches (L845, as for locks); an older claim with no id: host only.
+        if (!onThisMachine(claim, { host, machine })) return no(`claim is from another Mac (host ${claim.host}${claim.machine ? `, machine ${claim.machine}` : ''}); never broken from here`);
         if (!Number.isInteger(claim.pid)) return no('this claim has no process yet; it lapses at claims.unlaunched_min, never broken');
         const stuckMin = num('claims.stuck_min');
         if (stuckMin === undefined || stuckMin < 1) return no('the rules set no claims.stuck_min, so no claim is broken');

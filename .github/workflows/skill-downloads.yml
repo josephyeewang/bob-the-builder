@@ -1,0 +1,77 @@
+name: skill-downloads
+
+on:
+  pull_request:
+    paths:
+      - 'skills/**'
+      - 'LICENSE'
+      - 'third_party/**'
+      - 'scripts/skill_export.py'
+      - 'scripts/skill_publish.py'
+      - 'scripts/test_skill_*.py'
+      - '.github/workflows/skill-downloads.yml'
+  push:
+    branches: [main]
+
+# Every main revision runs: an unrelated later commit must not strand a queued
+# skill update when the publisher correctly refuses its now-stale source SHA.
+
+# One publisher at a time; a queued old revision also checks current main.
+concurrency:
+  group: skill-downloads
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline exporter and publisher tests
+        run: python3 -B -m unittest discover -s scripts -p 'test_skill_*.py' -v
+      - name: Standalone Verdict tests
+        run: python3 -B -m unittest discover -s skills/verdict/tests -v
+      - name: Install optional image-test dependency
+        run: python3 -m pip install Pillow==13.0.0
+      - name: Design module tests without provider calls
+        run: |
+          python3 -B -m unittest discover -s skills/design-mockups/tests -v
+          (cd skills/design-gallery/logo-kit && python3 -B tests/test_export_titles.py)
+      - name: Export committed source without publishing
+        run: |
+          test -z "$(git status --porcelain)"
+          python3 -B scripts/skill_export.py --output "$RUNNER_TEMP/skill-export"
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Export clean committed HEAD
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          python3 -B scripts/skill_export.py --output "$RUNNER_TEMP/skill-export"
+      - name: Publish immutable release and advance catalogue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B scripts/skill_publish.py \
+            --directory "$RUNNER_TEMP/skill-export" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-sha "$GITHUB_SHA"

@@ -16,6 +16,7 @@ import { outageStep, OUTAGE_FACT } from './outage.mjs';
 import { USAGE_FACT } from './usage.mjs';
 import { recWith, rulesWith, usageFact, withAlerts } from './fixtures.test-helper.mjs';
 import { makeRules } from '../../shared/rules.mjs';
+import { machineId } from '../M9-record/lock.mjs';
 // Rules with one reading replaced, built on makeRules (L148 item 1): num(), dec() and flag() read through the same
 // override, so a test never answers `get` alone while the code reads numbers through num().
 const overGet = (base, get) => makeRules({ get rev() { return base.rev; }, may: (a, s) => base.may(a, s), get, classify: (c) => base.classify(c) });
@@ -46,7 +47,7 @@ function world() {
   const pass = () => withAlerts(rec, env.clock.t, () => {}, (alert) => dispatcherPass({
     rec, rules, now: env.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/worker/${x.sessionId}` }; },
+    launch: async (x) => { const a = answer(x); if (!a.ok) return a; n += 1; launched.push({ card: x.card.id, sessionId: x.sessionId, pid: 1000 + n }); return { ok: true, sessionId: x.sessionId, pid: 1000 + n, pidStart: 'start', pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert,
   }));
   return { env, rec, rules, dead, launched, pass, refuseLaunch: (f) => { answer = f; } };
@@ -62,6 +63,8 @@ test('L72 contract: claim and start: the pass claims a ready card naming its ses
   assert.equal(c.state, 'running');
   const [l] = w.launched;
   assert.deepEqual([c.claim.kind, c.claim.session_id, c.claim.host, c.claim.pid, c.claim.pid_start], ['session', l.sessionId, HOST, l.pid, 'start']);
+  // L845: the claim names this Mac's hardware id, so a host name change does not make it foreign (none where no id is read).
+  assert.equal(c.claim.machine, machineId() ?? undefined);
   const kinds = diaryKinds(w.rec, 'C-1');
   assert.ok(kinds.indexOf('claim') >= 0 && kinds.indexOf('started') > kinds.indexOf('claim'), `claim, then start: ${kinds}`);
   // The launch record the Merge Gate counts from: the session the claim names.
@@ -145,7 +148,7 @@ async function inReview(w) {
   await w.pass();
   const [l] = w.launched;
   must(put(w.rec, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
-  must(w.rec.applyOutbox({ role: 'worker', sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
+  must(w.rec.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.env, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
   assert.equal(w.rec.read('card', 'C-1').doc.state, 'in_review');
   return l;
 }

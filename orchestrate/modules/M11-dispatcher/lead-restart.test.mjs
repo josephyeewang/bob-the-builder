@@ -18,11 +18,13 @@ const ended = (tokens, atMin = 0) => ({ tokens, turnEnded: true, endedAt: T0 + a
 const midTurn = (tokens) => ({ tokens, turnEnded: false, endedAt: null, openTools: ['t1'], compactions: 0 });
 
 function world() {
-  const outbox = join(tempDir('m11-lead-'), 'lead');
-  mkdirSync(outbox);
+  // The Lead's real outbox, <root>/lead/<id>, under the root the stand-in Record reads (L910).
+  const root = tempDir('m11-lead-');
+  const outbox = join(root, 'lead', SID);
+  mkdirSync(outbox, { recursive: true });
   const calls = { sent: [], stops: 0, starts: [], alerts: [] };
   let outcome = 'sent';
-  let rec = recWith();
+  let rec = recWith([], { outboxRoot: root });
   const step = (size, min, over = {}) => withAlerts(rec, T0 + min * MIN, over.alert ?? ((t) => calls.alerts.push(t)), (alert) => leadRestartStep({
     rec, rules: over.rules ?? R, now: T0 + min * MIN, lead: { sessionId: SID, product: 'p' }, size, alert: over.answer ?? alert,
     inFlight: over.inFlight ?? null,
@@ -557,4 +559,14 @@ test('L359: a re-ask the Lead keeps refusing is told from the first refusal, the
   assert.equal(doc.reask_refused_since, null, 'cleared once sent');
   assert.equal(doc.reask_refused_told, null);
   assert.equal(w.calls.stops, 0);
+});
+
+// L863 c1 (plant P10): what leadInFlight counts as used, by behaviour, not by its source text. Each used state lets the
+// restart go; a file still being applied, or in any other state or none, keeps it in flight.
+test('L863 c1: an outbox file is used only in a USED_STATES state; applying, or any other, is still in flight', async () => {
+  const { USED_STATES } = await import('./intake-facts.mjs');
+  const at = (state) => recWith(state === undefined ? [] : [['fact', `intake-applied-${SID}-wish-1.md`, { state }]]);
+  const ask = (state) => leadInFlight({ rec: at(state), sessionId: SID, outboxNames: ['wish-1.md'], questionOpen: false });
+  for (const state of USED_STATES) assert.equal(ask(state), null, state);
+  for (const state of ['applying', 'started', 'Applied', '', undefined]) assert.match(ask(state) ?? '', /wish-1\.md not used yet/, String(state));
 });

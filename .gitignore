@@ -41,3 +41,6 @@ npm-debug.log*
 # See audit-lenses/_lens-retro.md §B.
 lens-retros/*.json
 !lens-retros/.gitkeep
+
+# Generated standalone export previews and local verification artifacts
+.audit/

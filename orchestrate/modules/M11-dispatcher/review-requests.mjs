@@ -1,12 +1,16 @@
 // The Dispatcher's side of the review runner (lead call L65). The Dispatcher never starts a reviewer or an auditor:
-// it runs as the workers' Mac user, and anything it could start a worker could start too. It only asks, by writing a
+// it runs as the orchestrate user (workers run as the owner's, the review runner as `review`; L936 corrects an older
+// note that said the workers'), and a reviewer's verdict must come from a session only `review` started, in folders only
+// `review` can write. It only asks, by writing a
 // request { card, head, role, request_id } into the runner's requests/ folder, and the runner (M4
 // review-runner.mjs, running as `review`) checks the request against the Record and git before starting anything.
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or
 // older than 3 minutes is an error, never "no reviewer" (L63).
 //
 //   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main, runnerLog })
-//                                                             → { requestReview, hasReviewer, reviewAlerts }
+//                                                             → { requestReview, hasReviewer, planReviewsRunning,
+//                                                                 reviewAlerts, startPlanReview, planReviewAnswer }
+//   writePlanReviewRequest({ dir, card, fingerprint, key })   → asks for a plan reviewer (L703); its session is the request id
 //   mainSeenHead({ installRoot, main, owner, top })           → the mainHead port, from root's record of main (L75 m-2)
 //   statusAlerts(status, mainHead, now, { runnerLog })        → the Dispatcher's own alerts from the status (L66)
 //   relayReviewAlerts({ rec, alerts, alert, now, report })    → tells each runner alert once, and each hold while it lasts
@@ -30,39 +34,102 @@
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
-import { closeSync, constants, fstatSync, linkSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { readReviewStatus, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
+import { dirname, join } from 'node:path';
+import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
 import { behindSince, mainSeenFile, readMainSeen } from '../M4-workshop/launcher/install-check.mjs';
 import { RUNNER_LOG } from '../M4-workshop/launcher/review-daemons.mjs';
-import { REVIEW_ROLES } from '../../shared/review-roles.mjs';
+import { PLAN_REVIEW_ROLE, REVIEW_ROLES } from '../../shared/review-roles.mjs';
 import { tellThen, clearCause, writeFrom, queuedMarks } from './alerts.mjs';
 import { causeOf } from './pass.mjs';
 import { stillWaiting, pastTime, STILL_WAITING_MS } from '../../shared/still-waiting.mjs';
 
 const HEX40 = /^[0-9a-f]{40}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
  * One request file, given its name only once it is whole (the runner wakes on the folder and must never read half of
  * one), and never written over. → { ok, requestId } | { ok: false, reason }
  */
-export function writeReviewRequest({ dir, card, head, role, newId = randomUUID }) {
+export function writeReviewRequest({ dir, card, head, role, newId = randomUUID, tmpId = randomUUID }) {
   if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
   if (typeof head !== 'string' || !HEX40.test(head)) return { ok: false, reason: 'the card names no head (40 hex)' };
   if (!REVIEW_ROLES.includes(role)) return { ok: false, reason: `"${role}" is not a review role` };
   const id = newId();
   if (typeof id !== 'string' || !REQUEST_ID.test(id)) return { ok: false, reason: 'the request id is not letters, digits and dashes' };
-  const tmp = join(dir, `.${id}.tmp`);
+  const w = writeRequestFile(dir, id, { card, head, role, request_id: id }, { tmpId });
+  return w.ok ? { ok: true, requestId: id } : w;
+}
+
+// One request file: written whole under a hidden name, then given its own name, never over another. `same`: a file
+// already under that name may be this very request (a plan's id is its key's hash), and counts as written only when it
+// is (L735 m1-r2): a plain file of the Dispatcher's own, holding these very bytes. Anyone may write the requests folder
+// and work the name out, so any other file there is said, never taken as asked. → { ok, exists? } | { ok: false, reason }
+// The hidden name is new each call (#294 r3 m2): two writers of one plan's id never share it, and only the call that
+// made it takes it away, so a file someone else put there is never removed. `tmpId` lets a test name it.
+function writeRequestFile(dir, id, body, { same = false, uid = process.getuid(), tmpId = randomUUID } = {}) {
+  const tmp = join(dir, `.${id}.${tmpId()}.tmp`);
+  let made = false;
   const final = join(dir, `${id}.json`);
+  const text = JSON.stringify(body);
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
-    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, JSON.stringify({ card, head, role, request_id: id })); } finally { closeSync(fd); }
-    linkSync(tmp, final);
+    made = true;
+    // 0644 by handle, whatever the job's umask (the Dispatcher's is 077): else `review` can't read the request and no
+    // review ever starts (L945 a; the same fix as owner-status.mjs writeNewReadable, L929).
+    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
+    // A file the runner takes away between the link and the read is no intruder: the link is tried once more (#294
+    // self-review m2).
+    for (let tries = 0; ; tries += 1) {
+      try { linkSync(tmp, final); break; } catch (e) {
+        if (!same || e?.code !== 'EEXIST') throw e;
+        const why = ownRequest(final, text, uid);
+        if (why === GONE && tries === 0) continue;
+        return why ? { ok: false, reason: `another file stands under this plan's request name, so the request was not written (${why === GONE ? 'it went while it was read' : why}); the runner can't be asked until it is gone` } : { ok: true, exists: true };
+      }
+    }
   } catch (e) {
     return { ok: false, reason: `the request could not be written (${e?.code ?? e?.message ?? e})` };
-  } finally { try { unlinkSync(tmp); } catch { /* gone */ } }
-  return { ok: true, requestId: id };
+  } finally { if (made) try { unlinkSync(tmp); } catch { /* gone */ } }
+  return { ok: true };
+}
+
+// Why the file under a request's name is not this very request, or null when it is: read by descriptor, never a link.
+const GONE = Symbol('gone');
+function ownRequest(file, text, uid) {
+  let fd;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) { return e?.code === 'ENOENT' ? GONE : `it can't be opened (${e?.code ?? e?.message})`; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return 'it is not a plain file';
+    if (st.uid !== uid) return `it is uid ${st.uid}'s, not the Dispatcher's`;
+    const want = Buffer.from(text);
+    if (st.size !== want.length) return 'it holds another request';
+    const got = Buffer.alloc(want.length);
+    let n = 0;
+    while (n < got.length) { const r = readSync(fd, got, n, got.length - n, n); if (r === 0) break; n += r; }
+    return n === want.length && got.equals(want) ? null : 'it holds another request';
+  } catch (e) { return `it can't be read (${e?.code ?? e?.message})`; } finally { closeSync(fd); }
+}
+
+/**
+ * Asks the runner for a plan reviewer (L703): a request { card, fingerprint, request_id, role: plan_reviewer }. The
+ * request id is the sha256 of plan-go's `key` (card and fingerprint), so asking again for the same plan names the same
+ * request: one still waiting is left as it is, and one the runner already took is refused there as seen, never started
+ * twice. The session plan-go keeps is that request id; the runner's launch records carry it, and planReviewAnswer reads
+ * by it. The runner checks the request against the Record (a Tier-1 draft whose plan has this fingerprint) and starts
+ * the reviewer itself, retrying its own failed starts. → { ok: true, session } | { ok: false, reason }
+ */
+export function writePlanReviewRequest({ dir, card, fingerprint, key, uid = process.getuid(), tmpId = randomUUID }) {
+  if (typeof card !== 'string' || !CARD_ID.test(card)) return { ok: false, reason: 'not a card id' };
+  if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) return { ok: false, reason: 'the plan names no fingerprint (64 hex)' };
+  if (typeof key !== 'string' || !key) return { ok: false, reason: 'the start names no key' };
+  // The one id the runner takes for this plan (L726 m1): the key plan-go gives must be the card and plan it names.
+  const id = PLAN_REQUEST_ID(card, fingerprint);
+  if (key !== `${card}-${fingerprint}`) return { ok: false, reason: 'the start\'s key is not its card and plan' };
+  const w = writeRequestFile(dir, id, { card, fingerprint, request_id: id, role: PLAN_REVIEW_ROLE }, { same: true, uid, tmpId });
+  return w.ok ? { ok: true, session: id } : w;
 }
 
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex').slice(0, 24);
@@ -134,7 +201,28 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
+    // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list
+    // never sees them. Throws when the status can't be trusted, so the tick counts them as at the cap, never as none.
+    planReviewsRunning: () => read().running.filter((r) => r?.role === PLAN_REVIEW_ROLE).map(({ card, session_id: sessionId, started_at: startedAt, request_id: requestId }) => ({ card, session_id: sessionId, started_at: startedAt, ...(typeof requestId === 'string' ? { request_id: requestId } : {}) })),
     reviewAlerts: () => { const s = read(); return [...s.alerts, ...s.holds.map((h) => ({ ...h, hold: true })), ...statusAlerts(s, mainHead, now(), { runnerLog })]; },
+    // The plan reviewer (L703): asked by a request, its answer read from the runner's own ended record beside the status,
+    // so the Dispatcher never reads the reviewer's outbox. A record it can't trust throws, never "still working".
+    startPlanReview: ({ card, fingerprint, key }) => writePlanReviewRequest({ dir: requests, card, fingerprint, key }),
+    // A plan with no answer yet that the runner holds at the cap is said to wait for a slot (#294 r3 m1), naming the
+    // plan reviewers that hold the slots and since when (#335 r1 M1). One that runs says when its reviewer started, so
+    // "slow" is counted from there (#335 r1 m1). That is wording only: a status that can't be read leaves the plain
+    // "still working", never a refusal.
+    planReviewAnswer: ({ card, fingerprint, session }) => {
+      const a = planAnswerFor({ root: dirname(status), uid: reviewUid, card, fingerprint, session });
+      if (a.ok !== true || a.answer !== undefined) return a;
+      let s; try { s = read(); } catch { return a; }
+      const plans = (Array.isArray(s.running) ? s.running : []).filter((r) => r !== null && typeof r === 'object' && r.role === PLAN_REVIEW_ROLE && typeof r.card === 'string');
+      if (s.plans_waiting.some((p) => p.request_id === session && p.card === card && p.fingerprint === fingerprint)) {
+        return { ok: true, waiting: 'slot', holders: plans.map((r) => ({ card: r.card, ...(typeof r.started_at === 'string' ? { started_at: r.started_at } : {}), ...(r.card === card && r.fingerprint !== fingerprint ? { older_plan: true } : {}) })) };
+      }
+      const mine = plans.find((r) => r.request_id === session && r.card === card && r.fingerprint === fingerprint && typeof r.started_at === 'string');
+      return mine ? { ok: true, started_at: mine.started_at } : a;
+    },
   };
 }
 

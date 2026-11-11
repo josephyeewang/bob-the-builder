@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { writeReviewRequest, reviewPorts, statusAlerts, MAIN_UNREAD, mainSeenHead, STAMP_GRACE_MS } from './review-requests.mjs';
@@ -29,11 +29,20 @@ test('L65: a request is written whole under its final name, never over another, 
   assert.equal(again.ok, false);
   assert.match(again.reason, /could not be written \(EEXIST\)/);
   assert.equal(JSON.parse(readFileSync(join(dir, 'q-1.json'), 'utf8')).card, 'C-1');
-  // A link planted at the temporary name is not followed.
+  // A link planted at the temporary name is not followed, and, being someone else's, is not taken away (#294 r3 m2).
   const elsewhere = tempDir('m11-req-x-');
-  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.tmp'));
-  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9' }).ok, false);
+  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.t1.tmp'));
+  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9', tmpId: () => 't1' }).ok, false);
   assert.deepEqual(readdirSync(elsewhere), []);
+  assert.ok(lstatSync(join(dir, '.q-9.t1.tmp')).isSymbolicLink(), 'the planted name is left where it was');
+  unlinkSync(join(dir, '.q-9.t1.tmp'));
+  // The hidden name is new each call: one planted at the old fixed name is never met, and the request is written.
+  symlinkSync(join(elsewhere, 'target'), join(dir, '.q-9.tmp'));
+  assert.equal(writeReviewRequest({ dir, card: 'C-1', head: HEAD, role: 'reviewer', newId: () => 'q-9' }).ok, true);
+  assert.deepEqual(readdirSync(elsewhere), []);
+  assert.ok(lstatSync(join(dir, '.q-9.tmp')).isSymbolicLink());
+  unlinkSync(join(dir, '.q-9.tmp'));
+  unlinkSync(join(dir, 'q-9.json'));
   const bad = [
     [{ card: '../C-1' }, /not a card id/], [{ card: 7 }, /not a card id/],
     [{ head: HEAD.slice(1) }, /names no head/], [{ head: HEAD.toUpperCase() }, /names no head/], [{ head: undefined }, /names no head/],
@@ -86,6 +95,49 @@ test('L65: hasReviewer reads the runner\'s status: the card, role and head must 
   assert.throws(() => reviewPorts({ requests: dir, status: join(dir, 'none.json'), reviewUid: ME, now: () => now }).hasReviewer('C-1', 'reviewer', HEAD), /missing/);
   chmodSync(file, 0o666);
   assert.throws(() => p.hasReviewer('C-1', 'reviewer', HEAD), /written by others/);
+});
+
+test('L688: planReviewsRunning lists only the plan reviewers in the runner\'s status, and an untrusted status throws (never none)', () => {
+  const dir = tempDir('m11-status-');
+  const at = new Date(T0).toISOString();
+  const running = [{ card: 'C-1', role: 'reviewer', head: HEAD, session_id: 's-1', started_at: at },
+    { card: 'C-2', role: 'plan_reviewer', head: HEAD, session_id: 's-2', started_at: at, pid: 7 },
+    { card: 'C-3', role: 'auditor', head: HEAD, session_id: 's-3', started_at: at }];
+  const file = status(dir, { written_at: at, ok: true, running, alerts: [] });
+  let now = T0 + MINUTE;
+  const p = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => now });
+  assert.deepEqual(p.planReviewsRunning(), [{ card: 'C-2', session_id: 's-2', started_at: at }]);
+  assert.equal(p.hasReviewer('C-2', 'reviewer', HEAD), false, 'a plan reviewer is no reviewer of the change');
+  now = T0 + STATUS_STALE_MS + 1;
+  assert.throws(() => p.planReviewsRunning(), /minutes old/);
+  now = T0;
+  assert.throws(() => reviewPorts({ requests: dir, status: file, reviewUid: ME + 1, now: () => now }).planReviewsRunning(), /not owned by the review user/);
+});
+
+// #335 r2 m2: the holders are built here, so they are tested here. Only plan reviewers are listed, and "an older plan" is
+// set only for this card's own reviewer on another fingerprint.
+test('#335 r2 m2 planted: a plan waiting for a slot names only the plan reviewers, and marks an older plan only on its own card', () => {
+  const dir = tempDir('m11-holders-');
+  const at = new Date(T0 - 30 * MINUTE).toISOString();
+  const running = [
+    { card: 'C-1', role: 'plan_reviewer', head: HEAD, session_id: 's-1', started_at: at, fingerprint: 'f-old', request_id: 'q-0' },
+    { card: 'C-2', role: 'plan_reviewer', head: HEAD, session_id: 's-2', started_at: at, fingerprint: 'f-other', request_id: 'q-2' },
+    { card: 'C-3', role: 'plan_reviewer', head: HEAD, session_id: 's-3', fingerprint: 'f-new', request_id: 'q-3' },
+    { card: 'C-4', role: 'reviewer', head: HEAD, session_id: 's-4', started_at: at },
+    { card: 'C-5', role: 'auditor', head: HEAD, session_id: 's-5', started_at: at },
+    { card: 'C-1', role: 'plan_reviewer', head: HEAD, session_id: 's-6', fingerprint: 'f-new', request_id: 'q-6' },
+  ];
+  const plans_waiting = [{ card: 'C-1', fingerprint: 'f-new', request_id: 'q-1', waiting_since: at }];
+  const file = status(dir, { written_at: new Date(T0).toISOString(), ok: true, running, alerts: [], plans_waiting });
+  const p = reviewPorts({ requests: dir, status: file, reviewUid: ME, now: () => T0 + MINUTE });
+  assert.deepEqual(p.planReviewAnswer({ card: 'C-1', fingerprint: 'f-new', session: 'q-1' }), { ok: true, waiting: 'slot', holders: [
+    { card: 'C-1', started_at: at, older_plan: true },
+    { card: 'C-2', started_at: at },
+    { card: 'C-3' },
+    { card: 'C-1' },
+  ] });
+  // A plan that is not waiting is not told as waiting, whoever holds the slots.
+  assert.equal(p.planReviewAnswer({ card: 'C-1', fingerprint: 'f-new', session: 'q-9' }).waiting, undefined);
 });
 
 test('L66, L315: a failed runner pass and an installed copy behind main are holds, each naming its cause', () => {
@@ -214,4 +266,19 @@ test('L75 m-2: the stamp alert waits from root\'s record of main, read the way t
   writeFileSync(sfile, JSON.stringify({ written_at: new Date(T0).toISOString(), ...ok }), { mode: 0o644 });
   const got = reviewPorts({ requests: dir, status: sfile, reviewUid: ME, now: () => T0, installRoot, main: () => MAIN }).reviewAlerts();
   assert.deepEqual(got.map((a) => a.id), ['stamp']);
+});
+
+// L945 a: the Dispatcher's job runs under umask 077; a request it writes must still be 0644, or `review` (another user)
+// can't read it and no review starts. Plan requests go through the same file writer.
+test('L945 a: a review request is 0644 under the Dispatcher job\'s umask 077, so the review runner can read it', () => {
+  const dir = tempDir('m11-rr-umask-');
+  const old = process.umask(0o077);
+  try {
+    const r = writeReviewRequest({ dir, card: 'C-1', head: 'a'.repeat(40), role: 'reviewer', newId: () => 'req-1' });
+    assert.equal(r.ok, true, r.reason);
+    const st = lstatSync(join(dir, 'req-1.json'));
+    assert.equal(st.mode & 0o777, 0o644);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'req-1.json'), 'utf8')), { card: 'C-1', head: 'a'.repeat(40), role: 'reviewer', request_id: 'req-1' });
+    assert.deepEqual(readdirSync(dir), ['req-1.json'], 'no hidden file left');
+  } finally { process.umask(old); }
 });

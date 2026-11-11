@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { seed, plan, leadCard, HEAD, HEAD2 } from '../M9-record/fixtures.test-helper.mjs';
-import { outboxFile as m9file } from '../M9-record/fixtures.test-helper.mjs';
+import { outboxFile as m9file, outboxTag } from '../M9-record/fixtures.test-helper.mjs';
 import { checkOutboxFile, outboxFile } from '../M1-front-door/outbox.mjs';
 import { queueOrder } from '../M6-merge-gate/gate.mjs';
 import { markReverted, undoneBy } from '../M6-merge-gate/undo.mjs';
@@ -40,7 +40,7 @@ function flag(t, { sid = SID, role = 'front_door', pr = 41, brief = WORDS, id = 
   const f = outboxFile('ask-request', id, { ask: 'undo', product: PRODUCT, pr, brief });
   assert.equal(f.ok, true, f.reason);
   assert.equal(checkOutboxFile(f.name, f.text).ok, true);
-  must(t.record.applyOutbox({ role, sessionId: sid }, m9file(t, role, sid, f.name, f.text)), 'undo request');
+  must(t.record.applyOutbox(outboxTag(role, sid), m9file(t, role, sid, f.name, f.text)), 'undo request');
 }
 
 // The conversation the owner had, as M2's copy reads it.
@@ -137,7 +137,7 @@ test('R-0b-140: a flag a worker typed, or words found in a file, open nothing', 
   // A worker can't even hand the file in: the record takes ask requests only from the Front Door and incident roles.
   const w = m2env(); merged(w);
   const f = outboxFile('ask-request', '20261103-0915-uw', { ask: 'undo', product: PRODUCT, pr: 41, brief: WORDS });
-  assert.equal(w.record.applyOutbox({ role: 'worker', sessionId: 'W-1' }, m9file(w, 'worker', 'W-1', f.name, f.text)).ok, false);
+  assert.match(w.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'W-1' }, m9file(w, 'worker', 'W-1', f.name, f.text)).reason, /not listed for worker/);
   assert.deepEqual((await openUndoFlags(w.ctx, { entriesOf: said(WORDS), addedBy: noFilesAdded })).opened, []);
   // saidByOwner: typed or answered turns only.
   assert.equal(saidByOwner(null, WORDS), false);

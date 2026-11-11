@@ -34,7 +34,7 @@ test('L112: every Record write in a module is one the permissions table allows (
 
 test('L112: the scan sees the writes the lead counted, so an empty answer is not a blind scan', () => {
   const n = (actor, entity) => scan.sites.filter((s) => s.actor === actor && s.entity === entity).length;
-  assert.equal(n('dispatcher', 'fact'), 16, 'alerts, joe-waits ×2, lead-restart, merges ×2, moves, outage, outbox-intake, plan-go, proposals-intake ×5, usage (pass, tick and phone-link write through writeFrom, L335 m-1, L354)');
+  assert.equal(n('dispatcher', 'fact'), 18, 'alerts, joe-waits ×2, lead-restart, merges ×2, moves, outage, outbox-intake, plan-go, proposals-intake ×6 (noteUsed, #298 L736), refused-writes (the never-taken restore probe, #367 r1 M1), usage (pass, tick and phone-link write through writeFrom, L335 m-1, L354)');
   // #68: the restart handoff is the Lead's own (its outbox); the Dispatcher saves a lead-restart- fact instead, and
   // asks are approvals' alone (lane 2's consumeAsk).
   assert.equal(n('dispatcher', 'handoff'), 0);
@@ -154,8 +154,9 @@ test('comments are blanked without eating code after a regex or a string that lo
 const SNAPSHOT = {
   card: {
     lead: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe'], update: ['brief', 'desired', 'merge_requested', 'needs_joe'], updateInDraft: ['files', 'done_when', 'tier', 'plan_sha256', 'main_commit'], kinds: ['ordinary', 'lead_daily_card'] },
-    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
+    dispatcher: { create: ['state', 'product', 'module', 'lane', 'kind', 'depends_on', 'what', 'fix_of', 'source', 'research_ask', 'files', 'done_when', 'tier', 'plan_sha256', 'main_commit', 'brief', 'desired', 'merge_requested', 'needs_joe', 'round'], update: ['claim', 'wait', 'failure', 'summary', 'report_ref', 'needs_joe', 'attempts'], updateInDraft: ['done_when'], draftKinds: ['ordinary'], kinds: ['fix', 'exact_reverse', 'research_copy'] },
     worker: { update: ['summary', 'report_ref'] },
+    script: { update: ['summary', 'report_ref'] },
     workshop: { update: ['head'] },
     approvals: { update: ['needs_joe', 'approval_required', 'cancel_reason'] },
     merge_gate: { update: ['needs_joe', 'merge_commit', 'attempts'] },

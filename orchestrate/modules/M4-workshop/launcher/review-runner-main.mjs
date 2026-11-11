@@ -14,7 +14,8 @@
 //
 // The config names every path; nothing here names a machine:
 //   { "installRoot": "/abs", "root": "/abs", "outboxRoot": "/abs", "reviewHome": "/abs",
-//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review
+//     "uids": { "<role>": <uid>, ... },            every role of the design table (m-1); both review roles name review;
+//                                                   since L760 that includes "script", the workers' user's id
 //     "recordRoot": "/abs", "recordUid": <uid>,     the Record, read only (its docs/card/ and docs/verdict/)
 //     "mirror": "/abs",                             the git mirror, read only (refs/heads/card/<card>)
 //     "claudeBin": "/abs",                          the pinned claude program (checked on each pin bump, m-8), inside installRoot
@@ -34,7 +35,7 @@
 //                                                   folder (which the deny list covers whole). All five are checked at
 //                                                   daemon start (R-0b-163), so a typo stops the daemon, not each review
 //     "pin": "x.y.z", "machineWide": "/abs",       the Claude Code version the rules pin (launch checks 0, 6, 7) and the
-//                                                   machine-wide settings file (check 10)
+//                                                   machine-wide settings file (check 10; CLAUDE_FILE only, L913)
 //     "bobManifest": "/abs", "budget": "/abs.mjs",  optional, inside installRoot and root's: the pinned Bob folder's file
 //                                                   list { path: sha256 } (check 13), and a module exporting
 //                                                   budget(config) → M11's own check12 inputs { rules, rec, bandsNow,
@@ -85,12 +86,18 @@ import { sessionSettings, templateFile } from './review-settings.mjs';
 import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
 import { removeProtected, restoreMainCopies } from './worker-copy.mjs';
 import { writeSnapshot } from '../hooks/snapshot.mjs';
-import { KEYS, minutes } from '../../M11-dispatcher/keys.mjs';
+import { changeReaders, finalize } from '../../M5-review-audit/findings.mjs';
+import { KEYS, minutes, need } from '../../M11-dispatcher/keys.mjs';
+import { TOOLS_CHECKED } from '../../M10-rules/roles.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from './env-check.mjs';
 
 const ABS = ['installRoot', 'root', 'outboxRoot', 'reviewHome', 'recordRoot', 'mirror', 'claudeBin', 'hooksDir', 'ownerHome', 'wiring',
   'snapshot', 'bobFolder', 'reviewCopies', 'workerCopies', 'machineWide'];
 const OPTIONAL_ABS = ['accountCopy', 'ownerTaps', 'bobManifest', 'budget'];
 const PIN = /^\d+\.\d+\.\d+$/;
+// Every field readConfig reads, and nothing else: setup's review-config (setup/review-config.mjs) builds each from
+// exactly one source, and its test holds that table equal to this list.
+export const CONFIG_FIELDS = Object.freeze([...ABS, ...OPTIONAL_ABS, 'deny', 'pin', 'rules', 'uids', 'recordUid', 'ownerUid']);
 // The one export a wiring may have (R-0b-163, L78 n4).
 export const WIRING_EXPORTS = Object.freeze(['start']);
 const absList = (v) => Array.isArray(v) && v.every((p) => typeof p === 'string' && isAbsolute(p));
@@ -109,8 +116,14 @@ export function readConfig(file, { lstat = lstatSync, top = '/', acl = aclProble
   const c = openJobJson(file, (why) => { throw new Error(`config: ${file} ${why}`); }).value;
   for (const k of ABS) if (typeof c?.[k] !== 'string' || !isAbsolute(c[k])) throw new Error(`config: ${k} must be an absolute path`);
   for (const k of OPTIONAL_ABS) if (c[k] !== undefined && (typeof c[k] !== 'string' || !isAbsolute(c[k]))) throw new Error(`config: ${k} must be an absolute path`);
+  // L913 (a): claude reads only its fixed managed file; any other would refuse every review at check 10 instead.
+  if (c.machineWide !== CLAUDE_FILE) throw new Error(`config: machineWide must be ${CLAUDE_FILE}: claude ${MANAGED_SOURCES_CHECKED_ON} reads only that file`);
   if (!absList(c.deny) || c.deny.length === 0) throw new Error('config: deny must list absolute paths');
   if (typeof c.pin !== 'string' || !PIN.test(c.pin)) throw new Error('config: pin must be the Claude Code version the rules pin (x.y.z)');
+  // m-5 (L599, L709): the pin is the one the role tool lists were checked on. add-to-install wrote this pin, and the
+  // program at claudeBin, into the copy; a pin moved without that re-check is refused here, at daemon start, by its own
+  // name, not later by launch check 0 as "setting names not confirmed". No rules snapshot is read for it.
+  if (c.pin !== TOOLS_CHECKED.claude_code) throw new Error(`config: pin is ${c.pin}, but the role tool lists were checked on Claude Code ${TOOLS_CHECKED.claude_code} (M10 TOOLS_CHECKED); re-check them before the pin moves`);
   // No path may be / itself (L83 minor 3): a deny of / denies nothing the template can name, and a bobFolder of / would
   // attach the whole disk read-only as the method folder.
   for (const [k, p] of [...[...ABS, ...OPTIONAL_ABS].map((k) => [k, c[k]]), ...c.deny.map((p) => ['deny', p])]) {
@@ -184,6 +197,24 @@ function realPath(p) {
     rest.unshift(basename(head));
     head = up;
   }
+}
+/**
+ * Is the Front Door's taps folder the one the runner reads (L736 #306 m4)? The Front Door's walls guard `ownerTaps` as its
+ * launch is given it; were that another folder than the runner config's `ownerTaps`, the wall would guard the wrong one.
+ * Setup fills both from its one value; this compares them, reading the runner config as the runner does. The Front
+ * Door's must be its own real path, in the case the disk holds it (no link, no other case), since its rules name it as
+ * given and a rule for another spelling may match nothing (#306 self-review m1); trailing slashes aside, it must then be
+ * the runner's, on the runner's real path. No caller yet: the Front Door's install runs it and refuses on a reason when
+ * it is built (R-0b-162, lane 4's setup). `read` is a port for a test. → null | the reason
+ */
+export function tapsFolderProblem({ ownerTaps, runnerConfig, read = readConfig }) {
+  let c; try { c = read(runnerConfig); } catch (e) { return `the review runner's config can't be read (${String(e?.message ?? e).slice(0, 200)})`; }
+  if (typeof c?.ownerTaps !== 'string') return 'the review runner\'s config names no taps folder (ownerTaps), so no tap is ever read';
+  if (typeof ownerTaps !== 'string' || !isAbsolute(ownerTaps)) return 'the Front Door names no taps folder';
+  const given = ownerTaps.replace(/(?<=.)\/+$/, '');
+  const a = realPath(given), b = realPath(c.ownerTaps);
+  if (a !== given) return `the Front Door's taps folder (${ownerTaps}) is not written as the disk holds it (${a}), so a wall rule naming it may match nothing`;
+  return a === b ? null : `the Front Door's taps folder (${ownerTaps}) is not the one the review runner reads (${c.ownerTaps}), so its wall guards the wrong folder`;
 }
 /** Is `p` the folder `dir` or inside it? */
 const inside = (p, dir) => { const rel = relative(dir, p); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
@@ -274,6 +305,72 @@ export function readCardFile({ recordRoot, recordUid, card }) {
   if (!names.includes(`${card}.json`)) return { ok: false, missing: true, reason: 'no such card' };
   return readRecordFile(join(dir, `${card}.json`), recordUid, 'card', card, 'no such card');
 }
+
+/**
+ * A fact from the Record, read only (L852): docs/fact/<id>.json, with its revision (`rev`), as readCardFile reads a
+ * card. Nothing is written, moved or created: a missing or odd folder or file is an answer, never fixed here.
+ * → { ok: true, doc, rev } | { ok: false, missing?, reason }
+ */
+export function readFactFile({ recordRoot, recordUid, fact }) {
+  if (typeof fact !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(fact) || fact.startsWith('.')) return { ok: false, missing: true, reason: 'not a fact id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'fact')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  // The exact name, before anything opens it, as for a card: on a disk that ignores case, one spelling opens another's.
+  const dir = join(recordRoot, 'docs', 'fact');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the fact folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${fact}.json`)) return { ok: false, missing: true, reason: 'no such fact' };
+  return readRecordFile(join(dir, `${fact}.json`), recordUid, 'fact', fact, 'no such fact');
+}
+
+/**
+ * A session from the Record, read only (L899): docs/session/<id>.json, with its revision (`rev`), as readFactFile reads
+ * a fact. The worker runner's drain reads a session's attempt here, to find the push that took its bundle.
+ * → { ok: true, doc, rev } | { ok: false, missing?, reason }
+ */
+export function readSessionFile({ recordRoot, recordUid, session }) {
+  if (typeof session !== 'string' || !SESSION_ID.test(session)) return { ok: false, missing: true, reason: 'not a session id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'session')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  // The exact name, before anything opens it, as for a card.
+  const dir = join(recordRoot, 'docs', 'session');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the session folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${session}.json`)) return { ok: false, missing: true, reason: 'no such session' };
+  return readRecordFile(join(dir, `${session}.json`), recordUid, 'session', session, 'no such session');
+}
+
+/**
+ * Where a plan reviewer's plan is (L703): the Lead outbox file intake applied with this sha256, from the Record's own
+ * note of it (docs/fact/intake-applied-<session>-<name>.json, state `applied`). The path only says where to look: the
+ * runner reads that file once and refuses it unless its bytes hash to the card's plan_sha256 (review-runner.mjs
+ * packagePlan), so a note that points elsewhere starts nothing. → { ok: true, path } | { ok: false, reason }
+ */
+export function recordPlanFile({ recordRoot, recordUid, outboxRoot, plan_sha256 }) {
+  if (typeof plan_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(plan_sha256)) return { ok: false, reason: 'the card names no plan sha256' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'fact')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  const dir = join(recordRoot, 'docs', 'fact');
+  let names;
+  try { names = readdirSync(dir).filter((n) => n.startsWith('intake-applied-') && n.endsWith('.json')).sort(); } catch (e) { return { ok: false, reason: `the fact folder could not be listed (${e?.code ?? e?.message})` }; }
+  for (const n of names) {
+    const r = readRecordFile(join(dir, n), recordUid, 'fact', n.slice(0, -'.json'.length), 'it is gone');
+    const d = r.ok ? r.doc : null;
+    if (d?.state !== 'applied' || d.sha256 !== plan_sha256) continue;
+    if (typeof d.session !== 'string' || !SESSION_ID.test(d.session) || typeof d.name !== 'string' || !PLAN_NAME.test(d.name)) continue;
+    if (n !== `intake-applied-${d.session}-${d.name}.json`) continue;
+    return { ok: true, path: join(outboxRoot, 'lead', d.session, d.name) };
+  }
+  return { ok: false, reason: `the Record notes no plan applied with sha256 ${plan_sha256.slice(0, 12)}` };
+}
+// A plan file's name in a Lead's outbox (M9 OUTBOX_NAME, kind plan-): never a path.
+const PLAN_NAME = /^plan-[A-Za-z0-9-]+\.(md|json|txt)$/;
 
 /**
  * Whether the Record took a review session's verdict (item 20(a)): a verdict row of that session (docs/verdict/), for
@@ -422,6 +519,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
     now: () => Date.now(), ownUid: () => process.getuid(),
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
+    planFile: ({ plan_sha256 }) => recordPlanFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, plan_sha256 }),
     // The Dispatcher's own rules key, for how long a request may go unrenewed (R-0b-171). The key is per product; a request
     // that names no card has none, so it takes the longest. With no budget module it throws, and the runner then ends
     // nothing on silence; no review starts then either, and each refusal says so.
@@ -431,6 +529,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const listed = budget.rec.list('product');
       return listed.length ? Math.max(...listed.map((x) => gap(x.id))) : Infinity;
     },
+    // The Dispatcher's own read-only cap for a product (L735 M1), which the runner keeps for plan reviewers across every
+    // product. With no budget module it throws, and no plan reviewer starts.
+    planReviewCap: (product) => need(budget.rules, KEYS.readonlyPerSession, { product }),
     verdictTaken: ({ role, sessionId, card, head }) => recordVerdictTaken({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
     currentHead: async (card) => {
       const r = await git(['rev-parse', '--verify', '-q', `refs/heads/card/${card.toLowerCase()}^{commit}`], { gitDir: c.mirror, purpose: 'review-runner-head', timeoutMs: CHILD_MS });
@@ -480,6 +581,7 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       const r = readAccountFile({ file: own, uid: c.ownerUid });
       return r.ok ? r.account : null;
     },
+    finalize: async ({ role, sessionId, card, head, mark }) => finalize({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head, owner: c.uids[role], mark, ...await changeReaders({ gitDir: c.mirror, head }) }),
     handedIn: ({ role, sessionId, card, head }) => sessionVerdict({ outboxRoot: c.outboxRoot, uids: c.uids, role, sessionId, card, head }),
   };
 }

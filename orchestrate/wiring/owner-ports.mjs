@@ -5,9 +5,21 @@
 // The Dispatcher (the orchestrate user) never starts, reads or stops a worker itself, because workers run as the owner's
 // user. It writes a request into the runner's requests folder. The runner, a LaunchAgent of the owner's user, writes one
 // status file. Requests trust nothing, and the runner stops only what it started. probe, stopGroup and saveWork take any
-// session sessions() lists (pass.mjs's stop step reaches review, audit, merge and undo sessions of a cancelled card too):
-// the wiring routes each by kind to the runner that started it (the worker kinds to this runner, review and audit to the
-// review runner, a Lead to its own), never all to this one (#317 audit r1 M1).
+// session sessions() lists: the wiring routes each by kind to the runner that started it, never all to this one (#317
+// audit r1 M1, r2 n1). The stop step (pass.mjs stopPass) acts only on sessions whose own product is this Dispatcher's
+// (L927). Review and audit sessions name no product (the review runner's status has none), so the stop step does NOT
+// reach them yet. A review or audit session of a cancelled card is not stopped by anyone yet: it runs until it ends on
+// its own (the review runner records that end), and a verdict for a card no move leads out of (cancelled, failed,
+// closed_no_answer, reverted: M9 writer.mjs REVIEW_OVER, L933) is thrown away when it is taken, never recorded as a pass
+// and never a merge. A stop matched by the request_id this Dispatcher wrote is lane 3's follow-up card.
+// L935: lane 3's review-runner stop changes this; whichever of it and PR B lands second updates this text.
+// Where each kind goes:
+//   - the worker kinds, editing, undo and script, to this runner (overnight, an editing kind gate.mjs counts, too, once
+//     something starts one);
+//   - review and audit to the review runner;
+//   - lead, readonly, front_door, merge and undo_merge each to the runner that starts that kind.
+// A kind no runner owns is never a silent ok: probe throws and stopGroup answers { ok: false, reason }. stopSession takes
+// only an id: the wiring routes it by the claim's session id to the runner that received its launch request.
 //
 // Two kinds of port:
 // - A sync port reads status files only (stopSession may also write a stop request) and never waits on the runner. If a file it needs is older than STATUS_STALE_MS,
@@ -16,7 +28,8 @@
 // - An async port writes one request and waits for the runner's answer. The time limit is the tick's (pass.mjs guarded(),
 //   portDeadlineMs or saveDeadlineMs, which the tick may override); the port sets none of its own except where noted.
 //   `{ ok: false, reason }` means the outcome is known and nothing (more) happened. Except where noted (stopGroup's
-//   ok: false means it may still run; cleanup.saveWork answers timedOut at its own limit), a port never answers ok: false
+//   ok: false means it may still run; cleanup.saveWork answers timedOut at its own limit; the worker runner's asks, owner-asks.mjs, stop waiting at a limit past
+//   every tick limit and answer there as the tick's limit does, { ok: false, timedOut: true }), a port never answers ok: false
 //   while the outcome is unknown: it keeps waiting and lets the tick's limit answer, because pass.mjs reads only that limit's
 //   answer as "it may still start" (a launch that answers its own time-out could put a card back to ready while a session
 //   may be starting). This holds whether or not pass.mjs also reads timedOut. An async port does not throw, except
@@ -35,7 +48,7 @@ const SESSION = '{ id, product, kind, card, lead, role, pgid, signin, config_dir
 
 /** Each owner-side port: what goes in, what comes out, how a failure is answered, and its default time limit. */
 export const OWNER_PORTS = Object.freeze({
-  sessions: sync('()', `[${SESSION}]: every session running Mac-wide (pass.mjs). The wiring merges the runner's worker sessions (editing, undo, script) with every other kind gate.mjs counts (readonly, review, audit, merge, undo_merge, lead, front_door) from their own status; the start caps count from it`,
+  sessions: sync('()', `[${SESSION}]: every session running Mac-wide, every product's (pass.mjs). The wiring merges the runner's worker sessions (editing, undo, script) with every other kind gate.mjs counts from their own status: today the review runner's reviewers and auditors (review, audit; product, pgid, signin and config_dir null, plan reviewers left out, planReviewsRunning counts those); readonly, merge, undo_merge, lead and front_door once their runner reports them. The start caps count from it; the stop step acts only on this Dispatcher's product's`,
     `${NO}, if any one source can't be read: never the sources it could read; [] only when every fresh source lists none`),
   probe: sync('(session): any session sessions() lists, routed by kind', '{ size: { tokens, compactions, turnEnded, endedAt, openTools: [ids] }, activity: { state } }: size is transcript.mjs readSize, state the activity tracker\'s (exited, blocked, waiting_input, active, ...)',
     'throws; the stop step reads that as "not at a safe point" (the late hard stop still applies). Never a partial size, and a state the tracker can\'t tell is a throw, never a missing or null state (atSafePoint reads a missing state as safe)'),
@@ -46,22 +59,21 @@ export const OWNER_PORTS = Object.freeze({
   stopSession: sync('(sessionId): may write a stop request without waiting for it', 'true only when the status file shows the launch request for that id used up (started and since stopped, refused, or cancelled by this stop request); a request the runner has not yet seen is never true, and the runner refuses a launch request older than the claim timeout. It saves nothing: a session that started late, under a claim that never moved to running, leaves its work in its copy, and cleanup asks Joe about it',
     'false or a throw: the claim stays, and the owner is told once a day (M9 lapseClaims)'),
   launch: ask('({ card, kind, product, sessionId })',
-    '{ ok: true, sessionId, pid, pidStart, pgid, head, outbox, signin, configDir, copy }: the session started under the claimed id; outbox is <outboxRoot>/worker/<sessionId> and copy <copiesRoot>/<card>',
+    '{ ok: true, sessionId, pid, pidStart, pgid, head, base, outbox, signin, configDir, copy }: the session started under the claimed id; pidStart is the UTC ISO start time M9 lock.mjs startTime reads (START_ISO); base (optional, 40 hex) is the commit the copy was started on (L825-2), left out when not known (null or any other value is refused); outbox is <outboxRoot>/<product>/<role>/<sessionId> (L836), role worker or, for a script card, script (L767: its own outbox, so a script hands in only what the script role may), and copy <copiesRoot>/<product>/<card>',
     '{ ok: false, reason }: nothing was started (the claim is given back); a throw reads the same, so throw only before the request is written. Unknown: no answer, so the tick\'s limit answers and the card stays claimed', PORT_DEADLINE_MS),
-  stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone',
-    '{ ok: false, reason }: it may still run', PORT_DEADLINE_MS),
-  saveWork: ask('(session): any session sessions() lists, routed by kind', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down), or the session has no work copy to save (any session but a worker\'s), so a stop never reads as unsaved work', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
+  stopGroup: ask('(session): any session sessions() lists, routed by kind to the runner that started it; it needs only { id, pgid, kind } (pass.mjs also stops a session it just launched, not yet in any status), and the rest of the session (signin, config_dir) is passed as well', '{ ok: true, how }: the session\'s process group is gone, and the runner has set stop_requested for it in a status written before it answers',
+    '{ ok: false, reason }: it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out, so a session the Dispatcher stopped is never counted as a death', PORT_DEADLINE_MS),
+  saveWork: ask('(session): any session sessions() lists, routed by kind', '{ ok: true }: the work is pushed to the card branch (M4 save-work, inside the worker\'s lock-down), or the session has no work copy to save: only the kinds named here, review, audit, readonly, lead and front_door (by kind, never by role: M11 records role worker for a script card too), so a stop never reads as unsaved work. Every other kind is saved or told: editing, undo, script and overnight save, a worker kind whose copy is missing or unreadable is { ok: false, reason }, and any kind not named (merge and undo_merge included, until it is settled that they have no copy) is { ok: false, reason: no runner saves that kind }', '{ ok: false, reason }: unsaved, and told', SAVE_DEADLINE_MS),
   pauseLead: ask('({ product })', 'resolves { ok: true }: the product\'s Lead was asked to wrap up (lead-restart\'s WRAP flow). An unknown outcome is answered by the tick\'s limit and asked again next pass, so asking twice must be harmless',
-    'throws (rejects): today pass.mjs ignores what it resolves to, so a refusal answered as { ok: false } would read as asked', PORT_DEADLINE_MS),
+    'throws (rejects): a failed pause whether or not the pass reads the answer (pass.mjs now also reads a resolved { ok: false } as failed, so either holds there; the port throws)', PORT_DEADLINE_MS),
 });
 
 /**
- * The cleanup group's owner-side members. The copies are the owner's user's, so cleanup reaches them through the runner.
- * cleanupCopy puts no time limit on saveWork, so that port keeps its own.
+ * The cleanup group's owner-side member. cleanupCopy puts no time limit on saveWork, so that port keeps its own.
+ * (copiesRoot, the TOP worker-copies folder, is the Dispatcher config's now, L887: worker-ports.mjs, read through
+ * setup's access-list entry; #403 r1 m1.)
  */
 export const OWNER_CLEANUP_PORTS = Object.freeze({
-  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the folder of worker copies (<copiesRoot>/<card>), fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate an access list of its own there (L747): list, search, read (file contents and attributes, so a copy can be hashed) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass\'s checks (or on Joe\'s counted Yes). The runner never moves a file in from outside it, so a delete never stops partway',
-    notKnown: 'the read throws, never a folder that reads as empty', deadlineMs: null }),
   saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox, which is orchestrate\'s private staging folder: the runner writes the bundle where orchestrate can read it, and the port (orchestrate-side) copies it into outbox',
     '{ ok: false, reason }, or { ok: false, timedOut: true, reason } at its own limit', SAVE_DEADLINE_MS),
 });
@@ -71,7 +83,7 @@ export const OWNER_CLEANUP_PORTS = Object.freeze({
  * the push script's inputs (branch, outbox, attempt) are in the `session` record the Dispatcher writes at launch (#248,
  * L589), the one source for them. Read them there; the launch doc does not gain them.
  */
-export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
+export const LAUNCH_DOC_FIELDS = Object.freeze(['session_id', 'role', 'kind', 'card', 'head', 'base', 'rev', 'product', 'signin', 'config_dir', 'copy', 'launched_at']);
 export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'attempt']);
 
 /**

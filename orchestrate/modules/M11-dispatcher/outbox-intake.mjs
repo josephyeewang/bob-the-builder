@@ -24,6 +24,7 @@ import { HOLD_FACT, HOLD_REPEAT_MS, causeOf, guarded, holdAlert, refusalReport }
 import { RESTART_FACT } from './lead-restart.mjs';
 import { stillWaiting, STILL_WAITING_MS, pastTime } from '../../shared/still-waiting.mjs';
 import { OUTBOX_KINDS, leadLaunchHead } from '../../shared/record.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../../shared/product-paths.mjs';
 import { NEVER_RAN } from '../M9-record/outbox.mjs';
 
 export const READONLY_REQUESTS = Object.freeze({ think: 'reviewer', scout: 'scout', write: 'writer' });
@@ -391,8 +392,9 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
         catch (e) { return { ok: false, reason: `the start failed: ${e.message}` }; }
       }, startMs);
       r.request = started;
-      // It may have started, so it is left as a crash would leave it: the next pass tells that, and starts nothing.
-      if (/^it did not answer within /.test(started?.reason ?? '')) { r.refused = `the start ${started.reason}`; continue; }
+      // It may have started, so it is left as a crash would leave it: the next pass tells that, and starts nothing. Late is
+      // known by `timedOut` (guarded's own late answer, or a port's in its own words), the wording only as a backstop (L755).
+      if (started?.timedOut === true || /^it did not answer within /.test(started?.reason ?? '')) { r.refused = `the start ${started?.reason ?? 'did not answer in time'}`; continue; }
       if (!started?.ok) {
         const reason = started?.reason ?? 'no answer';
         const told = (prev?.doc?.tries ?? 0) > 0;
@@ -439,7 +441,10 @@ export async function intakePass({ rec, sessions, wait, alert, note, startReadon
     const claim = put({ state: 'applying' }, 'outbox_claim');
     if (!claim.ok) { r.refused = `could not record the hand-in: ${claim.reason}`; continue; }
     let applied;
-    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card, ...(isPlan ? { checked_sha256: hash } : {}) }, path); }
+    // The session's product, so the Record finds the outbox in that product's own folder (L865, L836), for the roles the
+    // worker runner starts only: a Lead's or any other role's outbox has no product folder, whatever its session's product.
+    const inProduct = s.product && PRODUCT_OUTBOX_ROLES.includes(s.role);
+    try { applied = rec.applyOutbox({ role: s.role, sessionId: s.sessionId, card: s.card, ...(inProduct ? { product: s.product } : {}), ...(isPlan ? { checked_sha256: hash } : {}) }, path); }
     catch (e) { applied = { ok: false, reason: e.message }; }
     // L140: a kind with no record rule is handled, not refused, so it is no alert.
     if (notARecord(applied)) applied = { ok: true, not_a_record: true };

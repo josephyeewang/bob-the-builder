@@ -10,12 +10,15 @@ import { LAUNCH_DOC_FIELDS, OWNER_CLEANUP_PORTS, SESSION_RECORD_PUSH_FIELDS, OWN
 
 const code = (f) => readFileSync(new URL(`../modules/M11-dispatcher/${f}`, import.meta.url), 'utf8');
 
-test('L741: the owner-side ports are the not-wired worker ports the runner answers, and none is wired yet', () => {
+test('L741, L925: the owner-side ports are the worker ports the runner answers; the sync ones are wired (B), the asks not yet', () => {
   assert.deepEqual(Object.keys(OWNER_PORTS).sort(), ['board', 'launch', 'outboxSessions', 'pauseLead', 'probe', 'saveWork', 'sessions', 'stopGroup', 'stopSession']);
-  for (const k of Object.keys(OWNER_PORTS)) assert.ok(NOT_WIRED_WORKER.includes(k), k);
+  const wired = Object.keys(OWNER_PORTS).filter((k) => OWNER_PORTS[k].sync).sort();
+  assert.deepEqual(wired, ['board', 'outboxSessions', 'probe', 'sessions', 'stopSession']);
+  for (const k of Object.keys(OWNER_PORTS)) assert.equal(NOT_WIRED_WORKER.includes(k), !wired.includes(k), k);
   // What stays orchestrate-side (L737's chunk for lane 3) is not here.
   for (const k of ['hostLock', 'reviewEnded']) assert.equal(OWNER_PORTS[k], undefined, k);
-  assert.deepEqual(Object.keys(OWNER_CLEANUP_PORTS).sort(), ['copiesRoot', 'saveWork']);
+  // copiesRoot is the Dispatcher config's (L887), so only saveWork is the runner's.
+  assert.deepEqual(Object.keys(OWNER_CLEANUP_PORTS).sort(), ['saveWork']);
   for (const k of Object.keys(OWNER_CLEANUP_PORTS)) { assert.ok(CLEANUP_PORTS.includes(k), k); assert.ok(NOT_WIRED_CLEANUP.includes(k), k); }
 });
 
@@ -24,7 +27,7 @@ test('L741: the stub refuses each port with the same text wire() uses, and copie
   assert.deepEqual(Object.keys(ports).sort(), Object.keys(OWNER_PORTS).sort());
   for (const k of Object.keys(OWNER_PORTS)) assert.throws(() => ports[k]({}), { message: notWiredText(k) }, k);
   for (const k of Object.keys(OWNER_CLEANUP_PORTS)) assert.throws(() => cleanup[k], { message: notWiredText(`cleanup.${k}`) }, `${k} refuses when read`);
-  assert.deepEqual(Object.keys(cleanup).sort(), ['copiesRoot', 'saveWork']);
+  assert.deepEqual(Object.keys(cleanup).sort(), ['saveWork']);
 });
 
 test('L741: every port says what goes in, what comes out, and how it fails; sync ports have no deadline, async ones the tick\'s', () => {
@@ -110,7 +113,7 @@ test('L741: the sync ports\' shapes are the callers\' own (probe: transcript.mjs
 
 test('L741: pauseLead resolves { ok: true } and fails by throwing: a throw is a failed pause, whether or not the pass reads the answer', () => {
   const pass = code('pass.mjs');
-  const at = pass.indexOf('await guarded(async () => { await pauseLead('); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
+  const at = pass.search(/await guarded\(async \(\) => \{ (const a = )?await pauseLead\(/); assert.ok(at > 0, 'pauseLead is called inside guarded, so a throw is { ok: false }');
   assert.match(pass.slice(at, at + 800), /'pause_lead_failed'/);
   assert.match(OWNER_PORTS.pauseLead.out, /^resolves \{ ok: true \}/); assert.match(OWNER_PORTS.pauseLead.fails, /^throws/);
 });
@@ -121,9 +124,27 @@ test('#317 audit r1 M1: stop and save take any session sessions() lists, routed 
   const pass = code('pass.mjs');
   const sr = pass.slice(pass.indexOf('function stopReason'), pass.indexOf('\n}\n', pass.indexOf('function stopReason')));
   assert.ok(sr.indexOf("return 'cancel'") > 0 && sr.indexOf("return 'cancel'") < sr.indexOf('parkable(s)'), 'a cancel is decided before parkable');
-  assert.match(pass, /guarded\(\(\) => stopGroup\(s\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
+  assert.match(pass, /guarded\(\(signal\) => stopGroup\(s, \{ signal \}\), portDeadlineMs\)/); assert.match(pass, /guarded\(\(\) => saveWork\(s\), saveDeadlineMs\)/);
   for (const k of ['probe', 'stopGroup', 'saveWork']) assert.match(OWNER_PORTS[k].in, /^\(session\): any session sessions\(\) lists, routed by kind/, k);
-  assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save \(any session but a worker's\), so a stop never reads as unsaved work/);
+  assert.match(OWNER_PORTS.saveWork.out, /or the session has no work copy to save: only the kinds named here, review, audit, readonly, lead and front_door \(by kind, never by role/);
+  assert.match(OWNER_PORTS.saveWork.out, /editing, undo, script and overnight save/);
+  assert.match(OWNER_PORTS.saveWork.out, /any kind not named \(merge and undo_merge included, until it is settled that they have no copy\) is \{ ok: false, reason: no runner saves that kind \}/);
+  assert.match(OWNER_PORTS.stopGroup.out, /the runner has set stop_requested for it in a status written before it answers/);
+  assert.match(OWNER_PORTS.stopGroup.fails, /it may still run; stop_requested stays set once the runner has acted on the stop, even though the stop failed or timed out/, 'L764 m1, #328 r1 c3');
+  assert.match(OWNER_PORTS.saveWork.out, /a worker kind whose copy is missing or unreadable is \{ ok: false, reason \}/);
+  assert.match(OWNER_PORTS.stopGroup.in, /it needs only \{ id, pgid, kind \}/);
+  // r2 n1: the routing map names every kind gate.mjs knows, once, with its runner; a kind no runner owns is never a silent ok.
+  const head = readFileSync(new URL('./owner-ports.mjs', import.meta.url), 'utf8').split('\n').filter((l) => l.startsWith('//')).join('\n');
+  assert.match(head.replace(/\n\/\/\s*/g, ' '), /the worker runner's asks, owner-asks\.mjs, stop waiting at a limit past every tick limit and answer there as the tick's limit does, \{ ok: false, timedOut: true \}/, 'L759: the asks\' own limit is a noted exception');
+  assert.match(head, /the worker kinds, editing, undo and script, to this runner \(overnight, an editing kind gate\.mjs counts, too/);
+  assert.match(head, /the wiring routes each by kind to the runner that started it, never all to this one/);
+  assert.match(head, /review and audit to the review runner;/);
+  assert.match(head, /lead, readonly, front_door, merge and undo_merge each to the runner that starts that kind\./);
+  assert.match(head, /A kind no runner owns is never a silent ok: probe throws and stopGroup answers \{ ok: false, reason \}/);
+  assert.match(head, /stopSession takes\n\/\/ only an id: the wiring routes it by the claim's session id to the runner that received its launch request/);
+  const gate = code('gate.mjs');
+  const kinds = new Set([...gate.match(/kind is ([a-z_ |]+)\./)[1].split('|').map((k) => k.trim()), ...[...gate.matchAll(/s\.kind === '(\w+)'/g)].map((m) => m[1])]);
+  for (const k of kinds) assert.match(head, new RegExp(`\\b${k}\\b`), `the routing map names ${k}`);
 });
 
 test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count, safe points, hand-ins and the copies are pinned', () => {
@@ -137,9 +158,11 @@ test('#317 audit r1 m1, m2, m4: the rules that guard the caps, the outage count,
   assert.match(OWNER_PORTS.sessions.notKnown, /if any one source can't be read: never the sources it could read/);
   assert.match(OWNER_PORTS.board.out, /An alive or ended the runner does not know is left out of that row \(the field, never the row\), never false/);
   assert.doesNotMatch(OWNER_PORTS.board.out, /\bis false\b/);
-  // m3/m4: copiesRoot's access list is L747's, and grants no add or write.
-  const cr = OWNER_CLEANUP_PORTS.copiesRoot.out;
+  // m3/m4: copiesRoot's access list is L747's, and grants no add or write. copiesRoot is the Dispatcher config's now
+  // (L887), so its contract is in worker-ports.mjs.
+  const wp = readFileSync(new URL('./worker-ports.mjs', import.meta.url), 'utf8');
+  const cr = wp.slice(wp.indexOf('//   cleanup.copiesRoot'), wp.indexOf('//   outboxRoot')).replace(/\n\/\/\s+/g, ' ');
   assert.match(cr, /list, search, read \(file contents and attributes, so a copy can be hashed\) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass's checks/);
   assert.doesNotMatch(cr, /as on the worker outboxes/);
-  assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(write|add)\b/, 'no other grant of add or write');
+  assert.doesNotMatch(cr.replace('no add, no write', ''), /\b(writ|add)\w*/i, 'no other grant of add or write (writes, adds, written too)');
 });

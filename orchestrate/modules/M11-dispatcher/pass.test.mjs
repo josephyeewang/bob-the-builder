@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -45,11 +45,11 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
   const probes = new Map();
   let n = 0;
   let launchAnswer = () => ({ ok: true });
-  const pass = (min = 0, extra = {}) => dispatcherPass({
+  const pass = (min = 0, extra = {}) => dispatcherPass({ product: 'p1',
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), outbox: 'outbox' in a ? a.outbox : `/outbox-root/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir, ...('product' in a ? { product: a.product } : {}) }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -118,7 +118,7 @@ test('R-0b-55: the claim is rev-checked: a card changed since it was read is not
   const real = rec.ready.bind(rec);
   // another writer changes the card after the pass read the ready list (M9's rec.ready, L72)
   const sneaky = { ...rec, ready: () => { const l = real(); if (l.length) change(rec, 'card', 'C-1', { head: 'b'.repeat(40) }); return l; } };
-  const r = await dispatcherPass({ rec: sneaky, rules: rulesWith({}, startAnswer(rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
+  const r = await dispatcherPass({ product: 'p1', rec: sneaky, rules: rulesWith({}, startAnswer(rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
     launch: async () => { throw new Error('must not launch'); }, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), alert: () => {} });
   assert.deepEqual(r.started, []);
   assert.match(r.refused[0][1], /not claimed/);
@@ -502,6 +502,20 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   const l = w.rec.read('launch', sid).doc;
   assert.deepEqual([l.session_id, l.role, l.card, l.head, l.rev, l.launched_at], [sid, 'worker', 'C-1', 'h'.repeat(40), w.rec.read('card', 'C-1').rev, iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
+  assert.equal(l.base, null, 'a launcher that does not say a base records null');
+  // L825-2: the commit the launcher started the copy on is recorded as it said it.
+  const b = world([card('C-3')]);
+  b.refuseLaunch(() => ({ ok: true, base: 'b'.repeat(40) }));
+  await b.pass();
+  assert.equal(b.rec.read('launch', b.sessions[0].id).doc.base, 'b'.repeat(40));
+  // #384 m2: a base that is no commit id is never recorded as the copy's start; the launch is refused and told.
+  for (const bad of ['main', 'B'.repeat(40), 7, { sha: 'b'.repeat(40) }]) {
+    const m = world([card('C-4')]);
+    m.refuseLaunch(() => ({ ok: true, base: bad }));
+    await m.pass();
+    assert.equal(m.rec.read('launch', m.sessions[0].id), null, String(bad));
+    assert.match(m.calls.alerts.join('\n'), /launch was not recorded \(the launch named a malformed base commit\); its merge will be refused/, String(bad));
+  }
   // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
@@ -519,14 +533,14 @@ test('L204-a: every start writes its session record, with its own attempt number
   const sid = w.sessions[0].id;
   const s = w.rec.read('session', sid).doc;
   assert.deepEqual([s.state, s.role, s.product, s.card, s.branch, s.outbox, s.attempt, s.pid, s.pid_start, s.launched_at],
-    ['preparing', 'worker', 'p1', 'C-1', 'card/c-1', `/outbox-root/worker/${sid}`, 'a2', 1001, 'start-1', iso(T0)]);
+    ['preparing', 'worker', 'p1', 'C-1', 'card/c-1', `/outbox-root/p1/worker/${sid}`, 'a2', 1001, 'start-1', iso(T0)]);
   assert.equal(w.calls.alerts.length, 0);
 });
 
 test('L72: a launcher that answers with a session the claim does not name starts nothing and is told', async () => {
   const w = world([card('C-2')]);
   let sid;
-  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, sessionId: 'S-SOMEONE-ELSE', outbox: '/outbox-root/worker/S-SOMEONE-ELSE' }; });
+  w.refuseLaunch((x) => { sid = x.sessionId; return { ok: true, sessionId: 'S-SOMEONE-ELSE', outbox: '/outbox-root/p1/worker/S-SOMEONE-ELSE' }; });
   const r = await w.pass();
   assert.deepEqual(r.started, []);
   assert.deepEqual(r.refused, [['C-2', 'launcher: it started a session the claim does not name']]);
@@ -540,10 +554,10 @@ test('L72: a launcher that answers with a session the claim does not name starts
 const WRONG_OUTBOXES = [
   ['missing', () => undefined, /was not named/],
   ['not a full path', (sid) => `outbox/worker/${sid}`, /is not a full path/],
-  ['another session\'s, such as an older attempt\'s', () => '/outbox-root/worker/SOME-OTHER-SESSION', /is not this session's own folder/],
-  ['climbing out', (sid) => `/outbox-root/worker/${sid}/../../../etc`, /is not a plain path/],
-  ['climbing back to the same name', (sid) => `/outbox-root/worker/x/../${sid}`, /is not a plain path/],
-  ['the reviewer\'s', (sid) => `/outbox-root/reviewer/${sid}`, /is not a worker outbox/],
+  ['another session\'s, such as an older attempt\'s', () => '/outbox-root/p1/worker/SOME-OTHER-SESSION', /is not this session's own folder/],
+  ['climbing out', (sid) => `/outbox-root/p1/worker/${sid}/../../../etc`, /is not a plain path/],
+  ['climbing back to the same name', (sid) => `/outbox-root/p1/worker/x/../${sid}`, /is not a plain path/],
+  ['the reviewer\'s', (sid) => `/outbox-root/p1/reviewer/${sid}`, /is not a worker outbox/],
   ['the top of the disk', () => '/', /is not a plain path/],
 ];
 
@@ -602,10 +616,11 @@ test('#219 M-1: a stopped session whose claim can\'t be given back says so', asy
 
 test('#219 M-1: with the outbox root known, the real folder must be the session\'s own, through any link', async () => {
   const root = realpathSync(tempDir('orch-pass-outbox-'));
-  mkdirSync(join(root, 'worker'), { recursive: true });
+  // L836: the outboxes are <root>/<product>/<role>/<session id>.
+  mkdirSync(join(root, 'p1', 'worker'), { recursive: true });
   // Good: the folder is really there.
   const w = world([card('C-1')]);
-  w.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
+  w.refuseLaunch((x) => { const d = join(root, 'p1', 'worker', x.sessionId); mkdirSync(d); return { ok: true, outbox: d }; });
   assert.deepEqual((await w.pass(0, { outboxRoot: root })).started, ['C-1']);
   assert.deepEqual(w.calls.alerts, []);
   // The right name, but outside the root.
@@ -615,16 +630,41 @@ test('#219 M-1: with the outbox root known, the real folder must be the session\
   assert.match(v.calls.alerts.join('\n'), /is not inside the outbox root/);
   // The right name in the right place, but a link to another session's folder.
   const u = world([card('C-3')]);
-  const older = join(root, 'worker', 'older-attempt');
+  const older = join(root, 'p1', 'worker', 'older-attempt');
   mkdirSync(older);
-  u.refuseLaunch((x) => { const d = join(root, 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
+  u.refuseLaunch((x) => { const d = join(root, 'p1', 'worker', x.sessionId); symlinkSync(older, d); return { ok: true, outbox: d }; });
   assert.deepEqual((await u.pass(0, { outboxRoot: root })).started, []);
   assert.match(u.calls.alerts.join('\n'), /is not inside the outbox root/);
   // Named, but not there.
   const t = world([card('C-4')]);
-  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'worker', x.sessionId) }));
+  t.refuseLaunch((x) => ({ ok: true, outbox: join(root, 'p1', 'worker', x.sessionId) }));
   assert.deepEqual((await t.pass(0, { outboxRoot: root })).started, []);
   assert.match(t.calls.alerts.join('\n'), /could not be read \(ENOENT\)/);
+  // L836: the right role and session, but in another product's folder, or the old flat place: not this session's own.
+  for (const [n, where] of [['C-5', ['p2', 'worker']], ['C-6', ['worker']]]) {
+    const o = world([card(n)]);
+    o.refuseLaunch((x) => { const d = join(root, ...where, x.sessionId); mkdirSync(d, { recursive: true }); return { ok: true, outbox: d }; });
+    assert.deepEqual((await o.pass(0, { outboxRoot: root })).started, [], n);
+    assert.match(o.calls.alerts.join('\n'), /is not inside the outbox root/, n);
+  }
+});
+
+test('#403 r1 A10: the outbox is checked against the product the pass launched, never one the launch answer names', async () => {
+  const root = realpathSync(tempDir('orch-pass-outbox-a10-'));
+  // The launcher answers with p2's outbox and says it is p2's: the pass still checks against p1, the card's product.
+  const o = world([card('C-1')]);
+  o.refuseLaunch((x) => {
+    assert.equal(x.product, 'p1', 'the pass launches the card\'s own product');
+    const d = join(root, 'p2', 'worker', x.sessionId); mkdirSync(d, { recursive: true });
+    return { ok: true, outbox: d, product: 'p2' };
+  });
+  assert.deepEqual((await o.pass(0, { outboxRoot: root })).started, []);
+  assert.match(o.calls.alerts.join('\n'), /is not inside the outbox root/);
+  // Without the root too: another product's folder is refused by name.
+  const v = world([card('C-2')]);
+  v.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/p2/worker/${x.sessionId}`, product: 'p2' }));
+  assert.deepEqual((await v.pass(0)).started, []);
+  assert.match(v.calls.alerts.join('\n'), /is not in product p1's own folder/);
 });
 
 test('#219 m-2: a record not written and a wrong outbox are two causes: one told today does not hide the other', async () => {
@@ -633,7 +673,7 @@ test('#219 m-2: a record not written and a wrong outbox are two causes: one told
   const says = (w, re) => w.calls.alerts.filter((a) => re.test(a)).length;
   const refuseRecord = (w) => w.refuseLaunch((x) => {
     assert.equal(w.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }).ok, true);
-    return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` };
+    return { ok: true, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` };
   });
   // Told once a day however often it repeats.
   const w = world([card('C-1')]);
@@ -665,7 +705,7 @@ test('#219 m-2: a later good start clears each cause, so a failure that comes ba
   assert.equal(v.rec.read('fact', 'hold-session-record-C-2').doc.told_at, iso(T0));
   // A record refused leaves the outbox cleared: that outbox was good.
   const u = world([card('C-3'), ['fact', 'hold-session-outbox-C-3', told]]);
-  u.refuseLaunch((x) => { u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }); return { ok: true, outbox: `/outbox-root/worker/${x.sessionId}` }; });
+  u.refuseLaunch((x) => { u.rec.write({ actor: 'dispatcher', entity: 'session', id: x.sessionId, expectRev: 0, doc: { state: 'preparing', role: 'worker', card: 'C-9' } }); return { ok: true, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; });
   await u.pass(1);
   assert.equal(u.rec.read('fact', 'hold-session-outbox-C-3').doc.told_at, null);
 });
@@ -685,17 +725,72 @@ test('M7: the stop sequence: SIGTERM, then SIGKILL after 10 s', async () => {
   assert.equal(gone.how, 'gone');
 });
 
+test('L822 planted: a stop its caller aborted sends nothing more: not before SIGTERM, not during the wait, not SIGKILL', async () => {
+  const sent = [];
+  const kill = (p, s) => sent.push(s);
+  // Aborted before it starts: nothing is sent.
+  const before = new AbortController();
+  before.abort();
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: before.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, []);
+  // Aborted while it waits (the caller's port limit): SIGTERM only, no SIGKILL, and it stops waiting.
+  const mid = new AbortController();
+  let t = 0;
+  const sleep = async (ms) => { t += ms; if (t >= 3000) mid.abort(); };
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep, signal: mid.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual([sent, t], [['SIGTERM'], 3000]);
+  // Aborted on the last wait, just before SIGKILL.
+  sent.length = 0;
+  const last = new AbortController();
+  let u = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async (ms) => { u += ms; if (u >= 10_000) last.abort(); }, signal: last.signal }), { ok: false, reason: 'abandoned' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // #372 m1: the abort and the group's exit at the same step: the exit is told, not 'abandoned'.
+  sent.length = 0;
+  const both = new AbortController();
+  let gone = false;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => !gone, sleep: async () => { gone = true; both.abort(); }, signal: both.signal }), { ok: true, how: 'SIGTERM' });
+  sent.length = 0;
+  const atEnd = new AbortController();
+  let v = 0;
+  assert.deepEqual(await stopProcessGroup({ pgid: 42, kill, alive: () => v < 10_000, sleep: async (ms) => { v += ms; if (v >= 10_000) atEnd.abort(); }, signal: atEnd.signal }), { ok: true, how: 'SIGTERM' });
+  assert.deepEqual(sent, ['SIGTERM']);
+  // Never aborted: the same as with no signal.
+  sent.length = 0;
+  assert.equal((await stopProcessGroup({ pgid: 42, kill, alive: () => true, sleep: async () => {}, signal: new AbortController().signal })).how, 'SIGKILL');
+  assert.deepEqual(sent, ['SIGTERM', 'SIGKILL']);
+});
+
+test('#372 m2: guarded aborts the signal it hands its port when it gives up, and never when the port answers', async () => {
+  let seen;
+  const late = await guarded((signal) => { seen = signal; return new Promise(() => {}); }, 20);
+  assert.equal(late.timedOut, true);
+  assert.equal(seen.aborted, true);
+  let quick;
+  assert.deepEqual(await guarded((signal) => { quick = signal; return { ok: true }; }, 20), { ok: true });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(quick.aborted, false);
+  // The stops hand the pass's signal to the port.
+  const w = world([card('C-1')]);
+  await w.pass(0);
+  const got = [];
+  w.setCard('C-1', { state: 'cancelled' });
+  await w.pass(1, { stopGroup: async (s, o) => { got.push(o?.signal instanceof AbortSignal); return { ok: true, how: 'SIGTERM' }; } });
+  assert.deepEqual(got, [true]);
+});
+
 test('M7: a stop that fails alerts and leaves the card as it was; a failed save alerts but the stop stands', async () => {
   const w = world([card('C-1')]);
   await w.pass(0);
   const sid = w.sessions[0].id;
   w.setCard('C-1', { state: 'cancelled' });
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }) };
-  const alerts = [];
-  await dispatcherPass({ ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) });
+  const alert = fakeAlert({ answer: true });
+  const alerts = alert.texts;
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert });
   assert.match(alerts[0], /could not be stopped: permission/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'pending');
-  await dispatcherPass({ ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
 });
@@ -708,14 +803,15 @@ test('L130: an unsaved stop whose alert was not queued is told on the next pass,
   w.setCard('C-1', { state: 'cancelled' });
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }),
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }) };
-  await dispatcherPass0({ ...base, now: T0 + MIN, alert: () => false });
+  await dispatcherPass0({ product: 'p1', ...base, now: T0 + MIN, alert: () => false });
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done', 'the stop stands');
   assert.equal(w.rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at, undefined, 'not marked told');
-  const alerts = [];
-  await dispatcherPass({ ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
+  const alert = fakeAlert({ answer: true });
+  const alerts = alert.texts;
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 2 * MIN, alert });
   assert.equal(alerts.filter((a) => /not saved: disk full/.test(a)).length, 1, alerts.join(' | '));
   assert.ok(w.rec.read('fact', UNSAVED_FACT(sid)).doc.told_at);
-  await dispatcherPass({ ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 3 * MIN, alert });
   assert.equal(alerts.filter((a) => /not saved/.test(a)).length, 1, 'told once');
 });
 
@@ -725,7 +821,7 @@ test('L130: a no-account limit wait whose alert was not queued waits on Joe, and
   const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
   const w = world([['card', 'N', parked], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
   const sessions = [];
-  await dispatcherPass0({ rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
+  await dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
     launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: () => false });
   assert.deepEqual([w.rec.read('card', 'N').doc.wait.who, w.rec.read('card', 'N').doc.wait.what], ['joe', LIMIT_NO_ACCOUNT]);
   assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, undefined, 'not marked told');
@@ -816,18 +912,18 @@ test('audit 0b-6 r2 MAT-7: a session whose probe, stop or save throws does not e
   const sessions = w.sessions.filter((s) => s.id === a || s.id === b);
   const stops = [];
   const alerts = [];
-  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
+  const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
   // Pass 1: A's probe throws; B is cancelled and idle.
-  let r = await dispatcherPass({ ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
+  let r = await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
   assert.deepEqual(stops, [b], 'B stops although A threw first');
   assert.deepEqual(r.stopping, [[a, 'cancel']], 'a throwing probe is not a safe point');
   assert.ok(r.started.length >= 1, 'starts still run');
   // Pass 2, past the grace: A is hard-stopped; its stop then its save throw and each becomes one alert.
-  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 30 * MIN, probe: () => { throw new Error('transcript unreadable'); },
+  r = await dispatcherPass({ product: 'p1', ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 30 * MIN, probe: () => { throw new Error('transcript unreadable'); },
     stopGroup: async () => { throw new Error('EPERM'); }, saveWork: async () => ({ ok: true }) });
   assert.match(alerts.join('\n'), /could not be stopped: EPERM/);
-  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 31 * MIN, probe: () => idle,
+  r = await dispatcherPass({ product: 'p1', ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 31 * MIN, probe: () => idle,
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => { throw new Error('disk gone'); } });
   assert.deepEqual(r.stopped, [[a, 'cancel']]);
   assert.match(alerts.join('\n'), /not saved: disk gone/);
@@ -849,6 +945,20 @@ test('audit 0b-6 r2 / L27: a running session of a kind the Dispatcher does not k
   // An unknown role waits for the stricter safe point (a finished turn); the stop is wanted all the same.
   assert.deepEqual(r.stopping, [['X-1', 'red']]);
   assert.equal(w.rec.read('fact', STOP_FACT('X-1')).doc.reason, 'red');
+});
+
+test('L759 (m4): a script session follows the worker safe point, whether it reports role script or no role; only open tools hold its stop', async () => {
+  for (const role of ['script', undefined]) {
+    const w = world([card('C-1')], { usage: RED });
+    w.sessions.push({ id: 'S-1', product: 'p1', kind: 'script', card: 'C-1', ...(role ? { role } : {}) });
+    w.probes.set('S-1', busy);
+    let r = await w.pass(0);
+    assert.deepEqual(r.stopping, [['S-1', 'red']], `${role}: mid-tool waits`);
+    // Its turn has not ended (idle.size.turnEnded is false): the Lead's rule would wait; a worker's does not.
+    w.probes.set('S-1', idle);
+    r = await w.pass(1);
+    assert.deepEqual(r.stopped, [['S-1', 'red']], `${role}: no open tool is a safe point`);
+  }
 });
 
 test('audit 0b-6 r2 MAT-8 (P4): in amber a card with no tier sorts as Tier 1, ahead of Tier 2 and with the Tier-1 hold', async () => {
@@ -895,7 +1005,7 @@ test('audit 0b-6 r2 MIN-10 (round 1 MIN-2, 3, 4): a cancel replaces a pending pa
   const alerts = [];
   const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
     stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) };
-  for (const m of [1, 2, 3]) await dispatcherPass({ ...base, now: T0 + m * MIN });
+  for (const m of [1, 2, 3]) await dispatcherPass({ product: 'p1', ...base, now: T0 + m * MIN });
   assert.equal(alerts.filter((x) => /could not be stopped/.test(x)).length, 1);
 });
 
@@ -1022,9 +1132,10 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
   usageInto(rec);
   const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }, { id: 'S-B', product: 'p1', kind: 'editing', card: 'C-B', pgid: 51 }];
-  const alerts = [];
+  const alert = fakeAlert();
+  const alerts = alert.texts;
   const stopped = [];
-  const run = (at) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert: (t) => alerts.push(t), portDeadlineMs: 50, saveDeadlineMs: 50,
+  const run = (at) => stopPass({ product: 'p1', rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert, portDeadlineMs: 50, saveDeadlineMs: 50,
     stopGroup: (s) => (s.id === 'S-A' ? new Promise(() => {}) : (stopped.push(s.id), { ok: true, how: 'SIGTERM' })),
     saveWork: async () => ({ ok: true }) });
   const r = await run(T0);
@@ -1038,6 +1149,52 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   assert.equal(alerts.length, 2, 'again a day later');
 });
 
+// L927: stopPass is given this Dispatcher's product. It acts only on sessions whose own product that is, and hands back
+// the Mac-wide list (less what it stopped) for the caps. C-7 is in this Record (cancelled) and in product q9.
+test('L927: stopPass stops only its own product\'s sessions, never another\'s C-7, and its running list stays Mac-wide', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 },
+    { id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', pgid: null }];
+  const called = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; }, alert: fakeAlert(),
+    stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async (s) => { called.push(`save ${s.id}`); return { ok: true }; } });
+  assert.deepEqual(r.stopped, [['S-1', 'cancel']]);
+  assert.deepEqual(called, ['probe S-1', 'stop S-1', 'save S-1'], 'nothing of another product\'s, nor the review runner\'s, is probed, stopped or saved');
+  assert.deepEqual(r.running.map((s) => s.id), ['S-9', 'R-1'], 'the caps still see every product');
+  assert.equal(rec.read('fact', STOP_FACT('S-9')), null);
+  assert.equal(r.missing.some((m) => /q9/.test(m)), false, 'another product\'s rules are not read here');
+});
+
+test('L927: dispatcherPass, running its own stop step, passes the product on: another product\'s C-7 is not stopped', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const stops = [];
+  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', probe: () => idle, alert: fakeAlert(), launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [],
+    sessions: [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 }],
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+  assert.deepEqual(stops, ['S-1']);
+});
+
+// L943 m2: stopPass with no product named (left out, empty, not a string) matches no session, never every one, and says so.
+test('L943 m2: stopPass with no product, an empty one or a non-string one stops nothing, and notes why', async () => {
+  for (const product of [undefined, '', 7, null]) {
+    const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+    usageInto(rec);
+    const called = []; const log = [];
+    const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-0', kind: 'editing', card: 'C-7', pgid: 52 }];
+    const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, ...(product === undefined ? {} : { product }), sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; },
+      alert: fakeAlert(), failureLog: (l) => log.push(l), stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+    const what = String(product);
+    assert.deepEqual(r.stopped, [], what);
+    assert.deepEqual(called, [], `${what}: nothing probed or stopped`);
+    assert.equal(rec.read('fact', STOP_FACT('S-1')), null, `${what}: no stop even wanted`);
+    assert.deepEqual(r.running.map((s) => s.id), ['S-1', 'S-0'], `${what}: the caps still see every session`);
+    assert.ok(r.notes.includes('stops: no product named, so no session is stopped (L943)'), what);
+    assert.deepEqual(log, ['stops: no product named, so no session is stopped (L943)'], what);
+  }
+});
+
 test('r4 MAT-1: the stops are called side by side, not one after another', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
   usageInto(rec);
@@ -1045,7 +1202,7 @@ test('r4 MAT-1: the stops are called side by side, not one after another', async
   const called = new Set();
   // A answers only once B's stop has been called too: one after another, A would time out.
   const waitFor = (id) => new Promise((ok) => { const t = setInterval(() => { if (called.has(id)) { clearInterval(t); ok(); } }, 2); });
-  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: () => {}, portDeadlineMs: 300,
+  const r = await stopPass({ product: 'p1', rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: fakeAlert(), portDeadlineMs: 300,
     stopGroup: async (s) => { called.add(s.id); if (s.id === 'S-A') await waitFor('S-B'); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { called.add(`save-${s.id}`); if (s.id === 'S-A') await waitFor('save-S-B'); return { ok: true }; } });
   assert.deepEqual(r.stopped.map(([id]) => id).sort(), ['S-A', 'S-B']);
@@ -1056,7 +1213,7 @@ test('r4 MAT-1: a save that never answers is told, and the stopped card still mo
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' })]);
   usageInto(rec);
   const alerts = [];
-  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions: [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }], probe: () => idle,
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }], probe: () => idle,
     alert: (t) => alerts.push(t), saveDeadlineMs: 50, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: () => new Promise(() => {}) });
   assert.deepEqual(r.stopped, [['S-A', 'cancel']]);
   assert.match(alerts.join(' | '), /S-A stopped but its unsaved work was not saved: it did not answer within 50 ms/);
@@ -1068,7 +1225,7 @@ test('r4 Minor: a Lead hand-off that fails, or never answers, is told again a da
     const w = world();
     w.setProduct('p1', 'paused');
     const alerts = () => w.calls.alerts.filter((a) => /could not be asked to hand off/.test(a));
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead, alert: (t) => w.calls.alerts.push(t), filesOf: filesOfCommits, portDeadlineMs: 50 });
     await at(0);
     await at(1);
@@ -1095,7 +1252,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', OUTAGE_FACT, { state: 'open' }], ...undoEntries('U-1')]);
   const launched = [];
   const r = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(launched, []);
   assert.deepEqual(r.started, []);
   assert.ok(r.notes.includes('outage: nothing starts'));
@@ -1104,7 +1261,7 @@ test('r4 MAT-5: during an outage the undo starts start nothing', async () => {
   const cur = rec.read('fact', OUTAGE_FACT);
   rec.write({ actor: 'dispatcher', entity: 'fact', id: OUTAGE_FACT, expectRev: cur.rev, doc: { state: 'ended' } });
   const r2 = await undoStarts({ rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false },
-    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
+    running: [], launch: async (x) => { launched.push(x.card.id); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; }, filesOf: filesOfCommits, alert: () => {} });
   assert.deepEqual(r2.started, ['U-1']);
 });
 
@@ -1115,7 +1272,7 @@ test('L199: at editing cap 0 the undo start starts one undo per product; the sec
   const rules = rulesWith({ [K.editingPerProduct]: 0 }, { start_session: { decision: 'allow', reason: 'ok' } });
   const launched = [];
   const ask = (running) => undoStarts({ rec, rules, now: T0, bands: { band: 'green', own_building: 'open', prodBlocked: false }, running,
-    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
+    launch: async (x) => { launched.push([x.card.id, x.kind]); return { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', head: 'h'.repeat(40) }; },
     filesOf: filesOfCommits, alert: fakeAlert() });
   const r = await ask([]);
   assert.deepEqual(r.started, ['U-1']);
@@ -1167,8 +1324,8 @@ function usageInto(rec) {
 // stays claimed (a late answer may still start a session, so it never goes back to ready) and Joe is told.
 test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
-  const run = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
+  const run = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+    launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
   const r = await run(0);
   assert.deepEqual(r.started.map((x) => (Array.isArray(x) ? x[0] : x)), ['C-B'], JSON.stringify(r));
@@ -1186,7 +1343,7 @@ test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert f
     const sent = [];
     let down = true;
     let n = 0;
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
       pauseLead: () => { throw new Error(`Lead not reachable (pid ${++n})`); }, alert: (t) => (down ? bad(t) : sent.push(t)) });
     await at(0);
@@ -1209,7 +1366,7 @@ test('r7 M2: a dropped stop takes its queued alert with it; the next failed stop
   let atRest = true;
   let up = false;
   const got = [];
-  const run = (min) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions, probe: () => (atRest ? idle : busy),
+  const run = (min) => stopPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions, probe: () => (atRest ? idle : busy),
     stopGroup: async () => ({ ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
     alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
   w.setUsage(RED, T0);
@@ -1238,7 +1395,7 @@ test('r7 M2: a stop that went through takes its queued failure alert with it', a
   let up = false;
   let works = false;
   const got = [];
-  const run = (min, ss = sessions) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: ss, probe: () => idle,
+  const run = (min, ss = sessions) => stopPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: ss, probe: () => idle,
     stopGroup: async () => (works ? { ok: true, how: 'term' } : { ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
     alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
   w.setUsage(RED, T0);
@@ -1262,7 +1419,7 @@ test('r7 M2: a hand-off alert queued while the port was down leaves when the pau
     const sent = [];
     let down = true;
     let fails = true;
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
       pauseLead: () => { if (fails) throw new Error('Lead not reachable'); }, alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
     const told = () => sent.filter((t) => /could not be asked to hand off/.test(t)).length;
@@ -1291,8 +1448,8 @@ test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale
   const allow = rulesWith({}, startAnswer(w.rec));
   let down = true;
   const sent = [];
-  const at = (min, rules) => dispatcherPass({ rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
+  const at = (min, rules) => dispatcherPass({ product: 'p1', rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
     alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
   const told = () => sent.filter((t) => /your undo \(card U-1\) is waiting/.test(t)).length;
@@ -1350,7 +1507,7 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
     setClock(w.rec, now + 1500);
     await withAlerts(w.rec, now, (t) => { sent.push(typeof t === 'string' ? t : t.text); return true; }, async (real) => {
       const alert = Object.assign((t, o) => (refuseCardTell && /^card C-1/.test(t) ? false : real(t, o)), { queues: true });
-      await dispatcherPass0({ rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      await dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
         stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert });
       retellWaits({ rec: w.rec, alert, now });
     });
@@ -1447,11 +1604,11 @@ test('L324: a failed stop whose told time is ahead or unreadable is told again o
     const alert = fakeAlert();
     const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert };
-    await dispatcherPass({ ...base, now: T0 + MIN });
+    await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN });
     const told = () => alert.texts.filter((x) => /could not be stopped/.test(x)).length;
     assert.equal(told(), 1, label);
     change(f.rec, 'fact', STOP_FACT(sid), { told_at: bad });
-    await dispatcherPass({ ...base, now: T0 + 2 * MIN });
+    await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN });
     assert.equal(told(), due ? 2 : 1, label);
   }
 });
@@ -1475,7 +1632,7 @@ test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told a
     w.setProduct('p1', 'paused');
     const alert = fakeAlert();
     const alerts = () => alert.texts.filter((a) => /could not be asked to hand off/.test(a));
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: () => { throw new Error('send failed'); }, alert, filesOf: filesOfCommits });
     await at(0);
     assert.equal(alerts().length, 1, label);
@@ -1524,8 +1681,8 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   // M10's own words for a paused product (the paused fold).
   const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
     ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
-  const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
-    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+  const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+    launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
   await at(T0 + 25 * H);
   assert.equal(isQueued(w.rec, fact), true, 'told: queued, not yet sent');
@@ -1870,8 +2027,8 @@ test('L354 fold over: the queued copy leaves first, and a late mark is cleared; 
     const fact = 'hold-waits-p1-paused';
     const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
       ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
-    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
-      launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
+    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ product: 'p1', rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+      launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
     await at(w.rec, T0 + 25 * H);
     assert.equal(isQueued(w.rec, fact), true);
@@ -1962,7 +2119,7 @@ test('L354 item 3: a mark landing as a clear is written does not outlive the cle
 test('L744 1: a launch that answers timed out in its own words keeps the card claimed, never back to ready', { timeout: 10_000 }, async () => {
   const w = world([card('C-A')]);
   const alert = fakeAlert();
-  const r = await dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
+  const r = await dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
     launch: async () => ({ ok: false, timedOut: true, reason: 'the launcher gave up waiting for claude' }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000 });
   assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');
@@ -1984,4 +2141,16 @@ test('L744 2: a pauseLead that answers ok:false is told once and not counted as 
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'failed', 'ok:false with no reason is a failure too');
   await w.pass(3);
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
+});
+
+test('L767: a script card\'s outbox is <root>/<product>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+  const ok = world([card('C-2', { kind: 'script' })]);
+  ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/${x.product}/script/${x.sessionId}` }));
+  assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');
+  const wrong = world([card('C-2', { kind: 'script' })]);
+  const r = await wrong.pass();
+  assert.deepEqual(r.started, []); assert.match(r.refused.map(([, x]) => x).join('\n'), /is not a script outbox/);
+  const editing = world([card('C-2')]);
+  editing.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/${x.product}/script/${x.sessionId}` }));
+  assert.match((await editing.pass()).refused.map(([, x]) => x).join('\n'), /is not a worker outbox/);
 });

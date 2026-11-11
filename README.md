@@ -190,3 +190,7 @@ Now, finally, the answer is: "Yes he can!" 🔨
 [MIT](LICENSE) — use it, fork it, adapt it, share it.
 
 Some pieces are adapted from other open-source projects (among them ECC, whose two guard hooks `bob-init` installs in every new project). The full list, with each licence and what was taken, is [`third_party/README.md`](third_party/README.md); those files keep their original licence.
+
+## Standalone skills
+
+Use individual capabilities without installing the whole framework. Maintained modules live in [skills/](skills/); [the export guide](skills/EXPORTS.md) defines standalone packaging, updates and how to add the next module.

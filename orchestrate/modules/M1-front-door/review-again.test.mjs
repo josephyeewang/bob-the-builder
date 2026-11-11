@@ -15,7 +15,7 @@ import { REVIEW_AGAIN, REVIEW_AGAIN_BUTTON, OFFER_NOTE, reviewAgainOffers, revie
 
 const ME = process.getuid();
 const OTHER = ME + 1;
-const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, reviewer: ME, auditor: ME };
+const UIDS = { lead: OTHER, worker: OTHER, front_door: OTHER, learning: OTHER, writer: OTHER, incident: OTHER, scout: OTHER, thinking: OTHER, script: OTHER, reviewer: ME, auditor: ME };
 const HEAD = 'a'.repeat(40);
 const HEAD2 = 'b'.repeat(40);
 const T0 = Date.parse('2026-11-09T12:00:00Z');
@@ -107,7 +107,7 @@ function runnerConfig(w, over = {}, at = installOf(w)) {
   mkdirSync(at, { recursive: true, mode: 0o755 }); chmodSync(at, 0o755);
   const c = { installRoot: installOf(w), root: w.root, outboxRoot: w.outboxRoot, reviewHome: '/h', uids: UIDS, recordRoot: '/x', recordUid: OTHER, mirror: '/m',
     claudeBin: CLAUDE, hooksDir: '/i/hooks', ownerHome: '/w', ownerUid: ME, ownerTaps: w.taps, wiring: '/i/w.mjs',
-    snapshot: join(w.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/ms.json',
+    snapshot: join(w.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json',
     rules: { production: { env_files: [], programs: [], hosts: [] } }, ...over };
   for (const k of Object.keys(over)) if (over[k] === undefined) delete c[k];
   const file = join(at, 'runner-config.json');
@@ -282,12 +282,15 @@ test('R-0b-164 planted: a tap for a silent session of an older head starts nothi
   w.ask();
   let r = await runnerPass(w.ctx);
   assert.deepEqual(r.started.map((x) => x.session_id), ['S-2'], 'the new head gets its own review');
-  // A tap on the old head's silent session sets it aside (harmless: that head is superseded) and never starts a review of
-  // the old head, even when a request for the old head follows (#284 r1 m3: this part fails if the tap is not read).
+  // A tap on the old head's silent session (an offer read before the push) is read and refused, and Joe is told: it would
+  // set aside a session whose head no new review can follow (#307 r1 M1). Nor does a request for the old head start one
+  // (#284 r1 m3: this part fails if the tap is not read).
   assert.equal(writeTap({ dir: w.taps, ownerUid: ME, sessionId: 'S-1', offers }).ok, true);
   writeFileSync(join(w.root, 'requests', 'q-old.json'), JSON.stringify({ card: 'C-1', head: HEAD, role: 'reviewer', request_id: 'q-old' }), { mode: 0o644 });
   r = await runnerPass(w.ctx);
-  assert.deepEqual(r.setAside, [{ session_id: 'S-1', card: 'C-1', role: 'reviewer' }], 'the tap was read');
+  assert.deepEqual(r.setAside, []);
+  assert.ok(r.refused.some((x) => /review again" for session S-1: card C-1 has moved on to head bbbbbbb/.test(x.reason)), 'the tap was read, and refused');
+  assert.equal(r.alerts.filter((a) => /^tap-refused-/.test(a.id)).length, 1, 'Joe is told');
   assert.deepEqual(r.started, []);
   assert.ok(r.refused.some((x) => /request names head aaaaaaa, but the card's head is bbbbbbb/.test(x.reason)), r.refused.map((x) => x.reason).join(' | '));
   assert.equal(w.starts.filter((x) => x.head === HEAD).length, 1, 'the old head was reviewed once');
@@ -317,10 +320,13 @@ test('R-0b-164: the handler as a command, with the runner\'s real config and sta
   // An old status refuses the tap: the runner may be stopped.
   assert.equal(await run(['tap', cfg, 'S-1'], T0 + 3 * 3600_000), 1);
   assert.match(said.at(-1), /status can't be used: .*minutes old/);
-  // Clear, today: M4's readReviewStatus does not pass `taps_read` on (lane 2, asked 9 Nov), so it removes nothing and says
-  // why. Lane 2's change turns this into one removal; that PR updates these two lines.
-  assert.equal(await run(['clear', cfg]), 1);
-  assert.match(said.at(-1), /taps not cleared: the status gives no list of taps read/);
+  // Clear: M4's readReviewStatus passes `taps_read` on (lane 2, #306), so once the runner has read the tap, clear removes it.
+  assert.equal(await run(['clear', cfg]), 0);
+  assert.match(said.at(-1), /0 tap\(s\) the runner has read removed/, 'not read yet: kept');
+  await runnerPass(w.ctx);
+  assert.equal(await run(['clear', cfg]), 0);
+  assert.match(said.at(-1), /1 tap\(s\) the runner has read removed/);
+  assert.deepEqual(readdirSync(w.taps), []);
   assert.equal(await run(['what', cfg]), 1);
   assert.equal(await run(['tap', join(w.base, 'missing.json'), 'S-1']), 1);
 });
