@@ -792,7 +792,7 @@ test('L914 check: a flat outbox folder of a worker runner role, left from before
   const W = (s = '') => mac.at(P(`outboxes/worker${s}`));
   mkdirSync(W('/sess-1'), { recursive: true }); writeFileSync(W('/sess-1/report.md'), 'x'); writeFileSync(W('/.DS_Store'), '');
   let i = row('worker'); assert.equal(i.ok, false);
-  assert.match(i.why, new RegExp(`^it is still there and holds an entry: ${P('outboxes/worker/sess-1')}\\. Check that each holds nothing unsaved \\(a hand-in not yet taken in\\), then remove it; setup removes nothing itself$`));
+  assert.match(i.why, new RegExp(`^it is still there and holds an entry: ${P('outboxes/worker/sess-1')}\\. Check that it holds nothing unsaved \\(a hand-in not yet taken in\\), then remove it; setup removes nothing itself$`));
   assert.deepEqual(check(mac, cfg).filter((x) => !x.ok).map((x) => x.what), [i.what], 'only this row FAILs: not the outbox root\'s');
   assert.equal(run(mac, ['check']).code, 1);
   // The apply leaves it too, and says it still FAILs (the owner clears it by hand).
@@ -806,8 +806,10 @@ test('L914 check: a flat outbox folder of a worker runner role, left from before
   assert.match(row('script').why, /^it is still there, empty\. Check that it holds nothing unsaved/);
   rmSync(mac.at(P('outboxes/script')), { recursive: true }); writeFileSync(mac.at(P('outboxes/script')), 'x');
   assert.match(row('script').why, /^it is still there \(not a folder\)\. Check that it holds nothing unsaved, then remove it; setup removes nothing itself$/);
+  assert.deepEqual(check(mac, cfg).filter((x) => !x.ok).map((x) => x.what), [row('script').what], 'a file there FAILs only on its own row');
   rmSync(mac.at(P('outboxes/script'))); symlinkSync(mac.at(P('outboxes/alpha/script')), mac.at(P('outboxes/script')));
   assert.match(row('script').why, /^it is still there \(a link\)\./);
+  assert.deepEqual(check(mac, cfg).filter((x) => !x.ok).map((x) => x.what), [row('script').what], 'a link there FAILs only on its own row');
   rmSync(mac.at(P('outboxes/script'))); assert.equal(row('script').ok, true);
   // A folder that cannot be listed or looked at FAILs rather than passes.
   mkdirSync(W());
@@ -859,6 +861,10 @@ test('L921: the worker runner\'s requests, own and snapshots folders: each apart
   // A link put in place of one FAILs (its row), and setup does not follow it.
   rmSync(mac.at(w.snapshots), { recursive: true }); symlinkSync(mac.at(w.state), mac.at(w.snapshots));
   assert.ok(check(mac, cfg).some((x) => !x.ok && x.what.includes(w.snapshots)), 'a link in place of the snapshots folder FAILs');
+  // and the apply does not follow it: it refuses, and the folder the link leads to keeps its owner and mode.
+  const before = mac.lstat(w.state);
+  const r = run(mac, ['users-folders']); assert.notEqual(r.code, 0, r.text); assert.match(r.text, /is a link; nothing was changed/);
+  const after = mac.lstat(w.state); assert.deepEqual([after.uid, after.gid, after.mode], [before.uid, before.gid, before.mode]);
 });
 
 test('PLANT the keys folder readable by the owner (mode 755) → the proof FAILs', () => {

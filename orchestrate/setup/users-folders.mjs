@@ -335,7 +335,7 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
     let names = null; try { names = io.list(old); } catch { item(false, what, 'it is still there, and its contents could not be listed'); continue; }
     const left = names.filter((n) => n !== '.DS_Store').sort();
     const one = left.length === 1;
-    item(false, what, `${left.length ? `it is still there and holds ${one ? 'an entry' : `${left.length} entries`}: ${left.slice(0, 5).map((n) => `${old}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}` : 'it is still there, empty'}. Check that ${left.length ? 'each holds' : 'it holds'} nothing unsaved (a hand-in not yet taken in), then remove it; setup removes nothing itself`);
+    item(false, what, `${left.length ? `it is still there and holds ${one ? 'an entry' : `${left.length} entries`}: ${left.slice(0, 5).map((n) => `${old}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}` : 'it is still there, empty'}. Check that ${left.length > 1 ? 'each holds' : 'it holds'} nothing unsaved (a hand-in not yet taken in), then remove it; setup removes nothing itself`);
   }
   // The workers' copies folder is the owner's, so the root-only rule above does not list it. Since L836 it holds one folder
   // per product and nothing else: a copy made before (flat, `<copies>/<card>`, also one whose card is named as a product:

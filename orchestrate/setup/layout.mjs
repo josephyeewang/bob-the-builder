@@ -204,7 +204,8 @@ export const ORCHESTRATE_READ_ACL = Object.freeze({ who: 'user:orchestrate', per
 export const COPIES_CLEANUP_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'delete_child', 'file_inherit', 'directory_inherit']) });
 // The worker runner's requests folder (L921): orchestrate goes in and adds a request file, and does nothing else there (it
 // writes each new, exclusively: owner-status.mjs requestWriter; no listing, no removing). No inherit: each file is
-// orchestrate's own, 0644, which the runner checks before it reads one (runner-files.mjs readRequest).
+// orchestrate's own, 0644 whatever its job's umask (owner-status.mjs writeNewReadable), which the runner checks before it
+// reads one (runner-files.mjs readRequest).
 export const WORKER_REQUESTS_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['search', 'add_file']) });
 // The proposals folders are read only for orchestrate: no delete_child (that is for the outbox folders, which it clears).
 export const PROPOSALS_READ_ACL = Object.freeze({ who: 'user:orchestrate', perms: Object.freeze(['list', 'search', 'readattr', 'readextattr', 'readsecurity', 'file_inherit', 'directory_inherit']) });
