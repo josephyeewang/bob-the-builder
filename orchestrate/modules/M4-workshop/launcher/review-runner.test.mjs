@@ -2014,7 +2014,8 @@ test('L968: a running row shows stop_wanted while a failed stop is tried again, 
   await runnerPass(made.w.ctx);
   assert.deepEqual([row(made.w).stopped_by_request, row(made.w).stop_wanted], [at, undefined], 'made, the session not gone yet');
   assert.deepEqual(STOP_SHOWN, ['stop_wanted', 'stop_failed', 'stopped_by_request']);
-  // A stamp the memory holds that is not a time is not shown (the Dispatcher would refuse the whole list on it).
+  // A stamp the memory holds that is not a time is shown raw (#458 r1 m-d): the runner acts on it, so the Dispatcher refuses
+  // the whole list on it, loudly, rather than read the row as one with no stop.
   const odd = await stopWorld();
   odd.w.ask({ request_id: 'r-3' });
   await runnerPass(odd.w.ctx);
@@ -2025,7 +2026,22 @@ test('L968: a running row shows stop_wanted while a failed stop is tried again, 
   writeFileSync(file, JSON.stringify(st), { mode: 0o600 });
   await runnerPass(odd.w.ctx);
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).running[0].stopped_by_request, 'soon', 'the memory still holds it');
-  assert.equal(Object.hasOwn(row(odd.w), 'stopped_by_request'), false);
+  assert.equal(row(odd.w).stopped_by_request, 'soon', 'shown as held');
+  // One the runner reads as no stop (null, '', false: it tests them as set or not) is not shown, so the list is not refused for it.
+  const blank = JSON.parse(readFileSync(file, 'utf8'));
+  blank.running[0].stopped_by_request = ''; blank.running[0].stop_failed = null;
+  writeFileSync(file, JSON.stringify(blank), { mode: 0o600 });
+  await runnerPass(odd.w.ctx);
+  assert.equal(Object.hasOwn(row(odd.w), 'stopped_by_request') || Object.hasOwn(row(odd.w), 'stop_failed'), false, 'unset: not shown');
+  // #458 r1 m-f: a stop by card, role and head (the Dispatcher's stop step, L946) shows the same: tried again, then made.
+  const byTarget = await stopWorld({ fail: 1 });
+  byTarget.w.ask({ request_id: 'r-4' });
+  await runnerPass(byTarget.w.ctx);
+  writeStopRequest({ dir: byTarget.w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(byTarget.w.ctx);
+  assert.deepEqual([row(byTarget.w).stop_wanted, row(byTarget.w).stopped_by_request], [at, undefined], 'by target, failed once: wanted');
+  await runnerPass(byTarget.w.ctx);
+  assert.deepEqual([row(byTarget.w).stopped_by_request, row(byTarget.w).stop_wanted], [at, undefined], 'by target, made on the next pass');
 });
 
 test('L935: what is not a stop is never one, and a runner with no stop port stops nothing', async () => {

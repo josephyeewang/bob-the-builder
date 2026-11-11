@@ -66,7 +66,8 @@
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read, offers,
 //                       stopped_by_request } (`stopped_by_request`: [{ session_id, card, role, head, at }], no request id)
-//                       (each `running` row also shows the stop asked for it, L968, as the time it was so: `stop_wanted`
+//                       (each `running` row also shows the stop asked for it, L968, as the time it was so, or as held when that is not
+//                       a time, #458 r1 m-d: `stop_wanted`
 //                       a stop that failed and is tried again next pass, `stop_failed` one given up on and told to Joe,
 //                       `stopped_by_request` one made; the Dispatcher's stop step stops asking once one shows)
 //                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps;
@@ -1696,9 +1697,24 @@ export async function runnerPass(ctx) {
 const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given');
 const isHead = (h) => typeof h === 'string' && HEX40.test(h);
 const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
-/** What a running row shows of a stop asked for it (L968): the stamps STOP_SHOWN names, each only when it is one. */
+/**
+ * What a running row shows of a stop asked for it (L968): the stamps STOP_SHOWN names, each as the memory holds it, the
+ * runner acting on any value that is set (truthy, as its own tests read it; #458 r1 m-d). One that is not a stopStamp is shown raw all the same, so the
+ * Dispatcher's reader refuses the whole list loudly, never reads a row the runner treats as stopped as one it does not.
+ */
 export const STOP_SHOWN = Object.freeze(['stop_wanted', 'stop_failed', 'stopped_by_request']);
-const stopShown = (r) => Object.fromEntries(STOP_SHOWN.filter((f) => stamp(r[f])).map((f) => [f, r[f]]));
+const stopShown = (r) => Object.fromEntries(STOP_SHOWN.filter((f) => r[f]).map((f) => [f, r[f]]));
+/** How far ahead of now a stop stamp may be (#458 r1 m-c): owner-status.mjs CLOCK_SKEW_MS, pinned equal by a test. */
+export const STOP_STAMP_SKEW_MS = 30_000;
+/**
+ * A stop stamp as the runner writes it (iso(now)), #458 r1 m-c: text that toISOString gives back exactly, so ISO to the
+ * millisecond in UTC (no "2026", no date alone, no 2026-02-30), and no later than `now` by more than `skewMs`.
+ */
+export function stopStamp(value, now, skewMs = STOP_STAMP_SKEW_MS) {
+  if (typeof value !== 'string') return false;
+  const t = Date.parse(value);
+  return Number.isFinite(t) && new Date(t).toISOString() === value && typeof now === 'number' && Number.isFinite(now) && t - now <= skewMs;
+}
 const isObject = (v) => v !== null && typeof v === 'object';
 const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && (r.product === undefined || typeof r.product === 'string') && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
 const goodNoVerdict = (n) => isObject(n) && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head) && stamp(n.first_at);

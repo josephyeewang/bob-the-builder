@@ -50,8 +50,8 @@ import { isRefusing, refusing } from './not-wired.mjs';
 import { privateFolder } from './private-folder.mjs';
 import { checkMirror, git as safeGit } from '../modules/M4-workshop/git/safe-git.mjs';
 import { ENDED_FOLDER, runnerEnded } from '../modules/M9-record/outbox.mjs';
-import { FOLDERS as RUNNER_FOLDERS, STOP_SHOWN, readReviewStatus } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { RUNNER_KINDS, ownerSyncPorts, requestWriter } from './owner-status.mjs';
+import { FOLDERS as RUNNER_FOLDERS, STOP_SHOWN, readReviewStatus, stopStamp } from '../modules/M4-workshop/launcher/review-runner.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KINDS, ownerSyncPorts, requestWriter } from './owner-status.mjs';
 import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
 
@@ -228,7 +228,7 @@ export const REVIEW_STATE_CORRUPT = 'state-corrupt';
  * file needs it): the stop step asks the runner to end one only for a card of this Record at that very head (pass.mjs
  * stopPass, L946). A status whose runner could not read its own memory lists none running, so that one is a throw.
  */
-export function reviewSessions(status) {
+export function reviewSessions(status, { now = Date.now() } = {}) {
   // review-runner.mjs: with its memory unreadable it starts nothing and writes running: [] with this hold; the reviewers
   // still running are then not known, so neither is the list (L925 rule 1, #B self-review m2).
   // Latent (L943 c4, M4's to change): readReviewStatus (M4 review-runner.mjs) reads a `holds` that is not a list as [],
@@ -243,8 +243,9 @@ export function reviewSessions(status) {
     if (typeof r.card !== 'string' || !r.card) throw new Error(`review session ${r.session_id} in the review runner's status has no card`);
     if (typeof r.head !== 'string' || !HEX40.test(r.head)) throw new Error(`review session ${r.session_id} in the review runner's status names no head (40 hex)`);
     // The stop the runner shows on the row (L968, review-runner.mjs STOP_SHOWN): made, given up on, or tried again. One that
-    // is not a time is not what the runner writes, so the list is not known (as for the head).
-    for (const f of STOP_SHOWN) if (r[f] !== undefined && (typeof r[f] !== 'string' || !Number.isFinite(Date.parse(r[f])))) throw new Error(`review session ${r.session_id} in the review runner's status has a ${f} that is not a time`);
+    // is not a time is not what the runner writes, so the list is not known (as for the head): only a stopStamp, ISO to the
+    // millisecond and not later than now by more than CLOCK_SKEW_MS (#458 r1 m-c).
+    for (const f of STOP_SHOWN) if (r[f] !== undefined && !stopStamp(r[f], now, CLOCK_SKEW_MS)) throw new Error(`review session ${r.session_id} in the review runner's status has a ${f} that is not a time (ISO, not in the future)`);
     const shown = r.stopped_by_request ? 'stopped' : r.stop_failed ? 'failed' : r.stop_wanted ? 'wanted' : null;
     out.push({ id: r.session_id, product: null, kind: REVIEW_KIND_OF[r.role], card: r.card, head: r.head, lead: null, role: r.role, pgid: null, signin: null, config_dir: null, bundle_files: [], ...(shown ? { runner_stop: shown } : {}) });
   }
@@ -319,7 +320,7 @@ export function runnerSyncPorts({ config: c, rec, now = Date.now }, io = {}) {
   const review = io.reviewStatus ?? (() => readReviewStatus({ file: c.reviewStatusFile, now: now(), uid: c.reviewUid }));
   return {
     // Both read before either is used: one that throws makes the whole list "not known" (L925 rule 1).
-    sessions: () => { const own = sync.sessions(); const rv = reviewSessions(review()); return [...own, ...rv]; },
+    sessions: () => { const own = sync.sessions(); const rv = reviewSessions(review(), { now: now() }); return [...own, ...rv]; },
     board: () => sync.board(),
     outboxSessions: () => sync.outboxSessions().filter((x) => x.product === c.product),
     probe: (session) => {

@@ -389,7 +389,7 @@ const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVI
  * failure log on each pass; Joe is told once for all of them (REVIEW_STOP_TELL_FACT), again each day it lasts, and the
  * tell still queued is dropped on a pass with none failing, but told_at stays (L962 m1), so a stop that fails, works
  * and fails again is told once a day, not each time. A session still listed after REVIEW_STOP_MAX_ASKS stop files is
- * given up on (said once; the runner tells Joe its own stop_failed). A fact write the Record refuses is said in the
+ * given up on: said once, and told to Joe once (#458 r1 m-b). A fact write the Record refuses is said in the
  * notes and the failure log (L962 m2). A stop asked for a session no longer listed is marked done. Results go in
  * out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed' | 'given_up' | 'runner_stopped' | 'runner_wanted' |
  * 'runner_failed'].
@@ -430,8 +430,12 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
       continue;
     }
     if ((was?.asks ?? 0) >= REVIEW_STOP_MAX_ASKS) {
-      say(`stops: the ${s.role} ${s.id} for ${word(why)} card ${s.card} is still running after ${was.asks} stop requests; it is not asked again (the review runner tells Joe a stop it could not make)`);
-      write(key, { ...was, state: 'given_up', given_up_at: iso(now) }, 'review_stop_given_up', was);
+      const gaveUp = `the ${s.role} ${s.id} for ${word(why)} card ${s.card} is still running after ${was.asks} stop requests; it is not asked again`;
+      say(`stops: ${gaveUp}`);
+      const kept = write(key, { ...was, state: 'given_up', given_up_at: iso(now) }, 'review_stop_given_up', was);
+      // Told to Joe once (#458 r1 m-b): this runner shows no stop of its own on the row, so nothing else tells him. Only
+      // once the fact says given_up, so a pass that could not write it neither tells twice nor stops asking.
+      if (kept?.ok === true) tellThen(alert, `${gaveUp}; the review runner showed no answer to them, so it may still be using the account. Stop it by hand if it should not run`, { fact: key, fields: { given_up_told_at: iso(now) }, kind: 'review_stop_given_up_told' });
       out.reviewStops.push([s.id, why, 'given_up']);
       continue;
     }
@@ -512,7 +516,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
 
 /**
  * One pass. Ports:
- *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files }] (head: a review session's, L946)
+ *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files, runner_stop }] (head: a review session's, L946;
+ *                                    runner_stop: a review session's only, 'stopped' | 'wanted' | 'failed', the stop its runner shows, L968)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
  *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;

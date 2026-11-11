@@ -44,7 +44,7 @@ export const STATUS_STALE_MS = 180_000;   // L248: a status file older than 3 mi
 const sync = (inp, out, notKnown) => Object.freeze({ sync: true, in: inp, out, notKnown, deadlineMs: null });
 const ask = (inp, out, fails, deadlineMs) => Object.freeze({ sync: false, in: inp, out, fails, deadlineMs });
 const NO = 'throws (a status file is stale or unreadable)';
-const SESSION = '{ id, product, kind, card, lead, role, head, pgid, signin, config_dir, bundle_files }';   // kind: one of gate.mjs's kinds, which the start caps count by; head: a reviewer's (L946), left out of other kinds' rows
+const SESSION = '{ id, product, kind, card, lead, role, head, pgid, signin, config_dir, bundle_files, runner_stop }';   // kind: one of gate.mjs's kinds, which the start caps count by; head: a reviewer's (L946), left out of other kinds' rows; runner_stop: a reviewer's or auditor's only, 'stopped' | 'wanted' | 'failed' when the review runner shows a stop on its row (L968), left out otherwise
 
 /** Each owner-side port: what goes in, what comes out, how a failure is answered, and its default time limit. */
 export const OWNER_PORTS = Object.freeze({
