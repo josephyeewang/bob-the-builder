@@ -792,18 +792,22 @@ test('L976 / L985: an undo start checks its reversed commit before the copy and 
   const seen = { prompts: [], checks: [] };
   const deps = { promptFor: (x) => { seen.prompts.push(x); return 'do the card'; }, undoCheck: async (x) => { seen.checks.push(x); return null; } };
   const w = world(deps);
+  w.deps.checksFor = (x) => { w.calls.push(['checks', x]); return {}; };
   try {
     const a = await w.start({ kind: 'undo', undoCommit: U });
     assert.equal(a.ok, true, a.reason);
     assert.equal(seen.prompts.at(-1).undoCommit, U);
     assert.deepEqual(seen.checks, [{ mirror: w.c.products.p1.mirror, commit: U, head: HEAD }], 'checked against the start commit');
+    assert.equal(w.calls.find((c) => c[0] === 'checks')[1].undoCommit, U, 'the launch checks are handed it (check 12)');
   } finally { rmSync(w.d, { recursive: true, force: true }); }
   const e = world(deps);
+  e.deps.checksFor = (x) => { e.calls.push(['checks', x]); return {}; };
   try {
     seen.checks.length = 0;
     const a = await e.start();
     assert.equal(a.ok, true, a.reason);
     assert.equal('undoCommit' in seen.prompts.at(-1), false, 'an editing prompt is given none');
+    assert.equal('undoCommit' in e.calls.find((c) => c[0] === 'checks')[1], false, 'nor its checks');
     assert.deepEqual(seen.checks, [], 'and the mirror is not asked');
   } finally { rmSync(e.d, { recursive: true, force: true }); }
   const cases = [
@@ -846,6 +850,14 @@ test('L985: undoCommitProblem, on a real mirror: an ancestor passes; a commit no
     const tree = (await gitOk(['rev-parse', `${A}^{tree}`], o)).trim();
     assert.match(await undoCommitProblem({ mirror, commit: tree, head: B }), /is not a commit in the mirror/);
     assert.match(await undoCommitProblem({ mirror, commit: A, head: 'e'.repeat(40) }), /can't be checked against the start commit \(git \d+\)/);
-    assert.match(await undoCommitProblem({ mirror: join(d, 'none'), commit: A, head: B }), /is not a commit in the mirror/);
+    // An annotated tag's id peels to a commit, and is still not the commit reversed (self-review m1).
+    await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'tag', '-a', '-m', 't', 'v1', A], o);
+    await gitOk(['fetch', '-q', src, 'refs/tags/v1:refs/tags/v1'], { gitDir: mirror });
+    const tag = (await gitOk(['rev-parse', 'refs/tags/v1'], { gitDir: mirror })).trim();
+    assert.notEqual(tag, A);
+    assert.equal(await undoCommitProblem({ mirror, commit: tag, head: B }), `the reversed commit ${tag.slice(0, 12)} is not a commit in the mirror`);
+    // A lookup that can't be made is said as such, never as "not a commit" (self-review m2).
+    assert.match(await undoCommitProblem({ mirror: join(d, 'none'), commit: A, head: B }), /can't be looked up in the mirror \(git -1\)/, 'no mirror');
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }, { run: async () => ({ code: -1, stdout: '', stderr: 'refused' }) }), `the reversed commit ${A.slice(0, 12)} can't be looked up in the mirror (git -1)`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

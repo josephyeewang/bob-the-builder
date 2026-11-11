@@ -429,6 +429,12 @@ test('L852: launch check 12 gives an undo the pass\'s answer: exact with filesOf
     assert.match(r.reason, /^it is not an exact reverse: /, why);
   }
   assert.match((await check12({ ...base, filesOf })({ card: null, kind: 'undo', product: 'p1' })).reason, /^it is not an exact reverse: it has no card/);
+  // L976: the commit the session was handed must be the one the source names; one that is not, or none at all when named, is refused.
+  assert.deepEqual(await ask((x) => check12({ ...base, filesOf })({ ...x, undoCommit: SHA })), viaPass, 'the source\'s commit');
+  for (const undoCommit of ['b'.repeat(40), undefined, null]) {
+    const r = await check12({ ...base, filesOf })({ card: undo, kind: 'undo', product: 'p1', undoCommit });
+    assert.equal(r.ok, false, String(undoCommit)); assert.match(r.reason, /the reversed commit it was handed is not the one its source names/);
+  }
   // L863 m1: at launch the undo is already claimed. With its id it is told from another undo and starts; a card doc
   // with no id is refused for that, never counted as "an undo is already running" by its own claim.
   const claimed = recWith([...['T-1', 'MG-1', 'A-1'].map((id) => { const e = id === 'T-1' ? 'card' : id === 'MG-1' ? 'merge' : 'ask'; return [e, id, rec.read(e, id).doc]; }),

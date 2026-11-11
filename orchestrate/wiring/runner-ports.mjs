@@ -3,13 +3,14 @@
 //
 // What each one does, and what is still another lane's (each such piece is a port that refuses until it is given, so no
 // session ever runs on a guess; the list is in the step-5 PR and on the lead's Mini list):
-//   start({ card, kind, product, sessionId, live }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
+//   start({ card, kind, product, sessionId, live, undoCommit? }) → { ok: true, pid, pgid, pidStart, head, base, outbox, signin, configDir, copy }
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
 //        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main). An undo
 //        launch's reversed commit (undoCommit, L976) must be in the mirror and an ancestor of that start commit
-//        (undoCommitProblem, safe-git; L985), or the start is refused with no copy made; it is handed to promptFor. Then M4's
+//        (undoCommitProblem, safe-git; L985), or the start is refused with no copy made. promptFor is handed it (it is asked
+//        earlier, and makes nothing), and so is launch check 12, which holds it to the commit the card's source names. Then M4's
 //        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there). The answer's `base` names that
 //        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
 //        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
@@ -253,8 +254,10 @@ export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain }
 export async function undoCommitProblem({ mirror, commit, head }, { run = git } = {}) {
   const at = { gitDir: mirror, purpose: 'runner-undo-commit', timeoutMs: 30_000 };
   const short = String(commit).slice(0, 12);
-  const there = await run(['cat-file', '-e', `${commit}^{commit}`], at);
-  if (there?.code !== 0) return `the reversed commit ${short} is not a commit in the mirror`;
+  // -t, never -e with ^{commit}: an annotated tag's id peels to a commit, and is still not the commit reversed.
+  const there = await run(['cat-file', '-t', commit], at);
+  if (there?.code === 128 || there?.code === 1 || (there?.code === 0 && String(there?.stdout ?? '').trim() !== 'commit')) return `the reversed commit ${short} is not a commit in the mirror`;
+  if (there?.code !== 0) return `the reversed commit ${short} can't be looked up in the mirror (git ${there?.code})`;
   const up = await run(['merge-base', '--is-ancestor', commit, head], at);
   if (up?.code === 1) return `the reversed commit ${short} is not an ancestor of the start commit ${String(head).slice(0, 12)}`;
   if (up?.code !== 0) return `the reversed commit ${short} can't be checked against the start commit (git ${up?.code})`;
@@ -353,7 +356,8 @@ export function liveWallProblem(live, product, places, read) {
  * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
  * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
  * readSettings(id) → a live session's settings (#378 r1 M1).
- * The request: { card, kind, product, sessionId, live } (live: the runner's other live sessions, liveWallProblem).
+ * The request: { card, kind, product, sessionId, live, undoCommit? } (live: the runner's other live sessions, liveWallProblem;
+ * undoCommit: the reversed commit, 40 hex, an undo's only, L976).
  */
 export function startPort(c, deps = {}) {
   const {
@@ -462,7 +466,7 @@ export function startPort(c, deps = {}) {
       try { fs.writeNew(spareSettings, `${JSON.stringify(tw.settings, null, 2)}\n`); } catch (e) { return no(`has no settings file (${e?.code ?? e?.message})`); }
       return { ok: true, copy: at, settingsFile: spareSettings, done };
     };
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}), copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.

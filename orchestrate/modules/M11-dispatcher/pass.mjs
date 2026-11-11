@@ -519,7 +519,7 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  *   sessions: the running sessions Mac-wide [{ id, product, kind, card, lead, role, head, pgid, bundle_files, runner_stop }] (head: a review session's, L946;
  *                                    runner_stop: a review session's only, 'stopped' | 'wanted' | 'failed', the stop its runner shows, L968)
  *   probe(s) -> { size, activity }   (transcript size incl. compactions, and the activity tracker)
- *   launch({ card, kind, product, sessionId }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
+ *   launch({ card, kind, product, sessionId, undoCommit? }) -> { ok, pid, pidStart, pgid, head, base, outbox, reason, signin, configDir }
  *                                    (M4 launch, through accountLaunch; it starts claude with the claimed sessionId;
  *                                    `outbox` is the full path of the session's own outbox folder, which it made)
  *   stopGroup(s, { signal }) -> { ok, how }  (stopProcessGroup on the session's group; `signal` aborts when the pass gives up on it)
