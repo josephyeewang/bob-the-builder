@@ -420,6 +420,22 @@ test('L925 rule 1: sessions() is every product\'s worker sessions and the review
   assert.deepEqual(reviewSessions({ running: [], holds: [{ id: 'other', text: 'x' }] }), [], 'another hold is not this');
 });
 
+// L968: the stop the review runner shows on a row reaches the stop step as runner_stop; one that is not a time is not the runner's.
+test('L968: a review row\'s stop_wanted, stop_failed or stopped_by_request is its runner_stop; a malformed one refuses the list', () => {
+  const t = '2026-11-11T12:00:00.000Z';
+  const base = { card: 'C-7', head: HEAD, role: 'reviewer', session_id: 'R-1', started_at: t };
+  const one = (more) => reviewSessions({ running: [{ ...base, ...more }] })[0];
+  assert.equal(Object.hasOwn(one({}), 'runner_stop'), false, 'nothing shown: no runner_stop');
+  assert.equal(one({ stop_wanted: t }).runner_stop, 'wanted');
+  assert.equal(one({ stop_failed: t }).runner_stop, 'failed');
+  assert.equal(one({ stopped_by_request: t }).runner_stop, 'stopped');
+  assert.equal(one({ stop_wanted: t, stopped_by_request: t }).runner_stop, 'stopped', 'made wins');
+  assert.equal(one({ stop_wanted: t, stop_failed: t }).runner_stop, 'failed');
+  for (const bad of [{ stop_wanted: 'soon' }, { stop_failed: 7 }, { stopped_by_request: null }, { stop_wanted: '' }]) {
+    assert.throws(() => one(bad), /review session R-1 in the review runner's status has a stop_\w+|stopped_by_request that is not a time/, JSON.stringify(bad));
+  }
+});
+
 test('L925 rule 2: probe answers for the kinds the worker runner starts; a review, audit or any other kind throws', () => {
   const { ports } = syncWorld();
   assert.deepEqual(ports.probe({ id: 'S-1', kind: 'editing' }), { size: SIZE, activity: { state: 'active' } });

@@ -28,7 +28,8 @@
 // WIRED (B, L925, L927, L933), from the worker runner's status (config workerStatusFile, the owner's, workerUid) and the
 // review runner's (config reviewStatusFile, the review user's), each read whole on every call (owner-status.mjs):
 //   sessions()           → Mac-wide, every product's: the worker runner's live sessions, then the review runner's
-//                          reviewers and auditors (kind review and audit, from their role; reviewSessions below). Either
+//                          reviewers and auditors (kind review and audit, from their role, each with runner_stop when
+//                          its row shows a stop, L968; reviewSessions below). Either
 //                          status missing, stale or not of its runner's shape throws: never one runner's half. Plan
 //                          reviewers are left out: planReviewsRunning counts them, so they would count twice (L933).
 //   board()              → this product's worker sessions only, by the product the status names (L927); a dead one's
@@ -49,7 +50,7 @@ import { isRefusing, refusing } from './not-wired.mjs';
 import { privateFolder } from './private-folder.mjs';
 import { checkMirror, git as safeGit } from '../modules/M4-workshop/git/safe-git.mjs';
 import { ENDED_FOLDER, runnerEnded } from '../modules/M9-record/outbox.mjs';
-import { FOLDERS as RUNNER_FOLDERS, readReviewStatus } from '../modules/M4-workshop/launcher/review-runner.mjs';
+import { FOLDERS as RUNNER_FOLDERS, STOP_SHOWN, readReviewStatus } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { RUNNER_KINDS, ownerSyncPorts, requestWriter } from './owner-status.mjs';
 import { PLAN_REVIEW_ROLE } from '../shared/review-roles.mjs';
 import { WORKER_REQUESTS_ACL, aclText } from '../setup/layout.mjs';
@@ -241,7 +242,11 @@ export function reviewSessions(status) {
     if (typeof r.session_id !== 'string' || !r.session_id) throw new Error('a session in the review runner\'s status has no session id');
     if (typeof r.card !== 'string' || !r.card) throw new Error(`review session ${r.session_id} in the review runner's status has no card`);
     if (typeof r.head !== 'string' || !HEX40.test(r.head)) throw new Error(`review session ${r.session_id} in the review runner's status names no head (40 hex)`);
-    out.push({ id: r.session_id, product: null, kind: REVIEW_KIND_OF[r.role], card: r.card, head: r.head, lead: null, role: r.role, pgid: null, signin: null, config_dir: null, bundle_files: [] });
+    // The stop the runner shows on the row (L968, review-runner.mjs STOP_SHOWN): made, given up on, or tried again. One that
+    // is not a time is not what the runner writes, so the list is not known (as for the head).
+    for (const f of STOP_SHOWN) if (r[f] !== undefined && (typeof r[f] !== 'string' || !Number.isFinite(Date.parse(r[f])))) throw new Error(`review session ${r.session_id} in the review runner's status has a ${f} that is not a time`);
+    const shown = r.stopped_by_request ? 'stopped' : r.stop_failed ? 'failed' : r.stop_wanted ? 'wanted' : null;
+    out.push({ id: r.session_id, product: null, kind: REVIEW_KIND_OF[r.role], card: r.card, head: r.head, lead: null, role: r.role, pgid: null, signin: null, config_dir: null, bundle_files: [], ...(shown ? { runner_stop: shown } : {}) });
   }
   return out;
 }

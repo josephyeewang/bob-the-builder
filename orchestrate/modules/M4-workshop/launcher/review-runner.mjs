@@ -66,6 +66,9 @@
 //                       <session>.sha256, its pin; a session reads them and never writes (M-1 (c), L83)
 //   status.json  0644   { written_at, ok, error, installed_commit, running, refused, alerts, taps_read, offers,
 //                       stopped_by_request } (`stopped_by_request`: [{ session_id, card, role, head, at }], no request id)
+//                       (each `running` row also shows the stop asked for it, L968, as the time it was so: `stop_wanted`
+//                       a stop that failed and is tried again next pass, `stop_failed` one given up on and told to Joe,
+//                       `stopped_by_request` one made; the Dispatcher's stop step stops asking once one shows)
 //                       (`taps_read`: the keys of Joe's taps the runner has read; the Front Door removes those taps;
 //                       `offers`: [{ session_id, card, role, head }], the sessions a tap would set aside now, each
 //                       passed by the tap loop's own test at the end of the pass, so none is for an old head; L733, #307)
@@ -586,7 +589,7 @@ export async function runnerPass(ctx) {
   const fail = (error) => { result.ok = false; result.error = result.error ? `${result.error}; ${error}` : error; };
   const finish = () => {
     const status = { written_at: iso(now), ok: result.ok, error: result.error, installed_commit: installed,
-      running: state.running.map(({ card, head, role, session_id, started_at, fingerprint, request_id }) => ({ card, head, role, session_id, started_at, ...(fingerprint ? { fingerprint, request_id } : {}) })),
+      running: state.running.map((r) => ({ card: r.card, head: r.head, role: r.role, session_id: r.session_id, started_at: r.started_at, ...(r.fingerprint ? { fingerprint: r.fingerprint, request_id: r.request_id } : {}), ...stopShown(r) })),
       refused: [...(state.refused ?? []), ...result.refused].slice(-KEEP_LIST), alerts: state.alerts,
       holds: [...result.holds, ...Object.values(state.not_taken ?? {}).map(({ id, text }) => ({ id, text })), ...stuckHolds(state, now)],
       taps_read: Array.isArray(state.taps_seen) ? state.taps_seen : [], offers,
@@ -1693,6 +1696,9 @@ export async function runnerPass(ctx) {
 const notTakenWhy = (t) => (typeof t?.reason === 'string' && t.reason ? t.reason.slice(0, 300) : 'no reason given');
 const isHead = (h) => typeof h === 'string' && HEX40.test(h);
 const stamp = (s) => typeof s === 'string' && Number.isFinite(Date.parse(s));
+/** What a running row shows of a stop asked for it (L968): the stamps STOP_SHOWN names, each only when it is one. */
+export const STOP_SHOWN = Object.freeze(['stop_wanted', 'stop_failed', 'stopped_by_request']);
+const stopShown = (r) => Object.fromEntries(STOP_SHOWN.filter((f) => stamp(r[f])).map((f) => [f, r[f]]));
 const isObject = (v) => v !== null && typeof v === 'object';
 const goodStreak = (r) => isObject(r) && typeof r.card === 'string' && CARD_ID.test(r.card) && typeof r.role === 'string' && typeof r.head === 'string' && HEX40.test(r.head) && (r.product === undefined || typeof r.product === 'string') && typeof r.reason === 'string' && stamp(r.first_at) && stamp(r.last_at);
 const goodNoVerdict = (n) => isObject(n) && typeof n.card === 'string' && CARD_ID.test(n.card) && typeof n.role === 'string' && typeof n.head === 'string' && HEX40.test(n.head) && stamp(n.first_at);
