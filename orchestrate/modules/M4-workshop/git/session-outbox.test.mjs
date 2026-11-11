@@ -4,8 +4,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { workerOutboxProblem, outboxProblemFor } from './session-outbox.mjs';
+import { WORKER_OUTBOX_ROLES, workerOutboxProblem, outboxProblemFor } from './session-outbox.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../../../shared/product-paths.mjs';
+
+test('L910 m3: the worker runner\'s outbox roles are the one list, PRODUCT_OUTBOX_ROLES, not a copy', () => {
+  assert.equal(WORKER_OUTBOX_ROLES, PRODUCT_OUTBOX_ROLES);
+});
 
 const SID = 'S-1';
 

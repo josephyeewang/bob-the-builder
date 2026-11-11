@@ -46,6 +46,7 @@
 //   outboxDrained(session): true when the outbox is gone, or every file in it (dot files count) has the Record's intake
 //     fact for it in a done state with the sha256 of its bytes now (L852, drainedPort below, read with M4 readFactFile).
 //     Any other file keeps the outbox open and its session listed: it fails safe, never closing on a hand-in not taken.
+//     It answers why (`{ drained: false, cause }`, a DRAIN_CAUSES name, L896), so the runner can tell it once it lasts.
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
@@ -60,6 +61,7 @@ import { dirname, join } from 'node:path';
 import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
+import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
@@ -99,7 +101,8 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
 }
 
 /**
- * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else false. Intake
+ * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else { drained:
+ * false, cause } naming why for the first file that holds it open (a DRAIN_CAUSES name, M11 drain-alerts.mjs, L896). Intake
  * keeps every hand-in (push and M6 gather read them from the outbox), so an empty folder is not the sign: each file
  * must have the Record's own `intake-applied-<session>-<name>` fact (M11 outbox-intake.mjs), naming this session and
  * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
@@ -126,18 +129,38 @@ const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || 
 const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
 const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
 const SHA256 = /^[0-9a-f]{64}$/;
+// Not drained, and why (L896): a DRAIN_CAUSES name, so the runner can tell it once it lasts.
+const held = (cause) => {
+  if (!DRAIN_CAUSES.includes(cause)) throw new Error(`no drain cause ${cause}`);
+  return { drained: false, cause };
+};
+// A file that could not be hashed: not a plain one (a folder, a link, a pipe), or not readable.
+const hashCause = (e) => (/not a plain file/.test(e?.message ?? '') || e?.code === 'ELOOP' ? 'not-a-plain-file' : 'file-unreadable');
+// A fact read that is not ok: missing is "never taken" (a dot file told as its own), anything else unreadable.
+const readCause = (f, name) => (f?.missing === true ? (name.startsWith('.') ? 'dot-name' : 'not-taken') : 'record-unreadable');
+// The fact id rule the Record reads by (M4 readFactFile): a name it can't hold is told by what is wrong with it (L896).
+const FACT_ID = /^[A-Za-z0-9._-]{1,200}$/;
+const IN_FLIGHT = new Set(['applying', 'starting']);
+function nameCause(id, name) {
+  if (name.includes('\uFFFD')) return 'name-not-utf8';
+  if (id.length > 200) return 'fact-id-too-long';
+  return FACT_ID.test(id) ? null : 'name-not-a-fact-id';
+}
 // The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
-function bundlePushed(s, path, { readFact, readSession, hashOf }) {
-  let sd; try { sd = readSession(s.id); } catch { return false; }
-  const doc = sd?.ok === true ? sd.doc : null;
+// → null when taken, else its cause.
+function bundleHeld(s, path, { readFact, readSession, hashOf }) {
+  let sd; try { sd = readSession(s.id); } catch { return 'record-unreadable'; }
+  if (sd?.ok !== true) return sd?.missing === true ? 'bundle-no-attempt' : 'record-unreadable';
+  const doc = sd.doc;
   const att = doc?.card === s.card ? doc.attempt : undefined;
-  if (typeof att !== 'string' || !att) return false;
-  let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return false; }
-  const d = f?.ok === true ? f.doc : null;
+  if (typeof att !== 'string' || !att) return 'bundle-no-attempt';
+  let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return 'record-unreadable'; }
+  if (f?.ok !== true) return f?.missing === true ? 'bundle-not-pushed' : 'record-unreadable';
+  const d = f.doc;
   // A push that could not note the card's head is not done (push.mjs reads it so too): it is pushed again (#388 r2 m2).
-  if (d?.result !== 'pushed' || d.head_refused || !SHA256.test(String(d.bundle_sha256))) return false;
-  let hash; try { hash = hashOf(path); } catch { return false; }
-  return hash === d.bundle_sha256;
+  if (d?.result !== 'pushed' || d.head_refused || !SHA256.test(String(d.bundle_sha256))) return 'bundle-not-pushed';
+  let hash; try { hash = hashOf(path); } catch (e) { return hashCause(e); }
+  return hash === d.bundle_sha256 ? null : 'bundle-changed';
 }
 function fileSha256(p) {
   const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -145,17 +168,24 @@ function fileSha256(p) {
 }
 export function drainedPort({ list = readdirSync, readFact = noFactReader, readSession = noSessionReader, hashOf = fileSha256 } = {}) {
   return (s) => {
-    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
+    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT' ? true : held('outbox-unreadable'); }
     for (const name of names) {
       if (WAITING_DONE_FOR.has(s.role) && typeof s.card === 'string' && name === bundleName(s.card)) {
-        if (!bundlePushed(s, join(s.outbox, name), { readFact, readSession, hashOf })) return false;
+        const why = bundleHeld(s, join(s.outbox, name), { readFact, readSession, hashOf });
+        if (why) return held(why);
         continue;
       }
-      let f; try { f = readFact(`intake-applied-${s.id}-${name}`); } catch { return false; }
-      const d = f?.ok === true ? f.doc : null;
-      if (!d || d.session !== s.id || d.name !== name || !doneFor(s, d.state)) return false;
-      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
-      if (d.sha256 !== hash) return false;
+      const id = `intake-applied-${s.id}-${name}`;
+      const bad = nameCause(id, name);
+      if (bad) return held(bad);
+      let f; try { f = readFact(id); } catch { return held('record-unreadable'); }
+      if (f?.ok !== true) return held(readCause(f, name));
+      const d = f.doc;
+      if (!d || d.session !== s.id || d.name !== name) return held('other');
+      // A Lead's 'waiting' is a queued request not yet started (#388 r1 m2): still in flight.
+      if (!doneFor(s, d.state)) return held(IN_FLIGHT.has(d.state) || d.state === 'waiting' ? 'in-flight' : 'other');
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch (e) { return held(hashCause(e)); }
+      if (d.sha256 !== hash) return held('hash-mismatch');
     }
     return true;
   };
