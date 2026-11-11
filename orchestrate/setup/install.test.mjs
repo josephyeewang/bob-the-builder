@@ -1234,6 +1234,8 @@ const ROBOT_PLANTS = [
   ['a bad alert repository', (c) => ({ ...c, ...ROBOT_APP, alertRepo: 'not a repo' }), /alertRepo/],
   ['a bad alert owner', (c) => ({ ...c, ...ROBOT_APP, alertOwner: '-bad-' }), /alertOwner must be a GitHub login/],
   ['a bad installation number', (c) => ({ ...c, ...ROBOT_APP, appInstallation: 'x' }), /appInstallation must be the installation's number/],
+  // #305 r1 m1: good App keys, but the config fails elsewhere: still no key line (the loop's doesNotMatch).
+  ['good App keys with a bad wiring', (c) => ({ ...c, ...ROBOT_APP, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
 ];
 for (const [what, edit, re] of ROBOT_PLANTS) {
   test(`PLANT robot.json: ${what} → load refuses, check FAILs`, async () => {
@@ -1282,6 +1284,27 @@ test('audit #305 n3: daemons check without sudo lists the robot App\'s key as NE
   assert.doesNotMatch(ck.text, /^PASS  the robot App's key/m);
   assert.notEqual(ck.code, 0, ck.text);
   w.mac.as = 0;
+});
+
+test('#305 r1 m4: a dry run without sudo says the robot App\'s key was NOT CHECKED, for place and for load; as root, no such line', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`; const orch = Number(w.mac.users.get('orchestrate').UniqueID);
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o600 }); chmodSync(w.mac.at(key), 0o600); w.mac.owners.set(key, { uid: orch, gid: orch });
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  const line = new RegExp(`^NOT CHECKED  the robot App's key: \\S*keys/${ROBOT_KEY_FILE.replace('.', '\\.')} .* — the folder is orchestrate-only; needs root to look; run with sudo$`, 'm');
+  try {
+    w.mac.as = 501;
+    for (const sub of ['place', 'load']) { const r = w.run(['daemons', sub, '--dry-run']); assert.match(r.text, line, `${sub}: ${r.text}`); }
+  } finally { w.mac.as = 0; }
+  for (const sub of ['place', 'load']) assert.doesNotMatch(w.run(['daemons', sub, '--dry-run']).text, /NOT CHECKED/, `as root, ${sub} looks`);
+});
+
+test('#305 r1 c1: the robot App\'s key owned by anyone but orchestrate → place and load refuse, check FAILs', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`;
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o600 }); chmodSync(w.mac.at(key), 0o600); w.mac.owners.set(key, { uid: 0, gid: 0 });
+  for (const sub of ['place', 'load']) { const r = w.run(['daemons', sub]); assert.equal(r.code, 1, r.text); assert.match(r.text, /owner is uid 0, not orchestrate, so the robot job could not send an alert/); }
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /the robot App's key: .* — owner is uid 0, not orchestrate$/m);
 });
 
 test('L727: with none of the four App keys no key is asked for (the deliver pass refuses as not wired); the key name is token.mjs\'s default', async () => {

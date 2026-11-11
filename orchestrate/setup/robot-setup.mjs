@@ -16,6 +16,11 @@
 //                           orchestrate's or root's. So no worker can plant a lock, and a lock that can't be taken is found
 //                           here. robot-main is the other half: any lock it cannot take is a non-zero exit, which `check`
 //                           fails on.
+//   the robot App (L727)    robot.json may name it with four keys, all or none: appId, appInstallation, alertRepo and
+//                           alertOwner (the wiring's own appProblem). With all four, its key must be in the robot key folder
+//                           as <base>/keys/<ROBOT_KEY_FILE> (token.mjs's name, imported): orchestrate's own plain 0600 file
+//                           of a key's size, no access list (watch-setup.mjs keyFileItems). place and load refuse without
+//                           it, check FAILs; without root it is NOT CHECKED (a dry run) or NEEDS ROOT (check), never a pass.
 //
 // Off unless the config says `"robot": true`. Nothing here names a product or a person.
 
@@ -25,7 +30,7 @@ import { NODE, aclProblem, chainProblem, installProblem } from '../modules/M4-wo
 import { CONFIG_KEYS as ROBOT_KEYS, appProblem } from '../wiring/robot-wiring.mjs';
 // The robot App's key file name: token.mjs owns it (L1471) and mints from it when the wiring names no keyFile (it names none).
 import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
-import { homeOf } from './layout.mjs';
+import { homeOf, keysPath } from './layout.mjs';
 import { installPaths } from './install.mjs';
 import { readUser } from './users-folders.mjs';
 import { keyFileItems } from './watch-setup.mjs';
@@ -94,14 +99,17 @@ export function robotConfigProblem(io, cfg) {
  */
 export function robotAppKeyItems(io, cfg) {
   const { config } = robotConfigRead(io, cfg);
-  if (!config || config.appId === undefined || appProblem(config) !== null) return [];
-  return keyFileItems(io, join(cfg.base, 'keys', ROBOT_KEY_FILE));
+  // None of the four App keys: no key is asked for (some but not all already failed the check above, via appProblem).
+  if (!config || config.appId === undefined) return [];
+  return keyFileItems(io, join(keysPath(cfg), ROBOT_KEY_FILE));
 }
 
+// The config comes back only when its check found no problem (#305 r1 m1): a robot.json that fails, for any reason, asks
+// for no key file, so the only robot line is the one that says what is wrong with it.
 function robotConfigRead(io, cfg) {
   let config = null;
   const problem = robotConfigCheck(io, cfg, (c) => { config = c; });
-  return { problem, config };
+  return { problem, config: problem === null ? config : null };
 }
 
 function robotConfigCheck(io, cfg, seen) {
@@ -117,7 +125,7 @@ function robotConfigCheck(io, cfg, seen) {
   const extra = Object.keys(c).filter((k) => !ROBOT_KEYS.includes(k));
   if (extra.length) why.push(`it has keys the robot job does not take: ${extra.slice(0, 5).join(', ')}`);
   const orch = readUser(io, ROBOT_USER);
-  const want = { wiring: join(root, ROBOT_WIRING), keyDir: io.at(join(cfg.base, 'keys')), ...('installRoot' in c ? { installRoot: root } : {}) };
+  const want = { wiring: join(root, ROBOT_WIRING), keyDir: io.at(keysPath(cfg)), ...('installRoot' in c ? { installRoot: root } : {}) };
   for (const [k, v] of Object.entries(want)) if (c[k] !== v) why.push(`${k} must be ${v}`);
   if (!orch.exists) why.push(`the ${ROBOT_USER} user does not exist (run users-folders first)`);
   else if (c.ownerUid !== orch.uid) why.push(`ownerUid must be ${orch.uid}, ${ROBOT_USER}'s (the Record's owner; the job refuses to run as anyone else)`);

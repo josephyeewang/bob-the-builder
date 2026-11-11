@@ -193,6 +193,8 @@ export function keyFileItems(io, f) {
   if (st.isSymbolicLink() || !st.isFile()) why.push('is not a plain file');
   else {
     if (st.uid !== orch.uid) why.push(`owner is uid ${st.uid}, not orchestrate`);
+    // Exactly 0600 on purpose: token.mjs (mintInstallationToken), the reader, refuses only group or other bits, so it takes
+    // 0400 too. Setup is stricter because the mode is one it sets and fixes; a key copied in read-only needs chmod 600.
     if ((st.mode & 0o7777) !== 0o600) why.push(`mode is ${(st.mode & 0o7777).toString(8)}, want 600`);
     if (st.nlink !== undefined && st.nlink !== 1) why.push('has a second name');
     if (!(st.size >= 200 && st.size <= 10_000)) why.push('its size is not a key\'s');

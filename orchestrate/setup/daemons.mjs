@@ -176,7 +176,7 @@ export function jobLive(io, cfg, job) {
 /** `daemons place`: launchd starts every job file in its folder at boot, with no load to refuse it, so a job file is placed only when load would start the job (L807 M1). */
 export function planPlace(io, cfg, jobs = jobsFor(cfg)) {
   const gate = startProblems(io, cfg, jobs);
-  if (!gate.length) return placeSteps(io, cfg, jobs);
+  if (!gate.length) return { ...placeSteps(io, cfg, jobs), unchecked: startUnchecked(io, cfg, jobs) };
   // A job file placed before still starts at boot; say so (the gate's own lines stay first, as load's).
   const live = (j) => { try { return jobLive(io, cfg, j); } catch { return null; } };   // the gate already refuses; this line only helps
   // Only a job whose own checks fail: a healthy job starting at boot is fine, and taking the review runner out would stop
@@ -245,6 +245,15 @@ export function startProblems(io, cfg, jobs) {
   return problems;
 }
 
+/**
+ * What startProblems could not look at without root, so a dry run says so instead of reading as a pass (#305 r1 m4): the
+ * robot App's key in the orchestrate-only key folder. A real run is root's (setup refuses it otherwise), so this is empty.
+ */
+export function startUnchecked(io, cfg, jobs) {
+  if (!jobs.includes(ROBOT_JOB)) return [];
+  return robotAppKeyItems(io, cfg).filter((k) => k.skip).map((k) => `the robot App's key: ${k.what} — ${k.why}`);
+}
+
 export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
   const ops = []; const problems = startProblems(io, cfg, jobs);
   const rec = readRecord(io, cfg);
@@ -262,7 +271,7 @@ export function planLoad(io, cfg, jobs = jobsFor(cfg)) {
       op(`record the fingerprint of ${label}'s job file in ${recordPath(cfg)}`, () => changeRecord(io, cfg, (x) => { x[label] = h; })),
       readBackOp(io, cfg, job));
   }
-  return { ops, problems };
+  return { ops, problems, unchecked: startUnchecked(io, cfg, jobs) };
 }
 
 /** Unload the jobs that are loaded; none loaded → nothing to do, no error. Runner first, so nothing starts while the updater goes. */

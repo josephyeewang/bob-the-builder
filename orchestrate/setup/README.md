@@ -234,7 +234,7 @@ App's key must be in the robot key folder under token.mjs's default name, `<base
 plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). The mode must be exactly 0600:
 0400 is refused too, so a key copied in read-only needs `chmod 600`. Missing or open: `place` and `load` refuse
 (no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, the key is listed as
-NEEDS ROOT and check does not exit 0). With none of the four, no key is asked for and the deliver pass refuses as not
+NEEDS ROOT and check does not exit 0; a `--dry-run` of place or load without sudo prints it as NOT CHECKED). With none of the four, no key is asked for and the deliver pass refuses as not
 wired, so alerts stay queued.
 Setup checks the key file's owner, mode and size only; it never reads the key, so it does not prove the key is the robot
 App's or that a token can be minted from it. A wrong key (another App's, or one replaced later) passes `load` and `check`
