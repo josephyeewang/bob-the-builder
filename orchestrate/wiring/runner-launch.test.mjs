@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
@@ -99,6 +99,16 @@ test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to
     writeFileSync(join(outbox, 'report-1.md'), 'x');
     const ok = ln(join(outbox, 'report-1.md'), join(outbox, 'report-2.md'));
     assert.equal(ok.status, 0, `control: a link inside the outbox failed: ${ok.stderr}`);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('link card: a launch whose notes folder is a link into the runner\'s requests folder is not walled', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    symlinkSync(runner.requestsDir, join(d, 'notes-link'));
+    const r = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, notes: join(d, 'notes-link') } }));
+    assert.match(r.reason ?? '', /^not walled: the session's folder .*notes-link is reached through a link/);
+    assert.equal(walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, notes: join(d, 'notes') } })).ok, true);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
