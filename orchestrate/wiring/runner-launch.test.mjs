@@ -2,17 +2,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { renderRoleSettings, checkRunnerWall } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { writeStatus } from './runner-files.mjs';
 import { checkRunnerConfig } from './runner-main.mjs';
 
 const PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
 };
@@ -77,17 +78,19 @@ test('L759 step 2: settings without the wall, a linked runner folder or a missin
 // #328 r1 M1 (L769): a forged status needs a hard link to status.json made outside the sandbox. Under macOS's own sandbox
 // (Seatbelt, which Claude Code's shell sandbox runs on), given the rendered denyWrite list as #320's L751 test does, a
 // worker's shell can't make that link, into its outbox or anywhere, nor one beside the status.
-test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to the runner\'s status; it can in its own outbox', {
+test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to the runner\'s status or its rules snapshot (#439 m4), nor put a file in the snapshot\'s folder; it can in its own outbox', {
   skip: process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec') ? 'needs macOS sandbox-exec' : false,
 }, () => {
   const { d, runner } = runnerDirs();
   try {
     const outbox = join(d, 'outbox'); mkdirSync(outbox);
     writeStatus(runner.statusFile, '{}\n');
-    const r = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, outbox } }));
+    const snaps = join(d, 'snapshots'); mkdirSync(snaps);
+    const snapshot = join(snaps, 'rules.json'); writeFileSync(snapshot, '{}\n');
+    const r = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, outbox, snapshot } }));
     assert.equal(r.ok, true, r.reason);
     const rules = r.settings[S.sandbox][S.filesystem][S.denyWrite].filter((p) => !/[*]/.test(p) && p.startsWith(d)).map((p) => `(deny file-write* (subpath "${p}"))`);
-    assert.equal(rules.length, 2, 'the runner folders are on the denyWrite list as plain folders here');
+    assert.equal(rules.length, 3, 'the runner folders and the snapshot folder are on the denyWrite list as plain folders here');
     const profile = `(version 1)(allow default)${rules.join('')}`;
     const ln = (from, to) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/ln', from, to], { encoding: 'utf8' });
     for (const to of [join(outbox, 'status-link.json'), join(d, 'state', 'second-name.json'), join(d, 'elsewhere.json')]) {
@@ -96,6 +99,18 @@ test('L769: under macOS\'s sandbox, a worker\'s shell can\'t make a hard link to
       assert.equal(existsSync(to), false, `${to} exists`);
     }
     assert.equal(statSync(runner.statusFile).nlink, 1);
+    // The rules snapshot alike: no second name for it outside its folder, and no file linked or moved into the folder.
+    const sb = (cmd, ...args) => spawnSync('/usr/bin/sandbox-exec', ['-p', profile, cmd, ...args], { encoding: 'utf8' });
+    for (const to of [join(outbox, 'snap-link.json'), join(d, 'elsewhere-snap.json')]) {
+      assert.notEqual(ln(snapshot, to).status, 0, `a link to the snapshot at ${to} was made`);
+      assert.equal(existsSync(to), false, `${to} exists`);
+    }
+    writeFileSync(join(outbox, 'forged.json'), '{}');
+    assert.notEqual(ln(join(outbox, 'forged.json'), join(snaps, 'forged.json')).status, 0, 'a link into the snapshot folder was made');
+    assert.notEqual(sb('/bin/mv', join(outbox, 'forged.json'), snapshot).status, 0, 'a file was renamed over the snapshot');
+    assert.equal(readFileSync(snapshot, 'utf8'), '{}\n');
+    assert.equal(statSync(snapshot).nlink, 1);
+    assert.deepEqual(readdirSync(snaps), ['rules.json']);
     writeFileSync(join(outbox, 'report-1.md'), 'x');
     const ok = ln(join(outbox, 'report-1.md'), join(outbox, 'report-2.md'));
     assert.equal(ok.status, 0, `control: a link inside the outbox failed: ${ok.stderr}`);
@@ -109,6 +124,17 @@ test('link card: a launch whose notes folder is a link into the runner\'s reques
     const r = walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, notes: join(d, 'notes-link') } }));
     assert.match(r.reason ?? '', /^not walled: the session's folder .*notes-link is reached through a link/);
     assert.equal(walledLaunchSettings(input('editing', runner, { paths: { ...PATHS, notes: join(d, 'notes') } })).ok, true);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#439 m6: the launch renders with the realpath it checks with, so a snapshot folder reached through a link is walled as it resolves', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const realpath = (p) => (p === '/w/snapshots' || p.startsWith('/w/snapshots/') ? p.replace('/w/snapshots', '/w/real-snaps') : p);
+    const r = walledLaunchSettings({ ...input('editing', runner), realpath });
+    assert.equal(r.ok, true, r.reason);
+    assert.ok(r.settings[S.permissions][S.deny].includes('Edit(//w/real-snaps/**)'), 'the real spelling is walled at render');
+    assert.ok(r.settings[S.sandbox][S.filesystem][S.denyWrite].includes('/w/real-snaps/**'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -131,5 +157,18 @@ test('L916 (#423 M2): a worker launch built from the config\'s real snapshot pla
     assert.throws(() => checkRunnerConfig(cfg(old)), /render\.paths\.snapshot must be a file in a folder of its own, apart from/);
     const was = launchFrom({ workerRunner: c.workerRunner, products: { p1: { render: { paths: { ...c.products.p1.render.paths, snapshot: old } } } } });
     assert.equal(was.ok, false); assert.match(was.reason, /the worker runner's folders must be apart from the session's own folders/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#439 r1 c1: the launch hands the render and the check the same lstat and realpath', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const realpath = (p) => realpathSync.native(p); const lstat = (p) => lstatSync(p);
+    const seen = {};
+    const r = walledLaunchSettings({ ...input('editing', runner), realpath, lstat,
+      render: (a) => { seen.render = [a.realpath, a.lstat]; return renderRoleSettings(a); },
+      check: (a) => { seen.check = [a.realpath, a.lstat]; return checkRunnerWall(a); } });
+    assert.equal(r.ok, true, r.reason);
+    assert.deepEqual(seen, { render: [realpath, lstat], check: [realpath, lstat] });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
