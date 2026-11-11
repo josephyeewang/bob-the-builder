@@ -202,10 +202,13 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  * owned by the runner's uid with no group or other write bit. The runner's sessions run as that same Mac user
  * (runner-ports.mjs), so owning the folder keeps out other users only: the folder right above it must be root's, with no
  * group or other write bit and no access list write entry (#419 r4 M1, option b), so a session can't rename the folder
- * away or put another in its place. Claude's per-user sandbox temp folder (/private/tmp/claude-<uid>), the temp folder,
- * the home folder and everything the sessions own fail this, and so does a copy; setup's <base>/worker-runner/ passes.
- * Writing into the folder itself only the sessions' sandbox and tool walls stop (the snapshot deny, a lane 4 card).
- * Every folder further up is root's or the runner's, with no group or other write bit unless it is sticky (/private/tmp).
+ * away or put another in its place. Every folder further up is root's too, with no group or other write bit unless it
+ * is sticky (/private/tmp): a session may rename a folder in one it can write, even a folder it can't (L939 self-review
+ * M-A: renaming <home>/orch with root's worker-runner/ in it would move the snapshots out from under the deny entries).
+ * So a folder in or under claude's per-user sandbox temp folder (/private/tmp/claude-<uid>), the temp folder or the home
+ * folder fails this, and so does a copy; setup's <base>/worker-runner/ passes when <base> sits in root's folders. (The
+ * home folder itself, its parent /Users being root's, passes; it is no snapshot folder anyone would name.) Writing into
+ * the folder itself only the sessions' sandbox and tool walls stop (the snapshot deny, a lane 4 card).
  * No folder on the way carries an access list entry that lets anyone write (L926 self-review M1: a 0755 folder with
  * "everyone allow add_file" is everyone's to write; macOS's own "deny" entries, as on a home folder, are fine).
  * → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
@@ -231,7 +234,7 @@ export function snapshotFolderProblem(dir, { lstat = lstatSync, realpath = (p) =
   if (ps.uid !== 0 || (ps.mode & 0o022)) return no(`sits in ${parent}, which is not root's alone (its owner is uid ${ps.uid}, mode ${(ps.mode & 0o7777).toString(8).padStart(4, '0')}): the runner's sessions are the runner's own user, so only a folder of root's that no one else can write keeps them from moving this one`);
   for (let a = dirname(dir); ; a = dirname(a)) {
     let s; try { s = lstat(a); } catch (e) { return no(`sits in ${a}, which can't be read (${e?.code ?? e?.message})`); }
-    if ((s.uid !== 0 && s.uid !== uid) || ((s.mode & 0o022) && !(s.mode & 0o1000))) return no(`sits in ${a}, which others than the runner can change`);
+    if (s.uid !== 0 || ((s.mode & 0o022) && !(s.mode & 0o1000))) return no(`sits in ${a}, which others than root can change (its owner is uid ${s.uid}, mode ${(s.mode & 0o7777).toString(8).padStart(4, '0')})`);
     const up = acl(a);
     if (up.length) return no(`sits in ${a}, which has an access list entry that lets others write (${up[0]})`);
     if (a === '/') return null;
