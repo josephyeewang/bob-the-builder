@@ -1303,3 +1303,27 @@ test('#451 L967: an alert lost outside the per-kind list (usage) still makes the
   await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn } });
   assert.match(logs.join('\n'), /robot: heartbeat ran, and 1 of its items failed/);
 });
+
+test('L969: the robot heartbeat tells a stopped Sensors job by name: green while it writes, red with its alert past usage.stale_after_min', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  // The clock stays put and the readings are dated back: the rules reader calls its rules unusable 5 minutes after its
+  // last fetch (M10 reader FETCH_GRACE_MS), which one robot round, one process, never reaches.
+  const t = Date.parse('2026-11-03T10:00:00Z');
+  const { rec, passes } = await wire(w.config, { fetchFn: gh.fetchFn, now: () => t, log: () => {} });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /Sensors job last wrote a reading: unknown/, 'no Sensors reading yet: not known, never red');
+  assert.ok(![...gh.issues.values()].some((i) => /heartbeat red: sensors/.test(i.title)));
+  sensed(rec, 'network-up', { value: true, observed_at: isoAt(t - 2 * MIN) });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /ok {4}Sensors job last wrote a reading: 2 min ago \(red after 15 min\)/);
+  sensed(rec, 'network-up', { value: true, observed_at: isoAt(t - 18 * MIN) });
+  await passes.heartbeat();
+  assert.match(pinnedOf(gh).body, /M10 Rules usable: yes/, 'the limit was there to read');
+  const al = [...gh.issues.values()].find((i) => /heartbeat red: sensors/.test(i.title));
+  assert.ok(al, 'red, with its own alert');
+  assert.match(al.body, /The Sensors job has written no reading for 18 minutes \(red after 15\)/);
+  sensed(rec, 'network-up', { value: true, observed_at: isoAt(t) });
+  await passes.heartbeat();
+  assert.equal(al.state, 'closed', 'cleared once it writes again');
+});

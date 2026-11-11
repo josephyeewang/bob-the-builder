@@ -20,6 +20,15 @@
 // `labels` turn a or b into the private config's label; an account with no label is shown as its letter.
 //
 // Usage. heartbeatOnce takes one window at a time, so it gets the fuller of the two.
+//
+// Sensors alive (L967, L969). Whether the Sensors job itself is still writing: the age of the newest reading it wrote
+// among the families its loop writes on every pass, whatever the reading says (EVERY_PASS below; M12 loop.mjs LOOP).
+// Its limit is usage.stale_after_min, the same age at which the Dispatcher holds starts for a stale account reading
+// (tick.mjs), so the plain "the Sensors job may have stopped" turns red no later than that hold, and one rule means the
+// two never disagree: `stale` is decided in milliseconds, as that hold decides it (`now - seen > staleMs`), and the
+// minutes are only for the line. Not known (null) with no limit in the rules, or with no Sensors reading at all: a Mini
+// that has never run the Sensors job is not a stopped one, and one whose Sensors facts were deleted reads the same. A
+// reading stamped in the future does not count.
 
 import { sensorsFact } from '../modules/M11-dispatcher/sensor-facts.mjs';
 import { ACCOUNT_FACT, LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
@@ -45,6 +54,9 @@ const whoOf = (d) => {
 // probe that throws as red, which for these would be a loud false alarm (#451 r1 m3).
 const orNull = (fn) => async () => { try { return await fn(); } catch { return null; } };
 
+/** The families the Sensors loop writes on every pass, each its own fact (no per-account or per-PR suffix). */
+export const EVERY_PASS = Object.freeze([ACCOUNT_FACT, FACTS.network, FACTS.reachable, FACTS.minibase]);
+
 export function heartbeatProbes({ rec, rules, now, labels = {} }) {
   // No age limit in the rules means no reading can be called current, so all of them are not known.
   const staleMs = () => { try { return minutes(rules, KEYS.staleAfterMin); } catch { return null; } };
@@ -55,6 +67,17 @@ export function heartbeatProbes({ rec, rules, now, labels = {} }) {
   };
   return {
     dispatcherLastGood: async () => rec.read('fact', LAST_PASS_FACT)?.doc?.at ?? null,
+    // → null (not known), or { ageMin, limitMin, stale }: the newest Sensors reading's age and limit, in whole minutes
+    // for the line, and whether it is past that limit, in milliseconds.
+    sensorsAlive: orNull(() => {
+      const ms = staleMs();
+      if (ms === null) return null;
+      const t = now();
+      const seen = EVERY_PASS.map((id) => Date.parse(sensorsFact(rec, id)?.doc?.observed_at ?? '')).filter((s) => Number.isFinite(s) && s <= t + FUTURE_MS);
+      if (!seen.length) return null;
+      const newest = Math.max(...seen);
+      return { ageMin: Math.max(0, Math.floor((t - newest) / 60_000)), limitMin: ms / 60_000, stale: t - newest > ms };
+    }),
     frontDoorReachable: orNull(() => {
       const d = sensorsFact(rec, FACTS.reachable)?.doc;
       if (!d || !current(d.observed_at, now(), READING_MAX_AGE_MS)) return null;

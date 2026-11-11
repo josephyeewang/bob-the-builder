@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { heartbeatProbes } from './heartbeat-probes.mjs';
+import { heartbeatProbes, EVERY_PASS } from './heartbeat-probes.mjs';
+import { LOOP } from '../modules/M12-sensors/loop.mjs';
 import { ACCOUNT_FACT, LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
 import { FACTS } from '../modules/M11-dispatcher/phone-link.mjs';
 import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
@@ -118,4 +119,44 @@ test('#451 r1 m3: a Record read or meta that throws is not known, never "not rea
     assert.equal(await p.account(), null);
     assert.equal(await p.usage(), null);
   }
+});
+
+// ── Sensors alive (L967, L969) ───────────────────────────────────────────────────────────────────────────────────────
+
+const wrote = (id, min) => [id, { value: true, observed_at: seen(min) }];
+
+test('L969: sensorsAlive is the newest Sensors reading\'s age, held to usage.stale_after_min', async () => {
+  assert.deepEqual(await setUp([wrote('network-up', 3)]).sensorsAlive(), { ageMin: 3, limitMin: STALE_MIN, stale: false });
+  // The newest of them counts, whatever each reading says (a false or an unknown one is still the job writing).
+  assert.deepEqual(await setUp([wrote('network-up', 50), said({ account: null, signed_in: null }, 7), [FACTS.minibase, { value: null, observed_at: seen(40) }]]).sensorsAlive(),
+    { ageMin: 7, limitMin: STALE_MIN, stale: false });
+  assert.deepEqual(await setUp([wrote('frontdoor-reachable', 45)]).sensorsAlive(), { ageMin: 45, limitMin: STALE_MIN, stale: true }, 'old is still known, and stale');
+  for (const id of EVERY_PASS) assert.deepEqual(await setUp([wrote(id, 2)]).sensorsAlive(), { ageMin: 2, limitMin: STALE_MIN, stale: false }, id);
+});
+
+test('L969 review m1: stale is decided in milliseconds, as the Dispatcher\'s account hold decides it', async () => {
+  const at = (ms) => setUp([['network-up', { value: true, observed_at: iso(T0 - ms) }]]).sensorsAlive();
+  assert.deepEqual(await at(STALE_MIN * MIN), { ageMin: STALE_MIN, limitMin: STALE_MIN, stale: false }, 'at the limit is not past it');
+  assert.deepEqual(await at(STALE_MIN * MIN + 1000), { ageMin: STALE_MIN, limitMin: STALE_MIN, stale: true }, 'a second past it is stale, though the minutes still read the limit');
+});
+
+test('L969: sensorsAlive is not known with no reading yet, no limit in the rules, a reading from the future, or one Sensors did not make', async () => {
+  assert.equal(await setUp().sensorsAlive(), null, 'a Mini that has never run the Sensors job');
+  assert.equal(await setUp([wrote('network-up', -5)]).sensorsAlive(), null, 'a reading from the future');
+  const made = recWith([]);
+  assert.equal(made.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  const by = (who) => heartbeatProbes({ rec: { read: made.read.bind(made), meta: () => ({ createdBy: who }) }, rules: rules(), now: () => T0 });
+  assert.deepEqual(await by('sensors').sensorsAlive(), { ageMin: 1, limitMin: STALE_MIN, stale: false }, 'the control');
+  assert.equal(await by('ledger').sensorsAlive(), null, 'a reading Sensors did not make');
+  const rec = recWith([]);
+  assert.equal(rec.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  assert.equal(await heartbeatProbes({ rec, rules: { ...rules(), get: () => undefined, num: () => { throw new Error('no value'); } }, now: () => T0 }).sensorsAlive(), null, 'no usage.stale_after_min');
+  assert.equal(await heartbeatProbes({ rec: { read: () => { throw new Error('x'); } }, rules: rules(), now: () => T0 }).sensorsAlive(), null, 'a read that throws');
+  // Usage and pull-request readings are per account or per PR, and not written every pass; they do not count.
+  assert.equal(await setUp([usage(10, 10, 1)]).sensorsAlive(), null);
+});
+
+test('L969: EVERY_PASS is exactly the families the Sensors loop writes every pass with no suffix', () => {
+  const every = Object.entries(LOOP).filter(([fam, how]) => !fam.endsWith('-') && /^every pass:/.test(how)).map(([fam]) => fam).sort();
+  assert.deepEqual([...EVERY_PASS].sort(), every);
 });

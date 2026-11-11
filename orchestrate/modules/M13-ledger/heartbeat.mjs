@@ -17,6 +17,11 @@
 //                     new notice even after Joe closed the last one (L730 m3). One Joe closed while it lasts answers
 //                     'suppressed' in `told`: the caller treats that as not told and tells it its own way, once a day.
 //   rules             the M10 Rules file reads and parses.
+//   sensors           when the caller passes `sensorsAlive` (→ null, or { ageMin, limitMin, stale }): the Sensors job's
+//                     newest reading; red when `stale` says it is past its limit, so a stopped Sensors job is told by
+//                     name, not only as readings that went "not known" (L967). Null is not known, as for the probes
+//                     below, and like them it neither raises nor clears: an alert open when the line goes not known stays
+//                     open until a known reading clears it, never closed on no word.
 //   front door        the Front Door answers through the phone link (Remote Control).
 //   account           the signed-in Claude account, as its label from private config ("account A"), never an
 //                     email address: the probe maps it. Signed out → a `signed-out` fact and one alert; nothing here
@@ -95,9 +100,23 @@ export async function heartbeatOnce({ product, writer, gh, alerts, owner, probes
   await set('rules', !(r.ok && r.v === true), `M10 Rules usable: ${r.ok && r.v === true ? 'yes' : 'no'}`,
     'The M10 Rules file could not be read or parsed. Everything that checks a rule refuses until it is fixed.');
 
-  const f = await probe(probes.frontDoorReachable);
   const unknown = [];
   const notKnownLine = (name, line) => { unknown.push(name); lines.push(`?     ${line}: unknown (no current reading)`); };
+  if (typeof probes.sensorsAlive === 'function') {
+    const s = await probe(probes.sensorsAlive);
+    if (notKnown(s)) notKnownLine('sensors', 'Sensors job last wrote a reading');
+    else {
+      const age = s.ok ? s.v?.ageMin : undefined; const limit = s.ok ? s.v?.limitMin : undefined;
+      const read = Number.isFinite(age) && Number.isFinite(limit) && typeof s.v?.stale === 'boolean';
+      const sRed = !read || s.v.stale;
+      await set('sensors', sRed, `Sensors job last wrote a reading: ${read ? `${age} min ago (red after ${limit} min)` : 'could not be read'}`,
+        read ? `The Sensors job has written no reading for ${age} minutes (red after ${limit}). It may have stopped, or its writes are being refused. The signed-in account, usage and Front Door readings are going stale, so the Dispatcher holds new starts. Check the Sensors background job on the Mini.`
+          : 'Whether the Sensors job is still writing could not be read. The Dispatcher may be holding new starts. Check the Sensors background job on the Mini.',
+        read ? 'red:sensors' : 'red:sensors:unreadable');
+    }
+  }
+
+  const f = await probe(probes.frontDoorReachable);
   if (notKnown(f)) notKnownLine('front door', 'Front Door reachable from the phone');
   else await set('front-door', !(f.ok && f.v === true), `Front Door reachable from the phone: ${f.ok && f.v === true ? 'yes' : 'no'}`,
     'The Front Door session does not answer through the phone link. Use the GitHub fallbacks (ideas as issues, Approve on the PR) until it is back.');
