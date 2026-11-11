@@ -51,6 +51,10 @@ export const REVIEW_STOP_FACT = (sid) => `stop-review-${sid}`;
 // While the session is still listed, the stop is asked again after this long (the runner stops at once, or tells Joe
 // itself when a stop it made does not take, review-runner.mjs STOP_IGNORED_MS).
 export const REVIEW_STOP_AGAIN_MS = 5 * 60_000;
+// The asks a session gets before the stop step gives up on it (L962 m5): the runner's status lists no per-session
+// stop_failed, and a session it did stop leaves its running list, so one still listed after this many stop files is
+// one the runner could not stop (it tells Joe itself, review-runner.mjs stop_failed). Said once, then left alone.
+export const REVIEW_STOP_MAX_ASKS = 6;
 // The one daily tell for every review stop that can't be asked (one broken folder fails them all): `stop-reviews-`, not
 // `stop-review-`, so the done sweep over REVIEW_STOP_FACT never reads it.
 export const REVIEW_STOP_TELL_FACT = 'stop-reviews-failing';
@@ -381,10 +385,20 @@ const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVI
  * REVIEW_STOP_AGAIN_MS while the session is listed. Every ask of a pass is made at once, each with its own time limit,
  * so the asks add one port deadline to the step however many there are. A failed ask is said in the notes and the
  * failure log on each pass; Joe is told once for all of them (REVIEW_STOP_TELL_FACT), again each day it lasts, and the
- * tell is taken back (a queued one dropped) on the first pass with none failing. A stop asked for a session no longer
- * listed is marked done. Results go in out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed'].
+ * tell still queued is dropped on a pass with none failing, but told_at stays (L962 m1), so a stop that fails, works
+ * and fails again is told once a day, not each time. A session still listed after REVIEW_STOP_MAX_ASKS stop files is
+ * given up on (said once; the runner tells Joe its own stop_failed). A fact write the Record refuses is said in the
+ * notes and the failure log (L962 m2). A stop asked for a session no longer listed is marked done. Results go in
+ * out.reviewStops as [session id, reason, 'asked' | 'waiting' | 'failed' | 'given_up'].
  */
 async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, failureLog, report, out, portDeadlineMs }) {
+  const say = (line) => { out.notes.push(line); failureLog(line); };
+  const write = (id, doc, kind, base) => {
+    const w = putFact(rec, id, doc, kind, base);
+    if (w?.ok !== true) say(`stops: the review stop fact ${id} could not be written (${w?.reason ?? 'no answer'})${kind === 'review_stop_asked' ? '; its stop file is written again on each pass until it is' : ''}`);
+    return w;
+  };
+  const word = (why) => (why === 'cancel' ? 'cancelled' : 'ended');
   const listed = new Set();
   const due = [];
   for (const s of sessions) {
@@ -397,6 +411,13 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
     if (!why) continue;
     const key = REVIEW_STOP_FACT(s.id);
     const was = factDoc(rec, key)?.doc;
+    if (was?.state === 'given_up') { out.reviewStops.push([s.id, why, 'given_up']); continue; }
+    if ((was?.asks ?? 0) >= REVIEW_STOP_MAX_ASKS) {
+      say(`stops: the ${s.role} ${s.id} for ${word(why)} card ${s.card} is still running after ${was.asks} stop requests; it is not asked again (the review runner tells Joe a stop it could not make)`);
+      write(key, { ...was, state: 'given_up', given_up_at: iso(now) }, 'review_stop_given_up', was);
+      out.reviewStops.push([s.id, why, 'given_up']);
+      continue;
+    }
     const askedAt = was?.state === 'asked' ? pastTime(was.asked_at, now) : null;
     if (askedAt !== null && now - askedAt < REVIEW_STOP_AGAIN_MS) { out.reviewStops.push([s.id, why, 'waiting']); continue; }
     due.push({ s, why, key, was });
@@ -409,28 +430,27 @@ async function reviewStops({ rec, sessions, ownProduct, now, stopReview, alert, 
     const r = answers[n];
     const base = { ...(was ?? {}), reason: why, card: s.card, role: s.role, head: s.head, since: was?.since ?? iso(now), tries: (was?.tries ?? 0) + 1 };
     if (r?.ok) {
-      putFact(rec, key, { ...base, state: 'asked', asked_at: iso(now), last_reason: null }, 'review_stop_asked', was);
+      write(key, { ...base, state: 'asked', asked_at: iso(now), asks: (was?.asks ?? 0) + 1, last_reason: null }, 'review_stop_asked', was);
       out.reviewStops.push([s.id, why, 'asked']);
       return;
     }
     const reason = String(r?.reason ?? 'no answer').slice(0, 300);
-    const line = `stops: the ${s.role} ${s.id} for card ${s.card} (${why}) could not be asked to stop: ${reason}`;
-    out.notes.push(line);
-    failureLog(line);
-    putFact(rec, key, { ...base, state: 'failing', last_reason: reason }, 'review_stop_failed', was);
+    say(`stops: the ${s.role} ${s.id} for ${word(why)} card ${s.card} could not be asked to stop: ${reason}`);
+    write(key, { ...base, state: 'failing', last_reason: reason }, 'review_stop_failed', was);
     out.reviewStops.push([s.id, why, 'failed']);
-    failing.push(`the ${s.role} ${s.id} for card ${s.card} (${reason})`);
+    failing.push(`the ${s.role} ${s.id} for ${word(why)} card ${s.card} (${reason})`);
   });
   const told = factDoc(rec, REVIEW_STOP_TELL_FACT)?.doc;
   if (failing.length) {
-    if (dueToTell(told, now, HOLD_REPEAT_MS)) tellThen(alert, `${failing.length === 1 ? 'a review session' : `${failing.length} review sessions`} of an ended card could not be asked to stop: ${failing.join('; ')}`, { fact: REVIEW_STOP_TELL_FACT, fields: { told_at: iso(now) }, kind: 'review_stop_told' });
-  } else if (told?.told_at || isQueued(rec, REVIEW_STOP_TELL_FACT)) {
-    clearCause(rec, REVIEW_STOP_TELL_FACT, () => { if (!told) return; const rest = Object.fromEntries(Object.entries(told).filter(([k]) => !TOLD.includes(k))); putFact(rec, REVIEW_STOP_TELL_FACT, { ...rest, cleared_at: iso(now) }, 'review_stop_cleared', told, TOLD); }, report, { hold: false });
+    if (dueToTell(told, now, HOLD_REPEAT_MS)) tellThen(alert, `${failing.length === 1 ? 'a review session' : `${failing.length} review sessions`} could not be asked to stop: ${failing.join('; ')}`, { fact: REVIEW_STOP_TELL_FACT, fields: { told_at: iso(now) }, kind: 'review_stop_told' });
+  } else if (isQueued(rec, REVIEW_STOP_TELL_FACT)) {
+    // Only the unsent tell goes; told_at stays, so the daily hold still counts from the last tell (L962 m1).
+    clearCause(rec, REVIEW_STOP_TELL_FACT, () => {}, report, { hold: false });
   }
   for (const f of rec.list('fact')) {
-    if (!f.id.startsWith(REVIEW_STOP_FACT('')) || !['asked', 'failing'].includes(f.doc?.state)) continue;
+    if (!f.id.startsWith(REVIEW_STOP_FACT('')) || !['asked', 'failing', 'given_up'].includes(f.doc?.state)) continue;
     if (listed.has(f.id.slice(REVIEW_STOP_FACT('').length))) continue;
-    putFact(rec, f.id, { ...f.doc, state: 'done', done_at: iso(now) }, 'review_stop_done', f.doc);
+    write(f.id, { ...f.doc, state: 'done', done_at: iso(now) }, 'review_stop_done', f.doc);
   }
 }
 
