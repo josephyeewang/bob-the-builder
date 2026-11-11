@@ -533,6 +533,53 @@ test('L896: an ended session\'s outbox undrained past the limit is listed with i
   assert.ok(!JSON.stringify(w.status).includes('undrained_since'), 'when it was first seen stays in the runner\'s memory');
 });
 
+test('#425 r1: a first sight ahead of now is past the limit; a failed Record read keeps the held cause; a bad drain_held is rewritten', async () => {
+  let answer = { drained: false, cause: 'not-taken' };
+  const w = world({ drained: () => answer });
+  await w.pass([launchReq('S-1')]);
+  const row = () => w.status.sessions.find((x) => x.id === 'S-1');
+  const mem = () => w.state.sessions.find((x) => x.id === 'S-1');
+  w.gone.add(4001); await w.pass();
+  assert.equal(row().drain_held, undefined, 'not yet past the limit');
+  // M1: a clock set back an hour leaves the first sight ahead of now; it is told now, not an hour and a half on.
+  w.now -= 60 * MIN; await w.pass();
+  assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() }, 'a clock set back');
+  delete mem().drain_held; mem().undrained_since = w.now + 365 * 24 * 60 * MIN;
+  w.now += MIN; await w.pass();
+  assert.equal(row().drain_held?.cause, 'not-taken', 'a first sight a year ahead, nothing held: past the limit');
+  delete mem().drain_held; mem().undrained_since = w.now + 60_000;
+  w.now += MIN; await w.pass();
+  assert.equal(row().drain_held, undefined, 'within FUTURE_SKEW_MS ahead: waited out as any first sight');
+  w.now += RUNNER_DRAIN_HELD_MS + 60_000; await w.pass();
+  assert.equal(row().drain_held?.cause, 'not-taken');
+  // m2: a Record that can't be read keeps the cause held; a cause that flips with it tells nothing new.
+  const kept = row().drain_held;
+  for (const c of ['record-unreadable', 'not-taken', 'record-unreadable', 'not-taken']) {
+    answer = { drained: false, cause: c }; w.now += MIN; await w.pass();
+    assert.deepEqual(row().drain_held, kept, `flipping to ${c} keeps the held cause`);
+  }
+  // Nothing held yet: record-unreadable is held as itself.
+  const v = world({ drained: () => ({ drained: false, cause: 'record-unreadable' }) });
+  await v.pass([launchReq('S-1')]); v.gone.add(4001); await v.pass();
+  v.now += RUNNER_DRAIN_HELD_MS; await v.pass();
+  assert.equal(v.status.sessions.find((x) => x.id === 'S-1').drain_held?.cause, 'record-unreadable');
+  // m4: a drain_held in memory the status reader would refuse is rewritten, so the status stays readable.
+  for (const bad of [{ cause: 'not-taken', since: 'garbled' }, { cause: 'made-up', since: kept.since }, { ...kept, extra: 1 }, 'x', []]) {
+    answer = { drained: false, cause: 'not-taken' };
+    mem().drain_held = bad; w.now += MIN; await w.pass();
+    assert.deepEqual(row().drain_held, { cause: 'not-taken', since: new Date(w.now).toISOString() }, JSON.stringify(bad));
+    assert.ok(Array.isArray(w.sync().drainHolds()), `the status reads (${JSON.stringify(bad)})`);
+  }
+  // A bad one beside a check that keeps the held cause is still one the reader takes.
+  answer = undefined; const was = w.ports.outboxDrained; w.ports.outboxDrained = () => { throw new Error('EIO'); };
+  mem().drain_held = { cause: 'made-up', since: 'garbled' }; w.now += MIN; await w.pass();
+  w.ports.outboxDrained = was;
+  assert.deepEqual(row().drain_held, { cause: 'other', since: new Date(w.now).toISOString() }, 'rewritten, then kept by a failed check');
+  // One on a session whose outbox is closed is dropped.
+  mem().outbox_open = false; mem().drain_held = 'x'; w.now += MIN; await w.pass();
+  assert.equal('drain_held' in row(), false, 'closed: dropped');
+});
+
 test('L896: a drain check that is late, fails or answers no known cause is held under its own cause', async () => {
   for (const [why, drained, cause] of [['late', () => new Promise(() => {}), 'check-late'], ['throws', () => { throw new Error('EIO'); }, 'check-failed'], ['throws with no message', () => { throw new Error(''); }, 'check-failed'],
     ['false', () => false, 'other'], ['an unknown cause', () => ({ drained: false, cause: 'made-up' }), 'other'], ['nothing', () => undefined, 'other'],

@@ -59,7 +59,8 @@ import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, USED_UP, checkSession } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
-import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
 
 /** How long the runner waits on one port before it answers for it, or (a start) leaves it to a later pass. Under the
  * status rewrite cadence, so a hung port never leaves the status unwritten for longer (L769). */
@@ -132,6 +133,13 @@ export async function workerRunnerPass(ctx) {
   if (typeof copiesRoot !== 'string' || !copiesRoot.startsWith('/')) throw new Error('the worker runner has no copies root, so a start\'s copy can\'t be checked');
   const state = structuredClone(ctx.state ?? {});
   state.sessions ??= []; state.requests ??= {}; state.answers ??= {}; state.seen ??= {};
+  // A drain_held in memory the status reader would refuse is rewritten before any status is written, so one bad field
+  // can't make the whole status unreadable (#425 r1 m4): held still (it was told), its cause kept when it is one.
+  for (const s of state.sessions) {
+    if (s?.drain_held === undefined || drainHeldOk(s.drain_held)) continue;
+    if (s.outbox_open !== true) { delete s.drain_held; continue; }
+    s.drain_held = { cause: DRAIN_CAUSES.includes(s.drain_held?.cause) ? s.drain_held.cause : 'other', since: new Date(now).toISOString() };
+  }
   const find = (id) => state.sessions.find((s) => s.id === id);
   const answer = (key, a) => { state.answers[key] = { ...a, at: now }; };
   const statusDoc = () => ({ written_at: new Date(Math.max(now, clock())).toISOString(), sessions: state.sessions.map(project),
@@ -159,12 +167,15 @@ export async function workerRunnerPass(ctx) {
     const asked = d && typeof d === 'object';
     const check = asked && d.late ? 'check-late' : asked && 'threw' in d ? 'check-failed' : null;
     const cause = check ?? (DRAIN_CAUSES.includes(d?.cause) ? d.cause : 'other');
-    // One already held whose first sight is not kept (a memory without it) is past the limit: it was told before.
-    if (!Number.isFinite(s.undrained_since)) s.undrained_since = s.drain_held ? now - RUNNER_DRAIN_HELD_MS : now;
+    // One already held whose first sight is not kept (a memory without it) is past the limit: it was told before. A
+    // first sight more than FUTURE_SKEW_MS ahead (a clock set back) is past it too: a future time is told, never waited
+    // out (still-waiting pastTime, L317 MAT-1; #425 r1 M1).
+    const first = s.undrained_since;
+    if (!Number.isFinite(first) || first > now + FUTURE_SKEW_MS) s.undrained_since = s.drain_held || Number.isFinite(first) ? now - RUNNER_DRAIN_HELD_MS : now;
     if (now - s.undrained_since < RUNNER_DRAIN_HELD_MS) return;
-    // A late or failed check tells nothing new of a cause already held (#425 r1 m1): that one stays, so one slow pass
-    // does not tell the owner twice.
-    if (check && s.drain_held) return;
+    // A late or failed check, or a Record that could not be read, tells nothing new of a cause already held (#425 r1 m1,
+    // m2): that one stays, so a slow pass or a cause that flips with a failing read does not tell the owner again.
+    if ((check || cause === 'record-unreadable') && s.drain_held) return;
     if (s.drain_held?.cause !== cause) s.drain_held = { cause, since: new Date(now).toISOString() };
   }
   // 1. The sessions as they are now. Ended is final (M1).

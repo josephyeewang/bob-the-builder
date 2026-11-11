@@ -107,3 +107,49 @@ test('L896: an alert that can\'t be queued is reported, and tried again next pas
   const ok = fakeAlert();
   assert.equal(relayDrainHolds({ rec, held: [held(S1, 'not-taken')], alert: ok, now: T0 + MIN, report: (l) => assert.fail(l) }), 1);
 });
+
+test('#425 r1 m3: a copy queued but not delivered, then drained, is dropped: nothing is sent', async () => {
+  const w = world();
+  assert.equal((await w.run(T0, () => [held(S1, 'not-taken')], false)).length, 1, 'tried, not delivered');
+  assert.equal(w.rec.read('fact', DRAIN_HOLD_FACT(S1))?.doc?.told_at, undefined, 'not marked');
+  assert.deepEqual(await w.run(T0 + MIN, () => []), [], 'drained: the queued copy is not sent');
+  assert.deepEqual(await w.run(T0 + 2 * MIN, () => []), []);
+});
+
+test('#425 r1 c2, m1: the session and card are told as plain text; the alert says not to delete the outbox', () => {
+  const alert = fakeAlert();
+  relayDrainHolds({ rec: recWith(), held: [{ session: 'S\nX\tY\rZ', card: 'C\n1', product: 'p1', cause: 'not-taken', since: new Date(T0).toISOString() }], alert, now: T0, report: (l) => assert.fail(l) });
+  const [text] = alert.texts;
+  assert.doesNotMatch(text, /[\r\n\t]/, 'no line breaks or tabs (alerts.mjs plain)');
+  assert.match(text, /^worker runner: session S X Y Z \(card/);
+  assert.match(text, /\(card C 1\)/);
+  assert.match(text, /Do not delete the outbox: a file in it may not be in the Record yet, and an outbox that is gone counts as drained$/);
+  const a = fakeAlert();
+  relayDrainHolds({ rec: recWith(), held: [held(S1, 'outbox-unreadable')], alert: a, now: T0, report: (l) => assert.fail(l) });
+  assert.match(a.texts[0], /its outbox stays open: the outbox folder itself can't be listed\./);
+});
+
+// #425 r1 M2: a relay that throws is reported as itself; the time-limits step ends as it would have without it, and a
+// review-status error is still the one it throws. The review relay beside it is wrapped the same way (the class).
+test('#425 r1 M2: a drain or review relay that throws is reported, and changes nothing else in the step', async () => {
+  const boom = (alert, lead) => (t, o) => { if (String(t).startsWith(lead)) throw new Error('queue write refused'); return alert(t, o); };
+  const base = { rules: R, now: T0, b: GREEN, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }) };
+  for (const [lead, over] of [['worker runner:', { drainHolds: () => [held(S1, 'not-taken')] }],
+    ['review runner:', { reviewAlerts: () => [{ id: 'gave-up-x', at: new Date(T0).toISOString(), text: 'card C-1: 3 starts failed' }] }]]) {
+    const rec = recWith();
+    const logged = [];
+    const got = [];
+    const done = await withAlerts(rec, T0, (t) => { got.push(t); return true; },
+      (alert) => timeLimits({ rec, ...base, ...over, alert: boom(alert, lead), failureLog: (l) => logged.push(l) }));
+    const plainRun = await withAlerts(recWith(), T0, () => true, (alert) => timeLimits({ rec: recWith(), ...base, alert }));
+    assert.deepEqual(done, plainRun, `${lead} the step's answer is unchanged`);
+    assert.equal(logged.length, 1, lead);
+    assert.match(logged[0], lead === 'worker runner:' ? /^the undrained-outbox relay failed: queue write refused$/ : /^the review alert relay failed: queue write refused$/);
+    assert.ok(got.some((t) => t.startsWith('the Dispatcher: the ')), `${lead} the failure is told`);
+    // With a review-status error too, that error is still the one thrown.
+    await assert.rejects(() => withAlerts(recWith(), T0, () => true, (alert) => timeLimits({ rec: recWith(), ...base, ...over,
+      hasReviewer: () => { throw new Error('the review runner\'s status is 4 minutes old'); },
+      rec: (() => { const r = recWith([['card', 'C-1', { state: 'in_review', head: 'a'.repeat(40), tier: 2, product: 'p1', changed_at: new Date(T0 - 60 * MIN).toISOString() }]]); return r; })(),
+      alert: boom(alert, lead) })), /no review was asked for: /, lead);
+  }
+});

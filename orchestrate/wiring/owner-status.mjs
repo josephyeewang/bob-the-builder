@@ -60,7 +60,7 @@ import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
 import { workerOutboxProblem } from '../modules/M4-workshop/git/session-outbox.mjs';
 import { State } from '../modules/M4-workshop/send-safe/activity.mjs';
 import { PRODUCT_OUTBOX_ROLES, runnerOutbox, runnerPlaces } from '../shared/product-paths.mjs';
-import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
+import { drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 
 export const REQUEST_STATES = Object.freeze(['waiting', 'started', 'refused', 'stopped', 'cancelled']);
 /** The states in which a launch request is used up: it can never start a session from now on. */
@@ -137,8 +137,7 @@ export function checkSession(x, { uid, outboxRoot, realpath }) {
   if ('last_write_at' in x && !Number.isFinite(x.last_write_at)) bad(x, 'has last_write_at that is not a time in ms');
   if ('drain_held' in x) {
     const h = x.drain_held;
-    if (!h || typeof h !== 'object' || !DRAIN_CAUSES.includes(h.cause) || typeof h.since !== 'string' || !Number.isFinite(Date.parse(h.since))
-      || Object.keys(h).some((k) => k !== 'cause' && k !== 'since')) bad(x, 'has a drain_held that is not a cause and a time');
+    if (!drainHeldOk(h)) bad(x, 'has a drain_held that is not a cause and a time');
     if (live(x) || x.outbox_open !== true) bad(x, 'has a drain_held but is running or its outbox is closed');
   }
 }

@@ -20,9 +20,9 @@ import { waitOnJoe } from './joe-waits.mjs';
 import { startGate } from './gate.mjs';
 import { rolesFor } from '../M4-workshop/launcher/review-runner.mjs';
 import { relayReviewAlerts, keepReviewHolds } from './review-requests.mjs';
-import { relayDrainHolds } from './drain-alerts.mjs';
+import { DRAIN_UNKNOWN_FACT, relayDrainHolds } from './drain-alerts.mjs';
 import { settleMerge, reconcileMerge, prReadingAfter, openTooLong as tooLongOpen, PR_FACT, MERGED_OUTSIDE, MERGED_OUTSIDE_UNTOLD, refusedTwice } from '../M6-merge-gate/merge-outcome.mjs';
-import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks } from './alerts.mjs';
+import { textAlerts, tellThen, alertText, heldAlerts, isQueued, dropCause, queuedMarks, plain } from './alerts.mjs';
 import { refusalReport } from './pass.mjs';
 import { stillWaiting, pastTime } from '../../shared/still-waiting.mjs';
 import { sensorsFact as fromSensors } from './sensor-facts.mjs';
@@ -291,13 +291,18 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     let list = null;
     try { list = await reviewAlerts(); } catch (e) { statusErrors.push(e?.message ?? String(e)); }
     const report = refusalReport({ rec, alert, now, lines: [], failureLog });
-    if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report);
+    // A relay that throws (a queue that refuses, say) is reported as itself, never as the time limits failing: the
+    // step still ends as it would have, and a review-status error is still the one thrown (#425 r1 M2).
+    try { if (list) relayReviewAlerts({ rec, alerts: list, alert, now, report }); else keepReviewHolds(rec, report); }
+    catch (e) { report(`the review alert relay failed: ${plain(e?.message ?? e)}`, 'review-relay'); }
   }
   // The worker runner's outboxes stuck undrained (L896, drain-alerts.mjs): a status that can't be read is told as such.
   if (drainHolds) {
     let held = null; let error;
     try { held = await drainHolds(); } catch (e) { error = e?.message ?? String(e); }
-    relayDrainHolds({ rec, held, error, alert, now, report: refusalReport({ rec, alert, now, lines: [], failureLog }) });
+    const report = refusalReport({ rec, alert, now, lines: [], failureLog });
+    try { relayDrainHolds({ rec, held, error, alert, now, report }); }
+    catch (e) { report(`the undrained-outbox relay failed: ${plain(e?.message ?? e)}`, DRAIN_UNKNOWN_FACT); }
   }
   if (statusErrors.length) throw new Error(`no review was asked for: ${statusErrors[0]}`);
   return done;

@@ -98,7 +98,7 @@ test('L835: an outbox is drained once every file in it has the Record\'s done in
     assert.deepEqual(drained(s), held('not-a-plain-file'), 'a pipe is not a plain file');
     rmSync(o, { recursive: true });
     assert.equal(drained(s), true, 'gone: nothing left to take');
-    assert.deepEqual(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), held('file-unreadable'));
+    assert.deepEqual(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), held('outbox-unreadable'), 'the outbox folder itself can\'t be listed (#425 r1 c1)');
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

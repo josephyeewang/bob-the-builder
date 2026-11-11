@@ -25,7 +25,7 @@ import { stillWaiting } from '../../shared/still-waiting.mjs';
 /** Why an ended session's outbox is not drained: the runner's one list (L896). */
 export const DRAIN_CAUSES = Object.freeze([
   'fact-id-too-long', 'name-not-utf8', 'name-not-a-fact-id', 'dot-name', 'not-a-plain-file', 'file-unreadable',
-  'not-taken', 'in-flight', 'hash-mismatch', 'bundle-no-attempt', 'bundle-not-pushed', 'bundle-changed', 'record-unreadable', 'check-late',
+  'outbox-unreadable', 'not-taken', 'in-flight', 'hash-mismatch', 'bundle-no-attempt', 'bundle-not-pushed', 'bundle-changed', 'record-unreadable', 'check-late',
   'check-failed', 'other',
 ]);
 const CAUSE_TEXT = Object.freeze({
@@ -35,18 +35,24 @@ const CAUSE_TEXT = Object.freeze({
   'dot-name': 'a file whose name starts with a dot was never taken in',
   'not-a-plain-file': 'it holds something that is not a plain file (a folder or a link)',
   'file-unreadable': 'a file in it can\'t be read',
+  'outbox-unreadable': 'the outbox folder itself can\'t be listed',
   'not-taken': 'a file in it was never taken in or told',
   'in-flight': 'a file\'s intake has been in progress for too long',
   'hash-mismatch': 'a file changed after the Record took it',
   'bundle-no-attempt': 'the Record\'s session gives no attempt of this card, so its bundle\'s push can\'t be found',
   'bundle-not-pushed': 'the card\'s bundle has no push of this session\'s attempt that took it',
   'bundle-changed': 'the card\'s bundle changed after its push took it',
-  'record-unreadable': 'the Record\'s note of a file can\'t be read',
+  'record-unreadable': 'the Record\'s note of a file, or of the session, can\'t be read',
   'check-late': 'the drain check did not answer within the runner\'s limit',
   'check-failed': 'the drain check failed',
   other: 'the Record\'s note of a file does not match it',
 });
 if (DRAIN_CAUSES.some((c) => !CAUSE_TEXT[c]) || Object.keys(CAUSE_TEXT).length !== DRAIN_CAUSES.length) throw new Error('every drain cause needs its words');
+
+/** A runner status's `drain_held`: { cause: one of DRAIN_CAUSES, since: ISO }, nothing else (the one check: the status
+ * reader refuses any other, and the runner rewrites any other it holds, #425 r1 m4). */
+export const drainHeldOk = (h) => !!h && typeof h === 'object' && !Array.isArray(h) && DRAIN_CAUSES.includes(h.cause)
+  && typeof h.since === 'string' && Number.isFinite(Date.parse(h.since)) && Object.keys(h).every((k) => k === 'cause' || k === 'since');
 
 const DRAIN_PREFIX = HOLD_FACT('drain-');
 /** The hold of one session's undrained outbox. */
@@ -54,7 +60,7 @@ export const DRAIN_HOLD_FACT = (session) => `${DRAIN_PREFIX}${idHash(session)}`;
 /** The hold of a status that could not be read. */
 export const DRAIN_UNKNOWN_FACT = HOLD_FACT('drain-status-unknown');
 
-const heldText = (h) => `worker runner: session ${plain(h.session, 140)} (card ${plain(h.card ?? 'none', 140)}) has ended, but its outbox stays open: ${CAUSE_TEXT[h.cause]}. It is never closed, and the session stays listed, until this clears or is fixed by hand`;
+const heldText = (h) => `worker runner: session ${plain(h.session, 140)} (card ${plain(h.card ?? 'none', 140)}) has ended, but its outbox stays open: ${CAUSE_TEXT[h.cause]}. It is never closed, and the session stays listed, until this clears or is fixed by hand. Do not delete the outbox: a file in it may not be in the Record yet, and an outbox that is gone counts as drained`;
 
 /**
  * `held` is the status reader's drainHolds(): [{ session, card, product, cause, since }], or null with `error` when the

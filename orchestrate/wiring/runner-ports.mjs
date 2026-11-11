@@ -168,7 +168,7 @@ function fileSha256(p) {
 }
 export function drainedPort({ list = readdirSync, readFact = noFactReader, readSession = noSessionReader, hashOf = fileSha256 } = {}) {
   return (s) => {
-    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT' ? true : held('file-unreadable'); }
+    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT' ? true : held('outbox-unreadable'); }
     for (const name of names) {
       if (WAITING_DONE_FOR.has(s.role) && typeof s.card === 'string' && name === bundleName(s.card)) {
         const why = bundleHeld(s, join(s.outbox, name), { readFact, readSession, hashOf });
