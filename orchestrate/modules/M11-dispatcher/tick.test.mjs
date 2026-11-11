@@ -47,8 +47,9 @@ const undoReady = (id, n) => [...undoEntries(id, { state: 'verified', head: head
 const requested = (rec, id) => rec.list('merge_request').find((q) => q.doc.card === id) ?? null;
 
 /** A world with every port faked; `over` replaces ports. */
-function world(entries = [], { over = {}, rules = rulesWith({}, allow) } = {}) {
-  const rec = recWith([['product', 'p1', { state: 'active' }], ...entries]);
+function world(entries = [], { over = {}, rules = rulesWith({}, allow), outboxRoot } = {}) {
+  // outboxRoot: the root the stand-in Record reads outbox files under, as M9 does (L910); a world with none takes no file.
+  const rec = recWith([['product', 'p1', { state: 'active' }], ...entries], { outboxRoot });
   const calls = { alerts: [], launched: [], reviewers: [], order: [] };
   const sessions = [];
   let n = 0;
@@ -901,8 +902,9 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
   };
   const root = tempDir('m11-l31-');
   for (const [band, facts] of Object.entries(bands)) {
-    const outbox = join(root, band.replace(' ', '-'));
-    mkdirSync(outbox);
+    const bandRoot = join(root, band.replace(' ', '-'));
+    const outbox = join(bandRoot, 'lead', 'L-1');
+    mkdirSync(outbox, { recursive: true });
     writeFileSync(join(outbox, 'think-q1.md'), 'Is A safe?');
     const sent = [];
     const starts = [];
@@ -923,7 +925,7 @@ test('audit 0b-6 r3 MAT-6 / MAT-4: in green, amber, red, unknown and with no acc
         size: { tokens: 300_000, turnEnded: true, endedAt, openTools: [], compactions: 0 },
         send: async (t) => { sent.push(t); return { outcome: 'sent' }; },
         stopSession: async () => ({ ok: true }), startLead: async (x) => { starts.push(x); return { ok: true, sessionId: 'L-2' }; } }],
-    } });
+    }, outboxRoot: bandRoot });
     const r1 = await w.pass(0);
     assert.ok(stops.includes('S-X'), `${band}: the cancel did not stop`);
     assert.equal(stops.includes('S-E'), band === 'red', `${band}: the red park`);
@@ -1659,7 +1661,9 @@ test('L494 Minor 4: over many ticks, a verdict that waits adds one note a day, o
 
 // A Lead for the tick's `leads` port, with a real outbox folder for the file checks.
 function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000, rules } = {}) {
-  const outbox = tempDir('m11-tick-lead-');
+  const root = tempDir('m11-tick-lead-');
+  const outbox = join(root, 'lead', 'L-1');
+  mkdirSync(outbox, { recursive: true });
   if (hand) writeFileSync(join(outbox, HANDOFF_NAME('L-1')), hand);
   const sent = [];
   const state = { product, tokens, endedAt: T0 };
@@ -1670,7 +1674,7 @@ function leadsWorld({ bad = null, hand = null, product = 'p1', tokens = 300_000,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [{ sessionId: 'L-1', role: 'lead', outbox, uid: process.getuid(), ...(state.product === null ? {} : { product: state.product }) }],
     leads: () => [...(bad ? [entry(bad, [], { tokens: 999_999, turnEnded: true, endedAt: T0, openTools: [], compactions: 0 })] : []),
       entry({ sessionId: 'L-1', product: 'p1' }, sent, { tokens: state.tokens, turnEnded: true, endedAt: state.endedAt, openTools: [], compactions: 0 })],
-  }, ...(rules ? { rules } : {}) });
+  }, outboxRoot: root, ...(rules ? { rules } : {}) });
   return { ...w, sent, outbox, state };
 }
 const untouched = /missing or over the cap/;
