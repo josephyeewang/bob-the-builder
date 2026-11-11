@@ -10,8 +10,8 @@
 // A run that writes its own snapshot (a test corpus, a fake) and lasts longer than the limit keeps
 // it fresh with `keepSnapshotFresh`, never by raising the limit.
 
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, renameSync, unlinkSync, openSync, fstatSync, closeSync, constants as FS } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 
 export const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 const refuse = (reason) => ({ ok: false, reason });
@@ -39,9 +39,21 @@ export function parseSnapshot(text, { now = Date.now(), maxAgeMs = SNAPSHOT_MAX_
   return { ok: true, rules: s.rules, writtenAt: s.written_at, hash: s.hash };
 }
 
+/**
+ * Reads the snapshot through one open handle, and only a plain file with one name (#439 m4): a second name (a hard link
+ * made elsewhere) would let whoever holds that name change the rules the hooks read, from outside the walled folder.
+ * The runner replaces the file by rename, so the snapshot it writes always has one name.
+ */
 export function readSnapshot(path, opts = {}) {
-  let text; try { text = readFileSync(path, 'utf8'); } catch { return refuse('rules snapshot is missing or unreadable'); }
-  return parseSnapshot(text, opts);
+  // Opened without waiting (O_NONBLOCK), so a pipe planted at the name can't hang a hook; it is then refused as not a file.
+  let fd; try { fd = openSync(path, FS.O_RDONLY | FS.O_NONBLOCK); } catch { return refuse('rules snapshot is missing or unreadable'); }
+  try {
+    let st; try { st = fstatSync(fd); } catch { return refuse('rules snapshot is missing or unreadable'); }
+    if (!st.isFile()) return refuse('rules snapshot is not a plain file');
+    if (st.nlink !== 1) return refuse(`rules snapshot has ${st.nlink} names (a hard link); it must have one`);
+    let text; try { text = readFileSync(fd, 'utf8'); } catch { return refuse('rules snapshot is missing or unreadable'); }
+    return parseSnapshot(text, opts);
+  } finally { try { closeSync(fd); } catch { /* closed */ } }
 }
 
 /** For tests and the fake: builds a snapshot file body. */
@@ -49,11 +61,22 @@ export function makeSnapshot(rules, at = new Date()) {
   return JSON.stringify({ written_at: at.toISOString(), hash: snapshotHash(rules), rules });
 }
 
-/** Writes a snapshot whole: to a side file first, then renamed, so a hook never reads half of one. */
+/**
+ * Writes a snapshot whole: to a side file first, then renamed, so a hook never reads half of one (L921). The side file
+ * is made new ('wx': refused if anything is at that name, a link included, so nothing planted there is written through)
+ * under a random name nobody can guess ahead; if the write or the rename fails, the side file is removed and the error
+ * thrown, so no half-written side file is left behind.
+ */
 export function writeSnapshot(path, rules, at = new Date()) {
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, makeSnapshot(rules, at));
-  renameSync(tmp, path);
+  const tmp = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, makeSnapshot(rules, at), { flag: 'wx' });
+    renameSync(tmp, path);
+  } catch (e) {
+    // Only a side file this call made is removed: one refused by 'wx' was never ours (EEXIST).
+    if (e?.code !== 'EEXIST') { try { unlinkSync(tmp); } catch { /* not made, or gone */ } }
+    throw e;
+  }
 }
 
 /**
