@@ -107,6 +107,66 @@ export const runnerWallDeny = (dir) => [`Read(/${abs(dir)}/**)`, `Edit(/${abs(di
 export const runnerWallShell = (dir) => [dir, `${dir}/**`];
 
 /**
+ * The rules snapshot's wall (L921): the snapshot is what the session's own hooks read their rules from, so a session
+ * that could rewrite it could loosen its own hooks. The workers run as the worker runner's Mac user, which owns the
+ * snapshots folder, so nothing but their settings keeps them out. Every role's settings deny the folder the hooks'
+ * snapshot sits in (the hook commands' `--snapshot`), to the tools (Edit and Write, every file under it) and to the
+ * shell (the folder and everything in it), as configured and as its real path. The one source for the renderer and the
+ * checks (checkSettings for every role, checkRunnerWall for real paths at launch).
+ * A role the review runner starts keeps its snapshot inside the runner's own folder (review-settings.mjs fill check),
+ * which its review walls already deny the same way: a wall on a folder above the snapshot's counts.
+ */
+export const snapshotWallDeny = (dir) => [`Edit(/${abs(dir)}/**)`, `Write(/${abs(dir)}/**)`];
+export const snapshotWallShell = (dir) => [dir, `${dir}/**`];
+/** Null, or why the settings leave the snapshot folder `dir` (or every folder above it) open to the tools or the shell. */
+export function snapshotWallProblem(settings, dir) {
+  const deny = settings?.[S.permissions]?.[S.deny] ?? [];
+  const shell = settings?.[S.sandbox]?.[S.filesystem]?.[S.denyWrite] ?? [];
+  const walled = (x) => snapshotWallDeny(x).every((r) => deny.includes(r)) && snapshotWallShell(x).every((r) => shell.includes(r));
+  for (let x = dir; ; x = posix.dirname(x)) {
+    if (x !== '/' && walled(x)) return null;
+    if (x === '/' || x === '.') break;
+  }
+  return `the role file does not deny the tools and the shell the rules snapshot's folder ${dir}`;
+}
+/** The one spelling of the snapshot the hooks read: ` --snapshot <path>`, once per hook, the same in every hook. → path | null */
+export function hooksSnapshot(settings) {
+  const seen = new Set();
+  for (const list of Object.values(settings?.[S.hooks] ?? {})) {
+    for (const m of Array.isArray(list) ? list : []) for (const h of m?.[H.hooks] ?? []) {
+      const c = h?.[H.command];
+      if (typeof c !== 'string') continue;
+      const words = c.match(/--snapshot\b/g) ?? [];
+      const w = c.match(/ --snapshot (\S+)/);
+      if (words.length !== 1 || !w) return null;
+      seen.add(w[1]);
+    }
+  }
+  return seen.size === 1 ? [...seen][0] : null;
+}
+
+/**
+ * A path as the disk resolves it, for the launch-time walls: realpath of the path, or, when nothing at all is at that
+ * name, of the nearest folder above it that is there. A link that leads nowhere yet, or in a loop, is refused (#423 r1
+ * M1): its target could be made later. → { ok: true, q (the folder resolved), real (its real path) } | refusal
+ */
+function nearestReal(p, realpath, lstat) {
+  let q = p;
+  for (;;) {
+    try { return { ok: true, q, real: realpath(q) }; } catch (e) {
+      let there = true;
+      try { lstat(q); } catch (le) {
+        if (le?.code !== 'ENOENT') return refuse(`the session's path ${p} can't be checked (${q}: ${le?.code ?? le})`);
+        there = false;
+      }
+      const why = there ? '; a link that leads nowhere yet could be made to lead into the runner\'s folders' : '';
+      if (there || e?.code !== 'ENOENT' || q === '/') return refuse(`the session's path ${p} can't be resolved (${q}: ${e?.code ?? e})${why}`);
+      q = dirname(q);
+    }
+  }
+}
+
+/**
  * The launch-time check of the runner wall (L751, review of #320 M1, M2): the role file denies each runner folder to the
  * tools and the shell, and each folder is spelled as its real path. A deny through a link is one macOS's sandbox ignores.
  * paths: the session's own paths (sessionOwnPaths), required: each folder is reached through no link, and each path
@@ -132,21 +192,30 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
   // Hard links are not seen here (realpath can't); the two files are the runner's own, replaced by rename, and the
   // sandbox test (L769) covers a hard link made from a session. Links inside the copy are the sandbox's, not this check's.
   if (!paths || typeof paths !== 'object') return refuse('the wall check was not given the session\'s own folders');
+  // The rules snapshot's wall as the disk resolves it (L921): its folder is denied as configured (checkSettings) and as its
+  // real path, as a deny through a link is one macOS's sandbox ignores.
+  {
+    const snap = paths.snapshot;
+    if (typeof snap !== 'string' || hooksSnapshot(settings) !== snap) return refuse('the role file\'s hooks do not read the session\'s rules snapshot');
+    const dir = dirname(snap);
+    const n = nearestReal(dir, realpath, lstat);
+    if (!n.ok) return n;
+    const real = n.q === dir ? n.real : posix.join(n.real, posix.relative(n.q, dir));
+    for (const x of new Set([dir, real])) { const why = snapshotWallProblem(settings, x); if (why) return refuse(why); }
+    // The snapshot itself, when it is there, resolves inside that folder (#439 m4): a link at its name to a file
+    // elsewhere would be read through, from a folder the wall does not shut.
+    let there = true;
+    try { lstat(snap); } catch (e) { if (e?.code !== 'ENOENT') return refuse(`the rules snapshot ${snap} can't be checked (${e?.code ?? e})`); there = false; }
+    if (there) {
+      let rs; try { rs = realpath(snap); } catch (e) { return refuse(`the rules snapshot ${snap} can't be resolved (${e?.code ?? e}); a link that leads nowhere yet could be made to lead out of its folder`); }
+      if (dirname(rs) !== real) return refuse(`the rules snapshot ${snap} resolves to ${rs}, outside its walled folder ${real}`);
+    }
+  }
   for (const [p, isFolder] of sessionOwnPaths(paths)) {
     if (wallPath(p) !== p) return refuse(`the session's path ${p} is not a plain absolute path, spelled as it resolves`);
-    let q = p; let real;
-    for (;;) {
-      try { real = realpath(q); break; } catch (e) {
-        let there = true;
-        try { lstat(q); } catch (le) {
-          if (le?.code !== 'ENOENT') return refuse(`the session's path ${p} can't be checked (${q}: ${le?.code ?? le})`);
-          there = false;
-        }
-        const why = there ? '; a link that leads nowhere yet could be made to lead into the runner\'s folders' : '';
-        if (there || e?.code !== 'ENOENT' || q === '/') return refuse(`the session's path ${p} can't be resolved (${q}: ${e?.code ?? e})${why}`);
-        q = dirname(q);
-      }
-    }
+    const n = nearestReal(p, realpath, lstat);
+    if (!n.ok) return n;
+    const { q, real } = n;
     if (isFolder && real !== q && foldKey(real) === foldKey(q)) return refuse(`the session's folder ${p} is not spelled in the case the disk holds (${real}); the wall's rules name spellings`);
     if (isFolder && real !== q) return refuse(`the session's folder ${p} is reached through a link (${q} is ${real}); the wall's rules name spellings, so a session folder must be its real path`);
     const resolved = q === p ? real : posix.join(real, posix.relative(q, p));
@@ -161,7 +230,7 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner?, ownerTaps? }
+ *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps? }
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
  * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
  * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
@@ -180,6 +249,10 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  * review runner's folder (its config's `root`).
  * product: { commands, hosts }         rulesHosts: the rules' allowed hosts; registryHosts: allowed during install only
  * phase: 'session' | 'install'
+ * realpath, lstat: how the snapshot folder's real path is read (L921), the disk's by default. A folder not made yet is
+ * resolved through the nearest folder above it that is there (nearestReal), and walled in that spelling too: a role the
+ * worker runner does not start (the Lead, the Front Door, the rooms) gets no launch-time pass (checkRunnerWall), so the
+ * render is where its real-path wall is made.
  * productionFiles: the rules' `production.env_files`. Each must be on the read-deny list, or the launch is refused
  * (audit R-0b-44 round 3 MIN-2): the hooks match only plain words, and this list is the wall for `grep -r` or `tar`.
  * proposalOutboxes: every product's `proposals.outbox` from the rules, not only this session's product's (R-0b-128; L77 (1),
@@ -187,7 +260,7 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
  * review roles runs as Joe's Mac user (L238), which can read Joe's proposals folders, so the settings are the wall. Required, and not empty (L746), for every role but a
  * reviewer or auditor, which runs as the `review` user the folders already shut out (the setup read-back proves it).
  */
-export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes }) {
+export function renderRoleSettings({ role, profile, paths, product = {}, rulesHosts = [], registryHosts = [], phase = 'session', productionFiles, proposalOutboxes, realpath = (p) => realpathSync.native(p), lstat = (p) => lstatSync(p) }) {
   if (!DESIGN_PROFILES[role]) return refuse(`no such role "${role}"`);
   if (phase !== 'session' && phase !== 'install') return refuse('bad phase');
   if (phase === 'install' && role !== 'worker') return refuse('only a worker has an install step');
@@ -286,6 +359,41 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
     if (!apart(paths.notes, paths.outbox)) return refuse('the notes folder must be apart from the outbox');
     notesArg = ` --notes ${paths.notes}`;
   }
+  // The rules snapshot's wall (L921, snapshotWallDeny): its folder, as given and, when it is there, as its real path.
+  // A role the review runner starts is walled by its runner folder above (its snapshot sits inside it).
+  const snapDirs = [];
+  if (RUNNER_ROLES.includes(role)) {
+    // Its snapshot must sit inside the runner's folder, which its walls shut (#439 m3), spelled exactly as that folder is,
+    // as the written-settings check (checkSettings) and the review fill check compare it (#439 r1 m2).
+    // A template's placeholders (review-settings.mjs renderTemplate) are checked when filled (its fill check).
+    const raw = paths.reviewWalls?.runnerRoot;
+    const root = wallPath(raw); // as walled above (a trailing slash is the same folder)
+    const token = (x) => typeof x === 'string' && /^\/__orch_[A-Za-z_]+__$/.test(x);
+    if (!(token(paths.snapshot) && token(raw))) {
+      if (typeof paths.snapshot !== 'string' || wallPath(paths.snapshot) !== paths.snapshot || !root
+        || paths.snapshot === root || !inside(paths.snapshot, root)) return refuse(`a ${role}'s rules snapshot must be a file inside the review runner's folder (runnerRoot), which its walls shut`);
+    }
+  } else {
+    if (typeof paths.snapshot !== 'string' || wallPath(paths.snapshot) !== paths.snapshot) return refuse(`the rules snapshot ${paths.snapshot} is not a plain absolute path, spelled as it resolves`);
+    const sd = dirname(paths.snapshot);
+    if (wallPath(sd) !== sd || sd.split('/').length < 3) return refuse('the rules snapshot must sit in a folder of its own below the top, spelled as it resolves');
+    // The wall shuts the whole folder, so it may hold none of the session's own folders, nor sit inside one.
+    const own = [paths.outbox, paths.copy, paths.notes, paths.bobFolder].filter((x) => x !== undefined);
+    // Say which folder is badly spelled, before apart refuses it as not apart (as the runner wall does, #420 r1 c1).
+    const odd = own.find((x) => wallPath(x) !== x);
+    if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);
+    if (own.some((x) => !apart(x, sd))) return refuse(`the rules snapshot's folder ${sd} must be apart from the session's own folders (outbox, copy, notes, Bob)`);
+    snapDirs.push(sd);
+    const n = nearestReal(sd, realpath, lstat);
+    if (!n.ok) return n;
+    const real = n.q === sd ? n.real : posix.join(n.real, posix.relative(n.q, sd));
+    if (real !== sd) {
+      if (wallPath(real) !== real) return refuse(`the rules snapshot's folder ${sd} resolves to ${real}, which is not a plain path`);
+      if (own.some((x) => !apart(x, real))) return refuse(`the rules snapshot's folder ${sd} resolves to ${real}, which is not apart from the session's own folders (outbox, copy, notes, Bob)`);
+      snapDirs.push(real);
+    }
+  }
+  for (const dir of snapDirs) deny.push(...snapshotWallDeny(dir));
   // Only a worker, the writer and a script card's session (L760: the Dispatcher counts a script card as writing its
   // files) change files in a code copy; every other role writes its outbox only.
   const copyArg = ['worker', 'writer', 'script'].includes(role) ? ` --copy ${paths.copy}` : '';
@@ -323,7 +431,7 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
       [S.failIfUnavailable]: true,
       [S.allowUnsandboxedCommands]: false,
       [S.network]: { [S.allowedDomains]: allowedDomains, [S.strictAllowlist]: true },
-      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...walls] },
+      [S.filesystem]: { [S.denyRead]: [...denyPaths, ...runnerDirs], [S.denyWrite]: [`${paths.outbox}/.*`, `${paths.outbox}/**/.*`, ...(paths.bobFolder ? bobFolderShell(paths.bobFolder) : []), ...runnerDirs.flatMap(runnerWallShell), ...snapDirs.flatMap(snapshotWallShell), ...walls] },
     },
     [S.hooks]: hooks,
     [S.env]: { [ENV.autoCompactWindow]: String(profile.compactWindow), [ENV.disableUpdates]: '1' },
@@ -469,6 +577,11 @@ export function checkSettings(obj, { machineWide = false, profile = null } = {})
       if (typeof h?.[H.command] !== 'string' || !h[H.command].endsWith(HOOK_FAILS_CLOSED)) return refuse('a hook command does not exit 2 when it fails to run');
     }
   }
+  // The rules snapshot's wall (L921): for every role, the folder its hooks' snapshot sits in is denied.
+  const snap = hooksSnapshot(obj);
+  if (!snap || wallPath(snap) !== snap) return refuse('the role file\'s hooks do not name one rules snapshot, as a plain absolute path');
+  const sw = snapshotWallProblem(obj, dirname(snap));
+  if (sw) return refuse(sw);
   if (obj[S.disableClaudeAiConnectors] !== true) return refuse('connectors are not off');
   if (obj[S.crossSessionInbound] !== 'refuse') return refuse('incoming messages are not refused');
   if (obj[S.disableSkillShellExecution] !== true) return refuse('skill shell lines are not off');

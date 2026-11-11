@@ -76,7 +76,7 @@ function world({ role = 'reviewer', smoke = 'sandboxed', init = initFor(role) } 
   const source = d('hooks-source'); cpSync(HOOKS_SOURCE, source, { recursive: true });
   for (const n of readdirSync(source)) if (n.endsWith('.test.mjs')) rmSync(join(source, n));
   const hooksDir = join(root, 'hooks'); installHooks(hooksDir, source);
-  const snapshot = join(root, 'rules.json');
+  const snapshot = join(d('rr'), 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.cfg')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeSnapshot(snapshot, rules); // the runner's pass writes it before any start (readyProblem)
   const profile = DESIGN_PROFILES[role];

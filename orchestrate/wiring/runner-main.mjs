@@ -214,7 +214,9 @@ export function realRunnerPorts(c, over = {}, { stopped = () => false, log, prod
  * What this can't stop (L942 m4): the folder's owner, the runner's user and so its sessions, may give itself "delete" on
  * the folder in its access list and then rename it away. That fails safe: the snapshot goes missing, and the product is
  * held. So the whole check, the folder's own access list included, runs again at each start (keepSnapshots `recheck`,
- * L942 c5), and a folder that fails it holds the product. A disk image mounted over the folder is the L921 settings deny's.
+ * L942 c5), and a folder that fails it holds the product. A disk image mounted over the folder is not checked here; the
+ * L921 snapshot deny is meant to stop a session mounting one, which is not yet shown (a real-sandbox hdiutil attach test
+ * is on the Mini list).
  * A missing folder whose parent is there is held to the rule for the folders above it (L942 m2), so a bad place is told
  * as that, not as a folder to make. → null | { missing, reason }. opts (tests): lstat, realpath, uid, aclWrites.
  */
