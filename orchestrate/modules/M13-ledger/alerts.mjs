@@ -102,10 +102,15 @@ export function alertKey(product, kind, subject) { return `${product}|${kind}|${
  * for, and no raise in the round raised again. It lists the robot's open issues whose last line is the orch:alert v1
  * footer once, and for a proven key whose issue is on the list it runs that key's own clear, looking on GitHub. An alert
  * nothing clears (a one-time notice, a sensor that can't look) is never closed. It fails closed: with no proof, the list
- * not read whole, the robot's own login unknown or the day's mark refused, it closes nothing and says why.
+ * not read whole, the robot's own login unknown or the key's mark refused, it closes nothing and says why.
+ * Each key has its own day's mark (L959 M1, M2): a key proven on any pass is looked at on that pass, and at most once a
+ * day, whichever caller (makeAlerts) proved it.
  */
 export const SWEEP_EVERY_MS = 24 * 3_600_000;
-export const sweepFactId = (product) => `alert-sweep-${String(product).replace(/[^A-Za-z0-9_-]/g, '-')}`;
+/** The Record id of a key's daily sweep mark: from the key's own hashed id, so two keys never share one (L959 m3). */
+export const sweepFactId = (key) => `alert-sweep-${idOf(key).slice('alert-'.length)}`;
+/** The key prefix of the home repository's own checks (outside-watch): not a product, so never swept (L959 m4). */
+export const HOME_PREFIX = 'outside-check';
 export const SWEEP_NOTE = 'Closed by the daily check of open alerts: its cause cleared while this issue\'s number was not kept, so it was not closed then. If it comes back, a new issue opens.';
 
 /** Whether raise's answer means the alert went out: not when GitHub lost it (false). */
@@ -133,8 +138,10 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   let again = false;  // and an earlier write had been refused too
   let wrote = false;  // a cache write landed
   let refused = null; // the latest cache write refused: which alert, its issue, and the status it was to have
-  const clearedNone = new Map(); // key → its id, for each key a clear this round found nothing to close for (the sweep's proof)
+  const clearedNone = new Map(); // key → { id, at }, for each key a clear this round found nothing to close for (the sweep's proof)
 
+  // The robot's own tail of a body, so a line in the alert's text can't pass for its "last seen".
+  const lastSeenPart = (body) => { const b = String(body ?? ''); const at = b.lastIndexOf(TAIL); return at < 0 ? '' : b.slice(at); };
   const bodyOf = (id, f, text, t) => `${text.slice(0, TEXT_MAX)}${TAIL}${f.since} · last seen ${t} · seen ${f.count} times\n${footerOf(id, f)}`;
   // GitHub's time, kept only when it is a readable past time: an outside clock never moves told ahead.
   // With no readable time it is GitHub's time now (L801 self-review m1): a fast robot stamp would read as ahead, so due every pass.
@@ -262,17 +269,27 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   // The condition no longer holds. The footer says so first, then an open issue closes with a note. Answers 'none' with
   // nothing to clear, and false, with the next pass trying again, when GitHub refused a step (L143). `look` also searches
   // GitHub when the Record doesn't point at an issue.
-  async function clear({ key, note = 'Cleared: the condition no longer holds.', look = false }) {
+  async function clear({ key, note = 'Cleared: the condition no longer holds.', look = false }, proof = null) {
     const id = idOf(key);
     const t = now().toISOString();
     const s = writer.get(id);
     const pointed = ISSUE(s?.issue) && s.status !== 'cleared';
-    if (!pointed && !look) { clearedNone.set(key, id); return 'none'; }
+    if (!pointed && !look) { clearedNone.set(key, { id, at: t }); return 'none'; }
     let at = pointed ? await held(s.issue, id, s, t) : null;
     if (at === false) return false;
     if (!at && look) {
       at = await looked(id, s, t);
       if (at === false) return false;
+    }
+    // The sweep's own checks, on the issue as GitHub showed it just now (L959 m2, m5): with the robot's login unknown,
+    // any bot's issue reads as the robot's, so nothing is closed (false); an old-form issue is kept; and an issue told
+    // or seen at or after the proof was raised again by another caller, so its cause stands and it is kept ('kept').
+    if (proof && at) {
+      if (!('loginTrouble' in gh) || gh.loginTrouble) return false;
+      const seen = Math.max(Date.parse(at.f.told) || 0, Date.parse(/ · last seen (\S+) · /.exec(lastSeenPart(at.i.body))?.[1]) || 0);
+      if (at.f.old) return 'kept'; // only an orch:alert v1 footer as the last line is swept (L957 rule 2)
+      if (!(seen < Date.parse(proof.at))) return 'kept';
+      proof.issue = at.n;
     }
     if (!at) {
       if (!pointed) return 'none';
@@ -294,42 +311,49 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     return 'cleared';
   }
 
-  // The daily sweep (L402, L957; see SWEEP_EVERY_MS), called after the round's raises and clears on this same object.
+  // The daily sweep (L402, L957, L959; see SWEEP_EVERY_MS), called after the round's raises and clears on this object.
   // Answers { swept, closed, failed, why }: swept false with a why when it stopped (`closed` then holds what it closed
-  // before it stopped), and with why null when it had no proof or was not due. Only this product's keys are swept.
-  // The proof does not expire: the caller makes a new makeAlerts each round, so a 'none' is this round's (L957 review m2). A close GitHub refused is in `failed`, and a later round's proof tries it again.
-  // The day's mark is written before the list, so a refused list or a failed close is not tried again on every pass.
+  // before it stopped), and with why null when no key of this product had proof due today. `closed` holds the issues
+  // the clears closed. A close GitHub refused is in `failed`, and that key's next proof, a day on, tries it again.
+  // The proof does not expire: the caller makes a new makeAlerts each round, so a 'none' is this round's (L957 review m2).
+  // Each due key's mark is written before the list, so a refused list or a failed close is not tried again every pass.
   async function sweep({ product } = {}) {
     if (typeof product !== 'string' || !product) throw new Error('sweep needs the product');
+    if (product === HOME_PREFIX) throw new Error(`sweep is for a product; ${HOME_PREFIX} keys are the home checks'`);
     const t = now().toISOString();
     const ms = Date.parse(t);
     const no = (why) => ({ swept: false, closed: [], failed: [], why });
-    if (!clearedNone.size) return no(null);
-    const last = pastTime(writer.get(sweepFactId(product))?.swept_at, ms);
-    if (last !== null && ms - last < SWEEP_EVERY_MS) return no(null);
+    // This product's proven keys whose own mark is a day old or none (L959 M1, M2), before any mark or list.
+    const due = [...clearedNone].filter(([key]) => key.startsWith(`${product}|`)).filter(([key]) => {
+      const last = pastTime(writer.get(sweepFactId(key))?.swept_at, ms);
+      return last === null || ms - last >= SWEEP_EVERY_MS;
+    });
+    if (!due.length) return no(null);
     if (typeof gh.listOpen !== 'function') return no('this GitHub client cannot list open issues, so no issue was closed');
-    const put = writer.put(sweepFactId(product), { kind: 'fact.alert-sweep', product, swept_at: t });
-    if (!wasSaved(put)) return no(`the Record refused the sweep's mark for the day (${masker.maskSecrets(String(put?.reason ?? 'no reason given')).text.slice(0, 200)}), so GitHub was not asked and no issue was closed`);
+    for (const [key, { id }] of due) {
+      const put = writer.put(sweepFactId(key), { kind: 'fact.alert-sweep', alert: id, swept_at: t });
+      if (!wasSaved(put)) return no(`the Record refused the sweep's mark for the day (${masker.maskSecrets(String(put?.reason ?? 'no reason given')).text.slice(0, 200)}), so GitHub was not asked and no issue was closed`);
+    }
     const list = await gh.listOpen((line) => FOOTER.test(line));
     const whole = Array.isArray(list) && list.every((i) => ISSUE(i?.number) && typeof i.body === 'string');
     if (!whole) return no(`GitHub's list of open issues could not be read whole${gh.lastAnswer ? ` (${gh.lastAnswer})` : ''}, so no issue was closed`);
-    // Only this product's keys: its day's mark is the one written (L957 review m1). A key with no product (a home check)
-    // is never swept.
-    const byId = new Map([...clearedNone].filter(([key]) => key.startsWith(`${product}|`)).map(([key, id]) => [id, key]));
+    const byId = new Map(due.map(([key, p]) => [p.id, [key, p]]));
     const out = { swept: true, closed: [], failed: [], why: null };
-    // Each call learns the login again, and with none any bot counts as the robot: stop then, checked before and after
-    // each close. A client that can't say is read as not known (L957 review m3).
+    // Each call learns the login again, and with none any bot counts as the robot: stop then, checked before the list's
+    // first close and after each; the clear checks it again on the issue it found (L957 review m3, L959 m2). A client
+    // that can't say is read as not known.
     const noLogin = () => !('loginTrouble' in gh) || gh.loginTrouble;
     const loginStop = { swept: false, why: 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed' };
     if (noLogin()) return { ...out, ...loginStop };
     for (const i of list) {
-      const key = byId.get(FOOTER.exec(lastLine(i.body))?.[1]);
-      if (key === undefined || !clearedNone.has(key)) continue;
+      const hit = byId.get(FOOTER.exec(lastLine(i.body))?.[1]);
+      if (hit === undefined || !clearedNone.has(hit[0])) continue;
       // The key's own clear, looking on GitHub: it finds the robot's open issue for this key by its own checks (the
       // robot's, open, the footer as the last line), says cleared in the footer, then closes it with the note.
-      const r = await clear({ key, note: SWEEP_NOTE, look: true });
-      if (r === 'cleared') out.closed.push(i.number);
-      else if (r === false) out.failed.push(i.number);
+      const proof = { at: hit[1].at, issue: null };
+      const r = await clear({ key: hit[0], note: SWEEP_NOTE, look: true }, proof);
+      if (r === 'cleared' && proof.issue !== null) out.closed.push(proof.issue);
+      else if (r === false) out.failed.push(proof.issue ?? i.number);
       if (noLogin()) return { ...out, ...loginStop };
     }
     return out;
