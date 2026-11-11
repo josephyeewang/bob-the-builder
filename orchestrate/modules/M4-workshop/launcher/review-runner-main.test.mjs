@@ -17,6 +17,11 @@ import { tempDir } from '../../../shared/test-tmp.mjs';
 import { openJobJson } from '../../../shared/job-config.mjs';
 import { git, gitOk } from '../git/safe-git.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const ME = process.getuid();
 // R-0b-163: the keys readConfig now also requires, with the snapshot inside each config's own root.
 const withR163 = (c) => ({ snapshot: join(c.root, 'rules-snapshot.json'), bobFolder: '/b', deny: ['/d'], reviewCopies: '/rc', workerCopies: '/wc', pin: '2.1.316', machineWide: '/Library/Application Support/ClaudeCode/managed-settings.json', rules: { production: { env_files: [], programs: [], hosts: [] } }, ...c });
@@ -506,6 +511,10 @@ test('L65: the config names every path as a full path', () => {
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, recordUid: '5' }));
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /recordUid must be a uid/);
   // L913 (a): machineWide is claude's fixed file only, refused at load rather than review by review at check 10.
+  for (const machineWide of NEAR_MISSES) {
+    writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide }));
+    assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
+  }
   writeFileSync(join(d, 'c.json'), JSON.stringify({ ...good, machineWide: '/etc/claude/managed-settings.json' }));
   assert.throws(() => readConfig(join(d, 'c.json'), OPEN_WALLS), /config: machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file$/);
 });

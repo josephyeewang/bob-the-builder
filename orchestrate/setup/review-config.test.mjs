@@ -15,6 +15,11 @@ import { pinnedBinary } from '../modules/M4-workshop/launcher/hooks-check.mjs';
 import { SNAPSHOT_FILE } from '../modules/M10-rules/snapshot.mjs';
 import { main, parseArgs } from './setup.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const PIN = TOOLS_CHECKED.claude_code;
 const me = process.getuid();
 const OWNER_UID = me + 1;   // a different number, so the uid map shows which role got which user
@@ -119,6 +124,7 @@ test('the input file may not set a field setup or the pin gives, nor any field t
       ['relative machineWide', (i) => { i.machineWide = 'settings.json'; }, /machineWide must be the full path/],
       // L909: any file but claude's fixed one, whose guard would never apply.
       ['another machineWide', (i) => { i.machineWide = '/etc/claude/managed-settings.json'; }, /the input file's machineWide must be \/Library\/Application Support\/ClaudeCode\/managed-settings\.json: claude 2\.1\.322 reads only that file/],
+      ...NEAR_MISSES.map((m) => [`machineWide near miss ${JSON.stringify(m)}`, (i) => { i.machineWide = m; }, new RegExp(`the input file's machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file`)]),
       ['a rules list that is not a list', (i) => { i.rules.production.hosts = 'api'; }, /rules\.production\.hosts must be a list/],
       ['an unknown rules part', (i) => { i.rules.extra = {}; }, /rules hold "extra"/],
       ['an unknown rules list', (i) => { i.rules.secrets.more = []; }, /rules\.secrets holds "more"/],

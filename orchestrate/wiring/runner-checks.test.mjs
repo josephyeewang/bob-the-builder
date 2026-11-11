@@ -14,6 +14,11 @@ import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
 import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
 import { RECHECK, checkRunnerConfig, startDeps, workerCheckInputs } from './runner-main.mjs';
 
+const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
+// #419 r3 m1: near misses of the fixed file, each refused by this layer's own check.
+const NEAR_MISSES = [FIXED + '/', FIXED.toLowerCase(), FIXED.replace(' ', '\u00a0'), FIXED + '.bak'];
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+
 const REPO = 'example-owner/example-repo';
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
@@ -241,7 +246,8 @@ test('step 6: the runner\'s config feeds the checks (pin, machine-wide file, the
   const base = { installRoot: '/i', requestsDir: '/r', statusFile: '/o/status.json', orchestrateUid: 501, outboxRoot: '/ob', copiesRoot: '/c', home: '/home',
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1, products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] } } } } } };
   assert.throws(() => checkRunnerConfig({ ...base, pin: 'latest' }), /pin must be/);
-  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w']) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), /machineWide must be a full path in its simplest form/, machineWide);   // the #364 r2 n4 class
+  // #419 r3 c1, m1: any value but the fixed file, a near miss or an unsimple path, is told the fixed file.
+  for (const machineWide of ['mw', '/mw/', '/a/../mw', '//mw', '/m w', ...NEAR_MISSES]) assert.throws(() => checkRunnerConfig({ ...base, machineWide }), new RegExp(`config: machineWide must be ${esc(FIXED)}: claude 2\\.1\\.322 reads only that file$`), JSON.stringify(machineWide));
   // L915 (#420 m2): render.paths node, hooksDir, notes and bobFolder, when given, in their simplest form, at load.
   for (const k of ['node', 'hooksDir', 'notes', 'bobFolder']) {
     const at = (v) => ({ ...base, products: { p1: { ...base.products.p1, render: { paths: { ...base.products.p1.render.paths, [k]: v } } } } });

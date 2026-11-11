@@ -1,12 +1,12 @@
 // Part C, runner step 5: the worker runner's entry point and its LaunchAgent file. Nothing here loads a job.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { makeLock } from '../modules/M9-record/lock.mjs';
 import { loginJobPlist } from '../modules/M11-dispatcher/login-job.mjs';
-import { DENY_KEYS, carriedOverProblem, checkRunnerConfig, keepSnapshots, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
+import { DENY_KEYS, carriedOverProblem, checkRunnerConfig, keepSnapshots, snapshotFolderProblem, startDeps, listenStop, main, realRunnerPorts } from './runner-main.mjs';
 import { RUNNER_JOB_LOG, RUNNER_JOB_UMASK, fullPath, workerRunnerPlist } from './runner-job.mjs';
 
 const config = (d, over = {}) => ({ installRoot: join(d, 'install'), requestsDir: join(d, 'requests'), statusFile: join(d, 'runner', 'status.json'), orchestrateUid: 501,
@@ -165,6 +165,7 @@ test('#369 r1 m2: main keeps each product\'s rules snapshot fresh for its life, 
   const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
+    mkdirSync(join(d, 'snapshots'), { mode: 0o755 }); chmodSync(join(d, 'snapshots'), 0o755);   // L926: a folder only the runner can write
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
     const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } },
       p2: { repo: 'o/p2', mirror: join(d, 'mirror2'), render: { paths: { deny: DENY(d) } } } } });
@@ -215,6 +216,7 @@ test('#369 r2 m2 self-review: main gives the start port its keeper, so a product
   const d = roots(tempDir('orch-rmain-'));
   try {
     mkdirSync(join(d, 'runner'), { recursive: true });
+    mkdirSync(join(d, 'snapshots'), { mode: 0o755 }); chmodSync(join(d, 'snapshots'), 0o755);   // L926: a folder only the runner can write
     const rules = { production: { env_files: [], programs: [], hosts: [] } };
     const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
     const logs = []; let r;
@@ -315,5 +317,78 @@ test('#378 r1 M1: a runner restart carrying over a product A session whose setti
     const all = [...most, join(d, 'mirror2')];
     writeFileSync(join(c.settingsDir, `${SA}.json`), JSON.stringify({ sandbox: { filesystem: { denyRead: all } }, permissions: { deny: all.flatMap((x) => [`Read(/${x}/**)`, `Edit(/${x}/**)`]) } }));
     assert.equal(carriedOverProblem(c, { sessions: [A], requests: {} }, { groupGone: () => false }), null);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L926 (#419 r3 M1): the snapshot\'s folder is decided on the disk: the runner\'s own real folder, writable by it alone, under folders no one else can change', () => {
+  const d = realpathSync(tempDir('orch-rmain-'));
+  try {
+    const ok = join(d, 'snaps'); mkdirSync(ok); chmodSync(ok, 0o755);
+    assert.equal(snapshotFolderProblem(ok), null);
+    // Missing: held, saying which folder to make.
+    assert.deepEqual(snapshotFolderProblem(join(d, 'none')), { missing: true, reason: `its folder ${join(d, 'none')} is missing: make it, owned by the runner and writable by it alone (setup does not make it yet)` });
+    // A link into a worker's copy, and a folder reached through one.
+    const card = join(d, 'copies', 'p1', 'card'); mkdirSync(card, { recursive: true });
+    symlinkSync(card, join(d, 'link'));
+    assert.deepEqual(snapshotFolderProblem(join(d, 'link')), { missing: false, reason: `its folder ${join(d, 'link')} is a link` });
+    mkdirSync(join(card, 'sub')); symlinkSync(join(d, 'copies'), join(d, 'via'));
+    assert.match(snapshotFolderProblem(join(d, 'via', 'p1', 'card', 'sub')).reason, /is reached through a link \(it is .*copies\/p1\/card\/sub\)$/);
+    // Group or other writable.
+    for (const mode of [0o775, 0o757, 0o777]) { chmodSync(ok, mode); assert.match(snapshotFolderProblem(ok).reason, /can be written by others than the runner/, mode.toString(8)); }
+    chmodSync(ok, 0o755);
+    // A folder the worker's uid owns (the runner here is another uid), and one under a folder the worker owns (claude's
+    // per-user sandbox temp folder, /private/tmp/claude-<uid>, is the worker's).
+    const me = process.getuid();
+    assert.equal(snapshotFolderProblem(ok, { uid: me + 1 }).reason, `its folder ${ok} is not the runner's own (its owner is uid ${me}, the runner is ${me + 1})`);
+    const workerOwns = (dir) => (p) => { const st = lstatSync(p); return p === dir ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: me + 7 }) : st; };
+    assert.equal(snapshotFolderProblem(ok, { lstat: workerOwns(d) }).reason, `its folder ${ok} sits in ${d}, which others than the runner can change`);
+    // A folder above it that others can write, not sticky.
+    chmodSync(d, 0o777);
+    assert.equal(snapshotFolderProblem(ok).reason, `its folder ${ok} sits in ${d}, which others than the runner can change`);
+    chmodSync(d, 0o700);
+    // The temp folder: /tmp is a link, and /private/tmp is root's and anyone's to write.
+    if (process.platform === 'darwin') {
+      assert.match(snapshotFolderProblem('/tmp').reason, /^its folder \/tmp is (a link|reached through a link)/);
+      assert.match(snapshotFolderProblem('/private/tmp').reason, /^its folder \/private\/tmp is not the runner's own/);
+    }
+  } finally { chmodSync(d, 0o700); rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L926 (#419 r3 M1, c2): main refuses to start for a snapshot folder linked into a copy, nothing written there; a missing one holds the product, named, and is checked again, folder and all, at each try', async () => {
+  const d = roots(tempDir('orch-rmain-'));
+  try {
+    mkdirSync(join(d, 'runner'), { recursive: true });
+    const card = join(d, 'copies', 'p1', 'card'); mkdirSync(card, { recursive: true });
+    symlinkSync(card, join(d, 'snapshots'));
+    const rules = { production: { env_files: [], programs: [], hosts: [] } };
+    const cfg = config(d, { products: { p1: { repo: 'o/p1', mirror: join(d, 'mirror'), rules, render: { paths: { deny: DENY(d), snapshot: join(d, 'snapshots', 'rules-p1.json') } } } } });
+    const logs = []; const wrote = [];
+    const fresh = (path) => { wrote.push(path); return { stop: () => {}, error: () => null }; };
+    let ran = false;
+    const code = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async () => { ran = true; } });
+    assert.equal(code, 1); assert.equal(ran, false); assert.deepEqual(wrote, []);
+    assert.ok(logs.some((l) => l === `the worker runner did not start: product p1's rules snapshot: its folder ${join(d, 'snapshots')} is a link`), logs.join('\n'));
+    assert.deepEqual(readdirSync(card), [], 'nothing written in the copy');
+    assert.equal(existsSync(join(d, 'runner', 'lock')), false, 'refused before the lock');
+    // Missing: the runner starts, the product is held, saying which folder to make; made as a link later, still held;
+    // made right, kept fresh.
+    rmSync(join(d, 'snapshots'));
+    logs.length = 0; const reasons = [];
+    const start = (ctx) => ctx.ports.start({ card: 'C-1', kind: 'editing', product: 'p1', sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e' });
+    const code2 = await main(['/cfg.json'], { readConfig: () => cfg, log: (s) => logs.push(s), onStop: () => {}, fresh, run: async (ctx) => {
+      reasons.push((await start(ctx)).reason);
+      symlinkSync(card, join(d, 'snapshots'));
+      reasons.push((await start(ctx)).reason);
+      rmSync(join(d, 'snapshots')); mkdirSync(join(d, 'snapshots')); chmodSync(join(d, 'snapshots'), 0o755);
+      await start(ctx);
+    } });
+    assert.equal(code2, 0, logs.join('\n'));
+    const missing = `its folder ${join(d, 'snapshots')} is missing: make it, owned by the runner and writable by it alone (setup does not make it yet)`;
+    assert.ok(logs.some((l) => l === `product p1's rules snapshot can't be written (${missing}); its sessions are refused`), logs.join('\n'));
+    assert.equal(reasons[0], `product p1's rules snapshot is not kept fresh (${missing}), so its sessions are not started`);
+    assert.equal(reasons[1], `product p1's rules snapshot is not kept fresh (its folder ${join(d, 'snapshots')} is a link), so its sessions are not started`);
+    assert.deepEqual(readdirSync(card), [], 'nothing written in the copy');
+    assert.deepEqual(wrote, [join(d, 'snapshots', 'rules-p1.json')], 'written once the folder is right');
+    assert.ok(logs.some((l) => /p1's rules snapshot is kept fresh again/.test(l)), logs.join('\n'));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
