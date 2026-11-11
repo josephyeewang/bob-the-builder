@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { plainFolder, proposalFolder, proposalWall } from './proposal-wall.mjs';
 import { renderRoleSettings } from './render-settings.mjs';
 import { DESIGN_PROFILES } from './role-profiles.mjs';
+import { RUNNER_ROLES } from '../../../shared/review-roles.mjs';
+import { join } from 'node:path';
 import { SETTINGS as S } from './settings-names.mjs';
 
 const rulesWith = (folders) => ({ get: (key, { product }) => { assert.equal(key, 'proposals.outbox'); return folders[product]; } });
@@ -14,7 +16,7 @@ const PATHS = (proposals) => ({
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals },
   bobFolder: '/w/bob', mirror: '/w/mirror.git', reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 });
-const render = (role, deny, proposalOutboxes, phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes, role, profile: DESIGN_PROFILES[role], paths: PATHS(deny),
+const render = (role, deny, proposalOutboxes, phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes, role, profile: DESIGN_PROFILES[role], paths: { ...PATHS(deny), ...(RUNNER_ROLES.includes(role) ? { snapshot: join('/r/review', 'rules-snapshot.json') } : {}) },
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], phase });
 // The review roles run as a Mac user that can't read these folders at all (L65), so the Mac is their wall.
 const SESSION_ROLES = Object.keys(DESIGN_PROFILES).filter((r) => !['reviewer', 'auditor'].includes(r));

@@ -25,7 +25,7 @@ export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSe
   // The profile must be this role's, inside its design ceiling (review m4): never another role's tools or mode.
   const pc = checkProfile(role, rest.profile);
   if (!pc.ok) return refuse(pc.reason);
-  const r = render({ ...rest, role, paths: { ...paths, workerRunner } });
+  const r = render({ ...rest, role, paths: { ...paths, workerRunner }, ...(realpath ? { realpath } : {}) });
   if (!r?.ok) return refuse(`the ${role} settings can't be made (${r?.reason ?? 'no answer'})`);
   const c = check({ settings: r.settings, workerRunner, paths, ...(realpath ? { realpath } : {}) });
   if (!c?.ok) return refuse(c?.reason ?? 'the wall check gave no answer');

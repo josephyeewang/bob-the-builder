@@ -3,7 +3,7 @@
 // that writes its own snapshot can keep it fresh with keepSnapshotFresh. The 5-minute limit itself is unchanged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, linkSync, unlinkSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -139,4 +139,23 @@ test('L921: writeSnapshot makes a new side file under a name nobody can guess, a
   // The side file is new each time ('wx', a random name): the source says so, as no test can plant at a name not yet drawn.
   const src = readFileSync(join(HERE, 'snapshot.mjs'), 'utf8');
   assert.match(src, /randomBytes\(8\)/); assert.match(src, /flag: 'wx'/);
+});
+
+test('#439 m4: readSnapshot reads a plain file with one name only: a hard link, a folder or a missing file is refused', () => {
+  const d = tempDir('orch-lane4-snap-');
+  const p = join(d, 'rules.json');
+  writeSnapshot(p, RULES);
+  assert.equal(readSnapshot(p).ok, true, 'control: the file the runner writes');
+  // A second name made elsewhere would let its holder change the rules from outside the walled folder.
+  const other = join(d, 'second-name.json'); linkSync(p, other);
+  assert.match(readSnapshot(p).reason ?? '', /rules snapshot has 2 names \(a hard link\); it must have one/);
+  assert.match(readSnapshot(other).reason ?? '', /has 2 names/);
+  unlinkSync(other);
+  assert.equal(readSnapshot(p).ok, true, 'one name again');
+  mkdirSync(join(d, 'dir'));
+  assert.equal(readSnapshot(join(d, 'dir')).reason, 'rules snapshot is not a plain file');
+  assert.equal(readSnapshot(join(d, 'gone.json')).reason, 'rules snapshot is missing or unreadable');
+  // A link at the name is followed (the launch check refuses one that leads out of the folder); its target has one name.
+  symlinkSync(p, join(d, 'via-link.json'));
+  assert.equal(readSnapshot(join(d, 'via-link.json')).ok, true);
 });
