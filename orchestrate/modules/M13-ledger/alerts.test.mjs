@@ -1222,7 +1222,7 @@ test('L402 sweep: an issue whose number the Record refused is closed once a clea
   assert.equal(cached(w.rec, A).status, 'cleared');
   for (const n of [2, 3]) assert.equal(w.gh.issues.get(n).closed, false, `issue ${n}: a notice nothing cleared, and B standing`);
   const { ts, ...mark } = w.writer.get(sweepFactId(A));
-  assert.deepEqual(mark, { kind: 'fact.alert-sweep', alert: idFor(A), swept_at: sweptAt }, 'A\'s own mark');
+  assert.deepEqual(mark, { kind: 'fact.alert-sweep', alert: idFor(A), issue: 1, swept_at: sweptAt }, 'A\'s own mark, for the issue the list held');
   assert.equal(w.writer.get(sweepFactId(C)), null, 'no mark for a key with no proof');
   w.clock.tick(60);
   const r2 = w.round();
@@ -1494,7 +1494,7 @@ test('L959: when the key\'s clear finds an old-form copy before its v1 issue, th
   const gh = { ...w.gh, listOpen: w.gh.listOpen, findOpen: async (test) => { for (const [k, x] of [...w.gh.issues].reverse()) if (!x.closed && test(lastLine(x.body))) return k; return null; } };
   const r = w.round({ gh });
   await r.clear({ key: B });
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], kept: [1], why: null }, 'listed issue 1, its clear found the old-form copy');
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], kept: [2], why: null }, 'listed issue 1, its clear found the old-form copy, issue 2, and named it (L965 c1)');
   for (const n of [1, 2]) assert.equal(w.gh.issues.get(n).closed, false, `issue ${n}`);
 });
 
@@ -1502,13 +1502,13 @@ test('L959 review: a refused mark keeps only its own key back; the answer names 
   const w = sweepWorld();
   await orphan(w, A);
   await orphan(w, B);
+  // A key's own mark refused after its issue was tried: both still closed, and the answer names the key (L965 c4).
   const markOf = sweepFactId(B);
   const r = w.round({ writer: { ...w.writer, put: (id, doc) => (id === markOf ? { ok: false, reason: 'the store is full' } : w.writer.put(id, doc)) } });
   for (const k of [A, B]) await r.clear({ key: k });
   const out = await r.sweep({ product: 'product 1' });
-  assert.deepEqual(out.closed, [1]);
-  assert.match(out.why, /refused the sweep's mark for the day \(the store is full\), so those keys were not asked/);
-  assert.equal(w.gh.issues.get(2).closed, false);
+  assert.deepEqual(out.closed, [1, 2]);
+  assert.equal(out.why, `the Record refused the mark of ${B}, so it may be tried again before the day is out`);
   assert.equal(w.writer.get(markOf), null);
   // The Record comes to point at an issue already closed between the proof and the sweep: nothing is named closed.
   const w2 = sweepWorld();
@@ -1525,4 +1525,45 @@ test('L959 review: a refused mark keeps only its own key back; the answer names 
   await orphan(w3, A);
   assert.equal(await w3.round().clear({ key: A, look: true }, 1), 'cleared');
   assert.equal(w3.gh.issues.get(1).closed, true);
+});
+
+test('L965 m1: an alert\'s text quoting an old "last seen" does not hide a raise after the proof', async () => {
+  const w = sweepWorld();
+  const body = 'Quoted: x · last seen 2000-01-01T00:00:00.000Z · y';
+  await orphan(w, A, body);
+  const r = w.round();
+  await r.clear({ key: A });
+  w.clock.tick(1);
+  // Another caller's quiet raise: told stays at the opening, so only the robot's own "last seen" shows it.
+  w.world.refuse = true;
+  assert.equal(await w.round().raise({ key: A, title: A, body }), 'updated');
+  w.world.refuse = false;
+  const out = await r.sweep({ product: 'product 1' });
+  assert.deepEqual(out.kept, [1]);
+  assert.equal(w.gh.issues.get(1).closed, false);
+});
+
+test('L965 m2: a key orphaned again within the day closes on its next proof; a key with no issue gets no mark; the list is not read every pass', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  const r1 = w.round();
+  await r1.clear({ key: A });
+  await r1.clear({ key: B });
+  assert.deepEqual((await r1.sweep({ product: 'product 1' })).closed, [1]);
+  assert.equal(w.writer.get(sweepFactId(B)), null, 'B had no issue: no mark of its own');
+  // An hour on, A is back and orphaned again (issue 2); a minute later it clears, once.
+  w.clock.tick(60);
+  await orphan(w, A, 'It holds again.');
+  const r2 = w.round();
+  await r2.clear({ key: A });
+  await r2.clear({ key: B });
+  assert.deepEqual((await r2.sweep({ product: 'product 1' })).closed, [2], 'its second orphan, the same day');
+  // B and A cleared again on every pass: known clear, so the list is not read again that day.
+  const before = listed(w.gh);
+  for (let n = 0; n < 3; n++) { w.clock.tick(1); const r = w.round(); await r.clear({ key: A }); await r.clear({ key: B }); await r.sweep({ product: 'product 1' }); }
+  assert.equal(listed(w.gh), before);
+  // A day on, the list is read again.
+  w.clock.tick(SWEEP_EVERY_MS / 60000);
+  const r3 = w.round(); await r3.clear({ key: B }); await r3.sweep({ product: 'product 1' });
+  assert.equal(listed(w.gh), before + 1);
 });
