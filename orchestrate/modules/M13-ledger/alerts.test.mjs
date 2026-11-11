@@ -1215,7 +1215,7 @@ test('L402 sweep: an issue whose number the Record refused is closed once a clea
   assert.equal(await r.clear({ key: A }), 'none', 'the cause cleared, but clear has no number to close');
   assert.equal(w.gh.issues.get(1).closed, false);
   const sweptAt = w.clock.now().toISOString();
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [1], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [1], failed: [], kept: [], why: null });
   assert.equal(w.gh.issues.get(1).closed, true);
   assert.equal(w.gh.issues.get(1).comments.at(-1), SWEEP_NOTE);
   assert.notEqual(foot(w.gh, 1).cleared, '-', 'the footer says it cleared, so the cause coming back opens a new issue');
@@ -1227,7 +1227,7 @@ test('L402 sweep: an issue whose number the Record refused is closed once a clea
   w.clock.tick(60);
   const r2 = w.round();
   await r2.clear({ key: A });
-  assert.deepEqual(await r2.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], why: null }, 'a key at most once a day');
+  assert.deepEqual(await r2.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null }, 'a key at most once a day');
   assert.equal(listed(w.gh), 1);
   assert.equal(await r2.raise({ key: A, title: A, body: 'It holds.' }), 'opened', 'back: a new issue');
   w.clock.tick(SWEEP_EVERY_MS / 60000);
@@ -1242,7 +1242,7 @@ test('L957 plant: with no proof, the list not read whole, the robot\'s login unk
     const w = sweepWorld();
     await orphan(w, A);
     const r = w.round();
-    assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], why: null }, 'nothing cleared this round');
+    assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null }, 'nothing cleared this round');
     await r.clear({ key: A });
     await r.raise({ key: A, title: A, body: 'It holds again.' });
     assert.deepEqual((await r.sweep({ product: 'product 1' })).closed, [], 'raised after its clear: the proof is gone');
@@ -1327,7 +1327,7 @@ test('L957: a close GitHub refused is in the answer, not tried again that day, a
   await orphan(w, A);
   const r = w.round({ gh: { ...w.gh, close: async () => false } });
   await r.clear({ key: A });
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [1], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [1], kept: [], why: null });
   assert.equal(w.gh.issues.get(1).closed, false);
   const r2 = w.round();
   await r2.clear({ key: A });
@@ -1391,7 +1391,7 @@ test('L959 M1, M2: each key has its own day: a key proven on any pass, by any ca
   await r.clear({ key: P2 });
   await r.clear({ key: alertKey(HOME_PREFIX, 'stopped', 'schedule') });
   const before = listed(w.gh);
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null });
   assert.equal(listed(w.gh), before);
   assert.equal(w.writer.get(sweepFactId(P2)), null);
   assert.notEqual(sweepFactId(alertKey('a.b', 'k', 's')), sweepFactId(alertKey('a-b', 'k', 's')), 'products differing by a dot keep apart (m3)');
@@ -1434,7 +1434,7 @@ test('L959 m5: an issue another caller raised again after the proof is not close
   assert.equal(await w.round().raise({ key: A, title: A, body: 'It holds again.', status: 'again' }), 'changed');
   w.world.refuse = false;
   w.clock.tick(1);
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], kept: [1], why: null }, 'kept, and said');
   assert.equal(w.gh.issues.get(1).closed, false);
   // A quiet raise moves only "last seen": that counts too.
   const w2 = sweepWorld();
@@ -1453,7 +1453,7 @@ test('L959 m6: a clear that looked on GitHub and found nothing is no proof', asy
   const w = sweepWorld();
   const r = w.round();
   assert.equal(await r.clear({ key: A, look: true }), 'none');
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null });
   assert.equal(listed(w.gh), 0);
   assert.equal(w.writer.get(sweepFactId(A)), null);
 });
@@ -1468,7 +1468,7 @@ test('L959 plants: a raise GitHub lost after the clear ends the proof; an old-fo
   lose = true;
   assert.equal(await r.raise({ key: A, title: A, body: 'It holds again.', status: 'again' }), false, 'back, but GitHub lost the raise');
   lose = false;
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: false, closed: [], failed: [], kept: [], why: null });
   assert.equal(w.gh.issues.get(1).closed, false);
   // An old-form issue whose Record says it was told long ago.
   const w2 = sweepWorld();
@@ -1494,6 +1494,35 @@ test('L959: when the key\'s clear finds an old-form copy before its v1 issue, th
   const gh = { ...w.gh, listOpen: w.gh.listOpen, findOpen: async (test) => { for (const [k, x] of [...w.gh.issues].reverse()) if (!x.closed && test(lastLine(x.body))) return k; return null; } };
   const r = w.round({ gh });
   await r.clear({ key: B });
-  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], why: null });
+  assert.deepEqual(await r.sweep({ product: 'product 1' }), { swept: true, closed: [], failed: [], kept: [1], why: null }, 'listed issue 1, its clear found the old-form copy');
   for (const n of [1, 2]) assert.equal(w.gh.issues.get(n).closed, false, `issue ${n}`);
+});
+
+test('L959 review: a refused mark keeps only its own key back; the answer names only an issue this sweep closed; clear takes one argument', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  await orphan(w, B);
+  const markOf = sweepFactId(B);
+  const r = w.round({ writer: { ...w.writer, put: (id, doc) => (id === markOf ? { ok: false, reason: 'the store is full' } : w.writer.put(id, doc)) } });
+  for (const k of [A, B]) await r.clear({ key: k });
+  const out = await r.sweep({ product: 'product 1' });
+  assert.deepEqual(out.closed, [1]);
+  assert.match(out.why, /refused the sweep's mark for the day \(the store is full\), so those keys were not asked/);
+  assert.equal(w.gh.issues.get(2).closed, false);
+  assert.equal(w.writer.get(markOf), null);
+  // The Record comes to point at an issue already closed between the proof and the sweep: nothing is named closed.
+  const w2 = sweepWorld();
+  await orphan(w2, A);
+  const r2 = w2.round();
+  await r2.clear({ key: A });
+  w2.gh.issues.get(1).closed = true;
+  w2.writer.put(idFor(A), { kind: 'fact.alert', key: A, issue: 1, status: 'open' });
+  await w2.gh.open({ title: 'copy', body: w2.gh.issues.get(1).body });
+  const out2 = await r2.sweep({ product: 'product 1' });
+  assert.equal(out2.closed.includes(1), false, 'issue 1 was closed before the sweep');
+  // A second argument (keys.map(alerts.clear) passes an index) changes nothing: the sweep's proof is its own.
+  const w3 = sweepWorld();
+  await orphan(w3, A);
+  assert.equal(await w3.round().clear({ key: A, look: true }, 1), 'cleared');
+  assert.equal(w3.gh.issues.get(1).closed, true);
 });
