@@ -3,7 +3,7 @@
 //
 //   the config      <base>/dispatcher.json, root's 0644, written by `dispatcher-config` from the setup config: every key
 //                   main.mjs and wiring/dispatcher-wiring.mjs take (CONFIG_KEYS). Setup knows most of them (the copy, the
-//                   lock, the Record's folder and owner, the review runner's files, the seven worker keys of dispatcherKeys);
+//                   lock, the Record's folder and owner, the review runner's files, the ten worker keys of dispatcherKeys);
 //                   the owner names the rest in the setup config's `dispatcher` entry (the product, M10's products file and
 //                   state folder, the read token's file, M2's state folder). The install carries the file into the copy, and
 //                   every update keeps it (it is one of the updater's `keep`), as review.json. main.mjs reads the config

@@ -57,7 +57,7 @@
 //                  checked before the start makes anything (L805)
 //   workerRequestsDir  the worker runner's requests folder (setup layout.mjs workerRunnerPaths: requests, the owner's,
 //                  which orchestrate may add files to, L921): a stop request goes there. It must be there at start; its
-//                  owner (workerUid) is checked on each write
+//                  owner (workerUid), mode and access list are checked on each write (L943 m4)
 //   workerStatusFile   the worker runner's status.json in its own folder (runner/status.json): what runs. Missing, stale
 //                  or not the owner's makes sessions, board, outboxSessions, probe and stopSession "not known" (a throw)
 //   workerUid      the owner's Mac user id, which the worker runner runs as (wiring/runner-job.mjs): hostLockUid's same
@@ -82,7 +82,7 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts, workerUidProblem } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -131,6 +131,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = pr
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
   if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
+  // The worker runner's user, the same owner's (L896), before wire() makes a folder (L943 m3).
+  if (keys.includes('workerUid')) { const bad = workerUidProblem(c); if (bad) throw new Error(`config: ${bad}`); }
   return c;
 }
 

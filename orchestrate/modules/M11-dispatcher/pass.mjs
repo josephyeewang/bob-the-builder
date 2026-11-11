@@ -233,7 +233,8 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
 // reads from this Record (two products may each have a C-7). A session naming no product is no product's: not stopped
 // here (a review or audit session: it runs until it ends on its own, and its verdict for an ended card is thrown away,
 // L933). `running` stays Mac-wide, so the caps count every
-// product. Left out (a test of the step alone), every session is this Dispatcher's.
+// product. Left out, or anything but a non-empty string, it matches NO session, never every one (L943 m2): the pass
+// stops nothing and says so in its notes and failure log (the tick refuses such a product before it gets here).
 export async function stopPass({ rec, rules, now, clock = () => now, account, product: ownProduct, sessions, probe, stopGroup, saveWork, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
   const out = { stopping: [], stopped: [], notes: [] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
@@ -261,7 +262,10 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
   };
   let products = [];
   try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
-  const mine = ownProduct === undefined ? sessions : sessions.filter((s) => s.product === ownProduct);
+  // L943 m2: no product named matches nothing, never everything.
+  const named = typeof ownProduct === 'string' && ownProduct !== '';
+  if (!named) { const line = 'stops: no product named, so no session is stopped (L943)'; out.notes.push(line); failureLog(line); }
+  const mine = named ? sessions.filter((s) => s.product === ownProduct) : [];
   for (const product of new Set([...products, ...mine.map((s) => s.product)].filter(Boolean))) limitsFor(product);
   const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });

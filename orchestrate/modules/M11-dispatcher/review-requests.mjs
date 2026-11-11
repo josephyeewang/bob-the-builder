@@ -34,7 +34,7 @@
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
-import { closeSync, constants, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
@@ -76,7 +76,9 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid(),
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
     made = true;
-    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, text); } finally { closeSync(fd); }
+    // 0644 by handle, whatever the job's umask (the Dispatcher's is 077): else `review` can't read the request and no
+    // review ever starts (L945 a; the same fix as owner-status.mjs writeNewReadable, L929).
+    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
     // A file the runner takes away between the link and the read is no intruder: the link is tried once more (#294
     // self-review m2).
     for (let tries = 0; ; tries += 1) {

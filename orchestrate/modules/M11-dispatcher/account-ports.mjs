@@ -1,5 +1,8 @@
-// The account switch's side of the Dispatcher (R-1-89 (c), L61). Every port that starts, lists, checks or stops a
-// session goes through here, so each one knows which sign-in folder it acts in:
+// The account switch's side of the Dispatcher (R-1-89 (c), L61). Not wired into the Dispatcher today (L943 c3): its
+// sessions, board, outboxSessions, probe and stopSession come from the worker runner (wiring/worker-ports.mjs
+// runnerSyncPorts, L925), which starts each session itself, and launch, stopGroup and saveWork are not wired yet (PR C).
+// Once wired, every port that starts, lists, checks or stops a session goes through here, so each one knows which
+// sign-in folder it acts in:
 //   start  (launch, startReadonly, startMinibase, a Lead's startLead): in the account in use (`accounts.mjs
 //          use a|b`), read at the start; the result names the folder (`signin`, `configDir`);
 //   list   (sessions, board, outboxSessions, leads): once per account folder, merged, each entry tagged with its folder,

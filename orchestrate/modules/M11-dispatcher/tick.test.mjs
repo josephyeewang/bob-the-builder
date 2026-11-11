@@ -59,7 +59,7 @@ function world(entries = [], { over = {}, rules = rulesWith({}, allow), outboxRo
     board: () => [], healthy: () => true, resume: () => false,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [],
-    sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
+    product: 'p1', sessions: () => [...sessions], probe: () => idle, planReviewsRunning: () => [],
     // The launcher starts the session the claim names (L72), as M4's does.
     launch: async ({ card: c, kind, product, sessionId: id }) => { calls.launched.push(c.id); n += 1; sessions.push({ id, product, kind, card: c.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `Mon Oct 29 12:0${n % 10}:00 2026`, pgid: 100 + n, head: HEAD, outbox: `/outbox-root/${product}/worker/${id}` }; },
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), hostLock: () => null, pauseLead: async () => {},
@@ -523,7 +523,7 @@ export const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACC
   ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
 export async function wire() {
   const noop = () => [];
-  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 2000, alert: (t) => { seen.push(t); }, board: noop, healthy: () => true,
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 2000, alert: (t) => { seen.push(t); }, board: noop, healthy: () => true,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => {}), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
@@ -725,6 +725,23 @@ test('L927: through the tick, a cancel stops only this product\'s session; anoth
   assert.deepEqual((await run([mine, theirs], 'q9')).stops, ['S-9']);
 });
 
+// L943 m2: a product port that is missing or not a non-empty string is refused in the stop step (told as that step's
+// failure), never read as every product's: nothing is stopped, and with the stop step not finished nothing starts.
+test('L943 m2: the tick refuses a missing, empty or non-string product: no session of any product is stopped, nothing starts, and it is told', async () => {
+  for (const product of [undefined, '', 7, ['p1']]) {
+    const stops = [];
+    const w = world([account(), usage(), card('C-7', { state: 'cancelled' }), card('C-2')], { rules: rulesWith({}, allow),
+      over: { product, sessions: () => [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 91 }], stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+    const r = await w.pass();
+    const what = JSON.stringify(product) ?? 'undefined';
+    assert.equal(r.steps.stops.ok, false, what);
+    assert.match(r.steps.stops.error, /no product named \(the product port is (empty|undefined|7|\["p1"\])\), so no session is stopped/, what);
+    assert.deepEqual(stops, [], `${what}: nothing stopped`);
+    assert.deepEqual(w.calls.launched, [], `${what}: nothing starts while the stop step did not finish`);
+    assert.ok(w.calls.alerts.some((a) => /the Dispatcher's stops step failed: no product named/.test(a)), `${what}: told`);
+  }
+});
+
 // ---- L27: the fail-open sweep ----
 
 // `edit` may change or drop (null) any seed entry: the merge sweep takes away one input of a merge at a time.
@@ -825,7 +842,7 @@ const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FA
   ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
 export async function wire() {
   const noop = () => [];
-  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,

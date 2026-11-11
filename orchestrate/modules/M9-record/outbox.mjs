@@ -36,7 +36,7 @@
 //     `uid` in place of `uids`: the review user the intake already proved (a verdict's outbox_uid), for the verdict rule.
 //   runnerLaunches({ root, uids }) → { ok, launches: [{ doc, key }], refused: [{ name, reason }] } | { ok: false, reason }
 //
-// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the workers' Mac user, so what a
+// THE VERDICT ITSELF (lead call L66, M1). The Record is written by the Dispatcher, as the `orchestrate` user (L936), so what a
 // verdict row says (pass, checklist, head, who wrote it) is never what counts. `verdictFromFile` re-reads the file the
 // row came from, with every check readOutboxFile makes, and needs it to be the very file the row names (its
 // `source_key`: real path and sha256). What counts is what the file says, and the session and role come from the folder

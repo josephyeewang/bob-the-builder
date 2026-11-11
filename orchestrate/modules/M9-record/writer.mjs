@@ -580,7 +580,8 @@ export function openRecordWithStore({ root, product, ownerUid, rules, alert = ()
           if (store.refuse({ ...ev, outbox: true, reason }) !== false) tx.markSeen(once, 'alerted');
           return no(reason);
         }
-        if (r.ok) { tx.markSeen(f.key, 'applied'); return r; }
+        // A verdict thrown away for an ended card (REVIEW_OVER, L933) is marked seen as 'dropped', not 'applied' (L943 c2).
+        if (r.ok) { tx.markSeen(f.key, r.dropped ? 'dropped' : 'applied'); return r; }
         tx.markSeen(f.key, 'refused');
         return refuse({ ...ev, outbox: true }, r.reason);
       });

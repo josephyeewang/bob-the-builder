@@ -108,10 +108,15 @@ test('L933 planted: a reviewer\'s or auditor\'s pass for a cancelled card is thr
   must(env.record.write({ actor: 'approvals', entity: 'card', id: 'C-1', expectRev: cur.rev, doc: { ...cur.doc, state: 'cancelled', cancel_reason: 'Joe said stop' } }), 'the cancel');
   for (const [role, id, name] of [['reviewer', 'R-1', 'verdict-1.md'], ['auditor', 'A-1', 'verdict-2.md']]) {
     const file = outboxFile(env, role, id, name, hdr({ head: HEAD, pass: true }));
+    const seenFile = join(env.root, 'outbox-seen.jsonl');
+    const before = readFileSync(seenFile, 'utf8').split('\n').filter(Boolean).length;
     const r = env.review.applyOutbox({ role, sessionId: id, card: 'C-1' }, file);
     assert.equal(r.ok, true, `${role}: thrown away, not refused (a refusal would be told every day)`);
     assert.equal(r.skipped, true, role);
     assert.match(r.dropped, /card C-1 is cancelled, so its review is over and this verdict is not kept/);
+    // Marked seen as dropped, never as applied (L943 c2): this read's one mark.
+    const marks = readFileSync(seenFile, 'utf8').split('\n').filter(Boolean).slice(before).map((l) => JSON.parse(l).outcome);
+    assert.deepEqual(marks, ['dropped'], `${role}: marked dropped, not applied`);
     runnerEndedRecord(env, 'C-1', id, role);
     // Read again, it is the same file already seen (the seen mark, not a second drop): still nothing kept.
     const again = env.review.applyOutbox({ role, sessionId: id, card: 'C-1' }, file);
@@ -230,7 +235,7 @@ test('L66 M1 planted: a verdict row flipped to pass while its file says fail ver
     const edit = (sid, over) => { const r = row(sid); env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: r.id, doc: { ...r.doc, ...over } }], { actor: `reviewer:${sid}`, kind: 'verdict' })); };
     return { row, edit, opts: { outboxRoot: env.outRoot, uids: env.reviewUids } };
   };
-  // The reviewer said fail; the row (the workers' Mac user can write the Record) is edited to say pass.
+  // The reviewer said fail; the row (the Dispatcher's `orchestrate` user writes the Record, L936) is edited to say pass.
   {
     const { env, hdr } = inReview();
     const { row, edit, opts } = rowsOf(env);

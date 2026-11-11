@@ -45,7 +45,7 @@ function mac(entries, { alert = fakeAlert() } = {}) {
   let n = 0;
   const dir = tempDir('orch-usage-unknown-');
   const ports = {
-    alert,
+    product: 'p1', alert,
     board: () => [], healthy: () => true, resume: () => false,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
     leads: () => [], approvals: () => [],

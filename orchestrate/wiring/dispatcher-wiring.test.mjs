@@ -202,6 +202,25 @@ test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals fo
   assert.equal(existsSync(rev.config.approvalsStateDir), false);
 });
 
+// L943 m3: the worker runner's user (workerUid) must be a Mac user id and host.lock's owner's, checked with the config,
+// before wire() makes a folder, opens the Record or reads GitHub.
+test('L943 m3: checkConfig and wire() refuse a workerUid that is not a safe integer equal to hostLockUid, before anything is made', async () => {
+  const base = world();
+  const owner = base.config.hostLockUid;
+  assert.equal(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the owner\'s');
+  for (const uid of [owner + 1, String(owner), owner + 0.5, -1, null, undefined, 2 ** 53]) {
+    const w = world({ extra: { workerUid: uid } });
+    if (uid === undefined) delete w.config.workerUid;
+    const re = /config: workerUid must be the owner's Mac user id, hostLockUid's: the worker runner runs as the owner/;
+    assert.throws(() => checkConfig(w.config), re, String(uid));
+    let fetched = 0;
+    await assert.rejects(wire(w.config, { log: () => {}, fetchFn: (...a) => { fetched++; return fakeGitHubFetch(w.fake)(...a); } }), re, String(uid));
+    assert.equal(existsSync(w.config.approvalsStateDir), false, `${uid}: no approvals folder made`);
+    assert.equal(existsSync(w.config.recordRoot), false, `${uid}: the Record was not opened`);
+    assert.equal(fetched, 0, `${uid}: GitHub was not read`);
+  }
+});
+
 // L674: the review user is neither the Dispatcher's own user nor the workers' (ownerUid). In process, through wire().
 test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or the workers\', and starts with another', async () => {
   const me = process.getuid();

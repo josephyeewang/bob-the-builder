@@ -359,7 +359,7 @@ function world() {
   rec.write({ actor: 'sensors', entity: 'fact', id: USAGE_FACT(ACCT), expectRev: 0, doc: usageFact({ week: 30, h5: 20, account: ACCT, now: T0 }) });
   const rules = rulesWith({}, { start_session: () => ({ decision: 'allow', reason: 'ok' }) });
   const idle = { size: { tokens: 1, turnEnded: false, openTools: [], compactions: 0 }, activity: { state: 'active' } };
-  const pass = (min, only) => dispatcherPass({ rec, rules, now: T0 + min * MIN, account: ACCT, sessions: f.ports.sessions(), probe: () => idle,
+  const pass = (min, only) => dispatcherPass({ product: 'p1', rec, rules, now: T0 + min * MIN, account: ACCT, sessions: f.ports.sessions(), probe: () => idle,
     launch: async (x) => (only && x.card.id !== only ? { ok: false, reason: 'not this pass' } : f.ports.launch(x)),
     stopGroup: f.ports.stopGroup, saveWork: async () => ({ ok: true }), alert: () => {} });
   const setCard = (id, patch) => change(rec, 'card', id, patch);

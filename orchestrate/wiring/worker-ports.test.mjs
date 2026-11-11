@@ -15,7 +15,7 @@ import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsAclProblem, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 
 const ME = process.getuid();
@@ -374,7 +374,7 @@ test('C (L739): a runner folder that is gone, a link or not the review user\'s i
 const OWNER = ME + 2; const T = Date.parse('2026-11-10T12:00:00Z');
 const fakeSt = ({ uid = OWNER, dir = false, link = false } = {}) => ({ uid, mode: dir ? 0o755 : 0o644, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => link });
 const SIZE = { tokens: 9, compactions: 0, turnEnded: true, endedAt: null, openTools: [] };
-function syncWorld({ sessions, requests, review = { running: [] }, rec = { read: () => null }, folder = fakeSt({ dir: true }), statusText } = {}) {
+function syncWorld({ sessions, requests, review = { running: [] }, rec = { read: () => null }, folder = fakeSt({ dir: true }), acl = null, statusText } = {}) {
   const w = mirrorWorld();
   const c = w.config;
   const row = (id, product, more = {}) => ({ id, product, kind: 'editing', card: 'C-7', lead: null, role: 'worker', pgid: 70, signin: 's', config_dir: '/cfg', bundle_files: [],
@@ -387,6 +387,7 @@ function syncWorld({ sessions, requests, review = { running: [] }, rec = { read:
     open: () => ({ st: fakeSt(), text: statusText ?? JSON.stringify(doc) }),
     realpath: (p) => p,
     lstat: (p) => { assert.equal(p, c.workerRequestsDir); return folder; },
+    requestsAcl: (p) => { assert.equal(p, c.workerRequestsDir); return acl; },
     writeFile: (path, text) => writes.push([path, text]),
     reviewStatus: typeof review === 'function' ? review : () => review,
   };
@@ -454,6 +455,58 @@ test('L925: stopSession writes its stop request into the runner\'s requests fold
     assert.deepEqual(w.writes, [], 'nothing written');
   }
   assert.match(requestsFolderProblem('/nope/requests', OWNER), /can't be read \(ENOENT\)/);
+});
+
+// L943 m4: the requests folder is refused, as the other folder checks refuse theirs, when group or others can write it or
+// an access-list entry other than setup's own lets anyone write it. Nothing is written then.
+test('L943 m4: a stop request is not written while the requests folder can be written by group or others, or through another access-list entry', () => {
+  for (const mode of [0o775, 0o757, 0o777]) {
+    const w = syncWorld({ folder: { ...fakeSt({ dir: true }), mode } });
+    assert.throws(() => w.ports.stopSession('S-1'), new RegExp(`requests folder \\(workerRequestsDir\\) .* can be written by group or others \\(mode ${mode.toString(8)}\\)`), mode.toString(8));
+    assert.deepEqual(w.writes, [], 'nothing written');
+  }
+  const acl = syncWorld({ acl: 'has an access-list entry letting group:staff write it (allow write); only setup\'s own entry (user:orchestrate allow add_file,search) may' });
+  assert.throws(() => acl.ports.stopSession('S-1'), /requests folder \(workerRequestsDir\) .* has an access-list entry letting group:staff write it/);
+  assert.deepEqual(acl.writes, [], 'nothing written');
+  const ok = syncWorld();
+  assert.equal(ok.ports.stopSession('S-1'), false);
+  assert.equal(ok.writes.length, 1, 'control: a 0755 folder with only setup\'s entry is written');
+});
+
+test('L943 m4: requestsAclProblem passes setup\'s own entry, a deny and a read-only entry, and refuses any other entry that writes', () => {
+  const ls = (...entries) => ({ run: (cmd, args) => { assert.equal(cmd, '/bin/ls'); assert.deepEqual(args, ['-led', '--', '/r']); return { status: 0, stdout: `drwx------+ 2 o wheel 64 Nov 10 10:00 /r\n${entries.map((e, i) => ` ${i}: ${e}`).join('\n')}\n` }; }, platform: 'darwin' });
+  assert.equal(requestsAclProblem('/r', ls()), null, 'no list');
+  assert.equal(requestsAclProblem('/r', ls('user:orchestrate allow add_file,search')), null, 'setup\'s entry');
+  assert.equal(requestsAclProblem('/r', ls('user:orchestrate allow search,add_file')), null, 'setup\'s entry, in another order');
+  assert.equal(requestsAclProblem('/r', ls('group:everyone deny write,delete')), null, 'a deny');
+  assert.equal(requestsAclProblem('/r', ls('user:x allow list,search,readattr')), null, 'read only');
+  for (const [entry, re] of [
+    ['user:orchestrate inherited allow add_file,search', /letting user:orchestrate write it \(inherited allow add_file,search\)/],
+    ['user:orchestrate allow add_file,search,delete_child', /letting user:orchestrate write it/],
+    ['user:worker allow add_file,search', /letting user:worker write it/],
+    ['group:staff allow write', /letting group:staff write it/],
+    ['user:x allow add_subdirectory', /letting user:x write it/],
+    ['user:x allow writesecurity', /letting user:x write it/],
+    ['something odd', /an access-list entry that can't be read \(1: something odd\)/]]) {
+    assert.match(requestsAclProblem('/r', ls('user:orchestrate allow add_file,search', entry)), re, entry);
+  }
+  assert.match(requestsAclProblem('/r', { run: () => ({ status: 1, stderr: 'ls: /r: Permission denied' }), platform: 'darwin' }), /could not be read \(ls: \/r: Permission denied\)/);
+  assert.match(requestsAclProblem('/r', { run: () => ({ error: new Error('spawn failed') }), platform: 'darwin' }), /could not be read \(spawn failed\)/);
+  const plain = (line) => ({ run: (cmd, args) => { assert.deepEqual(args, ['-ld', '--', '/r']); return { status: 0, stdout: `${line}\n` }; }, platform: 'linux' });
+  assert.match(requestsAclProblem('/r', plain('drwx------+ 2 o wheel 64 Nov 10 10:00 /r')), /has an access list \(ACL\)/);
+  assert.equal(requestsAclProblem('/r', plain('drwx------ 2 o wheel 64 Nov 10 10:00 /r')), null);
+});
+
+test('L943 m4: on this Mac, a real folder with another user\'s writing entry is refused, and the same folder without it passes', { skip: process.platform !== 'darwin' }, () => {
+  const dir = join(tempDir('m11-req-acl-'), 'requests');
+  mkdirSync(dir, { mode: 0o700 });
+  assert.equal(requestsFolderProblem(dir, process.getuid()), null, 'control: plain 0700, no list');
+  const me = spawnSync('/usr/bin/id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(spawnSync('/bin/chmod', ['+a', `user:${me} allow add_file,search`, dir]).status, 0);
+  assert.match(requestsFolderProblem(dir, process.getuid()), new RegExp(`has an access-list entry letting user:${me} write it \\(allow add_file,search\\)`));
+  assert.equal(spawnSync('/bin/chmod', ['-N', dir]).status, 0);
+  chmodSync(dir, 0o770);
+  assert.match(requestsFolderProblem(dir, process.getuid()), /can be written by group or others \(mode 770\)/);
 });
 
 test('L925, L896: the worker runner is the owner\'s user and its requests folder is there, or the start is refused; the ports are wired', () => {
