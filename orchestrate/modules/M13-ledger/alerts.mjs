@@ -295,8 +295,9 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
   }
 
   // The daily sweep (L402, L957; see SWEEP_EVERY_MS), called after the round's raises and clears on this same object.
-  // Answers { swept, closed, failed, why, mark? }: swept false with a why when it closed nothing, and with why null when
-  // it had no proof or was not due. A close GitHub refused is in `failed`, and a later round's proof tries it again.
+  // Answers { swept, closed, failed, why }: swept false with a why when it stopped (`closed` then holds what it closed
+  // before it stopped), and with why null when it had no proof or was not due. Only this product's keys are swept.
+  // The proof does not expire: the caller makes a new makeAlerts each round, so a 'none' is this round's (L957 review m2). A close GitHub refused is in `failed`, and a later round's proof tries it again.
   // The day's mark is written before the list, so a refused list or a failed close is not tried again on every pass.
   async function sweep({ product } = {}) {
     if (typeof product !== 'string' || !product) throw new Error('sweep needs the product');
@@ -312,11 +313,16 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
     const list = await gh.listOpen((line) => FOOTER.test(line));
     const whole = Array.isArray(list) && list.every((i) => ISSUE(i?.number) && typeof i.body === 'string');
     if (!whole) return no(`GitHub's list of open issues could not be read whole${gh.lastAnswer ? ` (${gh.lastAnswer})` : ''}, so no issue was closed`);
-    const byId = new Map([...clearedNone].map(([key, id]) => [id, key]));
+    // Only this product's keys: its day's mark is the one written (L957 review m1). A key with no product (a home check)
+    // is never swept.
+    const byId = new Map([...clearedNone].filter(([key]) => key.startsWith(`${product}|`)).map(([key, id]) => [id, key]));
     const out = { swept: true, closed: [], failed: [], why: null };
+    // Each call learns the login again, and with none any bot counts as the robot: stop then, checked before and after
+    // each close. A client that can't say is read as not known (L957 review m3).
+    const noLogin = () => !('loginTrouble' in gh) || gh.loginTrouble;
+    const loginStop = { swept: false, why: 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed' };
+    if (noLogin()) return { ...out, ...loginStop };
     for (const i of list) {
-      // Each call learns the login again, and with none any bot counts as the robot: stop then (L957 self-review m3).
-      if (gh.loginTrouble) return { ...out, swept: false, why: 'the robot\'s own login is not known, so its issues can\'t be told from another app\'s; nothing more was closed' };
       const key = byId.get(FOOTER.exec(lastLine(i.body))?.[1]);
       if (key === undefined || !clearedNone.has(key)) continue;
       // The key's own clear, looking on GitHub: it finds the robot's open issue for this key by its own checks (the
@@ -324,6 +330,7 @@ export function makeAlerts({ rec, gh, owner, actor = 'ledger', now = () => new D
       const r = await clear({ key, note: SWEEP_NOTE, look: true });
       if (r === 'cleared') out.closed.push(i.number);
       else if (r === false) out.failed.push(i.number);
+      if (noLogin()) return { ...out, ...loginStop };
     }
     return out;
   }
@@ -387,7 +394,7 @@ export function fakeIssues({ now = null, serverNow = null } = {}) {
   const said = (i, body) => { if (gNow) spoken.push({ i, at: gNow().toISOString(), body }); };
   let n = 0;
   return {
-    calls, issues,
+    calls, issues, loginTrouble: null,
     get lastServerTime() { return serverNow ? +serverNow() : null; },
     async open({ title, body, assignee, labels }) { n += 1; issues.set(n, { title, body, assignee, labels, closed: false, comments: [], created_at: serverNow ? serverNow().toISOString() : null }); calls.push(['open', n]); return n; },
     async edit(i, body) { issues.get(i).body = body; calls.push(['edit', i]); },

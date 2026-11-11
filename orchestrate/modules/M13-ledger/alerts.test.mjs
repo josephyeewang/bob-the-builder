@@ -1335,3 +1335,36 @@ test('L957: a close GitHub refused is in the answer, not tried again that day, a
   assert.equal(w.gh.issues.get(1).closed, true);
   assert.equal(w.gh.issues.get(1).comments.filter((c) => c === SWEEP_NOTE).length, 1);
 });
+
+test('L957 review: the sweep stops when the robot\'s login goes unknown after a close, and a client that cannot say closes nothing', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  await orphan(w, B);
+  const gh = { ...w.gh, listOpen: w.gh.listOpen, loginTrouble: null };
+  gh.close = async (...a) => { const r = await w.gh.close(...a); gh.loginTrouble = 'the robot\'s own login could not be read'; return r; };
+  const r = w.round({ gh });
+  for (const k of [A, B]) await r.clear({ key: k });
+  const out = await r.sweep({ product: 'product 1' });
+  assert.equal(out.swept, false);
+  assert.deepEqual(out.closed, [1], 'what it closed before it stopped');
+  assert.match(out.why, /login is not known/);
+  assert.equal(w.gh.issues.get(2).closed, false);
+  const w2 = sweepWorld();
+  await orphan(w2, A);
+  const { loginTrouble, ...silent } = w2.gh;
+  const r2 = w2.round({ gh: silent });
+  await r2.clear({ key: A });
+  assert.match((await r2.sweep({ product: 'product 1' })).why, /login is not known/);
+  assert.equal(w2.gh.issues.get(1).closed, false);
+});
+
+test('L957 review: one alerts object for two products sweeps only the named product\'s keys', async () => {
+  const w = sweepWorld();
+  await orphan(w, A);
+  await orphan(w, P2);
+  const r = w.round();
+  for (const k of [A, P2]) await r.clear({ key: k });
+  assert.deepEqual((await r.sweep({ product: 'product 1' })).closed, [1]);
+  assert.equal(w.gh.issues.get(2).closed, false, 'product 2 is left for its own sweep');
+  assert.deepEqual((await r.sweep({ product: 'product 2' })).closed, [2]);
+});
