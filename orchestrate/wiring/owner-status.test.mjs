@@ -277,3 +277,18 @@ test('L836: an outbox is its product\'s, in its product\'s folder; a product nam
   }
   assert.throws(() => world(doc({ sessions: [session('s1', { product: 'worker', outbox: `${ROOT}/worker/worker/s1` })] })).ports.sessions(), /product the runner's folders can't hold/);
 });
+
+test('L896: drain_held is read only as a known cause and a time, on an ended session whose outbox is open; drainHolds hands each on and throws on a status it can\'t read', () => {
+  const since = new Date(NOW - 60_000).toISOString();
+  const ended = (more = {}) => session('s2', { alive: false, ended: true, outbox_open: true, drain_held: { cause: 'not-taken', since }, ...more });
+  const d = (s2) => doc({ sessions: [session('s1'), s2], requests: { s1: { state: 'started' }, s2: { state: 'stopped' } } });
+  assert.deepEqual(world(d(ended())).ports.drainHolds(), [{ session: 's2', card: 'c-s2', product: 'p', cause: 'not-taken', since }]);
+  assert.deepEqual(world(doc()).ports.drainHolds(), [], 'nothing held');
+  for (const h of [null, 'x', [], {}, { cause: 'made-up', since }, { cause: 'not-taken' }, { cause: 'not-taken', since: 'soon' }, { cause: 'not-taken', since: 5 },
+    { cause: 'not-taken', since, more: 1 }]) {
+    assert.throws(() => world(d(ended({ drain_held: h }))).ports.drainHolds(), /has a drain_held that is not a cause and a time/, JSON.stringify(h));
+  }
+  assert.throws(() => world(d(ended({ alive: true }))).ports.drainHolds(), /has a drain_held but is running or its outbox is closed/, 'running');
+  assert.throws(() => world(d(ended({ outbox_open: false }))).ports.drainHolds(), /has a drain_held but is running or its outbox is closed/, 'closed');
+  assert.throws(() => world(d(ended()), { text: '{' }).ports.drainHolds(), 'a status that can\'t be read throws, never "nothing held"');
+});
