@@ -19,6 +19,7 @@ import { ROOT_CONFIG_PATH, folderTable, outboxRootPath, workerCopiesPath } from 
 import { BOOTSTRAP_FILES, LABEL_RE, installPaths, parseInstallConfig, spawnUpdater, updaterCommand, updaterConfigFor } from './install.mjs';
 import { FIRST_RUN_LIMIT_S, JOBS, checkDaemons, jobLogs, jobsFor, list, planLoad, planPlace, plistTexts, startProblems } from './daemons.mjs';
 import { ROBOT_NO_CONFIG, robotPlist } from './robot-setup.mjs';
+import { ROBOT_KEY_FILE } from '../modules/M6-merge-gate/token.mjs';
 import { DISPATCHER_RUN_LIMIT_S, dispatcherConfigFor, dispatcherConfigText, dispatcherPlist, keysDiffer, planDispatcherConfig, robotMatchProblem } from './dispatcher-setup.mjs';
 import { RUN_DEADLINE_MS, WATCHDOG_MARGIN_MS } from '../modules/M11-dispatcher/main.mjs';
 import { CONFIG_KEYS, checkConfig } from '../wiring/dispatcher-wiring.mjs';
@@ -36,6 +37,7 @@ import { runnerUidsProblem } from './install.mjs';
 import { uidsProblem } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { reviewUid as runnerReviewUid } from '../modules/M9-record/outbox.mjs';
 import { codeFileProblem, openJobJson } from '../shared/job-config.mjs';
+import { robotToken } from '../wiring/robot-wiring.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ME = process.getuid();
@@ -1204,6 +1206,8 @@ test('robot job: install carries robot.json into the copy; place, load and check
 });
 
 // Each clause of robotConfigProblem, planted one at a time in the copy's robot.json: load refuses and names it, check FAILs on it.
+/** The robot App's four keys (L727), as a working config names them. */
+const ROBOT_APP = Object.freeze({ appId: '123456', appInstallation: '7890', alertRepo: 'example-org/example-alerts', alertOwner: 'example-user' });
 const ROBOT_PLANTS = [
   ['the wiring is not the copy\'s robot-wiring.mjs', (c) => ({ ...c, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
   ['the Record\'s owner is not orchestrate', (c) => ({ ...c, ownerUid: c.ownerUid + 1 }), /ownerUid must be/],
@@ -1224,6 +1228,14 @@ const ROBOT_PLANTS = [
   ['a bad run deadline', (c) => ({ ...c, runDeadlineMs: -1 }), /runDeadlineMs must be a positive number/],
   ['not JSON', () => '{ not json', /is not JSON/],
   ['not an object', () => '[]', /is not a JSON object/],
+  // L727: the robot App's four keys, all or none (the wiring's own appProblem).
+  ['only some of the robot App keys', (c) => ({ ...c, appId: '123456', appInstallation: '7890' }), /all four or none: alertRepo, alertOwner missing/],
+  ['one robot App key alone', (c) => ({ ...c, alertOwner: 'example-user' }), /all four or none: appId, appInstallation, alertRepo missing/],
+  ['a bad alert repository', (c) => ({ ...c, ...ROBOT_APP, alertRepo: 'not a repo' }), /alertRepo/],
+  ['a bad alert owner', (c) => ({ ...c, ...ROBOT_APP, alertOwner: '-bad-' }), /alertOwner must be a GitHub login/],
+  ['a bad installation number', (c) => ({ ...c, ...ROBOT_APP, appInstallation: 'x' }), /appInstallation must be the installation's number/],
+  // #305 r1 m1: good App keys, but the config fails elsewhere: still no key line (the loop's doesNotMatch).
+  ['good App keys with a bad wiring', (c) => ({ ...c, ...ROBOT_APP, wiring: `${c.installRoot}/wiring/dispatcher-wiring.mjs` }), /wiring must be/],
 ];
 for (const [what, edit, re] of ROBOT_PLANTS) {
   test(`PLANT robot.json: ${what} → load refuses, check FAILs`, async () => {
@@ -1232,8 +1244,85 @@ for (const [what, edit, re] of ROBOT_PLANTS) {
     const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.match(ld.text, /so the robot job would not start/);
     assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
     const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+    assert.doesNotMatch(ck.text, /the robot App's key/, 'a robot.json that fails its check asks for no key file');
   });
 }
+
+test('L727: the robot App named in robot.json → its key (token.mjs\'s default name) must be orchestrate\'s 0600 key in the keys folder: missing or open → place and load refuse (L807 M1), check FAILs; in place → all pass', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`;
+  const pl = w.run(['daemons', 'place']); assert.equal(pl.code, 1, pl.text);
+  assert.match(pl.text, /: missing, so the robot job could not send an alert/);
+  assert.ok(!existsSync(plistFile(w, 'robot')), 'the robot job was not placed');
+  let ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text);
+  assert.match(ld.text, new RegExp(`keys/${ROBOT_KEY_FILE.replace('.', '\\.')} is orchestrate's own 0600 file.*: missing, so the robot job could not send an alert`));
+  assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
+  let ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /the robot App's key: .*missing/);
+  const orch = Number(w.mac.users.get('orchestrate').UniqueID);
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o644 }); chmodSync(w.mac.at(key), 0o644); w.mac.owners.set(key, { uid: orch, gid: orch });
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /mode is 644, want 600/);
+  const p2 = w.run(['daemons', 'place']); assert.equal(p2.code, 1, p2.text); assert.match(p2.text, /mode is 644, want 600/);
+  chmodSync(w.mac.at(key), 0o400);   // read-only is refused too: the mode must be exactly 0600 (README)
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /mode is 400, want 600/);
+  chmodSync(w.mac.at(key), 0o600);
+  const p3 = w.run(['daemons', 'place']); assert.equal(p3.code, 0, p3.text);
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(ROBOT_LABEL));
+  ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 0, ck.text); assert.match(ck.text, /the robot App's key: /);
+  // audit #305 c2: a link in the key's place, to a file that would pass every other rule, is refused for being a link.
+  const real = w.mac.at(`${BASE}/keys/real-key-file`); renameSync(w.mac.at(key), real); symlinkSync(real, w.mac.at(key));
+  ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /the robot App's key: .* — is not a plain file$/m);
+});
+
+test('audit #305 n3: daemons check without sudo lists the robot App\'s key as NEEDS ROOT, never drops it, and does not exit 0', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`; const orch = Number(w.mac.users.get('orchestrate').UniqueID);
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o600 }); chmodSync(w.mac.at(key), 0o600); w.mac.owners.set(key, { uid: orch, gid: orch });
+  const pl = w.run(['daemons', 'place']); assert.equal(pl.code, 0, pl.text);
+  w.mac.as = 501;
+  const ck = w.run(['daemons', 'check', '--only', 'robot']);
+  assert.match(ck.text, new RegExp(`^NEEDS ROOT  the robot App's key: \\S*keys/${ROBOT_KEY_FILE.replace('.', '\\.')} is orchestrate's own 0600 file.* — the folder is orchestrate-only; needs root to look; run with sudo$`, 'm'), ck.text);
+  assert.doesNotMatch(ck.text, /^PASS  the robot App's key/m);
+  assert.notEqual(ck.code, 0, ck.text);
+  w.mac.as = 0;
+});
+
+test('#305 r1 m4: a dry run without sudo says the robot App\'s key was NOT CHECKED, for place and for load; as root, no such line', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`; const orch = Number(w.mac.users.get('orchestrate').UniqueID);
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o600 }); chmodSync(w.mac.at(key), 0o600); w.mac.owners.set(key, { uid: orch, gid: orch });
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  const line = new RegExp(`^NOT CHECKED  the robot App's key: \\S*keys/${ROBOT_KEY_FILE.replace('.', '\\.')} .* — the folder is orchestrate-only; needs root to look; run with sudo$`, 'm');
+  try {
+    w.mac.as = 501;
+    for (const sub of ['place', 'load']) { const r = w.run(['daemons', sub, '--dry-run']); assert.match(r.text, line, `${sub}: ${r.text}`); }
+  } finally { w.mac.as = 0; }
+  for (const sub of ['place', 'load']) assert.doesNotMatch(w.run(['daemons', sub, '--dry-run']).text, /NOT CHECKED/, `as root, ${sub} looks`);
+});
+
+test('#305 r1 c1: the robot App\'s key owned by anyone but orchestrate → place and load refuse, check FAILs', async () => {
+  const w = await robotWorld((c) => ({ ...c, ...ROBOT_APP }));
+  const key = `${BASE}/keys/${ROBOT_KEY_FILE}`;
+  writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o600 }); chmodSync(w.mac.at(key), 0o600); w.mac.owners.set(key, { uid: 0, gid: 0 });
+  for (const sub of ['place', 'load']) { const r = w.run(['daemons', sub]); assert.equal(r.code, 1, r.text); assert.match(r.text, /owner is uid 0, not orchestrate, so the robot job could not send an alert/); }
+  const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, /the robot App's key: .* — owner is uid 0, not orchestrate$/m);
+});
+
+test('L727: with none of the four App keys no key is asked for (the deliver pass refuses as not wired); the key name is token.mjs\'s default', async () => {
+  const w = await robotWorld();
+  assert.equal(w.run(['daemons', 'place']).code, 0);
+  const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text);
+  assert.doesNotMatch(w.run(['daemons', 'check', '--only', 'robot']).text, /the robot App's key/);
+  // audit #305 n2: the tripwire reads the default parameter itself (never a comment), and the wiring must name no key file of its own.
+  const token = readFileSync(new URL('../modules/M6-merge-gate/token.mjs', import.meta.url), 'utf8');
+  const sig = /^export async function mintInstallationToken\(\{([^}]*)\}/m.exec(token);
+  assert.ok(sig, 'token.mjs still exports mintInstallationToken({ ... })');
+  // L1471: token.mjs owns the name, and setup imports it, so its default must be that one name (no second literal to drift).
+  assert.equal(/(?:^|,)\s*keyFile = ([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|$)/.exec(sig[1])?.[1], 'ROBOT_KEY_FILE', 'token.mjs mints from its own ROBOT_KEY_FILE when given no keyFile; setup checks that file');
+  const asked = [];
+  await robotToken({ keyDir: '/k', appId: '1', appInstallation: '2', ownerUid: 7 }, { mint: async (a) => { asked.push(a); return { ok: false, reason: 'x' }; } })();
+  assert.equal(asked.length, 1);
+  assert.ok(!('keyFile' in asked[0]), `robot-wiring passes its own keyFile (${asked[0].keyFile}): setup would check a file the job never reads`);
+});
 
 // L740, audit #292 M1 (A2): the lock folders themselves. Each planted on its own, after install: load refuses and names it, check FAILs.
 const LOCK_FOLDER_PLANTS = [
