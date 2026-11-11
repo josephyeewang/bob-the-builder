@@ -21,12 +21,10 @@ LOOKS. This lane decides what a page DOES to the visitor over time:
 - a **scroll QA pass** — headless Chrome screenshots every scroll position on desktop + phone +
   reduced-motion and reports dead scroll, faded copy, per-line contrast failures, stuck video.
 
-**Where it lives.** Installed as a Claude Code plugin, not copied here — it is 3 weeks old
-(Sept 2026) and shipping weekly, so it versions upstream:
-`claude plugin marketplace add nateherkai/scroll-craft` → `claude plugin install nateherk-design`
-→ invoke with `/nateherk-design:scroll-craft`. Source: https://github.com/nateherkai/scroll-craft
-(MIT, Nate Herk). Its own references — `devices.md`, `feel.md`, `uniqueness.md`, `verify.md`,
-`hero-depth.md` — are the method; read them from the plugin cache when running the lane.
+**Where it lives.** A separately installed optional plugin; source:
+https://github.com/nateherkai/scroll-craft. Resolve it through the current assistant's tool/skill
+registry. Read the installed version's workflow and references before using this integration;
+this module does not bundle its implementation or assume it is connected.
 
 ## How it sequences with the rest of design-gallery
 
@@ -38,13 +36,13 @@ LOOKS. This lane decides what a page DOES to the visitor over time:
 3. **Its QA pass runs before the transfer diff.** Dead-scroll / contrast / phone composition
    findings get fixed in the page, then the normal fidelity-protocol adversarial diff runs.
 
-## Overrides — what to change from Nate's defaults for the user's setup
+## Project choices for the optional integration
 
-| Nate's default | The user's setup | Why |
+| Plugin default | Project choice | Why |
 |---|---|---|
-| Asset generation through **kie.ai** (paid API key) | Generate stills/clips with the **design-mockups** skill (Nano Banana / Veo) and hand the files to scroll-craft as "assets you already have" (brief question 8) | Already paid for, already in the gallery numbering; no second image vendor |
+| Asset generation through **kie.ai** (paid API key) | Use approved existing assets; optionally use Design Mockups when installed and budgeted, then hand those files to the plugin | Reuse approved assets first; generation needs its own budget and data approval |
 | "Nate's standing hero preference" — dimensional layered hero is mandatory | Treat as an OPTION, not a requirement. The **locked design wins**; a flat typographic hero is fine if the lock says so | The lock is canonical (fidelity-protocol rule 1) |
-| Its own `engine/scrollcraft.js` + `.css` copied into the page | Fine for a static marketing page (vanilla, no build step). For a Next.js homepage, port the *acts* to the app's motion stack (`build-bridge.md`: GSAP + Lenis + Motion.dev) and keep the engine out of the product bundle | One motion stack per product |
+| Its own `engine/scrollcraft.js` + `.css` copied into the page | Fine for a static marketing page (vanilla, no build step). For a Next.js homepage, port the *acts* to the app's existing motion stack (the optional Design Mockups build bridge lists examples) and keep the engine out of the product bundle | One motion stack per product |
 | Consumer / food / drink brand voice baked in | Answer the 8-question brief in the product's voice; ignore the worked examples' register | Register drift shows up in copy |
 
 **Hard rule carried over from the transfer discipline:** scroll-craft *originates* design — it
@@ -52,13 +50,17 @@ will happily invent a look. Never run it before a lock exists for the surface, a
 output redefine tokens. If it proposes a palette or type change, that goes back to the gallery
 as a numbered mockup, not straight into the page.
 
-## Toolchain the lane needs (one-time, per machine)
-Node ≥ 20, a full `ffmpeg` build (`brew install ffmpeg`), and `playwright-core` (installed by
-the plugin's `scripts/doctor.mjs` check). Run `node <plugin>/scripts/doctor.mjs` first; it
-reports what is missing.
+## Toolchain for the optional plugin
 
-## Status / maturity (as of 2026-09-12)
-2,372★ in 3 weeks (creator-amplified), one author, 15 commits, v0.3.0. The METHOD is sound and
-fills a real gap; the ENGINE is young. Re-check in Nov 2026 — if still single-author and the
-QA harness has known-wrong-site bugs (`verify.md` §"photograph the wrong site"), keep the method
-and port acts to GSAP by hand.
+The plugin is a separate installation, not bundled here. Its documented integration uses Node
+≥20, ffmpeg and playwright-core. Inspect the installed version's requirements and doctor script
+before running it: a doctor may install dependencies. Use the user's approved package setup for
+the host OS. Do not install a plugin, browser or system package merely because this reference
+names it. If unavailable, keep the locked direction and use the project's existing motion tools;
+state that plugin-specific QA was not run.
+
+## Version boundary
+
+The original integration was written against scroll-craft v0.3.0. That capability note is void
+for another version: recheck the installed plugin's workflow and QA targets before relying on it.
+No installation, current runtime compatibility or successful plugin QA is implied by this module.

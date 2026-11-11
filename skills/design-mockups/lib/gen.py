@@ -62,8 +62,7 @@ def key():
 
 def resolve_refs(refs):
     """Refs may be paths OR stable gallery NUMBERS (int, or '#117'/'117' strings when
-    no such path exists) — numbers resolve via gallery.num2file. Ported from the
-    num2file + R() mechanism in the original project's gallery runner scripts."""
+    no such path exists) — numbers resolve via gallery.num2file."""
     if not refs: return refs
     n2f = None; resolved = []
     for r in refs:
