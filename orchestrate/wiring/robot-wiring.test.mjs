@@ -1346,7 +1346,7 @@ test('L977: a sweep that says why is round trouble, one queued entry under its o
   const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l) });
   const r = await passes.heartbeat();
   assert.match(String(r.sweep?.why), /login is not known/);
-  assert.ok(Array.isArray(r.red), 'the heartbeat\'s own answer');
+  assert.deepEqual(r.red, ['dispatcher', 'robot-login-unknown'], 'the beat\'s own answer: the Dispatcher never ran and the login is unknown, nothing from the sweep');
   assert.equal(r.failed, undefined, 'a sweep with a why is not a failed heartbeat');
   assert.match(logs.join('\n'), /robot: alert sweep: closed \[\], failed \[\], kept \[\]; the robot's own login is not known/);
   assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: the robot's own login is not known/.test(q)), queued(rec).join(' | '));
@@ -1363,20 +1363,20 @@ test('L977 review: a sweep that throws, or runs past its limit, is told masked a
   ]) {
     const w = withKey(world({ extra: APP }));
     const gh = appGitHub(w);
-    let beatDone = false;
-    // Only the sweep's own list (no creator filter, after the beat) breaks; the heartbeat's reads go through.
+    // The pinned issue is the beat's last write: only GitHub's open-issue list after it, the sweep's, breaks.
+    let pinned = false;
     const fetchFn = async (url, init = {}) => {
-      const u = new URL(url);
-      if (beatDone && u.pathname === `/repos/${ALERT_REPO}/issues` && (init.method ?? 'GET') === 'GET') return broken();
-      return gh.fetchFn(url, init);
+      const u = new URL(url); const method = init.method ?? 'GET';
+      if (pinned && u.pathname === `/repos/${ALERT_REPO}/issues` && method === 'GET') return broken();
+      const res = await gh.fetchFn(url, init);
+      if (method !== 'GET' && /mini_alive_at:/.test(String(init.body ?? ''))) pinned = true;
+      return res;
     };
     const logs = [];
-    const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => { if (/pinned|heartbeat/.test(l)) beatDone = true; logs.push(l); }, sweepDeadlineMs: 50 });
-    const orig = passes.heartbeat;
-    beatDone = false;
-    const r = await orig();
+    const { rec, passes } = await wire(w.config, { fetchFn, log: (l) => logs.push(l), sweepDeadlineMs: 50 });
+    const r = await passes.heartbeat();
+    assert.ok(pinned, `${name}: the beat posted its pinned issue`);
     assert.equal(r.failed, undefined, name);
-    if (r.sweep.why === null) continue;   // the list was not reached after the beat in this world: covered below
     assert.match(r.sweep.why, want, name);
     assert.ok(!logs.join('\n').includes(TOK) && !queued(rec).join('\n').includes(TOK), `${name}: the token is masked`);
     assert.ok(queued(rec).some((q) => /^the robot job's alert sweep: it (stopped|did not finish)/.test(q)), `${name}: ${queued(rec).join(' | ')}`);

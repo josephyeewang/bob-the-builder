@@ -323,21 +323,22 @@ export async function wire(config, { log = (s) => process.stderr.write(`${s}\n`)
     // deliver in this same round. A sweep that throws, or runs past its own limit, is the same trouble, and so is a
     // Record that refused to keep where an alert is during the sweep (the beat's own report has already run by then).
     // Never throws, and never changes the heartbeat's own answer.
-    const stopped = (e) => ({ swept: false, closed: [], failed: [], kept: [], why: `it stopped: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}` });
+    const none = (why) => ({ swept: false, closed: [], failed: [], kept: [], why });
+    const said = (e) => makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200);
     sweepRound = async () => {
       let a; let timer;
-      const limit = new Promise((resolve) => { timer = setTimeout(() => resolve({ swept: false, closed: [], failed: [], kept: [], why: `it did not finish within ${sweepDeadlineMs} ms` }), sweepDeadlineMs); timer.unref?.(); });
-      try { a = await Promise.race([alerts.sweep({ product: c.product }), limit]); } catch (e) { a = stopped(e); } finally { clearTimeout(timer); }
+      const limit = new Promise((resolve) => { timer = setTimeout(() => resolve(none(`it did not finish within ${sweepDeadlineMs} ms`)), sweepDeadlineMs); timer.unref?.(); });
+      try { a = await Promise.race([alerts.sweep({ product: c.product }), limit]); } catch (e) { a = none(`it stopped: ${said(e)}`); } finally { clearTimeout(timer); }
       let refused = null;
       try { refused = alerts.cacheTrouble(); } catch { refused = null; }
-      const why = [a.why, refused !== null ? `the Record refused to keep where an alert is (${String(refused).slice(0, 200)})` : null].filter((x) => x !== null).join('; ') || null;
+      const why = [a.why, refused !== null ? `the Record refused to keep where an alert is, this round (${String(refused).slice(0, 200)})` : null].filter((x) => x !== null).join('; ') || null;
       if (a.closed.length || a.failed.length || a.kept.length || why !== null) {
-        log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${why !== null ? `; ${why}` : ''}`);
+        try { log(`robot: alert sweep: closed ${JSON.stringify(a.closed)}, failed ${JSON.stringify(a.failed)}, kept ${JSON.stringify(a.kept)}${why !== null ? `; ${why}` : ''}`); } catch { /* the queue below still tells it */ }
       }
       if (why !== null) {
         try {
           if (hold({ rec, cause: SWEEP_CAUSE, text: `the robot job's alert sweep: ${why}`, alert: outbox(rec, now()), now: now() }) === false) log('robot: the alert sweep\'s trouble could not be queued');
-        } catch (e) { log(`robot: the alert sweep's trouble could not be queued: ${makeMasker().maskSecrets(String(e?.message ?? e)).text.slice(0, 200)}`); }
+        } catch (e) { try { log(`robot: the alert sweep's trouble could not be queued: ${said(e)}`); } catch { /* nothing left to tell it with */ } }
       }
       return { swept: a.swept, closed: a.closed, failed: a.failed, kept: a.kept, why };
     };
