@@ -1,5 +1,5 @@
 // Part C's interface (R-0b-162 C, L248, L741): the ports the Dispatcher reaches only through the owner-side worker runner.
-// This file only fixes their shape. Each answers "not wired yet" until the runner is built behind it. Lane 2's phone ports
+// This file only fixes their shape; worker-ports.mjs wires them (B: the sync ports; C, L963: the asks), and the stub below refuses. Lane 2's phone ports
 // build against it, so a change of shape needs a lead ruling.
 //
 // The Dispatcher (the orchestrate user) never starts, reads or stops a worker itself, because workers run as the owner's
@@ -88,8 +88,7 @@ export const SESSION_RECORD_PUSH_FIELDS = Object.freeze(['branch', 'outbox', 'at
 
 /**
  * The owner-side ports, given the runner's two paths: `requestsDir` (where the Dispatcher writes a request) and `statusFile`
- * (where the runner writes its status). Until the runner is built each port refuses, so behaviour stays the same:
- * worker-ports.mjs still lists them, with the same refusal.
+ * (where the runner writes its status). This stub refuses each port; worker-ports.mjs answers them for real (B, C).
  * @returns {{ ports: object, cleanup: object }}
  */
 export function ownerPorts({ requestsDir, statusFile, clock = Date.now } = {}) {
