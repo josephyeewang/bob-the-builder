@@ -305,8 +305,8 @@ async function messages(mirror, shas, names, about) {
  *                           swap the outbox bundle at the earliest moment (review R-0b-47 MAT-4).
  *   uids.worker             the Mac user a worker's bundle must be owned by (`orchestrate`, L65)
  *   outboxRoot              the TOP outboxes folder (<base>/outboxes), not a product's folder under it: a worker's
- *                           outbox must really be <root>/<product>/worker/<session id> (<root>/<product>/script/<session id>
- *                           for a script card; L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)
+ *                           outbox must really be either runner role's folder, <root>/<product>/{worker|script}/<session id>
+ *                           (L767, L836; outboxProblemFor, #378 r1 m2, #403 r1 M1)
  *   ownerUid                Joe's Mac user: a proposals bundle, and its folder, must be owned by it (L77 m2)
  *   fstat(fd)               tests only: stands in for fstatSync on the bundle's handle, so a test can make a bundle
  *                           look owned by another user (tests can't chown).

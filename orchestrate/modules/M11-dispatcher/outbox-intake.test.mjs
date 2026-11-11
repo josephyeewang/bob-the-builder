@@ -115,13 +115,18 @@ test('M15: a file still being written waits for the next pass', async () => {
 
 test("M4's intake checks apply: a link and a kind outside the role are refused", async () => {
   const w = world();
-  const ob = mk(join(w.root, 'worker'));
+  // A Record that reads the real root, so a refusal here is intake's own, never the stand-in's (L910).
+  const ob = box(w, 'worker', 'S-1');
   writeFileSync(join(w.root, 'secret.txt'), 'x');
   symlinkSync(join(w.root, 'secret.txt'), join(ob, 'report-C-2.md'));
   writeFileSync(join(ob, 'verdict-C-1.md'), 'I approve myself');
-  const rec = recWith();
-  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
+  const real = w.rec();
+  const reached = [];
+  const rec = Object.create(real, { applyOutbox: { value: (meta, file) => { reached.push(file); return real.applyOutbox(meta, file); } } });
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', product: 'p1', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
   assert.equal(out.every((r) => r.refused), true);
+  assert.deepEqual(reached, [], 'both are refused at intake\'s read, before the Record');
+  assert.match(out.find((r) => r.name === 'verdict-C-1.md').refused, /is not a kind this role may hand in/);
   assert.equal(rec.diary().filter((l) => l.kind === 'outbox').length, 0);
   assert.equal(w.calls.alerts.length, 2);
   // the wrong user
@@ -271,11 +276,11 @@ test('L130: a file the record refused, whose alert was not queued, is told on th
 
 test("audit MIN-20 (I6): a worker's think file starts no read-only session", async () => {
   const w = world();
-  const ob = mk(join(w.root, 'worker'));
+  const ob = box(w, 'worker', 'S-1');
   writeFileSync(join(ob, 'think-q1.md'), 'Is A safe?');
-  const out = await intakePass({ rec: recWith(), sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
+  const out = await intakePass({ rec: w.rec(), sessions: [{ sessionId: 'S-1', role: 'worker', product: 'p1', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
   assert.equal(w.calls.readonly.length, 0);
-  assert.ok(out[0].refused);
+  assert.match(out[0].refused, /is not a kind this role may hand in/, 'refused for its kind, not for where it is');
 });
 
 test('audit 0b-6 r2 MIN-7: the file is claimed before its read-only session starts; a pass that died after the claim never starts a second helper', async () => {
