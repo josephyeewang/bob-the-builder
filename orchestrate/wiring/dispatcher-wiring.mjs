@@ -116,7 +116,7 @@ const WIRED_HERE = Object.freeze(['alert', 'approvals']);
 export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
   'hostLock', 'launch', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product', 'proposals', 'replyToLead', 'requestReview',
   'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
-  'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
+  'stopGroup', 'stopReview', 'stopSession', 'strayFrontDoor', 'wait']);
 
 // `keys` and `paths`: the robot job's wiring (robot-wiring.mjs) checks its own config with its own lists.
 export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = process.getuid() } = {}) {
