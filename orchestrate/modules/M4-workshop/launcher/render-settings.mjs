@@ -230,7 +230,7 @@ export function checkRunnerWall({ settings, workerRunner, paths, realpath = (p) 
 
 /**
  * paths: { copy, outbox, hooksDir, snapshot, node, deny: { secrets: [], claudeHome, ssh, gh, robotKeys, record, otherCopies: [], proposals: [] },
- *          bobFolder?, extraOutboxes?: [], reviewWalls?, notes?, workerRunner?, ownerTaps? }
+ *          bobFolder?, reviewWalls?, notes?, workerRunner?, ownerTaps? }
  * workerRunner { requestsDir, statusFile }: the worker runner's two paths (lane 4's owner-ports.mjs names, L751). The
  * workers run as the runner's own Mac user, so the owner check can't tell the runner's status from one a worker wrote:
  * when given, for every role but a reviewer or auditor, its requests folder and its status file's folder are denied to
@@ -363,21 +363,22 @@ export function renderRoleSettings({ role, profile, paths, product = {}, rulesHo
   // A role the review runner starts is walled by its runner folder above (its snapshot sits inside it).
   const snapDirs = [];
   if (RUNNER_ROLES.includes(role)) {
-    // Its snapshot must sit inside the runner's folder, which its walls shut (#439 m3), compared without regard to case.
+    // Its snapshot must sit inside the runner's folder, which its walls shut (#439 m3), spelled exactly as that folder is,
+    // as the written-settings check (checkSettings) and the review fill check compare it (#439 r1 m2).
     // A template's placeholders (review-settings.mjs renderTemplate) are checked when filled (its fill check).
     const raw = paths.reviewWalls?.runnerRoot;
     const root = wallPath(raw); // as walled above (a trailing slash is the same folder)
     const token = (x) => typeof x === 'string' && /^\/__orch_[A-Za-z_]+__$/.test(x);
     if (!(token(paths.snapshot) && token(raw))) {
       if (typeof paths.snapshot !== 'string' || wallPath(paths.snapshot) !== paths.snapshot || !root
-        || foldKey(paths.snapshot) === foldKey(root) || !inside(foldKey(paths.snapshot), foldKey(root))) return refuse(`a ${role}'s rules snapshot must be a file inside the review runner's folder (runnerRoot), which its walls shut`);
+        || paths.snapshot === root || !inside(paths.snapshot, root)) return refuse(`a ${role}'s rules snapshot must be a file inside the review runner's folder (runnerRoot), which its walls shut`);
     }
   } else {
     if (typeof paths.snapshot !== 'string' || wallPath(paths.snapshot) !== paths.snapshot) return refuse(`the rules snapshot ${paths.snapshot} is not a plain absolute path, spelled as it resolves`);
     const sd = dirname(paths.snapshot);
     if (wallPath(sd) !== sd || sd.split('/').length < 3) return refuse('the rules snapshot must sit in a folder of its own below the top, spelled as it resolves');
     // The wall shuts the whole folder, so it may hold none of the session's own folders, nor sit inside one.
-    const own = [paths.outbox, paths.copy, paths.notes, paths.bobFolder, ...(paths.extraOutboxes ?? [])].filter((x) => x !== undefined);
+    const own = [paths.outbox, paths.copy, paths.notes, paths.bobFolder].filter((x) => x !== undefined);
     // Say which folder is badly spelled, before apart refuses it as not apart (as the runner wall does, #420 r1 c1).
     const odd = own.find((x) => wallPath(x) !== x);
     if (odd !== undefined) return refuse(`path "${odd}" is not a plain absolute path, spelled as it resolves`);

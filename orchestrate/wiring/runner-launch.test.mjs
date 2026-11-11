@@ -2,11 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { renderRoleSettings, checkRunnerWall } from '../modules/M4-workshop/launcher/render-settings.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { writeStatus } from './runner-files.mjs';
 import { checkRunnerConfig } from './runner-main.mjs';
@@ -156,5 +157,18 @@ test('L916 (#423 M2): a worker launch built from the config\'s real snapshot pla
     assert.throws(() => checkRunnerConfig(cfg(old)), /render\.paths\.snapshot must be a file in a folder of its own, apart from/);
     const was = launchFrom({ workerRunner: c.workerRunner, products: { p1: { render: { paths: { ...c.products.p1.render.paths, snapshot: old } } } } });
     assert.equal(was.ok, false); assert.match(was.reason, /the worker runner's folders must be apart from the session's own folders/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('#439 r1 c1: the launch hands the render and the check the same lstat and realpath', () => {
+  const { d, runner } = runnerDirs();
+  try {
+    const realpath = (p) => realpathSync.native(p); const lstat = (p) => lstatSync(p);
+    const seen = {};
+    const r = walledLaunchSettings({ ...input('editing', runner), realpath, lstat,
+      render: (a) => { seen.render = [a.realpath, a.lstat]; return renderRoleSettings(a); },
+      check: (a) => { seen.check = [a.realpath, a.lstat]; return checkRunnerWall(a); } });
+    assert.equal(r.ok, true, r.reason);
+    assert.deepEqual(seen, { render: [realpath, lstat], check: [realpath, lstat] });
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

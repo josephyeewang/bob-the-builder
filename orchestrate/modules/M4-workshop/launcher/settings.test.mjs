@@ -818,16 +818,20 @@ test('#439 m1: the render resolves the snapshot folder through the nearest folde
   assert.match(render('worker', { paths: { ...PATHS, snapshot: join(d, 'dangling', 'snaps', 'rules.json') } }).reason ?? '', /can't be resolved/);
 });
 
-test('#439 m3: a review runner role\'s rules snapshot must be a file inside runnerRoot, compared without regard to case', () => {
+test('#439 m3: a review runner role\'s rules snapshot must be a file inside runnerRoot, spelled exactly as it is (r1 m2), and what renders passes the written-settings check', () => {
   for (const role of RUNNER_ROLES) {
-    for (const snapshot of ['/w/snapshots/rules.json', '/r/outbox/rules.json', '/r/reviewer/rules.json', '/r/review', '/r/review/../rules.json']) {
+    for (const snapshot of ['/w/snapshots/rules.json', '/r/outbox/rules.json', '/r/reviewer/rules.json', '/r/review', '/r/review/../rules.json', '/R/Review/rules.json', '/r/REVIEW/s/rules.json']) {
       assert.match(render(role, { paths: { ...REVIEW_PATHS, snapshot } }).reason ?? '', /rules snapshot must be a file inside the review runner's folder \(runnerRoot\)/, `${role}: ${snapshot}`);
     }
-    for (const snapshot of ['/r/review/rules-snapshot.json', '/r/review/s/rules.json', '/R/Review/rules.json']) {
-      assert.equal(render(role, { paths: { ...REVIEW_PATHS, snapshot } }).ok, true, `${role}: ${snapshot}`);
+    const accepted = [{ snapshot: '/r/review/rules-snapshot.json' }, { snapshot: '/r/review/s/rules.json' },
+      // runnerRoot as walled (a trailing slash is the same folder).
+      { reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review/' } }];
+    for (const more of accepted) {
+      const r = render(role, { paths: { ...REVIEW_PATHS, ...more } });
+      assert.equal(r.ok, true, `${role}: ${JSON.stringify(more)} ${r.reason}`);
+      // Every file the render makes, the written-settings check takes: the two agree on the spelling.
+      assert.deepEqual(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }), { ok: true }, `${role}: ${JSON.stringify(more)}`);
     }
-    // runnerRoot as walled (a trailing slash is the same folder).
-    assert.equal(render(role, { paths: { ...REVIEW_PATHS, reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review/' } } }).ok, true, role);
   }
 });
 
@@ -847,4 +851,19 @@ test('#439 m4: checkRunnerWall refuses a rules snapshot that resolves out of its
   assert.match(check().reason ?? '', /can't be resolved \(ENOENT\); a link that leads nowhere yet/);
   rmSync(paths.snapshot); writeFileSync(join(d, 'snaps', 'real.json'), '{}'); symlinkSync(join(d, 'snaps', 'real.json'), paths.snapshot);
   assert.deepEqual(check(), { ok: true }, 'a link inside the walled folder');
+});
+
+test('#439 r1 m3: checkRunnerWall refuses a rules snapshot whose folder resolves inside the worker runner\'s requests folder', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [join(runner.requestsDir, 'snaps'), join(d, 'runner', 'state'), join(d, 's', 'outbox')]) mkdirSync(p, { recursive: true });
+  symlinkSync(join(runner.requestsDir, 'snaps'), join(d, 's', 'snaps'));
+  const paths = { ...PATHS, outbox: join(d, 's', 'outbox'), notes: join(d, 's', 'notes'), snapshot: join(d, 's', 'snaps', 'rules.json') };
+  const r = render('worker', { paths: { ...paths, workerRunner: runner } });
+  assert.equal(r.ok, true, `the render's checks let it by (${r.reason})`);
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner, paths }).reason ?? '', /snaps\/rules\.json resolves to .*runner\/requests\/snaps\/rules\.json, which is not apart from the worker runner's folders/);
+  // Control: the same folder made in place, apart from the runner's.
+  const own = { ...paths, snapshot: join(d, 's', 'own-snaps', 'rules.json') };
+  const ok = render('worker', { paths: { ...own, workerRunner: runner } });
+  assert.deepEqual(checkRunnerWall({ settings: ok.settings, workerRunner: runner, paths: own }), { ok: true });
 });

@@ -159,3 +159,18 @@ test('#439 m4: readSnapshot reads a plain file with one name only: a hard link, 
   symlinkSync(p, join(d, 'via-link.json'));
   assert.equal(readSnapshot(join(d, 'via-link.json')).ok, true);
 });
+
+test('#439 r1 m1: readSnapshot opens without waiting, so a pipe planted at the name is refused at once, not read forever', {
+  skip: existsSync('/usr/bin/mkfifo') ? false : 'needs mkfifo',
+}, () => {
+  const d = tempDir('orch-lane4-snap-');
+  const fifo = join(d, 'rules.json');
+  assert.equal(spawnSync('/usr/bin/mkfifo', [fifo]).status, 0);
+  // In a child with a deadline: a blocking open would wait for a writer that never comes.
+  const code = `import { readSnapshot } from ${JSON.stringify(join(HERE, 'snapshot.mjs'))}; console.log(JSON.stringify(readSnapshot(${JSON.stringify(fifo)})));`;
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(r.signal, null, 'the read hung on the pipe');
+  assert.ok(Date.now() - t0 < 5000);
+  assert.deepEqual(JSON.parse(r.stdout), { ok: false, reason: 'rules snapshot is not a plain file' });
+});

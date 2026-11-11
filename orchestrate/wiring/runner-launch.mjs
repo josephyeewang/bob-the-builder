@@ -18,16 +18,18 @@ const refuse = (reason) => ({ ok: false, reason: `not walled: ${reason}` });
  * `paths`. The rest goes to renderRoleSettings as is (profile, paths, product, rulesHosts, productionFiles, ...).
  * → { ok: true, role, settings } | { ok: false, reason }
  */
-export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSettings, check = checkRunnerWall, realpath, paths, ...rest }) {
+export function walledLaunchSettings({ kind, workerRunner, render = renderRoleSettings, check = checkRunnerWall, realpath, lstat, paths, ...rest }) {
   if (typeof kind !== 'string' || !Object.hasOwn(RUNNER_ROLE_OF, kind)) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
   const role = RUNNER_ROLE_OF[kind];
   if (!paths || typeof paths !== 'object') return refuse('the launch has no session paths');
   // The profile must be this role's, inside its design ceiling (review m4): never another role's tools or mode.
   const pc = checkProfile(role, rest.profile);
   if (!pc.ok) return refuse(pc.reason);
-  const r = render({ ...rest, role, paths: { ...paths, workerRunner }, ...(realpath ? { realpath } : {}) });
+  // The render and the check read the disk the same way (#439 m6, r1 c1).
+  const disk = { ...(realpath ? { realpath } : {}), ...(lstat ? { lstat } : {}) };
+  const r = render({ ...rest, role, paths: { ...paths, workerRunner }, ...disk });
   if (!r?.ok) return refuse(`the ${role} settings can't be made (${r?.reason ?? 'no answer'})`);
-  const c = check({ settings: r.settings, workerRunner, paths, ...(realpath ? { realpath } : {}) });
+  const c = check({ settings: r.settings, workerRunner, paths, ...disk });
   if (!c?.ok) return refuse(c?.reason ?? 'the wall check gave no answer');
   return { ok: true, role, settings: r.settings };
 }
