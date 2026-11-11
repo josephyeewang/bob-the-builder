@@ -53,7 +53,7 @@ function world({ pause = true, cards = ['C-1', 'C-2'], live = [{ id: 'S-1', prod
   const alerts = fake.texts;
   const empty = tempDir('m11-stale-');
   let sessions = [...live];
-  const ports = (step) => ({
+  const ports = (step) => ({ product: PRODUCT,
     alert: fake,
     board: board ?? (() => [{ id: 'S-2', card: 'C-2', alive: false, ended: true, lastWriteAt: E.clock.t - 10 * MIN }]),
     healthy: () => true, resume: () => false,
@@ -96,7 +96,7 @@ test('L321: stopPass parks after a save of 61, 80 or 125 s, and keeps the old re
       const { E, ports, card } = world();
       const now = E.clock.t;
       const p = ports(() => { E.clock.t += lag; });
-      await stopPass({ rec: E.record, rules: rulesWith({}, allow), now, ...(withClock ? { clock: () => E.clock.t } : {}), account: 'acct-a',
+      await stopPass({ product: PRODUCT, rec: E.record, rules: rulesWith({}, allow), now, ...(withClock ? { clock: () => E.clock.t } : {}), account: 'acct-a',
         sessions: p.sessions(), probe: p.probe, alert: fakeAlert(), stopGroup: p.stopGroup, saveWork: p.saveWork });
       const stop = E.record.read('fact', STOP_FACT('S-1')).doc;
       const what = `${lag / 1000} s, ${withClock ? 'with' : 'without'} the clock`;
@@ -316,7 +316,7 @@ test('L332 m3 (Probe C): a stop whose card now runs under another session is mar
   stopFact(E, 'S-1');
   stopFact(E, 'S-8');
   const sessions = [{ id: 'S-9', product: PRODUCT, kind: 'editing', card: 'C-1', pgid: 77 }];
-  await stopPass({ rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions, probe: () => idle,
+  await stopPass({ product: PRODUCT, rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions, probe: () => idle,
     alert: fakeAlert(), stopGroup: async () => ({ ok: true, how: 'x' }), saveWork: async () => ({ ok: true }) });
   assert.equal(card('C-1').state, 'running', 'the new run is not parked');
   for (const sid of ['S-1', 'S-8']) {
@@ -325,7 +325,7 @@ test('L332 m3 (Probe C): a stop whose card now runs under another session is mar
   }
   // The stop of the session that still runs it is parked, as before.
   stopFact(E, 'S-9');
-  await stopPass({ rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions: [], probe: () => idle,
+  await stopPass({ product: PRODUCT, rec: E.record, rules: rulesWith({}, allow), now: E.clock.t, clock: () => E.clock.t, account: 'acct-a', sessions: [], probe: () => idle,
     alert: fakeAlert(), stopGroup: async () => ({ ok: true, how: 'x' }), saveWork: async () => ({ ok: true }) });
   assert.deepEqual([card('C-1').state, card('C-1').wait?.what, E.record.read('fact', STOP_FACT('S-9')).doc.moved], ['waiting', 'needs_split', true]);
 });

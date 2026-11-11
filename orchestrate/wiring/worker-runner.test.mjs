@@ -37,7 +37,7 @@ function world({ startAnswer, stopAnswer, gone = new Set(), drained = () => true
   };
   const open = () => ({ st: st(), text: JSON.stringify(w.status) });
   w.read = () => readOwnerStatus({ file: FILE, now: w.now, uid: OWNER, outboxRoot: ROOT, realpath: (p) => p, stat: () => st({ dir: true }), open });
-  w.sync = (holds = () => true) => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => w.now, stat: () => st({ dir: true }), open, realpath: (p) => p, holds, writeRequest: (n, t) => w.asked.push({ name: n, body: JSON.parse(t) }) });
+  w.sync = (holds = () => true) => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, product: 'p1', clock: () => w.now, stat: () => st({ dir: true }), open, realpath: (p) => p, holds, writeRequest: (n, t) => w.asked.push({ name: n, body: JSON.parse(t) }) });
   w.asked = [];
   // The Dispatcher's asks, with the runner's pass run between its polls: end to end through the real readers.
   w.asks = () => ownerAsyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, copiesRoot: COPIES, clock: () => w.now, pollMs: 2000, giveUpMs: 20_000, nonce: (() => { let i = 0; return () => [N1, N2][i++]; })(),

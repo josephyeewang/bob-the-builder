@@ -45,7 +45,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
   const probes = new Map();
   let n = 0;
   let launchAnswer = () => ({ ok: true });
-  const pass = (min = 0, extra = {}) => dispatcherPass({
+  const pass = (min = 0, extra = {}) => dispatcherPass({ product: 'p1',
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
@@ -118,7 +118,7 @@ test('R-0b-55: the claim is rev-checked: a card changed since it was read is not
   const real = rec.ready.bind(rec);
   // another writer changes the card after the pass read the ready list (M9's rec.ready, L72)
   const sneaky = { ...rec, ready: () => { const l = real(); if (l.length) change(rec, 'card', 'C-1', { head: 'b'.repeat(40) }); return l; } };
-  const r = await dispatcherPass({ rec: sneaky, rules: rulesWith({}, startAnswer(rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
+  const r = await dispatcherPass({ product: 'p1', rec: sneaky, rules: rulesWith({}, startAnswer(rec)), now: T0, account: ACCT, sessions: [], probe: () => idle,
     launch: async () => { throw new Error('must not launch'); }, stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), alert: () => {} });
   assert.deepEqual(r.started, []);
   assert.match(r.refused[0][1], /not claimed/);
@@ -786,10 +786,10 @@ test('M7: a stop that fails alerts and leaves the card as it was; a failed save 
   w.setCard('C-1', { state: 'cancelled' });
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }) };
   const alerts = [];
-  await dispatcherPass({ ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) });
   assert.match(alerts[0], /could not be stopped: permission/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'pending');
-  await dispatcherPass({ ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }), alert: (x) => alerts.push(x) });
   assert.match(alerts[1], /not saved: disk full/);
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done');
 });
@@ -802,14 +802,14 @@ test('L130: an unsaved stop whose alert was not queued is told on the next pass,
   w.setCard('C-1', { state: 'cancelled' });
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions: [...w.sessions], probe: () => idle, launch: async () => ({ ok: false }),
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: false, reason: 'disk full' }) };
-  await dispatcherPass0({ ...base, now: T0 + MIN, alert: () => false });
+  await dispatcherPass0({ product: 'p1', ...base, now: T0 + MIN, alert: () => false });
   assert.equal(w.rec.read('fact', STOP_FACT(sid)).doc.state, 'done', 'the stop stands');
   assert.equal(w.rec.read('fact', UNSAVED_FACT(sid))?.doc?.told_at, undefined, 'not marked told');
   const alerts = [];
-  await dispatcherPass({ ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 2 * MIN, alert: (x) => alerts.push(x) });
   assert.equal(alerts.filter((a) => /not saved: disk full/.test(a)).length, 1, alerts.join(' | '));
   assert.ok(w.rec.read('fact', UNSAVED_FACT(sid)).doc.told_at);
-  await dispatcherPass({ ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
+  await dispatcherPass({ product: 'p1', ...base, sessions: [], now: T0 + 3 * MIN, alert: (x) => alerts.push(x) });
   assert.equal(alerts.filter((a) => /not saved/.test(a)).length, 1, 'told once');
 });
 
@@ -819,7 +819,7 @@ test('L130: a no-account limit wait whose alert was not queued waits on Joe, and
   const parked = { state: 'waiting', tier: 2, product: 'p1', files: ['src/n.js'], wait: { who: 'usage', what: 'limit_hit', since: iso(T0), next_check: iso(T0) } };
   const w = world([['card', 'N', parked], ['fact', LIMIT_FACT(ACCT), { resets_at: iso(T0 + 30 * MIN), observed_at: iso(T0 + MIN) }]]);
   const sessions = [];
-  await dispatcherPass0({ rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
+  await dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), now: T0 + 31 * MIN, account: ACCT, sessions, probe: () => idle,
     launch: async () => ({ ok: false }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: () => false });
   assert.deepEqual([w.rec.read('card', 'N').doc.wait.who, w.rec.read('card', 'N').doc.wait.what], ['joe', LIMIT_NO_ACCOUNT]);
   assert.equal(w.rec.read('fact', WAIT_TELL_FACT('N')).doc.told_since, undefined, 'not marked told');
@@ -912,16 +912,16 @@ test('audit 0b-6 r2 MAT-7: a session whose probe, stop or save throws does not e
   const alerts = [];
   const base = { rec: w.rec, rules: rulesWith({}, startAnswer(w.rec)), account: ACCT, sessions, launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 900, pidStart: 's900', pgid: 900, head: 'h'.repeat(40) }), alert: (x) => alerts.push(x) };
   // Pass 1: A's probe throws; B is cancelled and idle.
-  let r = await dispatcherPass({ ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
+  let r = await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN, probe: (s) => { if (s.id === a) throw new Error('transcript unreadable'); return idle; },
     stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
   assert.deepEqual(stops, [b], 'B stops although A threw first');
   assert.deepEqual(r.stopping, [[a, 'cancel']], 'a throwing probe is not a safe point');
   assert.ok(r.started.length >= 1, 'starts still run');
   // Pass 2, past the grace: A is hard-stopped; its stop then its save throw and each becomes one alert.
-  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 30 * MIN, probe: () => { throw new Error('transcript unreadable'); },
+  r = await dispatcherPass({ product: 'p1', ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 30 * MIN, probe: () => { throw new Error('transcript unreadable'); },
     stopGroup: async () => { throw new Error('EPERM'); }, saveWork: async () => ({ ok: true }) });
   assert.match(alerts.join('\n'), /could not be stopped: EPERM/);
-  r = await dispatcherPass({ ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 31 * MIN, probe: () => idle,
+  r = await dispatcherPass({ product: 'p1', ...base, sessions: sessions.filter((s) => s.id === a), now: T0 + 31 * MIN, probe: () => idle,
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => { throw new Error('disk gone'); } });
   assert.deepEqual(r.stopped, [[a, 'cancel']]);
   assert.match(alerts.join('\n'), /not saved: disk gone/);
@@ -1003,7 +1003,7 @@ test('audit 0b-6 r2 MIN-10 (round 1 MIN-2, 3, 4): a cancel replaces a pending pa
   const alerts = [];
   const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
     stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert: (x) => alerts.push(x) };
-  for (const m of [1, 2, 3]) await dispatcherPass({ ...base, now: T0 + m * MIN });
+  for (const m of [1, 2, 3]) await dispatcherPass({ product: 'p1', ...base, now: T0 + m * MIN });
   assert.equal(alerts.filter((x) => /could not be stopped/.test(x)).length, 1);
 });
 
@@ -1132,7 +1132,7 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   const sessions = [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }, { id: 'S-B', product: 'p1', kind: 'editing', card: 'C-B', pgid: 51 }];
   const alerts = [];
   const stopped = [];
-  const run = (at) => stopPass({ rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert: (t) => alerts.push(t), portDeadlineMs: 50, saveDeadlineMs: 50,
+  const run = (at) => stopPass({ product: 'p1', rec, rules: rulesWith(), now: at, account: ACCT, sessions, probe: () => idle, alert: (t) => alerts.push(t), portDeadlineMs: 50, saveDeadlineMs: 50,
     stopGroup: (s) => (s.id === 'S-A' ? new Promise(() => {}) : (stopped.push(s.id), { ok: true, how: 'SIGTERM' })),
     saveWork: async () => ({ ok: true }) });
   const r = await run(T0);
@@ -1146,6 +1146,52 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   assert.equal(alerts.length, 2, 'again a day later');
 });
 
+// L927: stopPass is given this Dispatcher's product. It acts only on sessions whose own product that is, and hands back
+// the Mac-wide list (less what it stopped) for the caps. C-7 is in this Record (cancelled) and in product q9.
+test('L927: stopPass stops only its own product\'s sessions, never another\'s C-7, and its running list stays Mac-wide', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 },
+    { id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', pgid: null }];
+  const called = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; }, alert: () => {},
+    stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async (s) => { called.push(`save ${s.id}`); return { ok: true }; } });
+  assert.deepEqual(r.stopped, [['S-1', 'cancel']]);
+  assert.deepEqual(called, ['probe S-1', 'stop S-1', 'save S-1'], 'nothing of another product\'s, nor the review runner\'s, is probed, stopped or saved');
+  assert.deepEqual(r.running.map((s) => s.id), ['S-9', 'R-1'], 'the caps still see every product');
+  assert.equal(rec.read('fact', STOP_FACT('S-9')), null);
+  assert.equal(r.missing.some((m) => /q9/.test(m)), false, 'another product\'s rules are not read here');
+});
+
+test('L927: dispatcherPass, running its own stop step, passes the product on: another product\'s C-7 is not stopped', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const stops = [];
+  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', probe: () => idle, alert: () => {}, launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [],
+    sessions: [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 }],
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+  assert.deepEqual(stops, ['S-1']);
+});
+
+// L943 m2: stopPass with no product named (left out, empty, not a string) matches no session, never every one, and says so.
+test('L943 m2: stopPass with no product, an empty one or a non-string one stops nothing, and notes why', async () => {
+  for (const product of [undefined, '', 7, null]) {
+    const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+    usageInto(rec);
+    const called = []; const log = [];
+    const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-0', kind: 'editing', card: 'C-7', pgid: 52 }];
+    const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, ...(product === undefined ? {} : { product }), sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; },
+      alert: () => {}, failureLog: (l) => log.push(l), stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+    const what = String(product);
+    assert.deepEqual(r.stopped, [], what);
+    assert.deepEqual(called, [], `${what}: nothing probed or stopped`);
+    assert.equal(rec.read('fact', STOP_FACT('S-1')), null, `${what}: no stop even wanted`);
+    assert.deepEqual(r.running.map((s) => s.id), ['S-1', 'S-0'], `${what}: the caps still see every session`);
+    assert.ok(r.notes.includes('stops: no product named, so no session is stopped (L943)'), what);
+    assert.deepEqual(log, ['stops: no product named, so no session is stopped (L943)'], what);
+  }
+});
+
 test('r4 MAT-1: the stops are called side by side, not one after another', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
   usageInto(rec);
@@ -1153,7 +1199,7 @@ test('r4 MAT-1: the stops are called side by side, not one after another', async
   const called = new Set();
   // A answers only once B's stop has been called too: one after another, A would time out.
   const waitFor = (id) => new Promise((ok) => { const t = setInterval(() => { if (called.has(id)) { clearInterval(t); ok(); } }, 2); });
-  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: () => {}, portDeadlineMs: 300,
+  const r = await stopPass({ product: 'p1', rec, rules: rulesWith(), now: T0, account: ACCT, sessions, probe: () => idle, alert: () => {}, portDeadlineMs: 300,
     stopGroup: async (s) => { called.add(s.id); if (s.id === 'S-A') await waitFor('S-B'); return { ok: true, how: 'SIGTERM' }; },
     saveWork: async (s) => { called.add(`save-${s.id}`); if (s.id === 'S-A') await waitFor('save-S-B'); return { ok: true }; } });
   assert.deepEqual(r.stopped.map(([id]) => id).sort(), ['S-A', 'S-B']);
@@ -1164,7 +1210,7 @@ test('r4 MAT-1: a save that never answers is told, and the stopped card still mo
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' })]);
   usageInto(rec);
   const alerts = [];
-  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, sessions: [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }], probe: () => idle,
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [{ id: 'S-A', product: 'p1', kind: 'editing', card: 'C-A', pgid: 50 }], probe: () => idle,
     alert: (t) => alerts.push(t), saveDeadlineMs: 50, stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: () => new Promise(() => {}) });
   assert.deepEqual(r.stopped, [['S-A', 'cancel']]);
   assert.match(alerts.join(' | '), /S-A stopped but its unsaved work was not saved: it did not answer within 50 ms/);
@@ -1176,7 +1222,7 @@ test('r4 Minor: a Lead hand-off that fails, or never answers, is told again a da
     const w = world();
     w.setProduct('p1', 'paused');
     const alerts = () => w.calls.alerts.filter((a) => /could not be asked to hand off/.test(a));
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead, alert: (t) => w.calls.alerts.push(t), filesOf: filesOfCommits, portDeadlineMs: 50 });
     await at(0);
     await at(1);
@@ -1275,7 +1321,7 @@ function usageInto(rec) {
 // stays claimed (a late answer may still start a session, so it never goes back to ready) and Joe is told.
 test('r5 m1: a launch that never answers holds no other start; its card stays claimed and is told once a day', { timeout: 10_000 }, async () => {
   const w = world([card('C-A'), card('C-B', { product: 'p2', files: ['src/b.js'] })]);
-  const run = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+  const run = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
     launch: (x) => (x.card.id === 'C-A' ? new Promise(() => {}) : { ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 9, pidStart: 's9', pgid: 9, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: (t) => w.calls.alerts.push(t), portDeadlineMs: 50 });
   const r = await run(0);
@@ -1294,7 +1340,7 @@ test('r5 MAT-2: usage unknown and a failed Lead hand-off, with the first alert f
     const sent = [];
     let down = true;
     let n = 0;
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
       pauseLead: () => { throw new Error(`Lead not reachable (pid ${++n})`); }, alert: (t) => (down ? bad(t) : sent.push(t)) });
     await at(0);
@@ -1317,7 +1363,7 @@ test('r7 M2: a dropped stop takes its queued alert with it; the next failed stop
   let atRest = true;
   let up = false;
   const got = [];
-  const run = (min) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions, probe: () => (atRest ? idle : busy),
+  const run = (min) => stopPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions, probe: () => (atRest ? idle : busy),
     stopGroup: async () => ({ ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
     alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
   w.setUsage(RED, T0);
@@ -1346,7 +1392,7 @@ test('r7 M2: a stop that went through takes its queued failure alert with it', a
   let up = false;
   let works = false;
   const got = [];
-  const run = (min, ss = sessions) => stopPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: ss, probe: () => idle,
+  const run = (min, ss = sessions) => stopPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: ss, probe: () => idle,
     stopGroup: async () => (works ? { ok: true, how: 'term' } : { ok: false, reason: 'EPERM' }), saveWork: async () => ({ ok: true }), portDeadlineMs: 50, saveDeadlineMs: 50,
     alert: (t) => { if (!up) throw new Error('no network'); got.push(t); return true; } });
   w.setUsage(RED, T0);
@@ -1370,7 +1416,7 @@ test('r7 M2: a hand-off alert queued while the port was down leaves when the pau
     const sent = [];
     let down = true;
     let fails = true;
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
       pauseLead: () => { if (fails) throw new Error('Lead not reachable'); }, alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
     const told = () => sent.filter((t) => /could not be asked to hand off/.test(t)).length;
@@ -1399,7 +1445,7 @@ test('r8 MAT-1: a held undo that starts before its alert is sent leaves no stale
   const allow = rulesWith({}, startAnswer(w.rec));
   let down = true;
   const sent = [];
-  const at = (min, rules) => dispatcherPass({ rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
+  const at = (min, rules) => dispatcherPass({ product: 'p1', rec: w.rec, rules, now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle,
     launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 300 + min, pidStart: `s${min}`, pgid: 300 + min, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, portDeadlineMs: 50,
     alert: (t) => { if (down) throw new Error('down'); sent.push(t); return true; } });
@@ -1458,7 +1504,7 @@ test('L138 m4: a card put on Joe for unread usage is told after usage is back, e
     setClock(w.rec, now + 1500);
     await withAlerts(w.rec, now, (t) => { sent.push(typeof t === 'string' ? t : t.text); return true; }, async (real) => {
       const alert = Object.assign((t, o) => (refuseCardTell && /^card C-1/.test(t) ? false : real(t, o)), { queues: true });
-      await dispatcherPass0({ rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+      await dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith(), now, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
         stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert });
       retellWaits({ rec: w.rec, alert, now });
     });
@@ -1555,11 +1601,11 @@ test('L324: a failed stop whose told time is ahead or unreadable is told again o
     const alert = fakeAlert();
     const base = { rec: f.rec, rules: rulesWith({}, startAnswer(f.rec)), account: ACCT, sessions: [...f.sessions], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: false, reason: 'permission' }), saveWork: async () => ({ ok: true }), alert };
-    await dispatcherPass({ ...base, now: T0 + MIN });
+    await dispatcherPass({ product: 'p1', ...base, now: T0 + MIN });
     const told = () => alert.texts.filter((x) => /could not be stopped/.test(x)).length;
     assert.equal(told(), 1, label);
     change(f.rec, 'fact', STOP_FACT(sid), { told_at: bad });
-    await dispatcherPass({ ...base, now: T0 + 2 * MIN });
+    await dispatcherPass({ product: 'p1', ...base, now: T0 + 2 * MIN });
     assert.equal(told(), due ? 2 : 1, label);
   }
 });
@@ -1583,7 +1629,7 @@ test('L324: a failed Lead hand-off, its told time ahead or unreadable, is told a
     w.setProduct('p1', 'paused');
     const alert = fakeAlert();
     const alerts = () => alert.texts.filter((a) => /could not be asked to hand off/.test(a));
-    const at = (min) => dispatcherPass({ rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
+    const at = (min) => dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith(), now: T0 + min * MIN, account: ACCT, sessions: [], probe: () => idle, launch: async () => ({ ok: false }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), pauseLead: () => { throw new Error('send failed'); }, alert, filesOf: filesOfCommits });
     await at(0);
     assert.equal(alerts().length, 1, label);
@@ -1632,7 +1678,7 @@ test('n5: a fold that ends while its alert is still queued drops the queued copy
   // M10's own words for a paused product (the paused fold).
   const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
     ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
-  const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+  const at = (now) => { w.setUsage(GREEN, now); return dispatcherPass0({ product: 'p1', rec: w.rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
     launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
   await at(T0 + 25 * H);
@@ -1978,7 +2024,7 @@ test('L354 fold over: the queued copy leaves first, and a late mark is cleared; 
     const fact = 'hold-waits-p1-paused';
     const m10 = { start_session: ({ product }) => (w.rec.read('product', product)?.doc?.state === 'paused'
       ? { decision: 'deny', reason: 'product is paused: no starts' } : { decision: 'allow', reason: 'ok' }) };
-    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
+    const at = (rec, now) => { w.setUsage(GREEN, now); return dispatcherPass0({ product: 'p1', rec, rules: rulesWith({}, m10), now, account: ACCT, sessions: [], probe: () => idle,
       launch: async (x) => ({ ok: true, sessionId: x.sessionId, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}`, pid: 4242, pidStart: 's4242', pgid: 42, head: 'h'.repeat(40) }),
       stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert: outbox(w.rec, now) }); };
     await at(w.rec, T0 + 25 * H);
@@ -2070,7 +2116,7 @@ test('L354 item 3: a mark landing as a clear is written does not outlive the cle
 test('L744 1: a launch that answers timed out in its own words keeps the card claimed, never back to ready', { timeout: 10_000 }, async () => {
   const w = world([card('C-A')]);
   const alert = fakeAlert();
-  const r = await dispatcherPass({ rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
+  const r = await dispatcherPass({ product: 'p1', rec: w.rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), now: T0, account: ACCT, sessions: [], probe: () => idle,
     launch: async () => ({ ok: false, timedOut: true, reason: 'the launcher gave up waiting for claude' }),
     stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), filesOf: filesOfCommits, alert, portDeadlineMs: 5_000 });
   assert.equal(w.rec.read('card', 'C-A').doc.state, 'claimed');

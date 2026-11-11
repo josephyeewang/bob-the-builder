@@ -23,7 +23,7 @@ function scriptWorld() {
     outbox, uid: process.getuid(), alive: true, ended: false, outbox_open: true, stop_requested: false };
   writeFileSync(statusFile, JSON.stringify({ written_at: new Date().toISOString(), sessions: [session], requests: { 'S-1': { state: 'started' } } }), { mode: 0o644 });
   chmodSync(statusFile, 0o644);
-  const ports = ownerSyncPorts({ statusFile, uid: process.getuid(), outboxRoot: runnerRoot, holds: () => true });
+  const ports = ownerSyncPorts({ statusFile, uid: process.getuid(), outboxRoot: runnerRoot, product: PRODUCT, holds: () => true });
   return { env, ports, outRoot };
 }
 

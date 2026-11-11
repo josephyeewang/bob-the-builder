@@ -55,6 +55,13 @@
 //                  link or a swap in the owner's folder never puts another user's file in the Record (L763). It may not
 //                  be the Dispatcher's own user (which could then write who the host is), root or the review user; it is
 //                  checked before the start makes anything (L805)
+//   workerRequestsDir  the worker runner's requests folder (setup layout.mjs workerRunnerPaths: requests, the owner's,
+//                  which orchestrate may add files to, L921): a stop request goes there. It must be there at start; its
+//                  owner (workerUid), mode and access list are checked on each write (L943 m4)
+//   workerStatusFile   the worker runner's status.json in its own folder (runner/status.json): what runs. Missing, stale
+//                  or not the owner's makes sessions, board, outboxSessions, probe and stopSession "not known" (a throw)
+//   workerUid      the owner's Mac user id, which the worker runner runs as (wiring/runner-job.mjs): hostLockUid's same
+//                  user, or the start is refused
 //
 // THE APPROVALS PORT (L270). Approvals' schedule pass runs for this product each tick: it turns the product on the
 // first time its rules file says onboarding.state: active (M2 onboard.mjs), which is all the first cutover needs from it.
@@ -75,7 +82,7 @@ import { makeRules } from '../shared/rules.mjs';
 import { readOnlyClient, tokenFile } from '../modules/M6-merge-gate/watch-only.mjs';
 import { queueAlert } from '../modules/M11-dispatcher/alerts.mjs';
 import { notWiredText, refusing } from './not-wired.mjs';
-import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts } from './worker-ports.mjs';
+import { NOT_WIRED_WORKER, cleanupProblem, hostLockOwnerProblem, workerPorts, workerUidProblem } from './worker-ports.mjs';
 import { NOT_WIRED_REVIEW, reviewPorts } from './review-ports.mjs';
 import { NOT_WIRED_PHONE, phonePorts } from './phone-ports.mjs';
 
@@ -84,10 +91,13 @@ export const REVIEW_CONFIG_KEYS = Object.freeze(['reviewRequestsDir', 'reviewSta
 // The worker and cleanup ports' (worker-ports.mjs, and filesOf in review-ports.mjs, L739). The Dispatcher's alone too.
 // outboxRoot and copiesRoot are the TOP folders (setup layout.mjs outboxRootPath, workerCopiesPath: <base>/outboxes and
 // <base>/worker-copies), never a product's: each product's own folder is under them (L836, L887).
-export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'outboxRoot', 'copiesRoot', 'hostLockPath', 'hostLockUid']);
+// The worker runner's requests folder, status file and Mac user (L921, L925: owner-status.mjs ownerSyncPorts). Its
+// outboxes are outboxRoot's, so there is no second outbox key.
+export const WORKER_CONFIG_KEYS = Object.freeze(['reviewRoot', 'mirror', 'sealRoot', 'outboxRoot', 'copiesRoot', 'hostLockPath', 'hostLockUid', 'workerRequestsDir', 'workerStatusFile', 'workerUid']);
+const UID_KEYS = Object.freeze(['reviewUid', 'hostLockUid', 'workerUid']);
 export const CONFIG_KEYS = Object.freeze(['installRoot', 'wiring', 'lockFile', 'runDeadlineMs', 'product', 'recordRoot', 'ownerUid', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir',
   ...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS]);
-const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...REVIEW_CONFIG_KEYS.filter((k) => k !== 'reviewUid'), ...WORKER_CONFIG_KEYS.filter((k) => k !== 'hostLockUid')]);
+const PATHS = Object.freeze(['recordRoot', 'productsFile', 'rulesStateDir', 'tokenFile', 'approvalsStateDir', ...[...REVIEW_CONFIG_KEYS, ...WORKER_CONFIG_KEYS].filter((k) => !UID_KEYS.includes(k))]);
 
 // The ports PRs C and D wire (M11 README, "The tick's ports"), each named in the port file that will answer it. A port
 // on a list throws when called: never a stand-in answer. To wire one, change its port file; this file doesn't change.
@@ -100,10 +110,11 @@ export { notWiredText, refusing };
 // Every port the tick needs from the wiring. A port's wiring moves between the port files; this list changes only when the
 // tick starts reading a new port. Options with defaults are not ports. `alert` and `approvals` are answered here.
 // `outboxRoot` is a port, not an option (#403 r1 M1): without it the pass checks a launch's outbox by its name only, so
-// it is answered from the config's own outboxRoot (worker-ports.mjs, L887), never left to a default.
+// it is answered from the config's own outboxRoot (worker-ports.mjs, L887), never left to a default. `product` is one too
+// (L927): the stop step acts only on this Dispatcher's product's sessions, so it is the config's, never a default.
 const WIRED_HERE = Object.freeze(['alert', 'approvals']);
 export const TICK_PORTS = Object.freeze([...WIRED_HERE, 'cleanup', 'board', 'filesOf', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'hasReviewer', 'healthy',
-  'hostLock', 'launch', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'proposals', 'replyToLead', 'requestReview',
+  'hostLock', 'launch', 'leads', 'mainSha', 'outboxRoot', 'outboxSessions', 'pauseLead', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product', 'proposals', 'replyToLead', 'requestReview',
   'restartFrontDoor', 'resume', 'reviewAlerts', 'reviewEnded', 'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startPlanReview', 'startReadonly',
   'stopGroup', 'stopSession', 'strayFrontDoor', 'wait']);
 
@@ -120,6 +131,8 @@ export function checkConfig(c, { keys = CONFIG_KEYS, paths = PATHS, selfUid = pr
   // host.lock's owner, with the rest of the config: before wire() makes any folder or opens the Record (L805 m1). The
   // Dispatcher's own user is this process's; workerPorts checks it again with the start's selfUid.
   if (keys.includes('hostLockUid')) { const bad = hostLockOwnerProblem(c.hostLockUid, selfUid, c.reviewUid); if (bad) throw new Error(`config: ${bad}`); }
+  // The worker runner's user, the same owner's (L896), before wire() makes a folder (L943 m3).
+  if (keys.includes('workerUid')) { const bad = workerUidProblem(c); if (bad) throw new Error(`config: ${bad}`); }
   return c;
 }
 

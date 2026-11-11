@@ -1365,10 +1365,11 @@ test('Dispatcher config: every key the Dispatcher takes, from the layout and the
     reviewRequestsDir: at(`${BASE}/review/requests`), reviewStatusFile: at(`${BASE}/review/status.json`), reviewUid: uid('review'),
     reviewRunnerLog: at(`${BASE}/logs/review-runner.err.log`), reviewInstallRoot: R,
     reviewRoot: at(`${BASE}/review`), mirror: at(`${BASE}/mirror`), sealRoot: at(`${BASE}/seals`), outboxRoot: at(`${BASE}/outboxes`), copiesRoot: at(`${BASE}/worker-copies`), hostLockPath: at(DLOCK), hostLockUid: uid('sam'),
+    workerRequestsDir: at(`${BASE}/worker-runner/requests`), workerStatusFile: at(`${BASE}/worker-runner/runner/status.json`), workerUid: uid('sam'),
   });
-  // The seven worker keys are dispatcherKeys' (the one source), as the job sees them; host.lock's owner is the owner's uid.
+  // The ten worker keys are dispatcherKeys' (the one source), as the job sees them; host.lock's owner is the owner's uid.
   const k = dispatcherKeysOn(w.mac, w.cfg);
-  for (const key of Object.keys(k)) assert.equal(config[key], key === 'hostLockUid' ? k[key] : at(k[key]), key);
+  for (const key of Object.keys(k)) assert.equal(config[key], (key === 'hostLockUid' || key === 'workerUid') ? k[key] : at(k[key]), key);
   assert.notEqual(config.hostLockUid, config.ownerUid, 'host.lock is the owner\'s, not the Dispatcher\'s');
 });
 

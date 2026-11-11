@@ -1,5 +1,7 @@
 // The Dispatcher's side of the review runner (lead call L65). The Dispatcher never starts a reviewer or an auditor:
-// it runs as the workers' Mac user, and anything it could start a worker could start too. It only asks, by writing a
+// it runs as the orchestrate user (workers run as the owner's, the review runner as `review`; L936 corrects an older
+// note that said the workers'), and a reviewer's verdict must come from a session only `review` started, in folders only
+// `review` can write. It only asks, by writing a
 // request { card, head, role, request_id } into the runner's requests/ folder, and the runner (M4
 // review-runner.mjs, running as `review`) checks the request against the Record and git before starting anything.
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or
@@ -32,7 +34,7 @@
 //
 // Writing a file is all this does: no process is started here (only-send-safe.test.mjs).
 
-import { closeSync, constants, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, linkSync, openSync, readSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { readReviewStatus, planAnswerFor, PLAN_REQUEST_ID, REQUEST_ID, CARD_ID } from '../M4-workshop/launcher/review-runner.mjs';
@@ -74,7 +76,9 @@ function writeRequestFile(dir, id, body, { same = false, uid = process.getuid(),
   try {
     const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
     made = true;
-    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); writeSync(fd, text); } finally { closeSync(fd); }
+    // 0644 by handle, whatever the job's umask (the Dispatcher's is 077): else `review` can't read the request and no
+    // review ever starts (L945 a; the same fix as owner-status.mjs writeNewReadable, L929).
+    try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); fchmodSync(fd, 0o644); writeSync(fd, text); } finally { closeSync(fd); }
     // A file the runner takes away between the link and the read is no intruder: the link is tried once more (#294
     // self-review m2).
     for (let tries = 0; ; tries += 1) {

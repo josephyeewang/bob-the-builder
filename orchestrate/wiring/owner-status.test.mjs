@@ -23,7 +23,7 @@ function world(d = doc(), { dirSt = st({ dir: true }), fileSt = st({ mode: 0o644
   const text = typeof d === 'string' ? d : JSON.stringify(d);
   const stat = (p) => { if (p === '/runner') return dirSt; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
   const open = (p) => { assert.equal(p, FILE); return { st: fileSt, text: forced === undefined ? text : forced }; };
-  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, realpath, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]), holds });
+  const ports = ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, product: 'p', realpath, clock: () => NOW, stat, open, writeRequest: (n, t) => writes.push([n, t]), holds });
   return { ports, writes };
 }
 
@@ -67,7 +67,22 @@ test('step 1 M1: the board holds the sessions meant to run; one stopped on reque
   assert.deepEqual(ports.board().map((r) => r.id), ['b2'], 'a handled death is not counted again on the next pass');
   for (const h of ['yes', undefined, { corrupt: true }]) assert.throws(() => world(d, { holds: () => h }).ports.board(), /the Record can't tell whether card/, `holds answering ${JSON.stringify(h)} is "not known", never a dropped row`);
   assert.deepEqual(ports.outboxSessions().map((x) => x.sessionId), ['a1', 'b1', 'b2', 'c1'], 'the outboxes are read whatever the board says');
-  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, writeRequest: () => {} }), /holds/);
+  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, product: 'p', writeRequest: () => {} }), /holds/);
+  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, writeRequest: () => {}, holds: () => true }), /the board needs the product whose Record it is for/);
+});
+
+test('L927: the board is one Record\'s: another product\'s sessions are never on it, and its card ids are never asked of this Record', () => {
+  // C-7 in two products: q's session runs and q's dead one would be "held" if its card id were read from p's Record.
+  const ended = { alive: false, ended: true };
+  const other = (id, more) => session(id, { product: 'q', card: 'C-7', outbox: `${ROOT}/q/worker/${id}`, ...more });
+  const d = doc({ sessions: [session('s1', { card: 'C-7' }), other('q1'), other('q2', ended), session('s3', { card: 'C-8', ...ended })],
+    requests: { s1: { state: 'started' }, q1: { state: 'started' }, q2: { state: 'stopped' }, s3: { state: 'stopped' } } });
+  const asked = [];
+  const { ports } = world(d, { holds: (q) => { asked.push(q.sessionId); return true; } });
+  assert.deepEqual(ports.board().map((r) => r.id), ['s1', 's3']);
+  assert.deepEqual(asked, ['s3'], 'only this product\'s dead session is asked about');
+  // The other ports stay Mac-wide: the wiring picks them by product where it needs to.
+  assert.deepEqual(ports.sessions().map((x) => x.id), ['s1', 'q1']);
 });
 
 test('step 1: a status that can\'t be trusted is "not known", a throw, never an empty or partial answer', () => {
@@ -131,7 +146,7 @@ test('step 1: a status that can\'t be trusted is "not known", a throw, never an 
   // m2: a closed outbox's folder is not looked up, so one cleared folder can't take every port down; its shape still is checked
   const gone = (p) => { if (p !== ROOT && p !== `${ROOT}/p`) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return p; };
   const closed = doc({ sessions: [session('s1'), session('s2', { alive: false, ended: true, outbox_open: false })], requests: { s1: { state: 'started' }, s2: { state: 'stopped' } } });
-  assert.deepEqual(ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NOW, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(closed) }), realpath: (p) => (p === `${ROOT}/p/worker/s1` ? p : gone(p)), writeRequest: () => {}, holds: () => true }).sessions().map((x) => x.id), ['s1']);
+  assert.deepEqual(ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, product: 'p', clock: () => NOW, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(closed) }), realpath: (p) => (p === `${ROOT}/p/worker/s1` ? p : gone(p)), writeRequest: () => {}, holds: () => true }).sessions().map((x) => x.id), ['s1']);
   assert.throws(() => world(doc({ sessions: [session('s1'), session('s2', { outbox_open: false, outbox: '/x/y' })] })).ports.sessions(), /outbox that is not this session's own folder/);
 });
 
@@ -216,7 +231,7 @@ test('#324 r1 m1, m4, c1, c2: a status that contradicts itself is not known; a l
   assert.deepEqual(world(d, { holds: () => true }).ports.board().map((r) => r.id), ['s1'], 'only a session stopped on request and no longer live leaves');
   // c1, c2
   assert.throws(() => readOwnerStatus({ file: FILE, now: NaN, uid: OWNER, outboxRoot: ROOT }), /clock gave no time/);
-  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, clock: () => NaN, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(doc()) }), realpath: (p) => p, writeRequest: () => {}, holds: () => true }).sessions(), /clock gave no time/);
+  assert.throws(() => ownerSyncPorts({ statusFile: FILE, uid: OWNER, outboxRoot: ROOT, product: 'p', clock: () => NaN, stat: () => st({ dir: true }), open: () => ({ st: st({ mode: 0o644 }), text: JSON.stringify(doc()) }), realpath: (p) => p, writeRequest: () => {}, holds: () => true }).sessions(), /clock gave no time/);
   for (const file of ['status.json', 'runner/status.json', '', undefined]) assert.throws(() => readOwnerStatus({ file, now: NOW, uid: OWNER, outboxRoot: ROOT }), /status file is not a full path/, String(file));
 });
 

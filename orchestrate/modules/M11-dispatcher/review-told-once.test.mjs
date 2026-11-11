@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runnerPass, REFUSED_QUIET_MS, MAX_STREAKS, MAX_MORE_STREAKS } from '../M4-workshop/launcher/review-runner.mjs';
@@ -1038,9 +1038,15 @@ test('R-0b-171: the quiet window follows the rules, for the card\'s product', as
 
 test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, daily', async () => {
   const m = mac();
-  const old = process.umask(0o777);
-  let told;
-  try { told = await m.run(0, 80, /Review requests can't be read \(EACCES\) for a day; the last: request #[0-9a-f]{12}/); } finally { process.umask(old); }
+  // The Dispatcher writes each request 0644 whatever its umask (L945 a), so a request the runner can't read is made so
+  // here, before each runner pass, as a folder's access list or a mode change by someone else would.
+  const re = /Review requests can't be read \(EACCES\) for a day; the last: request #[0-9a-f]{12}/;
+  const told = [];
+  const dir = join(m.root, 'requests');
+  for (let h = 0; h <= 80; h += 1) {
+    for (const f of existsSync(dir) ? readdirSync(dir) : []) chmodSync(join(dir, f), 0);
+    for (const t of await m.hour(h)) if (re.test(t)) told.push(h);
+  }
   assert.deepEqual(told, [25, 49, 73]);
   assert.equal(m.starts.length, 0);
   assert.equal(statusHolds(m).length, 1);
