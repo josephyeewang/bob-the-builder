@@ -73,7 +73,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runnerPass, CARD_ID, isClaudeCommand } from './review-runner.mjs';
+import { runnerPass, CARD_ID, isClaudeCommand, sessionIdOf } from './review-runner.mjs';
 import { installProblem, readInstallStamp, aclProblem, currentCopy, copyPath, copyReady, RUNNER_MODULES } from './install-check.mjs';
 import { sessionVerdict, verdictFromFile } from '../../M9-record/outbox.mjs';
 import { SESSION_ID } from '../../../shared/record.mjs';
@@ -457,7 +457,7 @@ export function sessionsFrom(text, bin, self = process.pid) {
     const pid = Number(m[1]);
     const cmd = m[2];
     if (pid === self || !isClaudeCommand(cmd, bin)) continue;
-    const sid = /(?:^|\s)--session-id[ =]([A-Za-z0-9-]{1,128})(?:\s|$)/.exec(cmd)?.[1];
+    const sid = sessionIdOf(cmd);
     out.push(sid ? { pid, sessionId: sid } : { pid });
   }
   return out;
@@ -499,6 +499,25 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
   }
 }
 
+/**
+ * Stops a review session's whole process group (L935): only when `pid` leads its own group (ps says its group id is its
+ * pid), so a pid that leads none is refused, never a group it merely belongs to. Throws why it stopped nothing; `final`
+ * on the error when trying again can't help (L935 self-review m3). A child that made its own group is not reached.
+ */
+export function stopGroupOf(pid, { sessionId, claudeBin, ps = run, kill = (p, sig) => process.kill(p, sig) } = {}) {
+  const final = (m) => Object.assign(new Error(m), { final: true });
+  if (!Number.isInteger(pid) || pid <= 1) throw final('not a process id');
+  // Its group and its command line in one read, right before the kill (re-review 3 m3): still claude under that session.
+  const r = ps('/bin/ps', ['-o', 'pgid=,command=', '-p', String(pid)]);
+  if (r.status !== 0) throw new Error(`process ${pid} is gone`);
+  const m = /^\s*(\d+)\s+(.*?)\s*$/s.exec(String(r.stdout));
+  if (!m) throw new Error(`process ${pid}'s group and command line can't be read`);
+  const group = Number(m[1]); const cmd = m[2];
+  if (!isClaudeCommand(cmd, claudeBin) || sessionIdOf(cmd) !== sessionId) throw new Error(`process ${pid} is no longer claude under session ${sessionId}`);
+  if (group !== pid) throw final(`process ${pid} does not lead its own process group (its group is ${m[1]})`);
+  kill(-pid, 'SIGTERM');
+}
+
 /** The real ports (the wiring gives `start`). */
 export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
@@ -517,6 +536,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
   return {
     root: c.root, outboxRoot: c.outboxRoot, uids: c.uids, reviewHome: c.reviewHome, claudeBin: c.claudeBin,
     now: () => Date.now(), ownUid: () => process.getuid(),
+    // The Dispatcher's Mac user, whose stops alone count (L935 re-review 2 M1): it owns the Record (setup's recordUid).
+    // Never the runner's own user (L935 re-review 3 m3): its sessions read untrusted branches.
+    dispatcherUid: c.recordUid !== process.getuid() ? c.recordUid : undefined,
     isAdmin: () => adminAnswer(run('/usr/sbin/dseditgroup', ['-o', 'checkmember', '-m', REVIEW_USER, 'admin'])),
     readCard: (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     planFile: ({ plan_sha256 }) => recordPlanFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, outboxRoot: c.outboxRoot, plan_sha256 }),
@@ -553,6 +575,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       return sessionsFrom(r.stdout, c.claudeBin);
     },
     stop: ({ pid }) => { process.kill(pid, 'SIGTERM'); },
+    // A stop request (L935): the session's whole process group. claude starts detached (review-launch.mjs), so it leads its
+    // own group, whose id is its pid; one that does not lead it is refused, so no other group is reached.
+    stopGroup: ({ pid, sessionId }) => stopGroupOf(pid, { sessionId, claudeBin: c.claudeBin }),
     processName: (pid) => {
       if (!Number.isInteger(pid) || pid <= 0) return null;
       const r = run('/bin/ps', ['-o', 'command=', '-p', String(pid)]);
@@ -626,7 +651,8 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
   }
   const r = await pass(realPorts(c, wiring, { budget, log }));
   for (const s of r.started) log(`started ${s.role} ${s.session_id} for ${s.card} at ${s.head.slice(0, 7)}`);
-  for (const x of r.refused) log(`refused ${x.request}: ${x.reason}`);
+  // A review request's file name is its request id, which the runner never shows (L935): the refusal carries none.
+  for (const x of r.refused) log(`refused ${x.request ?? 'a request'}: ${x.reason}`);
   if (!r.ok) log(`review runner: ${r.error}`);
   return r.ok ? 0 : 1;
 }
