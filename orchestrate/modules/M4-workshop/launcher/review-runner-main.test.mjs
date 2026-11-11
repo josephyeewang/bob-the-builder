@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, lstatSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
 import { installProblem, programsProblem, readCardFile, readFactFile, readSessionFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
@@ -397,6 +397,9 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   // The runner's port: the copy first (root's, so here it fails), then the owner's file.
   const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: ME }, recordRoot: '/x', recordUid: ME, mirror: '/m', claudeBin: '/c', accountCopy: to, ownerHome: home, ownerUid: ME };
   assert.equal(realPorts(c, {}).accountInUse(), 'b');
+  // The Dispatcher's Mac user, whose stops alone count (L935 re-review 2 M1): the Record's owner.
+  assert.equal(realPorts({ ...c, recordUid: ME + 7 }, {}).dispatcherUid, ME + 7);
+  assert.equal(realPorts({ ...c, recordUid: ME }, {}).dispatcherUid, undefined, 'never the runner\'s own user');
   // The Dispatcher's own rules key, per product as the real engine answers it (R-0b-171).
   const asked = [];
   const rules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 60, p2: 2880 })[o.product] };
@@ -932,4 +935,20 @@ test('L736 m4 planted: the Front Door\'s taps folder is checked against the one 
   assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: '/x', read: () => { throw new Error('config: not root\'s'); } }), /the review runner's config can't be read \(config: not root's\)/);
   // The real reader by default: a config that is not there can't be read, and is refused.
   assert.match(tapsFolderProblem({ ownerTaps: taps, runnerConfig: join(base, 'nothing.json') }), /the review runner's config can't be read/);
+});
+
+test('L946 m3: the wired stop checks the pid is still claude under that session, from the config\'s claude, right before the kill', async () => {
+  const leader = spawn('/bin/sh', ['-c', 'sleep 30 & wait', 'sh', '--session-id', 'S-9'], { detached: true, stdio: 'ignore' });
+  const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+  try {
+    for (let i = 0; i < 50 && !/session-id S-9/.test(String(spawnSync('/bin/ps', ['-o', 'command=', '-p', String(leader.pid)]).stdout)); i += 1) await new Promise((r) => setTimeout(r, 20));
+    const c = { root: '/r', outboxRoot: '/o', reviewHome: '/h', uids: { reviewer: ME }, recordRoot: '/x', recordUid: ME, mirror: '/m', claudeBin: '/bin/sh' };
+    const ports = realPorts(c, {});
+    assert.throws(() => ports.stopGroup({ pid: leader.pid, sessionId: 'S-8' }), /no longer claude under session S-8/);
+    assert.throws(() => realPorts({ ...c, claudeBin: '/c/claude' }, {}).stopGroup({ pid: leader.pid, sessionId: 'S-9' }), /no longer claude/);
+    assert.ok(alive(leader.pid));
+    const ended = new Promise((res) => leader.once('exit', res));
+    ports.stopGroup({ pid: leader.pid, sessionId: 'S-9' });
+    await ended;
+  } finally { try { process.kill(-leader.pid, 'SIGKILL'); } catch { /* gone */ } }
 });

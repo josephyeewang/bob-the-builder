@@ -1040,7 +1040,7 @@ test('R-0b-171 C4: requests the runner can\'t read are told as that, one hold, d
   const m = mac();
   // The Dispatcher writes each request 0644 whatever its umask (L945 a), so a request the runner can't read is made so
   // here, before each runner pass, as a folder's access list or a mode change by someone else would.
-  const re = /Review requests can't be read \(EACCES\) for a day; the last: [A-Za-z0-9-]+\.json/;
+  const re = /Review requests can't be read \(EACCES\) for a day; the last: request #[0-9a-f]{12}/;
   const told = [];
   const dir = join(m.root, 'requests');
   for (let h = 0; h <= 80; h += 1) {
@@ -1098,7 +1098,7 @@ test('R-0b-171: one hold per cause however many files, and none arriving ends it
   const holds = statusHolds(m);
   assert.equal(holds.length, 2);
   assert.equal(new Set(holds.map((h) => h.id)).size, 2);
-  assert.match(holds.map((h) => h.text).join(' '), /Review requests can't be read \(it is not JSON\) for a day; the last: junk-41\.json/);
+  assert.match(holds.map((h) => h.text).join(' '), /Review requests can't be read \(it is not JSON\) for a day; the last: request #[0-9a-f]{12}/);
   m.clock.t += REFUSED_QUIET_MS;
   await runnerPass(m.ctx);
   assert.deepEqual(statusHolds(m), []);
