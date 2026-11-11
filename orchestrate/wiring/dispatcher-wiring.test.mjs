@@ -38,15 +38,17 @@ const TICK = join(here, '..', 'modules', 'M11-dispatcher', 'tick.mjs');
 // PINNED HERE, not imported from the wiring (audit #127 M-1): a port the wiring quietly answers, or a step the tick
 // quietly skips, must fail this test. PRs B, C and D update these as each port is wired.
 // The ports not wired yet: each must refuse when called.
-const PORTS_NOT_WIRED = Object.freeze(['board', 'frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
-  'launch', 'leads', 'outboxSessions', 'pauseLead', 'probe', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
-  'saveWork', 'sendFrontDoor', 'sessions', 'startMinibase', 'startReadonly', 'stopGroup', 'stopSession', 'strayFrontDoor']);
+const PORTS_NOT_WIRED = Object.freeze(['frontDoorAlive', 'frontDoorHandoff', 'gateAlive', 'healthy',
+  'launch', 'leads', 'pauseLead', 'proposals', 'replyToLead', 'restartFrontDoor', 'resume',
+  'saveWork', 'sendFrontDoor', 'startMinibase', 'startReadonly', 'stopGroup', 'strayFrontDoor']);
 const CLEANUP_NOT_WIRED = Object.freeze(['saveWork']);
 // The cleanup ports wired for real (L739; worker-ports.test.mjs plants each).
 const CLEANUP_WIRED = Object.freeze(['copiesRoot', 'git', 'mirrorFor', 'sealRoot']);
 // The ports wired for real (L270): approvals, whose GitHub writes and copies still refuse (pinned below). filesOf, hostLock
-// and reviewEnded (L739): worker-ports.test.mjs plants each.
-const PORTS_WIRED = Object.freeze(['approvals', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'outboxRoot', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'reviewEnded', 'startPlanReview', 'wait']);
+// and reviewEnded (L739): worker-ports.test.mjs plants each. The worker runner's sync ports (L925: sessions, board,
+// outboxSessions, probe, stopSession) and the product value (L927): worker-ports.test.mjs plants those too.
+const PORTS_WIRED = Object.freeze(['approvals', 'board', 'filesOf', 'hasReviewer', 'hostLock', 'mainSha', 'outboxRoot', 'outboxSessions', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'probe', 'product',
+  'requestReview', 'reviewAlerts', 'reviewEnded', 'sessions', 'startPlanReview', 'stopSession', 'wait']);
 const APPROVALS_GH = Object.freeze(['get', 'patch', 'post', 'put']);
 const APPROVALS_COPIES = Object.freeze(['done', 'pending', 'sync', 'told']);
 // What else the tick reads from its ports object: the alert port, the cleanup group, and options with defaults.
@@ -57,9 +59,12 @@ const NW = (port) => notWiredText(port);
 // uid + 1), since the Dispatcher's own user may not be it, so the runner's status here is not that user's and the limits
 // step fails with exactly that. The in-process test below pins limits 'ok' on the healthy path. The lead checks this line.
 const NOT_REVIEW_USERS = "no review was asked for: the review runner's folder is not owned by the review user";
+// The worker runner is the owner's (workerUid, host.lock's stand-in uid): the test's runner folder is this user's, so its
+// status is never trusted, and every step that reads it fails with exactly that (L925: "not known", never a list).
+const NOT_THE_RUNNERS = "the worker runner's folder is not owned by the owner's user";
 const EXPECTED_STEPS = Object.freeze({
-  stops: NW('sessions'), undo: 'ok', 'undo-starts': NW('sessions'), outage: NW('board'), intake: NW('outboxSessions'), proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
-  pass: NW('sessions'), limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
+  stops: NOT_THE_RUNNERS, undo: 'ok', 'undo-starts': NOT_THE_RUNNERS, outage: NOT_THE_RUNNERS, intake: NOT_THE_RUNNERS, proposals: NW('proposals'), research: 'ok', leads: NW('leads'), approvals: 'ok', 'plan-go': 'ok',
+  pass: NOT_THE_RUNNERS, limits: NOT_REVIEW_USERS, merges: 'ok', waits: 'ok', 'lost-cards': 'ok', 'stuck-cards': 'ok', phone: 'ok', cleanup: NW(`cleanup.${NOT_WIRED_CLEANUP[0]}`),
 });
 
 // The Dispatcher's own user stood in for this one, for the worker ports' folders, which a test can only make as itself.
@@ -197,6 +202,25 @@ test('L805 m1: wire() refuses a bad hostLockUid before it makes the approvals fo
   assert.equal(existsSync(rev.config.approvalsStateDir), false);
 });
 
+// L943 m3: the worker runner's user (workerUid) must be a Mac user id and host.lock's owner's, checked with the config,
+// before wire() makes a folder, opens the Record or reads GitHub.
+test('L943 m3: checkConfig and wire() refuse a workerUid that is not a safe integer equal to hostLockUid, before anything is made', async () => {
+  const base = world();
+  const owner = base.config.hostLockUid;
+  assert.equal(checkConfig(base.config).workerUid, owner, 'the test world\'s workerUid is the owner\'s');
+  for (const uid of [owner + 1, String(owner), owner + 0.5, -1, null, undefined, 2 ** 53]) {
+    const w = world({ extra: { workerUid: uid } });
+    if (uid === undefined) delete w.config.workerUid;
+    const re = /config: workerUid must be the owner's Mac user id, hostLockUid's: the worker runner runs as the owner/;
+    assert.throws(() => checkConfig(w.config), re, String(uid));
+    let fetched = 0;
+    await assert.rejects(wire(w.config, { log: () => {}, fetchFn: (...a) => { fetched++; return fakeGitHubFetch(w.fake)(...a); } }), re, String(uid));
+    assert.equal(existsSync(w.config.approvalsStateDir), false, `${uid}: no approvals folder made`);
+    assert.equal(existsSync(w.config.recordRoot), false, `${uid}: the Record was not opened`);
+    assert.equal(fetched, 0, `${uid}: GitHub was not read`);
+  }
+});
+
 // L674: the review user is neither the Dispatcher's own user nor the workers' (ownerUid). In process, through wire().
 test('A2 (L674): wire() refuses a review user that is the Dispatcher\'s own or the workers\', and starts with another', async () => {
   const me = process.getuid();
@@ -244,7 +268,7 @@ test('the seam: each port has one home; a port file gets ctx and fills its ports
   assert.deepEqual(Object.keys(reviewPorts({ gh: { get: () => null }, entry: ENTRY, rec: { read: () => null }, config, now: Date.now, selfUid: process.getuid() + 2 })).sort(),
     ['filesOf', 'hasReviewer', 'mainSha', 'planReviewAnswer', 'planReviewsRunning', 'planRows', 'planView', 'requestReview', 'reviewAlerts', 'startPlanReview', 'wait']);
   const w = world();
-  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded']);
+  assert.deepEqual(Object.keys(workerPorts({ config: w.config, selfUid: process.getuid() })), ['cleanup', 'outboxRoot', 'hostLock', 'reviewEnded', 'product', 'sessions', 'board', 'outboxSessions', 'probe', 'stopSession']);
 
   const seen = [];
   const opts = { fetchFn: fakeGitHubFetch(w.fake), log: () => {} };

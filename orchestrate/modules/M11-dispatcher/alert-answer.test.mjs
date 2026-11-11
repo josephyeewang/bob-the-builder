@@ -41,7 +41,7 @@ function world() {
   must(E.record.write({ actor: 'sensors', entity: 'fact', id: ACCOUNT_FACT, expectRev: 0, doc: { account: ACCT, observed_at: iso(E.clock.t) } }), 'account');
   const delivered = [];
   const empty = tempDir('m11-alertanswere-');
-  const ports = (over = {}) => ({
+  const ports = (over = {}) => ({ product: 'p1',
     alert: (t) => { delivered.push(typeof t === 'string' ? t : t.text); return true; },
     board: () => [], healthy: () => true, resume: () => false,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
@@ -92,7 +92,7 @@ async function stageChecking(w) {
   const { dispatcherPass } = await import('./pass.mjs');
   readyCard(w.E, 'C-1');
   let sid = null;
-  await dispatcherPass({ rec: w.E.record, rules: w.rules, now: w.E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
+  await dispatcherPass({ product: 'p1', rec: w.E.record, rules: w.rules, now: w.E.clock.t, account: ACCT, sessions: [], probe: () => idle, host: HOST,
     launch: async (x) => { sid = x.sessionId; return { ok: true, sessionId: x.sessionId, pid: 1001, pidStart: 'start', pgid: 101, head: HEAD, outbox: `/outbox-root/${x.product}/worker/${x.sessionId}` }; },
     stopGroup: async () => ({ ok: true, how: 'SIGTERM' }), saveWork: async () => ({ ok: true }), filesOf: () => [], alert: outbox(w.E.record, w.E.clock.t) });
   must(put(w.E.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');

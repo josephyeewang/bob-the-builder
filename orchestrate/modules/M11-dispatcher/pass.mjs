@@ -228,7 +228,14 @@ function stopReason({ s, card, productDoc, b, compactions, split }) {
 // `clock` (ms) is read again once the stops and saves are back (up to PORT_DEADLINE_MS + SAVE_DEADLINE_MS later): the
 // park is written at that time, since the Store Writer refuses a wait whose since is more than 60 s off its clock (L321).
 // Left out, it is `now`.
-export async function stopPass({ rec, rules, now, clock = () => now, account, sessions, probe, stopGroup, saveWork, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
+// `product` is this Dispatcher's (the tick's value port, config.product, L927): `sessions` is Mac-wide, and the stop step
+// acts only on a session whose OWN product (the runner's status names it) is this one, never on one whose card id merely
+// reads from this Record (two products may each have a C-7). A session naming no product is no product's: not stopped
+// here (a review or audit session: it runs until it ends on its own, and its verdict for an ended card is thrown away,
+// L933). `running` stays Mac-wide, so the caps count every
+// product. Left out, or anything but a non-empty string, it matches NO session, never every one (L943 m2): the pass
+// stops nothing and says so in its notes and failure log (the tick refuses such a product before it gets here).
+export async function stopPass({ rec, rules, now, clock = () => now, account, product: ownProduct, sessions, probe, stopGroup, saveWork, alert, failureLog = () => {}, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS }) {
   const out = { stopping: [], stopped: [], notes: [] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
   // A missing rules value starts nothing, but every stop still runs (audit MAT-2): Cancel needs no band.
@@ -255,7 +262,11 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
   };
   let products = [];
   try { products = rec.list('product').map((x) => x.id); } catch { products = []; }
-  for (const product of new Set([...products, ...sessions.map((s) => s.product)].filter(Boolean))) limitsFor(product);
+  // L943 m2: no product named matches nothing, never everything.
+  const named = typeof ownProduct === 'string' && ownProduct !== '';
+  if (!named) { const line = 'stops: no product named, so no session is stopped (L943)'; out.notes.push(line); failureLog(line); }
+  const mine = named ? sessions.filter((s) => s.product === ownProduct) : [];
+  for (const product of new Set([...products, ...mine.map((s) => s.product)].filter(Boolean))) limitsFor(product);
   const b = read(() => currentBands({ rec, rules, account, now }), HELD_BANDS);
   const { unknownSince } = recordBands({ rec, b, now, account });
 
@@ -264,7 +275,7 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, se
   // two port deadlines however many sessions stop, and one stuck stop holds no other.
   let running = [...sessions];
   const due = [];
-  for (const s of sessions) {
+  for (const s of mine) {
     const card = s.card ? rec.read('card', s.card)?.doc : null;
     // A probe that throws reads as "not at a safe point", so the late hard stop still applies (MAT-7).
     let p = null;
@@ -392,8 +403,8 @@ export const HELD_BANDS = Object.freeze({ band: 'unknown', own_building: 'unknow
  * `stops` is the tick's own stopPass result; null when that step failed (then nothing new starts but
  * undo cards); left out, the pass runs stopPass itself.
  */
-export async function dispatcherPass({ rec, rules, now, clock = () => now, account, sessions, probe, launch, stopGroup, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
-  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
+export async function dispatcherPass({ rec, rules, now, clock = () => now, account, product, sessions, probe, launch, stopGroup, outboxRoot, saveWork, hostLock = () => null, pauseLead = () => {}, filesOf, alert, failureLog = () => {}, startsOff = null, tellMissing = true, stops, portDeadlineMs = PORT_DEADLINE_MS, saveDeadlineMs = SAVE_DEADLINE_MS, host = hostname() }) {
+  const st = stops === undefined ? await stopPass({ rec, rules, now, clock, account, product, sessions, probe, stopGroup, saveWork, alert, portDeadlineMs, saveDeadlineMs }) : stops;
   const out = { started: [], refused: [], stopping: st?.stopping ?? [], stopped: st?.stopped ?? [], resumed: [], notes: [...(st?.notes ?? [])] };
   const report = refusalReport({ rec, alert, now, lines: out.notes, failureLog });
   const failing = (line) => { out.notes.push(line); failureLog(line); };

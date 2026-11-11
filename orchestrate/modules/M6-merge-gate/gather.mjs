@@ -324,7 +324,8 @@ export async function gatherFacts(ctx, merge) {
   // The review (refusal 5; L44, L65, L66 M1, L68, L69). Read from review's own stores only, through M9's one check:
   // every session the review runner launched for this card at H0, or at any head with H0's tree (its launch records),
   // each one's verdict file in review's outbox, the runner's ended records and Joe's set-aside records. Nothing is read
-  // from the Record: its `launch` entries and verdict rows are written by the Dispatcher, as the workers' Mac user, and
+  // from the Record: its `launch` entries and verdict rows are written by the Dispatcher (the orchestrate user, not
+  // `review`; L936 corrects an older note that said the workers' Mac user), and
   // stay as history and for display. No folder setting, a folder that fails the check, or a tree git can't give leaves no
   // sessions and refusal 5 names why. When the pull request's head is not H0, the same is read at that head (L69).
   const reviewsAt = async (sha) => {

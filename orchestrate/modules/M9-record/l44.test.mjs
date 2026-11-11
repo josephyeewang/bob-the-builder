@@ -98,6 +98,52 @@ test('L44: the accepted verdict records the review user, and a verdict without o
 
 // ---- Lead call L65: only the review runner's own launch record makes a verdict count ----
 
+// L933: the stop step does not reach review or audit sessions (their product is not in the review runner's status), so a
+// card cancelled while one runs still gets its answer later. That answer is thrown away: no verdict row, no pass, no merge.
+test('L933 planted: a reviewer\'s or auditor\'s pass for a cancelled card is thrown away: no row, nothing verified, no merge', () => {
+  const { env, hdr } = inReview();
+  runnerLaunch(env, 'C-1', 'R-1');
+  runnerLaunch(env, 'C-1', 'A-1', 'auditor');
+  const cur = env.record.read('card', 'C-1');
+  must(env.record.write({ actor: 'approvals', entity: 'card', id: 'C-1', expectRev: cur.rev, doc: { ...cur.doc, state: 'cancelled', cancel_reason: 'Joe said stop' } }), 'the cancel');
+  for (const [role, id, name] of [['reviewer', 'R-1', 'verdict-1.md'], ['auditor', 'A-1', 'verdict-2.md']]) {
+    const file = outboxFile(env, role, id, name, hdr({ head: HEAD, pass: true }));
+    const seenFile = join(env.root, 'outbox-seen.jsonl');
+    const before = readFileSync(seenFile, 'utf8').split('\n').filter(Boolean).length;
+    const r = env.review.applyOutbox({ role, sessionId: id, card: 'C-1' }, file);
+    assert.equal(r.ok, true, `${role}: thrown away, not refused (a refusal would be told every day)`);
+    assert.equal(r.skipped, true, role);
+    assert.match(r.dropped, /card C-1 is cancelled, so its review is over and this verdict is not kept/);
+    // Marked seen as dropped, never as applied (L943 c2): this read's one mark.
+    const marks = readFileSync(seenFile, 'utf8').split('\n').filter(Boolean).slice(before).map((l) => JSON.parse(l).outcome);
+    assert.deepEqual(marks, ['dropped'], `${role}: marked dropped, not applied`);
+    runnerEndedRecord(env, 'C-1', id, role);
+    // Read again, it is the same file already seen (the seen mark, not a second drop): still nothing kept.
+    const again = env.review.applyOutbox({ role, sessionId: id, card: 'C-1' }, file);
+    assert.equal(again.skipped, true);
+    assert.equal(again.dropped, undefined, `${role}: the first read marked the file seen`);
+  }
+  assert.equal(env.record.list('verdict').length, 0, 'no verdict row records a pass');
+  // A verdict from a session the runner never launched is still refused (told), cancelled card or not: only a real
+  // runner-launched answer is quietly thrown away.
+  refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-9', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-9', 'verdict-9.md', hdr({ head: HEAD, pass: true }))), /from the review runner \(no launch record for session R-9\)/);
+  refused(env.review.applyOutbox({ role: 'reviewer', sessionId: 'R-1', card: 'C-1' }, outboxFile(env, 'reviewer', 'R-1', 'verdict-3.md', hdr({ head: 'nothex', pass: true }))), /./);
+  // Nothing moves the card on: cancelled has no way out, so it can't be verified, approved or merged, and no merge opens.
+  for (const to of ['verified', 'approved', 'merging', 'in_review']) refused(put(env.review, 'dispatcher', 'card', 'C-1', { state: to }), /./);
+  assert.equal(env.record.read('card', 'C-1').doc.state, 'cancelled');
+  assert.equal(env.record.list('merge').length, 0, 'no merge');
+});
+
+test('L933: the states whose verdicts are thrown away are the ones no move leads out of', async () => {
+  const { MOVES, INTERNAL_MOVES } = await import('./moves.mjs');
+  const { STATES } = await import('../../shared/record-names.mjs');
+  const { REVIEW_OVER } = await import('./writer.mjs');
+  const noWayOut = STATES.card.filter((st) => !Object.keys(MOVES.card[st] ?? {}).length && !INTERNAL_MOVES.card[st]);
+  assert.deepEqual([...REVIEW_OVER].sort(), noWayOut.sort(), 'exactly the states no move leads out of');
+  // A waiting card can still come back to verified: its verdict is kept.
+  assert.ok(MOVES.card.waiting.verified);
+});
+
 test('L65 planted: a verdict whose only launch is the Dispatcher\'s Record copy is refused, and verifies nothing', () => {
   const { env, hdr } = inReview();
   launch(env, 'C-1', 'R-1');   // the Dispatcher's copy in the Record, no runner record
@@ -189,7 +235,7 @@ test('L66 M1 planted: a verdict row flipped to pass while its file says fail ver
     const edit = (sid, over) => { const r = row(sid); env.store.transaction((tx) => tx.commit([{ entity: 'verdict', id: r.id, doc: { ...r.doc, ...over } }], { actor: `reviewer:${sid}`, kind: 'verdict' })); };
     return { row, edit, opts: { outboxRoot: env.outRoot, uids: env.reviewUids } };
   };
-  // The reviewer said fail; the row (the workers' Mac user can write the Record) is edited to say pass.
+  // The reviewer said fail; the row (the Dispatcher's `orchestrate` user writes the Record, L936) is edited to say pass.
   {
     const { env, hdr } = inReview();
     const { row, edit, opts } = rowsOf(env);

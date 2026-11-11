@@ -68,11 +68,12 @@ test('L748: on the real chmod and ls, the copies entry round-trips exactly, and 
   assert.match(aclEntries(w.mac, `${dir}/card-1`).entries[0], /^user:orchestrate inherited allow .*\bdelete_child\b/);
 });
 
-test('L748, L763: dispatcherKeys names the seven Dispatcher keys, the very ones the wiring reads, from the one place', () => {
+test('L748, L763, L925: dispatcherKeys names the ten Dispatcher keys, the very ones the wiring reads, from the one place', () => {
   const cfg = parseConfig(RAW);
   const k = dispatcherKeys(cfg, { hostLockUid: 65001 });
   assert.deepEqual(Object.keys(k).sort(), [...WORKER_CONFIG_KEYS].sort());
-  assert.deepEqual(k, { reviewRoot: `${BASE}/review`, mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: `${BASE}/outboxes`, copiesRoot: `${BASE}/worker-copies`, hostLockPath: LOCK, hostLockUid: 65001 });
+  assert.deepEqual(k, { reviewRoot: `${BASE}/review`, mirror: mirrorPath(cfg), sealRoot: sealRootPath(cfg), outboxRoot: `${BASE}/outboxes`, copiesRoot: `${BASE}/worker-copies`, hostLockPath: LOCK, hostLockUid: 65001,
+    workerRequestsDir: `${BASE}/worker-runner/requests`, workerStatusFile: `${BASE}/worker-runner/runner/status.json`, workerUid: 65001 });
   assert.throws(() => dispatcherKeys(parseConfig({ ...RAW, hostLockPath: undefined }), { hostLockUid: 65001 }), /hostLockPath is not set/);
   // host.lock's owner is the owner's Mac user id, read on this Mac: none is never a key.
   assert.throws(() => dispatcherKeys(cfg), /the owner sam is not a user on this Mac, so host\.lock's owner \(hostLockUid\) can't be named/);

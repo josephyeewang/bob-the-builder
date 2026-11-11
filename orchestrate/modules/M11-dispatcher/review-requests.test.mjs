@@ -267,3 +267,18 @@ test('L75 m-2: the stamp alert waits from root\'s record of main, read the way t
   const got = reviewPorts({ requests: dir, status: sfile, reviewUid: ME, now: () => T0, installRoot, main: () => MAIN }).reviewAlerts();
   assert.deepEqual(got.map((a) => a.id), ['stamp']);
 });
+
+// L945 a: the Dispatcher's job runs under umask 077; a request it writes must still be 0644, or `review` (another user)
+// can't read it and no review starts. Plan requests go through the same file writer.
+test('L945 a: a review request is 0644 under the Dispatcher job\'s umask 077, so the review runner can read it', () => {
+  const dir = tempDir('m11-rr-umask-');
+  const old = process.umask(0o077);
+  try {
+    const r = writeReviewRequest({ dir, card: 'C-1', head: 'a'.repeat(40), role: 'reviewer', newId: () => 'req-1' });
+    assert.equal(r.ok, true, r.reason);
+    const st = lstatSync(join(dir, 'req-1.json'));
+    assert.equal(st.mode & 0o777, 0o644);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'req-1.json'), 'utf8')), { card: 'C-1', head: 'a'.repeat(40), role: 'reviewer', request_id: 'req-1' });
+    assert.deepEqual(readdirSync(dir), ['req-1.json'], 'no hidden file left');
+  } finally { process.umask(old); }
+});

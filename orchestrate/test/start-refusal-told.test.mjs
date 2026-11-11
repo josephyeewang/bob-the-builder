@@ -53,6 +53,7 @@ function mac(entries, { state = 'active', usage = GREEN, rules = {}, answers = a
   let n = 0;
   const dir = tempDir('orch-start-refusal-');
   const ports = {
+    product: 'p1',
     alert,
     approvals: () => [], board: () => [], healthy: () => true, resume: () => false,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: () => [], wait: async () => {}, startReadonly: async () => ({ ok: true }), replyToLead: async () => {},
