@@ -1150,7 +1150,7 @@ export async function runnerPass(ctx) {
     if (!got.stop) { stopSaid(`a file named ${STOP_PREFIX}… must hold a stop, so it was not read as a review request`, name); continue; }
     // Only the Dispatcher stops (L935 re-review 2 M1): its file must be the Dispatcher's Mac user's (the Record's owner,
     // `dispatcherUid`). Anyone else's does nothing, and is never kept, so others can't fill the stops kept either.
-    if (!fromDispatcher(got)) { stopSaid(Number.isInteger(ctx.dispatcherUid) ? `its file is not the Dispatcher's user's (it is uid ${got.owner}'s), so nothing was stopped` : 'this runner is not told the Dispatcher\'s user, so no stop counts', name); continue; }
+    if (!fromDispatcher(got)) { stopSaid(Number.isInteger(ctx.dispatcherUid) ? "its file is not the Dispatcher's user's, so nothing was stopped" : 'this runner is not told the Dispatcher\'s user, so no stop counts', name); continue; }
     const rid = got.req.request_id;
     const r = state.running.find((x) => REVIEW_ROLES.includes(x.role) && typeof x.request_id === 'string' && x.request_id === rid);
     // One started before stops were (no `stoppable`, re-review m3), or on a request file someone other than the

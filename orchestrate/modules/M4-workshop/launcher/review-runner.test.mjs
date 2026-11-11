@@ -2284,7 +2284,7 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   writeStopRequest({ dir: w.requests, requestId: 'forged-1' });
   writeStopRequest({ dir: w.requests, requestId: 'not-yet' });
   const r = await runnerPass(w.ctx);
-  assert.equal(r.refused.filter((x) => x.reason === `a stop request: its file is not the Dispatcher's user's (it is uid ${ME}'s), so nothing was stopped`).length, 2, JSON.stringify(r.refused));
+  assert.equal(r.refused.filter((x) => x.reason === "a stop request: its file is not the Dispatcher's user's, so nothing was stopped").length, 2, JSON.stringify(r.refused));
   assert.equal(JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8')).stops_waiting.length, 0, 'never kept');
   // A stop the Dispatcher's user wrote does not reach the session someone else's request started either.
   w.ctx.dispatcherUid = ME;
@@ -2292,6 +2292,14 @@ test('L935 re-review 2 M1 planted: a request or a stop someone other than the Di
   refusedFor(await runnerPass(w.ctx), /a stop request: that session was not started on a request the Dispatcher's user wrote to this runner/);
   assert.deepEqual(groups, []);
   assert.equal(w.live.length, 1, 'the review goes on, as before stops');
+  // One not the Dispatcher's never reads a waiting request early (re-review 3 m2): that request still starts.
+  const u = await stopWorld();
+  u.w.ctx.dispatcherUid = ME + 1;
+  u.w.ask({ request_id: 'waiting-1' });
+  writeStopRequest({ dir: u.w.requests, requestId: 'waiting-1' });
+  const ur = await runnerPass(u.w.ctx);
+  assert.equal(ur.refused.some((x) => /a stop for it came before it started/.test(x.reason)), false, JSON.stringify(ur.refused));
+  assert.equal(JSON.parse(readFileSync(join(u.w.root, 'state.json'), 'utf8')).running.length, 1, 'it starts');
   // A runner not told the Dispatcher's user counts no stop.
   const v = await stopWorld();
   delete v.w.ctx.dispatcherUid;

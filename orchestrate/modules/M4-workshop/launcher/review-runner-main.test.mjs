@@ -394,6 +394,7 @@ test('L65 m-5: the account copy is a or b, root\'s; the runner falls back to the
   assert.equal(realPorts(c, {}).accountInUse(), 'b');
   // The Dispatcher's Mac user, whose stops alone count (L935 re-review 2 M1): the Record's owner.
   assert.equal(realPorts({ ...c, recordUid: ME + 7 }, {}).dispatcherUid, ME + 7);
+  assert.equal(realPorts({ ...c, recordUid: ME }, {}).dispatcherUid, undefined, 'never the runner\'s own user');
   // The Dispatcher's own rules key, per product as the real engine answers it (R-0b-171).
   const asked = [];
   const rules = { get: (k, o) => { asked.push([k, o.product]); return o.product ? 1 : undefined; }, num: (k, o) => ({ p1: 60, p2: 2880 })[o.product] };
