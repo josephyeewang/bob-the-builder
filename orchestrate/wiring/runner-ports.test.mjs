@@ -238,7 +238,7 @@ test('#364 self-review M4: with M4\'s own launch(), names that pass check 0 and 
   const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
   mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
   w.c.workerRunner = runner;
-  w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
+  w.c.products.p1.render = { paths: { hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', bobFolder: '/w/bob', mirror: '/w/mirror.git',
     deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/proposals'] };
   try {
@@ -438,7 +438,7 @@ test('#364 r1 M1: with two products, a p1 session\'s settings deny p2\'s mirror 
   const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
   mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
   w.c.workerRunner = runner;
-  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
+  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/snapshots/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
     deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
   w.c.products.p1.render = render('p1');
@@ -526,7 +526,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
   const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
   mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
   w.c.workerRunner = runner;
-  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
+  const render = (n) => ({ paths: { hooksDir: `/w/${n}/hooks`, snapshot: `/w/${n}/snapshots/rules.json`, node: '/w/node', notes: `/w/${n}/notes`, bobFolder: '/w/bob', mirror: `/w/${n}/mirror.git`,
     deny: { proposals: [`/w/${n}/proposals`], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: [`/w/${n}/proposals`] });
   w.c.products.p1.render = render('p1');
@@ -624,7 +624,7 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
   const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
   mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
   w.c.workerRunner = runner;
-  w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
+  w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/snapshots/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
     deny: { proposals: ['/w/p1/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
   product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
   try {

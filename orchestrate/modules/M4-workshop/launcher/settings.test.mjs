@@ -8,11 +8,11 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DESIGN_PROFILES, NEVER_TOOLS, checkProfile, profilePort, fakeProfilePort, sha256, hasShell } from './role-profiles.mjs';
 import { parseSnapshot, readSnapshot, makeSnapshot, snapshotHash, SNAPSHOT_MAX_AGE_MS } from '../hooks/snapshot.mjs';
-import { apart, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell } from './render-settings.mjs';
+import { apart, renderAllowRules, renderRoleSettings, checkSettings, writeRoleSettings, POLICY_HOOKS, HOOK_TIMEOUT, checkRunnerWall, runnerWallDeny, runnerWallDirs, runnerWallShell, bobFolderDeny, bobFolderShell, snapshotWallDeny, snapshotWallShell } from './render-settings.mjs';
 import { SETTINGS as S, ENV, HOOK_FIELDS as H, HOOK_EVENTS as E } from './settings-names.mjs';
 import { tempDir } from '../../../shared/test-tmp.mjs';
 import { checkMachineWide } from './env-check.mjs';
-import { REVIEW_ROLES } from '../../../shared/review-roles.mjs';
+import { REVIEW_ROLES, RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => tempDir('orch-set-');
 
@@ -23,13 +23,15 @@ const WIDENING_TOP = ['enabledPlatforms', 'allowAppleEvents', 'autoAllowBashIfSa
 const WIDENING_NETWORK = ['allowUnixSockets', 'allowAllUnixSockets', 'allowLocalBinding', 'allowMachLookup', 'httpProxyPort', 'socksProxyPort'];
 const WIDENING_FILESYSTEM = ['allowWrite', 'allowRead', 'allowManagedReadPathsOnly', 'somethingNew'];
 const PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
 };
 const PRODUCT = { commands: { test: 'npm test', build: 'npm run build' }, hosts: ['registry.example.com'] };
-const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
+// A role the review runner starts keeps its rules snapshot inside the runner's folder (review-settings.mjs fill check), as L921's wall needs.
+const REVIEW_PATHS = { ...PATHS, snapshot: '/r/review/rules-snapshot.json' };
+const render = (role, extra = {}) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: RUNNER_ROLES.includes(role) ? REVIEW_PATHS : PATHS, product: PRODUCT, rulesHosts: ['registry.example.com'], ...extra });
 
 // ---- role profiles ----
 
@@ -642,7 +644,9 @@ test('link card: checkRunnerWall refuses a session folder that is a link, or one
   // The node binary may be a link (an install's own), but not one that resolves into a runner folder.
   assert.deepEqual(wall({ ...own, node: join(d, 's', 'node-out') }), { ok: true });
   assert.match(wall({ ...own, node: join(d, 's', 'node-in') }).reason ?? '', /node-in resolves to .*fake-node, which is not apart from the worker runner's folders/);
-  assert.match(wall({ ...own, snapshot: join(d, 's', 'node-in') }).reason ?? '', /not apart from the worker runner's folders/, 'the rules snapshot alike');
+  // The rules snapshot alike, in a folder of its own (L921: its wall shuts the whole folder, so never the outbox's).
+  mkdirSync(join(d, 'snap')); symlinkSync(join(runner.requestsDir, 'fake-node'), join(d, 'snap', 'in.json'));
+  assert.match(wall({ ...own, snapshot: join(d, 'snap', 'in.json') }).reason ?? '', /not apart from the worker runner's folders/, 'the rules snapshot alike');
   // A link that leads nowhere yet, or in a loop, is refused, and so is a path below one (#423 r1 M1).
   symlinkSync(join(runner.requestsDir, 'later'), join(d, 's', 'dangling'));
   symlinkSync(join(d, 's', 'loop'), join(d, 's', 'loop'));
@@ -681,4 +685,107 @@ test('link card: checkRunnerWall refuses a session folder that is a link, or one
   // No session paths: refused, not skipped.
   const r = render('worker', { paths: { ...own, workerRunner: runner } });
   assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner }).reason ?? '', /not given the session's own folders/);
+});
+
+// ---- L921: the rules snapshot's wall ----
+
+const without = (s, drop) => { const c = structuredClone(s); c[S.permissions][S.deny] = c[S.permissions][S.deny].filter((r) => r !== drop); c[S.sandbox][S.filesystem][S.denyWrite] = c[S.sandbox][S.filesystem][S.denyWrite].filter((r) => r !== drop); return c; };
+
+test('L921: every role denies its tools and its shell the rules snapshot\'s folder; a review role through its runner folder', () => {
+  for (const role of Object.keys(DESIGN_PROFILES)) {
+    const r = render(role);
+    if (!r.ok) continue;
+    const deny = r.settings[S.permissions][S.deny];
+    const dw = r.settings[S.sandbox][S.filesystem][S.denyWrite];
+    const snap = RUNNER_ROLES.includes(role) ? '/r/review/rules-snapshot.json' : '/w/snapshots/rules.json';
+    // Edit covers every file-writing tool; the shell may write neither the snapshot nor a side file renamed over it.
+    for (const p of [snap, `${snap}.1.tmp`]) assert.ok(covers(dw, p), `${role}: shell ${p}`);
+    const dir = RUNNER_ROLES.includes(role) ? '/r/review' : '/w/snapshots';
+    for (const rule of snapshotWallDeny(dir)) assert.ok(deny.includes(rule), `${role}: ${rule}`);
+    assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
+  }
+  // The folder's real path is denied too when it is reached through a link (a deny through a link is one macOS's
+  // sandbox ignores), and only the folder as given when it is not there yet (the launch check resolves it).
+  const d = realpathSync(tmp());
+  mkdirSync(join(d, 'real-snaps')); symlinkSync(join(d, 'real-snaps'), join(d, 'snaps'));
+  const r = render('worker', { paths: { ...PATHS, snapshot: join(d, 'snaps', 'rules.json') } });
+  assert.equal(r.ok, true, r.reason);
+  for (const dir of [join(d, 'snaps'), join(d, 'real-snaps')]) {
+    for (const rule of snapshotWallDeny(dir)) assert.ok(r.settings[S.permissions][S.deny].includes(rule), rule);
+    for (const p of snapshotWallShell(dir)) assert.ok(r.settings[S.sandbox][S.filesystem][S.denyWrite].includes(p), p);
+  }
+  const bare = render('worker').settings[S.permissions][S.deny].filter((x) => x.includes('snapshots'));
+  assert.deepEqual(bare, snapshotWallDeny('/w/snapshots'));
+});
+
+test('L940: the old layout, a rules snapshot whose folder holds the outbox (or sits in one), is refused, saying why', () => {
+  assert.match(render('worker', { paths: { ...PATHS, snapshot: '/w/rules.json' } }).reason ?? '', /^the rules snapshot must sit in a folder of its own below the top/);
+  assert.match(render('worker', { paths: { ...PATHS, outbox: '/w/s/outbox', snapshot: '/w/s/rules.json' } }).reason ?? '', /^the rules snapshot's folder \/w\/s must be apart from the session's own folders/);
+  assert.match(render('lead', { paths: { ...PATHS, snapshot: '/w/outbox/snaps/rules.json' } }).reason ?? '', /^the rules snapshot's folder \/w\/outbox\/snaps must be apart/);
+  assert.match(render('worker', { paths: { ...PATHS, snapshot: '/w/copy/x/rules.json' } }).reason ?? '', /^the rules snapshot's folder \/w\/copy\/x must be apart/);
+  assert.match(render('worker', { paths: { ...PATHS, snapshot: '/w/a/../snapshots/rules.json' } }).reason ?? '', /^path "\/w\/a\/\.\.\/snapshots\/rules\.json" is not a plain absolute path|^the rules snapshot must sit in a folder of its own/);
+  // A snapshot folder that is a link to the outbox: its real path is not apart either.
+  const d = realpathSync(tmp()); mkdirSync(join(d, 'outbox')); symlinkSync(join(d, 'outbox'), join(d, 'snaps'));
+  assert.match(render('worker', { paths: { ...PATHS, outbox: join(d, 'outbox'), snapshot: join(d, 'snaps', 'rules.json') } }).reason ?? '', /^the rules snapshot's folder .*snaps resolves to .*outbox, which is not apart from the session's own folders/);
+});
+
+test('L921 planted: the written-settings check refuses a worker, reviewer or auditor file with any one snapshot-wall rule dropped', () => {
+  for (const role of ['worker', 'reviewer', 'auditor']) {
+    const r = render(role);
+    assert.equal(r.ok, true, r.reason);
+    const dir = RUNNER_ROLES.includes(role) ? '/r/review' : '/w/snapshots';
+    assert.equal(checkSettings(r.settings, { profile: DESIGN_PROFILES[role] }).ok, true, role);
+    for (const drop of [...snapshotWallDeny(dir), `${dir}/**`]) {
+      const c = checkSettings(without(r.settings, drop), { profile: DESIGN_PROFILES[role] });
+      assert.equal(c.ok, false, `${role} without ${drop}`);
+      assert.match(c.reason, /does not deny the tools and the shell the rules snapshot's folder/, `${role} without ${drop}`);
+    }
+    // A hook that names another snapshot, or none, or two: the check can't tell which one is read, so it refuses.
+    const other = structuredClone(r.settings);
+    const h = other[S.hooks][E.preToolUse][0][H.hooks][0];
+    for (const cmd of [h[H.command].replace(/ --snapshot \S+/, ' --snapshot /elsewhere/rules.json'), h[H.command].replace(/ --snapshot \S+/, ''), h[H.command].replace(/ --snapshot (\S+)/, ' --snapshot $1 --snapshot /x/y.json')]) {
+      h[H.command] = cmd;
+      assert.match(checkSettings(other, { profile: DESIGN_PROFILES[role] }).reason ?? '', /hooks do not name one rules snapshot/, `${role}: ${cmd}`);
+    }
+  }
+});
+
+test('L921: the snapshot wall wins over the profile\'s allow rules: only exact commands are allowed, and the shell they run in is walled', () => {
+  const r = render('worker');
+  assert.equal(r.ok, true, r.reason);
+  const p = r.settings[S.permissions];
+  assert.deepEqual(p[S.allow], ['Bash(npm test)', 'Bash(npm run build)']);
+  // Claude Code checks deny before allow: an Edit on the folder is denied whatever is allowed. No added folder reaches it.
+  assert.ok(snapshotWallDeny('/w/snapshots').every((x) => p[S.deny].includes(x)));
+  assert.equal(p[S.additionalDirectories].some((x) => !apart(x, '/w/snapshots')), false);
+  // An allowed command runs in the sandbox (no unsandboxed commands), whose write wall holds the folder.
+  assert.equal(r.settings[S.sandbox][S.allowUnsandboxedCommands], false);
+  assert.ok(covers(r.settings[S.sandbox][S.filesystem][S.denyWrite], '/w/snapshots/rules.json'));
+  // An allow rule naming the folder for a tool is not an exact command, and refused.
+  const planted = structuredClone(r.settings); planted[S.permissions][S.allow].push('Edit(//w/snapshots/**)');
+  assert.equal(checkSettings(planted, { profile: DESIGN_PROFILES.worker }).reason, 'an allow rule is not one exact command');
+  // A profile command that writes there is still walled: the shell's deny holds for it.
+  const w = render('worker', { product: { ...PRODUCT, commands: { snap: 'cp x /w/snapshots/rules.json' } } });
+  assert.equal(w.ok, true, w.reason);
+  assert.ok(w.settings[S.permissions][S.allow].includes('Bash(cp x /w/snapshots/rules.json)'));
+  assert.ok(covers(w.settings[S.sandbox][S.filesystem][S.denyWrite], '/w/snapshots/rules.json'));
+});
+
+test('L921: checkRunnerWall refuses a worker file whose snapshot wall misses the folder\'s real path, or whose hooks read another snapshot', () => {
+  const d = realpathSync(tmp());
+  const runner = { requestsDir: join(d, 'runner', 'requests'), statusFile: join(d, 'runner', 'state', 'status.json') };
+  for (const p of [runner.requestsDir, join(d, 'runner', 'state'), join(d, 'real-snaps')]) mkdirSync(p, { recursive: true });
+  symlinkSync(join(d, 'real-snaps'), join(d, 'snaps'));
+  const paths = { ...PATHS, snapshot: join(d, 'snaps', 'rules.json') };
+  const r = render('worker', { paths: { ...paths, workerRunner: runner } });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(checkRunnerWall({ settings: r.settings, workerRunner: runner, paths }), { ok: true });
+  for (const drop of [...snapshotWallDeny(join(d, 'real-snaps')), `${join(d, 'real-snaps')}/**`]) {
+    assert.match(checkRunnerWall({ settings: without(r.settings, drop), workerRunner: runner, paths }).reason ?? '', /rules snapshot's folder .*real-snaps/, drop);
+  }
+  // Rendered where the link was not there yet: only the given spelling is walled, and the launch check refuses.
+  const early = render('worker', { paths: { ...paths, workerRunner: runner }, realpath: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); } });
+  assert.equal(early.ok, true, early.reason);
+  assert.match(checkRunnerWall({ settings: early.settings, workerRunner: runner, paths }).reason ?? '', /rules snapshot's folder .*real-snaps/);
+  assert.match(checkRunnerWall({ settings: r.settings, workerRunner: runner, paths: { ...paths, snapshot: join(d, 'snaps', 'other.json') } }).reason ?? '', /hooks do not read the session's rules snapshot/);
 });

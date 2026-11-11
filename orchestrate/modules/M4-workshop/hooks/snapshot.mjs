@@ -10,8 +10,8 @@
 // A run that writes its own snapshot (a test corpus, a fake) and lasts longer than the limit keeps
 // it fresh with `keepSnapshotFresh`, never by raising the limit.
 
-import { readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 
 export const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 const refuse = (reason) => ({ ok: false, reason });
@@ -49,11 +49,22 @@ export function makeSnapshot(rules, at = new Date()) {
   return JSON.stringify({ written_at: at.toISOString(), hash: snapshotHash(rules), rules });
 }
 
-/** Writes a snapshot whole: to a side file first, then renamed, so a hook never reads half of one. */
+/**
+ * Writes a snapshot whole: to a side file first, then renamed, so a hook never reads half of one (L921). The side file
+ * is made new ('wx': refused if anything is at that name, a link included, so nothing planted there is written through)
+ * under a random name nobody can guess ahead; if the write or the rename fails, the side file is removed and the error
+ * thrown, so no half-written side file is left behind.
+ */
 export function writeSnapshot(path, rules, at = new Date()) {
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, makeSnapshot(rules, at));
-  renameSync(tmp, path);
+  const tmp = `${path}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, makeSnapshot(rules, at), { flag: 'wx' });
+    renameSync(tmp, path);
+  } catch (e) {
+    // Only a side file this call made is removed: one refused by 'wx' was never ours (EEXIST).
+    if (e?.code !== 'EEXIST') { try { unlinkSync(tmp); } catch { /* not made, or gone */ } }
+    throw e;
+  }
 }
 
 /**

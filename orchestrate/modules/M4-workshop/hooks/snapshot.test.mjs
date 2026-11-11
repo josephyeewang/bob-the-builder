@@ -3,7 +3,7 @@
 // that writes its own snapshot can keep it fresh with keepSnapshotFresh. The 5-minute limit itself is unchanged.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -122,4 +122,21 @@ test('with real timers it rewrites, and a run that never calls stop still ends o
   assert.equal(r.error, undefined, `the child did not end on its own: ${r.error?.code}`);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^rewrites [3-9]/);
+});
+
+test('L921: writeSnapshot makes a new side file under a name nobody can guess, and leaves none behind when it fails', () => {
+  const d = tempDir('orch-lane4-snap-');
+  const p = join(d, 'rules.json');
+  writeSnapshot(p, RULES); writeSnapshot(p, RULES);
+  assert.deepEqual(readdirSync(d), ['rules.json'], 'only the snapshot is left: each side file was renamed into place');
+  assert.equal(readSnapshot(p).ok, true);
+  // The rename fails (a folder holding a file sits at the snapshot's name): the error is thrown and the side file removed.
+  const q = join(d, 'busy'); mkdirSync(q); writeFileSync(join(q, 'x'), '');
+  assert.throws(() => writeSnapshot(q, RULES));
+  assert.deepEqual(readdirSync(d).sort(), ['busy', 'rules.json'], 'no side file is left after a failed rename');
+  // A folder that is not there: nothing is made, and the error is thrown.
+  assert.throws(() => writeSnapshot(join(d, 'gone', 'rules.json'), RULES), { code: 'ENOENT' });
+  // The side file is new each time ('wx', a random name): the source says so, as no test can plant at a name not yet drawn.
+  const src = readFileSync(join(HERE, 'snapshot.mjs'), 'utf8');
+  assert.match(src, /randomBytes\(8\)/); assert.match(src, /flag: 'wx'/);
 });

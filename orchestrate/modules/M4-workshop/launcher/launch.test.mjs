@@ -19,13 +19,14 @@ import { removeProtected } from './worker-copy.mjs';
 import { makeSnapshot } from '../hooks/snapshot.mjs';
 import { sha256 } from './role-profiles.mjs';
 import { memoryRecord } from '../../../shared/record.mjs';
+import { RUNNER_ROLES } from '../../../shared/review-roles.mjs';
 
 const tmp = () => realpathSync(tempDir('orch-launch-'));
 
 // The names check (audit R-0b-44 M-1): a real rendered role file and the start flags, with a
 // stand-in table that marks every name confirmed on the test version.
 const N_PATHS = {
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', ownerTaps: '/w/owner-taps', reviewAgainConfig: '/w/review-again.json', notes: '/w/notes',
   deny: { proposals: ['/w/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', robotKeys: '/w/keys', record: '/w/record', otherCopies: ['/w/copy2'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git',
   reviewWalls: { outboxRoot: '/r/outbox', runnerRoot: '/r/review' },
@@ -33,7 +34,9 @@ const N_PATHS = {
 const N_VERSION = '2.1.300';
 const N_FLAGS = Object.values(FLAGS).filter((f) => f.startsWith('-'));
 function NAMES(role, over = {}) {
-  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths: N_PATHS, product: { commands: { test: 'npm test' } } });
+  // A role the review runner starts keeps its snapshot inside the runner's folder (L921's wall: review-settings.mjs fill check).
+  const paths = RUNNER_ROLES.includes(role) ? { ...N_PATHS, snapshot: '/r/review/rules-snapshot.json' } : N_PATHS;
+  const r = renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role, profile: DESIGN_PROFILES[role], paths, product: { commands: { test: 'npm test' } } });
   assert.equal(r.ok, true, `${role}: ${r.reason}`);
   const confirmed = Object.fromEntries([...namesIn(r.settings), ...N_FLAGS].map((n) => [n, { by: 'readback:stand-in', version: N_VERSION }]));
   return { settings: r.settings, flags: N_FLAGS, version: N_VERSION, confirmed, ...over };
@@ -347,7 +350,9 @@ function hookWorld(role = 'worker') {
   const copy = join(root, 'copy'); mkdirSync(copy);
   const notes = join(root, 'notes'); mkdirSync(notes);
   const keys = join(root, 'keys'); mkdirSync(keys);
-  const snapshot = join(root, 'rules.json');
+  // In a folder of its own (L921: the snapshot's wall shuts its whole folder); for a review role, inside the runner's folder.
+  const snapDir = join(root, RUNNER_ROLES.includes(role) ? 'rr' : 'snapshots'); mkdirSync(snapDir);
+  const snapshot = join(snapDir, 'rules.json');
   const rules = { production: { env_files: [join(root, 'prod.env')], programs: ['fakehost'], hosts: ['db.prod.example.net'] }, secrets: { paths: [keys] } };
   writeFileSync(snapshot, makeSnapshot(rules));
   const profile = DESIGN_PROFILES[role];
@@ -551,7 +556,7 @@ test('intake: only a plain, single-link file of the role user, with an allowed n
 
 test('check 4: the registry is allowed for the install step only', async () => {
   const profile = DESIGN_PROFILES.worker;
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
   const registryHosts = ['registry.example.org'];
   const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile, paths, product: { commands: { test: 'npm test' } }, registryHosts, phase });
   const written = [];
@@ -677,7 +682,7 @@ test('check 7: a missing hook folder, no outbox kinds, a hook that is not a comm
 });
 
 test('check 4: a role file that will not write, before or after the install, refuses with its own reason', async () => {
-  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
+  const paths = { copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', deny: { proposals: ['/w/proposals'] } };
   const render = (phase) => renderRoleSettings({ productionFiles: [], proposalOutboxes: ['/w/proposals'], role: 'worker', profile: DESIGN_PROFILES.worker, paths, product: { commands: { test: 'npm test' } }, registryHosts: ['registry.example.org'], phase });
   const failOn = (n) => { let i = 0; return () => (++i === n ? { ok: false, reason: 'disk full' } : { ok: true }); };
   let ran = false;

@@ -12,7 +12,7 @@ import { SETTINGS as S } from './settings-names.mjs';
 const TAPS = '/o/owner-taps';
 const HANDLER = '/o/review-again.json';
 const PATHS = (ownerTaps, reviewAgainConfig = HANDLER, reviewWalls = { outboxRoot: '/r/outbox', runnerRoot: '/r/review' }) => ({
-  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/rules.json', node: '/w/node', notes: '/w/notes', ownerTaps, reviewAgainConfig,
+  copy: '/w/copy', outbox: '/w/outbox', hooksDir: '/w/hooks', snapshot: '/w/snapshots/rules.json', node: '/w/node', notes: '/w/notes', ownerTaps, reviewAgainConfig,
   deny: { secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record', otherCopies: [], proposals: ['/w/proposals'] },
   bobFolder: '/w/bob', mirror: '/w/mirror.git', reviewWalls,
 });
