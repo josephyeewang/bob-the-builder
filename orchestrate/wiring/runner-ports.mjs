@@ -7,7 +7,9 @@
 //     1. the card is read from the Record (read only) and must be claimed for this very session (claim.session_id): a
 //        launch request for a card claimed by another session starts nothing;
 //     2. the copy's start commit comes from `startCommit` (default cardStartCommit, L825: a Tier 1 card, or one with no
-//        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main), then M4's
+//        tier, starts on its plan's main_commit, which must be 40 hex; any other card on the mirror's main). An undo
+//        launch's reversed commit (undoCommit, L976) must be in the mirror and an ancestor of that start commit
+//        (undoCommitProblem, safe-git; L985), or the start is refused with no copy made; it is handed to promptFor. Then M4's
 //        prepareWorkerCopy makes <copiesRoot>/<product>/<card> (never over a folder that is there). The answer's `base` names that
 //        commit; it is kept in the runner's own session row and its answer (#364 r1 m2). The launch record has no field
 //        for it yet (writeLaunch, lane 2), and the status file's session fields don't carry it;
@@ -58,7 +60,7 @@ import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, r
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
+import { RUNNER_ROLE_OF, UNDO_COMMIT, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
 import { DRAIN_CAUSES } from '../modules/M11-dispatcher/drain-alerts.mjs';
@@ -244,6 +246,21 @@ export async function cardStartCommit({ mirror, cardDoc }, { main = mirrorMain }
   return main(mirror);
 }
 
+/**
+ * An undo's reversed commit in the mirror (L976, L985): there as a commit, and an ancestor of the start commit, so the
+ * copy holds what the undo reverses. → null, or the plain reason the start is refused. Asked before the copy is made.
+ */
+export async function undoCommitProblem({ mirror, commit, head }, { run = git } = {}) {
+  const at = { gitDir: mirror, purpose: 'runner-undo-commit', timeoutMs: 30_000 };
+  const short = String(commit).slice(0, 12);
+  const there = await run(['cat-file', '-e', `${commit}^{commit}`], at);
+  if (there?.code !== 0) return `the reversed commit ${short} is not a commit in the mirror`;
+  const up = await run(['merge-base', '--is-ancestor', commit, head], at);
+  if (up?.code === 1) return `the reversed commit ${short} is not an ancestor of the start commit ${String(head).slice(0, 12)}`;
+  if (up?.code !== 0) return `the reversed commit ${short} can't be checked against the start commit (git ${up?.code})`;
+  return null;
+}
+
 /** The mirror's main, as a fresh copy starts on it. → the commit, or a throw. */
 export async function mirrorMain(mirror, { run = git } = {}) {
   const r = await run(['rev-parse', '--verify', '-q', 'refs/heads/main^{commit}'], { gitDir: mirror, purpose: 'runner-start-commit', timeoutMs: 30_000 });
@@ -344,15 +361,17 @@ export function startPort(c, deps = {}) {
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
-    readSettings = sessionSettingsOf(c.settingsDir),
+    readSettings = sessionSettingsOf(c.settingsDir), undoCheck = undoCommitProblem,
   } = deps;
   const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, ...(deps.fs ?? {}) };
   const log = deps.log ?? (() => {});
-  return async ({ card, kind, product, sessionId, live = [] } = {}) => {
+  return async ({ card, kind, product, sessionId, live = [], undoCommit } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
     if (typeof card !== 'string' || !CARD_ID.test(card) || card.startsWith('.')) return refuse('not a card id');
     if (!Object.hasOwn(RUNNER_ROLE_OF, kind)) return refuse(`the worker runner does not start ${JSON.stringify(kind)} sessions`);
+    if (kind === 'undo' && !(typeof undoCommit === 'string' && UNDO_COMMIT.test(undoCommit))) return refuse('the undo launch names no reversed commit');
+    if (kind !== 'undo' && undoCommit !== undefined) return refuse('only an undo launch names a reversed commit');
     const role = RUNNER_ROLE_OF[kind];
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
@@ -364,11 +383,15 @@ export function startPort(c, deps = {}) {
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
     if (cd.doc.product !== product) return refuse(cd.doc.product === undefined ? 'the card names no product' : 'the card is another product\'s');
-    const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product });
+    const prompt = promptFor({ role, kind, card, cardDoc: cd.doc, product, ...(kind === 'undo' ? { undoCommit } : {}) });
     if (typeof prompt !== 'string' || !prompt) return notWired('no worker prompt is given to the runner');
     const who = account();
     if (!who?.account) return refuse(`no sign-in to start with (${who?.reason ?? 'no answer'})`);
     let commit; try { commit = await startCommit({ mirror: p.mirror, card, cardDoc: cd.doc }); } catch (e) { return refuse(`the copy's start commit can't be read (${e?.message ?? e})`); }
+    if (kind === 'undo') {
+      let why; try { why = await undoCheck({ mirror: p.mirror, commit: undoCommit, head: commit }); } catch (e) { why = `the reversed commit can't be checked (${e?.message ?? e})`; }
+      if (why) return refuse(why);
+    }
     let mine; let copy; let outbox;
     try {
       mine = runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product });

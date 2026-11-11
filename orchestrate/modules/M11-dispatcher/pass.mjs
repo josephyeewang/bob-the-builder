@@ -892,7 +892,8 @@ async function starts({ rec, rules, now, b, running, launch, stopGroup, outboxRo
     // A launch has its own time limit (audit 0b-6 r5 m1): one that never answers holds no other start.
     // It may still start a session after the limit, so the card stays claimed, never back to ready (a
     // second start would make two sessions for one card); Joe is told, once a day.
-    const l = await guarded(() => launch({ card, kind, product, sessionId }), portDeadlineMs);
+    // An undo's launch carries the reversed commit exactReverse found from the card's source (L976), never a card field.
+    const l = await guarded(() => launch({ card, kind, product, sessionId, ...(kind === 'undo' ? { undoCommit: exact.commit } : {}) }), portDeadlineMs);
     // Late is any answer marked timed out (guarded's own, or a port's), not only guarded's exact words (L744 1).
     if (!l?.ok && (l?.timedOut === true || l?.reason === `it did not answer within ${portDeadlineMs} ms`)) {
       out.refused.push([id, `launcher: ${l.reason}`]);

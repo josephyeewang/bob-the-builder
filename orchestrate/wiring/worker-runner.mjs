@@ -57,7 +57,7 @@
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
 import { PRODUCT } from '../shared/product-paths.mjs';
 import { REQUEST_ID } from '../modules/M4-workshop/launcher/review-runner.mjs';
-import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, USED_UP, checkSession } from './owner-status.mjs';
+import { CLOCK_SKEW_MS, RUNNER_KEEP_USED_UP_MS, RUNNER_KINDS, RUNNER_ROLE_OF, RUNNER_STATUS_EVERY_MS, UNDO_COMMIT, USED_UP, checkSession } from './owner-status.mjs';
 import { launchAnswerWrong } from './owner-asks.mjs';
 import { DRAIN_CAUSES, drainHeldOk } from '../modules/M11-dispatcher/drain-alerts.mjs';
 import { FUTURE_SKEW_MS } from '../shared/still-waiting.mjs';
@@ -259,6 +259,9 @@ export async function workerRunnerPass(ctx) {
     if (now - asked > claimMs) return refuse('the launch request is older than the claim timeout');
     if (!RUNNER_KINDS.includes(l.kind)) return refuse(`the worker runner does not start ${JSON.stringify(l.kind)} sessions`);
     if (typeof l.card !== 'string' || !CARD_ID.test(l.card) || l.card.startsWith('.') || !productName(l.product)) return refuse('the launch names no card or product the runner takes');
+    // An undo names the commit it reverses (L976); no other launch names one.
+    if (l.kind === 'undo' && !(typeof l.undo_commit === 'string' && UNDO_COMMIT.test(l.undo_commit))) return refuse('the undo launch names no reversed commit');
+    if (l.kind !== 'undo' && l.undo_commit !== undefined) return refuse('only an undo launch names a reversed commit');
     // One session per card's copy (#358 r1 m4): a live listed one, or a start that may be on, holds it.
     if (state.sessions.some((s) => s.card === l.card && isLive(s)) || Object.values(state.requests).some((r) => r.state === 'waiting' && r.card === l.card)) return refuse(`card ${l.card} already has a session the runner started, or a start still on`);
     state.requests[id] = { state: 'waiting', at: now, card: l.card, product: l.product }; flush();
@@ -269,7 +272,7 @@ export async function workerRunnerPass(ctx) {
       ...Object.entries(state.requests).filter(([q, r]) => q !== id && r?.state === 'waiting' && !pending.has(q)).map(([q, r]) => ({ id: q, product: r.product, unstarted: true }))];
     // The start is held across passes: one still on after portMs is settled by a later pass (step 0), never lost.
     const p = { key: k.key, id, l, done: false, a: undefined };
-    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live }))
+    p.on = Promise.resolve().then(() => ports.start({ card: l.card, kind: l.kind, product: l.product, sessionId: id, live, ...(l.kind === 'undo' ? { undoCommit: l.undo_commit } : {}) }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(id, p);
     await Promise.race([p.on, late(portMs)]);

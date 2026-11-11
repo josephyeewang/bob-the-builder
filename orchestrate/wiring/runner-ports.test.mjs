@@ -10,7 +10,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, undoCommitProblem, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -783,4 +783,69 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
     assert.ok(/^[A-Za-z0-9._/-]+$/.test(spare) && /^[A-Za-z0-9._/-]+$/.test(t.settingsFile), 'plain path letters only');
     await t.done();
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
+});
+
+// L976, L985: an undo start names the commit it reverses. It is checked (40 hex, an undo only) and then found in the
+// mirror as an ancestor of the start commit before any copy is made; only then does the prompt get it.
+test('L976 / L985: an undo start checks its reversed commit before the copy and hands it to the prompt; a bad one makes nothing', async () => {
+  const U = 'f'.repeat(40);
+  const seen = { prompts: [], checks: [] };
+  const deps = { promptFor: (x) => { seen.prompts.push(x); return 'do the card'; }, undoCheck: async (x) => { seen.checks.push(x); return null; } };
+  const w = world(deps);
+  try {
+    const a = await w.start({ kind: 'undo', undoCommit: U });
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(seen.prompts.at(-1).undoCommit, U);
+    assert.deepEqual(seen.checks, [{ mirror: w.c.products.p1.mirror, commit: U, head: HEAD }], 'checked against the start commit');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const e = world(deps);
+  try {
+    seen.checks.length = 0;
+    const a = await e.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal('undoCommit' in seen.prompts.at(-1), false, 'an editing prompt is given none');
+    assert.deepEqual(seen.checks, [], 'and the mirror is not asked');
+  } finally { rmSync(e.d, { recursive: true, force: true }); }
+  const cases = [
+    ['an undo with no commit', { kind: 'undo' }, {}, /the undo launch names no reversed commit/],
+    ['an undo with a short commit', { kind: 'undo', undoCommit: U.slice(1) }, {}, /names no reversed commit/],
+    ['an undo with an upper-case commit', { kind: 'undo', undoCommit: U.toUpperCase() }, {}, /names no reversed commit/],
+    ['an editing start naming a commit', { undoCommit: U }, {}, /only an undo launch names a reversed commit/],
+    ['a script start naming a commit', { kind: 'script', undoCommit: U }, {}, /only an undo launch/],
+    ['a commit not in the mirror', { kind: 'undo', undoCommit: U }, { undoCheck: async () => 'the reversed commit ffffffffffff is not a commit in the mirror' }, /is not a commit in the mirror/],
+    ['a check that throws', { kind: 'undo', undoCommit: U }, { undoCheck: async () => { throw new Error('git broke'); } }, /the reversed commit can't be checked \(git broke\)/],
+  ];
+  for (const [what, x, over, re] of cases) {
+    const v = world(over);
+    try {
+      const a = await v.start(x);
+      assert.equal(a.ok, false, what); assert.match(a.reason, re, what);
+      assert.deepEqual(v.left(), { copy: false, outbox: false, settings: false }, `${what}: nothing made`);
+      assert.equal(v.calls.some((c) => c[0] === 'prepare' || c[0] === 'spawn'), false, `${what}: no copy is asked for`);
+    } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+});
+
+test('L985: undoCommitProblem, on a real mirror: an ancestor passes; a commit not there, off the line, or not checkable is refused plainly', async () => {
+  const d = realpathSync(tempDir('orch-undo-commit-'));
+  const src = join(d, 'src'); const mirror = join(d, 'mirror'); mkdirSync(src);
+  const o = { gitDir: join(src, '.git'), workTree: src, cwd: src };
+  const commit = async (f) => { writeFileSync(join(src, f), `${f}\n`); await gitOk(['add', '-A'], o); await gitOk(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', f], o); return (await gitOk(['rev-parse', 'HEAD'], o)).trim(); };
+  try {
+    await gitOk(['init', '-q', '-b', 'main', src], o);
+    const A = await commit('a.txt'); const B = await commit('b.txt');
+    await gitOk(['checkout', '-q', '-b', 'side', A], o); const S = await commit('s.txt');
+    await initMirror(mirror);
+    await gitOk(['fetch', '-q', src, 'refs/heads/main:refs/heads/main', 'refs/heads/side:refs/heads/side'], { gitDir: mirror });
+    assert.equal(await undoCommitProblem({ mirror, commit: A, head: B }), null, 'an ancestor of the start commit');
+    assert.equal(await undoCommitProblem({ mirror, commit: B, head: B }), null, 'the start commit itself');
+    assert.equal(await undoCommitProblem({ mirror, commit: 'e'.repeat(40), head: B }), 'the reversed commit eeeeeeeeeeee is not a commit in the mirror');
+    assert.equal(await undoCommitProblem({ mirror, commit: S, head: B }), `the reversed commit ${S.slice(0, 12)} is not an ancestor of the start commit ${B.slice(0, 12)}`);
+    assert.equal(await undoCommitProblem({ mirror, commit: B, head: A }), `the reversed commit ${B.slice(0, 12)} is not an ancestor of the start commit ${A.slice(0, 12)}`, 'a later commit is not an ancestor');
+    // A tree or blob id is not a commit.
+    const tree = (await gitOk(['rev-parse', `${A}^{tree}`], o)).trim();
+    assert.match(await undoCommitProblem({ mirror, commit: tree, head: B }), /is not a commit in the mirror/);
+    assert.match(await undoCommitProblem({ mirror, commit: A, head: 'e'.repeat(40) }), /can't be checked against the start commit \(git \d+\)/);
+    assert.match(await undoCommitProblem({ mirror: join(d, 'none'), commit: A, head: B }), /is not a commit in the mirror/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
