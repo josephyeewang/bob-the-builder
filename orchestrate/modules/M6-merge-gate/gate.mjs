@@ -352,10 +352,11 @@ export async function gatePass(ctx) {
     const card = m?.doc?.card ? fresh('card', m.doc.card) : null;
     if (!card?.doc || card.corrupt || card.doc.kind !== 'exact_reverse') return;
     const at = m.doc.not_clean_head;
-    if (typeof at !== 'string' || !at || card.doc.head !== at) return;   // pushed again since: the next review judges it anew
+    if (typeof at !== 'string' || !at) return;
     const fid = REVERSE_FACT(card.id);
     const f = record.read('fact', fid);
     if (!f) {
+      if (card.doc.head !== at) return;   // pushed again since: the next review judges it anew
       const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
       const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() } });
       if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
