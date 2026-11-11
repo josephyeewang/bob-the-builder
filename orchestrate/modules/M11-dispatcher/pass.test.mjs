@@ -1146,6 +1146,33 @@ test('r4 MAT-1: a stop that never answers holds no other stop; it is told, and a
   assert.equal(alerts.length, 2, 'again a day later');
 });
 
+// L927: stopPass is given this Dispatcher's product. It acts only on sessions whose own product that is, and hands back
+// the Mac-wide list (less what it stopped) for the caps. C-7 is in this Record (cancelled) and in product q9.
+test('L927: stopPass stops only its own product\'s sessions, never another\'s C-7, and its running list stays Mac-wide', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const sessions = [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 },
+    { id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', pgid: null }];
+  const called = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: (s) => { called.push(`probe ${s.id}`); return idle; }, alert: () => {},
+    stopGroup: async (s) => { called.push(`stop ${s.id}`); return { ok: true, how: 'SIGTERM' }; }, saveWork: async (s) => { called.push(`save ${s.id}`); return { ok: true }; } });
+  assert.deepEqual(r.stopped, [['S-1', 'cancel']]);
+  assert.deepEqual(called, ['probe S-1', 'stop S-1', 'save S-1'], 'nothing of another product\'s, nor the review runner\'s, is probed, stopped or saved');
+  assert.deepEqual(r.running.map((s) => s.id), ['S-9', 'R-1'], 'the caps still see every product');
+  assert.equal(rec.read('fact', STOP_FACT('S-9')), null);
+  assert.equal(r.missing.some((m) => /q9/.test(m)), false, 'another product\'s rules are not read here');
+});
+
+test('L927: dispatcherPass, running its own stop step, passes the product on: another product\'s C-7 is not stopped', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled' })]);
+  usageInto(rec);
+  const stops = [];
+  await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', probe: () => idle, alert: () => {}, launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [],
+    sessions: [{ id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 50 }, { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 51 }],
+    stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; }, saveWork: async () => ({ ok: true }) });
+  assert.deepEqual(stops, ['S-1']);
+});
+
 test('r4 MAT-1: the stops are called side by side, not one after another', async () => {
   const rec = recWith([['product', 'p1', { state: 'active' }], card('C-A', { state: 'cancelled' }), card('C-B', { state: 'cancelled' })]);
   usageInto(rec);

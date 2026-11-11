@@ -182,6 +182,9 @@ export async function timeLimits({ rec, rules, now, clock = () => now, b, runnin
     let failed = false;
     for (const role of want) {
       let r;
+      // r.requestId is dropped here today. L936: whichever change first keeps it (for the review runner's stop request,
+      // matched by request_id) keeps it only in an orchestrate-only folder, 0600 files or a 0700 folder like sealRoot,
+      // never in the Record's product store (orchestrate's 0755, so the owner, and so the workers, could read it).
       try { r = await requestReview({ card: id, head: doc.head, role }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
       if (r?.ok) said.push(`${role} requested`);
       else { failed = true; said.push(`${role} request failed: ${r?.reason ?? 'no answer'}`); }

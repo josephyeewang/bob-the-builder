@@ -5,8 +5,14 @@
 // The Dispatcher (the orchestrate user) never starts, reads or stops a worker itself, because workers run as the owner's
 // user. It writes a request into the runner's requests folder. The runner, a LaunchAgent of the owner's user, writes one
 // status file. Requests trust nothing, and the runner stops only what it started. probe, stopGroup and saveWork take any
-// session sessions() lists (pass.mjs's stop step reaches review, audit, merge and undo sessions of a cancelled card too):
-// the wiring routes each by kind to the runner that started it, never all to this one (#317 audit r1 M1, r2 n1):
+// session sessions() lists: the wiring routes each by kind to the runner that started it, never all to this one (#317
+// audit r1 M1, r2 n1). The stop step (pass.mjs stopPass) acts only on sessions whose own product is this Dispatcher's
+// (L927). Review and audit sessions name no product (the review runner's status has none), so the stop step does NOT
+// reach them yet. A review or audit session of a cancelled card is not stopped by anyone yet: it runs until it ends on
+// its own (the review runner records that end), and a verdict for a card no move leads out of (cancelled, failed,
+// closed_no_answer, reverted: M9 writer.mjs REVIEW_OVER, L933) is thrown away when it is taken, never recorded as a pass
+// and never a merge. A stop matched by the request_id this Dispatcher wrote is lane 3's follow-up card.
+// Where each kind goes:
 //   - the worker kinds, editing, undo and script, to this runner (overnight, an editing kind gate.mjs counts, too, once
 //     something starts one);
 //   - review and audit to the review runner;
@@ -41,7 +47,7 @@ const SESSION = '{ id, product, kind, card, lead, role, pgid, signin, config_dir
 
 /** Each owner-side port: what goes in, what comes out, how a failure is answered, and its default time limit. */
 export const OWNER_PORTS = Object.freeze({
-  sessions: sync('()', `[${SESSION}]: every session running Mac-wide (pass.mjs). The wiring merges the runner's worker sessions (editing, undo, script) with every other kind gate.mjs counts (readonly, review, audit, merge, undo_merge, lead, front_door) from their own status; the start caps count from it`,
+  sessions: sync('()', `[${SESSION}]: every session running Mac-wide, every product's (pass.mjs). The wiring merges the runner's worker sessions (editing, undo, script) with every other kind gate.mjs counts from their own status: today the review runner's reviewers and auditors (review, audit; product, pgid, signin and config_dir null, plan reviewers left out, planReviewsRunning counts those); readonly, merge, undo_merge, lead and front_door once their runner reports them. The start caps count from it; the stop step acts only on this Dispatcher's product's`,
     `${NO}, if any one source can't be read: never the sources it could read; [] only when every fresh source lists none`),
   probe: sync('(session): any session sessions() lists, routed by kind', '{ size: { tokens, compactions, turnEnded, endedAt, openTools: [ids] }, activity: { state } }: size is transcript.mjs readSize, state the activity tracker\'s (exited, blocked, waiting_input, active, ...)',
     'throws; the stop step reads that as "not at a safe point" (the late hard stop still applies). Never a partial size, and a state the tracker can\'t tell is a throw, never a missing or null state (atSafePoint reads a missing state as safe)'),

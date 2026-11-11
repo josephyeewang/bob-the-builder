@@ -1,5 +1,7 @@
 // The Dispatcher's side of the review runner (lead call L65). The Dispatcher never starts a reviewer or an auditor:
-// it runs as the workers' Mac user, and anything it could start a worker could start too. It only asks, by writing a
+// it runs as the orchestrate user (workers run as the owner's, the review runner as `review`; L936 corrects an older
+// note that said the workers'), and a reviewer's verdict must come from a session only `review` started, in folders only
+// `review` can write. It only asks, by writing a
 // request { card, head, role, request_id } into the runner's requests/ folder, and the runner (M4
 // review-runner.mjs, running as `review`) checks the request against the Record and git before starting anything.
 // What runs, and the runner's alerts for Joe, come back in the runner's status file; a status that is missing or

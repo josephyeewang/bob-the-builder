@@ -112,6 +112,7 @@ export function dispatcherConfigFor(io, cfg, { keys = CONFIG_KEYS } = {}) {
     reviewRequestsDir: at(join(k.reviewRoot, FOLDERS.requests)), reviewStatusFile: at(join(k.reviewRoot, FOLDERS.status)), reviewUid: rev.uid,
     reviewRunnerLog: at(join(P.logDir, RUNNER_LOG)), reviewInstallRoot: root,
     reviewRoot: at(k.reviewRoot), mirror: at(k.mirror), sealRoot: at(k.sealRoot), outboxRoot: at(k.outboxRoot), copiesRoot: at(k.copiesRoot), hostLockPath: at(k.hostLockPath), hostLockUid: k.hostLockUid,
+    workerRequestsDir: at(k.workerRequestsDir), workerStatusFile: at(k.workerStatusFile), workerUid: k.workerUid,
   };
   // The other way too (L871): a key setup writes that the wiring doesn't take would stop the Dispatcher's start (an
   // unknown key), so it is told here, never written or dropped.

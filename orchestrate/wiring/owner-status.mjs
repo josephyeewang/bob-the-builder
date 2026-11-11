@@ -187,8 +187,11 @@ const requestOf = (s, id) => (Object.hasOwn(s.requests, id) ? s.requests[id] : u
  * read is a throw, never false; any answer but true or false makes the board "not known". `outboxRoot` is the runner's
  * top outbox root, holding one folder per product (L836), not a product's Record root `<outboxRoot>/<product>` (#378 m2).
  * The sessions are every product's: wiring that gives one product's Record its sessions picks them by `product` (#378 m3).
+ * `board` is one Record's (the outage step reads its cards), so it is given that Record's `product` and lists only that
+ * product's sessions, by the product the status names, never by whether a card id reads from the Record (L927).
  */
-export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, stat, open, realpath, writeRequest, holds }) {
+export function ownerSyncPorts({ statusFile, uid, outboxRoot, product, clock = Date.now, stat, open, realpath, writeRequest, holds }) {
+  if (typeof product !== 'string' || !product) throw new Error('the board needs the product whose Record it is for');
   if (typeof holds !== 'function') throw new Error('the board needs the Record\'s holds({ card, sessionId })');
   const held = (x) => {
     const h = holds({ card: x.card, sessionId: x.id });
@@ -202,7 +205,7 @@ export function ownerSyncPorts({ statusFile, uid, outboxRoot, clock = Date.now, 
     // is no longer live leaves when it was stopped on request; one that ended without a stop request stays only while its
     // card's claim is still its own, so the outage step sees each death once, not on every pass after.
     board: () => { const s = status();
-      return s.sessions.filter((x) => live(x) || (!x.stop_requested && held(x))).map((x) => {
+      return s.sessions.filter((x) => x.product === product && (live(x) || (!x.stop_requested && held(x)))).map((x) => {
       const row = { id: x.id, card: x.card };
       if ('alive' in x) row.alive = x.alive;
       if ('ended' in x) row.ended = x.ended;

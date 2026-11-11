@@ -266,7 +266,7 @@ export async function tick({ rec, rules, now, clock = () => now, ports: p }) {
   // The safety acts, first and alone (L38).
   let stops = null;
   await run('stops', async () => {
-    stops = await stopPass({ rec, rules, now, clock, account: acct.account, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, failureLog: failed('stops'), ...portDeadlines });
+    stops = await stopPass({ rec, rules, now, clock, account: acct.account, product: p.product, sessions: p.sessions(), probe: p.probe, stopGroup: p.stopGroup, saveWork: p.saveWork, alert, failureLog: failed('stops'), ...portDeadlines });
     missing.push(...stops.missing);
     return stops;
   });

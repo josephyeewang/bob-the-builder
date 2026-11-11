@@ -693,6 +693,37 @@ test('audit 0b-6 r2 MAT-2: a Lead\'s read-only request goes through the start ga
   assert.equal(ok.fact.state, 'applied');
 });
 
+// ---- L927: the stop step is this product's; the caps are the Mac's ----
+
+// sessions() is Mac-wide (owner-ports.mjs): another product's sessions, and the review runner's (no product), are on it.
+// The stop step acts only on those whose own product is this Dispatcher's (the `product` port), never on one whose card
+// id merely reads from this Record: q9 has a C-7 too, and this Record's C-7 is cancelled. The caps still count them all.
+test('L927: through the tick, a cancel stops only this product\'s session; another product\'s C-7 and a review are left; the caps count every product', async () => {
+  const mine = { id: 'S-1', product: 'p1', kind: 'editing', card: 'C-7', pgid: 91 };
+  const theirs = { id: 'S-9', product: 'q9', kind: 'editing', card: 'C-7', pgid: 92 };
+  const review = { id: 'R-1', product: null, kind: 'review', role: 'reviewer', card: 'C-7', pgid: null };
+  const run = async (running, product = 'p1') => {
+    const stops = []; const probed = [];
+    const w = world([account(), usage(), card('C-7', { state: 'cancelled' }), card('C-2')], { rules: rulesWith({ [K.editingPerMac]: 1 }, allow),
+      over: { product, sessions: () => running, probe: (s) => { probed.push(s.id); return idle; }, stopGroup: async (s) => { stops.push(s.id); return { ok: true, how: 'SIGTERM' }; } } });
+    await w.pass();
+    return { stops, probed, launched: w.calls.launched, rec: w.rec };
+  };
+  const both = await run([mine, theirs, review]);
+  assert.deepEqual(both.stops, ['S-1'], 'only this product\'s session is stopped');
+  assert.deepEqual(both.probed.filter((id) => id !== 'S-1'), [], 'nor is another\'s probed for a stop');
+  assert.equal(both.rec.read('fact', STOP_FACT('S-9')), null, 'no stop is even wanted for another product\'s C-7');
+  assert.equal(both.rec.read('fact', STOP_FACT('R-1')), null, 'a review session is the review runner\'s to end (L933)');
+  // The caps: S-9 runs on this Mac, so with a Mac cap of 1 nothing starts; without it, C-2 starts.
+  const other = await run([theirs, review]);
+  assert.deepEqual(other.stops, [], 'nothing of this product\'s runs, so nothing is stopped');
+  assert.deepEqual(other.launched, [], 'another product\'s editing session alone fills the Mac cap');
+  const alone = await run([review]);
+  assert.deepEqual(alone.launched, ['C-2'], 'with only a review running (no cap), the card starts');
+  // Planted: with q9 as this Dispatcher's product, q9's session is the one stopped.
+  assert.deepEqual((await run([mine, theirs], 'q9')).stops, ['S-9']);
+});
+
 // ---- L27: the fail-open sweep ----
 
 // `edit` may change or drop (null) any seed entry: the merge sweep takes away one input of a merge at a time.

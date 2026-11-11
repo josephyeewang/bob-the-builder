@@ -26,7 +26,8 @@
 // THE RUNNER'S LAUNCH RECORDS (lead call L65). The review runner (M4 review-runner.mjs) runs as `review`, makes each
 // review session's id itself, and writes `<launches folder>/<session id>.json` into a folder only `review` can write.
 // A verdict counts only when such a record names the same session, role, card and head. The Record's own `launch`
-// entries are written by the Dispatcher, which runs as the workers' Mac user, so for a review they never count. These
+// entries are written by the Dispatcher (the orchestrate user, not `review`; L936 corrects an older note that said the
+// workers' Mac user), so for a review they never count. These
 // checks live here and nowhere else: the record's intake and verdict rule (writer.mjs) and the Merge Gate (M6
 // gather.mjs) call them.
 //

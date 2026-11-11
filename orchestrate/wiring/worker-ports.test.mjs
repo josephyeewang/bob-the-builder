@@ -8,14 +8,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { limitedSync } from '../modules/M11-dispatcher/sync-limit.mjs';
 import { mirrorTree } from '../modules/M11-dispatcher/cleanup.mjs';
 import { ENDED_FOLDER } from '../modules/M9-record/outbox.mjs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { MIRROR_CONFIG_TEMPLATE } from '../modules/M4-workshop/git/safe-git.mjs';
-import { CLEANUP_GIT, HOST_LOCK_MAX, cleanupPorts, hostLockPort, mirrorProblem, reviewEndedPort, workerPorts } from './worker-ports.mjs';
+import { CLEANUP_GIT, HOST_LOCK_MAX, REVIEW_KIND_OF, REVIEW_STATE_CORRUPT, cleanupPorts, hostLockPort, mirrorProblem, recordHolds, requestsFolderProblem, reviewEndedPort, reviewSessions, runnerSyncPorts, workerPorts } from './worker-ports.mjs';
 import { mirrorFilesOf } from './review-ports.mjs';
 
 const ME = process.getuid();
@@ -55,8 +55,10 @@ function mirrorWorld() {
   chmodSync(mirror, 0o755);
   // host.lock's owner (hostLockUid) is never the Dispatcher's own user: the test user is the Dispatcher here.
   // The TOP outboxes and worker-copies folders (L887), as setup makes them.
-  for (const f of ['outboxes', 'worker-copies']) mkdirSync(join(base, f), { recursive: true, mode: 0o755 });
-  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2 };
+  for (const f of ['outboxes', 'worker-copies', 'worker-runner/requests', 'worker-runner/runner']) mkdirSync(join(base, f), { recursive: true, mode: 0o755 });
+  // The worker runner runs as the owner: host.lock's user (L896).
+  const config = { product: P, mirror, sealRoot: join(base, 'seals'), outboxRoot: join(base, 'outboxes'), copiesRoot: join(base, 'worker-copies'), reviewRoot: join(base, 'review-runner'), reviewUid: ME, hostLockPath: join(base, 'host.lock'), hostLockUid: ME + 2,
+    workerRequestsDir: join(base, 'worker-runner', 'requests'), workerStatusFile: join(base, 'worker-runner', 'runner', 'status.json'), workerUid: ME + 2 };
   mkdirSync(join(config.reviewRoot, 'launches'), { recursive: true, mode: 0o755 }); chmodSync(config.reviewRoot, 0o755);
   return { base, mirror, first, second, empty, config, ctx: { config, selfUid: ME, limitedSync: run } };
 }
@@ -101,7 +103,7 @@ test('C (L739): the mirror is checked at start: missing, a link, another user\'s
   assert.throws(start({ mirror: join(w.base, 'nope') }), /the product's mirror \(mirror\) .*nope can't be read \(ENOENT\)/);
   symlinkSync(w.mirror, join(w.base, 'link'));
   assert.throws(start({ mirror: join(w.base, 'link') }), /is not a plain folder/);
-  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, hostLockUid: ME + 5, workerUid: ME + 5 }, selfUid: ME + 1 }), /belongs to uid \d+, not to this job's uid/);
   chmodSync(w.mirror, 0o775);
   assert.throws(start({}), /can be written by others \(mode 775\)/);
   chmodSync(w.mirror, 0o755);
@@ -364,4 +366,104 @@ test('C (L739): a runner folder that is gone, a link or not the review user\'s i
   // A real folder that is not the runner's (no launch records folder) would read as "not ended" for ever: it stops the start.
   mkdirSync(join(w.base, 'not-runner'));
   assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, reviewRoot: join(w.base, 'not-runner') } }), /has no launches folder, so it is not the runner's/);
+});
+
+// ---- B (L925, L927, L933): the worker runner's sync ports, and the review runner's sessions beside them ----
+
+// The runner's status, stood in for (owner-status.test.mjs reads the real files): the owner's folder and file, fresh.
+const OWNER = ME + 2; const T = Date.parse('2026-11-10T12:00:00Z');
+const fakeSt = ({ uid = OWNER, dir = false, link = false } = {}) => ({ uid, mode: dir ? 0o755 : 0o644, nlink: 1, isDirectory: () => dir, isFile: () => !dir, isSymbolicLink: () => link });
+const SIZE = { tokens: 9, compactions: 0, turnEnded: true, endedAt: null, openTools: [] };
+function syncWorld({ sessions, requests, review = { running: [] }, rec = { read: () => null }, folder = fakeSt({ dir: true }), statusText } = {}) {
+  const w = mirrorWorld();
+  const c = w.config;
+  const row = (id, product, more = {}) => ({ id, product, kind: 'editing', card: 'C-7', lead: null, role: 'worker', pgid: 70, signin: 's', config_dir: '/cfg', bundle_files: [],
+    outbox: join(c.outboxRoot, product, 'worker', id), uid: OWNER, alive: true, ended: false, outbox_open: true, stop_requested: false, size: SIZE, activity: { state: 'active' }, ...more });
+  const list = typeof sessions === 'function' ? sessions(row) : sessions ?? [row('S-1', P), row('S-9', 'other-app')];
+  const doc = { written_at: new Date(T - 5000).toISOString(), sessions: list, requests: requests ?? Object.fromEntries(list.map((x) => [x.id, { state: 'started' }])) };
+  const writes = [];
+  const io = {
+    stat: (p) => { if (p === join(c.workerStatusFile, '..')) return fakeSt({ dir: true }); return fakeSt({ dir: true }); },
+    open: () => ({ st: fakeSt(), text: statusText ?? JSON.stringify(doc) }),
+    realpath: (p) => p,
+    lstat: (p) => { assert.equal(p, c.workerRequestsDir); return folder; },
+    writeFile: (path, text) => writes.push([path, text]),
+    reviewStatus: typeof review === 'function' ? review : () => review,
+  };
+  return { c, io, row, writes, ports: runnerSyncPorts({ config: c, rec, now: () => T }, io) };
+}
+
+test('L925 rule 1: sessions() is every product\'s worker sessions and the review runner\'s reviewers and auditors, or a throw, never a half', () => {
+  const rv = { running: [{ card: 'C-7', head: HEAD, role: 'reviewer', session_id: 'R-1', pid: 1, started_at: 't' }, { card: 'C-8', head: HEAD, role: 'auditor', session_id: 'A-1', pid: 2, started_at: 't' },
+    { card: 'C-9', fingerprint: 'f', request_id: 'q', role: 'plan_reviewer', session_id: 'P-1', pid: 3, started_at: 't' }] };
+  const { ports } = syncWorld({ review: rv });
+  assert.deepEqual(ports.sessions().map((x) => [x.id, x.product, x.kind]), [['S-1', P, 'editing'], ['S-9', 'other-app', 'editing'], ['R-1', null, 'review'], ['A-1', null, 'audit']],
+    'Mac-wide (another product\'s too), and the plan reviewer left out: planReviewsRunning counts it');
+  assert.deepEqual(ports.sessions()[2], { id: 'R-1', product: null, kind: 'review', card: 'C-7', lead: null, role: 'reviewer', pgid: null, signin: null, config_dir: null, bundle_files: [] });
+  assert.deepEqual({ ...REVIEW_KIND_OF }, { reviewer: 'review', auditor: 'audit' });
+  // Either status not known: the whole list is not known.
+  assert.throws(() => syncWorld({ review: () => { throw new Error('the review runner\'s status is missing'); } }).ports.sessions(), /review runner's status is missing/);
+  assert.throws(() => syncWorld({ statusText: '{' }).ports.sessions(), /worker runner's status can't be read/);
+  // One entry the review runner does not write: not known either, never the entries that could be read.
+  for (const [bad, re] of [[null, /not what the runner writes/], [{ role: 'worker', session_id: 'X', card: 'C' }, /role "worker", which the review runner does not start/],
+    [{ role: 'reviewer', card: 'C' }, /no session id/], [{ role: 'auditor', session_id: 'A-2' }, /A-2 .* has no card/]]) {
+    assert.throws(() => syncWorld({ review: { running: [rv.running[0], bad] } }).ports.sessions(), re, JSON.stringify(bad));
+  }
+  assert.deepEqual(reviewSessions({ running: [] }), []);
+  // The review runner's memory can't be read: it lists none running, but some may be. Not known (self-review m2).
+  assert.ok(readFileSync(new URL('../modules/M4-workshop/launcher/review-runner.mjs', import.meta.url), 'utf8').includes(`hold('${REVIEW_STATE_CORRUPT}',`), 'the id the review runner lists');
+  assert.throws(() => syncWorld({ review: { running: [], holds: [{ id: 'state-corrupt', text: 'x' }] } }).ports.sessions(), /can't read its own memory/);
+  assert.deepEqual(reviewSessions({ running: [], holds: [{ id: 'other', text: 'x' }] }), [], 'another hold is not this');
+});
+
+test('L925 rule 2: probe answers for the kinds the worker runner starts; a review, audit or any other kind throws', () => {
+  const { ports } = syncWorld();
+  assert.deepEqual(ports.probe({ id: 'S-1', kind: 'editing' }), { size: SIZE, activity: { state: 'active' } });
+  assert.throws(() => ports.probe({ id: 'R-1', kind: 'review', role: 'reviewer' }), /R-1 is the review runner's, which reports no size or activity/);
+  assert.throws(() => ports.probe({ id: 'A-1', kind: 'audit', role: 'auditor' }), /review runner's/);
+  for (const kind of ['lead', 'readonly', 'merge', 'front_door', undefined]) assert.throws(() => ports.probe({ id: 'X-1', kind }), /no runner here reports on a/, String(kind));
+  // A worker kind the runner has no row for is its own throw, never a stand-in answer.
+  assert.throws(() => ports.probe({ id: 'S-404', kind: 'editing' }), /S-404 is not in the worker runner's status/);
+});
+
+test('L927: the board and the outboxes are this product\'s only, by the product the status names; holds reads this Record\'s claim', () => {
+  const held = { read: (e, id) => (id === 'C-7' ? { doc: { state: 'running', claim: { kind: 'session', session_id: 'S-2' } } } : null) };
+  const dead = { alive: false, ended: true };
+  const ws = syncWorld({ rec: held, sessions: (row) => [row('S-1', P), row('S-2', P, dead), row('S-9', 'other-app'), row('S-8', 'other-app', dead)], requests: { 'S-1': { state: 'started' }, 'S-2': { state: 'stopped' }, 'S-9': { state: 'started' }, 'S-8': { state: 'stopped' } } });
+  assert.deepEqual(ws.ports.board().map((r) => r.id), ['S-1', 'S-2'], 'S-9 runs, and S-8\'s C-7 reads as held here: neither is this product\'s');
+  assert.deepEqual(ws.ports.outboxSessions().map((x) => x.sessionId), ['S-1', 'S-2']);
+  // recordHolds: the card's claim, by session; missing is false; corrupt or a failed read throws.
+  const h = recordHolds(held);
+  assert.equal(h({ card: 'C-7', sessionId: 'S-2' }), true);
+  assert.equal(h({ card: 'C-7', sessionId: 'S-3' }), false, 'another session\'s claim');
+  assert.equal(h({ card: 'C-404', sessionId: 'S-2' }), false, 'not in the Record');
+  for (const doc of [{ state: 'waiting', claim: { kind: 'session', session_id: 'S-2' } }, { state: 'running', claim: { kind: 'tab', claim_id: 'S-2' } }]) assert.equal(recordHolds({ read: () => ({ doc }) })({ card: 'C', sessionId: 'S-2' }), false, JSON.stringify(doc));
+  assert.throws(() => recordHolds({ read: () => ({ corrupt: true, reason: 'document changed outside the Store Writer' }) })({ card: 'C', sessionId: 'S' }), /can't be read from the Record \(document changed/);
+  assert.throws(() => recordHolds({ read: () => { throw new Error('store gone'); } })({ card: 'C', sessionId: 'S' }), /store gone/);
+});
+
+test('L925: stopSession writes its stop request into the runner\'s requests folder, only while that folder is the owner\'s plain folder', () => {
+  const used = syncWorld({ requests: { 'S-1': { state: 'started' }, 'S-9': { state: 'started' }, 'S-5': { state: 'stopped' } } });
+  assert.equal(used.ports.stopSession('S-5'), true, 'used up and nothing listed: gone');
+  assert.deepEqual(used.writes, []);
+  assert.equal(used.ports.stopSession('S-1'), false);
+  assert.deepEqual(used.writes, [[join(used.c.workerRequestsDir, 'stop-S-1.json'), '{"stop":"S-1"}\n']]);
+  for (const [folder, re] of [[fakeSt({ dir: true, uid: ME }), /is not the owner's \(workerUid\)/], [fakeSt({ dir: true, link: true }), /is not a plain folder/], [fakeSt(), /is not a plain folder/]]) {
+    const w = syncWorld({ folder });
+    assert.throws(() => w.ports.stopSession('S-1'), re);
+    assert.deepEqual(w.writes, [], 'nothing written');
+  }
+  assert.match(requestsFolderProblem('/nope/requests', OWNER), /can't be read \(ENOENT\)/);
+});
+
+test('L925, L896: the worker runner is the owner\'s user and its requests folder is there, or the start is refused; the ports are wired', () => {
+  const w = mirrorWorld();
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: ME + 9 } }), /workerUid must be the owner's Mac user id, hostLockUid's/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerUid: undefined } }), /workerUid must be/);
+  assert.throws(() => workerPorts({ ...w.ctx, config: { ...w.config, workerRequestsDir: join(w.base, 'nope') } }), /requests folder \(workerRequestsDir\) .*nope can't be read \(ENOENT\)/);
+  const ports = workerPorts(w.ctx);
+  assert.equal(ports.product, P, 'the stop step\'s product is the config\'s (L927)');
+  for (const k of ['sessions', 'board', 'outboxSessions', 'probe', 'stopSession']) assert.equal(typeof ports[k], 'function', k);
+  // The real reads: this test's runner folder is this user's, not the owner's, so the status is never trusted.
+  assert.throws(() => ports.sessions(), /the worker runner's folder is not owned by the owner's user/);
 });

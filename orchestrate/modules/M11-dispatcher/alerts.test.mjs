@@ -792,3 +792,14 @@ test('#403 r3 m2, r4 c1: plain() puts a space for every control character, separ
   assert.equal(plain('ab\u{1F600}', 3), 'ab', 'a cut through an emoji leaves no half of it');
   assert.equal(plain('ab\u{1F600}', 4), 'ab\u{1F600}');
 });
+
+test('L930 c1: plain() puts a space for a lone half of a pair kept in the text, and keeps a whole pair', () => {
+  for (const c of ['\uD800', '\uDBFF', '\uDC00', '\uDFFF']) {
+    assert.equal(plain(`a${c}b`), 'a b', JSON.stringify(c));
+    assert.equal(plain(`${c}`), ' ', `${JSON.stringify(c)} alone`);
+  }
+  // A low half before a high half is two lone halves, not a pair.
+  assert.equal(plain('a\uDC00\uD800b'), 'a b');
+  assert.equal(plain('a\u{1F600}b'), 'a\u{1F600}b');
+  assert.ok(plain('x\uD83Dy\uDE00z').isWellFormed(), 'the answer holds no lone half');
+});
