@@ -29,7 +29,7 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
 |---|---|---|
 | `node setup.mjs users-folders --config <file> --dry-run` | prints every step it would take; changes nothing (`--config` names your editable copy; there is no `--config` under `sudo`) | no |
 | `sudo /usr/local/bin/node setup.mjs users-folders` | makes the three users (ids 600-699, all different; hidden, shell `/usr/bin/false`, password `*`, own group with no members, never admin), then the folders (owner, group, exact mode, exact access list), then runs `check` | yes |
-| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 51 FAILs of 55 items for one product (about 9 more for each extra product: its copies and outbox folders, L836), which is expected | no |
+| `node setup.mjs check --config <file>` | read only: `PASS`, `FAIL` or `NEEDS ROOT` per item; exit 1 on any FAIL, exit 3 if all that could be seen passed but some items need root. Before setup it lists 53 FAILs of 59 items for one product (about 9 more for each extra product: its copies and outbox folders, L836), which is expected | no |
 | `sudo /usr/local/bin/node setup.mjs check` | the same with nothing hidden: the sudo-rule and password-hash items can be read | yes |
 | `sudo /usr/local/bin/node setup.mjs proofs` | runs, as the owner's user, the "cannot" proofs: the record, hooks, settings, launcher, lead-main and claude-code copies, the outbox folders cannot be written and the robot keys cannot be read (two controls first) | yes |
 
@@ -52,12 +52,20 @@ A config that does not parse is reported as "not valid JSON": the file's own tex
   whose children belong to different users (`products/<product>`) is root's, so none of them can rename another's away.
 - **One outbox root.** `outboxes/` is root's 0755; under it one folder for each role the review runner starts
   (`reviewer/`, `auditor/` and `plan_reviewer/`, `RUNNER_ROLES`) belongs to `review` (0755), so no worker can write their
-  answers (L722). An earlier setup built from the plan-reviewer branch alone made `plan_reviewer/` the workers' user's; `users-folders` refuses to take that over, so look inside it, remove it by hand, then run `users-folders` again. Each worker role has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
+  answers (L722). An earlier setup built from the plan-reviewer branch alone made `plan_reviewer/` the workers' user's; `users-folders` refuses to take that over, so look inside it, remove it by hand, then run `users-folders` again. Each other worker role but the two the worker runner starts has a folder owned by the workers' user, group wheel, 0750, with one access-list entry letting `orchestrate`
   list, read and clear (`delete_child`), with inheritance. The worker seals its own hand-in file 0440. `check` compares the
   access list and the group exactly: a missing or an extra entry FAILs.
   **One folder per product, too (L836).** Beside the role folders, `outboxes/<product>/` is root's 0755, and under it
   `worker/` and `script/` (the roles the worker runner starts) are the workers' user's 0750 with the same `orchestrate`
-  entry. The worker runner writes a session's outbox at `outboxes/<product>/<role>/<session>`, so a session can be
+  entry. Those two roles have no flat folder (L914): `outboxes/worker/` and `outboxes/script/` left by an earlier setup
+  FAIL in `check` by name, with what they hold (a hand-in there may not be taken in yet); check each holds nothing unsaved,
+  then remove it by hand. Setup removes nothing.
+- **The worker runner's folders (L921).** `worker-runner/` is root's 0755, so none under it can be renamed away; under it,
+  each apart from the others and from every copies, outbox and mirror folder: `requests/` (the owner's, group wheel, 0700,
+  with one access-list entry letting `orchestrate` only go in and add a file, `search,add_file`: the Dispatcher writes
+  each request new; the runner reads and removes it), `runner/` (the owner's 0755: the runner's status, which the
+  Dispatcher reads and refuses when others can write the folder, its memory, settings and lock) and `snapshots/` (the
+  owner's 0755: one rules snapshot per product, which its sessions' hooks read). The worker runner writes a session's outbox at `outboxes/<product>/<role>/<session>`, so a session can be
   denied every other product's whole folder (which names a product may take: `shared/product-paths.mjs`). The review roles take no product: their
   folders, and `review-copies/`, stay as they are. `proofs` checks, per product, that the owner CAN write
   `worker-copies/<product>` and both role folders (controls) and can NOT write `outboxes/<product>` itself.
