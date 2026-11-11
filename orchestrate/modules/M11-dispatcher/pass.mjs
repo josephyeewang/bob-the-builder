@@ -38,6 +38,7 @@ import { exactReverse } from './undo.mjs';
 import { cardBranch } from '../M4-workshop/git/branch.mjs';
 import { outboxProblemFor } from '../M4-workshop/git/session-outbox.mjs';
 import { FINAL_STATES, OWNER_WAIT_WHO, PAUSED_WAIT_WHAT } from '../../shared/record.mjs';
+import { REVIEW_OVER } from '../M9-record/writer.mjs';
 
 export const STOP_FACT = (sid) => `stop-${sid}`;
 /** The mark that a stop's unsaved work was told (L130 M9). */
@@ -367,8 +368,10 @@ export async function stopPass({ rec, rules, now, clock = () => now, account, pr
 
 const REVIEW_KINDS = ['review', 'audit'];
 // Only a cancel or an ended card ends a reviewer (L947): red, paused and a split don't (reviewers are free of the caps and
-// report no size), and a card waiting on Joe may be waiting on this very review.
-const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : FINAL_STATES.card.includes(card.state) ? 'card_ended' : null);
+// report no size), and a card waiting on Joe may be waiting on this very review. Ended is M9's REVIEW_OVER (L960), the
+// states whose verdict M9 throws away, not FINAL_STATES: an auditor on a closed card (closed can still move to reverted)
+// does work M9 would keep, so it runs on.
+const reviewStopReason = (card) => (card.state === 'cancelled' ? 'cancel' : REVIEW_OVER.includes(card.state) ? 'card_ended' : null);
 
 /**
  * L946: ask the review runner to end each reviewer or auditor (product null, kind review or audit) whose card is in this

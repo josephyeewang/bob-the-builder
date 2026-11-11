@@ -2257,7 +2257,7 @@ test('L946: with no product named, no reviewer is asked to stop either (L943 m2)
 });
 
 test('L946: asks are made at once (a hung one is a failure, never an ask, and holds no other); one tell names every failure', async () => {
-  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD }), card('C-8', { state: 'closed', head: HD })]);
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'cancelled', head: HD }), card('C-8', { state: 'failed', head: HD })]);
   usageInto(rec);
   const alert = fakeAlert({ answer: true });
   const started = [];
@@ -2295,4 +2295,17 @@ test('L946: a failing stop is done once its session is gone, one no longer due s
     const d = rec.read('fact', id)?.doc ?? {};
     assert.equal('moved' in d || 'saved' in d, false, `${id} carries nothing reparkStopped or tellUnsaved reads`);
   }
+});
+
+// L960: ended is M9's REVIEW_OVER, not FINAL_STATES. A closed card's auditor does work M9 keeps (closed can still be
+// reverted), so it is not stopped; a reverted or closed_no_answer card's is.
+test('L960: an auditor on a closed card is not asked to stop; one on a reverted or closed_no_answer card is', async () => {
+  const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state: 'closed', head: HD }), card('C-8', { state: 'reverted', head: HD }), card('C-9', { state: 'closed_no_answer', head: HD })]);
+  usageInto(rec);
+  const asked = [];
+  const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('A-7', 'auditor', 'C-7'), rv('A-8', 'auditor', 'C-8'), rv('A-9', 'auditor', 'C-9')],
+    probe: () => idle, alert: fakeAlert(), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x.card); return { ok: true }; } });
+  assert.deepEqual(asked, ['C-8', 'C-9'], 'the closed card\'s auditor runs on');
+  assert.deepEqual(r.reviewStops, [['A-8', 'card_ended', 'asked'], ['A-9', 'card_ended', 'asked']]);
+  assert.equal(rec.read('fact', REVIEW_STOP_FACT('A-7')), null);
 });
