@@ -1775,4 +1775,10 @@ test('L1006: a script outbox with its own card\'s saved bundle gives no alert', 
   assert.deepEqual(out, [], JSON.stringify(out));
   assert.deepEqual(w.calls.alerts, []);
   assert.deepEqual([...PRODUCT_OUTBOX_ROLES].sort(), ['script', 'worker']);
+  // Only its own card's: another card's bundle in a script outbox is still refused and told.
+  const ob2 = box(w, 'script', 'S-4');
+  writeFileSync(join(ob2, 'bundle-C-9.bundle'), 'a bundle of another card');
+  const o2 = await intakePass({ rec, sessions: [{ sessionId: 'S-4', role: 'script', product: 'p1', outbox: ob2, uid: UID, card: 'C-3' }], ...w.ports });
+  assert.equal(o2.length, 1); assert.ok(o2[0].refused, JSON.stringify(o2));
+  assert.equal(w.calls.alerts.length, 1, w.calls.alerts.join(' | '));
 });

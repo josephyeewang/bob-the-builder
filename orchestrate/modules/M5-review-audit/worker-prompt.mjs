@@ -20,7 +20,7 @@
 // headings in list items, underlined headings, fences not at the start of their line or left open, markup lines,
 // and hidden text), and the prompt says the brief is what
 // lies between # Card <id> and # Rules, so a field that copies the rules' or the hand-in's wording stays brief text.
-// Those lists can always be outflanked by one more look-alike (\# Rules, **# Rules**, a sharp-sign glyph, &#35;), so
+// Those lists can always be outflanked by one more look-alike (\# Rules, **# Rules**, a viewdata square U+2317, &#35;), so
 // they are the second guard (L1006 m-A): each system heading carries a random tag made for this one prompt (96 bits),
 // the opening line says only headings carrying it are the system's, and a brief holding the tag gives no prompt. A
 // brief can copy a heading's look but can not know its tag.
@@ -112,7 +112,7 @@ const BRIEF_HEADING = /^## [A-Za-z][A-Za-z ]*$/;
 export const BRIEF_MAX_BYTES = 200_000;
 export const RULES_HEADING = '# Rules';
 export const HANDIN_HEADING = '# Hand-in';
-// The heading tag: lower-case hex, 64 bits or more (a fresh 96 by default).
+// The heading tag: 16 to 64 lower-case hex characters (64 to 256 bits; a fresh 96 by default).
 const TAG = /^[0-9a-f]{16,64}$/;
 export const newHeadingTag = () => randomBytes(12).toString('hex');
 // The two kinds this prompt tells the worker to hand in; both must be on its profile, or there is no prompt.
@@ -134,9 +134,11 @@ export const handinLine = (card) => JSON.stringify({ entity: 'card', id: card, f
  * `tag` (option): the system headings' tag, fresh and random for each prompt unless given (tests); it comes back with
  * the text.
  */
-export function workerPrompt(x = {}, { kinds = DESIGN_PROFILES.worker?.outbox ?? [], tag = newHeadingTag() } = {}) {
+export function workerPrompt(x = {}, opts = {}) {
   const no = (reason) => ({ ok: false, reason: `no worker prompt: ${reason}` });
   try {
+    // Self-review m2: the defaults are made inside the try, so a bad options value or a failed random read is a refusal.
+    const { kinds = DESIGN_PROFILES.worker?.outbox ?? [], tag = newHeadingTag() } = opts ?? {};
     const { role, kind, card, cardDoc: d, product, head, outbox } = x ?? {};
     if (role !== 'worker') return no(role === 'script' ? 'a script card\'s prompt is not written yet' : `${JSON.stringify(role)} is not the worker role`);
     if (kind !== 'editing') return no(`the session kind ${JSON.stringify(kind ?? null).slice(0, 40)} has no prompt here (only "editing")`);
@@ -163,8 +165,12 @@ export function workerPrompt(x = {}, { kinds = DESIGN_PROFILES.worker?.outbox ??
     try { brief = briefText(card, d.brief); } catch (e) { return no(String(e?.message ?? e)); }
     // Checked on the finished text, so whatever the brief's fields are, what the worker reads is plain.
     // The tag is looked for in the brief as a reader would see it: full-width or other compatibility forms folded, and
-    // the invisible soft hyphen and joiners taken out.
-    if (brief.normalize('NFKC').toLowerCase().replace(/[\u00ad\u200b-\u200d\u2060]/g, '').includes(tag)) return no(`card ${card}'s brief holds this prompt's heading tag`);
+    // the invisible soft hyphen, zero-width space, joiners and word joiner taken out. Nor may the brief hold a decoy: a
+    // bracketed hex run shaped like a tag (self-review m1), which a reader could take for this one. A commit hash in a
+    // brief is never bracketed like that.
+    const folded = brief.normalize('NFKC').toLowerCase().replace(/[\u00ad\u200b-\u200d\u2060]/g, '');
+    if (folded.includes(tag)) return no(`card ${card}'s brief holds this prompt's heading tag`);
+    if (/\[[0-9a-f]{16,64}\]/.test(folded)) return no(`card ${card}'s brief holds a bracketed hex run shaped like a heading tag`);
     if (CONTROL.test(brief.replace(REGION_FLAG, ''))) return no(`card ${card}'s brief holds a control character`);
     if ((brief.match(IDEO_SELECTOR) ?? []).length > IDEO_SELECTORS_MAX) return no(`card ${card}'s brief holds more than ${IDEO_SELECTORS_MAX} ideographic variation selectors`);
     if (HIDDEN_SPACE.test(brief)) return no(`card ${card}'s brief holds a line ending in space or an unusual space character`);
