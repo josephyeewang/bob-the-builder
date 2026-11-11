@@ -2563,3 +2563,44 @@ test('L962 m6: a stop by card, role and head ends as a failure with no alert to 
   writeStopRequest({ dir: f.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
   assert.deepEqual((await runnerPass(f.ctx)).alerts.map((a) => a.id), ['stop-failed-S-1']);
 });
+
+test('L971 a: a stop by id beside a stop by card, role and head in one pass tells Joe, in either order of the files', async () => {
+  for (const [idName, targetName] of [['aaaa-id', 'bbbb-target'], ['bbbb-id', 'aaaa-target']]) {
+    const { w, groups } = await stopWorld();
+    w.ask({ request_id: 'b-1' });
+    await runnerPass(w.ctx);
+    writeStopRequest({ dir: w.requests, requestId: 'b-1', newName: () => idName });
+    writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD }, newName: () => targetName });
+    await runnerPass(w.ctx);
+    assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], `stopped once (${idName} first: ${idName < targetName})`);
+    assert.deepEqual((await runnerPass(w.ctx)).alerts.map((a) => a.id), ['stopped-S-1'], `told (${idName} ${targetName})`);
+  }
+});
+
+test('L971 gaps: a stop by card, role and head that works only on its retry is still not told; one ignored 5 minutes is', async () => {
+  const { w, groups } = await stopWorld({ fail: 1 });
+  w.ask({ request_id: 'rt-1' });
+  await runnerPass(w.ctx);
+  writeStopRequest({ dir: w.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  const first = await runnerPass(w.ctx);
+  assert.deepEqual(groups, [], 'the first try failed');
+  assert.deepEqual(first.alerts, []);
+  // Its retry, a later pass read back from state.json, keeps the mark.
+  let n = 0;
+  while (!groups.length && n++ < 6) { w.clock.t += 60_000; assert.deepEqual((await runnerPass(w.ctx)).alerts, []); }
+  assert.deepEqual(groups.map((g) => g.sessionId), ['S-1'], 'stopped on a retry');
+  assert.deepEqual((await runnerPass(w.ctx)).alerts, [], 'its end tells nothing');
+  const st = JSON.parse(readFileSync(join(w.root, 'state.json'), 'utf8'));
+  assert.equal(Object.values(st.attempts).find((a) => a.session_id === 'S-1').held, true, 'still held');
+  // Stopped by card, role and head, but still running 5 minutes on: told once, as any stop is.
+  const u = await ready();
+  u.ctx.stopGroup = async () => {};
+  u.ask({ request_id: 'ig-1' });
+  await runnerPass(u.ctx);
+  writeStopRequest({ dir: u.requests, target: { card: 'C-1', role: 'reviewer', head: HEAD } });
+  await runnerPass(u.ctx);
+  u.clock.t += 4 * 60_000;
+  assert.deepEqual((await runnerPass(u.ctx)).alerts, []);
+  u.clock.t += 60_000;
+  assert.deepEqual((await runnerPass(u.ctx)).alerts.map((a) => a.id), ['stop-ignored-S-1']);
+});

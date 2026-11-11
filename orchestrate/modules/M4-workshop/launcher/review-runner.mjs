@@ -805,11 +805,12 @@ export async function runnerPass(ctx) {
     else if (doc.stopped_by_request) {
       // Stopped at the Dispatcher's request (L935): told as that, in place of the silent-end alert, and with no "review
       // again": the Dispatcher stopped it on purpose. It still counts as a failure, so the head can't pass.
-      // A stop by card, role and head (L946) is the Dispatcher's user's own cancel (L962 m6): Joe is not told of it. Its
+      // A stop by card, role and head (L946) is the Dispatcher's user's own cancel (L962 m6): Joe is not told of it, unless a
+      // stop by its request id named it too (L971 a). Its
       // failure stays (the attempt held, its ended record, the status's stopped_by_request), so the head still can't
       // pass; only the tell is dropped. A stop by request id still tells, as do a stop that failed and one ignored.
       state.attempts[k] = { ...done, held: true, last_reason: 'stopped at the Dispatcher\'s request' };
-      if (doc.stop_by_target !== true) alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} was stopped at the Dispatcher's request ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
+      if (doc.stop_by_target !== true || doc.stop_by_id === true) alert(`stopped-${doc.session_id}`, `The ${doc.role} session ${doc.session_id} for ${where} was stopped at the Dispatcher's request ${sha ? 'and the verdict it wrote does not count' : 'before it handed in a verdict'}; ${left.said}. That counts as a failure, so this head can't pass, and nothing starts again on its own; a new push gets a new review.`);
     } else if (said === 'none' && left.empty) {
       // The attempt names what it is for (L733); the offer itself takes card, role and head from the launch record (#307).
       state.attempts[k] = { ...done, held: true, tap: true, card: doc.card, role: doc.role, head: doc.head, last_reason: 'ended with no verdict' };
@@ -1226,6 +1227,9 @@ export async function runnerPass(ctx) {
     // One started before stops were (no `stoppable`, re-review m3), or on a request file someone other than the
     // Dispatcher's user wrote (whose id that someone knows; re-review 2 M1), is never reached.
     if (r && r.stoppable !== true) { stopSaid('that session was not started on a request the Dispatcher\'s user wrote to this runner, which a stop does not reach; nothing was stopped', name); continue; }
+    // Named by its request id (L971 a): its end tells Joe, whatever stop did the stopping and in whatever order the stop
+    // files were read, so a stop by id is never silenced by a stop by card, role and head beside it.
+    if (r) r.stop_by_id = true;
     if (!r) {
       if (state.seen.includes(rid)) { stopSaid('no reviewer or auditor the runner is running was started on that request id (it has ended, never started, or is a plan reviewer\'s, which a stop never reaches); nothing was stopped', name); continue; }
       // Not seen yet. The Dispatcher names a request's file by its id, so one waiting in requests/ (this pass, or behind
