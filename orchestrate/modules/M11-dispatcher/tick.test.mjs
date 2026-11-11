@@ -516,14 +516,16 @@ test('L736 m5: a late pass with a low config deadline still queues the low-deadl
   writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
 import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
-export const seen = [];
+import { fakeAlert } from ${JSON.stringify(join(here, '../../test/fake-alert.test-helper.mjs'))};
+const alert = fakeAlert();
+export const seen = alert.texts;
 const now = ${T0};
 export const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FACT, { account: 'a', observed_at: new Date(now).toISOString() }],
   ['fact', USAGE_FACT('a'), usageFact({ week: 30, h5: 20, account: 'a', now })],
   ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
 export async function wire() {
   const noop = () => [];
-  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 2000, alert: (t) => { seen.push(t); }, board: noop, healthy: () => true,
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 2000, alert, board: noop, healthy: () => true,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => {}), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
@@ -836,13 +838,14 @@ test('audit 0b-6 r3 MAT-2: `node main.mjs` stuck on a port exits 2 at the run de
   writeFileSync(wiring, `import { recWith, rulesWith, usageFact } from ${JSON.stringify(join(here, 'fixtures.test-helper.mjs'))};
 import { ACCOUNT_FACT } from ${JSON.stringify(join(here, 'tick.mjs'))};
 import { USAGE_FACT } from ${JSON.stringify(join(here, 'usage.mjs'))};
+import { fakeAlert } from ${JSON.stringify(join(here, '../../test/fake-alert.test-helper.mjs'))};
 const now = Date.now();
 const rec = recWith([['product', 'p1', { state: 'active' }], ['fact', ACCOUNT_FACT, { account: 'a', observed_at: new Date(now).toISOString() }],
   ['fact', USAGE_FACT('a'), usageFact({ week: 30, h5: 20, account: 'a', now })],
   ['card', 'C-1', { state: 'ready', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], changed_at: new Date(now - 600000).toISOString() }]]);
 export async function wire() {
   const noop = () => [];
-  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 600000, alert: (t) => process.stderr.write('ALERT ' + t + '\\n'), board: noop, healthy: () => true,
+  return { rec, rules: rulesWith({}, { start_session: { decision: 'allow', reason: 'ok' } }), ports: { product: 'p1', stepDeadlineMs: 600000, alert: fakeAlert({ answer: (t) => process.stderr.write('ALERT ' + t + '\\n') }), board: noop, healthy: () => true,
     proposals: () => ({ products: [], ownerUid: 501 }), outboxSessions: noop, wait: async () => {}, leads: noop, sessions: noop, probe: () => null,
     launch: () => new Promise(() => { setInterval(() => {}, 1000); }), stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }),
     hasSession: () => true, gateAlive: () => true, hasReviewer: () => true, requestReview: () => ({ ok: true }), filesOf: noop,
