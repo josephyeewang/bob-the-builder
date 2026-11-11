@@ -661,6 +661,39 @@ test('L980: an undo whose reverse could not be read is held: no not_clean fact, 
   assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
 });
 
+// Self-review m3: a check that threw inside ("could not check: ...", not a failed read) says nothing about the change, so
+// gather keeps no finding: no not_clean fact, the card is not failed.
+test('L980: a reverse check that could not check records no not_clean fact and fails no card', async () => {
+  const w = world();
+  const flagged = await notCleanUndo(w);
+  const real = w.ctx.view;
+  const view = {};
+  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
+  view.commit = async (sha) => (sha === flagged ? {} : real.commit(sha));   // an odd answer: no parents list
+  w.ctx.view = view;
+  await gatePass(w.ctx);
+  const u = mergeOf(w, 'U-1');
+  assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
+});
+
+// Self-review m2: a reverse- fact there that is not the gate's own not_clean finding: the card is not failed, and the
+// owner is told once, not every pass.
+test('L980: a reverse fact the gate did not write fails no card and is told once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'fact', id: REVERSE_FACT('U-1'), doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: 'x' } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(mergeOf(w, 'U-1').doc.state, 'refused');
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  const told = w.alerts.filter((a) => a.type === 'merge_gate_unsure' && a.card === 'U-1');
+  assert.equal(told.length, 1, JSON.stringify(w.alerts));
+  assert.match(told[0].note, /not the gate's own not_clean finding/);
+  assert.ok(mergeOf(w, 'U-1').doc.not_clean_stuck_told_at);
+});
+
 test('L980: the first-cutover refusal (not a merge the gate made) writes no not_clean fact and fails no card', async () => {
   const w = world({ values: { 'product.cutover_stage': 'first' } });
   // A change put on main by hand, not by the gate, and its exact reverse.

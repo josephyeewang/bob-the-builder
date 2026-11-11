@@ -361,7 +361,15 @@ export async function gatePass(ctx) {
       const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() } });
       if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
       step(m, 'undo_not_clean', { fact: fid });
-    } else if (f.corrupt || f.doc?.state !== NOT_CLEAN || !factFrom(ACTOR, { id: fid, createdBy: record.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) return;
+    } else if (f.corrupt || f.doc?.state !== NOT_CLEAN || !factFrom(ACTOR, { id: fid, createdBy: record.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) {
+      // Self-review m2: a fact there that is not the gate's own not_clean finding: the card is never failed on it, and
+      // the owner is told once (not_clean_stuck_told_at), so the undo does not sit unseen.
+      if (m.doc.not_clean_stuck_told_at) return;
+      if (!alertTaken(alert, { type: 'merge_gate_unsure', merge: m.id, card: card.id, note: `undo ${card.id} can never be the exact reverse, but ${fid} is not the gate's own not_clean finding, so the card was not failed and no fix card will follow. Look at ${fid}.` })) return;
+      const r = write('merge', m, { not_clean_stuck_told_at: iso() });
+      if (!r.ok) alert({ type: 'merge_gate_write_refused', merge: m.id, to: 'not_clean_stuck_told', reason: r.reason });
+      return;
+    }
     const c = fresh('card', card.id);
     if (!['verified', 'approved'].includes(c?.doc?.state) || c.doc.head !== at || fresh('fact', fid)?.doc?.head !== at) return;
     const r = write('card', c, { state: 'failed' });
