@@ -15,7 +15,7 @@
 // mac.mjs `secure`. New folders are made while still root's, parents first; owners and modes are set deepest first, so
 // a parent that a robot user will own is handed over last.
 
-import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, workerCopiesPath } from './layout.mjs';
+import { BASE_MARKER, NO_SHELL, USERS, USER_ID_RANGE, aclText, baseMarkerPath, folderTable, homeOf, oldFlatOutboxPaths, workerCopiesPath } from './layout.mjs';
 import { baseChainProblem, guardOp } from './guard.mjs';
 
 const DSCL = '/usr/bin/dscl';
@@ -321,7 +321,22 @@ export function check(io, cfg, { alsoKnown = [] } = {}) {
   item(above === null, `folders above ${cfg.base} are root's alone, no links, no access lists`, above);
   { const b = baseProblem(io, cfg); item(!b.problem && !b.fresh, `${cfg.base} was made by this setup (root's ${BASE_MARKER} note is in it)`, b.problem ?? 'the base does not exist'); }
   const tableRows = folderTable(cfg);
-  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...alsoKnown]) });
+  // The runner roles' flat outbox folders (outboxes/worker, outboxes/script) that setup made before L914 are no entry the
+  // setup did not make: the check below names them and what they hold, so the outbox root's row does not FAIL on them too.
+  folderChecks(io, tableRows, ids, item, { known: new Set([...tableRows.map((r) => r.path), baseMarkerPath(cfg), ...oldFlatOutboxPaths(cfg), ...alsoKnown]) });
+  // L914: the worker runner's roles have their outboxes in each product's folder (L836), so setup makes their flat folders no
+  // more. One left from before is named with what it holds, for the owner to clear by hand: a session's hand-in there may
+  // not be taken in yet. Setup deletes nothing. Finder's own .DS_Store is let be.
+  for (const old of oldFlatOutboxPaths(cfg)) {
+    const what = `${old} is gone (L914: the ${old.split('/').pop()} outboxes are in each product's folder now)`;
+    let st = null; try { st = io.lstat(old); } catch (e) { if (e?.code !== 'ENOENT') { item(false, what, `it could not be looked at (${e?.code ?? e?.message})`); continue; } }
+    if (!st) { item(true, what); continue; }
+    if (!st.isDirectory() || st.isSymbolicLink()) { item(false, what, `it is still there (${st.isSymbolicLink() ? 'a link' : 'not a folder'}). Check that it holds nothing unsaved, then remove it; setup removes nothing itself`); continue; }
+    let names = null; try { names = io.list(old); } catch { item(false, what, 'it is still there, and its contents could not be listed'); continue; }
+    const left = names.filter((n) => n !== '.DS_Store').sort();
+    const one = left.length === 1;
+    item(false, what, `${left.length ? `it is still there and holds ${one ? 'an entry' : `${left.length} entries`}: ${left.slice(0, 5).map((n) => `${old}/${n}`).join(', ')}${left.length > 5 ? ` and ${left.length - 5} more` : ''}` : 'it is still there, empty'}. Check that ${left.length ? 'each holds' : 'it holds'} nothing unsaved (a hand-in not yet taken in), then remove it; setup removes nothing itself`);
+  }
   // The workers' copies folder is the owner's, so the root-only rule above does not list it. Since L836 it holds one folder
   // per product and nothing else: a copy made before (flat, `<copies>/<card>`, also one whose card is named as a product:
   // it has its own .git) or a dropped product's folder is named, for the owner to clear by hand. Setup deletes nothing:

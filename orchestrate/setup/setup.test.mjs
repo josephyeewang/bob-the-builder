@@ -11,7 +11,7 @@ import { REVIEW_USER } from '../modules/M4-workshop/launcher/review-user.mjs';
 import { readOutboxFile } from '../modules/M9-record/outbox.mjs';
 import { AI_ROLES } from '../shared/record.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
-import { BASE_MARKER, ORCHESTRATE_READ_ACL, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
+import { BASE_MARKER, FLAT_OUTBOX_ROLES, ORCHESTRATE_READ_ACL, PRODUCT_OUTBOX_ROLES, ROOT_CONFIG_PATH, USERS, USER_ID_RANGE, WORKER_ROLES, aclText, folderTable, homeOf, parseConfig } from './layout.mjs';
 import { nodeProblemOf, realIo, secureFolder } from './mac.mjs';
 import { aclEntries, adminAnswer, apply, check, parseDscl, plan, readUser } from './users-folders.mjs';
 import { proofList, runProofs } from './proofs.mjs';
@@ -87,7 +87,11 @@ test('the folder table: parents first, exact modes and owners, one outbox root w
   assert.deepEqual([...WORKER_ROLES].sort(), AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)).sort());
   assert.ok(WORKER_ROLES.includes('worker') && WORKER_ROLES.includes('lead'));
   for (const r of ['reviewer', 'auditor', 'plan_reviewer']) assert.ok(!WORKER_ROLES.includes(r), `${r} is not a worker role`);
-  for (const r of WORKER_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['owner', 0o750, [ORCHESTRATE_READ_ACL]]);
+  // L914: the worker runner's roles have no flat folder; theirs are each product's (L836, the L836 test below).
+  assert.deepEqual([...FLAT_OUTBOX_ROLES].sort(), WORKER_ROLES.filter((r) => !PRODUCT_OUTBOX_ROLES.includes(r)).sort());
+  assert.ok(PRODUCT_OUTBOX_ROLES.includes('worker') && PRODUCT_OUTBOX_ROLES.includes('script') && FLAT_OUTBOX_ROLES.includes('lead'));
+  for (const r of FLAT_OUTBOX_ROLES) assert.deepEqual([by(`outboxes/${r}`).owner, by(`outboxes/${r}`).mode, by(`outboxes/${r}`).acl], ['owner', 0o750, [ORCHESTRATE_READ_ACL]]);
+  for (const r of PRODUCT_OUTBOX_ROLES) assert.equal(by(`outboxes/${r}`), undefined, `no flat ${r} folder (L914)`);
 });
 
 test('parseDscl reads the shapes dscl prints', () => {
@@ -102,7 +106,7 @@ test('dry run: prints every step, changes nothing, needs no root', () => {
   assert.match(r.text, /would run: dscl \. -create \/Users\/review UserShell \/usr\/bin\/false/);
   assert.match(r.text, /would run: mkdir -m 700 \/Library\/orch-test\/outboxes\/reviewer/);
   assert.match(r.text, /set owner and mode of \/Library\/orch-test\/outboxes\/reviewer: chown 602:602, chmod 755/);
-  assert.match(r.text, /set the access list of \/Library\/orch-test\/outboxes\/worker to user:orchestrate allow delete_child,directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search/);
+  assert.match(r.text, /set the access list of \/Library\/orch-test\/outboxes\/lead to user:orchestrate allow delete_child,directory_inherit,file_inherit,list,readattr,readextattr,readsecurity,search/);
   assert.match(r.text, /dry run: \d+ step\(s\), nothing changed/);
   assert.equal(mac.log.length, 0, 'no changing call was made');
   assert.equal(mac.users.size, 1);
@@ -202,8 +206,9 @@ test('M9\'s own reader reads the table\'s paths: one worker file and one verdict
   chmodSync(join(root, 'reviewer', 'sess-2'), 0o755);
   const v = readOutboxFile({ outboxRoot: root, uids: { worker: me + 1, reviewer: me, auditor: me }, tag: { role: 'reviewer', sessionId: 'sess-2' }, file: verdictFile });
   assert.equal(v.ok, true, v.reason);
-  // and each role has its folder under that one root (no other root is needed)
-  for (const r of AI_ROLES) assert.ok(statSync(join(root, r)).isDirectory(), r);
+  // and each role has its folder under that one root (no other root is needed): the worker runner's roles in each
+  // product's folder (L836, L914), the rest flat
+  for (const r of AI_ROLES) assert.ok(statSync(PRODUCT_OUTBOX_ROLES.includes(r) ? join(root, 'alpha', r) : join(root, r)).isDirectory(), r);
 });
 
 test('a run cut off at ANY step is finished by the next run: nothing deleted, only the missing attributes written', () => {
@@ -434,7 +439,8 @@ test('PLANT a missing folder → caught by "missing"; apply makes it', () => {
 test('worker outbox folders carry exactly the one orchestrate entry: apply SETS it (it is not stripped), check compares it exactly', { skip: !isDarwin }, () => {
   const mac = applied();
   const want = aclText(ORCHESTRATE_READ_ACL);
-  assert.deepEqual(aclEntries(mac, P('outboxes/worker')).entries, [want]);
+  assert.deepEqual(aclEntries(mac, P('outboxes/lead')).entries, [want]);
+  assert.deepEqual(aclEntries(mac, P('outboxes/alpha/worker')).entries, [want]);
   assert.deepEqual(aclEntries(mac, P('outboxes/reviewer')).entries, []);
   assert.deepEqual(fails(mac), []);
   // a second run leaves it alone
@@ -448,10 +454,10 @@ test('PLANT the orchestrate entry missing → caught ("is missing"); apply sets 
 });
 
 test('PLANT an EXTRA entry beside the orchestrate one → caught ("not wanted"); apply removes it and keeps the wanted one', { skip: !isDarwin }, () => {
-  const mac = applied(); assert.equal(spawnSync('/bin/chmod', ['-h', '+a', 'everyone allow write,delete_child', mac.at(P('outboxes/worker'))]).status, 0);
+  const mac = applied(); assert.equal(spawnSync('/bin/chmod', ['-h', '+a', 'everyone allow write,delete_child', mac.at(P('outboxes/lead'))]).status, 0);
   const f = fails(mac); assert.equal(f.length, 1); assert.match(f[0].why, /access list has an entry that is not wanted: group:everyone allow/);
   assert.equal(run(mac, ['users-folders']).code, 0); assert.deepEqual(fails(mac), []);
-  assert.deepEqual(aclEntries(mac, P('outboxes/worker')).entries, [aclText(ORCHESTRATE_READ_ACL)]);
+  assert.deepEqual(aclEntries(mac, P('outboxes/lead')).entries, [aclText(ORCHESTRATE_READ_ACL)]);
 });
 
 test('PLANT the orchestrate entry with the wrong permissions (it can also write) → caught as one missing and one not wanted', { skip: !isDarwin }, () => {
@@ -480,10 +486,10 @@ test('a made folder does not keep an access list it inherited (c3)', { skip: !is
 
 test('the inherited entry on a NEW folder under an allowed parent is cleared (c3): a made folder under the base', { skip: !isDarwin }, () => {
   const mac = applied();
-  // make a new folder under outboxes/worker (which carries the inheriting entry) and look at it: it shows `inherited`
-  const sub = mac.at(P('outboxes/worker/sess')); mkdirSync(sub);
+  // make a new folder under outboxes/lead (which carries the inheriting entry) and look at it: it shows `inherited`
+  const sub = mac.at(P('outboxes/lead/sess')); mkdirSync(sub);
   assert.match(spawnSync('/bin/ls', ['-led', sub], { encoding: 'utf8' }).stdout, /inherited allow/);
-  assert.ok(aclEntries(mac, P('outboxes/worker/sess')).entries[0].includes(' inherited '), 'the check reads an inherited entry as an entry, so a table folder that has one FAILs');
+  assert.ok(aclEntries(mac, P('outboxes/lead/sess')).entries[0].includes(' inherited '), 'the check reads an inherited entry as an entry, so a table folder that has one FAILs');
 });
 
 test('PLANT the folder above the base writable by others → caught by the chain check', () => {
@@ -777,6 +783,84 @@ test('L836 check: the workers\' copies folder holds only the config\'s product f
   mac.list = list;
 });
 
+test('L914 check: a flat outbox folder of a worker runner role, left from before, FAILs naming what it holds and is not removed', () => {
+  const mac = applied();
+  const row = (r) => check(mac, cfg).find((i) => i.what.startsWith(`${P(`outboxes/${r}`)} is gone`));
+  for (const r of PRODUCT_OUTBOX_ROLES) assert.deepEqual(row(r), { ok: true, what: `${P(`outboxes/${r}`)} is gone (L914: the ${r} outboxes are in each product's folder now)` }, r);
+  assert.deepEqual(check(mac, cfg).filter((i) => !i.ok), []);
+  // Left from before with a hand-in in it: named, and the outbox root's own row does not FAIL on it too.
+  const W = (s = '') => mac.at(P(`outboxes/worker${s}`));
+  mkdirSync(W('/sess-1'), { recursive: true }); writeFileSync(W('/sess-1/report.md'), 'x'); writeFileSync(W('/.DS_Store'), '');
+  let i = row('worker'); assert.equal(i.ok, false);
+  assert.match(i.why, new RegExp(`^it is still there and holds an entry: ${P('outboxes/worker/sess-1')}\\. Check that each holds nothing unsaved \\(a hand-in not yet taken in\\), then remove it; setup removes nothing itself$`));
+  assert.deepEqual(check(mac, cfg).filter((x) => !x.ok).map((x) => x.what), [i.what], 'only this row FAILs: not the outbox root\'s');
+  assert.equal(run(mac, ['check']).code, 1);
+  // The apply leaves it too, and says it still FAILs (the owner clears it by hand).
+  { const r = run(mac, ['users-folders']); assert.equal(r.code, 1, r.text); assert.match(r.text, /1 item\(s\) still FAIL after the run/); }
+  assert.ok(existsSync(W('/sess-1/report.md')), 'setup removes nothing');
+  for (const n of ['a', 'b', 'c', 'd', 'e', 'f']) mkdirSync(W(`/${n}`));
+  assert.match(row('worker').why, new RegExp(`^it is still there and holds 7 entries: ${['a', 'b', 'c', 'd', 'e'].map((n) => P(`outboxes/worker/${n}`)).join(', ')} and 2 more\\. Check that each holds`));
+  rmSync(W(), { recursive: true });
+  // Empty, a file, a link: each named; gone again: PASS.
+  mkdirSync(mac.at(P('outboxes/script')));
+  assert.match(row('script').why, /^it is still there, empty\. Check that it holds nothing unsaved/);
+  rmSync(mac.at(P('outboxes/script')), { recursive: true }); writeFileSync(mac.at(P('outboxes/script')), 'x');
+  assert.match(row('script').why, /^it is still there \(not a folder\)\. Check that it holds nothing unsaved, then remove it; setup removes nothing itself$/);
+  rmSync(mac.at(P('outboxes/script'))); symlinkSync(mac.at(P('outboxes/alpha/script')), mac.at(P('outboxes/script')));
+  assert.match(row('script').why, /^it is still there \(a link\)\./);
+  rmSync(mac.at(P('outboxes/script'))); assert.equal(row('script').ok, true);
+  // A folder that cannot be listed or looked at FAILs rather than passes.
+  mkdirSync(W());
+  const list = mac.list; mac.list = (d) => { if (d === P('outboxes/worker')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return list(d); };
+  assert.equal(row('worker').why, 'it is still there, and its contents could not be listed'); mac.list = list;
+  const lstat = mac.lstat; mac.lstat = (q) => { if (q === P('outboxes/worker')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); return lstat(q); };
+  assert.equal(row('worker').why, 'it could not be looked at (EACCES)'); mac.lstat = lstat;
+  rmSync(W(), { recursive: true }); assert.deepEqual(check(mac, cfg).filter((x) => !x.ok), []);
+  // Any other entry in the root-owned outbox root still FAILs on the root's row (the L914 names are the only ones let be).
+  mkdirSync(mac.at(P('outboxes/stray')));
+  assert.match(check(mac, cfg).find((x) => !x.ok).why, /holds an entry the setup did not make: stray/);
+  rmSync(mac.at(P('outboxes/stray')), { recursive: true });
+});
+
+test('L921: the worker runner\'s requests, own and snapshots folders: each apart, no links, under a root-owned parent, as the runner and the Dispatcher read them', async () => {
+  const { WORKER_REQUESTS_ACL, WORKER_RUNNER_FOLDERS, mirrorPath, outboxRootPath, workerCopiesPath, workerRunnerPath, workerRunnerPaths } = await import('./layout.mjs');
+  const { runnerWallDirs } = await import('../modules/M4-workshop/launcher/render-settings.mjs');
+  const t = folderTable(cfg); const row = (p) => t.find((r) => r.path === p);
+  const w = workerRunnerPaths(cfg);
+  assert.deepEqual(Object.keys(w), ['requests', 'state', 'snapshots']);
+  assert.deepEqual(Object.keys(WORKER_RUNNER_FOLDERS), Object.keys(w));
+  assert.deepEqual([row(workerRunnerPath(cfg)).owner, row(workerRunnerPath(cfg)).mode, row(workerRunnerPath(cfg)).acl], ['root', 0o755, []]);
+  assert.deepEqual([row(w.requests).owner, row(w.requests).mode, row(w.requests).acl, row(w.requests).group], ['owner', 0o700, [WORKER_REQUESTS_ACL], 'root']);
+  assert.deepEqual([row(w.state).owner, row(w.state).mode, row(w.state).acl], ['owner', 0o755, []]);
+  assert.deepEqual([row(w.snapshots).owner, row(w.snapshots).mode, row(w.snapshots).acl], ['owner', 0o755, []]);
+  // orchestrate only goes in and adds a file (owner-status.mjs requestWriter writes exclusively): no list, read, delete or inherit.
+  assert.deepEqual([...WORKER_REQUESTS_ACL.perms].sort(), ['add_file', 'search']);
+  assert.equal(WORKER_REQUESTS_ACL.who, 'user:orchestrate');
+  // The Dispatcher reads the status through owner-status.mjs readOwnerStatus: the folder must be the owner's and not
+  // writable by others (plainOwned), or every pass refuses.
+  assert.equal(row(w.state).mode & 0o022, 0);
+  // Each apart from the others and from every copies, outbox and mirror folder (none is in another, either way round).
+  const inside = (a, b) => a === b || a.startsWith(`${b}/`);
+  const others = [workerCopiesPath(cfg), outboxRootPath(cfg), mirrorPath(cfg), join(cfg.base, 'review'), join(cfg.base, 'review-copies')];
+  const runner = Object.values(w);
+  for (const a of runner) {
+    for (const b of runner) if (a !== b) assert.ok(!inside(a, b) && !inside(b, a), `${a} apart from ${b}`);
+    for (const b of others) assert.ok(!inside(a, b) && !inside(b, a), `${a} apart from ${b}`);
+  }
+  // Every table row under them is one of these: nothing else is made in the runner's folders.
+  assert.deepEqual(t.filter((r) => inside(r.path, workerRunnerPath(cfg))).map((r) => r.path), [workerRunnerPath(cfg), ...runner]);
+  // As the runner's wall reads them (render-settings.mjs runnerWallDirs): plain, below a folder of their own, two apart.
+  const wall = runnerWallDirs({ requestsDir: w.requests, statusFile: join(w.state, 'status.json') });
+  assert.deepEqual(wall, { ok: true, dirs: [w.requests, w.state] });
+  // Made on the Mac as the table says, no link anywhere on the way.
+  const mac = applied();
+  for (const p of [workerRunnerPath(cfg), ...runner]) assert.ok(mac.lstat(p).isDirectory() && !mac.lstat(p).isSymbolicLink(), p);
+  assert.deepEqual(check(mac, cfg).filter((x) => !x.ok), []);
+  // A link put in place of one FAILs (its row), and setup does not follow it.
+  rmSync(mac.at(w.snapshots), { recursive: true }); symlinkSync(mac.at(w.state), mac.at(w.snapshots));
+  assert.ok(check(mac, cfg).some((x) => !x.ok && x.what.includes(w.snapshots)), 'a link in place of the snapshots folder FAILs');
+});
+
 test('PLANT the keys folder readable by the owner (mode 755) → the proof FAILs', () => {
   const mac = applied(); chmodSync(mac.at(P('keys')), 0o755);
   assert.ok(runProofs(mac, cfg).some((r) => !r.ok && /read the robot keys/.test(r.what)));
@@ -914,7 +998,8 @@ test('L836: each product has its own worker copies folder and outbox folder, mad
     assert.deepEqual(shape(row(places.copies)), shape(row(workerCopiesPath(cfg))), `${prod} copies as the copies folder`);
     assert.deepEqual(shape(row(places.outboxes)), shape(row(outboxRootPath(cfg))), `${prod} outboxes as the outbox root`);
     for (const r of PRODUCT_OUTBOX_ROLES) {
-      assert.deepEqual(shape(row(join(places.outboxes, r))), shape(row(join(outboxRootPath(cfg), r))), `${prod} ${r} as the ${r} folder`);
+      assert.deepEqual(shape(row(join(places.outboxes, r))), shape(row(join(outboxRootPath(cfg), 'lead'))), `${prod} ${r} as a flat worker role's folder`);
+      assert.equal(row(join(outboxRootPath(cfg), r)), undefined, `no flat ${r} folder (L914)`);
       assert.deepEqual(shape(row(join(places.outboxes, r))), ['owner', 0o750, JSON.stringify([ORCHESTRATE_READ_ACL])], `${prod} ${r}`);
     }
   }
