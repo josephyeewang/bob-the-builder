@@ -591,7 +591,7 @@ export const UNWIRED_FILES = Object.freeze({
   'modules/M1-front-door/': { files: 3, why: 'R-0b-162 D: the Front Door ports (frontDoorAlive, restartFrontDoor, sendFrontDoor); no job runs M1 yet' },
   'modules/M2-approvals/': { files: 3, why: 'R-0b-140 undo-flag, L135 transcript-copy, L86 required-keys: lead to place' },
   'modules/M3-lead/': { files: 2, why: 'R-0b-162 C: the Lead ports (leads, startLead) start the Lead that uses these (R-0b-143); L443: plan-go reaches the plan-review wording and its files' },
-  'modules/M4-workshop/': { files: 5, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor); save-work is reached by the worker runner since #378 (L874); R-0b-147 review-walls-proof; L601 required-keys, lead to place' },
+  'modules/M4-workshop/': { files: 6, why: 'R-0b-162 C/D: agent-seam (launch), send-safe (sendFrontDoor); L946 review-stop (writeStopRequest), lane 2 wires the Dispatcher stop step; save-work is reached by the worker runner since #378 (L874); R-0b-147 review-walls-proof; L601 required-keys, lead to place' },
   'modules/M6-merge-gate/': { files: 4, why: 'L236: gatePass in the robot job, once the robot App exists (R-0b-02); token.mjs is now reached by watch-run (L624)' },
   'modules/M9-record/': { files: 1, why: 'L86: required-keys, lead to place' },
   'modules/M10-rules/': { files: 4, why: 'R-0b-106 first-cutover fit check and known-gaps, L104 from-text, the hook rules snapshot: lead to place' },
