@@ -497,6 +497,19 @@ export async function prepareReviewCopy({ mirror, card, head, dest }) {
 }
 
 /** The real ports (the wiring gives `start`). */
+/**
+ * Stops a review session's whole process group (L935): only when `pid` leads its own group (ps says its group id is its
+ * pid), so a pid that leads none is refused, never a group it merely belongs to. Throws why it stopped nothing.
+ */
+export function stopGroupOf(pid, { ps = run, kill = (p, sig) => process.kill(p, sig) } = {}) {
+  if (!Number.isInteger(pid) || pid <= 1) throw new Error('not a process id');
+  const r = ps('/bin/ps', ['-o', 'pgid=', '-p', String(pid)]);
+  if (r.status !== 0) throw new Error(`process ${pid} is gone`);
+  const group = Number(String(r.stdout).trim());
+  if (group !== pid) throw new Error(`process ${pid} does not lead its own process group (its group is ${String(r.stdout).trim() || 'unknown'})`);
+  kill(-pid, 'SIGTERM');
+}
+
 export function realPorts(c, wiring, { node = realpathSync.native(process.execPath), owner = 0, budget = null, log = (s) => process.stderr.write(`${s}\n`) } = {}) {
   const uid = c.uids.reviewer;
   // What the launch checks read for one session (review-launch.mjs reviewChecks, L83 M-3).
@@ -550,6 +563,9 @@ export function realPorts(c, wiring, { node = realpathSync.native(process.execPa
       return sessionsFrom(r.stdout, c.claudeBin);
     },
     stop: ({ pid }) => { process.kill(pid, 'SIGTERM'); },
+    // A stop request (L935): the session's whole process group. claude starts detached (review-launch.mjs), so it leads its
+    // own group, whose id is its pid; one that does not lead it is refused, so no other group is reached.
+    stopGroup: ({ pid }) => stopGroupOf(pid),
     processName: (pid) => {
       if (!Number.isInteger(pid) || pid <= 0) return null;
       const r = run('/bin/ps', ['-o', 'command=', '-p', String(pid)]);
@@ -623,7 +639,8 @@ export async function main(argv, { log = (s) => process.stderr.write(`${s}\n`), 
   }
   const r = await pass(realPorts(c, wiring, { budget, log }));
   for (const s of r.started) log(`started ${s.role} ${s.session_id} for ${s.card} at ${s.head.slice(0, 7)}`);
-  for (const x of r.refused) log(`refused ${x.request}: ${x.reason}`);
+  // A review request's file name is its request id, which the runner never shows (L935): the refusal carries none.
+  for (const x of r.refused) log(`refused ${x.request ?? 'a request'}: ${x.reason}`);
   if (!r.ok) log(`review runner: ${r.error}`);
   return r.ok ? 0 : 1;
 }
