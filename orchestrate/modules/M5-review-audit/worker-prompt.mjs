@@ -15,7 +15,9 @@
 // here yet, and a script card's tools can't make a bundle, so each is refused with its reason until its own lands.
 //
 // The system's own parts sit under # headings (# Rules, # Hand-in) that no brief field can make (M3 refuses a heading
-// line in a field; this file refuses look-alike heading marks and code fences), and the prompt says the brief is what
+// line in a field; this file checks the finished text the way a Markdown reader reads it: look-alike heading marks,
+// headings in list items, underlined headings, fences not at the start of their line or left open, markup lines,
+// and hidden text), and the prompt says the brief is what
 // lies between # Card <id> and # Rules, so a field that copies the rules' or the hand-in's wording stays brief text.
 
 import { briefText } from '../M3-lead/task-brief.mjs';
@@ -31,10 +33,14 @@ const PLAIN_PRODUCT = /^[A-Za-z0-9._-]{1,64}$/;
 // Refused anywhere in the brief: a control character (other than a line break or a tab), a line or paragraph
 // separator, any format character but the three ordinary text uses (soft hyphen, ZWNJ, ZWJ), a private-use character,
 // the combining grapheme joiner, a tag character, or two in a row of the soft hyphen, the joiners and the variation
-// selectors (but a selector then a joiner, as emoji sequences use). Each is text a model reads but a person can't see;
-// ordinary Persian, Hindi and emoji text needs none of them (#460 r1 self-review). A flag of a region (a black flag,
-// two to six tag letters or digits, the cancel tag) is ordinary emoji: it is set aside before the check.
-const CONTROL = /[^\n\t\P{Cc}]|[\u2028\u2029\u034f\p{Co}\u{e0000}-\u{e007f}]|(?![\u00ad\u200c\u200d])\p{Cf}|(?![\ufe00-\ufe0f\u{e0100}-\u{e01ef}]\u200d)[\u00ad\u200c\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]{2}/u;
+// selectors (but a selector then a joiner, as emoji sequences use); an unassigned character; any other character that
+// draws as nothing (default-ignorable); the emoji selectors (U+FE0E/FE0F) but straight after an emoji; the ideographic
+// selectors (U+E0100-E01EF) but straight after a Han character (the other selectors are default-ignorable). One selector after any letter is
+// a hidden byte per letter ("emoji smuggling"). Each is text a model reads but a person can't see; ordinary Persian,
+// Hindi, CJK and emoji text needs none of them (#460 r1 self-review). A flag of a region (a black flag, two to six tag
+// letters or digits, the cancel tag) is ordinary emoji: it is set aside before the check.
+// Accepted limit: one soft hyphen or joiner between two letters still passes (a few bits a gap; ordinary text uses them).
+const CONTROL = /[^\n\t\P{Cc}]|[\u2028\u2029\u034f\p{Co}\p{Cn}\u{e0000}-\u{e007f}]|(?![\u00ad\u200c\u200d])\p{Cf}|(?![\u00ad\u200c\u200d\ufe0e\ufe0f\u{e0100}-\u{e01ef}])\p{Default_Ignorable_Code_Point}|(?<!\p{Emoji})[\ufe0e\ufe0f]|(?<!\p{Ideographic})[\u{e0100}-\u{e01ef}]|(?![\ufe00-\ufe0f\u{e0100}-\u{e01ef}]\u200d)[\u00ad\u200c\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]{2}/u;
 const REGION_FLAG = /\u{1f3f4}[\u{e0030}-\u{e0039}\u{e0061}-\u{e007a}]{2,6}\u{e007f}/gu;
 // What draws as blank: spaces, marks, the allowed format characters, Hangul fillers, the braille blank.
 const BLANK = String.raw`(?:[^\p{L}\p{N}\p{P}\p{S}]|[\u115f\u1160\u3164\uffa0\u2800])`;
@@ -81,7 +87,8 @@ function openFence(lines) {
   }
   return open !== null;
 }
-const OWNER_WORDS = /<outside-text source="[a-z-]+">[^<>]*<\/outside-text>/g;   // the shape M3 task-brief.mjs FENCE checks
+const OWNER_WORDS = /<outside-text source="[a-z-]+">[^<>]*<\/outside-text>/g;
+const OWNER_TAGS = /^<outside-text source="[a-z-]+">|<\/outside-text>$/g;   // the shape M3 task-brief.mjs FENCE checks
 // The finished brief's only heading lines: its own "# Card <id>" first, then M3's "## <section>" ones.
 const BRIEF_HEADING = /^## [A-Za-z][A-Za-z ]*$/;
 export const BRIEF_MAX_BYTES = 200_000;
@@ -130,6 +137,8 @@ export function workerPrompt(x = {}, { kinds = DESIGN_PROFILES.worker?.outbox ??
     // Checked on the finished text, so whatever the brief's fields are, what the worker reads is plain.
     if (CONTROL.test(brief.replace(REGION_FLAG, ''))) return no(`card ${card}'s brief holds a control character`);
     if (Buffer.byteLength(brief, 'utf8') > BRIEF_MAX_BYTES) return no(`card ${card}'s brief is over ${BRIEF_MAX_BYTES} bytes`);
+    // Inside the owner's words a full-width or small "<" or ">" could pass for the block's own tags to a model.
+    if ((brief.match(OWNER_WORDS) ?? []).some((b) => /[<>]/.test(b.replace(OWNER_TAGS, '').normalize('NFKC')))) return no(`card ${card}'s brief holds a look-alike tag mark in the owner's words`);
     const outside = brief.replace(OWNER_WORDS, '');
     if (LOOKALIKE.test(outside) || FENCE_RUN.test(outside.normalize('NFKC'))) return no(`card ${card}'s brief holds a look-alike heading mark or a code fence`);
     const lines = brief.split('\n');
