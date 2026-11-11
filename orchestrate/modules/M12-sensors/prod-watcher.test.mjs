@@ -830,13 +830,17 @@ test('row 202: each "condition stands" raise that answered false is in the pass\
     ['old-version-live', 'old-version-live', 'production', { stage: 'first' }, (t) => { t.v.s.live = t.v.s.deployments[1].uid; }, /An older deployment was promoted/],
     ['watcher-cannot-save', 'watcher-cannot-save', 'baseline', { stage: 'first' },
       (t) => { t.world.refuse = true; }, /The Record refused what the production watcher saw \(the store is full\)/, 'cannot-save'],
+    // A waited-for raise after it in the same pass (cannot-save) must not hide a no-stage raise nobody waits for (L958 m1).
+    ['no-stage, with a refused save after it', 'no-stage', 'rules', {}, (t) => { t.world.refuse = true; }, /has no stage/],
   ];
   // The status keeps a body that changes (an HTTP code, the store's reason) from reading as a new cause (L376).
   for (const [name, kind, subject, rulesEntry, start, body, status] of cases) {
     let lose = true;
     const raise = sink((a) => (lose && a.key === `product 1|${kind}|${subject}` ? false : 'opened'));
-    // GitHub answers a little later, as it does: a raise the pass forgot to wait for would land after the answer.
-    const t = lossSetup(async (x) => { await new Promise((r) => setTimeout(r, 2)); return raise(x); }, rulesEntry);
+    // GitHub answers the raise under test a little later, as it does, and every other one at once: a raise the pass
+    // forgot to wait for lands after the answer, and no waited-for raise after it gives it time to land (L958 m1).
+    const key = `product 1|${kind}|${subject}`;
+    const t = lossSetup(async (x) => { if (x.key === key) await new Promise((r) => setTimeout(r, 2)); return raise(x); }, rulesEntry);
     const d1 = dep(MAIN[0]); const d2 = dep(MAIN[1]);
     t.v.s.deployments = [d2, d1]; t.v.s.live = d2.uid;
     await t.pass();
@@ -844,6 +848,8 @@ test('row 202: each "condition stands" raise that answered false is in the pass\
     for (let i = 0; i < 3; i++) {
       raise.reset();
       const out = await t.pass();
+      // Exactly one entry for the key, and it is the raise's: subjects(raise, kind) shows the raise was asked. So a
+      // clear's false (a refused clear) can't pass for the lost raise (L958 c2).
       assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject), [{ kind, subject, result: false }], `${name}: pass ${i + 1}`);
       assert.deepEqual(subjects(raise, kind), [subject], `${name}: raised again on pass ${i + 1}`);
       const sent = raise.texts.find((a) => a.key.includes(`|${kind}|`));
