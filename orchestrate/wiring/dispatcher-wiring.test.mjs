@@ -166,9 +166,12 @@ test('R-0b-162 A: a config the wiring does not know stops the start, told on std
 
 // Audit #263 m1: a review path that is relative would resolve against the Dispatcher's working folder, so requests would go
 // where the runner never reads. Each must be absolute, and none may be left out.
-test('A2: each review path must be absolute, and present', () => {
+// #403 r2 m3: the worker paths too (outboxRoot, copiesRoot and the rest), named here one by one, so dropping one from
+// checkConfig's list is caught.
+test('A2: each review and worker path must be absolute, and present', () => {
   const w = world();
-  for (const k of ['reviewRequestsDir', 'reviewStatusFile', 'reviewRunnerLog', 'reviewInstallRoot']) {
+  for (const k of ['reviewRequestsDir', 'reviewStatusFile', 'reviewRunnerLog', 'reviewInstallRoot',
+    'outboxRoot', 'copiesRoot', 'mirror', 'sealRoot', 'reviewRoot', 'hostLockPath']) {
     assert.throws(() => checkConfig({ ...w.config, [k]: 'review-runner/x' }), { message: `config: ${k} must be an absolute path` }, k);
     const gone = { ...w.config };
     delete gone[k];

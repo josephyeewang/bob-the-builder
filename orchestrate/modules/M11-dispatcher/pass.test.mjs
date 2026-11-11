@@ -49,7 +49,7 @@ function world(entries = [], { usage = GREEN, over = {} } = {}) {
     rec: extra.rec ?? rec, rules: extra.rules ?? rules, now: T0 + min * MIN, account: ACCT, sessions: [...sessions],
     probe: (s) => probes.get(s.id) ?? idle,
     // The launcher starts the session the claim names and reports its process (L72), as M4's does.
-    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir }; },
+    launch: async (x) => { calls.launched.push(x.card.id); const a = launchAnswer(x); if (!a.ok) return a; n += 1; const id = 'sessionId' in a ? a.sessionId : x.sessionId; sessions.push({ id, product: x.product, kind: x.kind, card: x.card.id, pgid: 100 + n }); return { ok: true, sessionId: id, pid: 1000 + n, pidStart: `start-${n}`, pgid: 100 + n, head: 'head' in a ? a.head : 'h'.repeat(40), ...('base' in a ? { base: a.base } : {}), outbox: 'outbox' in a ? a.outbox : `/outbox-root/${x.product}/worker/${id}`, signin: a.signin, configDir: a.configDir, ...('product' in a ? { product: a.product } : {}) }; },
     outboxRoot: extra.outboxRoot,
     stopGroup: extra.stopGroup ?? (async (s) => { calls.stops.push(s.id); const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions.splice(i, 1); return { ok: true, how: 'SIGTERM' }; }),
     saveWork: async (s) => { calls.saves.push(s.id); return { ok: true }; },
@@ -508,6 +508,14 @@ test('R-0b-55: every start writes its launch record; a launch the record refuses
   b.refuseLaunch(() => ({ ok: true, base: 'b'.repeat(40) }));
   await b.pass();
   assert.equal(b.rec.read('launch', b.sessions[0].id).doc.base, 'b'.repeat(40));
+  // #384 m2: a base that is no commit id is never recorded as the copy's start; the launch is refused and told.
+  for (const bad of ['main', 'B'.repeat(40), 7, { sha: 'b'.repeat(40) }]) {
+    const m = world([card('C-4')]);
+    m.refuseLaunch(() => ({ ok: true, base: bad }));
+    await m.pass();
+    assert.equal(m.rec.read('launch', m.sessions[0].id), null, String(bad));
+    assert.match(m.calls.alerts.join('\n'), /launch was not recorded \(the launch named a malformed base commit\); its merge will be refused/, String(bad));
+  }
   // a launcher that names no head: the session runs, the record refuses the launch, the owner is told
   const v = world([card('C-2')]);
   v.refuseLaunch(() => ({ ok: true, head: undefined }));
@@ -2086,7 +2094,7 @@ test('L744 2: a pauseLead that answers ok:false is told once and not counted as 
   assert.equal(w.rec.read('fact', PAUSE_FACT('p1')).doc.state, 'asked');
 });
 
-test('L767: a script card\'s outbox is <root>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
+test('L767: a script card\'s outbox is <root>/<product>/script/<id>; the worker folder is refused for it, as the script folder is for an editing card', async () => {
   const ok = world([card('C-2', { kind: 'script' })]);
   ok.refuseLaunch((x) => ({ ok: true, outbox: `/outbox-root/${x.product}/script/${x.sessionId}` }));
   assert.equal((await ok.pass()).started.length, 1, 'a script card under its own folder starts');

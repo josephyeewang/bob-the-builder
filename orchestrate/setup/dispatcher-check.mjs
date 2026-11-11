@@ -1,4 +1,4 @@
-// The Dispatcher's four worker and cleanup config keys (L739, L748): what setup can check about them before the Dispatcher
+// The Dispatcher's seven worker and cleanup config keys (L739, L748): what setup can check about them before the Dispatcher
 // runs (`check-dispatcher`). Their values come from layout.mjs `dispatcherKeys` (the one place). The mirror and the seal
 // folder are rows of the folder table, so `check` already compares their owner and mode exactly; this adds what the table
 // can't say:

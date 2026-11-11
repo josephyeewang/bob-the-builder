@@ -209,6 +209,23 @@ test('self-review M1: an ended session is final; a process group number used aga
   assert.deepEqual(w.sync().sessions(), [], 'not live');
 });
 
+// #384 m1: the start's base reaches the answer the Dispatcher's launch ask reads; a start that says none leaves it out,
+// never null (owner-asks launchAnswerWrong refuses a null one).
+test('#384 m1: a start\'s base is handed on in its answer, and left out when the start names none', async () => {
+  const ok = (x, more = {}) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:00:01Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/${x.product}/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/${x.product}/${x.card}`, ...more });
+  const w = world({ startAnswer: (x) => ok(x, { base: 'b'.repeat(40) }) });
+  await w.pass([launchReq('S-1')]);
+  assert.equal(w.read().answers['launch-S-1'].base, 'b'.repeat(40));
+  const v = world({ startAnswer: (x) => ok(x) });
+  await v.pass([launchReq('S-1')]);
+  assert.equal(v.read().answers['launch-S-1'].ok, true);
+  assert.ok(!Object.hasOwn(v.read().answers['launch-S-1'], 'base'), 'no base key at all');
+  // A malformed one is refused as any other bad answer, and the session stopped.
+  const m = world({ startAnswer: (x) => ok(x, { base: 'main' }) });
+  await m.pass([launchReq('S-1')]);
+  assert.deepEqual([m.read().answers['launch-S-1'].ok, m.stops.map((x) => x.id)], [false, ['S-1']]);
+});
+
 test('self-review M2: a start answer the reader would refuse is never listed; it is stopped, then refused once its group is gone', async () => {
   const bad = { 'outbox outside the root': { outbox: '/elsewhere/worker/S-1' }, 'a script outbox for an editing card': { outbox: `${ROOT}/p1/script/S-1` },
     'no sign-in': { signin: '' }, 'no config folder': { configDir: undefined }, 'process group 1': { pgid: 1, ok: true }, 'no process': { pid: 0 },
@@ -267,6 +284,19 @@ test('self-review M4: the status is written after each session and each request,
   for (let i = 1; i < at.length; i += 1) assert.ok(at[i][1] > at[i - 1][1], `a write between ${at[i - 1][0]} and ${at[i][0]}`);
   assert.ok(w.writes.length > at.at(-1)[1], 'and after the last');
   assert.ok(Date.now() - t < 1000, 'each hung port is given up after portMs');
+});
+
+test('#388 r1 m4: a drain that hangs, throws or answers anything but true keeps an ended session\'s outbox open', async () => {
+  const cases = [['hangs', () => new Promise(() => {})], ['throws', () => { throw new Error('EIO'); }], ['rejects', () => Promise.reject(new Error('EIO'))],
+    ['false', () => false], ['undefined', () => undefined], ['an object', () => ({ drained: true })], ['the text true', () => 'true']];
+  for (const [why, drained] of [...cases, ['true', () => true]]) {
+    const w = world({ drained });
+    await w.pass([launchReq('S-1')]);
+    w.gone.add(4001); await w.pass(); await w.pass();
+    const x = w.status.sessions.find((y) => y.id === 'S-1');
+    assert.equal(x?.ended, true, why);
+    assert.equal(x.outbox_open, why !== 'true', why);
+  }
 });
 
 test('self-review m1, m3, m6, c3: a session stays listed while an answer naming it is kept; a request dated ahead, one that can\'t be removed, and a stop of another group are not acted on', async () => {

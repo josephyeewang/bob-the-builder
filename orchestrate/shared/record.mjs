@@ -11,7 +11,7 @@
 //   rec.list('card')                             // → [{ id, doc, rev }, …]
 //   rec.write({ actor: 'dispatcher', entity: 'card', id: 'C-12', expectRev: 3, doc, kind: 'claim' })
 //                                                // → { ok: true, rev, seq } or { ok: false, reason }
-//   rec.applyOutbox({ role: 'worker', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
+//   rec.applyOutbox({ role: 'worker', product: 'app', sessionId: 'S-4', card: 'C-12' }, '/path/report-C-12.md')
 //                                                // → { ok: true, … } or { ok: false, reason }
 //   rec.diary({ since: 0 })                      // → diary lines, oldest first
 //   rec.meta('card', 'C-12')                     // → { ts, stateSince, createdBy } (the Record's own clock: its last
@@ -36,6 +36,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox } from './product-paths.mjs';
 import { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, SESSION_ID, STATES, isNotARecord, notARecord, outboxKindOf } from './record-names.mjs';
 export { CARD_KINDS, NOT_A_RECORD, OUTBOX_KINDS, OUTBOX_KIND_PATTERN, OUTBOX_NAME, STATES, isNotARecord, notARecord, outboxKindOf };
 // A second name for outboxKindOf (the same function, not a copy), kept because record.test and older callers import it.
@@ -148,26 +149,49 @@ export const PAUSED_WAIT_WHAT = 'paused';
 export const WAIT_WHO = Object.freeze([OWNER_WAIT_WHO, 'usage', 'dependency', 'incident', 'date']);   // `date` also needs a reason
 export { SESSION_ID };   // one rule, in record-names.mjs (the guard reads it too)
 
+// The folders of one session's outbox, outermost first, ending with the session's own (L71, L836): the one place every
+// outbox reader takes them from (L850-2). The roles the worker runner starts (shared/product-paths.mjs
+// PRODUCT_OUTBOX_ROLES) have their outboxes only in a product's folder, <outboxRoot>/<product>/<role>/<sessionId>
+// (runnerOutbox, so the product's name may not climb out of it with `..` or `/`): their tag must name the product, and
+// one with none is refused, never read from the layout before L836 (L895 m1). Every other role keeps
+// <outboxRoot>/<role>/<sessionId> (the review runner's sessions, the Lead's) and may not name a product: setup makes it
+// no product folder. → { ok: true, folders } | { ok: false, reason }
+export function outboxFolders({ outboxRoot, tag }) {
+  const no = (reason) => ({ ok: false, reason });
+  if (!tag || !AI_ROLES.includes(tag.role) || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
+  if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
+  const inProduct = PRODUCT_OUTBOX_ROLES.includes(tag.role);
+  if (tag.product == null) {
+    if (inProduct) return no(`a ${tag.role} outbox is in its product's folder, and the tag names no product`);
+    return { ok: true, folders: [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)] };
+  }
+  if (!inProduct) return no(`a ${tag.role} outbox has no product folder`);
+  let session;
+  try { session = runnerOutbox({ outboxRoot, product: tag.product, role: tag.role, sessionId: tag.sessionId }); } catch (e) { return no(`bad outbox tag: ${e.message}`); }
+  return { ok: true, folders: [dirname(dirname(session)), dirname(session), session] };
+}
+
 // Where an outbox file is, checked before anything is read from its name (M9 readOutboxFile, and the stand-in below:
-// the one definition, L151 m7). → { ok: true, real } | { ok: false, reason }
+// the one definition, L151 m7). → { ok: true, real, folders } | { ok: false, reason }
 export function outboxPlace({ outboxRoot, tag, file }) {
   const no = (reason) => ({ ok: false, reason });
   const given = typeof file === 'string' ? file : '';
   if (!given) return no('no file');
-  if (!tag || typeof tag.role !== 'string' || typeof tag.sessionId !== 'string' || !SESSION_ID.test(tag.sessionId)) return no('bad outbox tag');
-  if (typeof outboxRoot !== 'string' || !outboxRoot) return no('no outbox root configured');
+  const where = outboxFolders({ outboxRoot, tag });
+  if (!where.ok) return no(where.reason);
+  const { folders } = where;
   let real; let folder;
   try { real = realpathSync(given); } catch { return no('file not found'); }
-  // The role and session folders themselves may not be links: a session folder linked to another's would hand that
-  // session's files in under this tag (0b-2 audit MIN-5).
+  // The product, role and session folders themselves may not be links: a session folder linked to another's would hand
+  // that session's files in under this tag (0b-2 audit MIN-5).
   try {
-    for (const p of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
-    folder = realpathSync(join(outboxRoot, tag.role, tag.sessionId));
-  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}`); }
+    for (const p of folders) if (lstatSync(p).isSymbolicLink()) return no(`outbox folder ${basename(p)} is a link`);
+    folder = realpathSync(folders.at(-1));
+  } catch { return no(`no outbox folder for ${tag.role} ${tag.sessionId}${tag.product == null ? '' : ` of product ${tag.product}`}`); }
   if (dirname(real) !== folder) return no(`file is not directly inside the ${tag.role} outbox of session ${tag.sessionId}`);
   // The name given must be the file itself, not a link to it: realpath follows links, O_NOFOLLOW checks the last part.
   if (basename(given) !== basename(real)) return no('file is a link');
-  return { ok: true, real };
+  return { ok: true, real, folders };
 }
 
 // The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
@@ -322,6 +346,8 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
       // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
       // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
+      // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
+      // (L850-2); a tag's product still picks the folder through outboxPlace.
       const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).

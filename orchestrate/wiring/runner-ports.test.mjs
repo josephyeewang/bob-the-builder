@@ -2,18 +2,20 @@
 // worker checks, the prompt) and on real files for what it makes; spawnLeader runs a real process group.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { sessionArgs } from '../modules/M4-workshop/launcher/review-launch.mjs';
+import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
 
 const SID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const HEAD = 'b'.repeat(40);
@@ -42,17 +44,110 @@ test('step 5: size reads the session\'s conversation file and its last write; a 
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test('step 5: an outbox is drained only when nothing is in it (a dot file counts) or it is gone; one that can\'t be read is not', () => {
+test('L835: an outbox is drained once every file in it has the Record\'s done intake fact with its sha256, or it is empty or gone', () => {
   const d = tempDir('orch-rports-');
   try {
     const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
-    const drained = drainedPort();
-    assert.equal(drained({ outbox: o }), true);
+    const s = { id: SID, role: 'worker', card: 'C-1', outbox: o };
+    const facts = new Map();
+    const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
+    const fact = (name, over = {}) => facts.set(`intake-applied-${SID}-${name}`, { session: SID, name, state: 'applied', sha256: createHash('sha256').update(readFileSync(join(o, name))).digest('hex'), ...over });
+    const drained = drainedPort({ readFact });
+    assert.equal(drained(s), true, 'empty: nothing to take');
+    // The one set of used states (L852): a file lead-restart counts as used, and only those, counts as taken here.
+    assert.equal(INTAKE_DONE, USED_STATES, 'lane 2\'s one list (intake-facts.mjs), not a copy');
+    writeFileSync(join(o, 'report-C-1.md'), '{"a":1}');
+    assert.equal(drained(s), false, 'a file the Record has no fact for');
+    fact('report-C-1.md');
+    assert.equal(drained(s), true, 'the file is kept (push reads it), and the Record took it');
     writeFileSync(join(o, '.half'), 'x');
-    assert.equal(drained({ outbox: o }), false);
+    assert.equal(drained(s), false, 'a dot file with no fact counts');
+    rmSync(join(o, '.half'));
+    for (const state of ['refused', 'interrupted', 'waiting']) { fact('report-C-1.md', { state }); assert.equal(drained(s), true, state); }
+    // #388 r1 m2: waiting is done only for a worker or script; a Lead's queued request or plan starts later.
+    fact('report-C-1.md', { state: 'waiting' });
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s waiting');
+    for (const role of ['lead', undefined, 'reviewer']) assert.equal(drained({ ...s, role }), false, `waiting is not done for ${role}`);
+    // #388 r1 m3: the fact is read first; a file whose fact is not done is never hashed.
+    const hashed = [];
+    const counting = drainedPort({ readFact, hashOf: (p) => { hashed.push(p); return 'x'; } });
+    for (const state of ['applying', 'starting', 'told']) { fact('report-C-1.md', { state }); assert.equal(counting(s), false, state); }
+    const kept = new Map(facts); facts.clear(); assert.equal(counting(s), false, 'no fact');
+    for (const [k, v] of kept) facts.set(k, v);
+    assert.deepEqual(hashed, [], 'nothing hashed until its fact is done');
+    for (const state of ['applying', 'starting', 'told', undefined]) { fact('report-C-1.md', { state }); assert.equal(drained(s), false, `still in flight: ${state}`); }
+    fact('report-C-1.md', { sha256: 'f'.repeat(64) }); assert.equal(drained(s), false, 'another sha256: the file changed after intake took it');
+    fact('report-C-1.md', { session: 'other' }); assert.equal(drained(s), false, 'a fact naming another session');
+    fact('report-C-1.md', { name: 'x.json' }); assert.equal(drained(s), false, 'a fact naming another file');
+    fact('report-C-1.md');
+    assert.equal(drainedPort({ readFact: () => ({ ok: false, reason: 'its file is not JSON' }) })(s), false, 'an unreadable fact');
+    fact('report-C-1.md');
+    assert.equal(drainedPort({ readFact: (id) => ({ ...readFact(id), ok: false }) })(s), false, 'a doc beside ok:false is not trusted (#388 r1 c1)');
+    assert.equal(drainedPort({ readFact })(s), true, 'the same doc with ok:true drains');
+    assert.equal(drainedPort({ readFact: () => { throw new Error('EACCES'); } })(s), false, 'a Record that throws');
+    assert.equal(drainedPort()(s), false, 'no fact reader wired: an outbox holding a file stays open');
+    symlinkSync(join(o, 'report-C-1.md'), join(o, 'handin-C-1.md')); fact('report-C-1.md');
+    facts.set(`intake-applied-${SID}-handin-C-1.md`, { ...facts.get(`intake-applied-${SID}-report-C-1.md`), name: 'handin-C-1.md' });
+    assert.equal(drained(s), false, 'a link is not a plain file');
+    rmSync(join(o, 'handin-C-1.md')); facts.delete(`intake-applied-${SID}-handin-C-1.md`);
+    assert.equal(drained(s), true);
+    // A named pipe opens without following a link, and reads as no bytes: not a plain file, never matched to a fact.
+    spawnSync('mkfifo', [join(o, 'pipe')]);
+    facts.set(`intake-applied-${SID}-pipe`, { ...facts.get(`intake-applied-${SID}-report-C-1.md`), name: 'pipe', sha256: createHash('sha256').update('').digest('hex') });
+    assert.equal(drained(s), false, 'a pipe is not a plain file');
     rmSync(o, { recursive: true });
-    assert.equal(drained({ outbox: o }), true, 'gone: nothing left to take');
-    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); } })({ outbox: o }), false);
+    assert.equal(drained(s), true, 'gone: nothing left to take');
+    assert.equal(drainedPort({ list: () => { throw Object.assign(new Error('no'), { code: 'EACCES' }); }, readFact })(s), false);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test('L898: the card\'s bundle counts as taken once the push of this session\'s attempt is pushed with its bytes\' sha256', () => {
+  const d = tempDir('orch-lane4-bundle-');
+  try {
+    const o = join(d, 'worker', SID); mkdirSync(o, { recursive: true });
+    const s = { id: SID, role: 'worker', card: 'C-1', outbox: o };
+    writeFileSync(join(o, 'report-C-1.md'), '# done\n');
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a]));
+    const sha = (f) => createHash('sha256').update(readFileSync(join(o, f))).digest('hex');
+    const facts = new Map([[`intake-applied-${SID}-report-C-1.md`, { session: SID, name: 'report-C-1.md', state: 'applied', sha256: sha('report-C-1.md') }],
+      ['push.C-1.a1', { result: 'pushed', branch: 'card/c-1', tip: 'f'.repeat(40), bundle_sha256: sha('bundle-C-1.bundle') }]]);
+    const readFact = (id) => (facts.has(id) ? { ok: true, doc: facts.get(id) } : { ok: false, missing: true, reason: 'no such fact' });
+    let sdoc = { card: 'C-1', attempt: 'a1' };
+    const readSession = (id) => (id === SID && sdoc ? { ok: true, doc: sdoc } : { ok: false, missing: true });
+    const drained = drainedPort({ readFact, readSession });
+    assert.equal(drained(s), true, 'a real binary bundle beside an applied report drains');
+    // Fails closed: each condition alone.
+    assert.equal(drainedPort({ readFact })(s), false, 'no session reader wired');
+    assert.equal(drainedPort({ readFact, readSession: () => { throw new Error('EIO'); } })(s), false, 'a session reader that throws');
+    assert.equal(drainedPort({ readFact, readSession: () => ({ ok: false, doc: sdoc }) })(s), false, 'a doc beside ok:false');
+    for (const v of [null, {}, { card: 'C-1' }, { card: 'C-1', attempt: '' }, { card: 'C-1', attempt: 1 }, { card: 'C-2', attempt: 'a1' }]) {
+      sdoc = v; assert.equal(drained(s), false, `session doc ${JSON.stringify(v)}`);
+    }
+    sdoc = { card: 'C-1', attempt: 'a2' }; assert.equal(drained(s), false, 'no push fact for this attempt');
+    sdoc = { card: 'C-1', attempt: 'a1' };
+    const push = facts.get('push.C-1.a1');
+    for (const v of [{ ...push, result: 'refused' }, { ...push, head_refused: 'the card head could not be noted' }, { ...push, bundle_sha256: undefined }, { ...push, bundle_sha256: 'F'.repeat(64) }, { ...push, bundle_sha256: 'f'.repeat(64) }]) {
+      facts.set('push.C-1.a1', v); assert.equal(drained(s), false, JSON.stringify(v));
+    }
+    facts.set('push.C-1.a1', push);
+    assert.equal(drainedPort({ readFact: (id) => (id === 'push.C-1.a1' ? { ok: false, doc: push } : readFact(id)), readSession })(s), false, 'a push doc beside ok:false');
+    assert.equal(drainedPort({ readFact: (id) => { if (id === 'push.C-1.a1') throw new Error('EIO'); return readFact(id); }, readSession })(s), false, 'a push read that throws');
+    assert.equal(drained(s), true);
+    writeFileSync(join(o, 'bundle-C-1.bundle'), 'other bytes'); assert.equal(drained(s), false, 'the bundle changed after its push');
+    rmSync(join(o, 'bundle-C-1.bundle')); symlinkSync(join(o, 'report-C-1.md'), join(o, 'bundle-C-1.bundle'));
+    facts.set('push.C-1.a1', { ...push, bundle_sha256: sha('report-C-1.md') });
+    assert.equal(drained(s), false, 'a link is not the bundle');
+    rmSync(join(o, 'bundle-C-1.bundle'));
+    // Another card's bundle name is not this session's: it is an intake file like any other, never taken.
+    writeFileSync(join(o, 'bundle-C-2.bundle'), 'x');
+    assert.equal(drained(s), false, 'another card\'s bundle');
+    assert.equal(drained({ ...s, card: undefined }), false, 'no card: no bundle is this session\'s');
+    // #388 r2 m1: only a worker's or script's session carries the card's bundle; another role's is an intake file, never taken.
+    rmSync(join(o, 'bundle-C-2.bundle'));
+    writeFileSync(join(o, 'bundle-C-1.bundle'), Buffer.from([0x23, 0x20, 0xff, 0x00, 0x80, 0x0a])); facts.set('push.C-1.a1', push);
+    assert.equal(drained(s), true, 'the worker\'s bundle, as pushed');
+    assert.equal(drained({ ...s, role: 'script' }), true, 'a script\'s');
+    for (const role of ['lead', 'reviewer', undefined]) assert.equal(drained({ ...s, role }), false, `a ${role} session's bundle`);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
@@ -100,6 +195,7 @@ function world(over = {}) {
   w.deps = {
     readCard: () => ({ ok: true, doc: w.card }),
     startCommit: async () => HEAD,
+    mainOf: async () => 'c'.repeat(40),
     prepare: async (x) => { w.calls.push(['prepare', x]); mkdirSync(x.dest); return { ok: true, dest: x.dest, head: HEAD }; },
     promptFor: () => 'do the card',
     account: () => ({ account: 'a', dir: join(d, 'home', '.claude'), env: {} }),
@@ -125,7 +221,7 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
     assert.equal(wl.kind, 'editing'); assert.deepEqual(wl.workerRunner, w.c.workerRunner);
     assert.equal(wl.paths.copy, join(w.mine.copies, 'C-1')); assert.equal(wl.paths.outbox, join(w.mine.outboxes, 'worker', SID));
-    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9')] }, 'every other card\'s copy of this product is denied');
+    assert.deepEqual(wl.paths.deny, { secrets: ['/s'], otherCopies: [join(w.mine.copies, 'C-9'), join(w.mine.copies, `C-1..baseline-${SID}`)] }, 'every other card\'s copy of this product is denied, and the baseline\'s throwaway place');
     const f = join(w.settingsDir, `${SID}.json`);
     assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), { s: 1 });
     assert.equal(statSync(f).mode & 0o777, 0o600);
@@ -256,6 +352,137 @@ test('#364 self-review M1: a stop that comes while a start runs its checks spawn
     assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
     assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
   } finally { rmSync(w.d, { recursive: true, force: true }); }
+});
+
+test('#369 M1: check 2 runs once more just before claude starts; setup files changed by the checks\' runs stop the start', async () => {
+  const seen = [];
+  const w = world({ beforeStart: async (x) => { seen.push([x.copy, x.product, x.sessionId]); return 'the copy holds .claude/settings.local.json, which main does not'; },
+    launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /a check failed again just before claude was to start, so it was not started: the copy holds \.claude\/settings\.local\.json/);
+    assert.equal(seen.length, 1); assert.equal(typeof seen[0][0], 'string');
+    assert.equal(w.calls.some((c) => c[0] === 'spawn'), false);
+    assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  const ok = world({ beforeStart: async () => null, launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+  try { assert.equal((await ok.start()).ok, true); assert.equal(ok.calls.some((c) => c[0] === 'spawn'), true); } finally { rmSync(ok.d, { recursive: true, force: true }); }
+});
+
+test('#369 r1 m3, r2 m3: main moving during a launch is said as such, and never hides a check\'s own reason; checks get the main the copy was restored from', async () => {
+  const A = 'a'.repeat(40); const B = 'e'.repeat(40);
+  for (const [when, re] of [['after prepare', /^main changed during launch; retry$/], ['before start', /^a check failed again just before claude was to start, so it was not started: the copy's \.mcp\.json is not main's \(main also moved during launch, or can't be read\)$/]]) {
+    let mains = [A];
+    let seen;
+    const w = world({ mainOf: async () => mains.shift() ?? B, checksFor: (x) => { seen = x.mainAt; return {}; },
+      beforeStart: async () => 'the copy\'s .mcp.json is not main\'s', launchFn: async (x) => ({ ok: true, started: await x.start() }) });
+    if (when === 'before start') mains = [A, A];
+    try {
+      const a = await w.start();
+      assert.equal(a.ok, false); assert.match(a.reason, re, when);
+      if (when === 'before start') assert.equal(seen, A, 'the checks compare with the main read before the copy was made');
+      assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
+});
+
+test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apart from the session\'s copy and outbox, and removed', async () => {
+  let t; let x0;
+  const w = world({ checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}..baseline.json`) });
+    const preps = w.calls.filter((c) => c[0] === 'prepare').map((c) => c[1]);
+    assert.equal(preps.length, 2); assert.deepEqual(preps[1].card, preps[0].card, 'the same card and commit'); assert.equal(preps[1].dest, join(spare, 'copy'));
+    const [own, theirs] = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    assert.ok(own.paths.deny.otherCopies.includes(spare), 'the session denies the throwaway place');
+    assert.equal(theirs.paths.copy, join(spare, 'copy')); assert.equal(theirs.paths.outbox, join(spare, 'outbox'));
+    for (const p of [join(w.mine.copies, 'C-1'), join(w.mine.outboxes, 'worker', SID), join(w.mine.copies, 'C-9')]) assert.ok(theirs.paths.deny.otherCopies.includes(p), `the baseline denies ${p}`);
+    assert.equal(theirs.paths.deny.otherCopies.includes(spare), false, 'never its own place');
+    assert.equal(existsSync(t.settingsFile), true); assert.equal(statSync(spare).mode & 0o077, 0);
+    await t.done();
+    assert.equal(existsSync(spare), false); assert.equal(existsSync(t.settingsFile), false);
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Another commit than the session's copy: refused, and nothing is left.
+  {
+    let r; let x1;
+    const v = world({ prepare: async (x) => { mkdirSync(x.dest); return { ok: true, dest: x.dest, head: x.dest.endsWith(`..baseline-${SID}/copy`) ? 'f'.repeat(40) : HEAD }; },
+      checksFor: (x) => { x1 = x; return {}; }, launchFn: async () => { r = await x1.throwaway(); return { ok: false, reason: 'stop here' }; } });
+    try { await v.start(); assert.equal(r.ok, false); assert.match(r.reason, /holds another commit than the session's copy/); assert.equal(existsSync(join(v.mine.copies, `C-1..baseline-${SID}`)), false); } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+  // #369 r2 m3: main moving while the throwaway is made refuses nothing there (its setup files come from main, trusted).
+  {
+    let r; let x1;
+    const v = world({ mainOf: (() => { let n = 0; return async () => (++n > 2 ? 'e'.repeat(40) : 'c'.repeat(40)); })(), checksFor: (x) => { x1 = x; return {}; },
+      launchFn: async () => { r = await x1.throwaway(); await r.done?.(); return { ok: false, reason: 'stop here' }; } });
+    try { await v.start(); assert.equal(r.ok, true, r.reason); } finally { rmSync(v.d, { recursive: true, force: true }); }
+  }
+});
+
+test('#369 r2 m1: a throwaway left by an earlier start of the card (one made read-only inside, too) is removed; one that can\'t be is told, and never stops the card starting', async () => {
+  let t; let x0;
+  const logs = [];
+  const w = world({ log: (s) => logs.push(s), checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  const old = join(w.mine.copies, 'C-1..baseline-S-9'); const earlier = join(w.mine.copies, 'C-1..baseline-S-0');
+  const other = join(w.mine.copies, 'C-10..baseline-S-7');
+  for (const f of [join(old, 'copy'), join(earlier, 'copy', 'ro'), other]) mkdirSync(f, { recursive: true });
+  writeFileSync(join(earlier, 'copy', 'ro', 'f'), 'x'); chmodSync(join(earlier, 'copy', 'ro'), 0o555); chmodSync(join(earlier, 'copy'), 0o555);
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(t.ok, true, t.reason);
+    assert.deepEqual([existsSync(old), existsSync(earlier), existsSync(other)], [false, false, true], 'this card\'s leftovers only');
+    // A folder made read-only inside the throwaway itself is removed by done() too.
+    mkdirSync(join(t.copy, 'ro')); writeFileSync(join(t.copy, 'ro', 'f'), 'x'); chmodSync(join(t.copy, 'ro'), 0o555);
+    await t.done();
+    assert.equal(existsSync(join(w.mine.copies, `C-1..baseline-${SID}`)), false);
+    assert.deepEqual(logs, []);
+  } finally { chmodSync(w.copiesRoot, 0o700); rmSync(w.d, { recursive: true, force: true }); }
+  // Self-review m1: a link inside a throwaway is never followed; the read-only folder it points to outside is unchanged.
+  {
+    const d = tempDir('orch-rports-');
+    try {
+      const out = join(d, 'outside'); mkdirSync(join(out, 'sub'), { recursive: true }); chmodSync(join(out, 'sub'), 0o555); chmodSync(out, 0o555);
+      const spare = join(d, 'C-1..baseline-S-0'); mkdirSync(join(spare, 'ro'), { recursive: true }); writeFileSync(join(spare, 'ro', 'f'), 'x');
+      symlinkSync(out, join(spare, 'ro', 'link')); chmodSync(join(spare, 'ro'), 0o555);
+      const fs = { rm: rmSync, chmodTree };
+      assert.equal(removeAll(fs, spare), true);
+      assert.equal(existsSync(spare), false);
+      assert.deepEqual([statSync(out).mode & 0o777, statSync(join(out, 'sub')).mode & 0o777], [0o555, 0o555]);
+    } finally { execFileSync('/bin/chmod', ['-R', 'u+rwx', d]); rmSync(d, { recursive: true, force: true }); }
+  }
+  // One that can't be removed: told once (after a second try), left, and the start still goes on under the session's own name.
+  const logs2 = []; let t2; let x2;
+  const fails = (p) => p.includes('..baseline');
+  const v = world({ log: (s) => logs2.push(s), checksFor: (x) => { x2 = x; return {}; }, launchFn: async (x) => { t2 = await x2.throwaway(); return { ok: true, started: await x.start() }; },
+    fs: { rm: (p, o) => { if (fails(p) && !p.endsWith('.json')) throw Object.assign(new Error('busy'), { code: 'ENOTEMPTY' }); return rmSync(p, o); } } });
+  mkdirSync(join(v.mine.copies, 'C-1..baseline-S-0'));
+  try {
+    const a = await v.start();
+    assert.equal(a.ok, true, a.reason); assert.equal(t2.ok, true, t2.reason);
+    assert.equal(t2.copy, join(v.mine.copies, `C-1..baseline-${SID}`, 'copy'));
+    assert.ok(logs2.some((l) => /C-1..baseline-S-0 can't be removed \(ENOTEMPTY\); it is left until this card's next start/.test(l)), logs2.join('\n'));
+    await t2.done();
+    assert.ok(logs2.some((l) => new RegExp(`C-1..baseline-${SID} can't be removed`).test(l)), logs2.join('\n'));
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
+});
+
+test('#369 r2 m2: a product the runner holds back (its rules snapshot not kept fresh) starts nothing, saying why', async () => {
+  const w = world({ productHeld: (p) => (p === 'p1' ? 'product p1\'s rules snapshot is not kept fresh (ENOSPC), so its sessions are not started' : null) });
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /p1's rules snapshot is not kept fresh/);
+    assert.equal(w.calls.some((c) => c[0] === 'prepare'), false, 'nothing is made');
+  } finally { rmSync(w.d, { recursive: true, force: true }); }
+  // Self-review m4: held back during the checks (a refresher that died in the baseline): claude is not started.
+  let n = 0;
+  const v = world({ productHeld: () => (n++ === 0 ? null : 'product p1\'s rules snapshot is not kept fresh (ENOSPC), so its sessions are not started'), beforeStart: async () => null });
+  try {
+    const a = await v.start();
+    assert.equal(a.ok, false); assert.match(a.reason, /not kept fresh/);
+    assert.equal(v.calls.some((c) => c[0] === 'spawn'), false, 'not started');
+  } finally { rmSync(v.d, { recursive: true, force: true }); }
 });
 
 test('L825: a Tier 1 card (or one with no tier) starts on its plan\'s main_commit; any other card on the mirror\'s main', async () => {
@@ -480,4 +707,29 @@ test('#378 r1 M1: productWallGap takes a folder above as a deny, and no list as 
   assert.match(productWallGap(all(['/c/q']), P), /shell may read \/o\/q$/);
   assert.match(productWallGap({}, P), /shell may read/);
   assert.match(productWallGap(null, P), /shell may read/);
+});
+
+test('L889: the baseline\'s throwaway settings pass the real renderer: its folder names keep to the plain path letters', async () => {
+  const d0 = realpathSync(tempDir('orch-rports-'));
+  const got = [];
+  let t; let x0;
+  const w = world({ walled: (x) => { const r = walledLaunchSettings(x); got.push(r); return r; },
+    checksFor: (x) => { x0 = x; return {}; }, launchFn: async (x) => { t = await x0.throwaway(); return { ok: true, started: await x.start() }; } });
+  const runner = { requestsDir: join(d0, 'requests'), statusFile: join(d0, 'state', 'status.json') };
+  mkdirSync(runner.requestsDir); mkdirSync(join(d0, 'state'));
+  w.c.workerRunner = runner;
+  w.c.products.p1.render = { paths: { hooksDir: '/w/p1/hooks', snapshot: '/w/p1/rules.json', node: '/w/node', notes: '/w/p1/notes', bobFolder: '/w/bob', mirror: '/w/p1/mirror.git',
+    deny: { proposals: ['/w/p1/proposals'], secrets: ['/w/secrets'], claudeHome: '/h/.claude', ssh: '/h/.ssh', gh: '/h/.config/gh', robotKeys: '/w/keys', record: '/w/record' } },
+  product: { commands: { test: 'npm test' }, hosts: [] }, rulesHosts: [], productionFiles: [], proposalOutboxes: ['/w/p1/proposals'] };
+  try {
+    const a = await w.start();
+    assert.equal(a.ok, true, a.reason);
+    assert.equal(t?.ok, true, t?.reason);
+    assert.equal(got.length, 2, 'the session\'s settings and the baseline\'s');
+    for (const r of got) assert.equal(r.ok, true, r.reason);
+    const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
+    assert.equal(got[1].settings.permissions.additionalDirectories[0], join(spare, 'outbox'));
+    assert.ok(/^[A-Za-z0-9._/-]+$/.test(spare) && /^[A-Za-z0-9._/-]+$/.test(t.settingsFile), 'plain path letters only');
+    await t.done();
+  } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
 });

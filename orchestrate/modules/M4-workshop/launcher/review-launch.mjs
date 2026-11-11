@@ -122,8 +122,8 @@ export async function spawnClaude(spawn, bin, args, { cwd, env }) {
  */
 export function reviewChecks(x) {
   const probeMs = x.probeMs ?? PROBE_MS;
-  // The worker runner (wiring/runner-checks.mjs) reuses these ports on a card's own copy (#369 c3): its refusals name
-  // that copy, never a review copy.
+  // The worker runner's `checksFor` (wiring/runner-ports.mjs step 5; lane 4's, not built yet; L882 c4) is to reuse
+  // these ports on a card's own copy (#369 c3): its refusals name that copy, never a review copy.
   const copyName = GATE_KIND[x.role] ? 'the review copy' : 'the card\'s copy';
   const ports = {
     1: async () => {

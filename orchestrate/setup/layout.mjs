@@ -13,7 +13,7 @@
 import { join, posix } from 'node:path';
 import { AI_ROLES } from '../shared/record.mjs';
 // A product name is a folder name setup makes: shared/product-paths.mjs PRODUCT, the one rule (L836, L848, #378 M1).
-import { PRODUCT, productRoleClash, runnerPlaces } from '../shared/product-paths.mjs';
+import { PRODUCT, productRoleClash, runnerPlaces, PRODUCT_OUTBOX_ROLES } from '../shared/product-paths.mjs';
 import { RUNNER_ROLES } from '../shared/review-roles.mjs';
 
 // The three plain-script Mac users (L44, R-0b-05). `review` is also REVIEW_USER in the launcher; the setup test pins them equal.
@@ -163,8 +163,8 @@ export const homeOf = (cfg, user) => join(cfg.base, 'home', user);
  * outbox is review's; were it the workers' user's, a worker could write that role's answer.
  */
 export const WORKER_ROLES = Object.freeze(AI_ROLES.filter((r) => !RUNNER_ROLES.includes(r)));
-/** The roles the worker runner starts, whose outboxes sit in a folder per product (L836; wiring/owner-status.mjs RUNNER_ROLE_OF). */
-export const PRODUCT_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
+/** The roles the worker runner starts (L836): one list, in shared/product-paths.mjs. */
+export { PRODUCT_OUTBOX_ROLES };
 
 /**
  * The one access-list entry on a worker role's outbox folder (L90 M2): the record's intake runs as `orchestrate`, so it

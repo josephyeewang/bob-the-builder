@@ -10,7 +10,7 @@ test('smoke: draft → ready → claimed → running → hand-in → verified', 
   runCard(env, 'C-1');
   must(put(env.record, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
   const f = outboxFile(env, 'worker', 'S-1', 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review', fields: { summary: 'done' } })}\n`);
-  must(env.record.applyOutbox({ role: 'worker', sessionId: 'S-1', card: 'C-1' }, f), 'handin');
+  must(env.record.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: 'S-1', card: 'C-1' }, f), 'handin');
   assert.equal(env.record.read('card', 'C-1').doc.state, 'in_review');
   assert.equal(env.record.read('card', 'C-1').doc.claim, undefined);
   runnerLaunch(env, 'C-1', 'R-1');

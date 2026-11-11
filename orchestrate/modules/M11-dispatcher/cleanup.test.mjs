@@ -4,13 +4,15 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, statSync, readFileSync, symlinkSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve, sep } from 'node:path';
-import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
+import { cleanupCopy, cleanupPass, ASK_ID, CLEANUP_FACT, COPIES_NOT_PRODUCT_CAUSE, COPIES_UNREAD_CAUSE, STRAY_FACT, namesInMark, hashCopy, mirrorTree, namedCopy, ownCopy, STALE_STAGING_MS, sweepStaging } from './cleanup.mjs';
 import { createSaveWork } from '../M4-workshop/git/save-work.mjs';
 import { git as safeGit, callLog } from '../M4-workshop/git/safe-git.mjs';
 import { PR_FACT } from './merges.mjs';
-import { rulesWith, recWith, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
+import { rulesWith, recWith, seed, change, setClock, T0, MIN, iso } from './fixtures.test-helper.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { fakeAlert } from '../../test/fake-alert.test-helper.mjs';
+import { outbox, sendAlerts, queueAlert, ALERT_QUEUE_FACT } from './alerts.mjs';
+const queue = (rec) => rec.read('fact', ALERT_QUEUE_FACT)?.doc?.entries ?? [];
 
 // Test set-up only: plain git with no user or machine config, in a throwaway folder. It never asks for a
 // password, never shares this run's terminal and is stopped at a minute (no test may hang, 30 Oct 2026).
@@ -506,13 +508,26 @@ test('L836: cleanupPass walks each product\'s folder and touches no copy outside
   assert.ok(!existsSync(w.copy), 'its own copy, proven, is deleted');
   assert.equal(readFileSync(join(w.copiesRoot, 'p2', 'C-1', 'x'), 'utf8'), 'p2', 'another product\'s folder is untouched');
   for (const p of ['C-7', 'worker', join('..', 'elsewhere', 'C-1')]) assert.ok(existsSync(join(w.copiesRoot, p)), p);
-  // #403 r1 m4: the folders kept as no product's are named to Joe in one notice, once a day, and never moved.
-  const told = alerts.filter((a) => /no product's, kept as they are/.test(String(a?.text ?? a)));
+  // #403 r1 m4: the folders that can be no product's are named to Joe in one notice and never moved. c-8 has a
+  // product's shape and no product in this Record: most often another product's own folder (each product's Dispatcher
+  // has its own Record), so it is kept and not told (self-review M1); p4 is a file, which is no copy.
+  const told = alerts.filter((a) => /n't belong to any product/.test(String(a?.text ?? a)));
   assert.equal(told.length, 1, JSON.stringify(alerts));
-  assert.match(String(told[0]?.text ?? told[0]), /holds 4 folders that are no product's, kept as they are and never looked inside: C-7, c-8, p3, worker \(a copy from before/);
-  // Through holdAlert (once a day per cause, marked told only once delivered): the mark names its own cause.
+  const text = String(told[0]?.text ?? told[0]);
+  // r2 m1: named by the Dispatcher's own product (every product's Dispatcher tells it, on purpose, L908).
+  assert.match(text, /^the Dispatcher for products p1, p2, p3: the worker copies folder .* holds 3 folders that don't belong to any product: "C-7", "p3", "worker"\. Each is a card folder from before/);
+  assert.doesNotMatch(text.replace(/^[^:]*: /, ''), /c-8|p2/);
+  assert.match(text, /or a link \(a product's own folder that is a link counts too\)\./, 'p3, a product\'s folder that is a link, is named as one');
+  // r2 M1: no folder's product is confirmed and a link's target is never looked at, so no move or delete is advised:
+  // the notice says not to, and the only move it names is the lead's, once the card's product is confirmed.
+  assert.match(text, /may hold a card's unpushed work, so do not move or delete them: the lead moves an old card folder into its card's product folder once that card's product is confirmed, and what a link points to is never deleted\. Nothing else for you to do/);
+  const rest = ['do not move or delete them', 'the lead moves an old card folder', 'is never deleted'].reduce((t, ok) => t.replace(ok, ''), text);
+  assert.doesNotMatch(rest, /delet|\bmov|remov|\brm\b|by hand|check what is in|you (may|can)/i, 'no other move or delete words');
+  // Through tellThen (marked told only once delivered), with the names told (r2 m2): one fact, whatever the names.
   const call = alert.calls.find(([t]) => told[0] === t);
-  assert.equal(call[1].mark.fact, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
+  assert.equal(call[1].mark.fact, STRAY_FACT);
+  assert.equal(STRAY_FACT, `hold-${COPIES_NOT_PRODUCT_CAUSE}`);
+  assert.deepEqual(namesInMark(call[1].mark.fields), ['C-7', 'p3', 'worker']);
   assert.equal(call[1].mark.kind, 'hold_alert');
   assert.ok(existsSync(join(w.copiesRoot, 'C-7')) && existsSync(join(w.copiesRoot, 'c-8', 'x')), 'never moved');
   // A product folder that can't be read fails the step, as the copies folder does (L744 3).
@@ -541,8 +556,210 @@ test('#403 r1 A5, A6: a product read that throws, or a damaged product record, k
     assert.match(out[0][1].reasons.join(), why, name);
     assert.ok(existsSync(w.copy), `${name}: the copy is never deleted`);
     assert.deepEqual(saved, [], `${name}: nor bundled`);
-    assert.ok(alert.texts.some((t) => /no product's, kept as it is and never looked inside: p1 /.test(String(t))), `${name}: and told`);
+    // Told as possibly the product's own unpushed work, never as a folder to delete (self-review M1).
+    const told = alert.texts.filter((t) => /were not looked at this pass/.test(String(t)));
+    assert.equal(told.length, 1, `${name}: told once`);
+    assert.match(String(told[0]), /the worker copies of product p1 were not looked at this pass: its product record could not be read or is damaged\. The copies are kept and may hold unpushed work: do not delete them/, name);
+    assert.equal(alert.calls.find(([t]) => t === told[0])[1].mark.fact, `hold-${COPIES_UNREAD_CAUSE}`, name);
+    assert.ok(!alert.texts.some((t) => /n't belong to any product/.test(String(t))), `${name}: never told as no product's`);
   }
+});
+
+test('#403 r2 m2: the folders that belong to no product are told only when a name not told before is there, never daily', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  mkdirSync(join(w.copiesRoot, 'C-9'));
+  // Told for C-7 and C-9 three days ago: a told mark with the names (the real outbox writes it on delivery; fakeAlert does not).
+  const after = (names) => { const rec = recFor(w); seed(rec, 'fact', STRAY_FACT, { text: 'earlier', told_names: JSON.stringify(names), told_at: iso(T0) }); return rec; };
+  const run = async (rec, alert) => cleanupPass({ rec, rules: R, now: T0 + 3 * 24 * 60 * MIN, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot,
+    mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const strays = (alert) => alert.texts.filter((t) => /n't belong to any product/.test(String(t)));
+  const same = fakeAlert();
+  await run(after(['C-7', 'C-9']), same);
+  assert.deepEqual(strays(same), [], 'the same names, days later, are not told again');
+  // One moved away by the lead: fewer names are no news.
+  rmSync(join(w.copiesRoot, 'C-9'), { recursive: true });
+  const fewer = fakeAlert();
+  await run(after(['C-7', 'C-9']), fewer);
+  assert.deepEqual(strays(fewer), [], 'fewer names are not told');
+  // A new name is news: told, naming them all, and marked with them all.
+  mkdirSync(join(w.copiesRoot, 'worker'));
+  const more = fakeAlert();
+  await run(after(['C-7', 'C-9']), more);
+  assert.equal(strays(more).length, 1, JSON.stringify(more.texts));
+  assert.match(String(strays(more)[0]), /don't belong to any product: new since the last notice "worker"; still there from before "C-7"\./);
+  const mark = more.calls.find(([t]) => t === strays(more)[0])[1].mark;
+  assert.equal(mark.fact, STRAY_FACT);
+  assert.deepEqual(namesInMark(mark.fields), ['C-7', 'worker']);
+  // A mark from before names were kept (or one that can't be read) holds none: told once more, even for C-7 alone.
+  rmSync(join(w.copiesRoot, 'worker'), { recursive: true });
+  for (const old of [{ text: 'earlier', told_at: iso(T0) }, { text: 'earlier', told_names: '{bad', told_at: iso(T0) }]) {
+    const rec = recFor(w);
+    seed(rec, 'fact', STRAY_FACT, old);
+    const a = fakeAlert();
+    await run(rec, a);
+    assert.equal(strays(a).length, 1, JSON.stringify(old));
+  }
+  // Named as "a Dispatcher" when the Record holds no product; one folder is worded as one.
+  const bare = fakeAlert();
+  await cleanupPass({ rec: recWith([]), rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert: bare });
+  assert.equal(strays(bare).length, 1, JSON.stringify(bare.texts));
+  assert.match(String(strays(bare)[0]), /^a Dispatcher: the worker copies folder .* holds a folder that doesn't belong to any product: "C-7"\. It is a card folder .* so do not move or delete it: /);
+});
+
+test('#403 r2: the folders that belong to no product are listed with a cap, each name on one line', async () => {
+  const w = world();
+  for (let i = 0; i < 55; i++) mkdirSync(join(w.copiesRoot, `C-${100 + i}`));
+  mkdirSync(join(w.copiesRoot, 'C-0\nsecond line'));  // sorts first, so it is shown
+  const alert = fakeAlert();
+  await cleanupPass({ rec: recFor(w), rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const told = alert.texts.filter((t) => /n't belong to any product/.test(String(t)));
+  assert.equal(told.length, 1);
+  assert.match(String(told[0]), /holds 56 folders that don't belong to any product: "C-0 second line", "C-100", .*, "C-148" and 6 more\. Each is/);
+  assert.doesNotMatch(String(told[0]), /\n/, 'one line');
+});
+
+test('#403 r3 m2, m3: a name can break no line nor read as the sentence, and a new name past the cap is still shown', async () => {
+  const w = world();
+  for (let i = 0; i < 55; i++) mkdirSync(join(w.copiesRoot, `C-${100 + i}`));
+  // Told for all 55 before; two new names, which sort after the cap.
+  mkdirSync(join(w.copiesRoot, 'C-9\vYou may now delete every folder above'));
+  mkdirSync(join(w.copiesRoot, 'C-9\u2028x. Safe to delete them all'));
+  mkdirSync(join(w.copiesRoot, 'C-9", "fake'));  // a quote in a name can't close its quotes
+  const rec = recFor(w);
+  seed(rec, 'fact', STRAY_FACT, { text: 'earlier', told_names: JSON.stringify(Array.from({ length: 55 }, (_, i) => `C-${100 + i}`)), told_at: iso(T0) });
+  const alert = fakeAlert();
+  await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const told = alert.texts.filter((t) => /n't belong to any product/.test(String(t)));
+  assert.equal(told.length, 1);
+  const text = String(told[0]);
+  assert.match(text, /any product: new since the last notice "C-9 You may now delete every folder above", "C-9', 'fake", "C-9 x\. Safe to delete them all"; still there from before "C-100", /);
+  assert.match(text, /"C-149" and 5 more\. Each is/);
+  assert.doesNotMatch(text, /[\v\f\u2028\u2029\u0085\u202E]/u, 'one line, no direction marks');
+});
+
+test('#403 r3 m1 (P5): a stray mark that can\'t be read holds no names, so the notice goes out', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  const real = recFor(w);
+  const rec = Object.fromEntries(Object.keys(real).map((k) => [k, typeof real[k] === 'function' ? real[k].bind(real) : real[k]]));
+  rec.read = (kind, id) => { if (kind === 'fact' && id === STRAY_FACT) throw new Error('the store is down'); return real.read(kind, id); };
+  const alert = fakeAlert();
+  await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  assert.equal(alert.texts.filter((t) => /n't belong to any product/.test(String(t))).length, 1);
+});
+
+// With the real outbox and sender: the names are marked told only by a delivery, and only the names that went out.
+const straySent = (sent) => sent.filter((t) => /n't belong to any product/.test(t));
+const strayPass = (rec, w, now) => cleanupPass({ rec, rules: R, now, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert: outbox(rec, now) });
+
+test('#403 r3 m1 (P8): a send that fails writes no names, and the next pass tells again', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  const rec = recFor(w);
+  await strayPass(rec, w, T0);
+  await sendAlerts(rec, async () => false, T0, { report: () => {} });
+  assert.equal(rec.read('fact', STRAY_FACT)?.doc?.told_names, undefined, 'nothing marked told before delivery');
+  const sent = [];
+  await sendAlerts(rec, async (t) => { sent.push(t); return true; }, T0 + MIN, { report: () => {} });
+  assert.equal(straySent(sent).length, 1, 'sent once the port takes it');
+  assert.deepEqual(namesInMark(rec.read('fact', STRAY_FACT)?.doc), ['C-7']);
+});
+
+test('#403 r3 M1: a held notice replaced by one with a new name marks only what went out, and the new name is still told', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  const base = recFor(w);
+  let refuse = true;
+  const rec = Object.fromEntries(Object.keys(base).map((k) => [k, typeof base[k] === 'function' ? base[k].bind(base) : base[k]]));
+  const write = rec.write;
+  rec.write = (a) => (refuse && a?.id === STRAY_FACT ? { ok: false, reason: 'planted refusal' } : write(a));
+  const sent = [];
+  const port = async (t) => { sent.push(t); return true; };
+  // Pass 1: C-7 delivered, its mark refused: held.
+  await strayPass(rec, w, T0);
+  await sendAlerts(rec, port, T0, { report: () => {} });
+  assert.equal(straySent(sent).length, 1);
+  assert.deepEqual(namesInMark(rec.read('fact', STRAY_FACT)?.doc), []);
+  // Pass 2: C-9 appears; the mark saves now. The retry writes only C-7, which is all that went out.
+  mkdirSync(join(w.copiesRoot, 'C-9'));
+  refuse = false;
+  sent.length = 0;
+  await strayPass(rec, w, T0 + 60 * MIN);
+  await sendAlerts(rec, port, T0 + 60 * MIN, { report: () => {}, budgetMs: 1e9 });
+  const marked = namesInMark(rec.read('fact', STRAY_FACT)?.doc);
+  const said = straySent(sent).join('\n');
+  for (const n of marked) assert.ok(n === 'C-7' || said.includes(`"${n}"`), `${n} is marked told but never went out`);
+  // Then until the queue is empty: C-9 goes out, and only then is marked.
+  for (let i = 1; i < 5 && queue(base).length; i++) await sendAlerts(rec, port, T0 + (60 + i) * MIN, { report: () => {}, budgetMs: 1e9 });
+  assert.match(straySent(sent).join('\n'), /"C-9"/, 'the new name is told');
+  assert.deepEqual(namesInMark(rec.read('fact', STRAY_FACT)?.doc), ['C-7', 'C-9']);
+});
+
+// A Record whose stray mark write is refused while `s.refuse` is set.
+const strayRefusing = (w) => {
+  const base = recFor(w);
+  const s = { refuse: true, base, sent: [] };
+  const rec = Object.fromEntries(Object.keys(base).map((k) => [k, typeof base[k] === 'function' ? base[k].bind(base) : base[k]]));
+  const write = rec.write;
+  rec.write = (a) => (s.refuse && a?.id === STRAY_FACT ? { ok: false, reason: 'planted refusal' } : write(a));
+  s.rec = rec;
+  s.port = async (t) => { s.sent.push(t); return true; };
+  s.drain = async (t) => { for (let i = 0; i < 6; i++) { await strayPass(rec, w, t + i * 60 * MIN); for (let j = 0; j < 4; j++) await sendAlerts(rec, s.port, t + i * 60 * MIN + j * MIN, { report: () => {}, budgetMs: 1e9 }); } };
+  // Every name marked told was named in a stray text that went out.
+  s.unsaid = () => namesInMark(rec.read('fact', STRAY_FACT)?.doc).filter((n) => !straySent(s.sent).some((t) => t.includes(`"${n}"`)) && !/^[AX]-/.test(n));
+  return s;
+};
+
+test('#403 r4 M1 (probe F): past the cap, names swapped behind the same "and N more" are still told when a held mark saves', async () => {
+  const w = world();
+  const A = Array.from({ length: 50 }, (_, i) => `A-${String(i).padStart(2, '0')}`);
+  for (const n of [...A, 'X-1', 'X-2', 'X-3']) mkdirSync(join(w.copiesRoot, n));
+  const s = strayRefusing(w);
+  await strayPass(s.rec, w, T0);
+  await sendAlerts(s.rec, s.port, T0, { report: () => {} });
+  assert.match(straySent(s.sent)[0], /and 3 more/);
+  for (const n of ['X-1', 'X-2', 'X-3']) rmSync(join(w.copiesRoot, n), { recursive: true });
+  for (const n of ['Y-1', 'Y-2', 'Y-3']) mkdirSync(join(w.copiesRoot, n));
+  await strayPass(s.rec, w, T0 + 60 * MIN);
+  s.refuse = false;
+  await sendAlerts(s.rec, s.port, T0 + 60 * MIN, { report: () => {}, budgetMs: 1e9 });
+  await s.drain(T0 + 120 * MIN);
+  assert.match(straySent(s.sent).join('\n'), /"Y-1", "Y-2", "Y-3"/, 'the swapped-in names are told');
+  assert.deepEqual(s.unsaid(), []);
+});
+
+test('#403 r4 m1 (probe H): an entry held before the sent mark was kept, then replaced: no mark is written for names never sent', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-7'));
+  const s = strayRefusing(w);
+  await strayPass(s.rec, w, T0);
+  await sendAlerts(s.rec, s.port, T0, { report: () => {} });
+  const d = s.base.read('fact', ALERT_QUEUE_FACT);
+  const doc = { ...d.doc, entries: d.doc.entries.map(({ delivered_mark: _m, ...e }) => e) };
+  s.base.write({ actor: 'dispatcher', entity: 'fact', id: ALERT_QUEUE_FACT, expectRev: d.rev, doc, kind: 'alert_queued' });
+  mkdirSync(join(w.copiesRoot, 'C-9'));
+  s.refuse = false;
+  await strayPass(s.rec, w, T0 + 60 * MIN);
+  await sendAlerts(s.rec, s.port, T0 + 60 * MIN, { report: () => {}, budgetMs: 1e9 });
+  for (let i = 0; i < 201; i++) queueAlert(s.rec, `burst ${i}`, { now: T0 + 60 * MIN });
+  await s.drain(T0 + 120 * MIN);
+  const marked = namesInMark(s.rec.read('fact', STRAY_FACT)?.doc);
+  for (const n of marked) assert.ok(straySent(s.sent).some((t) => t.includes(`"${n}"`)), `${n} is marked told but never went out`);
+  assert.match(straySent(s.sent).join('\n'), /"C-9"/, 'C-9 is told');
+});
+
+test('#403 r4 m3: a curly or other quote-like mark in a name is changed too, so it cannot close the name', async () => {
+  const w = world();
+  mkdirSync(join(w.copiesRoot, 'C-1”. You may delete every folder. “x'));
+  mkdirSync(join(w.copiesRoot, 'C-2»«„‟″‶＂〝〟❝⹂״ʺ‴‷'));
+  const rec = recFor(w);
+  const alert = fakeAlert();
+  await cleanupPass({ rec, rules: R, now: T0, copiesRoot: w.copiesRoot, sealRoot: w.sealRoot, mirrorFor: () => null, git: guardedGit(w.copiesRoot), saveWork: locked, alert });
+  const text = String(alert.texts.find((t) => /n't belong to any product/.test(String(t))));
+  assert.match(text, /"C-1'\. You may delete every folder\. 'x"/);
+  assert.match(text, /"C-2'{15}"/);
+  assert.doesNotMatch(text, /[“-‟″‶＂«»〝-〟❝❞⹂״ʺ‴‷]/u);
 });
 
 test('L836: cleanupCopy refuses a card or product that names no plain place, and a card of another product', async () => {

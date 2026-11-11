@@ -40,6 +40,35 @@ test('M15: the role comes from the session map, never from the file', async () =
   assert.equal(line.data.card, 'C-1');
 });
 
+// L865: the hand-in's tag names the session's product, so the Record finds its outbox in that product's own folder
+// (L836: <outboxRoot>/<product>/<role>/<session id>). A session with no product hands in no product key, nor does a
+// session whose role has no product folder, even if it names one (L895 m1: only PRODUCT_OUTBOX_ROLES).
+test('L865: the intake tags a hand-in with its session\'s product', async () => {
+  const w = world();
+  const ob = mk(join(w.root, 'p1', 'worker', 'S-1'));
+  writeFileSync(join(ob, 'report-C-1.md'), 'done');
+  const real = recWith();
+  const tags = [];
+  const rec = Object.create(real, { applyOutbox: { value: (tag, file) => { tags.push(tag); return real.applyOutbox(tag, file); } } });
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', outbox: ob, uid: UID, card: 'C-1', product: 'p1' }], ...w.ports });
+  assert.equal(out[0].applied, true);
+  assert.equal(tags[0].product, 'p1');
+  const ob2 = mk(join(w.root, 'flat', 'worker', 'S-2'));
+  writeFileSync(join(ob2, 'report-C-2.md'), 'done');
+  await intakePass({ rec, sessions: [{ sessionId: 'S-2', role: 'worker', outbox: ob2, uid: UID, card: 'C-2' }], ...w.ports });
+  assert.ok(!Object.hasOwn(tags[1], 'product'));
+  // A Lead's wish- and a Front Door's ask- are handed in (a think- starts a read-only session instead).
+  for (const [role, sid, name] of [['lead', 'L-1', 'wish-1.md'], ['front_door', 'F-1', 'ask-request-1.md']]) {
+    const ob3 = mk(join(w.root, role, sid));
+    writeFileSync(join(ob3, name), 'words');
+    const before = tags.length;
+    await intakePass({ rec, sessions: [{ sessionId: sid, role, outbox: ob3, uid: UID, card: null, product: 'p1' }], ...w.ports });
+    assert.equal(tags.length, before + 1, `the ${role}'s file was handed in`);
+    assert.equal(tags.at(-1).role, role);
+    assert.ok(!Object.hasOwn(tags.at(-1), 'product'), `a ${role} names no product, even when its session says one`);
+  }
+});
+
 test('M15: a file is applied once; the same name with new content is refused with an alert', async () => {
   const w = world();
   const ob = mk(join(w.root, 'worker'));

@@ -29,8 +29,10 @@
 //        session of another product has settings that do not deny Q's copies and outbox folders whole (liveWallProblem;
 //        the worker runner passes its live sessions as `live`), and the runner itself does not start while a session it
 //        carries over has such settings for any product in its config (runner-main.mjs carriedOverProblem);
-//     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (not built yet: lane 4's next step,
-//        reusing review-launch.mjs's ports); a check that applies and has no port is refused there;
+//     5. M4's launch(), checks 1 to 13, with the worker checks from `checksFor` (runner-checks.mjs workerChecks, joined
+//        by runner-main.mjs; none by default); a check that applies and has no port is refused there. Just before
+//        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
+//        since checks 4 and 11 run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
 //        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
@@ -41,9 +43,9 @@
 //     lock-down runner (`runLocked`), which is not built; without it save-work refuses, as it says it must.
 //   pauseLead({ product }): the Lead's WRAP flow (lead-restart.mjs through sendSafe) needs the activity tracker's feed,
 //     which nothing gives the runner yet; it refuses ("not wired").
-//   outboxDrained(session): true when the outbox holds no file (dot files count) or is gone. Intake keeps its own keys
-//     and may delete a hand-in it took (its access list has delete_child, setup/layout.mjs); until intake does, or tells
-//     the runner some other way, an outbox with a file in it stays open and its session stays listed. A lead question.
+//   outboxDrained(session): true when the outbox is gone, or every file in it (dot files count) has the Record's intake
+//     fact for it in a done state with the sha256 of its bytes now (L852, drainedPort below, read with M4 readFactFile).
+//     Any other file keeps the outbox open and its session listed: it fails safe, never closing on a hand-in not taken.
 //   size(session): the session's conversation file, read by M11 transcript.mjs, and its last write time. The activity
 //     state is left out (the tracker is not fed in the runner), so the Dispatcher's probe reads "can't tell" and the
 //     stop step waits for its late hard stop, never a guess of "safe".
@@ -52,10 +54,12 @@
 // line shapes are; void at the next pin. TRANSCRIPT_PLACE_CHECKED_AGAINST names the version once the live proof runs.
 
 import { fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeSync, closeSync, constants } from 'node:fs';
-import { spawn as childSpawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { RUNNER_ROLE_OF, runnerCopy, runnerOutbox, runnerPlaces } from './owner-status.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
+import { USED_STATES } from '../modules/M11-dispatcher/intake-facts.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { SESSION_ID } from '../shared/record.mjs';
 import { CARD_ID } from '../modules/M9-record/outbox.mjs';
@@ -71,6 +75,7 @@ import { readCardFile } from '../modules/M4-workshop/launcher/review-runner-main
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { cardBranch } from '../modules/M4-workshop/git/branch.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
+import { PUSH_FACT, bundleName } from '../modules/M4-workshop/git/push.mjs';
 
 export const TRANSCRIPT_PLACE_CHECKED_AGAINST = null;
 const refuse = (reason) => ({ ok: false, reason });
@@ -93,10 +98,66 @@ export function sizePort({ read = readTranscriptFile, lstat = lstatSync } = {}) 
   };
 }
 
-/** outboxDrained(session) → true when nothing is left in the outbox (or it is gone), else false. */
-export function drainedPort({ list = readdirSync } = {}) {
+/**
+ * outboxDrained(session) → true once the Record has taken or told every file in the outbox (L835), else false. Intake
+ * keeps every hand-in (push and M6 gather read them from the outbox), so an empty folder is not the sign: each file
+ * must have the Record's own `intake-applied-<session>-<name>` fact (M11 outbox-intake.mjs), naming this session and
+ * file, in a state intake is done with (INTAKE_DONE), and with the sha256 of the bytes in the outbox now. Read only.
+ * A file with no such fact, a fact with another sha256 or still in flight (applying, starting), a file that is
+ * not a plain one, or a Record that can't be read: not drained. No files, or the outbox gone: drained.
+ * `waiting` is done only for a worker or script session (#388 r1 m2): intake writes it only for a Lead's queued
+ * request or plan, which starts by itself later, so a Lead's outbox would close on a hand-in not yet taken. The fact
+ * is read first and the file hashed only when its fact is done (#388 r1 m3), so a file never taken is never read.
+ * The card's bundle (`bundle-<card>.bundle`, M4 push.mjs) is never an intake file: it counts as taken once the push of
+ * this session's attempt (read from the Record's session doc, `readSession`, M4 readSessionFile) is `pushed` with the
+ * sha256 of these bytes (`bundle_sha256`, L898), for a worker or script session only. No session reader, no attempt, no
+ * such push, a refused one, one whose card head was not noted (head_refused), an older fact without the hash, or other
+ * bytes: it stays open.
+ * `readFact(id)` is the Record's read-only fact reader, `{ ok: true, doc } | { ok: false, missing?, reason }` as
+ * M4 review-runner-main.mjs readFactFile answers (runner-main.mjs wires it). Left out, every read fails and an outbox
+ * holding a file stays open: it fails safe, never closing one the Record has not taken.
+ */
+// The states intake is done with (L852): lane 2's one list (M11 intake-facts.mjs USED_STATES), which lead-restart reads too.
+export const INTAKE_DONE = USED_STATES;
+// The roles whose sessions are a card's own work: 'waiting' is done for them (#388 r1 m2), and only theirs carry the
+// card's bundle (#388 r2 m1).
+const WAITING_DONE_FOR = new Set(['worker', 'script']);
+const doneFor = (s, state) => INTAKE_DONE.has(state) && (state !== 'waiting' || WAITING_DONE_FOR.has(s.role));
+const noFactReader = () => ({ ok: false, reason: 'no Record fact reader is wired' });
+const noSessionReader = () => ({ ok: false, reason: 'no Record session reader is wired' });
+const SHA256 = /^[0-9a-f]{64}$/;
+// The bundle taken by its push (L898): the attempt from the session's own doc, its push fact pushed with these bytes.
+function bundlePushed(s, path, { readFact, readSession, hashOf }) {
+  let sd; try { sd = readSession(s.id); } catch { return false; }
+  const doc = sd?.ok === true ? sd.doc : null;
+  const att = doc?.card === s.card ? doc.attempt : undefined;
+  if (typeof att !== 'string' || !att) return false;
+  let f; try { f = readFact(PUSH_FACT(s.card, att)); } catch { return false; }
+  const d = f?.ok === true ? f.doc : null;
+  // A push that could not note the card's head is not done (push.mjs reads it so too): it is pushed again (#388 r2 m2).
+  if (d?.result !== 'pushed' || d.head_refused || !SHA256.test(String(d.bundle_sha256))) return false;
+  let hash; try { hash = hashOf(path); } catch { return false; }
+  return hash === d.bundle_sha256;
+}
+function fileSha256(p) {
+  const fd = openSync(p, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try { if (!fstatSync(fd).isFile()) throw new Error('not a plain file'); return createHash('sha256').update(readFileSync(fd)).digest('hex'); } finally { closeSync(fd); }
+}
+export function drainedPort({ list = readdirSync, readFact = noFactReader, readSession = noSessionReader, hashOf = fileSha256 } = {}) {
   return (s) => {
-    try { return list(s.outbox).length === 0; } catch (e) { return e?.code === 'ENOENT'; }
+    let names; try { names = list(s.outbox); } catch (e) { return e?.code === 'ENOENT'; }
+    for (const name of names) {
+      if (WAITING_DONE_FOR.has(s.role) && typeof s.card === 'string' && name === bundleName(s.card)) {
+        if (!bundlePushed(s, join(s.outbox, name), { readFact, readSession, hashOf })) return false;
+        continue;
+      }
+      let f; try { f = readFact(`intake-applied-${s.id}-${name}`); } catch { return false; }
+      const d = f?.ok === true ? f.doc : null;
+      if (!d || d.session !== s.id || d.name !== name || !doneFor(s, d.state)) return false;
+      let hash; try { hash = hashOf(join(s.outbox, name)); } catch { return false; }
+      if (d.sha256 !== hash) return false;
+    }
+    return true;
   };
 }
 
@@ -167,6 +228,21 @@ function writeNew(file, text) {
   try { const b = Buffer.from(text, 'utf8'); for (let o = 0; o < b.length;) o += writeSync(fd, b, o, b.length - o); } finally { closeSync(fd); }
 }
 
+/** Removes a folder whole (#369 r2 m1, self-review m1, m2): removed at once; only when that fails are its folders made
+ * writable again, by /bin/chmod -R -P (never through a link, so nothing outside is changed), and it is removed once
+ * more. One still there is told with `log` and left until this card's next start removes it, which cleanup does not.
+ * → true when it is gone. */
+/** A folder's tree made owner-writable again, never through a link (-P). */
+export const chmodTree = (d) => execFileSync('/bin/chmod', ['-R', '-P', 'u+rwx', d], { stdio: 'ignore', timeout: 60_000 });
+export function removeAll(fs, dir, log = () => {}) {
+  try { fs.rm(dir, { recursive: true, force: true }); return true; } catch { /* made writable, then once more */ }
+  try { fs.chmodTree(dir); } catch { /* the removal says */ }
+  try { fs.rm(dir, { recursive: true, force: true }); return true; } catch (e) {
+    log(`the baseline's throwaway copy ${dir} can't be removed (${e?.code ?? e?.message}); it is left until this card's next start`);
+    return false;
+  }
+}
+
 /**
  * Whether a session's settings deny a product's folders whole (#378 r1 M1): its shell's read-deny list holds each one, or
  * a folder above it, and so do Claude's own Read and Edit denies. → null, or what is not denied.
@@ -224,8 +300,12 @@ export function liveWallProblem(live, product, places, read) {
  * products: { <name>: { repo, mirror, render: { paths, product, rulesHosts, productionFiles, proposalOutboxes } } } }.
  * deps (ports; production passes only what is built): readCard, startCommit, prepare, checksFor(x) → { [n]: check },
  * promptFor(x) → text, names ({ version, confirmed? }, launch check 0; the flags are sessionArgs'), account, spawn, pidStartOf, kill, there, launchFn,
- * walled, fs ({ mkdir, rm, writeNew, list }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
- * #364 self-review M1), readSettings(id) → a live session's settings (#378 r1 M1).
+ * mainOf(mirror) → the mirror's main commit (read before and after the copy is made, #369 r1 m3), beforeStart(x) → null
+ * or the reason claude must not start,
+ * walled, fs ({ mkdir, rm, writeNew, list, lstat, chmodTree }), ownUid, stopped (true once the runner is stopping: nothing more is spawned,
+ * #364 self-review M1), log (what is told, such as a throwaway that can't be removed), productHeld(product) → null or why
+ * the product starts no session (runner-main.mjs keepSnapshots, #369 r2 m2; asked at the start and again before claude),
+ * readSettings(id) → a live session's settings (#378 r1 M1).
  * The request: { card, kind, product, sessionId, live } (live: the runner's other live sessions, liveWallProblem).
  */
 export function startPort(c, deps = {}) {
@@ -233,9 +313,11 @@ export function startPort(c, deps = {}) {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
     startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = () => null,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
-    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, readSettings = sessionSettingsOf(c.settingsDir),
+    walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
+    readSettings = sessionSettingsOf(c.settingsDir),
   } = deps;
-  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, ...(deps.fs ?? {}) };
+  const fs = { mkdir: mkdirSync, rm: rmSync, writeNew, list: readdirSync, lstat: lstatSync, chmodTree, ...(deps.fs ?? {}) };
+  const log = deps.log ?? (() => {});
   return async ({ card, kind, product, sessionId, live = [] } = {}) => {
     if (stopped()) return refuse('the worker runner is stopping');
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return refuse('the session id is not one the Dispatcher makes');
@@ -245,6 +327,9 @@ export function startPort(c, deps = {}) {
     const profile = DESIGN_PROFILES[role];
     const p = Object.hasOwn(c.products ?? {}, product) ? c.products[product] : null;
     if (!p || typeof p.repo !== 'string' || typeof p.mirror !== 'string' || !p.render?.paths) return refuse(`product ${product} is not in the runner's config`);
+    // A product whose rules snapshot is not kept fresh starts no session (#369 r2 m2): its hooks would refuse every call. Asked before anything is read.
+    const held = deps.productHeld?.(product);
+    if (held) return refuse(held);
     const cd = readCard(card);
     if (!cd?.ok) return refuse(`the card can't be read from the Record (${cd?.reason ?? 'no answer'})`);
     if (cd.doc?.state !== 'claimed' || cd.doc?.claim?.session_id !== sessionId) return refuse('the card is not claimed for this session');
@@ -265,11 +350,20 @@ export function startPort(c, deps = {}) {
     const settingsFile = join(c.settingsDir, `${sessionId}.json`);
     // Setup makes each product's folders (setup/layout.mjs, L836); the start never does, so one missing is refused here.
     for (const f of [mine.copies, dirname(outbox)]) { let st; try { st = fs.lstat(f); } catch { st = null; } if (!st?.isDirectory()) return refuse(`setup has made no folder ${f} for product ${product}`); }
-    const made = await prepare({ product: { repo: p.repo, mirror: p.mirror }, card: { id: card, repo: p.repo, commit, branch: cardBranch(card) }, dest: copy });
+    // The main the copy's setup files are restored from (#369 r1 m3): read before and after the copy is made, so checks 2
+    // compare with that commit, and main moving meanwhile is said as such, never read as the branch's tampering.
+    let mainAt; try { mainAt = await mainOf(p.mirror); } catch (e) { return refuse(`the mirror's main can't be read (${e?.message ?? e})`); }
+    const sameMain = async () => { try { return (await mainOf(p.mirror)) === mainAt; } catch { return false; } };
+    const making = { product: { repo: p.repo, mirror: p.mirror }, card: { id: card, repo: p.repo, commit, branch: cardBranch(card) } };
+    const made = await prepare({ ...making, dest: copy });
     if (!made?.ok) return refuse(`the copy can't be made (${made?.reason ?? 'no answer'})`);
     const ours = [copy];
     const undo = (reason) => { for (const f of ours) { try { fs.rm(f, { recursive: true, force: true }); } catch { /* left for cleanup */ } } return refuse(reason); };
+    if (!(await sameMain())) return undo('main changed during launch; retry');
     try { fs.mkdir(outbox, { mode: 0o700 }); ours.push(outbox); } catch (e) { return undo(`the outbox can't be made (${e?.code ?? e?.message})`); }
+    // This card's throwaways left by an earlier start (#369 r2 m1): one session per card, so none of them runs now.
+    // One that can't be removed is told and left until the next start; the new one has its own name, so the card is never stuck on it.
+    try { for (const n of fs.list(mine.copies)) if (n.startsWith(`${card}..baseline-`)) removeAll(fs, join(mine.copies, n), log); } catch { /* listed again below */ }
     let others; try { others = fs.list(mine.copies).filter((n) => n !== card).map((n) => join(mine.copies, n)); } catch (e) { return undo(`the product's copies folder can't be listed (${e?.code ?? e?.message})`); }
     // Every other folder under the copies root and the outbox root, whole (#378 m1): a product setup made but this config
     // leaves out, and anything left in the old flat layout, as well as the config's other products.
@@ -284,20 +378,56 @@ export function startPort(c, deps = {}) {
       others.push(theirs.copies, theirs.outboxes);
       if (typeof o?.mirror === 'string') others.push(o.mirror);
     }
+    // The baseline's throwaway place (#369 r1 M1), in the product's own copies folder (L836). `..` is in no card id
+    // (CARD_ID refuses it), so no card's copy is named so, and the name keeps to the plain path letters the settings
+    // renderer takes ([A-Za-z0-9._-], L889: a `~` was refused there). Its name is this session's (#369 r2 m1), so one
+    // left behind never refuses a later start of the card.
+    const spare = join(mine.copies, `${card}..baseline-${sessionId}`);
+    others.push(spare);
     others = [...new Set(others)];
     const r = p.render;
-    const w = walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
-      paths: { ...r.paths, copy, outbox, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...others] } } });
+    const settingsFor = (at, box, deny) => walled({ kind, workerRunner: c.workerRunner, profile, product: r.product, rulesHosts: r.rulesHosts, productionFiles: r.productionFiles, proposalOutboxes: r.proposalOutboxes,
+      paths: { ...r.paths, copy: at, outbox: box, deny: { ...(r.paths.deny ?? {}), otherCopies: [...(r.paths.deny?.otherCopies ?? []), ...deny] } } });
+    const w = settingsFor(copy, outbox, others);
     if (!w?.ok) return undo(w?.reason ?? 'not walled: no answer');
     try { fs.writeNew(settingsFile, `${JSON.stringify(w.settings, null, 2)}\n`); ours.push(settingsFile); } catch (e) { return undo(`the settings file can't be written (${e?.code ?? e?.message})`); }
     const env = roleEnv(process.env, { path: c.path, extra: { ...who.env, HOME: c.home } });
-    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid };
+    // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
+    // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
+    const throwaway = async () => {
+      const spareSettings = join(c.settingsDir, `${sessionId}..baseline.json`);
+      const done = async () => { removeAll(fs, spare, log); try { fs.rm(spareSettings, { force: true }); } catch (e) { log(`the baseline's settings file ${spareSettings} can't be removed (${e?.code ?? e?.message})`); } };
+      const no = async (reason) => { await done(); return refuse(`the baseline's throwaway copy ${reason}`); };
+      try { fs.mkdir(spare, { mode: 0o700 }); } catch (e) { return refuse(`the baseline's throwaway copy can't be made (${e?.code ?? e?.message})`); }
+      const at = join(spare, 'copy'); const box = join(spare, 'outbox');
+      const t = await prepare({ ...making, dest: at });
+      if (!t?.ok) return no(`can't be made (${t?.reason ?? 'no answer'})`);
+      if (t.head !== made.head) return no('holds another commit than the session\'s copy');
+      try { fs.mkdir(box, { mode: 0o700 }); } catch (e) { return no(`has no outbox (${e?.code ?? e?.message})`); }
+      const tw = settingsFor(at, box, [...others.filter((o) => o !== spare), copy, outbox]);
+      if (!tw?.ok) return no(`is not walled (${tw?.reason ?? 'no answer'})`);
+      try { fs.writeNew(spareSettings, `${JSON.stringify(tw.settings, null, 2)}\n`); } catch (e) { return no(`has no settings file (${e?.code ?? e?.message})`); }
+      return { ok: true, copy: at, settingsFile: spareSettings, done };
+    };
+    const x = { role, profile, kind, sessionId, card, cardDoc: cd.doc, product, copy, outbox, env, head: made.head, mainAt, claudeBin: c.claudeBin, settings: { file: settingsFile, settings: w.settings }, ownUid, throwaway };
     let l;
     try {
       // Launch check 0 sees the very flags claude is started with (#364 self-review m5), as review-wiring.mjs does.
       const args = sessionArgs({ profile, settingsFile, sessionId, prompt });
       l = await launchFn({ role, profile, checks: checksFor(x) ?? {}, names: { ...names, flags: args.filter((a) => a.startsWith('--')), settings: w.settings }, ownUid,
-        start: () => stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) }) });
+        start: async () => {
+          // Checks 1, 2, 3 and 8 once more (#369 M1, r1 m1 and m2): checks 4 and 11 ran the branch's own code.
+          // The product held back since the checks began (self-review m4: a refresher that died during the baseline), with
+          // or without a beforeStart (#369 merge review minor 2).
+          const h = deps.productHeld?.(product);
+          if (h) return refuse(h);
+          if (beforeStart) {
+            const p = await beforeStart(x);
+            // The check's own reason is kept (#369 r2 m3): every check compares with mainAt, so main moving is only told beside it.
+            if (p) return refuse(`a check failed again just before claude was to start, so it was not started: ${p}${(await sameMain()) ? '' : ' (main also moved during launch, or can\'t be read)'}`);
+          }
+          return stopped() ? refuse('the worker runner is stopping, so claude was not started') : spawnLeader({ spawn, bin: c.claudeBin, args, cwd: copy, env, pidStartOf, ...(kill ? { kill } : {}), ...(there ? { there } : {}) });
+        } });
     } catch (e) { return undo(`the launch failed (${e?.message ?? e})`); }
     // A claude that may still run keeps its copy, outbox and settings (#364 r1 m3); the runner keeps the request waiting.
     if (l?.started?.running === true) return { ok: false, running: true, pgid: l.started.pgid, reason: l.started.reason };

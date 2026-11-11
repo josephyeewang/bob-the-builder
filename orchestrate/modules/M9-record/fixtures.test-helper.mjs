@@ -6,6 +6,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFil
 import { join } from 'node:path';
 import { planFingerprint } from '../../shared/plan-fingerprint.mjs';
 import { outboxKindOf } from '../../shared/record-names.mjs';
+import { PRODUCT_OUTBOX_ROLES } from '../../shared/product-paths.mjs';
 import { tempDir } from '../../shared/test-tmp.mjs';
 import { openRecordWithStore } from './writer.mjs';
 import { HEAD, PRODUCT, UID, rulesFor } from './rules.test-helper.mjs';
@@ -72,10 +73,16 @@ export function go(env, id, doc) {
   must(env.record.write({ actor: 'approvals', entity: 'go', id: `go-${id}`, expectRev: 0, doc: { product: PRODUCT, card_id: id, plan_fingerprint: fingerprintFor(id, doc) } }), 'go');
 }
 
+// A session's outbox folder: the worker runner's roles in the product's own folder (L836, L895 m1), others flat.
+export const outboxDir = (env, role, sid) => (PRODUCT_OUTBOX_ROLES.includes(role) ? join(env.outRoot, PRODUCT, role, sid) : join(env.outRoot, role, sid));
+
+// A session's outbox tag: the worker runner's roles name the product, as M11 intake does (L865, L895 m1).
+export const outboxTag = (role, sessionId, more = {}) => ({ role, sessionId, ...(PRODUCT_OUTBOX_ROLES.includes(role) ? { product: PRODUCT } : {}), ...more });
+
 // Drop a file in a session's outbox and return its path.
 let fileNo = 0;
 export function outboxFile(env, role, sid, name, text) {
-  const dir = join(env.outRoot, role, sid);
+  const dir = outboxDir(env, role, sid);
   mkdirSync(dir, { recursive: true });
   const p = join(dir, name ?? `report-${++fileNo}.md`);
   writeFileSync(p, text);
@@ -145,7 +152,7 @@ export function runCard(env, id, claim = sessionClaim()) {
 // `tree` (L69), when given, is the head's tree: a session counts at every head with that tree. The runner makes the
 // session's outbox folder before the start, so it is made here too (L71: a folder that is gone is not a silence).
 export function runnerLaunch(env, card, sid, role = 'reviewer', head = HEAD, { tree } = {}) {
-  if (env.outRoot) mkdirSync(join(env.outRoot, role, sid), { recursive: true });
+  if (env.outRoot) mkdirSync(outboxDir(env, role, sid), { recursive: true });
   const p = join(env.launchRoot, `${sid}.json`);
   writeFileSync(p, JSON.stringify({ session_id: sid, role, card, head, ...(tree ? { tree } : {}), launched_at: iso(env.clock.t), request_id: `q-${sid}` }), { mode: 0o644, flag: 'wx' });
   chmodSync(p, 0o644);

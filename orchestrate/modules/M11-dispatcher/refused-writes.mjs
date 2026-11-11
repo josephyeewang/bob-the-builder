@@ -145,15 +145,36 @@ const stillRefused = (rec, k) => {
   return now === k.from || now === 'unreadable' || k.from === 'unreadable';
 };
 
-// This pass's refusals, named in the error a corrupt kept list raises (#367 r1 M1), so they are told now whatever the list.
-const namedOf = (fresh) => {
-  const once = [...new Map(fresh.map((x) => [keyOf(x), x])).values()];
+// This pass's refusals, once each, as the kept list holds them (L366 m-A: a write refused twice is one refusal, the latest).
+const onceOf = (fresh) => [...new Map(fresh.map((x) => [keyOf(x), x])).values()];
+// This pass's refusals, named in an error (#367 r1 M1), so they are told now whatever the list. Where they are kept (a
+// restored list whose keep write was taken), the latest REFUSED_LIST_MAX are named and the rest counted. With `all`,
+// every one is named: used wherever they are saved nowhere (the list could not be restored, #367 r2 m2; or its keep
+// write was refused, L875 M1 and m3), since the error is then all that tells them.
+const namedOf = (fresh, { all = false } = {}) => {
+  const once = onceOf(fresh);
   if (!once.length) return '';
-  const shown = once.slice(-REFUSED_LIST_MAX).map((x) => `${aboutOf(x).id} (${x.reason})`).join('; ');
-  return `; refused this pass: ${shown}${once.length > REFUSED_LIST_MAX ? ` and ${once.length - REFUSED_LIST_MAX} more` : ''}`;
+  const shown = (all ? once : once.slice(-REFUSED_LIST_MAX)).map((x) => `${aboutOf(x).id} (${x.reason})`).join('; ');
+  return `; refused this pass: ${shown}${!all && once.length > REFUSED_LIST_MAX ? ` and ${once.length - REFUSED_LIST_MAX} more` : ''}`;
 };
+// #367 r2 m3: the check write below is refused on purpose, and the Record tells that refusal as any other (its `refused`
+// alert). Its reason varies: the tamper found in this process, "changed since read ... expected 9007199254740991" in a new
+// one, or a store error. The error names the fact instead, so Joe doesn't read that alert as a lost write (self-review m1).
+const probeNote = (fact) => `; the Record's "refused" alert for fact ${fact} this pass, whatever its reason, is this check, not a lost write`;
 
+// An error that already names this pass's refusals as it should, so the wrapper below adds nothing.
+const naming = (message) => Object.assign(new Error(message), { namesFresh: true });
+
+// L882 m1: any throw on the way, a store read that throws included, names every refusal this pass unless it already
+// names them: none of them is known to be kept when the pass stops here.
 function tellCause(args) {
+  try { return tellCauseOnce(args); } catch (e) {
+    if (e?.namesFresh) throw e;
+    throw naming(`${e?.message ?? e}${namedOf(args.fresh, { all: true })}`);
+  }
+}
+
+function tellCauseOnce(args) {
   const { rec, cause, fresh } = args;
   const fact = REFUSED_FACT(cause);
   const cur = rec.read('fact', fact);
@@ -161,19 +182,26 @@ function tellCause(args) {
   if (!cur?.corrupt) return tellKept(args, cur, null);
   // #367 r1 M1: nor may it drop this pass's refusals. A write makes the store check the file first (M9 writer.mjs, before
   // the version check): one changed outside the Store Writer is restored from the diary, a stray one is moved aside. The
-  // write itself is at version Number.MAX_SAFE_INTEGER, which no fact reaches, so it is never taken (the Record refuses a
-  // version below 0 before the store sees it). The list is then read again; if it reads, or
+  // write itself is at version Number.MAX_SAFE_INTEGER, which no fact reaches, so the Store Writer's version check
+  // refuses it and it is never taken (#367 r2 c1; -1 would not do: the Record refuses a version below 0 before the
+  // store sees it, so no file check would run). The list is then read again; if it reads, or
   // is now absent, this pass goes on as any other and keeps this pass's refusals. Whatever happens after, the error
   // names them, so they are told this pass even when the daily tell is not due.
   const why = cur.reason ?? 'corrupt';
   try { rec.write({ actor: 'dispatcher', entity: 'fact', id: fact, expectRev: Number.MAX_SAFE_INTEGER, doc: {}, kind: 'write_refused_kept' }); } catch { /* the read below says */ }
   const again = rec.read('fact', fact);
-  if (again?.corrupt) throw new Error(`its kept list could not be read (${why}) or restored, so this pass's refusals are not kept${namedOf(fresh)}`);
+  if (again?.corrupt) throw naming(`its kept list could not be read (${why}) or restored, so this pass's refusals are not kept${namedOf(fresh, { all: true })}${probeNote(fact)}`);
   const how = again ? 'it was restored from the Record\'s diary' : 'no list was on record, so it starts again';
+  // A keep write refused after the restore saves them nowhere: every one is named (L875 M1), once (tellKept's own throw
+  // names them already when it is that refusal).
   try { tellKept(args, again, how); } catch (e) {
-    throw new Error(`its kept list could not be read (${why}); ${how}, then ${e?.message ?? e}${namedOf(fresh)}`);
+    const names = e?.namesFresh ? '' : namedOf(fresh, { all: true });
+    throw naming(`its kept list could not be read (${why}); ${how}, then ${e?.message ?? e}${names}${probeNote(fact)}`);
   }
-  throw new Error(`its kept list could not be read (${why}); ${how}, and this pass's refusals are kept with it${namedOf(fresh)}`);
+  // #367 r2 c2: "kept with it" only when this pass refused something.
+  const keptNow = onceOf(fresh).length ? ', and this pass\'s refusals are kept with it' : '';
+  // Kept, so the latest are named and the rest counted, as the list holds them.
+  throw naming(`its kept list could not be read (${why}); ${how}${keptNow}${namedOf(fresh)}${probeNote(fact)}`);
 }
 
 function tellKept({ rec, alert, now, cause, fresh, taken, ran }, cur) {
@@ -181,7 +209,7 @@ function tellKept({ rec, alert, now, cause, fresh, taken, ran }, cur) {
   const { kept, over: keptOver, more: prior, unreadable } = keptOf(cur?.doc);
   if (!fresh.length && !kept.length && !keptOver.length && !prior && !REFUSED_CAUSES[cause].steps.every(ran)) return 'kept';
   // A write refused twice in a pass is one refusal, the latest (L366 m-A).
-  const once = [...new Map(fresh.map((x) => [keyOf(x), x])).values()];
+  const once = onceOf(fresh);
   const freshKeys = new Set(once.map(keyOf));
   const still = [...keptOver, ...kept].filter((k) => !freshKeys.has(keyOf(k)) && !taken.has(keyOf(k)) && stillRefused(rec, k));
   const all = [...still, ...once];
@@ -214,7 +242,10 @@ function tellKept({ rec, alert, now, cause, fresh, taken, ran }, cur) {
   const keep = { items, over, more, unreadable };
   if ((items.length || more) && Object.entries(keep).some(([k, v]) => JSON.stringify(c?.doc?.[k]) !== JSON.stringify(v))) {
     const w = writeFrom(rec, fact, c?.doc, { ...(c?.doc ?? {}), ...keep }, 'write_refused_kept');
-    if (w?.ok !== true) throw new Error(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused`);
+    // L875 m3: then this pass's refusals are saved nowhere, so the error names every one.
+    if (w?.ok !== true) {
+      throw naming(`its list could not be kept (${w?.reason ?? 'no answer'}), so it may clear while still refused${namedOf(fresh, { all: true })}`);
+    }
   }
   return r.did;
 }

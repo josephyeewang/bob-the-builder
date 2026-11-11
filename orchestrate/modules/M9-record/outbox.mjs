@@ -1,7 +1,8 @@
 // outbox.mjs — read one AI session's outbox file safely (0b-2 M-3, R2-M8, R2-M9, R2-M10, R3-m7).
 //
-// WHY. AI sessions never write the record. They drop files in their own outbox, `<outboxRoot>/<role>/<sessionId>/`,
-// and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
+// WHY. AI sessions never write the record. They drop files in their own outbox: `<outboxRoot>/<product>/<role>/<sessionId>/`
+// for a worker runner session (PRODUCT_OUTBOX_ROLES; its tag must name the product, L836, L895 m1), and
+// `<outboxRoot>/<role>/<sessionId>/` for every other role (the one definition is shared outboxFolders), and the Dispatcher hands each file to the Store Writer. The file is written by an AI, so it is read as hostile:
 //   - the role and session come from where the file really is (realpath), never from what it says;
 //   - it is opened without following a link, and must be a plain file owned by the role's user, ≤ 256 KB, so a link to a
 //     key file can't be copied into the record; in a worker's outbox it must have one name, and in review's it may have
@@ -80,7 +81,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { CHECKLIST_LEVELS, FINDING_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
+import { CHECKLIST_LEVELS, FINDING_LEVELS, OUTBOX_KINDS, SESSION_ID, VERDICT_CHECKLIST, notARecord, outboxFolders, outboxKindOf, outboxPlace } from '../../shared/record.mjs';
 import { REVIEW_ROLES, RUNNER_ROLES } from '../../shared/review-roles.mjs';
 
 export { REVIEW_ROLES };
@@ -423,7 +424,7 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
   // Where the file is (missing, a link, the wrong folder): the one check, shared with the stand-in (L151 m7).
   const place = outboxPlace({ outboxRoot, tag, file });
   if (!place.ok) return no(place.reason);
-  const { real } = place;
+  const { real, folders } = place;
 
   const name = basename(real);
   const kind = kindOf(name);
@@ -440,7 +441,7 @@ export function readOutboxFile({ outboxRoot, uids = {}, tag, file }) {
     const p = reviewUserProblem(uids, tag.role);
     if (p) return no(`verdict refused: ${p}`);
     try {
-      for (const d of [join(outboxRoot, tag.role), join(outboxRoot, tag.role, tag.sessionId)]) {
+      for (const d of folders) {
         const st = lstatSync(d);
         if (st.uid !== owner) return no(`verdict refused: outbox folder ${basename(d)} is not owned by the review user`);
         if (st.mode & 0o022) return no(`verdict refused: outbox folder ${basename(d)} is writable by others than the review user`);
@@ -542,7 +543,10 @@ export function sessionVerdict({ outboxRoot, uids, role, sessionId, card, head }
   try {
     if (!REVIEW_ROLES.includes(role)) return no(`${role} is not a review role`);
     if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return no('no session id of letters, digits and dashes');
-    const dir = join(outboxRoot, role, sessionId);
+    // A review session's outbox has no product folder: outboxFolders gives the one place (L850-2).
+    const where = outboxFolders({ outboxRoot, tag: { role, sessionId } });
+    if (!where.ok) return no(where.reason);
+    const dir = where.folders.at(-1);
     let names;
     // The runner makes the outbox folder before the start, so one that is gone (renamed, or its role folder renamed) is
     // a refusal, never "nothing handed in" (L71 point 1); so is any other failure to list it.

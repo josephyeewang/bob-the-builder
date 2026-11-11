@@ -15,7 +15,7 @@
 // known, so it never answers { ok: false }):
 //   - launch ok: the request is 'started' (or since 'stopped'), and every field is what this runner must make:
 //     sessionId the asked one, outbox <outboxRoot>/<product>/<role>/<id> (worker, or script for a script card: L767, L836), copy <copiesRoot>/<product>/<card>, pid and pgid real, pid_start
-//     a non-empty string, head a commit id, signin and configDir non-empty. The session it started is listed while
+//     a non-empty string, head a commit id, base a commit id or left out (L825-2), signin and configDir non-empty. The session it started is listed while
 //     'started' (and may be after), and the listing agrees: card, product, kind, pgid, signin, config_dir and outbox.
 //     launch ok: false: the request is 'refused'.
 //   - stopGroup ok: the session is listed with stop_requested, no longer live by the status's own rule, and with the
@@ -51,7 +51,8 @@ const realPid = (n) => Number.isInteger(n) && n > 1;
 /**
  * What is wrong with a start's answer, or null: the one definition both sides use (#358 r1 m1), the runner before it
  * lists a session and the Dispatcher's launch ask before it trusts one. sessionId the asked one, pid and pgid real, a
- * leader start time, head a commit id, outbox <outboxRoot>/<product>/<role>/<sessionId>, copy <copiesRoot>/<product>/<card> (L836), signin and
+ * leader start time, head a commit id, base a commit id or left out (L825-2: a port that does not know it leaves it out,
+ * never null), outbox <outboxRoot>/<product>/<role>/<sessionId>, copy <copiesRoot>/<product>/<card> (L836), signin and
  * configDir non-empty.
  */
 export function launchAnswerWrong(a, { sessionId, kind, card, product, outboxRoot, copiesRoot }) {

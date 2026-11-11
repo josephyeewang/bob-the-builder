@@ -64,7 +64,7 @@ async function verifiedCard(w) {
   await w.pass();
   const [l] = w.launched;
   must(put(w.rec, 'workshop', 'card', 'C-1', { head: HEAD }), 'head');
-  must(w.rec.applyOutbox({ role: 'worker', sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.E, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
+  must(w.rec.applyOutbox({ role: 'worker', product: PRODUCT, sessionId: l.sessionId, card: 'C-1' }, outboxFile(w.E, 'worker', l.sessionId, 'handin-1.md', `${JSON.stringify({ entity: 'card', id: 'C-1', from_state: 'running', to_state: 'in_review' })}\n`)), 'hand-in');
   passingVerdict(w.E, 'C-1', 'R-1', HEAD);
   must(put(w.E.review, 'dispatcher', 'card', 'C-1', { state: 'verified' }), 'verified');
   must(w.rec.write({ actor: 'sensors', entity: 'fact', id: 'pr-7', expectRev: 0, doc: { type: 'pr', head_sha: HEAD, state: 'open', merged: false, at: iso(w.E.clock.t), observed_at: iso(w.E.clock.t) } }), 'pr reading');
