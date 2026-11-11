@@ -1242,6 +1242,7 @@ for (const [what, edit, re] of ROBOT_PLANTS) {
     const ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, re); assert.match(ld.text, /so the robot job would not start/);
     assert.equal(w.mac.loaded.size, 0, 'nothing was loaded');
     const ck = w.run(['daemons', 'check', '--only', 'robot']); assert.equal(ck.code, 1, ck.text); assert.match(ck.text, re);
+    assert.doesNotMatch(ck.text, /the robot App's key/, 'a robot.json that fails its check asks for no key file');
   });
 }
 
@@ -1259,6 +1260,8 @@ test('L727: the robot App named in robot.json → its key (token.mjs\'s default 
   writeFileSync(w.mac.at(key), 'k'.repeat(1700), { mode: 0o644 }); chmodSync(w.mac.at(key), 0o644); w.mac.owners.set(key, { uid: orch, gid: orch });
   ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /mode is 644, want 600/);
   const p2 = w.run(['daemons', 'place']); assert.equal(p2.code, 1, p2.text); assert.match(p2.text, /mode is 644, want 600/);
+  chmodSync(w.mac.at(key), 0o400);   // read-only is refused too: the mode must be exactly 0600 (README)
+  ld = w.run(['daemons', 'load']); assert.equal(ld.code, 1, ld.text); assert.match(ld.text, /mode is 400, want 600/);
   chmodSync(w.mac.at(key), 0o600);
   const p3 = w.run(['daemons', 'place']); assert.equal(p3.code, 0, p3.text);
   ld = w.run(['daemons', 'load']); assert.equal(ld.code, 0, ld.text); assert.ok(w.mac.loaded.has(ROBOT_LABEL));

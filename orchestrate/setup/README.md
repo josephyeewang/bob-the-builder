@@ -229,10 +229,10 @@ prepared config as a file named `robot.json`, which the install puts in the copy
 The robot App (L600, L727): `robot.json` may name it with four keys, all or none (the wiring's own `appProblem`):
 `appId` (the App's id), `appInstallation` (its installation's number on the alert repository), `alertRepo` (owner/name:
 the repository where alert issues go, where the App is installed; never Bob's repository) and `alertOwner` (the GitHub
-login the issues are assigned to). Some but not all, or a bad value: `load` refuses and `check` FAILs. With all four, the
+login the issues are assigned to). Some but not all, or a bad value: `place` and `load` refuse and `check` FAILs. With all four, the
 App's key must be in the robot key folder under token.mjs's default name, `<base>/keys/robot-app.pem`: orchestrate's own
 plain 0600 file of a key's size, no access list (the same rule as the watcher App's key). The mode must be exactly 0600:
-0400 is refused too, so a key copied in read-only needs `chmod 600`. Missing or open: `load` refuses
+0400 is refused too, so a key copied in read-only needs `chmod 600`. Missing or open: `place` and `load` refuse
 (no alert, not even the store-free one, could be sent) and `check` FAILs (with sudo; without, the key is listed as
 NEEDS ROOT and check does not exit 0). With none of the four, no key is asked for and the deliver pass refuses as not
 wired, so alerts stay queued.
