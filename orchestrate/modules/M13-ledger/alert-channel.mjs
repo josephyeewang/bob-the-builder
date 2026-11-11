@@ -121,8 +121,8 @@ const once = (token) => {
  * closed it. Anyone can open an issue on a public repo and quote a marker, so the robot's own login decides (L399).
  * findOpen(test) → the number of an open issue of the robot's whose last line passes test, on any page, null when there
  * is none, false when GitHub refused the list or there are too many to read.
- * listOpen(test) → every open issue of the robot's whose last line passes test, as [{ number, body, updated_at }], read
- * whole or not at all: false when GitHub refused a page, a page was not a list, or there are too many to read (L957).
+ * listOpen(test) → every open issue of the robot's whose last line passes test, as [{ number, body }], read whole or
+ * not at all: false when GitHub refused a page, a page was not a list, or there are too many to read (L957).
  * latestOwnComment(n, since) → the robot's latest comment since that ISO time, as { at, body }; null when there is none;
  * false when GitHub refused a read or there are too many comments to read them all.
  * `lastAnswer` says what GitHub answered to the latest call, so a refusal can tell the owner what GitHub said.
@@ -217,8 +217,9 @@ export function githubIssues({ repo, token, fetchFn = globalThis.fetch, timeoutM
         for (const i of r.json) {
           if (!i || i.pull_request || !mine(i.user) || typeof i.body !== 'string' || !test(lastLine(i.body))) continue;
           if (!ISSUE(i.number)) return false;
-          found.push({ number: i.number, body: i.body, updated_at: typeof i.updated_at === 'string' ? i.updated_at : null });
+          found.push({ number: i.number, body: i.body });
         }
+        // Pages move while issues open and close: one skipped is not closed this day, one twice is found again by its clear.
         if (r.json.length < COMMENT_PAGE) return found;
       }
       last = `GitHub has more than ${ISSUE_PAGES * COMMENT_PAGE} open issues to look through, too many to read`;
