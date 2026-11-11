@@ -326,6 +326,25 @@ export function readFactFile({ recordRoot, recordUid, fact }) {
 }
 
 /**
+ * A session from the Record, read only (L899): docs/session/<id>.json, with its revision (`rev`), as readFactFile reads
+ * a fact. The worker runner's drain reads a session's attempt here, to find the push that took its bundle.
+ * → { ok: true, doc, rev } | { ok: false, missing?, reason }
+ */
+export function readSessionFile({ recordRoot, recordUid, session }) {
+  if (typeof session !== 'string' || !SESSION_ID.test(session)) return { ok: false, missing: true, reason: 'not a session id' };
+  for (const d of [recordRoot, join(recordRoot, 'docs'), join(recordRoot, 'docs', 'session')]) {
+    const bad = recordFolderProblem(d, recordUid);
+    if (bad) return { ok: false, reason: bad };
+  }
+  // The exact name, before anything opens it, as for a card.
+  const dir = join(recordRoot, 'docs', 'session');
+  let names;
+  try { names = readdirSync(dir); } catch (e) { return { ok: false, reason: `the session folder could not be listed (${e?.code ?? e?.message})` }; }
+  if (!names.includes(`${session}.json`)) return { ok: false, missing: true, reason: 'no such session' };
+  return readRecordFile(join(dir, `${session}.json`), recordUid, 'session', session, 'no such session');
+}
+
+/**
  * Where a plan reviewer's plan is (L703): the Lead outbox file intake applied with this sha256, from the Record's own
  * note of it (docs/fact/intake-applied-<session>-<name>.json, state `applied`). The path only says where to look: the
  * runner reads that file once and refuses it unless its bytes hash to the card's plan_sha256 (review-runner.mjs

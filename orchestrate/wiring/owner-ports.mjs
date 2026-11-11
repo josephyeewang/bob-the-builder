@@ -62,12 +62,11 @@ export const OWNER_PORTS = Object.freeze({
 });
 
 /**
- * The cleanup group's owner-side members. The copies are the owner's user's, so cleanup reaches them through the runner.
- * cleanupCopy puts no time limit on saveWork, so that port keeps its own.
+ * The cleanup group's owner-side member. cleanupCopy puts no time limit on saveWork, so that port keeps its own.
+ * (copiesRoot, the TOP worker-copies folder, is the Dispatcher config's now, L887: worker-ports.mjs, read through
+ * setup's access-list entry; #403 r1 m1.)
  */
 export const OWNER_CLEANUP_PORTS = Object.freeze({
-  copiesRoot: Object.freeze({ sync: true, in: 'a value, read on use', out: 'the full path of the product\'s own folder of worker copies, runnerPlaces(...).copies = <copiesRoot>/<product> (L836, #378 r1 m2), so each entry in it is a card\'s copy, never the top copies folder whose entries are products; fixed at start. cleanupPass, as the orchestrate user, lists, reads and deletes in it directly, so setup gives orchestrate an access list of its own there (L747): list, search, read (file contents and attributes, so a copy can be hashed) and delete, inherited by every file and folder made under it; no add, no write; it deletes only after cleanupPass\'s checks (or on Joe\'s counted Yes). The runner never moves a file in from outside it, so a delete never stops partway',
-    notKnown: 'the read throws, never a folder that reads as empty', deadlineMs: null }),
   saveWork: ask('({ clone, mirror, card, branch, outbox })', '{ ok: true, bundle }: a fresh bundle file inside outbox, which is orchestrate\'s private staging folder: the runner writes the bundle where orchestrate can read it, and the port (orchestrate-side) copies it into outbox',
     '{ ok: false, reason }, or { ok: false, timedOut: true, reason } at its own limit', SAVE_DEADLINE_MS),
 });

@@ -7,7 +7,7 @@ import { chmodSync, existsSync, fstatSync, linkSync, mkdirSync, readdirSync, rea
 import { basename, dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { templateFile } from './review-settings.mjs';
-import { installProblem, programsProblem, readCardFile, readFactFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
+import { installProblem, programsProblem, readCardFile, readFactFile, readSessionFile, recordVerdictTaken, adminAnswer, sessionsFrom, realPorts, readConfig, readInstallStamp, readJoeTaps, tapsFolderProblem, readyProblem, reviewCopyPath, prepareReviewCopy, WIRING_EXPORTS, holdersOf, main } from './review-runner-main.mjs';
 import { parseSnapshot } from '../hooks/snapshot.mjs';
 import { readOutboxFile } from '../../M9-record/outbox.mjs';
 import { STAMP, installStamp } from './review-daemons.mjs';
@@ -318,6 +318,32 @@ test('L852: a fact is read from the Record read only, as a card is; reading chan
   assert.equal(read('INTAKE-applied-S-1-plan-a.md').missing, true, 'only the exact name');
   assert.equal(read('f-3').missing, true, 'only the exact name is that fact, even when its file is ruined');
   assert.equal(tree(), before, 'no read writes, moves or makes anything');
+});
+
+test('L899: a session is read from the Record read only, as a fact is: its id checked, its folders checked, only the exact name', () => {
+  const root = tempDir('m4-lane4-sessionread-');
+  const read = (session, uid = ME) => readSessionFile({ recordRoot: root, recordUid: uid, session });
+  chmodSync(root, 0o755);
+  assert.match(read('S-1').reason, /docs is missing/);
+  mkdirSync(join(root, 'docs', 'session'), { recursive: true });
+  for (const p of [root, join(root, 'docs'), join(root, 'docs', 'session')]) chmodSync(p, 0o755);
+  const put = (id, body, mode = 0o644) => { const p = join(root, 'docs', 'session', `${id}.json`); writeFileSync(p, typeof body === 'string' ? body : JSON.stringify(body), { mode }); chmodSync(p, mode); return p; };
+  put('S-1', { entity: 'session', id: 'S-1', rev: 3, doc: { card: 'C-1', attempt: 'a1' } });
+  put('S-2', { entity: 'fact', id: 'S-2', doc: {} });
+  put('S-3', { entity: 'session', id: 'S-3', doc: {} }, 0o666);
+  put('Ab-1', { entity: 'session', id: 'Ab-1', doc: { attempt: 'a1' } });
+  assert.deepEqual(read('S-1'), { ok: true, doc: { card: 'C-1', attempt: 'a1' }, rev: 3 });
+  assert.match(read('S-9').reason, /no such session/);
+  for (const id of ['../S-1', 'S-1.json', 'S_1', '', 7, null, 'x'.repeat(129)]) assert.equal(read(id).missing, true, String(id));
+  assert.match(read('../S-1').reason, /not a session id/);
+  assert.match(read('S-2').reason, /not a session document/);
+  assert.match(read('S-3').reason, /not the Record's own plain file/);
+  assert.match(read('S-1', ME + 1).reason, /not the Record owner's alone/);
+  // Only the exact name: a name that differs by case or is a prefix of one listed is no such session.
+  for (const id of ['s-1', 'AB-1', 'S', 'Ab']) assert.match(read(id).reason, /no such session/, id);
+  chmodSync(join(root, 'docs', 'session'), 0o777);
+  assert.match(read('S-1').reason, /not the Record owner's alone/, 'a session folder others can write');
+  chmodSync(join(root, 'docs', 'session'), 0o755);
 });
 
 test('L852: one list of the intake states that mean an outbox file is used, and the Lead restart reads it', async () => {
