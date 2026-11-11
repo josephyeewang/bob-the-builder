@@ -12,6 +12,7 @@
 // its own (the review runner records that end), and a verdict for a card no move leads out of (cancelled, failed,
 // closed_no_answer, reverted: M9 writer.mjs REVIEW_OVER, L933) is thrown away when it is taken, never recorded as a pass
 // and never a merge. A stop matched by the request_id this Dispatcher wrote is lane 3's follow-up card.
+// L935: lane 3's review-runner stop changes this; whichever of it and PR B lands second updates this text.
 // Where each kind goes:
 //   - the worker kinds, editing, undo and script, to this runner (overnight, an editing kind gate.mjs counts, too, once
 //     something starts one);
