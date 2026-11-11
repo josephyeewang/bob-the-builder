@@ -194,15 +194,6 @@ export function outboxPlace({ outboxRoot, tag, file }) {
   return { ok: true, real, folders };
 }
 
-// The stand-in's check when it has no outbox root: the file exists and the name given is the file, not a link.
-function fileOnly(file) {
-  const given = typeof file === 'string' ? file : '';
-  if (!given) return { ok: false, reason: 'no file' };
-  let real;
-  try { real = realpathSync(given); } catch { return { ok: false, reason: 'file not found' }; }
-  return basename(given) === basename(real) ? { ok: true, real } : { ok: false, reason: 'file is a link' };
-}
-
 export function isActor(a) {
   if (SCRIPT_ACTORS.includes(a)) return true;
   const m = /^([a-z_]+):(.+)$/s.exec(String(a));
@@ -289,7 +280,11 @@ export function makeRecord(impl) {
 // The diary data of a release: who gave the card back and why (a reason is text, capped like any diary text).
 export const releaseData = (by, reason) => ({ by, ...(typeof reason === 'string' && reason ? { reason: reason.slice(0, 500) } : {}) });
 
-export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null } = {}) {
+// The Record's refusal of another product's outbox: one wording for M9's Store Writer and the stand-in (L850-2, L938 m2).
+export const otherProductReason = (product, other) => `this record is product ${product}'s, and the outbox is product ${other}'s`;
+
+// product: the product this stand-in is the Record of (as M9's); a tag naming another product is refused, as M9 refuses it.
+export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null, product = null } = {}) {
   const docs = new Map();
   const lines = [];
   const key = (e, id) => `${e}/${id}`;
@@ -343,12 +338,11 @@ export function memoryRecord({ outboxRoot, now = () => Date.now(), dead = null }
       return { ok: true, rev, seq };
     },
     applyOutbox(tag, file) {
-      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. Given no
-      // root, the stand-in still refuses a missing file or a link, but cannot check the folder: M11's fixture keeps a
-      // session's files in <tmp>/<role>/ with no session folder (lane 2's to move to the real layout; then root is required).
-      // DEPARTURE: the stand-in holds no product, so it can't refuse a tag naming another product as the Store Writer does
-      // (L850-2); a tag's product still picks the folder through outboxPlace.
-      const place = outboxRoot === undefined ? fileOnly(file) : outboxPlace({ outboxRoot, tag, file });
+      // Like the real M9: first where the file is (missing, a link, the wrong folder; L151 m7), then its name. With no
+      // outbox root it refuses every file, as M9 does, so no test hands in a file the real Record would not find (L910).
+      // Given its product, it refuses another product's tag first, as the Store Writer does (L850-2, L938 m2).
+      if (product != null && tag?.product != null && tag.product !== product) return refused(otherProductReason(product, tag.product));
+      const place = outboxPlace({ outboxRoot, tag, file });
       if (!place.ok) return refused(place.reason);
       // A file whose name has no outbox kind is refused, never logged as handed in (L121).
       const name = String(file).split('/').pop();

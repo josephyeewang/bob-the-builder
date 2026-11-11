@@ -10,10 +10,10 @@
 
 import { realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { runnerOutbox, runnerPlaces } from '../../../shared/product-paths.mjs';
+import { PRODUCT_OUTBOX_ROLES, runnerOutbox, runnerPlaces } from '../../../shared/product-paths.mjs';
 
-/** The roles a worker-runner session hands in as, each with its own outbox folder (L767). */
-export const WORKER_OUTBOX_ROLES = Object.freeze(['worker', 'script']);
+/** The roles a worker-runner session hands in as, each with its own outbox folder (L767): the one list, PRODUCT_OUTBOX_ROLES (L910 m3). */
+export const WORKER_OUTBOX_ROLES = PRODUCT_OUTBOX_ROLES;
 
 /**
  * What is wrong with `outbox` as session `sessionId`'s own outbox, in words, or null when it is right. `role` is the
