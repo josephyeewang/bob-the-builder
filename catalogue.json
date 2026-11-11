@@ -2,53 +2,53 @@
   "modules": [
     {
       "bytes": 52388,
-      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-a142f06e8d8850253e2429b112b52dba156e0b2a/verdict.zip",
+      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-dca64869a544b0ab21e01d8dc713779323aa02a6/verdict.zip",
       "id": "verdict",
       "optionalModules": [],
       "origin": "Workflow",
-      "sha256": "b8f406dec86321150a98e101ff3c74f2f573737dd072abe630e221327b8f3bc5",
-      "source": "https://github.com/josephyeewang/bob-the-builder/tree/a142f06e8d8850253e2429b112b52dba156e0b2a/skills/verdict",
-      "sourceCommit": "a142f06e8d8850253e2429b112b52dba156e0b2a",
+      "sha256": "87be1ebbfec588e5f10d70a7f6587b08b24c331b1bc95f90991a2f3fe76ef6ae",
+      "source": "https://github.com/josephyeewang/bob-the-builder/tree/dca64869a544b0ab21e01d8dc713779323aa02a6/skills/verdict",
+      "sourceCommit": "dca64869a544b0ab21e01d8dc713779323aa02a6",
       "summary": "Evaluate tools against your projects and workflow.",
       "title": "Verdict"
     },
     {
-      "bytes": 88552,
-      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-a142f06e8d8850253e2429b112b52dba156e0b2a/design-gallery.zip",
+      "bytes": 88551,
+      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-dca64869a544b0ab21e01d8dc713779323aa02a6/design-gallery.zip",
       "id": "design-gallery",
       "optionalModules": [
         "design-mockups"
       ],
       "origin": "Bob",
-      "sha256": "3954974db652b646dd9fcebc63d74957b396343c3d5fe84d7b8839b31033bb62",
-      "source": "https://github.com/josephyeewang/bob-the-builder/tree/a142f06e8d8850253e2429b112b52dba156e0b2a/skills/design-gallery",
-      "sourceCommit": "a142f06e8d8850253e2429b112b52dba156e0b2a",
+      "sha256": "506e5f0444507eb390d6a531cd092ed7176b61add0f72998942af0662bb8e844",
+      "source": "https://github.com/josephyeewang/bob-the-builder/tree/dca64869a544b0ab21e01d8dc713779323aa02a6/skills/design-gallery",
+      "sourceCommit": "dca64869a544b0ab21e01d8dc713779323aa02a6",
       "summary": "Explore visual directions before committing to a design.",
       "title": "Design Gallery"
     },
     {
       "bytes": 30762,
-      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-a142f06e8d8850253e2429b112b52dba156e0b2a/design-mockups.zip",
+      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-dca64869a544b0ab21e01d8dc713779323aa02a6/design-mockups.zip",
       "id": "design-mockups",
       "optionalModules": [
         "design-gallery"
       ],
       "origin": "Bob",
-      "sha256": "f543e9a1ae91ced5c238b9c1c3c9433499c58ac94fffaa434fdd6933d5343e15",
-      "source": "https://github.com/josephyeewang/bob-the-builder/tree/a142f06e8d8850253e2429b112b52dba156e0b2a/skills/design-mockups",
-      "sourceCommit": "a142f06e8d8850253e2429b112b52dba156e0b2a",
+      "sha256": "9421ad6a6902146529a40bf4683917857f693321e4a3fad6ccc0ebd3a7c5ba20",
+      "source": "https://github.com/josephyeewang/bob-the-builder/tree/dca64869a544b0ab21e01d8dc713779323aa02a6/skills/design-mockups",
+      "sourceCommit": "dca64869a544b0ab21e01d8dc713779323aa02a6",
       "summary": "Generate image concepts for websites and landing pages.",
       "title": "Design Mockups"
     },
     {
-      "bytes": 4400,
-      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-a142f06e8d8850253e2429b112b52dba156e0b2a/pushall.zip",
+      "bytes": 4396,
+      "download": "https://github.com/josephyeewang/bob-the-builder/releases/download/skills-dca64869a544b0ab21e01d8dc713779323aa02a6/pushall.zip",
       "id": "pushall",
       "optionalModules": [],
       "origin": "Workflow",
-      "sha256": "65199662298fe73542e58ec5a1315160a6f16d405e3fd084e255187c6d5f5ab0",
-      "source": "https://github.com/josephyeewang/bob-the-builder/tree/a142f06e8d8850253e2429b112b52dba156e0b2a/skills/pushall",
-      "sourceCommit": "a142f06e8d8850253e2429b112b52dba156e0b2a",
+      "sha256": "0219e53a4da76c210bbf74816a5a6d0d77ecdfd4778ccba8c79dedc858ec6600",
+      "source": "https://github.com/josephyeewang/bob-the-builder/tree/dca64869a544b0ab21e01d8dc713779323aa02a6/skills/pushall",
+      "sourceCommit": "dca64869a544b0ab21e01d8dc713779323aa02a6",
       "summary": "Save verified work with a clear handoff.",
       "title": "PushAll"
     }
@@ -56,5 +56,5 @@
   "preview": false,
   "repository": "josephyeewang/bob-the-builder",
   "schemaVersion": 1,
-  "sourceCommit": "a142f06e8d8850253e2429b112b52dba156e0b2a"
+  "sourceCommit": "dca64869a544b0ab21e01d8dc713779323aa02a6"
 }
