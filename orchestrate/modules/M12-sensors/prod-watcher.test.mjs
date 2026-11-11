@@ -446,15 +446,18 @@ function sink(decide = () => 'opened') {
 const downWhen = (cond) => (a) => { if (cond(a)) throw new Error('github down'); return 'opened'; };
 
 // The watcher's record writer runs on its own fixed clock, apart from the alerts' tick (L143).
+// world.refuse (row 202) makes the writer refuse each put, as a full store does.
 function lossSetup(raise, rulesEntry = { stage: 'first' }) {
   const rec = memoryRecord();
   const v = fakeVercel();
-  const writer = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
+  const world = { refuse: false };
+  const w = makeFactWriter(rec, { now: () => new Date('2026-01-01T00:00:00Z') });
+  const writer = { get: w.get, put: (id, doc) => (world.refuse ? { ok: false, reason: 'the store is full' } : w.put(id, doc)) };
   // The real clear can answer false (L143); nothing the pass saves may hang on it (L152 m1).
   const reported = [];
   const alerts = { raise, clear: async () => false, reportTrouble: async (...a) => { reported.push(a); return 'none'; } };
   const pass = () => watchOnce({ vercel: v.reader, rulesEntry, mainFirstParent: new Set(MAIN), evidence: new Set(), writer, alerts, product: 'product 1' });
-  return { v, pass, writer, reported };
+  return { v, pass, writer, reported, world };
 }
 const subjects = (raise, kind) => raise.texts.filter((a) => a.key.includes(`|${kind}|`)).map((a) => a.key.split('|')[2]);
 
@@ -812,5 +815,40 @@ test('L402: an alert about the Record that GitHub lost is in the pass\'s answer,
     const alerts = { raise: async () => 'opened', clear: async () => 'none', reportTrouble: async () => answer };
     const out = await watchOnce({ vercel: t.v.reader, rulesEntry: { stage: 'first' }, mainFirstParent: new Set(MAIN), evidence: new Set(), writer: t.writer, alerts, product: 'product 1' });
     assert.deepEqual(ofKind(out, 'alerts'), want);
+  }
+});
+
+// Row 202 (#195 / L435, L957): the five raises ruled "condition stands" save nothing on a loss, so a lost one must show
+// in the pass's answer as false, be raised again on every pass while its condition stands, and go out once GitHub takes it.
+test('row 202: each "condition stands" raise that answered false is in the pass\'s answer and is raised again next pass', async () => {
+  const broken = (t) => Object.defineProperty(t.v.s, 'deployments', { configurable: true, get() { throw Object.assign(new Error('x'), { status: 502 }); } });
+  const cases = [
+    ['watcher-cannot-read (a read that throws)', 'watcher-cannot-read', 'vercel', { stage: 'first' }, broken, /could not read Vercel \(HTTP 502\)/],
+    ['watcher-cannot-read (an answer in a shape it does not know)', 'watcher-cannot-read', 'vercel', { stage: 'first' },
+      (t) => { for (const d of t.v.s.deployments) { d.status = d.readyState; delete d.readyState; } }, /shape the production watcher does not know/],
+    ['no-stage', 'no-stage', 'rules', {}, () => {}, /has no stage/],
+    ['old-version-live', 'old-version-live', 'production', { stage: 'first' }, (t) => { t.v.s.live = t.v.s.deployments[1].uid; }, /An older deployment was promoted/],
+    ['watcher-cannot-save', 'watcher-cannot-save', 'baseline', { stage: 'first' },
+      (t) => { t.world.refuse = true; }, /The Record refused what the production watcher saw \(the store is full\)/],
+  ];
+  for (const [name, kind, subject, rulesEntry, start, body] of cases) {
+    let lose = true;
+    const raise = sink((a) => (lose && a.key === `product 1|${kind}|${subject}` ? false : 'opened'));
+    // GitHub answers a little later, as it does: a raise the pass forgot to wait for would land after the answer.
+    const t = lossSetup(async (x) => { await new Promise((r) => setTimeout(r, 2)); return raise(x); }, rulesEntry);
+    const d1 = dep(MAIN[0]); const d2 = dep(MAIN[1]);
+    t.v.s.deployments = [d2, d1]; t.v.s.live = d2.uid;
+    await t.pass();
+    start(t);
+    for (let i = 0; i < 3; i++) {
+      raise.reset();
+      const out = await t.pass();
+      assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject && o.result !== 'none').map((o) => o.result), [false], `${name}: pass ${i + 1}`);
+      assert.deepEqual(subjects(raise, kind), [subject], `${name}: raised again on pass ${i + 1}`);
+      assert.match(raise.texts.find((a) => a.key.includes(`|${kind}|`)).body, body, name);
+    }
+    lose = false; raise.reset();
+    const out = await t.pass();
+    assert.deepEqual(out.filter((o) => o.kind === kind && o.subject === subject).map((o) => o.result), ['opened'], `${name}: sent once GitHub takes it`);
   }
 });
