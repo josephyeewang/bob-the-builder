@@ -339,10 +339,13 @@ export function liveWallProblem(live, product, places, read) {
  * readSettings(id) → a live session's settings (#378 r1 M1).
  * The request: { card, kind, product, sessionId, live } (live: the runner's other live sessions, liveWallProblem).
  */
+/** The start's default prompt (L970): the worker prompt's text, or null (and the start is refused) when it gives none. */
+export const workerPromptText = (x) => { const p = workerPrompt(x); return p.ok ? p.text : null; };
+
 export function startPort(c, deps = {}) {
   const {
     readCard = (card) => readCardFile({ recordRoot: c.recordRoot, recordUid: c.recordUid, card }),
-    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = (x) => { const p = workerPrompt(x); return p.ok ? p.text : null; },
+    startCommit = cardStartCommit, prepare = prepareWorkerCopy, checksFor = () => ({}), promptFor = workerPromptText,
     names = {}, account = () => accountInUse({ home: c.home }), spawn = childSpawn, pidStartOf = leaderStart, kill, there, launchFn = launch,
     walled = walledLaunchSettings, ownUid = () => process.getuid(), stopped = () => false, beforeStart, mainOf = mirrorMain,
     readSettings = sessionSettingsOf(c.settingsDir),

@@ -11,7 +11,7 @@ import { tempDir } from '../shared/test-tmp.mjs';
 import { SETTINGS as S } from '../modules/M4-workshop/launcher/settings-names.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { launch } from '../modules/M4-workshop/launcher/launch.mjs';
-import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath } from './runner-ports.mjs';
+import { INTAKE_DONE, chmodTree, removeAll, cardStartCommit, drainedPort, groupThere, pauseLeadPort, liveWallProblem, productWallGap, projectFolderName, saveWorkPort, sizePort, spawnLeader, startPort, transcriptPath, workerPromptText } from './runner-ports.mjs';
 import { walledLaunchSettings } from './runner-launch.mjs';
 import { leaderStart } from './runner-loop.mjs';
 import { FLAGS, namesIn } from '../modules/M4-workshop/launcher/settings-names.mjs';
@@ -305,13 +305,18 @@ test('L970: the default promptFor is the worker prompt builder, which refuses wi
     delete w.deps.promptFor;
     const b = { goal: 'Add search.', done_when: 'The test passes.', files: ['src/s.js'], not_in_scope: 'The store.' };
     let read = 0;   // only the prompt builder reads the brief, so this counts that the default asked it
-    w.card = { ...w.card, tier: 2, get brief() { read += 1; return b; } };
+    w.card = { ...w.card, kind: 'ordinary', tier: 2, get brief() { read += 1; return b; } };
     const a = await w.start();
     assert.equal(a.ok, false); assert.match(a.reason, /^not wired: no worker prompt/);
     assert.ok(read >= 1, 'the default promptFor is the worker prompt builder');
     assert.deepEqual(w.left(), { copy: false, outbox: false, settings: false });
-    assert.match(workerPrompt({ role: 'worker', kind: 'editing', card: 'C-1', cardDoc: w.card, product: 'p1' }).reason, /no head given/);
-    assert.equal(workerPrompt({ role: 'worker', kind: 'editing', card: 'C-1', cardDoc: w.card, product: 'p1', head: HEAD, outbox: '/o/p1/worker/S-1' }).ok, true);
+    // The port's own default, given what the start passes it: no prompt; with the head and outbox added, the worker's.
+    const asked = { role: 'worker', kind: 'editing', card: 'C-1', cardDoc: w.card, product: 'p1' };
+    assert.equal(workerPromptText(asked), null);
+    assert.match(workerPrompt(asked).reason, /no head given/, 'null because the start does not pass the head yet (lane 2 moves the call)');
+    const full = { ...asked, head: HEAD, outbox: '/o/p1/worker/S-1' };
+    assert.equal(workerPromptText(full), workerPrompt(full).text);
+    assert.match(workerPromptText(full), /^You are a worker\./);
   } finally { rmSync(w.d, { recursive: true, force: true }); }
 });
 

@@ -1738,3 +1738,28 @@ test('L838: a script session hands in report- and handin- only (no worker compac
   assert.deepEqual(kindsFor({ role: 'script' }), ['report-', 'handin-']);
   assert.ok(kindsFor({ role: 'worker' }).includes('report-compact-'), 'the worker keeps its own');
 });
+
+// L982 (#460 r1 M2): a worker hands in its branch as bundle-<its card>.bundle beside its report and hand-in; the push
+// reads that file, so intake leaves it alone and tells no one. Only the worker's own card's bundle: another card's
+// bundle in a worker outbox, or a bundle-named file in another role's outbox, is still refused with an alert.
+test('L982: a worker outbox with its own card\'s bundle gives no alert; any other bundle is still refused', async () => {
+  const w = world();
+  const ob = box(w, 'worker', 'S-1');
+  writeFileSync(join(ob, 'bundle-C-1.bundle'), 'a bundle');
+  writeFileSync(join(ob, 'report-C-1.md'), 'I changed a. I ran the test; it passed.');
+  const rec = w.rec([['card', 'C-1', { state: 'running', product: 'p1' }]]);
+  const out = await intakePass({ rec, sessions: [{ sessionId: 'S-1', role: 'worker', product: 'p1', outbox: ob, uid: UID, card: 'C-1' }], ...w.ports });
+  assert.deepEqual(out.map((r) => r.name), ['report-C-1.md'], JSON.stringify(out));
+  assert.equal(out[0].refused, undefined, JSON.stringify(out));
+  assert.deepEqual(w.calls.alerts, []);
+
+  const ob2 = box(w, 'worker', 'S-2');
+  writeFileSync(join(ob2, 'bundle-C-9.bundle'), 'another card\'s');
+  const o2 = await intakePass({ rec, sessions: [{ sessionId: 'S-2', role: 'worker', product: 'p1', outbox: ob2, uid: UID, card: 'C-2' }], ...w.ports });
+  assert.equal(o2.length, 1); assert.ok(o2[0].refused, JSON.stringify(o2));
+  const ob3 = box(w, 'reviewer', 'R-1');
+  writeFileSync(join(ob3, 'bundle-C-1.bundle'), 'not a reviewer\'s');
+  const o3 = await intakePass({ rec, sessions: [{ sessionId: 'R-1', role: 'reviewer', product: 'p1', outbox: ob3, uid: UID, card: 'C-1' }], ...w.ports });
+  assert.equal(o3.length, 1); assert.ok(o3[0].refused, JSON.stringify(o3));
+  assert.equal(w.calls.alerts.length, 2, w.calls.alerts.join(' | '));
+});
