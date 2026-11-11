@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, fchmodSync, linkSync, openSync, renameSync, unlinkSync, writeSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { join } from 'node:path';
-import { REQUEST_MAX_BYTES, readRequest, writeStatus } from './runner-files.mjs';
+import { REQUEST_MAX_BYTES, REQUEST_SETTLE_MS, readRequest, writeStatus } from './runner-files.mjs';
 
 const dir = () => realpathSync(tempDir('orch-rf-'));
 const ME = process.getuid();
@@ -46,6 +46,40 @@ test('L763: a failed write leaves the old status and no temp file', () => {
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
+// #433 r1 m1: requestWriter makes the name at its open, then sets 0644, then writes, so a pass can see the file 0600
+// (EACCES to the runner) or empty. A young one of those is left for the next pass, never refused (refused is removed and
+// lost); an older one, or one that is not the orchestrate user's plain one-name file, is refused as before.
+test('#433 r1 m1: a request seen half-made (unreadable, empty or cut short) and under REQUEST_SETTLE_MS old waits; an older one is refused', () => {
+  const d = dir();
+  try {
+    assert.equal(REQUEST_SETTLE_MS, 5_000);
+    const f = join(d, 'launch-S-1.json'); writeFileSync(f, '');
+    const at = statSync(f).mtimeMs;
+    const eacces = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+    // Unreadable (still 0600): looked at by name, never followed.
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at + 100, open: eacces }).notYet, /not readable yet/);
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at + REQUEST_SETTLE_MS + 1, open: eacces }).refused, /can't be opened \(EACCES\)/);
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at - 5_000, open: eacces }).refused, /EACCES/, 'dated in the future: never waits forever');
+    assert.match(readRequest(f, { orchestrateUid: ME + 1, now: at + 100, open: eacces }).refused, /EACCES/, 'not the orchestrate user\'s');
+    const s = join(d, 'sym.json'); symlinkSync(f, s);
+    assert.match(readRequest(s, { orchestrateUid: ME, now: at + 100, open: eacces }).refused, /EACCES/, 'a link is never waited on');
+    linkSync(f, join(d, 'two'));
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at + 100, open: eacces }).refused, /EACCES/, 'nor a second name');
+    unlinkSync(join(d, 'two'));
+    assert.match(readRequest(join(d, 'gone.json'), { orchestrateUid: ME, now: at + 100, open: eacces }).refused, /EACCES/);
+    // Readable but empty, or cut short: waits while young, refused once old.
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at + 100 }).notYet, /empty yet/);
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at + REQUEST_SETTLE_MS + 1 }).refused, /can't be read/);
+    writeFileSync(f, '{"launch":'); const at2 = statSync(f).mtimeMs;
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at2 + 100 }).notYet, /not whole yet/);
+    assert.match(readRequest(f, { orchestrateUid: ME, now: at2 + REQUEST_SETTLE_MS + 1 }).refused, /can't be read/);
+    // Every other refusal is not softened by youth, and a whole one is read at once.
+    chmodSync(f, 0o666); assert.match(readRequest(f, { orchestrateUid: ME, now: at2 + 100 }).refused, /written by others/); chmodSync(f, 0o644);
+    writeFileSync(f, '{"launch":{"sessionId":"S-1"}}'); assert.deepEqual(readRequest(f, { orchestrateUid: ME, now: statSync(f).mtimeMs + 100 }), { launch: { sessionId: 'S-1' } });
+    writeFileSync(f, '{"notYet":"x"}'); assert.match(readRequest(f, { orchestrateUid: ME }).refused, /not what the Dispatcher writes/, 'a body can\'t pose as one still being written');
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
 test('L763: a request is read only when it is a plain file with one name, the orchestrate user\'s, and small', () => {
   const d = dir();
   try {
@@ -71,7 +105,7 @@ test('L763: a request is read only when it is a plain file with one name, the or
     chmodSync(open, 0o664); assert.match(readRequest(open, { orchestrateUid: ME }).refused, /written by others/);
     for (const body of ['null', '7', '[]', '"x"', '{"refused":"no"}']) { writeFileSync(join(d, 'v.json'), body); assert.match(readRequest(join(d, 'v.json'), { orchestrateUid: ME }).refused, /not what the Dispatcher writes/, body); }
     const bad = join(d, 'bad.json'); writeFileSync(bad, '{');
-    assert.match(readRequest(bad, { orchestrateUid: ME }).refused, /can't be read/);
+    assert.match(readRequest(bad, { orchestrateUid: ME, now: Date.now() + REQUEST_SETTLE_MS + 1_000 }).refused, /can't be read/);
     assert.match(readRequest(join(d, 'gone.json'), { orchestrateUid: ME }).refused, /can't be opened \(ENOENT\)/);
     assert.match(readRequest(d, { orchestrateUid: ME }).refused, /not a plain file/);
     assert.throws(() => readRequest(f, {}), /uid is not known/);

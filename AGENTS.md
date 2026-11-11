@@ -32,7 +32,7 @@ reference/                  ← Glossary, project profiles, architecture pattern
 audit-lenses/               ← The audit lens library: one file per lens, the list in README.md, panel choice in _selection-rubric.md
 templates/                  ← Templates a project copies (phase report, behavioral core, etc.); blueprint-roadmap/ is the Blueprint
 scripts/                    ← Bob's checks and tools (scripts/blueprint/ for the Blueprint, scripts/hooks/ for guard hooks)
-skills/                     ← The two design skills (design-gallery, design-mockups)
+skills/                     ← Portable skill modules; exports.json defines public files and EXPORTS.md defines packaging
 orchestrate/                ← ORCHESTRATE, the multi-session loop (being built; its own README and LANES.md)
 decision-log.md, CHANGELOG.md, audit-log.md, evolutions/, retros/, lens-retros/, fixtures/  ← History: why things are the way they are
 README.md, SECURITY.md, CONTRIBUTING.md, LICENSE, third_party/, assets/                   ← The public face
@@ -47,6 +47,11 @@ When two or more sessions work on Bob at once, each area has one writer. A chang
 |---|---|---|
 | `orchestrate/`, `templates/blueprint-roadmap/`, `scripts/blueprint/`, and the text of an ORCHESTRATE mode wherever it is added | ORCHESTRATE lead (lanes in `orchestrate/LANES.md`) | — |
 | Everything else, including the NEW mode and startup text (core "MODES" and "MODE: NEW", `build-protocol.md` Part II, the startup steps in `skill/SKILL.md`, `scripts/bob-init.sh`, `spec-audit.py`, `doc-pointers-check.mjs`; moved from the ORCHESTRATE lead on 2026-11-03, D-037) | Bob upkeep | `VERSION` (one bump per change set; the ORCHESTRATE lanes bump once per milestone), `CHANGELOG.md`, `decision-log.md`, `.github/workflows/scripts-ci.yml` |
+
+## Standalone modules
+
+[skills/EXPORTS.md](skills/EXPORTS.md) owns the portable module contract, update flow and verification commands.
+[evolutions/009-standalone-skills/plan.md](evolutions/009-standalone-skills/plan.md) records this evolution; `audit-ledger.json` records the fresh review; artifacts are generated into .audit/ and are never source.
 
 ## Key Rules
 

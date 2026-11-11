@@ -12,7 +12,7 @@
 // its status at least every RUNNER_STATUS_EVERY_MS (owner-status.mjs). A sandboxed shell can't make the link at all:
 // runner-launch.test.mjs pins that under macOS's own sandbox. The lasting fix is L751's: workers off the runner's user.
 
-import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
@@ -49,13 +49,28 @@ export function writeStatus(file, text, { fs = { openSync, writeSync, fsyncSync,
 }
 
 /**
- * Read one request file as the runner: opened once, never through a link and never waiting; that open file must be a
- * plain file with one name, owned by `orchestrateUid`, and small. → the parsed request, or { refused: reason }.
+ * How long a request may look half-made before it is refused (#433 r1 m1). The Dispatcher's requestWriter makes the name
+ * at its open, then sets 0644, then writes: between those steps the runner can see a 0600 file it can't open (EACCES),
+ * or an empty one. Such a file, the orchestrate user's, one name, with a modification time under this age (and not
+ * later than now by more than a second), is { notYet } and left for the next pass; an older one is refused as before.
  */
-export function readRequest(file, { orchestrateUid, open = openSync, fstat = fstatSync, read = readFileSync, close = closeSync } = {}) {
+export const REQUEST_SETTLE_MS = 5_000;
+const young = (st, now) => { const age = now - st.mtimeMs; return Number.isFinite(age) && age > -1_000 && age < REQUEST_SETTLE_MS; };
+
+/**
+ * Read one request file as the runner: opened once, never through a link and never waiting; that open file must be a
+ * plain file with one name, owned by `orchestrateUid`, and small. → the parsed request, { refused: reason }, or
+ * { notYet: reason } for one still being written (REQUEST_SETTLE_MS), which the pass leaves in place.
+ */
+export function readRequest(file, { orchestrateUid, now = Date.now(), open = openSync, fstat = fstatSync, lstat = lstatSync, read = readFileSync, close = closeSync } = {}) {
   if (!Number.isInteger(orchestrateUid) || orchestrateUid < 0) throw new Error('the orchestrate user\'s uid is not known, so no request can be trusted');
   let fd;
   try { fd = open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch (e) {
+    if (e?.code === 'EACCES') {
+      // Still 0600: the Dispatcher's fchmod may not have run yet. Looked at by name only, never followed.
+      let st = null; try { st = lstat(file); } catch { /* gone: refused below */ }
+      if (st && st.isFile() && st.nlink === 1 && st.uid === orchestrateUid && young(st, now)) return { notYet: 'the request is not readable yet (it may still be being written)' };
+    }
     return { refused: e?.code === 'ELOOP' ? 'the request is a link' : `the request can't be opened (${e?.code ?? e?.message})` };
   }
   try {
@@ -67,7 +82,7 @@ export function readRequest(file, { orchestrateUid, open = openSync, fstat = fst
     if (st.size > REQUEST_MAX_BYTES) return { refused: 'the request is larger than any the Dispatcher writes' };
     const text = read(fd, 'utf8');
     if (Buffer.byteLength(text) > REQUEST_MAX_BYTES) return { refused: 'the request is larger than any the Dispatcher writes' };
-    let r; try { r = JSON.parse(text); } catch { return { refused: 'the request can\'t be read' }; }
-    return r && typeof r === 'object' && !Array.isArray(r) && !Object.hasOwn(r, 'refused') ? r : { refused: 'the request is not what the Dispatcher writes' };
+    let r; try { r = JSON.parse(text); } catch { return young(st, now) ? { notYet: text ? 'the request is not whole yet' : 'the request is empty yet' } : { refused: 'the request can\'t be read' }; }
+    return r && typeof r === 'object' && !Array.isArray(r) && !Object.hasOwn(r, 'refused') && !Object.hasOwn(r, 'notYet') ? r : { refused: 'the request is not what the Dispatcher writes' };
   } finally { close(fd); }
 }
