@@ -630,6 +630,23 @@ test('L980: a not_clean fact the gate wrote whose card move was lost is settled 
   assert.equal(w.env.record.read('card', 'U-1').doc.state, 'failed');
 });
 
+// Review r0 m1: the fact was written, the card's move was lost, and the card was pushed again since. The old finding
+// was for the old head: the gate does not fail the card on it.
+test('L980: a card pushed again after its not_clean finding is not failed on the old head', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'card' && x.id === 'U-1' && x.doc?.state === 'failed' ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  const at = w.env.record.read('card', 'U-1').doc.head;
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).doc.head, at, 'the fact names the head it was found on');
+  w.ctx.record = real;
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, head: 'f'.repeat(40) } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
 test('L980: an undo whose reverse could not be read is held: no not_clean fact, the card is not failed', async () => {
   const w = world();
   const flagged = await notCleanUndo(w);

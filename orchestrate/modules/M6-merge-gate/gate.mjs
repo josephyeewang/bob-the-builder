@@ -328,7 +328,7 @@ export async function gatePass(ctx) {
 
   function refuse(m, facts, v) {
     const reasons = v.refusals.map((x) => `${x.n}: ${x.reason}`);
-    const nc = notCleanOf(v);
+    const nc = notCleanOf(v, facts);
     // The owner's Approve is missing: say so on the card, so M2 asks for it (refusal 8).
     const card = fresh('card', m.doc.card);
     if (v.refusals.some((x) => x.n === 8) && facts.approve?.needed && card && card.doc.needs_joe !== true) write('card', card, { needs_joe: true });
@@ -339,9 +339,10 @@ export async function gatePass(ctx) {
   // changed since, or one not back as it was): what it found, kept on the refused merge. A read that failed is a hold
   // (refusals.mjs), never this; and the first cutover's "not a merge the gate made" is an undo not allowed, not an
   // unclean one, so it has none.
-  function notCleanOf(v) {
+  // The card's head it was found on goes with it, so a card pushed again since is never failed on the old finding.
+  function notCleanOf(v, facts) {
     const r = v.refusals.find((x) => x.n === 9 && Array.isArray(x.not_clean) && x.not_clean.length);
-    return r ? { not_clean: r.not_clean } : {};
+    return r ? { not_clean: r.not_clean, not_clean_head: facts?.card?.doc?.head ?? null } : {};
   }
 
   // Records it (M11 undo.mjs fixCards reads it): the fact reverse-<undo card> = not_clean, written once (a fact already
@@ -350,16 +351,18 @@ export async function gatePass(ctx) {
   function settleNotClean(m) {
     const card = m?.doc?.card ? fresh('card', m.doc.card) : null;
     if (!card?.doc || card.corrupt || card.doc.kind !== 'exact_reverse') return;
+    const at = m.doc.not_clean_head;
+    if (typeof at !== 'string' || !at || card.doc.head !== at) return;   // pushed again since: the next review judges it anew
     const fid = REVERSE_FACT(card.id);
     const f = record.read('fact', fid);
     if (!f) {
       const why = m.doc.not_clean.map(String).join('; ').slice(0, 1000);
-      const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, at: iso() } });
+      const w = record.write({ actor: ACTOR, entity: 'fact', id: fid, expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: NOT_CLEAN, reason: why, merge: m.id, head: at, at: iso() } });
       if (!w.ok) { alert({ type: 'merge_gate_write_refused', card: card.id, to: fid, reason: w.reason }); return; }
       step(m, 'undo_not_clean', { fact: fid });
     } else if (f.corrupt || f.doc?.state !== NOT_CLEAN || !factFrom(ACTOR, { id: fid, createdBy: record.meta?.('fact', fid)?.createdBy ?? null }, 'reverse-')) return;
     const c = fresh('card', card.id);
-    if (!['verified', 'approved'].includes(c?.doc?.state)) return;
+    if (!['verified', 'approved'].includes(c?.doc?.state) || c.doc.head !== at || fresh('fact', fid)?.doc?.head !== at) return;
     const r = write('card', c, { state: 'failed' });
     if (!r.ok) alert({ type: 'merge_gate_write_refused', card: card.id, to: 'failed', reason: r.reason });
     else step(m, 'undo_failed', { card: card.id });
@@ -480,7 +483,7 @@ export async function gatePass(ctx) {
     const head = facts.pr?.head?.sha;
     if (v.decision !== 'merge' || head !== m.doc.judged_head) {
       const reasons = v.decision === 'merge' ? ['the head moved while the merge was being checked'] : v.refusals.map((x) => `${x.n}: ${x.reason}`);
-      const nc = v.decision === 'refuse' ? notCleanOf(v) : {};
+      const nc = v.decision === 'refuse' ? notCleanOf(v, facts) : {};
       const left = v.decision === 'hold' ? hold(m, v, passUnreadable(facts).unreadable) : move(m, 'refused', { reasons, ...nc });
       if (!left) cutShort(m, reasons);
       putBack(m, 'verified');

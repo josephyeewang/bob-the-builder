@@ -223,6 +223,8 @@ test('L980: the gate fails an undo card only on its own not_clean reverse- fact'
   refused(card('U-none', 'verified'), /only on its own not_clean fact reverse-U-none/, 'no fact');
   fact('merge_gate', 'reverse-U-clean', 'clean');
   refused(card('U-clean', 'verified'), /not_clean fact/, 'a clean fact');
+  seed(env, 'fact', 'reverse-U-seed', { type: 'undo_reverse', state: 'not_clean', reason: 'x' });
+  refused(card('U-seed', 'verified'), /not_clean fact reverse-U-seed/, 'a not_clean fact the gate did not write');
   fact('merge_gate', 'reverse-C-ord', 'not_clean');
   refused(card('C-ord', 'verified', 'ordinary'), /fails only an undo \(exact_reverse\) card/, 'an ordinary card');
 

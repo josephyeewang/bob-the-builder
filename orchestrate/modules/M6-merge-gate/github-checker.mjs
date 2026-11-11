@@ -2186,10 +2186,12 @@ const MOVES = Object.freeze({
     // → in_review from verified or approved: a new head pushed after verification (workshop, R2-M7).
     // verified/approved → merged: only the Merge Gate's reconcile of an interrupted merge GitHub shows merged (L85 M-1 b);
     // the writer asks for this card's merged merge document at the same commit, as for every move into merged.
-    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A },
+    // verified/approved → failed: only the Merge Gate, only an undo card it found can never be an exact reverse (L980);
+    // the writer asks for the gate's own not_clean reverse- fact, so M11 can write the fix card (a fix fixes a failed card).
+    verified: { in_review: W, approved: A, merging: G, merged: G, waiting: D, cancelled: A, failed: G },
     // approved → waiting: an approved card whose merge is refused twice is put on the owner, and comes back to approved
     // (L116; the wait's resume: continue returns to approved).
-    approved: { merging: G, merged: G, verified: A, in_review: W, waiting: D, cancelled: A },
+    approved: { merging: G, merged: G, verified: A, in_review: W, waiting: D, cancelled: A, failed: G },
     merging: { merged: G, verified: G, in_review: G },
     merged: { closed: D, reverted: G },
     closed: { reverted: G },
@@ -2691,6 +2693,8 @@ Object.defineProperties(__bob_e, {
   outboxKindOf: { get: () => outboxKindOf, enumerable: true },
   CARD_KINDS: { get: () => CARD_KINDS, enumerable: true },
   STATES: { get: () => STATES, enumerable: true },
+  REVERSE_FACT: { get: () => REVERSE_FACT, enumerable: true },
+  NOT_CLEAN: { get: () => NOT_CLEAN, enumerable: true },
 });
 // record-names.mjs — the Record's names that M9's own tables are built from: the outbox kinds, the card kinds and the
 // state models. record.mjs re-exports every one, so callers import them from there as before.
@@ -2793,6 +2797,12 @@ const STATES = Object.freeze({
     'audited_ok', 'audit_flagged', 'refused'],
   product: ['light', 'active', 'away', 'paused'],
 });
+
+// The Merge Gate's answer on an undo card it judged (L980): `reverse-<undo card>` = { state: 'not_clean', reason, ... }
+// when the change can never be the exact reverse. M6 gate.mjs writes it, M9's writer reads it before the gate may fail
+// the undo card, and M11 undo.mjs (its own REVERSE_FACT, held equal by a test) makes the fix card from it.
+const REVERSE_FACT = (undoCard) => `reverse-${undoCard}`;
+const NOT_CLEAN = 'not_clean';
 });
 
 // ---- orchestrate/shared/record.mjs ----
