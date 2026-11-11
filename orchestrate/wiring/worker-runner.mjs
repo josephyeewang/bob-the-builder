@@ -35,10 +35,14 @@
 //      - stopGroup-<id>-<nonce>: stop_requested is set and the status written before the stop (L762), and the answer is
 //        ok only once the group is gone; a stop that fails or times out answers ok: false with the flag still set; one
 //        that names another process group than the listed one is refused;
-//      - saveWork-<id>-<nonce>: the port's answer. A save runs a lock-down job (runner-locked.mjs, up to LOCKED_SAVE_MS),
-//        so one still on after portMs is held in `pending` as a start is (key `save:<id>`) and answered by a later pass
-//        (step 0); the status cadence (L769) is kept. A second save of a session whose save is still on is refused at
-//        once ("still running"), so two never run in one copy (#456 runLocked self-review M1);
+//      - saveWork-<id>-<nonce>: the port's answer. A save runs a lock-down job (runner-locked.mjs, up to LOCKED_SAVE_MS).
+//        Every save of the pass is started before any is waited for, then all are waited for once, up to portMs (#463
+//        r1 m1: N saves cost one wait, so each fits the Dispatcher's SAVE_DEADLINE_MS). One still on then is held in
+//        `pending` as a start is (key `save:<id>`) and answered by a later pass (step 0); the status cadence (L769) is
+//        kept. A second save of a session whose save is still on is refused at once ("still running"), so two never run
+//        in one copy (#456 runLocked self-review M1). The job's process group is kept in the memory (`saves`, #463 r1
+//        m2) while it runs; one kept there that no save of this runner holds (a runner that stopped or crashed with it
+//        on) is stopped at step 0;
 //      - pauseLead-<product>-<nonce>: the port's answer, or ok: false at portMs.
 //   3. Used-up request entries, answers and seen keys older than RUNNER_KEEP_USED_UP_MS are dropped.
 //   4. The status is written. In every status that carries a launch ok or a stopGroup ok, the session stays listed.
@@ -139,7 +143,7 @@ export async function workerRunnerPass(ctx) {
   if (!Number.isFinite(claimMs) || claimMs <= 0) throw new Error('the worker runner has no claim timeout');
   if (typeof copiesRoot !== 'string' || !copiesRoot.startsWith('/')) throw new Error('the worker runner has no copies root, so a start\'s copy can\'t be checked');
   const state = structuredClone(ctx.state ?? {});
-  state.sessions ??= []; state.requests ??= {}; state.answers ??= {}; state.seen ??= {};
+  state.sessions ??= []; state.requests ??= {}; state.answers ??= {}; state.seen ??= {}; state.saves ??= {};
   // A drain_held in memory the status reader would refuse is dropped before any status is written, so one damaged field
   // can't make every status read fail (#425 r1 m4, r2 m2): it stands only as a cause and a time, on an ended session
   // whose outbox is open (owner-status.mjs checkSession). On such a session it was told, so its first sight is set past
@@ -159,12 +163,29 @@ export async function workerRunnerPass(ctx) {
   // The memory is kept first, then the status written: a status never runs ahead of what the runner will remember.
   // A settled start leaves `pending` only after a keep that holds it succeeded (#358 r1 m3, #362 r1 M1).
   const settled = new Set();
+  // The saves this pass started (#463 r1 m1), waited for together once the requests are read.
+  const saving = [];
+  let over = false; // set once this pass has returned: a late onGroup then writes nothing of this pass's
   const flush = () => { keep(structuredClone(state)); for (const id of settled) pending.delete(id); settled.clear(); const doc = statusDoc(); write(doc); return doc; };
   // Every port wait is followed by a write (step-4 review M4), so no two writes are further apart than one port's wait.
   const wait = async (fn) => { const r = await within(portMs, fn); flush(); return r; };
 
-  // 0. Starts that answered since the last pass; a 'waiting' entry with no start held for it is told.
+  // 0. A held save's process group told after its pass returned is kept now (#463 r1 self-review c2).
+  for (const p of pending.values()) if (p.save && p.group) state.saves[p.id] = p.group;
+  // Starts that answered since the last pass; a 'waiting' entry with no start held for it is told.
   for (const [id, p] of [...pending]) if (p.done) { if (p.save) settleSave(p); else await settle(p); settled.add(id); flush(); }
+  // A save's process group kept from an earlier run (#463 r1 m2): no save of this runner holds it, so the runner that
+  // started it stopped or crashed with it on; it is stopped now, through the session stop's own leader check (its
+  // start time, so a reused number is never signalled), and forgotten once gone. One that can't be stopped is told
+  // and tried again each pass.
+  for (const [id, g] of Object.entries(state.saves)) {
+    if (pending.has(saveKey(id))) continue;
+    const r = await wait(() => ports.stopGroup({ id, pgid: g?.pgid, pid: g?.pid, pid_start: g?.pid_start }));
+    if (r?.ok === true) { delete state.saves[id]; continue; }
+    if (Number.isFinite(g?.told) && now - g.told < RUNNER_NOTE_EVERY_MS) continue;
+    if (g && typeof g === 'object') g.told = now;
+    note(`the save of ${id} from an earlier run may still run in process group ${g?.pgid ?? 'unknown'} (${failed(r, 'the stop')}); it is tried again next pass`);
+  }
   // Noted at most every RUNNER_NOTE_EVERY_MS, whether a start is still held or none is (#358 r1 m6).
   for (const [id, r] of Object.entries(state.requests)) {
     if (r.state !== 'waiting' || (Number.isFinite(r.told) && now - r.told < RUNNER_NOTE_EVERY_MS)) continue;
@@ -237,6 +258,14 @@ export async function workerRunnerPass(ctx) {
     else await pause(k, body.pauseLead);
     flush();
   }
+  // The saves this pass started, waited for together, once (#463 r1 m1): N saves wait one port wait, not N.
+  if (saving.length) {
+    await Promise.race([Promise.all(saving.map((p) => p.on)), late(portMs)]);
+    for (const p of saving) {
+      if (p.done) { settleSave(p); settled.add(saveKey(p.id)); } else note(`the save of ${p.id} is still on; it is answered when it ends`);
+    }
+    flush();
+  }
 
   async function stopRequest(id) {
     // Only a launch never seen is cancelled. A 'waiting' one may have started before a pass that never finished, so it
@@ -297,7 +326,10 @@ export async function workerRunnerPass(ctx) {
     if (!a || a.threw || a.ok !== true) return refuse(failed(a, 'the start'));
     const s = { id, product: l.product, kind: l.kind, card: l.card, lead: null, role: RUNNER_ROLE_OF[l.kind], pgid: a.pgid, signin: a.signin, config_dir: a.configDir,
       bundle_files: [], outbox: a.outbox, uid, outbox_open: true, stop_requested: false, alive: true, ended: false,
-      pid: a.pid, pid_start: a.pidStart, head: a.head, base: a.base, copy: a.copy, started_at: now };
+      pid: a.pid, pid_start: a.pidStart, head: a.head, base: a.base, copy: a.copy, started_at: now,
+      // The save-phase settings file's hash (#463 r1 m3), checked before every save; one not in that form is not kept,
+      // and the save then refuses (runner-ports.mjs saveWorkPort).
+      ...(typeof a.saveSettingsSha === 'string' && /^[0-9a-f]{64}$/.test(a.saveSettingsSha) ? { save_settings_sha: a.saveSettingsSha } : {}) };
     let wrong = null;
     try { checkSession(project(s), { uid, outboxRoot, realpath }); } catch (e) { wrong = e.message; }
     if (!wrong) wrong = launchAnswerWrong(a, { sessionId: id, kind: l.kind, card: l.card, product: l.product, outboxRoot, copiesRoot });
@@ -328,15 +360,21 @@ export async function workerRunnerPass(ctx) {
     if (!s) return answer(k.key, { ok: false, reason: 'the worker runner did not start that session, so it has no copy to save' });
     const held = saveKey(s.id);
     if (pending.has(held)) return answer(k.key, { ok: false, reason: `a save of ${s.id} is still running` });
+    // One an earlier run left that step 0 could not stop yet may still run in the copy (#463 r1 self-review m1).
+    if (state.saves[s.id]) return answer(k.key, { ok: false, reason: `a save of ${s.id} from an earlier run may still be running` });
     const p = { save: true, key: k.key, id: s.id, done: false, a: undefined };
-    p.on = Promise.resolve().then(() => ports.saveWork(s))
+    // The job's process group, kept in the memory as soon as it runs (#463 r1 m2), so a restart or a stop can end it.
+    // Held on the save itself (the caller's pending map outlives this pass): a pass still running keeps it at once; one
+    // told after this pass returned is kept by the next pass's step 0, never written into this pass's old copy.
+    const onGroup = (g) => { p.group = { pgid: g.pgid, pid: g.pid, pid_start: g.pid_start, at: now }; if (!over) { state.saves[s.id] = p.group; flush(); } };
+    p.on = Promise.resolve().then(() => ports.saveWork(s, { onGroup }))
       .then((a) => { p.a = a; }, (e) => { p.a = { threw: e?.message ?? String(e) }; }).finally(() => { p.done = true; });
     pending.set(held, p);
-    await Promise.race([p.on, late(portMs)]);
-    if (!p.done) { note(`the save of ${s.id} is still on; it is answered when it ends`); return; }
-    settleSave(p); settled.add(held);
+    // Not waited for here (#463 r1 m1): every save of the pass is started first, then all are waited for once (below).
+    saving.push(p);
   }
-  function settleSave({ key, a }) { answer(key, a?.ok === true ? { ok: true } : { ok: false, reason: failed(a, 'the save') }); }
+  // A save that ended: answered, and its group forgotten (runToEnd killed what was left of it).
+  function settleSave({ key, id, a }) { delete state.saves[id]; answer(key, a?.ok === true ? { ok: true } : { ok: false, reason: failed(a, 'the save') }); }
   async function pause(k, p) {
     const r = await wait(() => ports.pauseLead({ product: p.product }));
     answer(k.key, r?.ok === true ? { ok: true } : { ok: false, reason: failed(r, 'the pause') });
@@ -350,7 +388,8 @@ export async function workerRunnerPass(ctx) {
   for (const [key, at] of Object.entries(state.seen)) if (old(at)) delete state.seen[key];
 
   // 4. The status.
-  return { state, status: flush() };
+  const status = flush(); over = true;
+  return { state, status };
 }
 
 export { VERBS };

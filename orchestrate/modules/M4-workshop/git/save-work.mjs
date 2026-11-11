@@ -47,10 +47,16 @@ export function resetCloneGit({ clone, mirror }) {
   return gitDir;
 }
 
+/** The bundle's name while it is written (L991 M1): in the copy's `.git`, never in the outbox, whose dot-names the
+ * save's settings deny and whose every other name intake may read. */
+export const partialName = (card) => `orch-save-${card}.bundle.partial`;
+
 /**
  * The save itself, run inside the lock-down by the save-work job (jobs/save-work.mjs, L969), never in the runner's own
- * process: the copy's `.git` reset, then one `bundle create` of the card branch into the outbox, under a temporary name
- * and then moved. → { ok: true, bundle }, or a throw.
+ * process: the copy's `.git` reset, then one `bundle create` of the card branch, written in the copy's `.git` (git's
+ * lock file beside it) and then moved into the outbox under its final name in one rename (L991 M1), so intake never
+ * sees half a bundle and the save writes only in `.git` and the outbox. A copy and an outbox on different disks can't
+ * be renamed across: refused plainly (setup puts them on one). → { ok: true, bundle }, or a throw.
  */
 export async function saveWorkJob({ clone, mirror, card, branch, outbox }) {
   if (!CARD.test(String(card))) throw new Error('bad card id');
@@ -58,14 +64,18 @@ export async function saveWorkJob({ clone, mirror, card, branch, outbox }) {
   const gitDir = resetCloneGit({ clone, mirror });
   const o = st(outbox);
   if (!o || o.isSymbolicLink() || !o.isDirectory()) throw new Error('the outbox is not a real folder');
-  // Written under a temporary name, then moved, so a half-written bundle is never read.
-  const tmp = join(outbox, `.${bundleName(card)}.partial`);
+  const tmp = join(gitDir, partialName(card));
   rmSync(tmp, { force: true });
-  await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']], allowObjects: [resolve(mirror, 'objects')] });
-  const out = join(outbox, bundleName(card));
-  if (st(out)?.isSymbolicLink()) rmSync(out);
-  renameSync(tmp, out);
-  return { ok: true, bundle: out };
+  try {
+    await gitOk(['bundle', 'create', '-q', tmp, `refs/heads/${branch}`], { gitDir, purpose: 'save-work', extraConfig: [['core.symlinks', 'false']], allowObjects: [resolve(mirror, 'objects')] });
+    const out = join(outbox, bundleName(card));
+    if (st(out)?.isSymbolicLink()) rmSync(out);
+    try { renameSync(tmp, out); } catch (e) {
+      if (e?.code === 'EXDEV') throw new Error('the copy and the outbox are on different disks, so the bundle can\'t be moved into the outbox in one step; setup must put both on one disk');
+      throw e;
+    }
+    return { ok: true, bundle: out };
+  } finally { try { rmSync(tmp, { force: true }); } catch { /* left in the copy's .git; removed before the next save */ } }
 }
 
 /**

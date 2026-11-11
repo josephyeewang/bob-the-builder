@@ -118,6 +118,10 @@ export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep
   return { groupGone, stopGroup };
 }
 
+// A save's process group as worker-runner.mjs keeps it (#463 r1 m2): its leader leads it, with a start time to check.
+const saveGroup = (g) => g !== null && typeof g === 'object' && !Array.isArray(g) && Number.isInteger(g.pgid) && g.pgid > 1 && g.pid === g.pgid
+  && typeof g.pid_start === 'string' && g.pid_start.length > 0 && Number.isFinite(g.at);
+
 /**
  * The runner's memory, read once at start. → {} on a first run (no file), the memory, or a throw (never a guess).
  */
@@ -144,7 +148,7 @@ export function loadMemory(file, { uid, note = () => {}, open = openSync, fstat 
   const obj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
   // Each session and request entry an object too (#362 r1 c1): one null would make every pass throw.
   if (!m || typeof m !== 'object' || Array.isArray(m) || !(m.sessions === undefined || (Array.isArray(m.sessions) && m.sessions.every(obj))) || !plain(m.requests)
-    || !Object.values(m.requests ?? {}).every(obj) || !plain(m.answers) || !plain(m.seen)) {
+    || !Object.values(m.requests ?? {}).every(obj) || !plain(m.answers) || !plain(m.seen) || !plain(m.saves) || !Object.values(m.saves ?? {}).every(saveGroup)) {
     throw new Error('the worker runner\'s memory is not what the runner writes');
   }
   return m;
@@ -207,7 +211,19 @@ export async function runRunner(ctx) {
     let t; const late = new Promise((r) => { t = setTimeout(r, drainMs); });
     await Promise.race([Promise.all([...pending.values()].map((p) => p.on)), late]); clearTimeout(t);
     try { state = await runnerTick({ ...ctx, state, pending, readNone: true }); } catch (e) { note(`the worker runner's last tick failed (${e?.message ?? e})`); }
-    for (const [id, p] of pending) note(p.save ? `the save of ${p.id} was still on when the worker runner stopped; it is not answered, so the Dispatcher asks again` : `the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`);
+    for (const [id, p] of pending) {
+      if (!p.save) { note(`the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`); continue; }
+      // A save still on (#463 r1 m2): its process group, kept in the memory, is stopped, so no job is left running in
+      // the copy. It is not answered: the Dispatcher's wait for it runs out and the work is told as not saved (pass.mjs
+      // UNSAVED_FACT). One that can't be stopped stays in the memory, and the next runner stops it (worker-runner.mjs step 0).
+      const g = state?.saves?.[p.id] ?? p.group; // p.group: told after the last pass returned
+      let how = 'its process group was not yet known, so nothing was stopped';
+      if (g) {
+        let r; try { r = await ctx.ports.stopGroup({ id: p.id, pgid: g.pgid, pid: g.pid, pid_start: g.pid_start }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+        how = r?.ok === true ? 'its process group is stopped' : `its process group ${g.pgid} can't be stopped now (${r?.reason ?? 'no answer'}); the next runner stops it`;
+      }
+      note(`the save of ${p.id} was still on when the worker runner stopped; ${how}. It is not answered, so the Dispatcher's wait for it runs out and the work is told as not saved`);
+    }
   }
   return state;
 }

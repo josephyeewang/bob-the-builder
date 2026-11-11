@@ -660,3 +660,106 @@ test('#456 runLocked self-review M1: a save still on after portMs is held, answe
   const n3 = '00112233445566ff'; await w.pass([ask(n3)]);
   assert.deepEqual(w.read().answers[`saveWork-S-1-${n3}`], { ok: false, reason: 'the save failed (boom)' });
 });
+
+test('#463 r1 m1: every save of a pass is started before any is waited for, and all are waited for once', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1'), launchReq('S-2')]);
+  const ev = [];
+  w.ports.saveWork = async (s) => { ev.push(`start ${s.id}`); await new Promise((r) => setTimeout(r, 30)); ev.push(`end ${s.id}`); return { ok: true }; };
+  const ask = (id, n) => ({ name: `saveWork-${id}-${n}.json`, body: { saveWork: { id }, asked_at: new Date(w.now).toISOString() } });
+  const t = Date.now();
+  await w.pass([ask('S-1', N1), ask('S-2', N2)]);
+  assert.deepEqual(ev.slice(0, 2), ['start S-1', 'start S-2'], 'the second starts before the first is waited for');
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: true });
+  assert.deepEqual(w.read().answers[`saveWork-S-2-${N2}`], { ok: true }, 'both answered in their own pass');
+  assert.ok(Date.now() - t < 1000);
+  // Two that outlast the one wait are both held and noted, and both answered by the next pass.
+  const ends = [];
+  w.ports.saveWork = () => new Promise((r) => ends.push(r));
+  const n3 = '00112233445566aa'; const n4 = '00112233445566bb';
+  await w.pass([ask('S-1', n3), ask('S-2', n4)]);
+  assert.equal(ends.length, 2, 'both started');
+  assert.ok(w.pending.has(saveKey('S-1')) && w.pending.has(saveKey('S-2')));
+  assert.equal((w.notes.join('\n').match(/is still on; it is answered when it ends/g) ?? []).length, 2);
+  for (const e of ends) e({ ok: true });
+  await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.deepEqual([w.read().answers[`saveWork-S-1-${n3}`], w.read().answers[`saveWork-S-2-${n4}`]], [{ ok: true }, { ok: true }]);
+});
+
+test('#463 r1 m2: a save\'s process group is kept in the memory while it runs, forgotten when it ends, and one left by an earlier run is stopped', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  let end;
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z' }); return new Promise((r) => { end = r; }); };
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  await w.pass([ask(N1)]);
+  assert.deepEqual(w.kept.at(-1).saves['S-1'], { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z', at: w.now }, 'kept in the memory');
+  // Held by this runner: never stopped by a later pass while it runs.
+  w.stops.length = 0;
+  await w.pass();
+  assert.deepEqual(w.stops, []);
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined, 'forgotten once it ended');
+  // A runner that restarts (no save held) with one in its memory stops that group, through the stop's leader check.
+  const z = world();
+  z.state = { saves: { 'S-9': { pgid: 7009, pid: 7009, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
+  const asked = [];
+  z.ports.stopGroup = async (s) => { asked.push(s); return { ok: true, how: 'SIGTERM' }; };
+  await z.pass();
+  assert.deepEqual(asked, [{ id: 'S-9', pgid: 7009, pid: 7009, pid_start: '2026-11-10T12:00:00Z' }]);
+  assert.equal(z.kept.at(-1).saves['S-9'], undefined, 'forgotten once stopped');
+  // One that can't be stopped is told, kept, and tried again next pass.
+  const y = world();
+  y.state = { saves: { 'S-8': { pgid: 7008, pid: 7008, pid_start: '2026-11-10T12:00:00Z', at: T0 } } };
+  y.ports.stopGroup = async () => ({ ok: false, reason: 'the group leader\'s start time can\'t be read' });
+  await y.pass();
+  assert.ok(y.kept.at(-1).saves['S-8']);
+  assert.match(y.notes.join('\n'), /the save of S-8 from an earlier run may still run in process group 7008/);
+});
+
+test('#463 r1 m3: a start\'s save settings hash is kept in the session\'s row (never in the status); one in another form is not kept', async () => {
+  const base = (x) => ({ ok: true, pid: 4001, pidStart: '2026-11-10T12:01:00Z', pgid: 4001, head: 'a'.repeat(40), outbox: `${ROOT}/p1/worker/${x.sessionId}`, signin: 's', configDir: '/cfg', copy: `${COPIES}/p1/${x.card}` });
+  const w = world({ startAnswer: (x) => ({ ...base(x), saveSettingsSha: 'b'.repeat(64) }) });
+  await w.pass([launchReq('S-1')]);
+  assert.equal(w.kept.at(-1).sessions[0].save_settings_sha, 'b'.repeat(64));
+  assert.equal('save_settings_sha' in w.read().sessions[0], false, 'not in the status');
+  const z = world({ startAnswer: (x) => ({ ...base(x), saveSettingsSha: 'B'.repeat(64) }) });
+  await z.pass([launchReq('S-1')]);
+  assert.equal('save_settings_sha' in z.kept.at(-1).sessions[0], false);
+});
+
+test('#463 r1 self-review m1, c2: a save left by an earlier run blocks a new save of that session; a group told after its pass returned is kept by the next pass, not written into the old one', async () => {
+  const w = world();
+  await w.pass([launchReq('S-1')]);
+  const ask = (n) => ({ name: `saveWork-S-1-${n}.json`, body: { saveWork: { id: 'S-1' }, asked_at: new Date(w.now).toISOString() } });
+  // m1: the earlier run's group can't be stopped yet, so no second job runs in the copy.
+  w.state.saves = { 'S-1': { pgid: 7001, pid: 7001, pid_start: '2026-11-10T12:00:00Z', at: T0 } };
+  w.ports.stopGroup = async () => ({ ok: false, reason: 'not yet' });
+  let ran = 0; w.ports.saveWork = async () => { ran += 1; return { ok: true }; };
+  await w.pass([ask(N1)]);
+  assert.equal(ran, 0);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N1}`], { ok: false, reason: 'a save of S-1 from an earlier run may still be running' });
+  assert.equal(w.kept.at(-1).saves['S-1'].pgid, 7001, 'still kept, to be stopped');
+  // m3: the note of a group that can't be stopped is made once per RUNNER_NOTE_EVERY_MS.
+  const told = () => w.notes.filter((t) => /from an earlier run may still run in process group 7001/.test(t)).length;
+  const n0 = told(); await w.pass(); assert.equal(told(), n0, 'not again at once');
+  w.now += RUNNER_NOTE_EVERY_MS; await w.pass(); assert.equal(told(), n0 + 1);
+  // c2: once stopped, a new save runs; its group is told only after the pass returned.
+  w.ports.stopGroup = async () => ({ ok: true, how: 'SIGTERM' });
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined);
+  let onG; let end;
+  w.ports.saveWork = (s, { onGroup }) => { onG = onGroup; return new Promise((r) => { end = r; }); };
+  await w.pass([ask(N2)]);
+  const kept = w.kept.length; const writes = w.writes.length;
+  onG({ pgid: 7002, pid: 7002, pid_start: '2026-11-10T12:02:00Z' });
+  assert.deepEqual([w.kept.length, w.writes.length], [kept, writes], 'nothing written from the old pass');
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'].pgid, 7002, 'kept by the next pass');
+  end({ ok: true }); await new Promise((r) => setImmediate(r));
+  await w.pass();
+  assert.equal(w.kept.at(-1).saves['S-1'], undefined);
+  assert.deepEqual(w.read().answers[`saveWork-S-1-${N2}`], { ok: true });
+});

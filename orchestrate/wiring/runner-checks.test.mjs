@@ -131,7 +131,7 @@ test('L969, check 4: a port only with runLocked, an install command and both set
     assert.deepEqual(log.map((l) => (l[0] === 'run' ? 'run' : l[0] === 'write' ? (l[1] === during ? 'write install' : 'write session') : `render ${l[1]}`)),
       ['render install', 'write install', 'run', 'render session', 'write session'], 'the install runs under the install settings, and the session settings are put back');
     const job = log.find((l) => l[0] === 'run')[1];
-    assert.deepEqual(job, { job: 'install', command: 'npm ci', sessionId: SID, role: 'worker', settingsFile: x.settings.file, cwd: x.copy }, 'in the copy, under the session\'s settings file');
+    assert.deepEqual(job, { job: 'install', command: 'npm ci', sessionId: SID, role: 'worker', settingsFile: x.settings.file, cwd: x.copy, env: x.env }, 'in the copy, under the session\'s settings file, with the start\'s own environment (#463 r1 m6)');
     // A failed install, or one that throws, is refused once the session settings are back.
     log.length = 0;
     const failed = await workerChecks({ ...x, ...four, runLocked: async () => { throw new Error('the install job did not finish inside the lock-down (it did not finish in time)'); } })[4]();
@@ -149,7 +149,7 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
     path: '/usr/bin', claudeBin: '/i/claude', recordRoot: '/rec', recordUid: 502, claimMs: 1,
     products: { p1: { repo: 'o/p', mirror: '/m', render: { paths: { deny: { record: '/rec', ssh: '/h/.ssh', gh: '/h/.config/gh', claudeHome: '/h/.claude', robotKeys: '/k', secrets: ['/sec'] }, hooksDir: '/h', snapshot: '/snap/s.json' }, product: { commands: { install: 'npm ci', test: 'npm test' } }, registryHosts: [] } } } });
   const wx = { role: 'worker', profile: DESIGN_PROFILES.worker, kind: 'editing', product: 'p1', sessionId: SID, copy: '/c/C-1', settings: { file: '/f', settings: {} }, renderPhase: () => ({ ok: true, settings: {} }), writeSettings: () => ({ ok: true }) };
-  const session = { id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: '/c/C-1', outbox: '/ob/p1/worker/x' };
+  const session = { id: SID, product: 'p1', kind: 'editing', card: 'C-1', copy: '/c/C-1', outbox: '/ob/p1/worker/x', save_settings_sha: 'a'.repeat(64) };
   // Off: no runLocked. Save-work refuses (it runs only in the lock-down) and no worker has check 4.
   const off = lockedWiring(c, { runLocked: null });
   assert.equal(off.runLocked, null);
@@ -236,7 +236,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
     let dd;
     const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
     const { d, x } = inputs({ spawn }); dd = d;
-    try { const r = await workerChecks(x)[11](); assert.equal(r.ok, false, what); assert.match(r.reason, /baseline tests failed inside the lock-down \(exit (|abc|not written)\)/, what); } finally { rmSync(d, { recursive: true, force: true }); }
+    try { const r = await workerChecks(x)[11](); assert.equal(r.ok, false, what); assert.match(r.reason, /baseline tests failed inside the lock-down \(exit (|abc|not written; claude exited 0)\)/, what); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // No throwaway port: a worker gets no check 11, so launch() refuses there.
   { const { d, x } = inputs({ throwaway: undefined }); try { assert.equal(workerChecks(x)[11], undefined); } finally { rmSync(d, { recursive: true, force: true }); } }

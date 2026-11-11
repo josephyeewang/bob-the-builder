@@ -69,7 +69,7 @@ import { baselineTest, installStep } from '../modules/M4-workshop/launcher/launc
 import { isProtectedName } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { git } from '../modules/M4-workshop/git/safe-git.mjs';
 import { check12 } from '../modules/M11-dispatcher/gate.mjs';
-import { exitCodeCommand, readNoLink, runLockedCommand } from './runner-locked.mjs';
+import { claudeEnd, exitCodeCommand, readNoLink, runLockedCommand } from './runner-locked.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 
 const refuse = (reason) => ({ ok: false, reason });
@@ -182,10 +182,12 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
         let cmd; try { cmd = baselineCommand(x.testCommand, f); } catch (e) { return refuse(e.message); }
         rmSync(f, { force: true });
         b = await baselineTest({ run: async () => {
-          await runLockedCommand({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, profile: x.profile, cwd: t.copy, env: x.env,
+          const ran = await runLockedCommand({ spawn: x.spawn, claudeBin: x.claudeBin, settingsFile: t.settingsFile, command: cmd, profile: x.profile, cwd: t.copy, env: x.env,
             ms: x.baselineMs ?? BASELINE_MS, killGroup: x.killGroup, groupThere: x.groupThere });
           // The command's own exit code, as it wrote it; none written, and the baseline can't say (not 0).
-          let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: 'not written' }; }
+          // Claude's own end (#463 r1 c3, as runLocked): one ended by a signal is no baseline, whatever it wrote.
+          if (ran?.exitCode === null) return { exitCode: claudeEnd(ran) };
+          let text; try { text = readNoLink(f).toString('utf8').trim(); } catch { return { exitCode: `not written; ${claudeEnd(ran)}` }; }
           return { exitCode: /^\d{1,3}$/.test(text) ? Number(text) : text.slice(0, 20) };
         } });
       } finally { try { await t.done(); } catch { /* left for cleanup */ } }
@@ -198,7 +200,9 @@ export function workerChecks(x, { gateOf = check12 } = {}) {
   // save-work has too (runner-main.mjs lockedWiring: one value, so a launch is never possible while a save is not, #456 r1 m3).
   if (typeof x.runLocked === 'function' && has(x.installCommand) && typeof x.renderPhase === 'function' && typeof x.writeSettings === 'function') {
     ports[4] = () => installStep({ render: x.renderPhase, write: x.writeSettings, registryHosts: Array.isArray(x.registryHosts) ? x.registryHosts : [],
-      install: () => x.runLocked({ job: 'install', command: x.installCommand, sessionId: x.sessionId, role: x.role, settingsFile: x.settings?.file, cwd: x.copy }) });
+      install: () => x.runLocked({ job: 'install', command: x.installCommand, sessionId: x.sessionId, role: x.role, settingsFile: x.settings?.file, cwd: x.copy,
+        // The start's own environment (#463 r1 m6), which launch check 9 holds: the sign-in is not read a second time.
+        ...(x.env && typeof x.env === 'object' ? { env: x.env } : {}) }) });
   }
   if (x.budget) {
     const gate = gateOf(x.budget);
