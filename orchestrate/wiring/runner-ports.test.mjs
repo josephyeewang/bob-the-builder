@@ -202,19 +202,29 @@ test('L896: an undrained outbox names its cause, one of the one list, checking t
 });
 
 test('step 5: save-work refuses without the lock-down runner, and the pause is not wired', async () => {
-  const s = { product: 'p1', copy: '/copies/C-1', card: 'C-1', outbox: `/o/worker/${SID}` };
+  const SHA = 'a'.repeat(64);
+  const s = { product: 'p1', copy: '/copies/C-1', card: 'C-1', outbox: `/o/worker/${SID}`, save_settings_sha: SHA };
   assert.match((await saveWorkPort({ mirrorOf: () => '/m' })(s)).reason, /only inside the worker's lock-down/);
   assert.match((await saveWorkPort({ mirrorOf: () => null })(s)).reason, /no mirror/);
   const seen = [];
   await saveWorkPort({ mirrorOf: () => '/m', make: () => async (x) => { seen.push(x); return { ok: true }; } })(s);
   assert.deepEqual(seen, [{ clone: '/copies/C-1', mirror: '/m', card: 'C-1', branch: 'card/c-1', outbox: `/o/worker/${SID}` }]);
-  // L969: runLocked is bound to the session: its id, role, own settings file and copy.
+  // L969, L991 M1, #463 r1 m3: runLocked is bound to the session: its id, role, its save-phase settings file by the hash
+  // its row keeps, in the copy's .git; and (m2) the runner's onGroup is passed through.
   const jobs = [];
   let given;
-  await saveWorkPort({ mirrorOf: () => '/m', settingsDir: '/st', runLocked: async (j) => { jobs.push(j); return { ok: true }; },
-    make: ({ runLocked }) => { given = runLocked; return async (x) => runLocked({ job: 'save-work', args: x }); } })({ ...s, id: SID, kind: 'editing' });
+  const port = saveWorkPort({ mirrorOf: () => '/m', settingsDir: '/st', runLocked: async (j) => { jobs.push(j); return { ok: true }; },
+    make: ({ runLocked }) => { given = runLocked; return async (x) => runLocked({ job: 'save-work', args: x }); } });
+  const onGroup = () => {};
+  await port({ ...s, id: SID, kind: 'editing' }, { onGroup });
   assert.equal(typeof given, 'function');
-  assert.deepEqual(jobs, [{ job: 'save-work', args: seen[0], sessionId: SID, role: 'worker', settingsFile: `/st/${SID}.json`, cwd: '/copies/C-1' }]);
+  assert.deepEqual(jobs, [{ job: 'save-work', args: seen[0], sessionId: SID, role: 'worker', settingsFile: `/st/${SID}.save.json`, settingsSha: SHA, cwd: '/copies/C-1/.git', onGroup }]);
+  // A row with no save settings' hash, or one in another form, is refused before any job.
+  for (const bad of [undefined, 'A'.repeat(64), 'a'.repeat(40)]) {
+    const r = await port({ ...s, id: SID, kind: 'editing', save_settings_sha: bad });
+    assert.match(r.reason, /has no save settings kept by its start/, String(bad));
+  }
+  assert.equal(jobs.length, 1);
   const p = await pauseLeadPort()({ product: 'p1' });
   assert.equal(p.ok, false); assert.match(p.reason, /^not wired: /);
 });
@@ -273,7 +283,14 @@ test('step 5: a start makes the copy, the outbox and the walled settings, and an
   try {
     const a = await w.start();
     assert.deepEqual(a, { ok: true, pid: 4242, pgid: 4242, pidStart: 'Tue Nov 10 12:00:00 2026', head: HEAD, base: HEAD, outbox: join(w.mine.outboxes, 'worker', SID),
-      signin: 'a', configDir: join(w.d, 'home', '.claude'), copy: join(w.mine.copies, 'C-1') });
+      signin: 'a', configDir: join(w.d, 'home', '.claude'), copy: join(w.mine.copies, 'C-1'), saveSettingsSha: a.saveSettingsSha });
+    // L991 M1, #463 r1 m3: the save's settings, rendered in the save phase, written new beside the session's, and their hash answered.
+    const sf = join(w.settingsDir, `${SID}.save.json`);
+    assert.equal(a.saveSettingsSha, createHash('sha256').update(readFileSync(sf)).digest('hex'));
+    assert.equal(statSync(sf).mode & 0o777, 0o600);
+    const walls = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    assert.deepEqual(walls.map((x) => x.phase), [undefined, 'save']);
+    assert.deepEqual(walls[1].paths, walls[0].paths, 'the session\'s very walls');
     const prep = w.calls.find((c) => c[0] === 'prepare')[1];
     assert.deepEqual(prep.card, { id: 'C-1', repo: 'o/p1', commit: HEAD, branch: 'card/c-1' });
     const wl = w.calls.find((c) => c[0] === 'walled')[1];
@@ -470,7 +487,7 @@ test('#369 r1 M1: the baseline\'s throwaway copy is the same commit, walled apar
     assert.deepEqual({ ok: t.ok, copy: t.copy, settingsFile: t.settingsFile }, { ok: true, copy: join(spare, 'copy'), settingsFile: join(w.settingsDir, `${SID}..baseline.json`) });
     const preps = w.calls.filter((c) => c[0] === 'prepare').map((c) => c[1]);
     assert.equal(preps.length, 2); assert.deepEqual(preps[1].card, preps[0].card, 'the same card and commit'); assert.equal(preps[1].dest, join(spare, 'copy'));
-    const [own, theirs] = w.calls.filter((c) => c[0] === 'walled').map((c) => c[1]);
+    const [own, theirs] = w.calls.filter((c) => c[0] === 'walled' && c[1].phase !== 'save').map((c) => c[1]);
     assert.ok(own.paths.deny.otherCopies.includes(spare), 'the session denies the throwaway place');
     assert.equal(theirs.paths.copy, join(spare, 'copy')); assert.equal(theirs.paths.outbox, join(spare, 'outbox'));
     for (const p of [join(w.mine.copies, 'C-1'), join(w.mine.outboxes, 'worker', SID), join(w.mine.copies, 'C-9')]) assert.ok(theirs.paths.deny.otherCopies.includes(p), `the baseline denies ${p}`);
@@ -746,7 +763,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     const b0 = await startB([{ ...A, unstarted: true }]);
     assert.equal(b0.ok, true, b0.reason);
     // 3. Once A has ended (no longer live), B starts; a live session of B's own product is not asked.
-    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`));
+    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`)); rmSync(join(w.settingsDir, `${SB}.save.json`));
     const b = await startB([{ id: SID.replace('0f', '4f'), product: 'p2' }]);
     assert.equal(b.ok, true, b.reason);
     // A p1 session started with p2 in the config denies p2 whole, so a later p2 start goes ahead while it runs.
@@ -755,7 +772,7 @@ test('#378 r1 M1: product B added while a product A session runs: B\'s start is 
     const a2 = await startPort(c2, w.deps)({ card: 'C-5', kind: 'editing', product: 'p1', sessionId: SA2 });
     assert.equal(a2.ok, true, a2.reason);
     assert.equal(productWallGap(got.settings, { copies: join(w.copiesRoot, 'p2'), outboxes: join(w.outboxRoot, 'p2') }), null);
-    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`));
+    rmSync(join(w.copiesRoot, 'p2', 'C-3'), { recursive: true }); rmSync(join(w.outboxRoot, 'p2', 'worker', SB), { recursive: true }); rmSync(join(w.settingsDir, `${SB}.json`)); rmSync(join(w.settingsDir, `${SB}.save.json`));
     const b2 = await startB([{ id: SA2, product: 'p1' }]);
     assert.equal(b2.ok, true, b2.reason);
   } finally { rmSync(w.d, { recursive: true, force: true }); rmSync(d0, { recursive: true, force: true }); }
@@ -799,8 +816,12 @@ test('L889: the baseline\'s throwaway settings pass the real renderer: its folde
     const a = await w.start();
     assert.equal(a.ok, true, a.reason);
     assert.equal(t?.ok, true, t?.reason);
-    assert.equal(got.length, 2, 'the session\'s settings and the baseline\'s');
+    assert.equal(got.length, 3, 'the session\'s settings, the save\'s and the baseline\'s');
     for (const r of got) assert.equal(r.ok, true, r.reason);
+    // L991 M1: the save's pass the real renderer too, with the network shut and the outbox its only extra folder.
+    assert.deepEqual(got[1].settings.sandbox.network.allowedDomains, []);
+    assert.deepEqual(got[1].settings.permissions.additionalDirectories, [join(w.mine.outboxes, 'worker', SID)]);
+    got.splice(1, 1);
     const spare = join(w.mine.copies, `C-1..baseline-${SID}`);
     assert.equal(got[1].settings.permissions.additionalDirectories[0], join(spare, 'outbox'));
     assert.ok(/^[A-Za-z0-9._/-]+$/.test(spare) && /^[A-Za-z0-9._/-]+$/.test(t.settingsFile), 'plain path letters only');
@@ -840,4 +861,16 @@ test('#456 runLocked self-review M2: check 4\'s real settings steps write the in
     assert.equal(r.ok, false); assert.match(r.reason, /not written \(EXDEV\)/);
     assert.deepEqual([r.same, r.next], [true, false]);
   } finally { rmSync(v.d, { recursive: true, force: true }); }
+});
+
+test('#463 r1 m5 (P11): a settings write that reads back other than written, or can\'t be read back, is refused', async () => {
+  for (const [readSettings, re] of [[() => ({ s: 2 }), /not read back as written/], [() => { const e = new Error('gone'); e.code = 'ENOENT'; throw e; }, /not read back \(ENOENT\)/]]) {
+    let x0; let r;
+    const w = world({ readSettings, checksFor: (x) => { x0 = x; return {}; },
+      launchFn: async () => { r = x0.writeSettings({ s: 1 }); return { ok: false, reason: 'stop here' }; } });
+    try {
+      await w.start();
+      assert.equal(r.ok, false); assert.match(r.reason, re);
+    } finally { rmSync(w.d, { recursive: true, force: true }); }
+  }
 });

@@ -198,7 +198,7 @@ test('step-4 review m3, m4: a memory that is a link, has two names or the wrong 
   assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /more than one name/);
   rmSync(w.memoryFile);
   assert.throws(() => loadMemory('memory.json', { uid: UID }), /not a full path/, '#362 r1 c3');
-  for (const bad of ['{"sessions":{}}', '{"requests":[]}', '{"answers":null}', '{"seen":[1]}', '[]', '{"sessions":[null]}', '{"requests":{"S-1":null}}']) {
+  for (const bad of ['{"sessions":{}}', '{"requests":[]}', '{"answers":null}', '{"seen":[1]}', '[]', '{"sessions":[null]}', '{"requests":{"S-1":null}}', '{"saves":[]}', '{"saves":{"S-1":7}}', '{"saves":{"S-1":{"pgid":1,"pid":1,"pid_start":"x","at":1}}}', '{"saves":{"S-1":{"pgid":70,"pid":71,"pid_start":"x","at":1}}}', '{"saves":{"S-1":{"pgid":70,"pid":70,"at":1}}}']) {
     writeFileSync(w.memoryFile, bad); chmodSync(w.memoryFile, 0o600);
     assert.throws(() => loadMemory(w.memoryFile, { uid: UID }), /not what the runner writes/, bad);
     rmSync(w.memoryFile);
@@ -334,4 +334,20 @@ test('#364 self-review M1: a start still on when the stop comes is waited for an
   const st = await runRunner({ ...v.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => m >= 1, sleep: async () => { m += 1; } });
   assert.equal(st.requests['S-1'].state, 'waiting');
   assert.ok(v.notes.some((t) => /still on when the worker runner stopped/.test(t)), v.notes.join('\n'));
+});
+
+test('#463 r1 m2: a save still on when the runner stops has its kept process group stopped, and is told truly (not answered, told as not saved)', async () => {
+  const w = world(); let n = 0;
+  w.ask(...launch('S-1'));
+  // The first tick starts S-1; the save is asked during the sleep and never ends.
+  w.ports.saveWork = (s, { onGroup }) => { onGroup({ pgid: 7101, pid: 7101, pid_start: S0 }); return new Promise(() => {}); };
+  const stopped = [];
+  w.ports.stopGroup = async (s) => { stopped.push(s); return { ok: true, how: 'SIGTERM' }; };
+  const state = await runRunner({ ...w.ctx({ portMs: 30 }), drainMs: 30, stopWhen: () => n >= 2,
+    sleep: async () => { if (n === 0) w.ask('saveWork-S-1-0123456789abcdef.json', { saveWork: { id: 'S-1' } }); n += 1; } });
+  assert.deepEqual(stopped.map((s) => [s.id, s.pgid, s.pid, s.pid_start]), [['S-1', 7101, 7101, S0]]);
+  const told = w.notes.find((t) => /the save of S-1 was still on when the worker runner stopped/.test(t));
+  assert.match(told, /its process group is stopped\. It is not answered, so the Dispatcher's wait for it runs out and the work is told as not saved/);
+  assert.equal(/asks again/.test(w.notes.join('\n')), false, 'never the old claim');
+  assert.ok(state.saves['S-1'], 'kept until the next runner sees it gone');
 });

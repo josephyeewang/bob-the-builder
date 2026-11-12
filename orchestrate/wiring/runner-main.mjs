@@ -40,14 +40,14 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
 import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
 import { fullPath } from './runner-job.mjs';
 import { productRoleClash } from './owner-status.mjs';
-import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv, roleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
+import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON, checkRoleEnv } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { accountInUse } from '../modules/M4-workshop/launcher/accounts.mjs';
 import { LOCKED_MS, lockedRunner } from './runner-locked.mjs';
 import { apart } from '../modules/M4-workshop/launcher/render-settings.mjs';
@@ -185,15 +185,15 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
 
 /**
  * The one lock-down runner of this runner (L969): null when the config names no claude to run a job with. The sign-in is
- * read for each job, as the start port reads it for each start, and the environment is held to launch check 9
- * (checkRoleEnv) as the session's is. `who` and `base` stand in for accountInUse and process.env in a test.
+ * read for each save, as the start port reads it for each start (runner-ports.mjs sessionEnv, the one form), and the
+ * environment is held to launch check 9 (checkRoleEnv) as the session's is; the install is given the start's own (#463 r1 m6). `who` and `base` stand in for accountInUse and process.env in a test.
  */
 export function lockedOf(c, { make = lockedRunner, who: account = accountInUse, base = process.env } = {}) {
   if (typeof c.claudeBin !== 'string' || !c.claudeBin.startsWith('/')) return null;
   return make({ claudeBin: c.claudeBin, ...(c.lockedMs !== undefined ? { ms: c.lockedMs } : {}), envOf: () => {
     const who = account({ home: c.home });
     if (!who?.account) throw new Error(who?.reason ?? 'no answer');
-    const env = roleEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
+    const env = sessionEnv(c, who, base);
     const nine = checkRoleEnv(env);
     if (!nine?.ok) throw new Error(nine?.reason ?? 'check 9 gave no answer');
     return env;

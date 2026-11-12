@@ -192,18 +192,33 @@ export function drainedPort({ list = readdirSync, readFact = noFactReader, readS
   };
 }
 
-/** saveWork(session) → M4 save-work's answer. `runLocked` is the lock-down runner; left out, save-work refuses. */
+/** The save-phase settings file of a session (L991 M1): no `..` in it, so it keeps to the settings folder's plain names; a session
+ * id holds none, so it is no other session's file. */
+export const saveSettingsName = (id) => `${id}.save.json`;
+
+/**
+ * saveWork(session, { onGroup }?) → M4 save-work's answer. `runLocked` is the lock-down runner; left out, save-work
+ * refuses. The save runs under the session's save-phase settings (L991 M1: the session's walls with the network off),
+ * the file the start wrote and whose hash it kept in the row (`save_settings_sha`, #463 r1 m3), in the copy's `.git`,
+ * so it writes there and in the outbox only. A row with no such hash (a session started before it was kept) is refused.
+ * onGroup: told the job's process group (#463 r1 m2, worker-runner.mjs keeps it).
+ */
 export function saveWorkPort({ mirrorOf, runLocked, settingsDir, make = createSaveWork } = {}) {
-  return async (s) => {
+  return async (s, { onGroup } = {}) => {
     const mirror = mirrorOf?.(s.product);
     if (typeof mirror !== 'string' || !mirror) return refuse(`product ${s.product} has no mirror in the runner's config`);
-    // The save runs under the session's own settings (its copy and outbox writable, no network), as the session ran.
+    if (typeof runLocked === 'function' && (typeof s.save_settings_sha !== 'string' || !SHA256.test(s.save_settings_sha))) return refuse(`session ${s.id} has no save settings kept by its start, so its work can't be saved inside the lock-down`);
     const bound = typeof runLocked === 'function'
-      ? (j) => runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, `${s.id}.json`) : undefined, cwd: s.copy })
+      ? (j) => runLocked({ ...j, sessionId: s.id, role: RUNNER_ROLE_OF[s.kind], settingsFile: typeof settingsDir === 'string' ? join(settingsDir, saveSettingsName(s.id)) : undefined,
+        // cwd .git: see runner-locked.mjs's capability note (claude 2.1.322 denies <cwd>/.git/config and hooks).
+        settingsSha: s.save_settings_sha, cwd: join(s.copy, '.git'), ...(typeof onGroup === 'function' ? { onGroup } : {}) })
       : undefined;
     return make({ runLocked: bound })({ clone: s.copy, mirror, card: s.card, branch: cardBranch(s.card), outbox: s.outbox });
   };
 }
+
+/** The session's environment (#463 r1 m6): the one form, for the start and the lock-down runner. */
+export const sessionEnv = (c, who, base = process.env) => roleEnv(base, { path: c.path, extra: { ...who.env, HOME: c.home } });
 
 /** pauseLead({ product }): not wired (see the top of this file). */
 export const pauseLeadPort = () => async () => notWired('the Lead\'s wrap-up needs the activity tracker\'s feed, which the runner does not have yet');
@@ -432,7 +447,15 @@ export function startPort(c, deps = {}) {
     const w = settingsFor(copy, outbox, others);
     if (!w?.ok) return undo(w?.reason ?? 'not walled: no answer');
     try { fs.writeNew(settingsFile, `${JSON.stringify(w.settings, null, 2)}\n`); ours.push(settingsFile); } catch (e) { return undo(`the settings file can't be written (${e?.code ?? e?.message})`); }
-    const env = roleEnv(process.env, { path: c.path, extra: { ...who.env, HOME: c.home } });
+    // The save's settings (L991 M1): the session's walls, the network off; written new beside the session's, and its
+    // hash answered for the row, so each save can show it is this file (#463 r1 m3).
+    const ws = settingsFor(copy, outbox, others, { phase: 'save' });
+    if (!ws?.ok) return undo(`the save's settings are not walled (${ws?.reason ?? 'no answer'})`);
+    const saveFile = join(c.settingsDir, saveSettingsName(sessionId));
+    const saveText = `${JSON.stringify(ws.settings, null, 2)}\n`;
+    try { fs.writeNew(saveFile, saveText); ours.push(saveFile); } catch (e) { return undo(`the save's settings file can't be written (${e?.code ?? e?.message})`); }
+    const saveSha = createHash('sha256').update(saveText).digest('hex');
+    const env = sessionEnv(c, who);
     // A throwaway copy of the same commit for the baseline (#369 r1 M1), with settings that allow writes there and in its
     // own outbox only, and deny the session's copy and outbox; done() removes it. The session's own settings deny it.
     const throwaway = async () => {
@@ -454,9 +477,16 @@ export function startPort(c, deps = {}) {
     // is the very settings written above, so the file put back after the install is byte for byte what check 5 reads back.
     const renderPhase = (phase) => (phase === 'session' ? { ok: true, settings: w.settings }
       : phase === 'install' ? settingsFor(copy, outbox, others, { phase: 'install', registryHosts: Array.isArray(r.registryHosts) ? r.registryHosts : [] }) : refuse('bad phase'));
+    // c1: launch.mjs installStep checks the registry gone in the settings it rendered, not in the file; the two are one
+    // only because this write reads the file back and compares it with them, byte for byte.
+    // c4: a runner that dies during the install leaves the install-phase file (the registry's hosts allowed) as this
+    // session's settings. No claude starts with it again: a session id's settings are written new only once, and the
+    // undo (ours) removes it on every refusal; the owner removes it with the session's other files.
     const writeSettings = (settings) => {
       const text = `${JSON.stringify(settings, null, 2)}\n`;
       const next = `${settingsFile}.next`;
+      // c2: in `ours`, so an undo removes it when the removal below fails.
+      if (!ours.includes(next)) ours.push(next);
       try { fs.rm(next, { force: true }); fs.writeNew(next, text); fs.rename(next, settingsFile); } catch (e) { try { fs.rm(next, { force: true }); } catch { /* left */ } return refuse(`not written (${e?.code ?? e?.message})`); }
       let back; try { back = readSettings(sessionId); } catch (e) { return refuse(`not read back (${e?.code ?? e?.message})`); }
       return `${JSON.stringify(back, null, 2)}\n` === text ? { ok: true } : refuse('not read back as written');
@@ -486,6 +516,6 @@ export function startPort(c, deps = {}) {
     if (!l?.ok) return undo(l?.reason ?? 'the launch gave no answer');
     const s = l.started;
     if (!s?.ok) return undo(s?.reason ?? 'claude was not started');
-    return { ok: true, pid: s.pid, pgid: s.pgid, pidStart: s.pidStart, head: made.head, base: commit, outbox, signin: who.account, configDir: who.dir, copy };
+    return { ok: true, pid: s.pid, pgid: s.pgid, pidStart: s.pidStart, head: made.head, base: commit, outbox, signin: who.account, configDir: who.dir, copy, saveSettingsSha: saveSha };
   };
 }
