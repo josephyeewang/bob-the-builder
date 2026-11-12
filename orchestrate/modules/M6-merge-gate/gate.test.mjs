@@ -726,6 +726,8 @@ test('L980 (#466 r1 M1): a finding on a pull request head that is not the card h
   w.g.openPull({ number: 9, head: h2, files: { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' } });
   await gatePass(w.ctx);
   const u = mergeOf(w, 'U-1');
+  // Refused as before (6: the pull request is not at the card's head), never held on the other head's test merge.
+  assert.equal(u.doc.state, 'refused', JSON.stringify(u.doc));
   assert.equal(u.doc.not_clean, undefined, JSON.stringify(u.doc));
   assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
   assert.notEqual(w.env.record.read('card', 'U-1').doc.state, 'failed');
@@ -762,20 +764,33 @@ test('L980 (#466 r1 m1): an undo waits while GitHub has not worked out the test 
   await waitsThenSettles(w, () => { w.ctx.gh = real; });
 });
 
+// GitHub answers with a test merge that is not the current one: built on another main, or of another head. The
+// commit is real and readable (so the check answers no), but it is not the card's change on main as read now.
+function staleTestMerge(w, parentsOf) {
+  const real = w.ctx.gh;
+  const p = w.g.pulls.get(9);
+  const [base, tip] = parentsOf(p.head);
+  const files = { 'src/a.mjs': 'one', 'src/extra.mjs': 'x' };
+  const tm = w.g.commit([base, tip], files, { from: base });
+  w.ctx.gh = Object.create(real, { get: { value: async (path, ...rest) => {
+    const r = await real.get(path, ...rest);
+    return /\/pulls\/9$/.test(path) && r?.json ? { ...r, json: { ...r.json, merge_commit_sha: tm } } : r;
+  } } });
+  return () => { w.ctx.gh = real; };
+}
+
 test('L980 (#466 r1 m1): an undo waits on a stale test merge (of an old main), then is failed', async () => {
   const w = world();
   await notCleanUndo(w);
-  const real = w.ctx.view;
-  const view = {};
-  for (const k of Object.keys(real)) view[k] = typeof real[k] === 'function' ? real[k].bind(real) : real[k];
-  const stale = 'd'.repeat(40);
-  view.commit = async (sha) => {
-    const c = await real.commit(sha);
-    const p = w.g.pulls.get(9);
-    return c && Array.isArray(c.parents) && c.parents.length === 2 && c.parents[1] === p.head ? { ...c, parents: [stale, p.head] } : c;
-  };
-  w.ctx.view = view;
-  await waitsThenSettles(w, () => { w.ctx.view = real; });
+  const old = w.g.commit([w.g.main], { 'docs/other.md': 'o' }, { from: w.g.main });
+  await waitsThenSettles(w, staleTestMerge(w, (head) => [old, head]));
+});
+
+test('L980 (#466 r1 M1): an undo waits on a test merge of another head, then is failed', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const other = w.g.commit([w.g.main], { 'src/a.mjs': 'one', 'src/extra.mjs': 'x', 'src/more.mjs': 'm' }, { from: w.g.main });
+  await waitsThenSettles(w, staleTestMerge(w, () => [w.g.main, other]));
 });
 
 // #466 r1 m4: refused under the lock (check), the card put back to verified is failed in that same pass. Main moves
@@ -848,6 +863,47 @@ test('L980: a reverse fact the gate did not write fails no card and is told once
   assert.equal(told.length, 1, JSON.stringify(w.alerts));
   assert.match(told[0].note, /not the gate's own not_clean finding/);
   assert.ok(mergeOf(w, 'U-1').doc.not_clean_stuck_told_at);
+});
+
+// Plants g7, g19, g20: the guards before the fact is written or brought up to date.
+test('L980: a fact write lost, then the card pushed again: no fact is written for the old head', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === REVERSE_FACT('U-1') ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, head: 'f'.repeat(40) } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+});
+
+test('L980: a refused not_clean merge whose card is no longer an undo writes no fact', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  const real = w.ctx.record;
+  w.ctx.record = Object.create(real, { write: { value: (x) => (x.entity === 'fact' && x.id === REVERSE_FACT('U-1') ? { ok: false, reason: 'the Record was in use' } : real.write(x)) } });
+  await gatePass(w.ctx);
+  w.ctx.record = real;
+  const c = w.env.record.read('card', 'U-1');
+  w.env.store.transaction((tx) => tx.commit([{ entity: 'card', id: 'U-1', doc: { ...c.doc, kind: 'ordinary' } }], { actor: 'test', kind: 'seed' }));
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')), null);
+});
+
+test('L980: the gate own reverse fact in another state is not its finding: not rewritten, told once', async () => {
+  const w = world();
+  await notCleanUndo(w);
+  must(w.env.record.write({ actor: 'merge_gate', entity: 'fact', id: REVERSE_FACT('U-1'), expectRev: 0, kind: 'undo_not_clean', doc: { type: 'undo_reverse', state: 'clean', reason: 'x', head: 'e'.repeat(40) } }), 'seed');
+  const rev = w.env.record.read('fact', REVERSE_FACT('U-1')).rev;
+  await gatePass(w.ctx);
+  await gatePass(w.ctx);
+  assert.equal(w.env.record.read('fact', REVERSE_FACT('U-1')).rev, rev);
+  assert.equal(w.env.record.read('card', 'U-1').doc.state, 'verified');
+  assert.equal(w.alerts.filter((a) => a.type === 'merge_gate_unsure' && a.card === 'U-1').length, 1, JSON.stringify(w.alerts));
 });
 
 test('L980: the first-cutover refusal (not a merge the gate made) writes no not_clean fact and fails no card', async () => {
