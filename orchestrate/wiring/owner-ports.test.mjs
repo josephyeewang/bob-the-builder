@@ -64,8 +64,9 @@ test('L741: the launch answer names every field the pass reads from it (pass.mjs
   assert.match(body, /l\?\.reason === `it did not answer within \$\{portDeadlineMs\} ms`|l\?\.timedOut === true/);
   assert.match(OWNER_PORTS.launch.fails, /the tick's limit answers and the card stays claimed/);
   // The call itself: the inputs the interface names.
-  assert.match(pass, /launch\(\{ card, kind, product, sessionId \}\)/);
-  assert.match(OWNER_PORTS.launch.in, /\{ card, kind, product, sessionId \}/);
+  // L976: an undo's launch adds the reversed commit, and only an undo's.
+  assert.match(pass, /launch\(\{ card, kind, product, sessionId, \.\.\.\(kind === 'undo' \? \{ undoCommit: exact\.commit \} : \{\}\) \}\)/);
+  assert.match(OWNER_PORTS.launch.in, /\{ card, kind, product, sessionId, undoCommit\? \}/);
 });
 
 test('L741: cleanup\'s saveWork call matches the interface, and cleanup puts no time limit on it (so the port keeps its own)', () => {
