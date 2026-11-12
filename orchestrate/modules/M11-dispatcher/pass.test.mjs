@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../../shared/test-tmp.mjs';
-import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
+import { STATES, FINAL_STATES } from '../../shared/record.mjs';
+import { STOP_QUIET_REASONS } from '../M4-workshop/launcher/review-runner.mjs';
+import { dispatcherPass as dispatcherPass0, stopPass as stopPass0, undoStarts, stopProcessGroup, guarded, STOP_FACT, UNSAVED_FACT, LIMIT_FACT, LIMIT_NO_ACCOUNT, LIMIT_NO_RUN, LIMIT_NO_HIT, LIMIT_NO_RESET, LIMIT_RESET_MAX_MS, UNDO_HELD_FACT, PAUSE_FACT, RULES_MISSING_FACT, rulesMissingAlert as rulesMissingAlert0, UNKNOWN_FACT, REVIEW_STOP_FACT, REVIEW_STOP_RUNNER_REASON, REVIEW_STOP_AGAIN_MS, REVIEW_STOP_TELL_FACT, REVIEW_STOP_MAX_ASKS } from './pass.mjs';
 import { USAGE_FACT, BAND_FACT } from './usage.mjs';
 import { OUTAGE_FACT } from './outage.mjs';
 import { retellWaits, WAIT_TELL_FACT } from './joe-waits.mjs';
@@ -2171,7 +2173,7 @@ test('L946: a reviewer or auditor of this Record\'s cancelled or ended card at i
   const asked = [];
   const r = await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions, probe: () => idle, alert: fakeAlert(),
     stopGroup: async () => { throw new Error('no worker here'); }, saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x); return { ok: true, name: 'stop-1.json' }; } });
-  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }, { card: 'C-7', role: 'auditor', head: HD }, { card: 'C-8', role: 'reviewer', head: HD }],
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD, reason: 'cancel' }, { card: 'C-7', role: 'auditor', head: HD, reason: 'cancel' }, { card: 'C-8', role: 'reviewer', head: HD, reason: 'card_final' }],
     'exactly the three, each by card, role and head: not an older head, a live card (its product paused: no matter), another product\'s card, a card not here, one waiting on Joe, a row with no head, nor a non-review row');
   assert.deepEqual(r.reviewStops, [['R-1', 'cancel', 'asked'], ['A-1', 'cancel', 'asked'], ['R-2', 'card_ended', 'asked']]);
   assert.deepEqual(r.stopped, [], 'the review runner\'s sessions are not stopGroup\'s');
@@ -2253,7 +2255,7 @@ test('L946: with no product named, no reviewer is asked to stop either (L943 m2)
   assert.deepEqual(asked, []);
   await dispatcherPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
     launch: async () => ({ ok: false, reason: 'no' }), filesOf: () => [], stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview });
-  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD }]);
+  assert.deepEqual(asked, [{ card: 'C-7', role: 'reviewer', head: HD, reason: 'cancel' }]);
 });
 
 test('L946: asks are made at once (a hung one is a failure, never an ask, and holds no other); one tell names every failure', async () => {
@@ -2438,4 +2440,43 @@ test('L962 m1: a queued tell is dropped on the first pass with no failing stop',
   assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), true, 'the port lost it, so it waits in the queue');
   await run(1, { ok: true }, fakeAlert({ answer: false }));
   assert.equal(isQueued(rec, REVIEW_STOP_TELL_FACT), false, 'dropped once none fails');
+});
+
+// L976: an undo's launch names the commit it reverses, found from the card's source (M6 undoneBy, via exactReverse),
+// never from a field on the card; no other launch names one.
+test('L976: the undo launch carries the reversed commit from its source; an editing launch carries none', async () => {
+  const SHA = 'a'.repeat(40);
+  const w = world([
+    ['card', 'T-1', { state: 'merged', module: 'M-test', product: 'p1', tier: 2, files: ['src/a.js'], merge_commit: SHA }],
+    ['merge', 'MG-1', { state: 'audited_ok', card: 'T-1', pr: 7, merge_commit: SHA, product: 'p1' }],
+    ['ask', 'A-1', { state: 'answered', kind: 'undo', product: 'p1', card: 'T-1' }],
+    // A look-alike field on the card is never read: the commit comes from the source.
+    card('U-1', { kind: 'exact_reverse', source: { ask: 'A-1' }, files: ['src/a.js'], merge_commit: 'b'.repeat(40) }),
+    card('C-1')]);
+  const asked = [];
+  w.refuseLaunch((x) => { asked.push(x); return { ok: true }; });
+  await w.pass(0, { filesOf: () => ['src/a.js'] });
+  const by = Object.fromEntries(asked.map((x) => [x.card.id, x]));
+  assert.ok(by['U-1'] && by['C-1'], `both started: ${Object.keys(by)}`);
+  assert.equal(by['U-1'].kind, 'undo');
+  assert.equal(by['U-1'].undoCommit, SHA, 'the source\'s merge commit');
+  assert.equal(by['C-1'].kind, 'editing');
+  assert.equal('undoCommit' in by['C-1'], false, 'an editing launch names no reversed commit');
+});
+
+// L1000: each card state pinned to the reason its reviewer's stop carries. Only a cancel and a state no move leads out of
+// may be quiet (the runner's STOP_QUIET_REASONS); every other state asks no stop at all.
+test('L1000: every card state is pinned to its review stop reason: cancelled is cancel, failed, closed_no_answer and reverted are card_final, and no other state is stopped', async () => {
+  const want = { cancelled: 'cancel', failed: 'card_final', closed_no_answer: 'card_final', reverted: 'card_final' };
+  assert.deepEqual(Object.values(REVIEW_STOP_RUNNER_REASON).every((x) => STOP_QUIET_REASONS.includes(x)), true, 'each word is one the runner keeps quiet');
+  for (const state of STATES.card) {
+    const extra = state === 'waiting' ? { wait: { who: 'joe', what: 'x', since: iso(T0) } } : {};
+    const rec = recWith([['product', 'p1', { state: 'active' }], card('C-7', { state, head: HD, ...extra })]);
+    usageInto(rec);
+    const asked = [];
+    await stopPass({ rec, rules: rulesWith(), now: T0, account: ACCT, product: 'p1', sessions: [rv('R-1', 'reviewer', 'C-7')], probe: () => idle, alert: fakeAlert(),
+      stopGroup: async () => ({ ok: true }), saveWork: async () => ({ ok: true }), stopReview: (x) => { asked.push(x.reason); return { ok: true, name: 'stop-1.json' }; } });
+    assert.deepEqual(asked, want[state] ? [want[state]] : [], state);
+    if (want[state] === 'card_final') assert.equal(FINAL_STATES.card.includes(state), true, `${state} is final`);
+  }
 });

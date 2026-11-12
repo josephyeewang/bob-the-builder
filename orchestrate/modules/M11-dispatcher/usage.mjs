@@ -14,6 +14,7 @@
 
 import { KEYS, need, minutes } from './keys.mjs';
 import { sensorsFact } from './sensor-facts.mjs';
+import { READING_FUTURE_MS } from '../M12-sensors/facts.mjs';
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const H5_MS = 5 * 60 * 60_000;
@@ -33,7 +34,7 @@ export function readFact(fact, { account, now, staleMs }) {
   if (d.account !== account) return { ok: false, reason: `the usage reading is for another account (${d.account})` };
   const seen = time(d.observed_at);
   if (!Number.isFinite(seen)) return { ok: false, reason: 'the usage reading has no time' };
-  if (seen > now + 60_000) return { ok: false, reason: 'the usage reading is from the future' };
+  if (seen > now + READING_FUTURE_MS) return { ok: false, reason: 'the usage reading is from the future' };
   if (now - seen > staleMs) return { ok: false, reason: 'the usage reading is stale' };
   for (const [name, w, span] of [['5-hour', d.h5, H5_MS], ['week', d.week, WEEK_MS]]) {
     if (!w || !pct(w.used_pct)) return { ok: false, reason: `the ${name} figure is not a percent` };

@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { heartbeatProbes } from './heartbeat-probes.mjs';
-import { ACCOUNT_FACT, LAST_PASS_FACT } from '../modules/M11-dispatcher/tick.mjs';
-import { FACTS } from '../modules/M11-dispatcher/phone-link.mjs';
-import { USAGE_FACT } from '../modules/M11-dispatcher/usage.mjs';
+import { heartbeatProbes, EVERY_PASS, GRACE_MS } from './heartbeat-probes.mjs';
+import { LOOP, EVERY_S, RUN_DEADLINE_MS } from '../modules/M12-sensors/loop.mjs';
+import { ACCOUNT_FACT, LAST_PASS_FACT, signedInAccount } from '../modules/M11-dispatcher/tick.mjs';
+import { FACTS, phoneLinkStep } from '../modules/M11-dispatcher/phone-link.mjs';
+import { USAGE_FACT, readFact } from '../modules/M11-dispatcher/usage.mjs';
+import { READING_FUTURE_MS } from '../modules/M12-sensors/facts.mjs';
+import { withAlerts } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
 import { KEYS as K } from '../modules/M11-dispatcher/keys.mjs';
 import { factFamilyOf } from '../modules/M9-record/permissions.mjs';
 import { rulesWith, recWith, T0, MIN, iso } from '../modules/M11-dispatcher/fixtures.test-helper.mjs';
@@ -118,4 +121,124 @@ test('#451 r1 m3: a Record read or meta that throws is not known, never "not rea
     assert.equal(await p.account(), null);
     assert.equal(await p.usage(), null);
   }
+});
+
+// ── Sensors alive (L967, L969) ───────────────────────────────────────────────────────────────────────────────────────
+
+const wrote = (id, min) => [id, { value: true, observed_at: seen(min) }];
+const UP = () => 3_600_000;
+const sensorsOf = (facts, over = {}) => {
+  const rec = recWith([]);
+  for (const [id, doc, actor] of facts) assert.equal(rec.write({ actor: actor ?? factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc }).ok, true, id);
+  return heartbeatProbes({ rec, rules: rules(), now: () => T0, upMs: UP, ...over }).sensorsAlive();
+};
+const fresh = (min, acc = min) => ({ ageMin: min, limitMin: STALE_MIN, stale: min > STALE_MIN, newestAt: seen(min),
+  account: acc === null ? { ageMin: null, stale: true, at: null } : { ageMin: acc, stale: acc > STALE_MIN, at: seen(acc) } });
+
+test('L969: sensorsAlive is the newest Sensors reading\'s age, held to usage.stale_after_min, with the account reading\'s own', async () => {
+  assert.deepEqual(await sensorsOf([wrote('network-up', 3), signedIn('a', 3)]), fresh(3));
+  // The newest of them counts, whatever each reading says (a false or an unknown one is still the job writing).
+  assert.deepEqual(await sensorsOf([wrote('network-up', 50), said({ account: null, signed_in: null }, 7), [FACTS.minibase, { value: null, observed_at: seen(40) }]]), fresh(7));
+  assert.deepEqual(await sensorsOf([wrote('frontdoor-reachable', 45), signedIn('a', 45)]), fresh(45), 'old is still known, and stale');
+  for (const id of EVERY_PASS) assert.equal((await sensorsOf([wrote(id, 2)])).ageMin, 2, id);
+});
+
+test('#464 r1 m1: the account reading alone past the limit, or never written, is its own stale', async () => {
+  assert.deepEqual(await sensorsOf([wrote('network-up', 1), signedIn('a', STALE_MIN + 5)]), fresh(1, STALE_MIN + 5));
+  assert.deepEqual(await sensorsOf([wrote('network-up', 1)]), fresh(1, null), 'no account reading at all');
+  const made = (by) => heartbeatProbes({ rec: (() => { const r = recWith([]); for (const [id, doc] of [wrote('network-up', 1), signedIn('a', 1)]) r.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: 0, doc }); return { read: r.read.bind(r), meta: (_e, id) => ({ createdBy: id === ACCOUNT_FACT ? by : 'sensors' }) }; })(), rules: rules(), now: () => T0, upMs: UP }).sensorsAlive();
+  assert.equal((await made('sensors')).account.stale, false, 'the control');
+  assert.equal((await made('ledger')).account.stale, true, 'an account fact Sensors did not make is no account reading');
+});
+
+test('L969 review m1: stale is decided in milliseconds, as the Dispatcher\'s account hold decides it', async () => {
+  const at = async (ms) => { const r = await sensorsOf([['network-up', { value: true, observed_at: iso(T0 - ms) }], [ACCOUNT_FACT, { account: 'a', observed_at: iso(T0 - ms) }]]); return [r.ageMin, r.stale, r.account.stale]; };
+  assert.deepEqual(await at(STALE_MIN * MIN), [STALE_MIN, false, false], 'at the limit is not past it');
+  assert.deepEqual(await at(STALE_MIN * MIN + 1000), [STALE_MIN, true, true], 'a second past it is stale, though the minutes still read the limit');
+});
+
+test('#464 r1 M1, m2a: no reading at all, deleted readings, or a Record that throws is "none", for the heartbeat to count', async () => {
+  assert.deepEqual(await sensorsOf([]), { none: true, limitMin: STALE_MIN, why: 'none' }, 'a Mini that has never run the Sensors job');
+  assert.deepEqual(await sensorsOf([usage(10, 10, 1)]), { none: true, limitMin: STALE_MIN, why: 'none' }, 'usage is not written every pass: it does not count');
+  const made = recWith([]);
+  assert.equal(made.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  const by = (who) => heartbeatProbes({ rec: { read: made.read.bind(made), meta: () => ({ createdBy: who }) }, rules: rules(), now: () => T0, upMs: UP }).sensorsAlive();
+  assert.equal((await by('sensors')).ageMin, 1, 'the control');
+  assert.equal((await by('ledger')).none, true, 'a reading Sensors did not make');
+  const boom = () => { throw new Error('the store could not be read'); };
+  for (const rec of [{ read: boom }, { read: made.read.bind(made), meta: boom }]) {
+    assert.deepEqual(await heartbeatProbes({ rec, rules: rules(), now: () => T0, upMs: UP }).sensorsAlive(), { none: true, limitMin: STALE_MIN, why: 'record' });
+  }
+  const damaged = { read: (_e, id) => (id === 'network-up' ? { id, doc: null, corrupt: true } : null), meta: () => ({ createdBy: 'sensors' }) };
+  assert.deepEqual(await heartbeatProbes({ rec: damaged, rules: rules(), now: () => T0, upMs: UP }).sensorsAlive(), { none: true, limitMin: STALE_MIN, why: 'record' }, 'r2 m1: a damaged reading names the Record');
+  const gone = recWith([]);
+  assert.equal(gone.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  let deleted = false;
+  const p = heartbeatProbes({ rec: { read: (e, id) => (deleted ? null : gone.read(e, id)), meta: gone.meta?.bind(gone) }, rules: rules(), now: () => T0, upMs: UP });
+  assert.equal((await p.sensorsAlive()).ageMin, 1);
+  deleted = true;
+  assert.equal((await p.sensorsAlive()).none, true, 'deleted readings take the same path');
+});
+
+test('#464 r1 m2: a reading stamped more than READING_FUTURE_MS ahead is the clock, not a reading', async () => {
+  assert.deepEqual(await sensorsOf([wrote('network-up', -5), signedIn('a', 1)]), { clock: true, aheadMin: 5, limitMin: STALE_MIN });
+  assert.equal((await sensorsOf([['network-up', { value: true, observed_at: iso(T0 + READING_FUTURE_MS) }], signedIn('a')])).clock, undefined, 'up to READING_FUTURE_MS ahead is a reading');
+  assert.equal((await sensorsOf([['network-up', { value: true, observed_at: iso(T0 + READING_FUTURE_MS + 1) }], signedIn('a')])).clock, true);
+});
+
+test('#464 r1 m3: inside the grace after the Mini started, a stale reading is not known; after it, stale', async () => {
+  const old = [wrote('network-up', 120), signedIn('a', 120)];
+  assert.equal(await sensorsOf(old, { upMs: () => GRACE_MS - 1 }), null, 'just started');
+  assert.equal((await sensorsOf(old, { upMs: () => GRACE_MS })).stale, true);
+  assert.equal((await sensorsOf([wrote('network-up', 1)], { upMs: () => 0 })), null, 'an account reading not yet written, just after the start');
+  assert.equal((await sensorsOf([wrote('network-up', 1), signedIn('a', 1)], { upMs: () => 0 })).stale, false, 'a current one is said at once');
+  assert.equal(GRACE_MS, EVERY_S * 1000 + RUN_DEADLINE_MS, 'r2 c-2: one Sensors interval and its first pass\'s time limit, exactly');
+});
+
+test('L969: sensorsAlive is not known with no limit in the rules; a clock that is not a time throws (r1 c1)', async () => {
+  const rec = recWith([]);
+  assert.equal(rec.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  assert.equal(await heartbeatProbes({ rec, rules: { ...rules(), get: () => undefined, num: () => { throw new Error('no value'); } }, now: () => T0, upMs: UP }).sensorsAlive(), null, 'no usage.stale_after_min');
+  await assert.rejects(heartbeatProbes({ rec, rules: rules(), now: () => NaN, upMs: UP }).sensorsAlive(), /not a time/);
+});
+
+test('L969: EVERY_PASS is exactly the families the Sensors loop writes every pass with no suffix', () => {
+  const every = Object.entries(LOOP).filter(([fam, how]) => !fam.endsWith('-') && /^every pass:/.test(how)).map(([fam]) => fam).sort();
+  assert.deepEqual([...EVERY_PASS].sort(), every);
+});
+
+// #464 r2 m-E: one allowance for a reading stamped ahead, for every reader of a Sensors reading's time. Each reader takes
+// a reading exactly READING_FUTURE_MS ahead and refuses one a millisecond further, so none can drift from the others.
+test('#464 r2 m-E: the account hold, the usage reading, the phone link and the Sensors line share one future allowance', async () => {
+  assert.equal(READING_FUTURE_MS, 60_000, 'the allowance itself');
+  const at = (ahead) => iso(T0 + ahead);
+  for (const [ahead, counts] of [[READING_FUTURE_MS, true], [READING_FUTURE_MS + 1, false]]) {
+    const what = `${ahead} ms ahead`;
+    const rec = recWith([]);
+    const put = (id, doc) => assert.equal(rec.write({ actor: factFamilyOf(id), entity: 'fact', id, expectRev: rec.read('fact', id)?.rev ?? 0, doc }).ok, true, id);
+    put(ACCOUNT_FACT, { account: 'a', observed_at: at(ahead) });
+    assert.equal(signedInAccount({ rec, rules: rules(), now: T0 }).account, counts ? 'a' : null, `tick.mjs account hold, ${what}`);
+    const u = readFact({ doc: { account: 'a', observed_at: at(ahead), h5: { used_pct: 1, resets_at: iso(T0 + 60 * MIN) }, week: { used_pct: 1, resets_at: iso(T0 + 2880 * MIN) } } },
+      { account: 'a', now: T0, staleMs: STALE_MIN * MIN });
+    assert.equal(u.ok, counts, `usage.mjs, ${what}: ${u.reason}`);
+    for (const id of [FACTS.network, FACTS.reachable, FACTS.minibase]) put(id, { value: false, observed_at: at(ahead) });
+    const did = await withAlerts(rec, T0, () => {}, (alert) => phoneLinkStep({ rec, rules: rulesWith(), now: T0, send: async () => ({ outcome: 'sent' }),
+      restartFrontDoor: async () => ({ ok: true }), startMinibase: async () => ({ ok: true }), alert }));
+    assert.equal(did.includes('network down: nothing done'), counts, `phone-link.mjs, ${what}: ${JSON.stringify(did)}`);
+    const p = heartbeatProbes({ rec, rules: rules(), now: () => T0, upMs: () => GRACE_MS });
+    assert.equal((await p.sensorsAlive()).clock === true, !counts, `heartbeat-probes.mjs Sensors line, ${what}`);
+    put(FACTS.reachable, { value: true, observed_at: at(ahead) });
+    assert.equal(await p.frontDoorReachable(), counts ? true : null, `heartbeat-probes.mjs Front Door, ${what}`);
+  }
+});
+
+test('#464 r2 m-A: a damaged account row, the other readings current, is the Record\'s, not "never written"; checked on its own', async () => {
+  const good = recWith([]);
+  assert.equal(good.write({ actor: 'sensors', entity: 'fact', id: 'network-up', expectRev: 0, doc: { value: true, observed_at: seen(1) } }).ok, true);
+  const view = (accountRow) => ({ read: (e, id) => (id === ACCOUNT_FACT ? accountRow() : good.read(e, id)), meta: good.meta?.bind(good) });
+  const ask = (accountRow) => heartbeatProbes({ rec: view(accountRow), rules: rules(), now: () => T0, upMs: UP }).sensorsAlive();
+  assert.deepEqual((await ask(() => ({ id: ACCOUNT_FACT, doc: null, corrupt: true }))).account, { ageMin: null, stale: true, at: null, why: 'record' });
+  assert.deepEqual(await ask(() => { throw new Error('store unreadable'); }), { none: true, limitMin: STALE_MIN, why: 'record' }, 'a read that throws is the Record\'s for every reading (r1 m2a)');
+  assert.deepEqual((await ask(() => null)).account, { ageMin: null, stale: true, at: null }, 'never written is still never');
+  assert.equal((await ask(() => ({ id: ACCOUNT_FACT, doc: null, corrupt: true }))).ageMin, 1, 'the other readings are still read');
 });

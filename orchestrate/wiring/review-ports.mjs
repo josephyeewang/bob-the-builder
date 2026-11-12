@@ -21,7 +21,7 @@
 // WIRED (A2, L615, L639): the review runner's three ports, from M11 review-requests.mjs. The Dispatcher only writes a
 // request into the runner's requests folder and reads its status file; it never starts a reviewer (L65).
 //   requestReview, hasReviewer, reviewAlerts   as in review-requests.mjs reviewPorts
-//   stopReview                                 the same (L946): the stop step's stop file, by card, role and head
+//   stopReview                                 the same (L946): the stop step's stop file, by card, role and head, with its reason word (L1000)
 // WIRED (A3b, L703): the plan reviewer's two ports, from the same file. startPlanReview writes a plan request (the card
 // and its plan's fingerprint) into the same requests folder; the runner checks it against the Record and starts the
 // reviewer. planReviewAnswer reads the answer from the runner's own ended record beside its status file. Another

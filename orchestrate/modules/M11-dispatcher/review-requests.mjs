@@ -10,7 +10,7 @@
 //   reviewPorts({ requests, status, reviewUid, now, newId, mainHead, installRoot, main, runnerLog })
 //                                                             → { requestReview, stopReview, hasReviewer, planReviewsRunning,
 //                                                                 reviewAlerts, startPlanReview, planReviewAnswer }
-//   stopReview({ card, role, head })                         → { ok, name } | { ok: false, reason }: the stop step's ask to
+//   stopReview({ card, role, head, reason? })                → { ok, name } | { ok: false, reason }: the stop step's ask to
 //     end every reviewer or auditor running for exactly that card, role and head (L946, L947), a stop file written by
 //     M4 review-stop.mjs writeStopRequest in its target form into the same requests/ folder. No request id is kept or
 //     sent: the runner counts the stop only because the file is the Dispatcher's Mac user's. A requests/ that is a link,
@@ -212,8 +212,9 @@ export function reviewPorts({ requests, status, reviewUid, now = () => Date.now(
   const read = () => readReviewStatus({ file: status, now: now(), uid: reviewUid });
   return {
     requestReview: ({ card, head, role }) => writeReviewRequest({ dir: requests, card, head, role, ...(newId ? { newId } : {}) }),
-    // L946: by card, role and head only, never a request id (L947: M11 keeps none).
-    stopReview: ({ card, role, head }) => { const bad = plainFolder(requests); return bad ? { ok: false, reason: bad } : writeStopRequest({ dir: requests, target: { card, role, head } }); },
+    // L946: by card, role and head only, never a request id (L947: M11 keeps none). The stop step's reason goes with it
+    // (L992, L1000: pass.mjs REVIEW_STOP_RUNNER_REASON), so a cancelled or finished card's end is not told to Joe.
+    stopReview: ({ card, role, head, reason }) => { const bad = plainFolder(requests); return bad ? { ok: false, reason: bad } : writeStopRequest({ dir: requests, target: { card, role, head, ...(reason !== undefined ? { reason } : {}) } }); },
     // Throws when the status can't be trusted: an unclear answer is an error, never a no (L63).
     hasReviewer: (card, role, head) => read().running.some((r) => r.card === card && r.role === role && r.head === head),
     // The plan reviewers the runner says run (L688): they run as the review user, so the Dispatcher's own session list
