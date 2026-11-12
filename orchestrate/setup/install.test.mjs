@@ -2145,6 +2145,9 @@ test('L1026 (iii): a broken copy still refuses the watch job (written by others,
   const sub = join(copyOf(w), readdirSync(copyOf(w), { withFileTypes: true }).find((e) => e.isDirectory()).name);
   const on = spawnSync('/bin/chmod', ['+a', 'everyone allow write', sub], { encoding: 'utf8' }); assert.equal(on.status, 0, `${sub}: ${on.stderr}`); refused('an access list');
   const off = spawnSync('/bin/chmod', ['-N', sub], { encoding: 'utf8' }); assert.equal(off.status, 0, off.stderr);
+  const above = w.mac.at(dirname(installPaths(w.cfg).installRoot));   // the install folder, above the copy: only the access-list line looks there
+  const on2 = spawnSync('/bin/chmod', ['+a', 'everyone allow write', above], { encoding: 'utf8' }); assert.equal(on2.status, 0, on2.stderr);
+  try { refused('an access list above the copy'); } finally { spawnSync('/bin/chmod', ['-N', above]); }
   const stampFile = join(realCopy(w), STAMP); const stamp = readFileSync(stampFile, 'utf8'); rmSync(stampFile); refused('no stamp');
   writeFileSync(stampFile, stamp); chmodSync(stampFile, 0o644);
   assert.deepEqual(startProblems(w.mac, w.cfg, ['watch-only']), [], 'each one put back: the gate passes again');
