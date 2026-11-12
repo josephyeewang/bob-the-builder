@@ -37,7 +37,9 @@
 //        claude starts, `beforeStart` runs checks 1, 2, 3 and 8 again (runner-main.mjs RECHECK; #369 M1, r1 m1 and m2),
 //        since checks 4 and 11 run the branch's own code;
 //     6. claude is spawned detached (review-launch.mjs spawnClaude), so it leads its own process group (pid = pgid), with
-//        the prompt from `promptFor` (another lane's; none, and nothing starts). Its start time is read at once
+//        the prompt from `promptFor` (by default workerPromptText, M5 worker-prompt.mjs; it is asked before any copy
+//        is made, with no head or outbox yet, so today it gives none and nothing starts until lane 2 moves the call,
+//        L970). Its start time is read at once
 //        (runner-loop.mjs leaderStart, in UTC, the one reader the stop checks against); one that can't be read gets the group killed and the start refused, since the runner tells its own
 //        group from a reused number only by that time (step-4 review M3).
 //     A refusal once the copy is made removes the copy, the outbox and the settings file this start made (claude never ran in

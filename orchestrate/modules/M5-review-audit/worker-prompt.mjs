@@ -114,7 +114,11 @@ export const RULES_HEADING = '# Rules';
 export const HANDIN_HEADING = '# Hand-in';
 // The heading tag: 16 to 64 lower-case hex characters (64 to 256 bits; a fresh 96 by default).
 const TAG = /^[0-9a-f]{16,64}$/;
-export const newHeadingTag = () => randomBytes(12).toString('hex');
+const TAG_BYTES = 12;
+export const newHeadingTag = () => randomBytes(TAG_BYTES).toString('hex');
+// A decoy is a bracketed hex run of exactly the length newHeadingTag makes (L1020 m1). Other lengths, such as a quoted
+// 32-hex trace id, are ordinary words; the real guard is that only this prompt's exact tag counts.
+const DECOY = new RegExp(`\\[[0-9a-f]{${TAG_BYTES * 2}}\\]`);
 // The two kinds this prompt tells the worker to hand in; both must be on its profile, or there is no prompt.
 export const WORKER_HANDIN_KINDS = Object.freeze(['report-', 'handin-']);
 
@@ -166,11 +170,11 @@ export function workerPrompt(x = {}, opts = {}) {
     // Checked on the finished text, so whatever the brief's fields are, what the worker reads is plain.
     // The tag is looked for in the brief as a reader would see it: full-width or other compatibility forms folded, and
     // the invisible soft hyphen, zero-width space, joiners and word joiner taken out. Nor may the brief hold a decoy: a
-    // bracketed hex run shaped like a tag (self-review m1), which a reader could take for this one. A commit hash in a
-    // brief is never bracketed like that.
+    // bracketed hex run of exactly a tag's length (self-review m1, narrowed by L1020 m1), which a reader could take for
+    // this one. A commit hash or a trace id in a brief is not refused for it.
     const folded = brief.normalize('NFKC').toLowerCase().replace(/[\u00ad\u200b-\u200d\u2060]/g, '');
     if (folded.includes(tag)) return no(`card ${card}'s brief holds this prompt's heading tag`);
-    if (/\[[0-9a-f]{16,64}\]/.test(folded)) return no(`card ${card}'s brief holds a bracketed hex run shaped like a heading tag`);
+    if (DECOY.test(folded)) return no(`card ${card}'s brief holds a bracketed hex run shaped like a heading tag`);
     if (CONTROL.test(brief.replace(REGION_FLAG, ''))) return no(`card ${card}'s brief holds a control character`);
     if ((brief.match(IDEO_SELECTOR) ?? []).length > IDEO_SELECTORS_MAX) return no(`card ${card}'s brief holds more than ${IDEO_SELECTORS_MAX} ideographic variation selectors`);
     if (HIDDEN_SPACE.test(brief)) return no(`card ${card}'s brief holds a line ending in space or an unusual space character`);

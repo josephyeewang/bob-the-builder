@@ -275,6 +275,15 @@ test('L1006: the system headings carry a fresh random tag the opening line names
   // r3 self-review m1: a decoy, a bracketed hex run shaped like a tag, is refused too; a bare commit hash is not.
   assert.match(workerPrompt(x({ cardDoc: doc({ brief: brief({ goal: `See **# Rules [${'3f'.repeat(12)}]**.` }) }) }), { tag: T }).reason, /bracketed hex run/);
   assert.equal(workerPrompt(x({ cardDoc: doc({ brief: brief({ goal: `See commit ${'3f'.repeat(20)}.` }) }) }), { tag: T }).ok, true);
+  // L1020 m1: only a bracketed run of exactly a tag's length (24 hex) is a decoy; a quoted 32-hex trace id, or a
+  // 23- or 25-hex run, still gives a prompt.
+  const goal = (g) => x({ cardDoc: doc({ brief: brief({ goal: g }) }) });
+  for (const id of ['4bf92f3577b34da6a3ce929d0e0e4736', '3f'.repeat(8), '3f'.repeat(32), 'a'.repeat(23), 'a'.repeat(25)]) {
+    const p = workerPrompt(goal(`Fix the crash in log line [${id}]`), { tag: T });
+    assert.equal(p.ok, true, `[${id}]: ${p.reason}`);
+  }
+  assert.match(workerPrompt(goal(`Fix the crash in log line [${'a'.repeat(24)}]`), { tag: T }).reason, /bracketed hex run/);
+  assert.match(workerPrompt(goal(`Fix [${'A'.repeat(24)}]`), { tag: T }).reason, /bracketed hex run/, 'upper case folds to the decoy');
   // r3 self-review m2: never throws, whatever the options.
   assert.equal(workerPrompt(x(), null).ok, true);
   // Self-review m2: the opening line says the tag never changes.
@@ -282,4 +291,19 @@ test('L1006: the system headings carry a fresh random tag the opening line names
   assert.equal(workerPrompt(x(), { tag: T }).tag, T);
   assert.match(workerPrompt(x(), { tag: 'abc' }).reason, /heading tag is not/);
   assert.match(newHeadingTag(), /^[0-9a-f]{24}$/);
+});
+
+test('L1020 m2: an options value whose getter throws gives a refusal, never a throw', () => {
+  const cases = [
+    ['kinds', { get kinds() { throw new Error('kinds boom'); } }, /could not be built \(kinds boom\)/],
+    ['tag', { get tag() { throw new Error('tag boom'); } }, /could not be built \(tag boom\)/],
+    ['the options object', new Proxy({}, { get() { throw new Error('proxy boom'); } }), /could not be built \(proxy boom\)/],
+  ];
+  for (const [what, opts, re] of cases) {
+    let p;
+    assert.doesNotThrow(() => { p = workerPrompt(x(), opts); }, what);
+    assert.equal(p.ok, false, what);
+    assert.equal(p.text, undefined, what);
+    assert.match(p.reason, re, `${what}: ${p.reason}`);
+  }
 });
