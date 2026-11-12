@@ -22,8 +22,9 @@
 //
 // A launch that stops before or after check 4 for a reason that is not runLocked's (launch check 0, the setting names
 // not yet confirmed on the pin, live proof L2; checks 12 and 13, not wired yet) makes the steps it blocks NOT RUN, with
-// that reason: never FAIL, which would blame runLocked, and never PASS.
-// Capability note (Principle 9): steps 6 and 2 read claude's stream-json lines (`system`/`init` permissionMode, `tool_use`,
+// that reason: never FAIL, which would blame runLocked, and never PASS. The run's last line names the check that
+// blocked it, and the run exits 1, so a blocked run can never be read as done (L989).
+// Capability note (Principle 9): step 6 reads claude's stream-json lines (`system`/`init` permissionMode, `tool_use`,
 // `tool_result` is_error, `result` permission_denials, and a `system` hook line naming PreToolUse) by names not yet
 // confirmed on any pin. A line missing reads as "can't tell", which fails the step; a renamed is_error would not be
 // seen, so step 6 also needs save-work's own ok answer. Claude Code's own transcripts of the proof's sessions stay in the
@@ -250,7 +251,7 @@ export async function proveRunLocked({ c, product, io }) {
     out.set(5, !c4 ? noFour(5, s5) : c4.ok ? fail(5, `check 4 passed an install that sleeps 20 minutes (${SLOW_INSTALL})`)
       : !/did not finish inside the lock-down \(it did not finish in time\)/.test(c4.reason ?? '') ? fail(5, `check 4 refused, but not for the time limit: ${c4.reason}`)
         : listed === null ? fail(5, `whether claude's group (${run5?.pid}) is gone can't be told`) : listed ? fail(5, `ps -g ${run5.pid} still lists processes of claude's group`)
-          : left === null ? fail(5, `whether ${SLOW_INSTALL} still runs can't be told`) : left.length ? fail(5, `${SLOW_INSTALL} still runs (${left.join(', ')}): the install was not stopped with claude`)
+          : left === null ? fail(5, `whether ${SLOW_INSTALL} still runs can't be told`) : left.length ? fail(5, `${SLOW_INSTALL} still runs (${left.join(', ')}): the install was not stopped with claude. Left running, not killed; each ends by itself within 20 minutes`)
             : pass(5, { reason: c4.reason }));
 
     // Step 8: an install's leftover, looked at once the session has started (a known limit, never a fail). NOT SEEN counts
@@ -361,7 +362,9 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     sleep: (ms) => new Promise((r) => { setTimeout(r, ms); }), now,
     id: (prefix) => `${prefix}-${tag}-${(n += 1)}`,
     cleanup: ({ copy, outbox, settingsFile, sleepers = [] }) => {
-      for (const pid of sleepers) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+      // Never killed: they are found by their command line, not by a pid this proof started (L1013). Step 5 has failed
+      // and named them; each ends by itself within SLOW_INSTALL's 20 minutes.
+      if (sleepers.length) log(`left running, not killed (found by command line, not started here): ${sleepers.join(', ')}`);
       const fs = { rm: rmSync, chmodTree };
       for (const d of [copy, outbox]) if (d) removeAll(fs, d, log);
       try { rmSync(settingsFile, { force: true }); } catch (e) { log(`the proof's settings file ${settingsFile} can't be removed (${e?.code ?? e?.message})`); }
