@@ -3,15 +3,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { spawn as childSpawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { gitOk, initMirror } from '../modules/M4-workshop/git/safe-git.mjs';
 import { prepareWorkerCopy } from '../modules/M4-workshop/launcher/worker-copy.mjs';
 import { DESIGN_PROFILES } from '../modules/M4-workshop/launcher/role-profiles.mjs';
 import { CHECKS } from '../modules/M4-workshop/launcher/launch.mjs';
-import { WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
+import { BASELINE_MS, WALK_DEPTH, baselineCommand, baselineFile, setupFilesProblem, workerChecks } from './runner-checks.mjs';
+import { LOCKED_MS, groupFile, groupRecordCommand } from './runner-locked.mjs';
 import { RECHECK, checkRunnerConfig, lockedOf, lockedWiring, startDeps, workerCheckInputs } from './runner-main.mjs';
 
 const FIXED = '/Library/Application Support/ClaudeCode/managed-settings.json';
@@ -61,19 +62,36 @@ test('step 6, check 2: the copy\'s setup files are main\'s exactly; one changed,
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-// A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends.
+// claude as its Bash tool runs a command (#463 r2 M3, claude 2.1.322): detached, in a process group of its own, so claude's
+// group is not the command's; claude ends when the command does.
+const bashTool = (cmd, opts) => childSpawn(process.execPath, ['-e',
+  'const c = require(\'node:child_process\').spawn(\'/bin/sh\', [\'-c\', process.argv[1]], { detached: true, stdio: \'ignore\' }); c.on(\'exit\', (x) => process.exit(x ?? 1));', cmd], opts);
+// A stand-in claude: it runs the one shell command its prompt names, in its working folder, and ends. The baseline's runs
+// as the Bash tool runs it (bashTool), its group's record and the runner's go-ahead (#463 r2 M3) for real; `baseline:
+// false`, it runs nothing (a claude that never ran the command).
 function standIn(calls, { sandbox = false, baseline = true } = {}) {
   return (bin, args, opts) => {
     const cmd = args.at(-1).replace(/^Run exactly this shell command once and report its exit code: /, '');
-    calls.push({ bin, args, cwd: opts.cwd, cmd });
+    calls.push({ bin, args, cwd: opts.cwd, env: opts.env, cmd });
+    const smoke = cmd.includes('.orch-smoke-');
+    if (!smoke && baseline) return bashTool(cmd, opts);
     const c = new EventEmitter(); c.kill = () => {};
     // Sandboxed: the smoke's first step (marking it ran, inside the copy) runs; its write outside and network reach do not.
-    const smoke = cmd.includes('.orch-smoke-');
-    const run = smoke && sandbox ? cmd.split(';')[0] : smoke || baseline ? cmd : null;
+    const run = smoke && sandbox ? cmd.split(';')[0] : smoke ? cmd : null;
     setImmediate(() => { if (run) spawnSync('/bin/sh', ['-c', run], { cwd: opts.cwd, stdio: 'ignore' }); c.emit('close', 0); });
     return c;
   };
 }
+// A made-up claude (#463 r2 M3) that keeps the handshake: its command's shell records a made-up pid, in a group of its own
+// (jobPorts below read it as there and started after claude), and `then` runs once the runner's go-ahead is written.
+const T0 = '2026-01-01T00:00:00.000Z';
+const fakeJob = (more = {}) => ({ info: (pid) => ({ pgid: pid, start: T0 }), pidStartOf: () => T0, jobGone: () => true, pollMs: 5, ...more });
+const handshake = async (args, then, pid = 7777) => {
+  const g = /^\( set -C; \/bin\/echo \$\$ > '([^']+)' \)/.exec(args.at(-1).replace(/^Run exactly this shell command once and report its exit code: /, ''))[1];
+  writeFileSync(g, `${pid}\n`);
+  for (let n = 0; n < 400 && !existsSync(`${g}.ok`); n += 1) await new Promise((r) => setTimeout(r, 5));
+  if (existsSync(`${g}.ok`)) then();
+};
 
 function inputs(over = {}) {
   const d = tempDir('orch-rchecks-');
@@ -161,14 +179,16 @@ test('#456 r1 m3: save-work and check 4 are both on or both off: one runLocked f
   const on = lockedWiring(c, { runLocked });
   assert.equal(on.runLocked, runLocked);
   assert.deepEqual(await on.startDeps.checksFor(wx)[4](), { ok: true });
-  assert.deepEqual(await on.saveWork(session), { ok: false, reason: 'stand-in' });
+  // The save runs in the copy's real .git (#463 r2 m3), so the copy here is a real one.
+  const real = tempDir('orch-'); mkdirSync(join(real, '.git'));
+  try { assert.deepEqual(await on.saveWork({ ...session, copy: real }), { ok: false, reason: 'stand-in' }); } finally { rmSync(real, { recursive: true, force: true }); }
   assert.deepEqual(seen, ['install', 'save-work'], 'one runLocked ran both');
   // By default it is built from the config's claude: one there, both on, with the config's time limit.
   assert.equal(typeof lockedWiring(c).runLocked, 'function');
   let made; lockedOf({ ...c, lockedMs: 5000 }, { make: (o) => { made = o; return () => {}; } });
   assert.deepEqual([made.claudeBin, made.ms, typeof made.envOf], ['/i/claude', 5000, 'function']);
   assert.equal(lockedOf({ ...c, claudeBin: undefined }), null, 'no claude: none, so both off');
-  for (const bad of [0, 15 * 60_000 + 1]) assert.throws(() => checkRunnerConfig({ ...c, products: c.products, lockedMs: bad }), /lockedMs must be/, String(bad));
+  for (const bad of [0, 10 * 60_000 + 1]) assert.throws(() => checkRunnerConfig({ ...c, products: c.products, lockedMs: bad }), /lockedMs must be/, String(bad));
   // The job's environment (#456 runLocked self-review m5): the sign-in's, HOME and PATH from the config, held to check 9.
   const envOf = (who, base = { PATH: '/elsewhere', TERM: 'x' }) => { let o; lockedOf(c, { who: () => who, base, make: (m) => { o = m; return () => {}; } }); return o.envOf; };
   assert.throws(() => envOf({ reason: 'not signed in' })(), /not signed in/);
@@ -182,7 +202,7 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   const runs = [['exit 3', /baseline tests failed inside the lock-down \(exit 3\)/, 2, true], ['true', null, 2, true], ['true', /wrote outside the copy/, 1, false]];
   for (const [testCommand, re, n, sandbox] of runs) {
     const calls = [];
-    const { d, x, spare } = inputs({ testCommand, spawn: standIn(calls, { sandbox }) });
+    const { d, x, spare } = inputs({ testCommand, spawn: standIn(calls, { sandbox }), nonce: () => 'r1' });
     try {
       const r = await workerChecks(x)[11]();
       if (re) { assert.equal(r.ok, false); assert.match(r.reason, re, testCommand); } else assert.deepEqual(r, { ok: true });
@@ -192,22 +212,54 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
       if (n === 2) {
         // #369 r1 M1: the baseline runs in the throwaway copy with its settings, never in the session's copy.
         assert.equal(calls[1].cwd, join(spare, 'copy')); assert.ok(calls[1].args.includes(join(d, 'spare.json'))); assert.equal(calls[1].args.includes(x.settings.file), false);
-        assert.equal(calls[1].cmd, baselineCommand(testCommand, baselineFile({ copy: join(spare, 'copy'), sessionId: SID })));
+        // #463 r2 M3: its shell's record first, in a process group of its own, and the Bash tool's wait the baseline's limit.
+        assert.equal(calls[1].cmd, `${groupRecordCommand(groupFile({ cwd: join(spare, 'copy'), job: 'baseline', sessionId: SID, run: 'r1' }))} && { ${baselineCommand(testCommand, baselineFile({ copy: join(spare, 'copy'), sessionId: SID }))}; }`);
+        assert.deepEqual(calls[1].env, { PATH: '/usr/bin:/bin', BASH_DEFAULT_TIMEOUT_MS: String(BASELINE_MS), BASH_MAX_TIMEOUT_MS: String(BASELINE_MS) });
       }
       assert.equal(existsSync(spare), false, 'the throwaway copy, its exit file with it, is removed');
     } finally { rmSync(d, { recursive: true, force: true }); }
   }
-  // A command that never writes its exit code can't say: refused.
+  // #463 r2 M3: the baseline's limit is the Bash tool's longest wait, 10 minutes, not 15.
+  assert.equal(BASELINE_MS, LOCKED_MS); assert.equal(BASELINE_MS, 10 * 60_000);
+  // Only guardedRun's reading ports are taken from jobPorts (self-review c1): a spawn there is not used.
+  {
+    const calls = [];
+    const { d, x } = inputs({ testCommand: 'true', spawn: standIn(calls, { sandbox: true }), jobPorts: { spawn: () => { throw new Error('the jobPorts spawn'); } } });
+    try { assert.deepEqual(await workerChecks(x)[11](), { ok: true }); assert.equal(calls.length, 2); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // A limit past that wait is refused before claude starts.
+  {
+    const calls = [];
+    const { d, x } = inputs({ spawn: standIn(calls, { sandbox: true }), baselineMs: LOCKED_MS + 1 });
+    try { assert.match((await workerChecks(x)[11]()).reason, /the baseline's limit is not a time limit within the Bash tool's longest wait \(600000 ms\)/); assert.equal(calls.length, 1, 'the smoke only'); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // A claude that never ran the command (no record of its group) is no baseline.
   {
     const { d, x } = inputs({ spawn: standIn([], { sandbox: true, baseline: false }) });
-    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); } finally { rmSync(d, { recursive: true, force: true }); }
+    try { assert.match((await workerChecks(x)[11]()).reason, /the baseline run did not finish: the baseline's process group was not recorded, so it did not run as the runner runs it \(claude exited 0\)/); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // A command that ran, kept, but never wrote its exit code can't say: refused.
+  {
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4320; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob() });
+    try { assert.match((await workerChecks(x)[11]()).reason, /exit not written; claude exited 0/); } finally { rmSync(d, { recursive: true, force: true }); }
+  }
+  // #463 r2 M3: a group that can't be told about at claude's end, or a record that can't be trusted, is no baseline.
+  for (const [more, re] of [[{ jobGone: () => { throw new Error('ps'); } }, /the baseline run did not finish: the baseline may still be running after claude ended \(claude exited 0\); its process group can't be told about/],
+    [{ info: () => null }, /the baseline run did not finish: its job's process group can't be kept \(the job's shell 7777 can't be read\), so it is stopped/]]) {
+    const smoke = standIn([], { sandbox: true });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4319; c.kill = () => {};
+      handshake(a, () => { writeFileSync(baselineFile({ copy: o.cwd, sessionId: SID }), '0\n'); c.emit('close', 0); }); return c; };
+    const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob(more) });
+    try { assert.match((await workerChecks(x)[11]()).reason, re); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // A baseline past its time limit has its whole process group killed, not claude alone (#369 m2).
   {
     const killed = []; const spawned = [];
     const smoke = standIn([], { sandbox: true });
     const spawn = (b, a, o) => { spawned.push(o.detached); if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4321; c.kill = () => { killed.push('child'); }; return c; };
-    const { d, x } = inputs({ spawn, baselineMs: 50, killGroup: (g) => killed.push(g) });
+    const { d, x } = inputs({ spawn, baselineMs: 50, killGroup: (g) => killed.push(g), jobPorts: fakeJob() });
     try {
       assert.match((await workerChecks(x)[11]()).reason, /did not finish in time/);
       assert.deepEqual(killed, [4321], 'the group, by its leader\'s pid'); assert.equal(spawned.at(-1), true, 'the baseline leads its own group');
@@ -217,16 +269,16 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   {
     const killed = [];
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
-    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: (g) => g === 4322 });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4322; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: (g) => g === 4322, jobPorts: fakeJob() });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, [4322]); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // #369 r2 c3: after the end, a group signal 0 no longer finds is not killed (its number may be another's).
   {
     const killed = [];
     const smoke = standIn([], { sandbox: true });
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; setImmediate(() => c.emit('close', 0)); return c; };
-    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: () => false });
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4323; c.kill = () => {}; handshake(a, () => c.emit('close', 0)); return c; };
+    const { d, x } = inputs({ spawn, killGroup: (g) => killed.push(g), groupThere: () => false, jobPorts: fakeJob() });
     try { assert.match((await workerChecks(x)[11]()).reason, /exit not written/); assert.deepEqual(killed, []); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // #369 r1 m6: an empty exit file, one that is not a number, and a link to a file holding 0 are not exit 0.
@@ -234,8 +286,8 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
     ['a link', (f, d) => { writeFileSync(join(d, 'zero'), '0\n'); symlinkSync(join(d, 'zero'), f); }]]) {
     const smoke = standIn([], { sandbox: true });
     let dd;
-    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.kill = () => {}; setImmediate(() => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
-    const { d, x } = inputs({ spawn }); dd = d;
+    const spawn = (b, a, o) => { if (a.at(-1).includes('.orch-smoke-')) return smoke(b, a, o); const c = new EventEmitter(); c.pid = 4324; c.kill = () => {}; handshake(a, () => { write(baselineFile({ copy: o.cwd, sessionId: SID }), dd); c.emit('close', 0); }); return c; };
+    const { d, x } = inputs({ spawn, killGroup: () => {}, groupThere: () => false, jobPorts: fakeJob() }); dd = d;
     try { const r = await workerChecks(x)[11](); assert.equal(r.ok, false, what); assert.match(r.reason, /baseline tests failed inside the lock-down \(exit (|abc|not written; claude exited 0)\)/, what); } finally { rmSync(d, { recursive: true, force: true }); }
   }
   // No throwaway port: a worker gets no check 11, so launch() refuses there.
@@ -252,6 +304,19 @@ test('step 6, check 11 (#369 M2): the smoke runs first; a worker\'s baseline run
   assert.throws(() => baselineCommand('a\nb', '/f'), /one-line test command/);
   assert.throws(() => baselineCommand('', '/f'), /one-line/);
   assert.throws(() => baselineCommand('t', "/f'x"), /quote/);
+});
+
+test('#463 r2 M3: the baseline\'s own process group (the Bash tool\'s, not claude\'s) is killed at its time limit', async () => {
+  const { d, x } = inputs({ spawn: standIn([], { sandbox: true }), baselineMs: 4_000 });
+  x.testCommand = `/bin/echo $$ > '${join(d, 'job.pid')}'; /bin/sleep 30`;
+  try {
+    assert.match((await workerChecks(x)[11]()).reason, /the baseline run did not finish: it did not finish in time/);
+    assert.ok(existsSync(join(d, 'job.pid')), 'the tests started (their shell wrote its pid) before the limit');
+    const g = Number(readFileSync(join(d, 'job.pid'), 'utf8'));
+    let alive = true;
+    for (let n = 0; n < 100 && alive; n += 1) { try { process.kill(-g, 0); await new Promise((r) => setTimeout(r, 20)); } catch { alive = false; } }
+    assert.equal(alive, false, 'the tests\' own group is gone, not claude\'s alone');
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 test('#369 r1 M1: what the baseline leaves running, in its group or in a session of its own, never reaches the session\'s copy', async () => {

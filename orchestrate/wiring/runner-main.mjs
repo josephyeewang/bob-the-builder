@@ -40,7 +40,7 @@ import { makeLock } from '../modules/M9-record/lock.mjs';
 import { PRODUCT, runnerPlaces } from '../shared/product-paths.mjs';
 import { foldKey } from '../shared/plan-fingerprint.mjs';
 import { loadMemory, processGroupPorts, runRunner } from './runner-loop.mjs';
-import { drainedPort, liveWallProblem, pauseLeadPort, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
+import { drainedPort, liveWallProblem, pauseLeadPort, productWallGap, saveSettingsName, saveWorkPort, sessionEnv, sessionSettingsOf, sizePort, startPort } from './runner-ports.mjs';
 import { workerChecks } from './runner-checks.mjs';
 import { holdersOf, readFactFile, readSessionFile } from '../modules/M4-workshop/launcher/review-runner-main.mjs';
 import { keepSnapshotFresh, writeSnapshot } from '../modules/M4-workshop/hooks/snapshot.mjs';
@@ -69,7 +69,7 @@ export function checkRunnerConfig(c) {
   for (const k of UIDS) if (!Number.isInteger(c[k]) || c[k] < 0) fail(`${k} must be a uid`);
   if (typeof c.path !== 'string' || !c.path || !c.path.split(':').every(fullPath)) fail('path must be full folders in their simplest form joined by ":"');
   if (!Number.isFinite(c.claimMs) || c.claimMs <= 0) fail('claimMs must be the claim timeout in ms');
-  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0 || c.lockedMs > LOCKED_MS)) fail('lockedMs must be the install job\'s time limit in ms, at most 15 minutes (left out: 15 minutes)');
+  if (c.lockedMs !== undefined && (!Number.isInteger(c.lockedMs) || c.lockedMs <= 0 || c.lockedMs > LOCKED_MS)) fail('lockedMs must be the install job\'s time limit in ms, at most 10 minutes, the Bash tool\'s own longest wait (left out: 10 minutes)');
   if (!c.products || typeof c.products !== 'object' || Array.isArray(c.products) || !Object.keys(c.products).length) fail('products must name at least one product');
   for (const [name, p] of Object.entries(c.products)) {
     if (!productName(name)) fail(`product ${JSON.stringify(name)} is not a product name`);
@@ -158,7 +158,7 @@ export const startDeps = (c, { stopped = () => false, log, productHeld, runLocke
  * still waiting) whose settings do not deny some other product of this config whole, a product added after it started.
  * groupGone(s) is the process-group port; a group it can't tell about counts as live.
  */
-export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), listSettings = () => readdirSync(c.settingsDir) } = {}) {
+export function carriedOverProblem(c, memory, { groupGone, readSettings = sessionSettingsOf(c.settingsDir), readSaveSettings = sessionSettingsOf(c.settingsDir, saveSettingsName), listSettings = () => readdirSync(c.settingsDir) } = {}) {
   // No memory (a first run, or one lost) while settings files of earlier sessions are there (#378 self-review M3): a
   // session started with one may still run, and the runner knows nothing of it, so it can't be told about.
   // A memory with no sessions and no requests is no memory either (#378 r2 n4: one restored or edited to empty lists).
@@ -177,8 +177,22 @@ export function carriedOverProblem(c, memory, { groupGone, readSettings = sessio
   // Waiting rows are not counted here (#378 self-review M2): no group of theirs can be shown gone, and they are never
   // dropped, so the runner would stay down, serving no stop. Each start still checks them (worker-runner.mjs `live`).
   for (const q of Object.keys(c.products)) {
-    const why = liveWallProblem(live, q, { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror }, readSettings);
+    const places = { ...runnerPlaces({ copiesRoot: c.copiesRoot, outboxRoot: c.outboxRoot, product: q }), mirror: c.products[q]?.mirror };
+    const why = liveWallProblem(live, q, places, readSettings);
     if (why) return why;
+    // Its save settings too (#463 r2 m5): a later save of that session runs claude with them. A save comes after the stop,
+    // so every listed session that can still be saved counts (self-review M-1), live or not: one whose row keeps the
+    // hash of its save settings. None written is no gap: a row with no hash is never saved (worker-runner.mjs).
+    for (const s of Array.isArray(memory?.sessions) ? memory.sessions : []) {
+      if (!s?.save_settings_sha || s.product === q) continue;
+      if (typeof s.product !== 'string') return `session ${s.id} names no product, so whether its saves may read product ${q}'s folders can't be told`;
+      let set; try { set = readSaveSettings(s.id); } catch (e) {
+        if (e?.code === 'ENOENT') continue;
+        return `session ${s.id}'s save settings can't be read (${e?.code ?? e?.message}), so whether its saves may read product ${q}'s folders can't be told`;
+      }
+      const gap = productWallGap(set, places);
+      if (gap) return `session ${s.id} (product ${s.product})'s save settings were written before product ${q}'s folders were on their deny list (${gap}); start product ${q}'s sessions once it has ended`;
+    }
   }
   return null;
 }

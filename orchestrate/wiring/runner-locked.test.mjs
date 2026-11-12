@@ -6,13 +6,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn as childSpawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir } from '../shared/test-tmp.mjs';
 import { pushWorld } from '../modules/M4-workshop/git/push-world.test-helper.mjs';
 import { createSaveWork } from '../modules/M4-workshop/git/save-work.mjs';
 import { bundleName } from '../modules/M4-workshop/git/push.mjs';
-import { JOBS_DIR, LOCKED_JOBS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, jobFile, lockedRunner, settingsSha } from './runner-locked.mjs';
+import { JOBS_DIR, JOB_ACK_WAIT_MS, LOCKED_JOBS, LOCKED_MS, LOCKED_SAVE_MS, RESULT_MAX_BYTES, SAVE_DELAYS_MS, ackFile, groupFile, groupRecordCommand, jobFile, lockedRunner, readGroupRecord, runToEnd, settingsSha } from './runner-locked.mjs';
+import { EventEmitter } from 'node:events';
 import { SAVE_DEADLINE_MS } from '../modules/M11-dispatcher/pass.mjs';
 import { partialName } from '../modules/M4-workshop/git/save-work.mjs';
 import { RUNNER_STATUS_EVERY_MS } from './owner-status.mjs';
@@ -39,6 +40,23 @@ const world = () => {
   return { d, cwd, settingsFile, sha: settingsSha(Buffer.from(SAFE)) };
 };
 const runner = (more = {}) => lockedRunner({ claudeBin: '/x/claude', envOf: () => ({ PATH: '/usr/bin:/bin' }), ...more });
+// The Bash tool's own wait, set to the job's limit (#463 r2 m1), beside the environment given.
+const bashWait = (ms) => ({ BASH_DEFAULT_TIMEOUT_MS: String(ms), BASH_MAX_TIMEOUT_MS: String(ms) });
+// The words before the job itself: its shell's record and the wait for the runner's go-ahead (#463 r2 M1).
+const recordOf = (args) => args.at(-1).slice(ASK.length).split(' && { ')[0];
+// claude as its Bash tool runs a command (#463 r2 M1, claude 2.1.322): detached, in a process group of its own, so
+// claude's group is not the job's. `leave`: claude ends at once, leaving its command running (as a Bash tool that moved
+// a command to the background would).
+const detachedClaude = (calls = [], { leave = false } = {}) => (bin, args, opts) => {
+  const cmd = args.at(-1).slice(ASK.length);
+  const js = `const c = require('node:child_process').spawn('/bin/sh', ['-c', process.argv[1]], { detached: true, stdio: 'ignore' });`
+    + (leave ? 'setTimeout(() => process.exit(0), 600);' : 'c.on(\'exit\', (x) => process.exit(x ?? 1));');
+  const child = childSpawn(process.execPath, ['-e', js, cmd], opts);
+  calls.push({ bin, args, opts, child });
+  return child;
+};
+const groupAlive = (g) => { try { process.kill(-g, 0); return true; } catch { return false; } };
+const goneSoon = async (g) => { for (let n = 0; n < 100 && groupAlive(g); n += 1) await new Promise((r) => setTimeout(r, 20)); return !groupAlive(g); };
 
 test('L969: the install job runs the declared command in the copy under the session settings; exit 0 is ok, any other is a refusal', async () => {
   const { cwd, settingsFile } = world();
@@ -49,9 +67,22 @@ test('L969: the install job runs the declared command in the copy under the sess
   assert.equal(calls[0].bin, '/x/claude');
   assert.equal(calls[0].args[calls[0].args.indexOf('--settings') + 1], settingsFile, 'under the session\'s settings file');
   assert.equal(calls[0].opts.cwd, cwd); assert.equal(calls[0].opts.detached, true, 'it leads its own group');
-  assert.deepEqual(calls[0].opts.env, { PATH: '/usr/bin:/bin' }, 'the sign-in environment, as envOf gave it');
+  assert.deepEqual(calls[0].opts.env, { PATH: '/usr/bin:/bin', ...bashWait(LOCKED_MS) }, 'the sign-in environment, as envOf gave it, and the Bash tool\'s wait');
   assert.deepEqual(await run({ job: 'install', command: 'exit 3', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: false, reason: 'the install exited 3' });
   assert.deepEqual(readdirSync(cwd), ['installed'], 'no result file left');
+});
+
+// Self-review m1 (#463 r2 M3): an old record or go-ahead that can't be removed is said as it is, nothing having run.
+test('#463 r2 M3: an old process-group record or go-ahead that can\'t be removed refuses the job, said as it is, before claude starts', async () => {
+  const { cwd, settingsFile } = world();
+  for (const [part, what] of [['.group.r1', 'process-group record'], ['.group.r1.ok', 'go-ahead']]) {
+    const calls = [];
+    const rm = (f, o) => { if (f.endsWith(part)) { const e = new Error('no'); e.code = 'EPERM'; throw e; } return rmSync(f, o); };
+    const run = runner({ spawn: sh(calls), rm, nonce: () => 'r1' });
+    await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
+      { message: `the install job's old ${what} can't be removed (EPERM)` });
+    assert.equal(calls.length, 0, 'claude never started');
+  }
 });
 
 test('L969: a real save-work job (M4\'s own script, run by node) makes the card\'s bundle in the outbox', async () => {
@@ -59,7 +90,7 @@ test('L969: a real save-work job (M4\'s own script, run by node) makes the card\
   writeFileSync(join(w.clone, 'app.txt'), 'changed\n');
   const settingsFile = join(tempDir('orch-locked-'), 'S-1.save.json'); writeFileSync(settingsFile, SAFE);
   const calls = [];
-  const run = runner({ spawn: sh(calls), envOf: () => ({ PATH: process.env.PATH, HOME: process.env.HOME }) });
+  const run = runner({ spawn: sh(calls), envOf: () => ({ PATH: process.env.PATH, HOME: process.env.HOME }), nonce: () => 'r1' });
   // As saveWorkPort binds it (L991 M1): in the copy's .git, under the save's settings, by their hash.
   const at = join(w.clone, '.git');
   const bound = (j) => run({ ...j, sessionId: 'S-1', role: 'worker', settingsFile, settingsSha: settingsSha(Buffer.from(SAFE)), cwd: at });
@@ -68,15 +99,18 @@ test('L969: a real save-work job (M4\'s own script, run by node) makes the card\
   assert.equal(saved.bundle, join(w.outbox, bundleName('C-1')));
   assert.equal(spawnSync('git', ['bundle', 'verify', '-q', saved.bundle], { cwd: w.mirror, encoding: 'utf8' }).status, 0, 'git bundle verify');
   const cmd = calls[0].args.at(-1).slice(ASK.length);
-  assert.ok(cmd.startsWith(`'${process.execPath}' '${join(JOBS_DIR, 'save-work.mjs')}' '`), cmd);
-  assert.ok(cmd.endsWith(` '${jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })}'`), 'of the copy, only the result file is named');
-  assert.equal(cmd.split(w.clone).length, 2, 'the copy is named once, for the result file');
+  const g = groupFile({ cwd: at, job: 'save-work', sessionId: 'S-1', run: 'r1' });
+  assert.ok(cmd.startsWith(`${groupRecordCommand(g)} && { '${process.execPath}' '${join(JOBS_DIR, 'save-work.mjs')}' '`), cmd);
+  assert.ok(cmd.endsWith(` '${jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })}'; }`), 'of the copy, only the record, its go-ahead and the result file are named');
+  assert.equal(cmd.split(w.clone).length, 5, 'the copy is named for the record (once), its go-ahead (twice) and the result file');
+  assert.deepEqual(calls[0].opts.env, { PATH: process.env.PATH, HOME: process.env.HOME, ...bashWait(LOCKED_SAVE_MS) }, 'the Bash tool waits as long as the save may run');
   assert.equal(calls[0].opts.cwd, at, 'run in the copy\'s .git');
   assert.equal(existsSync(jobFile({ cwd: at, job: 'save-work', sessionId: 'S-1' })), false, 'the result file is removed');
   // L991 M1: the bundle was written in .git and moved; the outbox holds the bundle only, never a dot file, and no
   // partial is left in .git.
   assert.deepEqual(readdirSync(w.outbox).filter((n) => n.startsWith('.') || n.endsWith('.partial')), [], 'no dot file or partial in the outbox');
   assert.equal(existsSync(join(at, partialName('C-1'))), false, 'no partial left in .git');
+  assert.deepEqual([g, ackFile(g)].filter((f) => existsSync(f)), [], 'no record or go-ahead left');
 });
 
 // #463 r1 M1 (L991): the same real job, its command run under macOS's sandbox (Seatbelt, which Claude Code's shell
@@ -97,8 +131,11 @@ test('#463 r1 M1: a real save-work job, run inside the save\'s writes only, make
   const [g, o] = [realpathSync(at), realpathSync(w.outbox)];
   const q = (x) => JSON.stringify(x);
   const esc = (x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  // #463 r2 (P11): of the outbox, only the card's bundle by its final name may be written, so a partial or any other
+  // name made there, even for a moment, fails the save.
   const profile = `(version 1)(allow default)(deny file-write* (require-not (require-any (subpath ${q(g)}) (subpath ${q(o)}) (subpath ${q(tmp)}) (subpath "/dev"))))`
-    + `(deny file-write* (regex ${q(`^${esc(o)}/(.*/)?\\.`)}))`;
+    + `(deny file-write* (regex ${q(`^${esc(o)}/(.*/)?\\.`)}))`
+    + `(deny file-write* (require-all (regex ${q(`^${esc(o)}/`)}) (require-not (literal ${q(join(o, bundleName('C-1')))}))))`;
   const boxed = (bin, args, opts) => {
     const prompt = args.at(-1);
     assert.ok(prompt.startsWith(ASK), prompt);
@@ -110,8 +147,8 @@ test('#463 r1 M1: a real save-work job, run inside the save\'s writes only, make
   assert.equal(saved.ok, true, saved.reason);
   assert.equal(spawnSync('git', ['bundle', 'verify', '-q', saved.bundle], { cwd: w.mirror, encoding: 'utf8' }).status, 0, 'git bundle verify');
   assert.equal(readFileSync(join(w.clone, 'app.txt'), 'utf8'), before, 'the copy\'s files are untouched');
-  // Control: the same sandbox refuses a write beside the .git, and a dot file in the outbox.
-  for (const f of [join(w.clone, 'x.txt'), join(w.outbox, '.x')]) {
+  // Control: the same sandbox refuses a write beside the .git, a dot file in the outbox, and any other name there.
+  for (const f of [join(w.clone, 'x.txt'), join(w.outbox, '.x'), join(w.outbox, partialName('C-1')), join(w.outbox, 'x')]) {
     const out = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', `echo x > ${q(f)}`], { encoding: 'utf8' });
     assert.notEqual(out.status, 0, f); assert.equal(existsSync(f), false, f);
   }
@@ -180,9 +217,10 @@ test('L969: every way runLocked can fail is a throw with a plain reason, and not
   assert.throws(() => lockedRunner({ claudeBin: '/x/claude' }), /needs the sign-in environment/);
   assert.deepEqual(LOCKED_JOBS, ['save-work', 'install']);
   // After claude: no result, a result that is not the job's form, claude failing to start.
-  const quiet = (write) => (bin, args, opts) => childSpawn('/bin/sh', ['-c', write ? `printf '%s' '${write}' > '${jobFile({ cwd, job: args.at(-1).includes('save-work.mjs') ? 'save-work' : 'install', sessionId: 'S-1' })}'` : 'exit 0'], opts);
+  // Each runs the job's record and waits for the go-ahead first (#463 r2 M1), then writes what it is given in place of the job.
+  const quiet = (write) => (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && ${write ? `printf '%s' '${write}' > '${jobFile({ cwd, job: args.at(-1).includes('save-work.mjs') ? 'save-work' : 'install', sessionId: 'S-1' })}'` : 'exit 0'}`], opts);
   await assert.rejects(runner({ spawn: quiet() })(base), /the install job's result was not written \(claude exited 0; ENOENT\)/);
-  const big = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `head -c ${RESULT_MAX_BYTES + 1} /dev/zero > '${jobFile({ cwd, job: 'install', sessionId: 'S-1' })}'`], opts);
+  const big = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && head -c ${RESULT_MAX_BYTES + 1} /dev/zero > '${jobFile({ cwd, job: 'install', sessionId: 'S-1' })}'`], opts);
   await assert.rejects(runner({ spawn: big })(base), new RegExp(`the install job's result was not written \\(claude exited 0; over ${RESULT_MAX_BYTES} bytes\\)`), 'a result over the limit is refused unread');
   await assert.rejects(runner({ spawn: quiet('x') })(base), /the install's exit code is not a number \(x; claude exited 0\)/);
   const save = { ...base, job: 'save-work', args: {}, settingsSha: sha };
@@ -243,7 +281,7 @@ test('#463 r1 m6: an environment given (the start\'s own) is used, and the sign-
   const run = runner({ spawn: sh(calls), envOf: () => { read += 1; return { PATH: '/usr/bin:/bin' }; } });
   await run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd, env: { PATH: '/bin', X: '1' } });
   assert.equal(read, 0, 'envOf is not called');
-  assert.deepEqual(calls[0].opts.env, { PATH: '/bin', X: '1' });
+  assert.deepEqual(calls[0].opts.env, { PATH: '/bin', X: '1', ...bashWait(LOCKED_MS) });
   await run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd });
   assert.equal(read, 1, 'without one, the sign-in is read');
   await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd, env: null }), /no environment to run the install job with/);
@@ -253,10 +291,10 @@ test('#463 r1 m2: the job\'s process group, with its leader\'s start time, is to
   const { cwd, settingsFile } = world();
   const calls = [];
   const told = [];
-  const run = runner({ spawn: sh(calls), pidStartOf: (pid) => `start-of-${pid}` });
+  const run = runner({ spawn: sh(calls), pidStartOf: () => '2000-01-01T00:00:00Z' });
   assert.deepEqual(await run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd, onGroup: (g) => told.push(g) }), { ok: true });
   const pid = calls[0].child.pid;
-  assert.deepEqual(told, [{ pgid: pid, pid, pid_start: `start-of-${pid}` }]);
+  assert.deepEqual(told, [{ pgid: pid, pid, pid_start: '2000-01-01T00:00:00Z' }], 'the stand-in runs the job in claude\'s own group: no second group is told');
   const slow = [];
   const blind = runner({ spawn: sh(slow), pidStartOf: () => null });
   await assert.rejects(blind({ job: 'install', command: 'sleep 30', sessionId: 'S-1', role: 'worker', settingsFile, cwd, onGroup: () => {} }), /its process group can't be kept \(its start time can't be read\), so it is stopped/);
@@ -271,10 +309,10 @@ test('#463 r1 c3: a claude ended by a signal is refused, whatever result it left
   const f = jobFile({ cwd, job: 'install', sessionId: 'S-1' });
   const killed = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'; kill -9 $$`], opts);
   await assert.rejects(runner({ spawn: killed })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /the install job did not finish inside the lock-down \(claude was ended by a signal\)/);
-  const three = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `printf x > '${f}'; exit 3`], opts);
+  const three = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && printf x > '${f}'; exit 3`], opts);
   await assert.rejects(runner({ spawn: three })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /the install's exit code is not a number \(x; claude exited 3\)/);
   // A non-zero exit with the result written is not refused (--max-turns 1 may end claude in error after its one command).
-  const late = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'; exit 1`], opts);
+  const late = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `${recordOf(args)} && echo 0 > '${f}'; exit 1`], opts);
   assert.deepEqual(await runner({ spawn: late })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: true });
 });
 
@@ -313,4 +351,96 @@ console.log('runner survived');
   const lines = r.stdout.trim().split('\n');
   assert.match(lines[0], /^refused 0 .*ENOENT/, 'no folder: the spawn\'s own reason, and no group told');
   assert.match(lines[1], /^refused 0 .*ENOENT/, 'no claude');
+});
+
+// #463 r2 M1: claude's Bash tool runs each command in a process group of its own, so killing claude's group alone left
+// the job running. The job's shell records itself and waits; the runner keeps that group, then lets it run.
+test('#463 r2 M1: the job\'s own process group is kept before it runs, told with claude\'s, and killed at the time limit', async () => {
+  const { cwd, settingsFile } = world();
+  const calls = []; const told = [];
+  const run = runner({ spawn: detachedClaude(calls), ms: 1_500 });
+  const t0 = Date.now(); const okBefore = [];
+  // Self-review m6: when the job's group is told, no go-ahead is written yet (the job has not run).
+  const onGroup = (g) => { told.push(g); if (g.job) okBefore.push(readdirSync(cwd).filter((n) => n.endsWith('.ok'))); };
+  await assert.rejects(run({ job: 'install', command: 'sleep 30', sessionId: 'S-1', role: 'worker', settingsFile, cwd, onGroup }), /the install job did not finish inside the lock-down \(it did not finish in time\)/);
+  assert.deepEqual(okBefore, [[]], 'kept before the go-ahead');
+  assert.ok(Date.now() - t0 < 10_000);
+  const claude = calls[0].child.pid;
+  assert.equal(told.length, 2, JSON.stringify(told));
+  assert.equal(told[0].pgid, claude);
+  assert.deepEqual(told[1].pgid, claude, 'the same record, claude\'s group first');
+  const job = told[1].job;
+  assert.ok(job && job.pgid !== claude && job.pid === job.pgid && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(job.pid_start), JSON.stringify(job));
+  assert.equal(await goneSoon(claude), true, 'claude\'s group is gone');
+  assert.equal(await goneSoon(job.pgid), true, 'the job\'s own group is gone too');
+  assert.deepEqual(readdirSync(cwd), [], 'no record, go-ahead or result left');
+});
+
+// #463 r2 m6: a job still running once claude closed is a plain refusal of its own, and its group is killed.
+test('#463 r2 m6: a job group still there after claude closes is refused and killed, whatever result it left', async () => {
+  const { cwd, settingsFile } = world();
+  const calls = []; const told = [];
+  const f = jobFile({ cwd, job: 'install', sessionId: 'S-1' });
+  const run = runner({ spawn: detachedClaude(calls, { leave: true }) });
+  await assert.rejects(run({ job: 'install', command: `echo 0 > '${f}'; sleep 30`, sessionId: 'S-1', role: 'worker', settingsFile, cwd, onGroup: (g) => told.push(g) }),
+    /the install job was still running after claude ended \(claude exited 0\); its process group was stopped/);
+  assert.equal(await goneSoon(told[1].job.pgid), true, 'killed');
+  // A job that ended with claude is not refused.
+  const ok = runner({ spawn: detachedClaude([]) });
+  assert.deepEqual(await ok({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), { ok: true });
+});
+
+test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that can\'t be trusted stops it', async () => {
+  const { cwd, settingsFile } = world();
+  const ran = join(cwd, 'ran');
+  // The go-ahead can't be written: the job never runs, and the save is refused.
+  const calls = [];
+  await assert.rejects(runner({ spawn: detachedClaude(calls), answer: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } })({ job: 'install', command: `touch '${ran}'`, sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
+    /its job's process group can't be kept \(the job's go-ahead can't be written \(EACCES\)\), so it is stopped/);
+  assert.equal(existsSync(ran), false, 'never ran');
+  // A record naming a process older than claude (the runner's own here): refused, nothing run.
+  const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
+  const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${process.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
+  await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
+  // No record at all (a claude that ran something else): refused, whatever result it left.
+  const f = jobFile({ cwd, job: 'install', sessionId: 'S-1' });
+  await assert.rejects(runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'`], opts) })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
+    /the install job's process group was not recorded/);
+  // The shell gives up waiting for a go-ahead that never comes, and the job does not run.
+  const g = join(cwd, 'g');
+  const r = spawnSync('/bin/sh', ['-c', `${groupRecordCommand(g)} && touch '${ran}'`], { encoding: 'utf8', timeout: JOB_ACK_WAIT_MS + 5_000 });
+  assert.notEqual(r.status, 0); assert.equal(existsSync(ran), false);
+  assert.equal(readFileSync(g, 'utf8').trim(), String(r.pid ?? readFileSync(g, 'utf8').trim()), 'its record is its own pid');
+  // The record's form: none yet, half written, not a pid.
+  const rec = join(cwd, 'rec');
+  assert.equal(readGroupRecord(rec, { since: '2000-01-01T00:00:00Z' }), null);
+  writeFileSync(rec, '123'); assert.equal(readGroupRecord(rec, { since: '2000-01-01T00:00:00Z' }), null, 'no line break yet: still being written');
+  writeFileSync(rec, 'x\n'); assert.throws(() => readGroupRecord(rec, { since: '2000-01-01T00:00:00Z' }), /not in its form/);
+  writeFileSync(rec, '4242\n');
+  assert.deepEqual(readGroupRecord(rec, { since: '2026-01-01T00:00:00Z', info: () => ({ pgid: 4200, start: '2026-02-01T00:00:00Z' }), startOf: () => '2026-01-02T00:00:00Z' }), { pgid: 4200, pid: 4200, pid_start: '2026-01-02T00:00:00Z' }, 'the group\'s leader, not the shell');
+  assert.throws(() => readGroupRecord(rec, { since: '2026-01-03T00:00:00Z', info: () => ({ pgid: 4200, start: '2026-02-01T00:00:00Z' }), startOf: () => '2026-01-02T00:00:00Z' }), /did not start after claude/, 'a leader older than claude');
+  assert.throws(() => readGroupRecord(rec, { since: '2026-01-01T00:00:00Z', info: () => null }), /can't be read/);
+});
+
+test('#463 r2 m1: the Bash tool waits as long as the job may run; the install\'s limit is at most its longest wait', () => {
+  assert.equal(LOCKED_MS, 600_000, 'claude 2.1.322\'s BASH_MAX_TIMEOUT_MS ceiling');
+  assert.throws(() => runner({ ms: LOCKED_MS + 1 }), /the install's limit can't pass 600000 ms/);
+});
+
+// #463 r2 (P4): a child with no pid (a spawn that failed) is never signalled: node's kill of it would reach pid 0.
+test('#463 r2 P4: a pid-less child is never signalled, even at the time limit', async () => {
+  const kills = [];
+  const fake = new EventEmitter(); fake.pid = undefined; fake.kill = (s) => kills.push(['child.kill', s]);
+  await assert.rejects(runToEnd(() => fake, '/x', [], {}, 30, (g) => kills.push(['group', g]), () => true, () => kills.push(['onSpawn'])), /it did not finish in time/);
+  assert.deepEqual(kills, []);
+});
+
+test('#463 r2 self-review m2: each run\'s record has a name of its own, so a shell left by an earlier run never takes its go-ahead', async () => {
+  const { cwd, settingsFile } = world();
+  const seen = [];
+  const spy = (bin, args, opts) => { seen.push(/\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1]); return childSpawn('/bin/sh', ['-c', 'exit 0'], opts); };
+  const run = runner({ spawn: spy });
+  for (let i = 0; i < 2; i += 1) await assert.rejects(run({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /result was not written/);
+  assert.equal(seen.length, 2); assert.notEqual(seen[0], seen[1]);
+  for (const f of seen) assert.match(f, /\.orch-job-install-S-1\.group\.[0-9a-f]{16}$/);
 });

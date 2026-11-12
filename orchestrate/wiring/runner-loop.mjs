@@ -118,9 +118,11 @@ export function processGroupPorts({ kill = groupKill, probe = runnerProbe, sleep
   return { groupGone, stopGroup };
 }
 
-// A save's process group as worker-runner.mjs keeps it (#463 r1 m2): its leader leads it, with a start time to check.
-const saveGroup = (g) => g !== null && typeof g === 'object' && !Array.isArray(g) && Number.isInteger(g.pgid) && g.pgid > 1 && g.pid === g.pgid
-  && typeof g.pid_start === 'string' && g.pid_start.length > 0 && Number.isFinite(g.at);
+// A save's process groups as worker-runner.mjs keeps them (#463 r1 m2): each led by its leader, with a start time to
+// check; claude's, and the job's own when it was read (`job`, #463 r2 M1).
+const leads = (g) => g !== null && typeof g === 'object' && !Array.isArray(g) && Number.isInteger(g.pgid) && g.pgid > 1 && g.pid === g.pgid
+  && typeof g.pid_start === 'string' && g.pid_start.length > 0;
+const saveGroup = (g) => leads(g) && Number.isFinite(g.at) && (g.job === undefined || leads(g.job));
 
 /**
  * The runner's memory, read once at start. → {} on a first run (no file), the memory, or a throw (never a guess).
@@ -194,8 +196,10 @@ export async function runRunner(ctx) {
   if (!(everyMs > 0) || everyMs + RUNNER_PORT_MS >= RUNNER_STATUS_EVERY_MS) throw new Error('the worker runner\'s tick must leave a port wait under the status cadence');
   let state = load(memoryFile, { uid, note });
   const pending = new Map();
+  // The newest pass's keeper of a save's group told after its pass returned (worker-runner.mjs, self-review M-2).
+  const saveHolder = {};
   while (!stopWhen()) {
-    try { state = await runnerTick({ ...ctx, state, pending }); } catch (e) {
+    try { state = await runnerTick({ ...ctx, state, pending, saveHolder }); } catch (e) {
       note(`a worker runner tick failed (${e?.message ?? e}); the next one runs in ${everyMs} ms`);
       // What that tick kept is the memory now (review M1); one that can't be read back stops the runner (a throw).
       state = load(memoryFile, { uid, note });
@@ -210,17 +214,24 @@ export async function runRunner(ctx) {
   if (pending.size) {
     let t; const late = new Promise((r) => { t = setTimeout(r, drainMs); });
     await Promise.race([Promise.all([...pending.values()].map((p) => p.on)), late]); clearTimeout(t);
-    try { state = await runnerTick({ ...ctx, state, pending, readNone: true }); } catch (e) { note(`the worker runner's last tick failed (${e?.message ?? e})`); }
+    try { state = await runnerTick({ ...ctx, state, pending, saveHolder, readNone: true }); } catch (e) { note(`the worker runner's last tick failed (${e?.message ?? e})`); }
     for (const [id, p] of pending) {
       if (!p.save) { note(`the start of ${id} was still on when the worker runner stopped; it stays waiting, so its claim stays`); continue; }
       // A save still on (#463 r1 m2): its process group, kept in the memory, is stopped, so no job is left running in
       // the copy. It is not answered: the Dispatcher's wait for it runs out and the work is told as not saved (pass.mjs
       // UNSAVED_FACT). One that can't be stopped stays in the memory, and the next runner stops it (worker-runner.mjs step 0).
-      const g = state?.saves?.[p.id] ?? p.group; // p.group: told after the last pass returned
+      const g = p.group ?? state?.saves?.[p.id]; // p.group: the latest told, also after the last pass returned
       let how = 'its process group was not yet known, so nothing was stopped';
       if (g) {
-        let r; try { r = await ctx.ports.stopGroup({ id: p.id, pgid: g.pgid, pid: g.pid, pid_start: g.pid_start }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
-        how = r?.ok === true ? 'its process group is stopped' : `its process group ${g.pgid} can't be stopped now (${r?.reason ?? 'no answer'}); the next runner stops it`;
+        // claude's group, then the job's own (#463 r2 M1): both, or the next runner stops what is left.
+        // The job's group may be told while claude's is being stopped (self-review m3): read again, until none is new.
+        const bad = []; const done = new Set(); let n = 0;
+        for (let x; (x = [g, p.group, g.job, p.group?.job].find((y) => y && !done.has(y.pgid))); ) {
+          done.add(x.pgid); n += 1;
+          let r; try { r = await ctx.ports.stopGroup({ id: p.id, pgid: x.pgid, pid: x.pid, pid_start: x.pid_start }); } catch (e) { r = { ok: false, reason: e?.message ?? String(e) }; }
+          if (r?.ok !== true) bad.push(`${x.pgid} (${r?.reason ?? 'no answer'})`);
+        }
+        how = !bad.length ? `its process group${n > 1 ? 's are' : ' is'} stopped` : `its process group${bad.length > 1 ? 's' : ''} ${bad.join(', ')} can't be stopped now; the next runner stops ${bad.length > 1 ? 'them' : 'it'}`;
       }
       note(`the save of ${p.id} was still on when the worker runner stopped; ${how}. It is not answered, so the Dispatcher's wait for it runs out and the work is told as not saved`);
     }

@@ -213,18 +213,34 @@ test('step 5: save-work refuses without the lock-down runner, and the pause is n
   // its row keeps, in the copy's .git; and (m2) the runner's onGroup is passed through.
   const jobs = [];
   let given;
+  // #463 r2 m3: the copy's .git is checked (a real folder, the runner's own) and run in by its real path.
+  const me = process.getuid(); let st = { isDirectory: () => true, isSymbolicLink: () => false, uid: me };
   const port = saveWorkPort({ mirrorOf: () => '/m', settingsDir: '/st', runLocked: async (j) => { jobs.push(j); return { ok: true }; },
+    lstat: (f) => { assert.equal(f, '/copies/C-1/.git'); return st; }, realpath: (f) => `/real${f}`,
     make: ({ runLocked }) => { given = runLocked; return async (x) => runLocked({ job: 'save-work', args: x }); } });
   const onGroup = () => {};
   await port({ ...s, id: SID, kind: 'editing' }, { onGroup });
   assert.equal(typeof given, 'function');
-  assert.deepEqual(jobs, [{ job: 'save-work', args: seen[0], sessionId: SID, role: 'worker', settingsFile: `/st/${SID}.save.json`, settingsSha: SHA, cwd: '/copies/C-1/.git', onGroup }]);
+  assert.deepEqual(jobs, [{ job: 'save-work', args: seen[0], sessionId: SID, role: 'worker', settingsFile: `/st/${SID}.save.json`, settingsSha: SHA, cwd: '/real/copies/C-1/.git', onGroup }]);
   // A row with no save settings' hash, or one in another form, is refused before any job.
   for (const bad of [undefined, 'A'.repeat(64), 'a'.repeat(40)]) {
     const r = await port({ ...s, id: SID, kind: 'editing', save_settings_sha: bad });
     assert.match(r.reason, /has no save settings kept by its start/, String(bad));
   }
   assert.equal(jobs.length, 1);
+  for (const [bad, why] of [[{ isDirectory: () => false, isSymbolicLink: () => true, uid: me }, /not a real folder/], [{ isDirectory: () => true, isSymbolicLink: () => false, uid: me + 1 }, /not the runner's own/]]) {
+    st = bad;
+    await assert.rejects(port({ ...s, id: SID, kind: 'editing' }), why);
+  }
+  assert.equal(jobs.length, 1, 'no job run in a .git that is a link or another user\'s');
+  // A real link, read by the real lstat: refused.
+  const d = tempDir('orch-');
+  try {
+    mkdirSync(join(d, 'elsewhere')); mkdirSync(join(d, 'c')); symlinkSync(join(d, 'elsewhere'), join(d, 'c', '.git'));
+    const real = saveWorkPort({ mirrorOf: () => '/m', settingsDir: '/st', runLocked: async (j) => { jobs.push(j); return { ok: true }; }, make: ({ runLocked }) => async (x) => runLocked({ job: 'save-work', args: x }) });
+    await assert.rejects(real({ ...s, copy: join(d, 'c'), id: SID, kind: 'editing' }), /not a real folder/);
+    assert.equal(jobs.length, 1);
+  } finally { rmSync(d, { recursive: true, force: true }); }
   const p = await pauseLeadPort()({ product: 'p1' });
   assert.equal(p.ok, false); assert.match(p.reason, /^not wired: /);
 });
