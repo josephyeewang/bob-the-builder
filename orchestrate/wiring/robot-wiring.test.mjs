@@ -401,9 +401,15 @@ test('L265 M1, P16: an alert the queue refuses, or a queue that throws, is logge
   assert.equal(r.gate.tell, `the sweep was not run; ${NOT_QUEUED}`);
   r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => { throw new Error('the queue is damaged'); } });
   assert.equal(r.gate.tell, 'the sweep was not run; the queue is damaged');
+  assert.equal(r.gate.untold, true, 'a queue that threw: the failure itself was not told (#465 r2 audit c2)');
   // Already told today (null) is not a refusal.
   r = await runPasses({ rec, passes, now: () => Date.now(), hold: () => null });
   assert.equal(r.gate.tell, undefined);
+  // #465 r2 audit c2: a pass's own tell beside a failure alert that was queued is not "could not be told".
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => true });
+  assert.deepEqual([r.gate.tell, r.gate.untold], ['the sweep was not run', undefined]);
+  r = await runPasses({ rec, passes: told, now: () => Date.now(), hold: () => false });
+  assert.equal(r.gate.untold, true);
   // In main: the failed pass's line says it could not be told, and a stopped round whose alert is refused says so.
   writeFileSync(lockOf(w), JSON.stringify({ pid: deadPid(), taken_at: 'T0' }));
   const logs = [];
@@ -1605,4 +1611,65 @@ test('#465 r2 m6: a sweep cause the queue refused joins the tell of a heartbeat 
   const e = await o.passes.heartbeat().then(() => null, (x) => x);
   assert.match(String(e?.message), /pinned edit broke/);
   assert.match(String(e?.tell), new RegExp(`the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`));
+});
+
+// #465 r2 audit m2: the other two failing-pass paths carry the sweep's refused cause too. No pass limit, so the sweep is
+// not run and holds its timeout cause, which this queue refuses.
+test('#465 r2 audit m2: a sweep cause the queue refused joins the tell when the late alert was neither queued nor told', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { passes } = await wire(w.config, { fetchFn, hold: () => false, log: () => {}, passDeadlineMs: undefined });
+  const e = await passes.heartbeat().then(() => null, (x) => x);
+  assert.match(String(e?.message), /neither queued nor told/);
+  assert.equal(e.tell, `the Dispatcher-late alert could not be queued; the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`);
+});
+
+test('#465 r2 audit m2: a sweep cause the queue refused joins the tell when the pinned issue was not posted', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const isPinned = (init) => { try { return /mini_alive_at:/.test(JSON.parse(init.body).body ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (isPinned(init) && init.method === 'POST' ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const hold = (a) => (String(a.cause).startsWith('robot-sweep-') ? false : holdAlert(a));
+  const { passes } = await wire(w.config, { fetchFn, hold, log: () => {}, passDeadlineMs: undefined });
+  const e = await passes.heartbeat().then(() => null, (x) => x);
+  assert.match(String(e?.message), /the pinned heartbeat issue was not posted/);
+  assert.equal(e.tell, `the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued`);
+  // #465 r2 audit c2: in main, the heartbeat's own failure alert is queued, so its line does not say "could not be told".
+  const logs = [];
+  await main([w.configFile], { self: w.main, log: (l) => logs.push(l), wireOpts: { fetchFn, hold, passDeadlineMs: undefined } });
+  const line = logs.find((l) => /^robot: heartbeat failed: the pinned heartbeat issue was not posted/.test(l));
+  assert.ok(line, logs.join('\n'));
+  assert.doesNotMatch(line, /could not be told/);
+  assert.match(line, new RegExp(`\\(its failure is queued; the alert sweep's trouble: ${SWEEP_CAUSES.timeout} could not be queued\\)$`));
+});
+
+test('#465 r2 audit m3: a heartbeat with an alert GitHub lost still answers the sweep\'s status', async () => {
+  const w = withKey(world({ extra: APP }));
+  const gh = appGitHub(w);
+  const alertPost = (init) => { try { return init.method === 'POST' && /heartbeat red/.test(JSON.parse(init.body).title ?? ''); } catch { return false; } };
+  const fetchFn = async (url, init = {}) => (alertPost(init) ? { status: 500, json: async () => ({}) } : gh.fetchFn(url, init));
+  const { passes } = await wire(w.config, { fetchFn, log: () => {} });
+  const out = await passes.heartbeat();
+  assert.ok(out.red.includes('alert-not-told'), JSON.stringify(out));
+  assert.ok(out.failed >= 1, JSON.stringify(out));
+  assert.equal(typeof out.sweep, 'object', JSON.stringify(out));
+  assert.notEqual(out.sweep, null, JSON.stringify(out));
+  assert.equal(typeof out.sweep.swept, 'boolean', JSON.stringify(out.sweep));
+});
+
+test('#465 r2 audit m1: a per-key sweep mark the Record refuses (the close landed) is told under the mark cause', async () => {
+  const alertsOf = (o) => {
+    const inner = makeFactWriter(o.rec, { actor: 'ledger', now: o.now });
+    const writer = { ...inner, put: (id, doc) => (doc?.kind === 'fact.alert-sweep' ? { ok: false, reason: 'the store is full' } : inner.put(id, doc)) };
+    return makeAlerts({ ...o, writer });
+  };
+  const o = await orphanRound({ wireOpts: { alertsOf } });
+  const r = await o.passes.heartbeat();
+  assert.deepEqual(r.sweep.closed, [o.out.number], JSON.stringify(r.sweep));
+  assert.equal(o.gh.issues.get(o.out.number).state, 'closed', 'the close itself landed');
+  assert.match(String(r.sweep.why), /the Record refused the mark of /, JSON.stringify(r.sweep));
+  assert.deepEqual(sweepEntries(o.rec).map((e) => e.mark?.fact), [HOLD_FACT(SWEEP_CAUSES.mark)]);
+  assert.equal(r.failed, undefined);
 });
