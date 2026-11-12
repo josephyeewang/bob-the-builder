@@ -371,6 +371,23 @@ export function realWiring(dir, log) {
 function selfPath() { try { return realpathSync.native(fileURLToPath(import.meta.url)); } catch { return undefined; } }
 const arg = (argv, k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
 
+/**
+ * What the proof leaves behind, removed (#463 harness): the copy and outbox, and every settings file of the proof's own session
+ * (`<id>.json`, `<id>.save.json`, `<id>..baseline.json`): a `.json` left in the settings folder stops the real runner from
+ * starting. Nothing else in the folder is touched. Sleepers are named, never killed (L1013).
+ */
+export function cleanupProof({ copy, outbox, settingsFile, saveSettingsFile, settingsDir, sessionId, sleepers = [] }, log) {
+  // Never killed: they are found by their command line, not by a pid this proof started (L1013). Step 5 has failed
+  // and named them; each ends by itself within SLOW_INSTALL's 20 minutes.
+  if (sleepers.length) log(`left running, not killed (found by command line, not started here): ${sleepers.join(', ')}`);
+  const fs = { rm: rmSync, chmodTree };
+  for (const d of [copy, outbox]) if (d) removeAll(fs, d, log);
+  // Every settings file of the proof's own session (its id is the proof's, made by io.id): the session's, the save's,
+  // and the baseline's `<id>..baseline.json` if check 11 left it (r2 review m4). A `.json` left would stop the real runner.
+  let own = []; try { own = readdirSync(settingsDir).filter((n) => n.startsWith(`${sessionId}.`) && n.endsWith('.json')).map((n) => join(settingsDir, n)); } catch (e) { log(`the settings folder ${settingsDir} can't be listed (${e?.code ?? e?.message})`); }
+  for (const f of new Set([settingsFile, saveSettingsFile, ...own])) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
+}
+
 export async function main(argv, { print = (t) => process.stdout.write(t), uid = process.getuid?.(), now = () => Date.now(), platform = process.platform } = {}) {
   const fails = (why) => { print(report(STEPS.map(([n]) => notRun(n, why))).text); return 1; };
   // macOS only (L1005): ps -g, pgrep and perl's setsid are read as the Mini's; anywhere else, a named skip, never a run.
@@ -411,17 +428,7 @@ export async function main(argv, { print = (t) => process.stdout.write(t), uid =
     reachable: () => spawnSync('/usr/bin/curl', ['-sS', '--max-time', '20', '-o', '/dev/null', 'https://github.com'], { timeout: 30_000 }).status === 0,
     warn: (t) => { print(`${t}\n`); log(t); },
     rm: (p) => rmSync(p, { force: true }),
-    cleanup: ({ copy, outbox, settingsFile, saveSettingsFile, settingsDir, sessionId, sleepers = [] }) => {
-      // Never killed: they are found by their command line, not by a pid this proof started (L1013). Step 5 has failed
-      // and named them; each ends by itself within SLOW_INSTALL's 20 minutes.
-      if (sleepers.length) log(`left running, not killed (found by command line, not started here): ${sleepers.join(', ')}`);
-      const fs = { rm: rmSync, chmodTree };
-      for (const d of [copy, outbox]) if (d) removeAll(fs, d, log);
-      // Every settings file of the proof's own session (its id is the proof's, made by io.id): the session's, the save's,
-      // and the baseline's `<id>..baseline.json` if check 11 left it (r2 review m4). A `.json` left would stop the real runner.
-      let own = []; try { own = readdirSync(settingsDir).filter((n) => n.startsWith(`${sessionId}.`) && n.endsWith('.json')).map((n) => join(settingsDir, n)); } catch (e) { log(`the settings folder ${settingsDir} can't be listed (${e?.code ?? e?.message})`); }
-      for (const f of new Set([settingsFile, saveSettingsFile, ...own])) if (f) { try { rmSync(f, { force: true }); } catch (e) { log(`the proof's settings file ${f} can't be removed (${e?.code ?? e?.message})`); } }
-    },
+    cleanup: (x) => cleanupProof(x, log),
   };
   let results;
   try { results = await proveRunLocked({ c, product, io }); } catch (e) { results = STEPS.map(([k]) => notRun(k, `the proof stopped: ${e?.message ?? e}`)); } finally { try { lock.release(held.nonce); } catch { /* gone */ } }

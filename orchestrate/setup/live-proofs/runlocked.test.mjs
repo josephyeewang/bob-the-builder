@@ -3,7 +3,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, hooksSet, main, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { tempDir } from '../../shared/test-tmp.mjs';
+import { CURL_UNREACHED, LEFTOVER_INSTALL, LEFTOVER_WAIT_MS, SLOW_INSTALL, STEPS, TEST_REPO, blockedBy, guardProblem, cleanupProof, hooksSet, main, proveRunLocked, readStream, realWiring, recordGroups, report, variant, walledInstall } from './runlocked.mjs';
 import { JOBS_DIR, LOCKED_SAVE_MS, quoted } from '../../wiring/runner-locked.mjs';
 import { CLONE_CONFIG_TEMPLATE } from '../../modules/M4-workshop/git/save-work.mjs';
 
@@ -142,6 +144,7 @@ function world(over = {}) {
             const g = { pgid: 4242, pid: 4242, pid_start: '2026-11-03T10:00:00.000Z' };
             rec.groups.push({ name: 'install', group: g });
             if (w.jobGroup !== null) rec.groups.push({ name: 'install', group: { ...g, job: { pgid: w.jobGroup, pid: w.jobGroup, pid_start: '2026-11-03T10:00:01.000Z' } } });
+            if (w.lateClaude) rec.groups.push({ name: 'install', group: g });   // another onGroup call after the job's, naming claude's group only
             rec.answers[4] = w.slow; return { ok: false, reason: 'launch check 4 (dependencies): …' };
           }
           rec.answers[4] = { ok: true };
@@ -357,4 +360,25 @@ test('recordGroups: every group runLocked is told of is kept with its job, and t
   assert.deepEqual(told, [{ pgid: 1 }, { pgid: 1, job: { pgid: 2 } }]);
   assert.deepEqual(seen, ['install', 'save-work']);
   assert.equal(recordGroups(null, rec), null, 'no runLocked: none');
+});
+
+test('#463 harness r2: step 5 takes the last record that names the job, not a later one naming claude\'s group only', async () => {
+  const y = await run({ lateClaude: true });
+  const s5 = y.by[5];
+  assert.equal(s5.result, 'PASS', `planted: the job's group taken from the last record of any kind (${s5.reason})`);
+  assert.equal(s5.found.jobGroup, 4250);
+});
+
+test('#463 harness r2 m4: the real cleanup removes the copy, the outbox and every settings file of the proof\'s session, and nothing else', () => {
+  const t = tempDir('orch-runlocked-cleanup-');
+  const dir = join(t, 'settings'); const copy = join(t, 'copy'); const outbox = join(t, 'outbox');
+  for (const d of [dir, join(copy, 'a'), outbox]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(copy, 'a', 'f'), 'x'); writeFileSync(join(outbox, 'b'), 'x');
+  const id = 'proof-x-1';
+  for (const n of [`${id}.json`, `${id}.save.json`, `${id}..baseline.json`, 'proof-x-10.json', 'other.json', `${id}.txt`]) writeFileSync(join(dir, n), '{}');
+  const logged = [];
+  cleanupProof({ copy, outbox, settingsFile: join(dir, `${id}.json`), saveSettingsFile: join(dir, `${id}.save.json`), settingsDir: dir, sessionId: id, sleepers: [4321] }, (l) => logged.push(l));
+  assert.deepEqual(readdirSync(dir).sort(), ['other.json', `${id}.txt`, 'proof-x-10.json'], 'planted: the baseline left, or another session\'s file taken');
+  assert.equal(existsSync(copy), false); assert.equal(existsSync(outbox), false);
+  assert.match(logged.join(' '), /left running, not killed .*4321/);
 });
