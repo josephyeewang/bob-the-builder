@@ -398,10 +398,16 @@ test('#463 r2 M1: no job runs without the runner\'s go-ahead, and a record that 
   await assert.rejects(runner({ spawn: detachedClaude(calls), answer: () => { throw Object.assign(new Error('x'), { code: 'EACCES' }); } })({ job: 'install', command: `touch '${ran}'`, sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
     /its job's process group can't be kept \(the job's go-ahead can't be written \(EACCES\)\), so it is stopped/);
   assert.equal(existsSync(ran), false, 'never ran');
-  // A record naming a process older than claude (the runner's own here): refused, nothing run.
-  const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
-  const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${process.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
-  await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
+  // A record naming a process older than claude: refused, nothing run. The older process is a sleep in its own group,
+  // started 1.5 s ahead (start times are whole seconds), never this test's own: if the check broke, the kill that follows
+  // would reach the test runner's group and whatever started it, not just fail this test (lane 2 plant run, 12 Nov).
+  const older = childSpawn('/bin/sleep', ['60'], { detached: true, stdio: 'ignore' });
+  try {
+    await new Promise((r) => setTimeout(r, 1_500));
+    const recordPath = (args) => /\/bin\/echo \$\$ > '([^']+)'/.exec(recordOf(args))[1];
+    const old = (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo ${older.pid} > '${recordPath(args)}'; sleep 1; touch '${ran}'`], opts);
+    await assert.rejects(runner({ spawn: old })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }), /names a process that did not start after claude/);
+  } finally { try { process.kill(-older.pid, 'SIGKILL'); } catch { /* already gone */ } }
   // No record at all (a claude that ran something else): refused, whatever result it left.
   const f = jobFile({ cwd, job: 'install', sessionId: 'S-1' });
   await assert.rejects(runner({ spawn: (bin, args, opts) => childSpawn('/bin/sh', ['-c', `echo 0 > '${f}'`], opts) })({ job: 'install', command: 'true', sessionId: 'S-1', role: 'worker', settingsFile, cwd }),
