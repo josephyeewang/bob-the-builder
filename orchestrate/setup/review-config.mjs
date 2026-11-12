@@ -8,8 +8,10 @@
 //   owner  from the owner's input file, and only these: which product's Record the runner reads, the machine-wide settings
 //          file, and the rules the review sessions' hooks read (the product also names its Record and the Dispatcher's rules
 //          snapshot for it, check 12). None has a default: a field left out is refused by name
-//   later  not written yet, because nothing in the repository makes it (the Bob file list); until it is, launch check 13
-//          has no port and the launcher refuses every review, as today
+//   bob    the Bob file list (bobManifest): the `bob` step's (bob-manifest.mjs), which installs the Bob folder and its list
+//          together. Named only once that step has put the list in the installed copy: a config naming a list that is not
+//          there would stop the whole runner (programsProblem), not only check 13. Until it is, check 13 has no port and
+//          the launcher refuses every review; run `bob`, then this again (L995)
 // The input file may hold only the owner's fields: a setup field in it is refused, so a typed value can never stand in for
 // one setup knows.
 //
@@ -42,6 +44,7 @@ import { TOOLS_CHECKED } from '../modules/M10-rules/roles.mjs';
 import { CLAUDE_FILE, MANAGED_SOURCES_CHECKED_ON } from '../modules/M4-workshop/launcher/env-check.mjs';
 import { COPY_HOOKS, REVIEW_SNAPSHOT_FILE, WORKER_STATUS_FILE, bobPath, dispatcherRulesPath, homeOf, keysPath, mirrorPath, outboxRootPath, ownerTapsPath, privatePath, reviewCopiesPath, storePath, workerCopiesPath, workerRunnerPaths } from './layout.mjs';
 import { installPaths } from './install.mjs';
+import { bobManifestPath } from './bob-manifest.mjs';
 
 // The one source of each field. The test holds the keys equal to CONFIG_FIELDS.
 export const SOURCES = Object.freeze({
@@ -51,7 +54,7 @@ export const SOURCES = Object.freeze({
   pin: 'pin', claudeBin: 'pin',
   budget: 'setup', workerStatusFile: 'setup', workerUid: 'setup',
   recordRoot: 'owner', machineWide: 'owner', rules: 'owner', dispatcherRules: 'owner',
-  bobManifest: 'later',
+  bobManifest: 'bob',
 });
 // What the owner's input file holds: exactly these keys, each required. `product` picks the Record (recordRoot).
 export const OWNER_INPUT = Object.freeze(['product', 'machineWide', 'rules']);
@@ -108,7 +111,7 @@ export function ownerFields(cfg, input) {
   if (!plainObject(input)) return { fields: null, problems: ['the input file must be one JSON object holding product, machineWide and rules'] };
   for (const k of Object.keys(input)) {
     if (OWNER_INPUT.includes(k)) continue;
-    problems.push(Object.hasOwn(SOURCES, k) ? `the input file may not set ${k}: it comes from ${SOURCES[k] === 'pin' ? '--pin' : SOURCES[k] === 'later' ? 'no source yet (it is left out)' : SOURCES[k] === 'owner' ? 'the product named (set product instead)' : 'setup'}, not from a typed value` : `the input file holds ${JSON.stringify(k.slice(0, 40))}, which is no field of the runner's config`);
+    problems.push(Object.hasOwn(SOURCES, k) ? `the input file may not set ${k}: it comes from ${SOURCES[k] === 'pin' ? '--pin' : SOURCES[k] === 'bob' ? 'the bob step (setup.mjs bob)' : SOURCES[k] === 'owner' ? 'the product named (set product instead)' : 'setup'}, not from a typed value` : `the input file holds ${JSON.stringify(k.slice(0, 40))}, which is no field of the runner's config`);
   }
   // No defaults (L709): a missing field is refused by name, never filled in.
   for (const k of OWNER_INPUT) if (!Object.hasOwn(input, k)) problems.push(`the input file must set ${k} (there is no default)`);
@@ -139,8 +142,11 @@ export function ownerFields(cfg, input) {
   return { fields: { recordRoot: storePath(cfg, input.product), dispatcherRules: dispatcherRulesPath(cfg, input.product), machineWide: input.machineWide, rules }, problems };
 }
 
-/** The whole config: { config, problems }. Each field from its one source (SOURCES), in CONFIG_FIELDS' order. */
-export function buildReviewConfig(cfg, { pin, input, userOf }) {
+/**
+ * The whole config: { config, problems }. Each field from its one source (SOURCES), in CONFIG_FIELDS' order. `bobInstalled`:
+ * whether the bob step's list is in the installed copy (bobManifestPath); only then is bobManifest named.
+ */
+export function buildReviewConfig(cfg, { pin, input, userOf, bobInstalled = false }) {
   const s = setupFields(cfg, { pin, userOf }); const o = ownerFields(cfg, input); const pinWhy = pinProblem(pin);
   const problems = [...(pinWhy ? [pinWhy] : []), ...s.problems, ...o.problems];
   if (problems.length) return { config: null, problems };
@@ -148,11 +154,16 @@ export function buildReviewConfig(cfg, { pin, input, userOf }) {
   const config = {};
   for (const k of CONFIG_FIELDS) {
     const src = SOURCES[k];
-    if (src === 'later') continue;
+    if (src === 'bob') { if (bobInstalled) config[k] = bobManifestPath(cfg); continue; }
     if (!from[src] || !Object.hasOwn(from[src], k)) throw new Error(`review-config: ${k} has no value from its source (${src})`);   // a builder's slip, never the owner's
     config[k] = from[src][k];
   }
   return { config, problems: [] };
+}
+
+/** Whether the bob step's list is in the installed copy: a plain file there (not a link). */
+export function bobListThere(p, { lstat = lstatSync } = {}) {
+  try { const st = lstat(p); return st.isFile() && !st.isSymbolicLink(); } catch { return false; }
 }
 
 /** Reads the owner's input file: a plain file of their own, not a link. Never quotes it. → value, or throws. */
@@ -186,18 +197,20 @@ function writeOut(out, { text, checkText = text }, check) {
  * The command. `userOf`, `check` (the runner's readConfig, with its ports) and `write` are ports for a test. → exit code:
  * 0 written and read back, 1 a problem (`out` as it was), 2 usage.
  */
-export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, dry, forInstall = false }, { euid, userOf, out, err, check = (f) => readConfig(f), write = writeOut, readIn = readInput }) {
+export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, dry, forInstall = false }, { euid, userOf, out, err, check = (f) => readConfig(f), write = writeOut, readIn = readInput, bobThere = bobListThere }) {
   if (euid === 0) { err('refused: review-config reads your own input file and writes your own copy, so it runs without sudo. Root reads the result only once you have put it in place (README).'); return 2; }
   if (!absPath(outFile) || (basename(outFile) === RUNNER_CONFIG && dirname(outFile).startsWith(installPaths(cfg).install))) { err('refused: --out must be a full path of your own (not the installed copy\'s review.json)'); return 2; }
   let input; try { input = readIn(inputFile); } catch (e) { err(`PROBLEM  ${e.message}`); err('nothing was written.'); return 1; }
-  const built = buildReviewConfig(cfg, { pin, input, userOf });
+  const bobInstalled = bobThere(bobManifestPath(cfg));
+  const built = buildReviewConfig(cfg, { pin, input, userOf, bobInstalled });
   for (const p of built.problems) err(`PROBLEM  ${p}`);
   if (built.problems.length) { err('nothing was written.'); return 1; }
   const json = (c) => `${JSON.stringify(c, null, 1)}\n`;
   const full = json(built.config);
   const text = forInstall ? json(Object.fromEntries(Object.entries(built.config).filter(([k]) => !INSTALL_LATER.includes(k)))) : full;
-  const left = Object.entries(SOURCES).filter(([, s]) => s === 'later').map(([k]) => k);
-  const leftNow = forInstall ? `${left.join(', ')}; and, for the first install, ${INSTALL_LATER.join(' and ')} (add-to-install's)` : left.join(', ');
+  // Every field has a source now (L1035 m4); only the Bob file list waits, for its own step.
+  const left = bobInstalled ? [] : ['bobManifest (run the bob step first, then this again)'];
+  const leftNow = [...left, ...(forInstall ? [`for the first install, ${INSTALL_LATER.join(' and ')} (add-to-install's)`] : [])].join('; ');
   if (dry) {
     // The dry run reads the whole file back too (L731 self-review m3), through a scratch copy that is then removed, so it
     // refuses what the real run refuses.
@@ -205,14 +218,14 @@ export function reviewConfigCommand(cfg, { pin, input: inputFile, out: outFile, 
     try { write(join(scratch, RUNNER_CONFIG), { text: full }, check); } catch (e) {
       err(e?.refused ? `PROBLEM  the review runner would refuse it: ${e.message}` : `PROBLEM  the dry run's scratch copy could not be written (${e?.code ?? e?.message ?? 'error'})`); err('dry run: nothing written.'); return 1;
     } finally { rmSync(scratch, { recursive: true, force: true }); }
-    out(text.trimEnd()); out(`dry run: nothing written. Left out (no source yet): ${leftNow}.`); return 0;
+    out(text.trimEnd()); out(`dry run: nothing written.${leftNow ? ` Left out (its step not run yet): ${leftNow}.` : ''}`); return 0;
   }
   try { write(outFile, { text, checkText: full }, check); } catch (e) {
     if (e?.refused) { err(`PROBLEM  the review runner would refuse it: ${e.message}`); err(`nothing was written; ${outFile} is as it was.`); return 1; }
     err(`PROBLEM  ${outFile} could not be written (${e?.code ?? e?.message ?? 'error'}); it is as it was.`); return 1;
   }
   out(`written: ${outFile}, and the review runner's own check takes it${forInstall ? ` (checked whole, then written without ${INSTALL_LATER.join(' and ')})` : ''}.`);
-  out(`Left out (no source yet): ${left.join(', ')}. Until they are, launch checks 12 and 13 refuse every review.`);
+  if (left.length) out(`Left out (its step not run yet): ${left.join(', ')}. Until it is named, launch check 13 refuses every review.`);
   out(`Next: sudo install -o root -g wheel -m 0644 /dev/stdin <the runnerConfig path in your setup config> < ${outFile}`);
   out(forInstall ? 'Then: install. After it, run review-config again without --for-install, put that file in place the same way, and run add-to-install.' : 'Then: add-to-install (it puts the pinned Claude Code and the hooks where this file names them).');
   return 0;

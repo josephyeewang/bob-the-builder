@@ -156,5 +156,6 @@ export function exactReverse({ rec, card, filesOf }) {
   if (!Array.isArray(files) || !Array.isArray(card.files)) return { ok: false, reason: 'the reversed commit\'s files could not be read' };
   const set = (l) => [...new Set(l.map(String))].sort().join('\n');
   if (set(files) !== set(card.files)) return { ok: false, reason: 'its file list does not match the reversed commit' };
-  return { ok: true };
+  // The reversed commit goes with the launch (L976): the undo session's prompt names it, and the runner checks it.
+  return { ok: true, commit: d.commit };
 }
